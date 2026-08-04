@@ -43,7 +43,7 @@ use std::collections::VecDeque;
 
 use aether_math::{Mat4, Vec2, Vec3};
 use aether_render::{
-    CreateGeometry, CreateTexture, DestroyTexture, DrawMaterialTextured, DrawTriangle, MaterialRect,
+    CreateGeometry, CreateTexture, DestroyTexture, DrawMaterialTextured, DrawTriangle, GeometrySlotSpec, MaterialRect,
     MaterialTexturedRect, ProgramDestroy, ProgramDispatch, ProgramRegister, QuadBlend, TextureFormat, TextureSampling,
     TextureUsage, UpdateGeometry,
 };
@@ -135,28 +135,60 @@ const INK_GEOMETRY: usize = 1;
 const APERTURE_GEOMETRY: usize = 2;
 const GEOMETRIES: usize = 3;
 
+/// Each slot beside the vertex layout its pass binds, in create order —
+/// which is the order the ids answer in.
+const GEOMETRY_SLOTS: [(usize, fn() -> GeometrySlotSpec); GEOMETRIES] = [
+    (SUBJECT_GEOMETRY, bake::geometry_slot),
+    (INK_GEOMETRY, ink::geometry_slot),
+    (APERTURE_GEOMETRY, face::geometry_slot),
+];
+
 /// The sampled plane textures one canvas carries, before the writable
 /// sheet that completes the set.
 const PLANE_COUNT: usize = 6;
 
 /// One geometry's packed buffers, waiting for the mail that ships them.
+/// Present means the bytes still have to travel; taken means the GPU
+/// holds them.
 struct GeometryBytes {
     vertices: Vec<u8>,
     indices: Vec<u8>,
 }
 
-/// One frame's staged work: the two uniform blobs and whichever
-/// geometries moved. Overwritten every develop — a frame the render cap
-/// could not serve is dropped rather than queued, since the next frame's
-/// answer supersedes it anyway.
-struct Staged {
+/// The two uniform blobs one develop produced.
+///
+/// Kept rather than moved out with the dispatch: a develop at a view
+/// already derived for re-stages these rather than re-deriving them, and
+/// the dispatch needs its own copy either way.
+struct Uniforms {
+    bake: Vec<u8>,
+    wash: Vec<u8>,
+}
+
+/// What one develop is a pure function of, as bit patterns so two frames
+/// of one held view compare equal exactly.
+///
+/// Everything else it reads — the subject's mesh, its material scores,
+/// the chart's anchors, the settings — is fixed for as long as the
+/// subject stands, so it rides [`Easel::subject_changed`] rather than
+/// this key. Anything added to the develop that varies within one subject
+/// at one view has to join it here, or a held frame will keep serving the
+/// answer before it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DevelopKey {
+    eye: [u32; 3],
+    view_proj: [u32; 16],
     canvas: Canvas,
-    bake_uniforms: Vec<u8>,
-    wash_uniforms: Vec<u8>,
-    /// The drawing, re-solved for this eye.
-    ink: GeometryBytes,
-    /// The chart's aperture loops, re-projected for this eye.
-    aperture: GeometryBytes,
+}
+
+impl DevelopKey {
+    fn of(view: &View, canvas: Canvas) -> Self {
+        Self {
+            eye: view.eye.to_array().map(f32::to_bits),
+            view_proj: view.view_proj.to_cols_array().map(f32::to_bits),
+            canvas,
+        }
+    }
 }
 
 /// Where a resident buffer stands: nothing sent yet, a create in flight
@@ -232,16 +264,26 @@ pub struct Easel {
     creating: Option<Creating>,
     /// The three resident geometries, indexed by the slot constants.
     geometries: [Resident; GEOMETRIES],
-    /// The subject's vertex buffer, waiting for the create that ships it.
-    /// Packed once per subject: nothing in it turns with the view.
-    subject_geometry: Option<GeometryBytes>,
+    /// The bytes each geometry slot still owes the GPU, indexed the same
+    /// way. A slot is `Some` from the develop that packed it until the
+    /// create or the update that ships it, and `None` while the buffer up
+    /// there is already the answer — which is every frame of a held view.
+    packed: [Option<GeometryBytes>; GEOMETRIES],
     /// What the subject measures independent of the view, for the
     /// centroids the accidents are placed about.
     survey: Option<Survey>,
     /// The accident stream, rolled for this seed, canvas and visible set.
     seed_slice: Option<SeedUniforms>,
-    /// This frame's develop, staged between the CPU half and the mail.
-    frame: Option<Staged>,
+    /// The view the staged uniforms and packed geometries were derived
+    /// for, so a develop at the same one re-derives nothing.
+    derived_for: Option<DevelopKey>,
+    /// The uniform blobs that key produced.
+    uniforms: Option<Uniforms>,
+    /// A develop is staged for this canvas, waiting for the mail. Cleared
+    /// by the dispatch that ships it — a develop the render cap could not
+    /// serve is dropped rather than queued, since the next frame's answer
+    /// supersedes it anyway.
+    staged: Option<Canvas>,
     /// At least one dispatch has been sent, so the sheet holds paint
     /// rather than the writable texture's transparent clear.
     developed: bool,
@@ -269,14 +311,16 @@ impl Easel {
         }
         self.window = Some((width, height));
         self.seed_slice = None;
+        self.derived_for = None;
     }
 
     /// A new subject or field arrived; everything measured off the old one
     /// has to be measured again.
     pub fn subject_changed(&mut self) {
         self.survey = None;
-        self.subject_geometry = None;
+        self.packed[SUBJECT_GEOMETRY] = None;
         self.geometries[SUBJECT_GEOMETRY] = Resident::Absent;
+        self.derived_for = None;
     }
 
     /// The reply to one requested register. Ids arrive in send order, so
@@ -384,6 +428,15 @@ impl Easel {
     /// this does is measure the subject if it has not been measured, roll
     /// the accident stream if the visible set has changed, and stage the
     /// two uniform blobs and the two geometries that move.
+    ///
+    /// A held view is the exception, and it is most of what the frame
+    /// used to cost (iamacoffeepot/aether#4447). Every quantity below is
+    /// a pure function of the eye, the matrix and the canvas over a
+    /// subject that has not changed, so a develop at a view already
+    /// derived for re-stages the uniform blobs the dispatch takes and
+    /// re-derives nothing: no occlusion split, no centroid pass over the
+    /// vertices, no re-pack, and — because the packed slots stay taken —
+    /// no geometry mail for buffers already holding those very bytes.
     pub fn develop(&mut self, subject: &Subject<'_>, view: &View) {
         if self.disabled {
             return;
@@ -391,16 +444,22 @@ impl Easel {
         let Some(canvas) = self.canvas() else {
             return;
         };
+        let key = DevelopKey::of(view, canvas);
+        if self.derived_for == Some(key) && self.uniforms.is_some() {
+            self.staged = Some(canvas);
+            return;
+        }
+
         let (body_width, body_height) = canvas.body();
         let Subject { mesh, scores, settings, drawn, chart } = subject;
-        // Past the gate, so this is the one place the CPU still splits
-        // the drawing into visible runs — once per develop, not once
-        // per frame.
+        // Past both gates, so this is the one place the CPU still splits
+        // the drawing into visible runs — once per view, not once per
+        // frame.
         let drawn = &drawn();
 
         let survey = self.survey.get_or_insert_with(|| Survey::measure(mesh, scores));
-        if self.subject_geometry.is_none() && self.geometries[SUBJECT_GEOMETRY] == Resident::Absent {
-            self.subject_geometry =
+        if self.packed[SUBJECT_GEOMETRY].is_none() && self.geometries[SUBJECT_GEOMETRY] == Resident::Absent {
+            self.packed[SUBJECT_GEOMETRY] =
                 Some(GeometryBytes { vertices: bake::vertices(mesh, scores, settings), indices: bake::indices(mesh) });
         }
 
@@ -449,17 +508,19 @@ impl Easel {
         let faces = chart.as_ref().map(|_| Faces { fine: &fine_eyes, body: &body_eyes, presence: &presence });
         let frame = Frame { view_proj: view.view_proj, placement, faces };
 
-        self.frame = Some(Staged {
-            canvas,
-            bake_uniforms: bake::BakeUniforms { view_proj: view.view_proj, eye: view.eye }.encode().to_vec(),
-            wash_uniforms: program.frame_uniforms(&slice, &frame),
-            ink: GeometryBytes { vertices: ink::vertices(drawn), indices: ink::indices(drawn) },
-            aperture: GeometryBytes {
-                vertices: face::vertices(&fine_eyes, canvas.width, canvas.height),
-                indices: face::indices(&fine_eyes, canvas.width, canvas.height),
-            },
+        self.uniforms = Some(Uniforms {
+            bake: bake::BakeUniforms { view_proj: view.view_proj, eye: view.eye }.encode().to_vec(),
+            wash: program.frame_uniforms(&slice, &frame),
+        });
+        self.packed[INK_GEOMETRY] =
+            Some(GeometryBytes { vertices: ink::vertices(drawn), indices: ink::indices(drawn) });
+        self.packed[APERTURE_GEOMETRY] = Some(GeometryBytes {
+            vertices: face::vertices(&fine_eyes, canvas.width, canvas.height),
+            indices: face::indices(&fine_eyes, canvas.width, canvas.height),
         });
         self.seed_slice = Some(slice);
+        self.derived_for = Some(key);
+        self.staged = Some(canvas);
     }
 
     /// The programs a re-lay left behind, to release after the canvas'
@@ -478,7 +539,7 @@ impl Easel {
     /// whenever a resize re-lays its graph. The replies land in
     /// [`Easel::registered`] in this order.
     pub fn take_registers(&mut self) -> Vec<ProgramRegister> {
-        if self.disabled || !self.registering.is_empty() || self.frame.is_none() {
+        if self.disabled || !self.registering.is_empty() || self.staged.is_none() {
             return Vec::new();
         }
         let Some(program) = self.program.as_ref() else {
@@ -504,11 +565,7 @@ impl Easel {
         if self.creating.is_some() {
             return Vec::new();
         }
-        let stale = self
-            .textures
-            .as_ref()
-            .zip(self.frame.as_ref())
-            .is_some_and(|((_, canvas), staged)| *canvas != staged.canvas);
+        let stale = self.textures.as_ref().zip(self.staged).is_some_and(|((_, created), staged)| *created != staged);
         if !stale {
             return Vec::new();
         }
@@ -533,10 +590,9 @@ impl Easel {
         {
             return Vec::new();
         }
-        let Some(staged) = self.frame.as_ref() else {
+        let Some(canvas) = self.staged else {
             return Vec::new();
         };
-        let canvas = staged.canvas;
         let (body_width, body_height) = canvas.body();
 
         let body = field::paper(SHEET_SEED, body_width, body_height);
@@ -578,38 +634,34 @@ impl Easel {
     /// collects their ids: the subject the bake rasterizes, the drawing
     /// the ink pass does, and the chart's aperture loops the face pass
     /// fills. One create each, then updated in place for the session.
+    ///
+    /// The bytes are moved out of the packed slot rather than copied out
+    /// of it. What the slot then says is the truth the frame wants: this
+    /// buffer is the GPU's, and nothing owes it an upload.
     pub fn take_geometry_creates(&mut self) -> Vec<CreateGeometry> {
-        if self.disabled {
+        if self.disabled || self.staged.is_none() {
             return Vec::new();
         }
-        let Some(staged) = self.frame.as_ref() else {
-            return Vec::new();
-        };
-
-        let mut creates = Vec::new();
-        let mut claim = |slot: usize, layout, bytes: &GeometryBytes| {
-            creates.push(CreateGeometry { layout, vertices: bytes.vertices.clone(), indices: bytes.indices.clone() });
-            slot
-        };
         // One create in flight at a time: the reply carries no slot, so
         // the collector matches it against the one slot that is asking.
         if self.geometries.contains(&Resident::Creating) {
             return Vec::new();
         }
-        if self.geometries[SUBJECT_GEOMETRY] == Resident::Absent
-            && let Some(subject) = self.subject_geometry.as_ref()
-        {
-            self.geometries[claim(SUBJECT_GEOMETRY, bake::geometry_slot().layout, subject)] = Resident::Creating;
-            return creates;
-        }
-        if self.geometries[INK_GEOMETRY] == Resident::Absent {
-            self.geometries[claim(INK_GEOMETRY, ink::geometry_slot().layout, &staged.ink)] = Resident::Creating;
-            return creates;
-        }
-        if self.geometries[APERTURE_GEOMETRY] == Resident::Absent {
-            self.geometries[claim(APERTURE_GEOMETRY, face::geometry_slot().layout, &staged.aperture)] =
-                Resident::Creating;
-            return creates;
+
+        for (slot, geometry_slot) in GEOMETRY_SLOTS {
+            if self.geometries[slot] != Resident::Absent {
+                continue;
+            }
+            let Some(bytes) = self.packed[slot].take() else {
+                continue;
+            };
+
+            self.geometries[slot] = Resident::Creating;
+            return vec![CreateGeometry {
+                layout: geometry_slot().layout,
+                vertices: bytes.vertices,
+                indices: bytes.indices,
+            }];
         }
 
         Vec::new()
@@ -618,21 +670,25 @@ impl Easel {
     /// The two geometries that move with the eye, replacing the resident
     /// bytes in place. The subject's does not: nothing in its buffer turns
     /// with the view, so it is uploaded once and left alone.
+    ///
+    /// A slot only ships when it owes bytes *and* has an id to ship them
+    /// against — so a develop that re-derived nothing sends no mail here
+    /// at all, which at the shipped framing is six megabytes a frame the
+    /// GPU already held (iamacoffeepot/aether#4447).
     pub fn take_geometry_updates(&mut self) -> Vec<UpdateGeometry> {
-        let Some(staged) = self.frame.as_ref() else {
-            return Vec::new();
-        };
+        let mut updates = Vec::new();
+        for slot in [INK_GEOMETRY, APERTURE_GEOMETRY] {
+            let Some(geometry_id) = self.geometries[slot].id() else {
+                continue;
+            };
+            let Some(bytes) = self.packed[slot].take() else {
+                continue;
+            };
 
-        [(INK_GEOMETRY, &staged.ink), (APERTURE_GEOMETRY, &staged.aperture)]
-            .into_iter()
-            .filter_map(|(slot, bytes)| {
-                self.geometries[slot].id().map(|geometry_id| UpdateGeometry {
-                    geometry_id,
-                    vertices: bytes.vertices.clone(),
-                    indices: bytes.indices.clone(),
-                })
-            })
-            .collect()
+            updates.push(UpdateGeometry { geometry_id, vertices: bytes.vertices, indices: bytes.indices });
+        }
+
+        updates
     }
 
     /// The two dispatches developing this frame: the bake filling the
@@ -647,10 +703,13 @@ impl Easel {
             return Vec::new();
         };
         let live: Option<Vec<u32>> = self.geometries.iter().map(|at| at.id()).collect();
-        let (Some(ids), Some(staged)) = (live, self.frame.take()) else {
+        let (Some(ids), Some(staged)) = (live, self.staged.take()) else {
             return Vec::new();
         };
-        if staged.canvas != *canvas {
+        let Some(uniforms) = self.uniforms.as_ref() else {
+            return Vec::new();
+        };
+        if staged != *canvas {
             return Vec::new();
         }
 
@@ -660,13 +719,13 @@ impl Easel {
                 program_id: bake_id,
                 bindings: vec![bindings.packed],
                 geometries: vec![ids[SUBJECT_GEOMETRY]],
-                uniforms: staged.bake_uniforms,
+                uniforms: uniforms.bake.clone(),
             },
             ProgramDispatch {
                 program_id: wash_id,
                 bindings: bindings.to_vec(),
                 geometries: vec![ids[INK_GEOMETRY], ids[APERTURE_GEOMETRY]],
-                uniforms: staged.wash_uniforms,
+                uniforms: uniforms.wash.clone(),
             },
         ]
     }
@@ -790,7 +849,10 @@ mod tests {
     }
 
     fn view() -> View {
-        let eye = Vec3::new(0.0, 0.0, 5.0);
+        view_from(Vec3::new(0.0, 0.0, 5.0))
+    }
+
+    fn view_from(eye: Vec3) -> View {
         View {
             eye,
             target: Vec3::ZERO,
@@ -863,6 +925,76 @@ mod tests {
             easel.programs,
             easel.textures.is_some(),
             easel.geometries.map(Resident::id),
+        );
+    }
+
+    /// Drive one easel to convergence against a stand-in render cap, so a
+    /// test past the reply protocol can ask what a steady frame does.
+    fn converged(mesh: &Mesh, scores: &[[f32; CLASSES]], settings: &Settings, at: &View) -> Easel {
+        let drawn = Vec::new;
+        let mut easel = Easel::default();
+        easel.resized(160, 200);
+
+        let mut next_id = 0u32;
+        let mut ids = || {
+            next_id += 1;
+            next_id
+        };
+        for _ in 0..10 {
+            let subject = Subject { mesh, scores, settings, drawn: &drawn, chart: None };
+            easel.develop(&subject, at);
+
+            for _ in easel.take_registers() {
+                easel.registered(Ok(ids()));
+            }
+            for _ in easel.take_creates() {
+                easel.created(Ok(ids()));
+            }
+            for _ in easel.take_geometry_creates() {
+                easel.geometry_created(Ok(ids()));
+            }
+            for _ in easel.take_geometry_updates() {}
+            if easel.take_dispatch().len() == 2 {
+                return easel;
+            }
+        }
+
+        panic!("the easel never converged, so nothing past the reply protocol can be asked of it");
+    }
+
+    /// Tripwire: a held view must ship no geometry mail, and a moved eye
+    /// must ship it again.
+    ///
+    /// This is the whole of iamacoffeepot/aether#4447 as a claim about
+    /// mail rather than about milliseconds, and both ways of getting it
+    /// wrong are silent. A develop key that never matches renders exactly
+    /// the same picture and quietly re-uploads six megabytes a frame — the
+    /// saving evaporates with nothing to notice it. A key that always
+    /// matches renders a *stale* picture: the wash keeps developing off
+    /// the drawing solved for the eye it first saw, so an orbit turns the
+    /// ink and leaves the paint behind, which reads as the wash being
+    /// slightly wrong rather than as a fault.
+    #[test]
+    fn a_held_view_ships_no_geometry_and_a_moved_eye_ships_it_again() {
+        let mesh = quad();
+        let scores = vec![[1.0; CLASSES]; mesh.positions.len()];
+        let settings = Settings::default();
+        let drawn = Vec::new;
+        let subject = || Subject { mesh: &mesh, scores: &scores, settings: &settings, drawn: &drawn, chart: None };
+        let mut easel = converged(&mesh, &scores, &settings, &view());
+
+        easel.develop(&subject(), &view());
+        assert!(
+            easel.take_geometry_updates().is_empty(),
+            "a develop at the view already derived for owes the GPU nothing"
+        );
+        assert_eq!(easel.take_dispatch().len(), 2, "and it still dispatches, so the sheet is redeveloped either way");
+
+        easel.develop(&subject(), &view_from(Vec3::new(3.0, 1.0, 4.0)));
+        assert_eq!(
+            easel.take_geometry_updates().len(),
+            2,
+            "an eye that moved re-derives the drawing and the aperture, and both have to travel",
         );
     }
 
