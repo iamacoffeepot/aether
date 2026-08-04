@@ -11,12 +11,11 @@
 //!
 //! Two programs run, in order, against one set of textures:
 //!
-//! 1. [`sight`](crate::easel::program::sight) writes the four field
-//!    planes at canvas resolution — the point's verdict, its reach, its
-//!    curve's coverage, its run's arc.
-//! 2. [`stroke`](crate::easel::program::stroke) reads those planes in
-//!    its vertex stage and rasterizes the ribbons into a supersampled
-//!    ink sheet.
+//! 1. [`sight`] writes the four field planes at canvas resolution —
+//!    the point's verdict, its reach, its curve's coverage, its run's
+//!    arc.
+//! 2. [`stroke`] reads those planes in its vertex stage and rasterizes
+//!    the ribbons into a supersampled ink sheet.
 //!
 //! The sheet then composites as a screen-space quad, which puts it in
 //! the overlay pass — after the material pass the wash sheet draws in,
