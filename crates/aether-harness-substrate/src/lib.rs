@@ -28,6 +28,7 @@ mod harness;
 #[cfg(test)]
 mod mail_latency;
 pub mod perf;
+pub mod pump_stats;
 mod settlement_config;
 pub mod test_helpers;
 pub mod unsupported_cap;

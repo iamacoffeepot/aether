@@ -1211,8 +1211,12 @@ impl SubstrateHarness {
         // and sleeps coarsely rather than pinning a core. Each sleep
         // yields the CPU, so capability dispatcher threads still run
         // (ADR-0070).
+        // The cap is settable (issue 4453) so an instrument can trade CPU
+        // for observation resolution: a long silent handler is otherwise
+        // observed up to a whole capped sleep after it actually finished,
+        // and that lag is indistinguishable from work at this seam.
         const BACKOFF_FLOOR: Duration = Duration::from_micros(50);
-        const BACKOFF_CAP: Duration = Duration::from_millis(10);
+        let backoff_cap = crate::pump_stats::backoff_cap();
         // Wall-clock budget for consecutive quiet (no-progress) time
         // before giving up — a deadlock/livelock backstop, not the gate a
         // healthy reply meets, so it reads the runtime-configurable
@@ -1306,7 +1310,8 @@ impl SubstrateHarness {
                     return Err(SubstrateHarnessError::Timeout { expected, pumped_iterations: iterations });
                 }
                 thread::sleep(backoff);
-                backoff = (backoff * 2).min(BACKOFF_CAP);
+                crate::pump_stats::record_sleep(backoff, backoff >= backoff_cap);
+                backoff = (backoff * 2).min(backoff_cap);
             }
         }
     }
