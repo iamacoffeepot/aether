@@ -202,7 +202,16 @@ graph with no draw pass in it:
   passes clear and test against. These carry an extent alone, since their
   format is fixed.
 
-A `SlotSpec` is a `format` (`Rgba8`, `R8`, or `R32Float`) plus an `extent`:
+A `SlotSpec` is a `format` (`Rgba8`, `R8`, `R32Float`, or `R16Float`) plus an
+`extent`. The two float formats are both data planes — texels carrying
+quantities rather than colours — and choosing between them is a question about
+what the texel holds and who reads it. `R32Float` keeps a full 24-bit mantissa
+and cannot be linear-filtered in core WebGPU, so it is what a label, an index,
+or anything a pass reads point by point stands at. `R16Float` keeps about
+eleven bits and *is* filterable, so a pass may take a fractional coordinate
+through one and be handed the interpolation instead of computing it from four
+point fetches — which is what a separable blur wants, since pairing its taps
+into filtered reads halves its texture fetches.
 
 - `SlotExtent::Full` — the reference size.
 - `SlotExtent::Divided { divisor }` — the reference size floor-divided by
@@ -264,8 +273,8 @@ slot — load the existing content. A draw pass states its own color load
 semantic instead, described under [draw passes](#color-load-semantics) below.
 What "load" composes is the pass's blend, and the blend is
 fixed by the output format: `Rgba8` and `R8` outputs alpha-blend onto the
-target, while `R32Float` outputs replace it (core WebGPU cannot blend 32-bit
-floats). So a repeated pass accumulates on a blendable target, and on a float
+target, while a float data plane replaces it — which is what a pass writing a
+quantity rather than a colour means by writing it. So a repeated pass accumulates on a blendable target, and on a float
 target each iteration overwrites the last — a repeat there keeps only its
 final iteration. A multi-step chain over float planes is therefore laid
 structurally — each step its own pass entry with its own window — rather than
@@ -292,7 +301,10 @@ Bindings inside the shader, identical for both pass classes:
 The sampler an input receives follows the bound texture: nearest when the
 registry texture was created with `Nearest` sampling or its format cannot be
 linear-filtered (`R32Float`), linear otherwise. Transients sample by their
-declared format the same way.
+declared format the same way. So a pass that wants a filtered read has to be
+handed a plane standing at a filterable format — filtering is a property of
+the texture, not of the pass, and a plane another program wrote stands at
+whatever format that program declared.
 
 ## Draw passes
 

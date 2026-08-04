@@ -108,6 +108,7 @@ pub(super) fn wgpu_texture_format(format: TextureFormat) -> wgpu::TextureFormat 
         TextureFormat::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
         TextureFormat::R8 => wgpu::TextureFormat::R8Unorm,
         TextureFormat::R32Float => wgpu::TextureFormat::R32Float,
+        TextureFormat::R16Float => wgpu::TextureFormat::R16Float,
     }
 }
 

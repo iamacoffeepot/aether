@@ -275,11 +275,11 @@ impl ProgramRegistry {
 }
 
 /// Blend state per output format: blendable color formats alpha-blend
-/// over the target; `R32Float` cannot blend in core WebGPU, so its
-/// passes replace.
+/// over the target; a data plane replaces, which is what a pass writing
+/// a quantity rather than a colour means by writing it.
 fn blend_for(format: TextureFormat) -> Option<wgpu::BlendState> {
     match format {
         TextureFormat::Rgba8 | TextureFormat::R8 => Some(wgpu::BlendState::ALPHA_BLENDING),
-        TextureFormat::R32Float => None,
+        TextureFormat::R32Float | TextureFormat::R16Float => None,
     }
 }

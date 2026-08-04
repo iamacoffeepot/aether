@@ -27,12 +27,17 @@
 // CI skip toggle — test-harness knobs, not cap config.
 #![allow(clippy::disallowed_methods)]
 #![allow(clippy::cast_precision_loss)]
+// A quantile's nearest rank is a count of samples, clamped into range
+// either side before it indexes.
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_sign_loss)]
 // `mul_add` on a sample counter and a millisecond accumulator is
 // arithmetic nobody reads better for the rewrite.
 #![allow(clippy::suboptimal_flops)]
 
 use std::cmp::Reverse;
 use std::env;
+use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -58,9 +63,30 @@ use aether_render::{PassTimingRow, ProgramTimings, ProgramTimingsResult};
 /// The address a loaded component registers at (ADR-0099).
 const PUPPET: &str = "aether.component/aether.embedded:aether.puppet";
 
-/// The canvas every visual A/B and every pacing number is taken at.
-const WIDTH: u32 = 900;
-const HEIGHT: u32 = 1200;
+/// The canvas every visual A/B is pinned to. A comparison between two
+/// framings is unmeasured rather than a result, so this stays fixed and
+/// `compare_against_baseline` refuses a baseline of another size.
+const PINNED: (u32, u32) = (900, 1200);
+
+/// The canvas the frame budget is stated at (iamacoffeepot/aether#4387).
+/// Wider and shorter than the pinned one, and a seventh more pixels.
+const ACCEPTANCE: (u32, u32) = (1280, 960);
+
+/// Which of the two this run measures at, or a `WxH` of the reader's own.
+/// `pinned` (the default) develops the framing the baselines were written
+/// from; `acceptance` develops #4387's.
+fn canvas() -> (u32, u32) {
+    let named = env::var("AETHER_PUPPET_CANVAS").unwrap_or_else(|_| "pinned".to_owned());
+    match named.as_str() {
+        "pinned" => PINNED,
+        "acceptance" => ACCEPTANCE,
+        explicit => {
+            let (width, height) =
+                explicit.split_once('x').expect("AETHER_PUPPET_CANVAS reads `pinned`, `acceptance` or `WxH`");
+            (width.parse().expect("canvas width"), height.parse().expect("canvas height"))
+        }
+    }
+}
 
 /// The pinned framing: facing her, slightly above, her whole height in
 /// frame. `Puppet::init`'s own default.
@@ -138,8 +164,9 @@ fn mounted_with(dir: &Path, wasm: &Path, pass_timings: bool) -> SubstrateHarness
     // frame with a silent stretch of guest work in it is observed late by
     // up to the whole of that sleep and reported as work that never
     // happened (#4453).
+    let (width, height) = canvas();
     let builder = SubstrateHarness::builder()
-        .size(WIDTH, HEIGHT)
+        .size(width, height)
         .poll_cap(Some(Duration::from_micros(200)))
         .namespace_roots(test_namespace_roots(save));
     let builder = if pass_timings {
@@ -203,7 +230,7 @@ fn mounted_with(dir: &Path, wasm: &Path, pass_timings: bool) -> SubstrateHarness
     harness
         .execute(vec![(
             "canvas",
-            HarnessOp::send_and_settle(PUPPET, &WindowSize { window: WindowId(0), width: WIDTH, height: HEIGHT }),
+            HarnessOp::send_and_settle(PUPPET, &WindowSize { window: WindowId(0), width, height }),
         )])
         .expect("the canvas announcement settles");
 
@@ -260,10 +287,12 @@ fn the_frame_paces_at_the_pinned_framing() {
     let orbit = timed(&mut harness, Some(AZIMUTH));
     let orbit_cpu = handler_cost(&mut harness, Render::ID);
     let after = timed(&mut harness, None);
-    eprintln!(
-        "pace: static frame {still:.2} ms (and {after:.2} ms after the orbit), orbit frame {orbit:.2} ms, at \
-         {WIDTH}x{HEIGHT} over {SAMPLES} frames each",
-    );
+    let (width, height) = canvas();
+    eprintln!("pace: at {width}x{height} over {SAMPLES} frames each, and {}", still.observation);
+    eprintln!("pace: {:>28} | {}", "condition", Pace::header());
+    for (label, pace) in [("static", &still), ("orbit", &orbit), ("static after the orbit", &after)] {
+        eprintln!("pace: {label:>28} | {pace}");
+    }
     // The component's own share of each, read straight after its
     // condition so the EWMA is that condition's. What the frame carries
     // beyond it is the GPU, the host's encode, and the present.
@@ -463,12 +492,60 @@ fn compare_against_baseline(after: &Path, baseline_variable: &str, diff_variable
     );
 }
 
-/// One condition's mean frame, in milliseconds. `orbit` turns the camera
-/// by [`ORBIT_STEP`] before each frame, so every frame re-solves; `None`
+/// One condition's frame times, in milliseconds — the whole sample, not a
+/// mean, because a budget is a claim about the frames a viewer sees rather
+/// than about their average.
+struct Pace {
+    /// Sorted, so the quantiles below are reads rather than searches.
+    millis: Vec<f64>,
+    /// How much of every span here could be the settle pump sleeping past
+    /// the moment the work finished — the harness' own account of its
+    /// observation lag (iamacoffeepot/aether#4457). Stated with the
+    /// numbers rather than hoped away: at the default ten-millisecond
+    /// ceiling it is most of a frame.
+    observation: String,
+}
+
+impl Pace {
+    fn header() -> String {
+        format!("{:>8} {:>8} {:>8} {:>8} {:>8} {:>8}", "mean", "min", "p50", "p90", "p99", "max")
+    }
+
+    /// The sample at `quantile` of the sorted run, taken by nearest rank
+    /// so every printed number is a frame that actually happened.
+    fn at(&self, quantile: f64) -> f64 {
+        let rank = (quantile * self.millis.len() as f64).ceil().max(1.0) as usize;
+        self.millis[(rank - 1).min(self.millis.len() - 1)]
+    }
+
+    fn mean(&self) -> f64 {
+        self.millis.iter().sum::<f64>() / self.millis.len() as f64
+    }
+}
+
+impl Display for Pace {
+    fn fmt(&self, out: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            out,
+            "{:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>8.2}",
+            self.mean(),
+            self.millis[0],
+            self.at(0.5),
+            self.at(0.9),
+            self.at(0.99),
+            self.millis[self.millis.len() - 1],
+        )
+    }
+}
+
+/// One condition timed frame by frame. `orbit` turns the camera by
+/// [`ORBIT_STEP`] before each frame, so every frame re-solves; `None`
 /// leaves the eye alone, so every frame serves the drawing already
 /// solved.
-fn timed(harness: &mut SubstrateHarness, orbit: Option<f32>) -> f64 {
-    let mut millis = 0.0;
+fn timed(harness: &mut SubstrateHarness, orbit: Option<f32>) -> Pace {
+    let mut millis = Vec::with_capacity(SAMPLES as usize);
+    let mut lag = Duration::ZERO;
+    harness.take_pump_stats();
     for sample in 0..SAMPLES + WARMUP {
         let started = Instant::now();
         let mut ops = Vec::new();
@@ -477,13 +554,17 @@ fn timed(harness: &mut SubstrateHarness, orbit: Option<f32>) -> f64 {
         }
         ops.push(("frame", HarnessOp::advance(1)));
         harness.execute(ops).expect("timed frame");
+        let stats = harness.take_pump_stats();
 
         if sample >= WARMUP {
-            millis += started.elapsed().as_secs_f64() * 1000.0;
+            millis.push(started.elapsed().as_secs_f64() * 1000.0);
+            lag = lag.max(stats.overshoot_bound());
         }
     }
+    let observation = format!("no frame is inflated past {:.3} ms by the settle pump", lag.as_secs_f64() * 1000.0);
+    millis.sort_by(f64::total_cmp);
 
-    millis / f64::from(SAMPLES)
+    Pace { millis, observation }
 }
 
 /// The census the pacing is explained by: how the drawing divides into
@@ -520,7 +601,7 @@ fn the_drawing_divides_by_volatility() {
             .collect();
 
         let drawing = Drawing { resident: &resident, volatile: &volatile };
-        let layout = sight::layout(drawing, (WIDTH, HEIGHT)).expect("the drawing fits");
+        let layout = sight::layout(drawing, canvas()).expect("the drawing fits");
         let both = |packed: (Vec<u8>, Vec<u8>)| packed.0.len() + packed.1.len();
         let points = |spans: &[sight::Span]| both((sight::point_vertices(drawing, spans), sight::point_indices(spans)));
         let ribbons = |half| both(stroke::ribbon_geometry(drawing, &layout, half));
@@ -594,10 +675,11 @@ fn the_render_handler_divides_by_phase() {
     let view = view_at(AZIMUTH);
     let volatile = at.volatile_at(view.eye);
     let drawing = Drawing { resident: &at.resident, volatile: &volatile };
-    let canvas = Canvas { width: WIDTH as usize, height: HEIGHT as usize };
+    let (width, height) = canvas();
+    let canvas = Canvas { width: width as usize, height: height as usize };
 
     eprintln!(
-        "phase: at {WIDTH}x{HEIGHT}, {} resident curves + {} volatile, over {PHASE_REPEATS} repeats",
+        "phase: at {width}x{height}, {} resident curves + {} volatile, over {PHASE_REPEATS} repeats",
         at.resident.len(),
         volatile.len(),
     );
@@ -646,7 +728,7 @@ fn time_the_pose_moved_half(at: &Subject, skin: &deform::Skin, view: &View) {
     let volatile: Vec<Curve3> = carried.into_iter().chain(at.volatile_at(view.eye)).collect();
     let drawing = Drawing { resident: &[], volatile: &volatile };
     phase("pose — strokes pack, the WHOLE drawing volatile", PHASE_REPEATS, || {
-        let layout = sight::layout(drawing, (WIDTH, HEIGHT)).expect("the drawing fits");
+        let layout = sight::layout(drawing, canvas()).expect("the drawing fits");
         (
             sight::point_vertices(drawing, layout.volatile()),
             sight::point_indices(layout.volatile()),
@@ -716,7 +798,7 @@ fn time_the_develop(at: &Subject, view: &View, canvas: Canvas) {
 fn time_the_eye_moved_half(at: &Subject, drawing: Drawing<'_>, view: &View) {
     phase("volatile extraction — the eye-moved half", PHASE_REPEATS, || at.volatile_at(view.eye));
     phase("strokes pack — the volatile field and ribbon buffers", PHASE_REPEATS, || {
-        let layout = sight::layout(drawing, (WIDTH, HEIGHT)).expect("the drawing fits");
+        let layout = sight::layout(drawing, canvas()).expect("the drawing fits");
         (
             sight::point_vertices(drawing, layout.volatile()),
             sight::point_indices(layout.volatile()),
@@ -799,7 +881,8 @@ fn phase<T>(label: &str, repeats: u32, mut work: impl FnMut() -> T) -> T {
 /// The camera the component holds at `azimuth`, the whole `View` the
 /// easel develops through.
 fn view_at(azimuth: f32) -> View {
-    let (eye, aspect) = (eye_at(azimuth), WIDTH as f32 / HEIGHT as f32);
+    let (width, height) = canvas();
+    let (eye, aspect) = (eye_at(azimuth), width as f32 / height as f32);
     let view_proj =
         Mat4::perspective_rh(FIELD_OF_VIEW, aspect, 0.05, 40.0) * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
 

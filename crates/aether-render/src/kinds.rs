@@ -130,6 +130,16 @@ pub enum TextureFormat {
     /// filtering binding only, so they warn-drop batches over this
     /// format; its consumers are the authored render programs.
     R32Float,
+    /// Two bytes per pixel, one little-endian `f16` — the data-plane
+    /// format for a quantity a filtering sampler has to read. Core
+    /// WebGPU filters 16-bit floats, so a program pass may take a
+    /// fractional coordinate through one and be handed the interpolation
+    /// rather than computing it from four point fetches; what it gives
+    /// up against [`Self::R32Float`] is mantissa, about eleven bits of
+    /// it, which is finer than any eight-bit target the plane resolves
+    /// into. A label or a texel index does not belong in it — that is
+    /// what the 32-bit plane is for.
+    R16Float,
 }
 
 impl TextureFormat {
@@ -137,6 +147,7 @@ impl TextureFormat {
     pub const fn bytes_per_pixel(self) -> usize {
         match self {
             Self::Rgba8 | Self::R32Float => 4,
+            Self::R16Float => 2,
             Self::R8 => 1,
         }
     }
@@ -147,7 +158,7 @@ impl TextureFormat {
     #[must_use]
     pub const fn filterable(self) -> bool {
         match self {
-            Self::Rgba8 | Self::R8 => true,
+            Self::Rgba8 | Self::R8 | Self::R16Float => true,
             Self::R32Float => false,
         }
     }
