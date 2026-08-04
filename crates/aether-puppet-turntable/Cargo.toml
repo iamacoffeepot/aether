@@ -1,0 +1,41 @@
+[package]
+name = "aether-puppet-turntable"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# A motor for the puppet's eye: one `aether.puppet.look` per tick, so the
+# subject turns at a constant rate with nothing crossing the wasm boundary
+# after boot.
+#
+# Its own crate rather than a second export of `aether-puppet` because the
+# two have nothing to say to each other beyond the `Look` kind (ADR-0066:
+# peers share the kind crate, not the module), and because the puppet's
+# `lib.rs` is the drawing — a driver bolted into it would be the only thing
+# in there that is not.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+# Guest faces only — this is a wasm component and addresses every capability
+# by mail, so each cap comes in marker-only with its runtime feature off.
+aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
+# The peer, for its `Look` kind alone. `library` strips the puppet's own
+# `export!` entry surface so its `receive_p32` / `init` shims do not collide
+# with this crate's at link.
+aether-puppet = { path = "../aether-puppet", features = ["library"] }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-kinds = { path = "../aether-kinds" }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+tracing = { workspace = true, default-features = false }
+
+# Every crate that derives `Kind` needs `inventory` reachable on native
+# builds so the `aether.kinds` descriptor list picks up its types. Wasm
+# guests skip the submission via the derive's cfg gate.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = { workspace = true }
+
+[lints]
+workspace = true

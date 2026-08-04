@@ -20,6 +20,15 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# A peer cdylib that links this crate for its kind vocabulary — the
+# turntable, for `Look` — enables this to strip the `export!` entry
+# surface: one `export!` emits the FFI entries per wasm module, so the
+# entry-free rlib face keeps the actor impl without a second
+# `receive_p32` / `init` colliding with the embedder's own `export!` at
+# link. Non-default, so the puppet's own wasm build still emits.
+library = []
+
 [dependencies]
 aether-actor = { path = "../aether-actor" }
 # Guest faces only — this is a wasm component and addresses every capability
