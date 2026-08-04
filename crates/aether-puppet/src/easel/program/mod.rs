@@ -16,6 +16,15 @@
 //! per-develop uniform blob. Each module owns its own `.wgsl` and
 //! scenario files under this directory.
 
+//! [`bake`] (iamacoffeepot/aether#4411) is the other half of the same
+//! move and the only one that rasterizes: the painter's input maps,
+//! which [`super::regions`] walks the subject's faces for on the CPU,
+//! authored as draw passes over the subject's own geometry (ADR-0171).
+//! It stands beside the wash rather than under it — the wash still
+//! paints from CPU-baked planes, and the bake is held against that
+//! oracle until the switch-over.
+
+pub mod bake;
 pub mod pigment;
 pub mod puddle;
 pub mod sheet;
