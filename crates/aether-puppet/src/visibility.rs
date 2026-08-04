@@ -9,7 +9,7 @@
 //! - **Occluded.** The point is real and front-facing, but something else
 //!   stands between it and the eye.
 
-use core::mem;
+use core::{iter, mem};
 
 use aether_math::Vec3;
 
@@ -63,17 +63,17 @@ fn visible(mesh: &Mesh, eye: Vec3, span: &[SurfacePoint], stride: usize, bias: f
     // The last point is sampled whether or not it lands on the grid, so
     // the final window has an end to be refined against like any other.
     let last = span.len() - 1;
-    let samples: Vec<usize> = (0..last).step_by(stride).chain(core::iter::once(last)).collect();
-    let sampled: Vec<bool> = samples.iter().map(|&at| !hidden(mesh, eye, &span[at], bias)).collect();
+    let samples: Vec<(usize, bool)> =
+        (0..last).step_by(stride).chain(iter::once(last)).map(|at| (at, !hidden(mesh, eye, &span[at], bias))).collect();
 
     let mut seen = vec![false; span.len()];
-    for (&at, &verdict) in samples.iter().zip(&sampled) {
+    for &(at, verdict) in &samples {
         seen[at] = verdict;
     }
-    for (window, verdicts) in samples.windows(2).zip(sampled.windows(2)) {
-        let (from, to) = (window[0], window[1]);
-        if verdicts[0] == verdicts[1] {
-            seen[from..to].fill(verdicts[0]);
+    for window in samples.windows(2) {
+        let ((from, before), (to, after)) = (window[0], window[1]);
+        if before == after {
+            seen[from..to].fill(before);
         } else {
             for (point, seen) in span[from + 1..to].iter().zip(&mut seen[from + 1..to]) {
                 *seen = !hidden(mesh, eye, point, bias);
