@@ -42,6 +42,10 @@ impl StagedGeometry {
     /// dirty geometry re-creates rather than re-uploading in place.
     /// Runs at record time on the driver thread, where a device + queue
     /// are available (the ADR-0171 draw-pass slice is the caller).
+    ///
+    /// # Panics
+    /// Panics if the index count exceeds `u32` — unreachable behind the
+    /// mail frame-size cap, and fail-fast per ADR-0063 if it ever isn't.
     pub fn ensure_realized(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         if self.realized.is_some() && !self.dirty {
             return;
@@ -97,6 +101,12 @@ fn staged_buffer(
 pub struct GeometryRegistry {
     pub next_id: u32,
     pub entries: HashMap<u32, StagedGeometry>,
+}
+
+impl Default for GeometryRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GeometryRegistry {
@@ -181,9 +191,7 @@ fn validate_geometry(layout: &[VertexAttribute], vertices: &[u8], indices: &[u8]
     }
     let stride = vertex_stride_bytes(layout);
     if !vertices.len().is_multiple_of(stride) {
-        return Err(
-            format!("vertices length {} does not divide evenly by the layout stride {stride}", vertices.len(),),
-        );
+        return Err(format!("vertices length {} does not divide evenly by the layout stride {stride}", vertices.len()));
     }
     if !indices.len().is_multiple_of(size_of::<u32>()) {
         return Err(format!("indices length {} does not divide evenly by 4 (indices are 32-bit)", indices.len()));
