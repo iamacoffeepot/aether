@@ -2,7 +2,9 @@
 //!
 //! Where the water decides the edge: the separable box blur (iterated
 //! small-tap, held against the CPU running sum within a stated similarity
-//! threshold rather than bit-exactly), the shrink that resamples a pour
+//! threshold rather than bit-exactly, and swept at a reduced extent when
+//! its radius is wide enough to spare the texels), the shrink that
+//! resamples a pour
 //! about its centroid with the pre-rolled jitter, the threshold that cuts
 //! the softened puddle along a window of the tide-line noise, and the rim
 //! — alpha minus its own blur, noise-varied along the tide line.
@@ -36,6 +38,11 @@ pub const PUDDLE_WGSL: &str = include_str!("puddle.wgsl");
 /// Entry point of one separable box-average sweep ([`box_blur_passes`]).
 pub const BOX_BLUR_ENTRY: &str = "fs_box_blur";
 
+/// Entry points of a reduced-extent chain's two ends: the block average
+/// into the reduced plane and the bilinear carry back out of it.
+pub const BOX_DOWNSAMPLE_ENTRY: &str = "fs_box_downsample";
+pub const BOX_UPSAMPLE_ENTRY: &str = "fs_box_upsample";
+
 /// Entry point of the scale-about-centroid resample ([`shrink_pass`]).
 pub const SHRINK_ENTRY: &str = "fs_shrink";
 
@@ -52,7 +59,8 @@ pub const RIM_ENTRY: &str = "fs_rim";
 /// `params.rim * params.load * RIM_GAIN`, and [`box_radius_texels`] and
 /// [`box_blur_passes`] round and iterate through the same
 /// [`BOX_TO_GAUSSIAN`] / [`BLUR_PASSES`] as `image::blur` — each blur is
-/// `2 * BLUR_PASSES` program passes, horizontal then vertical.
+/// `2 * BLUR_PASSES` sweep passes, horizontal then vertical, plus the
+/// two ends a reduced-extent chain adds.
 pub use crate::easel::field::{EDGE_BAND, RIM_GAIN, RIM_RESTRIDE, RIM_VARY, RIM_VARY_CEILING};
 pub use crate::easel::image::{BLUR_PASSES, BOX_TO_GAUSSIAN};
 
@@ -62,6 +70,57 @@ pub use crate::easel::image::{BLUR_PASSES, BOX_TO_GAUSSIAN};
 /// no texel holds.
 pub fn plane_slot() -> SlotSpec {
     SlotSpec { format: TextureFormat::R32Float, extent: SlotExtent::Full }
+}
+
+/// The plane a blur chain of [`BoxBlurChain::divisor`] sweeps over: the
+/// data plane at a `divisor`-th of the canvas on each axis. A divisor of
+/// one is [`plane_slot`] itself — the executor pools both onto the same
+/// texture (ADR-0170), so a full-extent chain declared this way allocates
+/// nothing extra.
+pub fn reduced_plane_slot(divisor: u32) -> SlotSpec {
+    SlotSpec { format: TextureFormat::R32Float, extent: SlotExtent::Divided { divisor } }
+}
+
+/// Extents a blur chain may run reduced at, widest reduction first. Two
+/// and four keep the block average a whole number of texels on each axis,
+/// which is what lets the downsample be an exact box average rather than
+/// a resample.
+const REDUCED_DIVISORS: [u32; 2] = [4, 2];
+
+/// Narrowest window, in texels of its own reduced plane, a chain may
+/// sweep once reduced. What the reduction costs is set by how many
+/// samples the window spans on the plane it is swept over, not by any
+/// absolute size — the block average and the bilinear carry-back
+/// contribute their own support to the softening, and the carry-back
+/// resolves the reduced plane's curve as straight lines between its
+/// samples — so the bound holds the same at every divisor. Two and a
+/// half texels is where the window carries whole interior taps either
+/// side of its centre rather than resting on the straddling pair, and
+/// puts the reduction's own support around a twentieth of the softening's
+/// spread. It also decides where a reduction stops being worth having:
+/// the sweeps that fall under it are the narrow ones, which are cheap at
+/// full extent for the same reason they cannot be reduced.
+pub const MIN_REDUCED_HALF_WIDTH: f32 = 2.5;
+
+/// Half-width of the sweep window that softens by `radius_pixels`
+/// (already this sheet's pixels) on a plane reduced by `divisor`: the
+/// full-extent window the CPU rounds to, divided down. Between texels for
+/// every divisor past one, which is why the sweep takes a half-width
+/// rather than a tap count.
+pub fn box_half_width(radius_pixels: f32, divisor: u32) -> f32 {
+    (box_radius_texels(radius_pixels) as f32 + 0.5) / divisor as f32
+}
+
+/// The extent divisor a blur of `radius_pixels` (already this sheet's
+/// pixels) runs its sweeps at: the widest reduction whose window still
+/// spans [`MIN_REDUCED_HALF_WIDTH`], or one for a blur too narrow to
+/// reduce — which is every blur on a canvas small enough that its
+/// softening is a handful of texels to begin with.
+pub fn blur_divisor(radius_pixels: f32) -> u32 {
+    REDUCED_DIVISORS
+        .into_iter()
+        .find(|&divisor| box_half_width(radius_pixels, divisor) >= MIN_REDUCED_HALF_WIDTH)
+        .unwrap_or(1)
 }
 
 /// The box radius one `image::blur` call uses for a softening of
@@ -75,74 +134,122 @@ pub fn box_radius_texels(radius_pixels: f32) -> u32 {
 }
 
 /// Uniforms for one blur chain: both sweep windows of
-/// [`box_blur_passes`], horizontal then vertical, each an all-`i32`
-/// `BoxBlurParams` block (`axis_x`, `axis_y`, `radius_texels`).
+/// [`box_blur_passes`], horizontal then vertical, each a `BoxBlurParams`
+/// block (`axis_x`, `axis_y`, `half_width_texels`), then the
+/// `ScaleParams` window the reduced chain's two ends read.
 pub struct BoxBlurUniforms {
-    /// Window half-width in texels, from [`box_radius_texels`].
-    pub radius_texels: u32,
+    /// Window half-width in texels of the plane the sweeps run on, from
+    /// [`box_half_width`] — so a reduced chain states the window its own
+    /// smaller plane carries.
+    pub half_width_texels: f32,
+    /// The chain's extent divisor, from [`blur_divisor`].
+    pub divisor: u32,
 }
 
 /// Bytes of one `BoxBlurParams` uniform window.
 const BOX_BLUR_WINDOW_BYTES: u32 = 12;
 
+/// Bytes of the `ScaleParams` window, at the end of the chain's blob.
+const BOX_SCALE_WINDOW_BYTES: u32 = 4;
+
 impl BoxBlurUniforms {
     /// Total bytes [`Self::encode`] appends at the chain's
-    /// `uniform_offset`: the horizontal window then the vertical one.
-    pub const BYTES: u32 = 2 * BOX_BLUR_WINDOW_BYTES;
+    /// `uniform_offset`: the horizontal window, the vertical one, then the
+    /// scale window. A full-extent chain lays no pass over the last one
+    /// and encodes it all the same, so the layout is the same shape
+    /// whatever extent the chain settles on.
+    pub const BYTES: u32 = 2 * BOX_BLUR_WINDOW_BYTES + BOX_SCALE_WINDOW_BYTES;
 
-    /// The two windows, packed tight in the blob layout the shader
+    /// The three windows, packed tight in the blob layout the shader
     /// declares.
     pub fn encode(&self) -> [u8; Self::BYTES as usize] {
         encode_words([
             1u32.to_le_bytes(),
             0u32.to_le_bytes(),
-            self.radius_texels.to_le_bytes(),
+            self.half_width_texels.to_le_bytes(),
             0u32.to_le_bytes(),
             1u32.to_le_bytes(),
-            self.radius_texels.to_le_bytes(),
+            self.half_width_texels.to_le_bytes(),
+            self.divisor.to_le_bytes(),
         ])
     }
+}
+
+/// Where one blur chain sweeps: the two transients its iterations
+/// ping-pong between, and the extent they run at. Both transients are
+/// [`reduced_plane_slot`]s of the same `divisor` the caller declares
+/// (distinct from each other, and from `output` when that is a
+/// transient).
+pub struct BoxBlurChain {
+    pub scratch: u32,
+    pub carry: u32,
+    /// One for a chain that sweeps the canvas itself, otherwise the
+    /// reduction [`blur_divisor`] chose.
+    pub divisor: u32,
 }
 
 /// The full blur chain mirroring `image::blur`: [`BLUR_PASSES`] box
 /// iterations, each a horizontal sweep into the `scratch` transient and a
 /// vertical sweep out of it — the vertical result parking in `carry`
-/// between iterations and landing in `output` on the last. `scratch` and
-/// `carry` are indices of two [`plane_slot`] transients the caller
-/// declares (distinct, and distinct from `output` when that is a
-/// transient); the chain's [`BoxBlurUniforms`] encode at
-/// `uniform_offset`, shared by every iteration.
+/// between iterations. At `divisor` one the last vertical sweep lands
+/// straight in `output`; past it the chain opens with a block-average
+/// downsample into `carry`, sweeps the reduced plane, and closes with a
+/// bilinear upsample out of `carry` into `output`. The chain's
+/// [`BoxBlurUniforms`] encode at `uniform_offset`, shared by every pass.
 pub fn box_blur_passes(
     source: InputSlot,
-    scratch: u32,
-    carry: u32,
+    chain: &BoxBlurChain,
     output: OutputSlot,
     uniform_offset: u32,
 ) -> Vec<ProgramPass> {
-    let mut passes = Vec::with_capacity(2 * BLUR_PASSES as usize);
-    let mut read = source;
+    let reduced = chain.divisor > 1;
+    let scale_offset = uniform_offset + 2 * BOX_BLUR_WINDOW_BYTES;
+    let mut passes = Vec::with_capacity(2 * BLUR_PASSES as usize + 2);
+    let mut read = if reduced {
+        passes.push(pass(
+            BOX_DOWNSAMPLE_ENTRY,
+            vec![source],
+            OutputSlot::Transient { index: chain.carry },
+            scale_offset,
+            BOX_SCALE_WINDOW_BYTES,
+        ));
+        InputSlot::Transient { index: chain.carry }
+    } else {
+        source
+    };
 
     for iteration in 0..BLUR_PASSES {
-        let vertical_out = if iteration + 1 == BLUR_PASSES {
+        let last = iteration + 1 == BLUR_PASSES;
+        let vertical_out = if last && !reduced {
             output
         } else {
-            OutputSlot::Transient { index: carry }
+            OutputSlot::Transient { index: chain.carry }
         };
         passes.push(pass(
             BOX_BLUR_ENTRY,
             vec![read],
-            OutputSlot::Transient { index: scratch },
+            OutputSlot::Transient { index: chain.scratch },
             uniform_offset,
             BOX_BLUR_WINDOW_BYTES,
         ));
         passes.push(pass(
             BOX_BLUR_ENTRY,
-            vec![InputSlot::Transient { index: scratch }],
+            vec![InputSlot::Transient { index: chain.scratch }],
             vertical_out,
             uniform_offset + BOX_BLUR_WINDOW_BYTES,
             BOX_BLUR_WINDOW_BYTES,
         ));
-        read = InputSlot::Transient { index: carry };
+        read = InputSlot::Transient { index: chain.carry };
+    }
+
+    if reduced {
+        passes.push(pass(
+            BOX_UPSAMPLE_ENTRY,
+            vec![InputSlot::Transient { index: chain.carry }],
+            output,
+            scale_offset,
+            BOX_SCALE_WINDOW_BYTES,
+        ));
     }
 
     passes

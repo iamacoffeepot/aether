@@ -364,7 +364,7 @@ fn the_wash_program_develops_the_cpu_sheet() {
     };
     let oracle_id = rgba_nearest(&mut harness, "oracle", expected);
 
-    let program = wash::program();
+    let program = wash::program(CANVAS_HEIGHT);
     let registered = harness
         .execute(vec![("register", HarnessOp::send_and_await_reply("aether.render", program.register()))])
         .expect("register sequence");

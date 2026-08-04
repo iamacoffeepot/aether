@@ -33,8 +33,8 @@ pub mod regions;
 use aether_math::{Mat4, Vec3};
 use aether_render::{
     CreateGeometry, CreateTexture, DestroyTexture, DrawMaterialTextured, DrawTriangle, MaterialRect,
-    MaterialTexturedRect, ProgramDispatch, ProgramRegister, QuadBlend, TextureFormat, TextureSampling, TextureUsage,
-    UpdateGeometry, UpdateTexture,
+    MaterialTexturedRect, ProgramDestroy, ProgramDispatch, ProgramRegister, QuadBlend, TextureFormat, TextureSampling,
+    TextureUsage, UpdateGeometry, UpdateTexture,
 };
 
 use program::wash::{self, WashBindings, WashProgram};
@@ -151,6 +151,17 @@ enum Resident {
     Live(u32),
 }
 
+/// Which graph the register in flight was sent for. A resize can re-lay
+/// the graph while one is still unanswered, and the id coming back then
+/// belongs to a program the easel has already moved past.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Registering {
+    /// The graph the easel means to dispatch against.
+    Current,
+    /// A graph the canvas has outgrown.
+    Stale,
+}
+
 /// The creates for one canvas size are in flight; the render cap
 /// answers them in send order, so the collected ids land in binding
 /// order. The uniforms wait here for the dispatch that follows.
@@ -171,13 +182,18 @@ pub struct Easel {
     last_seen: Option<Vec3>,
     frames_still: u32,
     painted_from: Option<Vec3>,
-    /// The wash program's static graph and window layout, laid once at
-    /// the first develop and kept for the session.
+    /// The wash program's graph and window layout, laid at the first
+    /// develop and re-laid only when the canvas changes height — the one
+    /// thing its blur extents are chosen against.
     program: Option<WashProgram>,
-    /// A register is in flight; hold further registers until it answers.
-    registering: bool,
+    /// A register is in flight, and which graph for; further registers
+    /// hold until it answers.
+    registering: Option<Registering>,
     /// The program id the render cap assigned.
     program_id: Option<u32>,
+    /// Programs a re-lay left behind, released once the canvas' own graph
+    /// has been registered in their place.
+    stale_programs: Vec<u32>,
     /// A develop not yet on the GPU.
     pending: Option<Develop>,
     /// The bound registry textures and the size they were created at.
@@ -226,10 +242,13 @@ impl Easel {
     }
 
     /// The reply to a requested register. `Err` disables the easel for
-    /// the session, exactly as a refused create does.
+    /// the session, exactly as a refused create does. An id answering a
+    /// register the canvas has outgrown joins the release list instead of
+    /// becoming the one the easel dispatches against.
     pub fn registered(&mut self, result: Result<u32, ()>) {
-        self.registering = false;
+        let stale = self.registering.take() == Some(Registering::Stale);
         match result {
+            Ok(program_id) if stale => self.stale_programs.push(program_id),
             Ok(program_id) => self.program_id = Some(program_id),
             Err(()) => self.disabled = true,
         }
@@ -391,7 +410,15 @@ impl Easel {
         let flow = image::structure_tensor_flow(&regions::ink(drawn, &view.view_proj, width, height), width, height);
 
         let sheet = field::Sheet::new(planes, SHEET_SEED);
-        let program = self.program.get_or_insert_with(wash::program);
+        // A canvas of a new height wants its own graph: how far the water
+        // reaches in pixels is what decides the extent each blur sweeps
+        // at, so the structure follows the height and a resize re-lays it.
+        if self.program.as_ref().is_none_or(|program| program.canvas_height() != height) {
+            self.program = None;
+            self.stale_programs.extend(self.program_id.take());
+            self.registering = self.registering.map(|_| Registering::Stale);
+        }
+        let program = self.program.get_or_insert_with(|| wash::program(height));
         let uniforms = program.uniforms(&sheet, Some(&flow), accents.as_ref(), view.view_proj);
 
         // The same triangles the CPU rasterize above just walked, staged
@@ -430,17 +457,27 @@ impl Easel {
         self.frames_still = 0;
     }
 
-    /// The register mail carrying the wash program, once per session at
-    /// the first develop — by then the GPU device exists, since a develop
-    /// only ever follows a render stage. The reply lands in
-    /// [`Easel::registered`].
+    /// The programs a re-lay left behind, to release after the canvas'
+    /// own graph has registered — sent then rather than at the re-lay so
+    /// nothing is destroyed while a dispatch could still name it.
+    pub fn take_program_destroys(&mut self) -> Vec<ProgramDestroy> {
+        if self.program_id.is_none() {
+            return Vec::new();
+        }
+        self.stale_programs.drain(..).map(|program_id| ProgramDestroy { program_id }).collect()
+    }
+
+    /// The register mail carrying the wash program: at the first develop
+    /// — by then the GPU device exists, since a develop only ever follows
+    /// a render stage — and again whenever a resize re-lays the graph.
+    /// The reply lands in [`Easel::registered`].
     pub fn take_register(&mut self) -> Option<&ProgramRegister> {
-        if self.disabled || self.registering || self.program_id.is_some() || self.pending.is_none() {
+        if self.disabled || self.registering.is_some() || self.program_id.is_some() || self.pending.is_none() {
             return None;
         }
 
         let register = self.program.as_ref()?.register();
-        self.registering = true;
+        self.registering = Some(Registering::Current);
         Some(register)
     }
 
@@ -626,5 +663,29 @@ mod tests {
 
         easel.resized(3024, 1670);
         assert!(easel.painted_from.is_none(), "a canvas change must orphan the sheet so the next render repaints");
+    }
+
+    // A register answered after the canvas outgrew the graph it was sent
+    // for names a program the easel must not dispatch against: its blur
+    // extents were chosen for the old canvas, so every reduced chain
+    // would sweep the wrong plane. The bug shape without this routing is
+    // worse than a wrong develop — the stale id becomes `program_id`, the
+    // register gate sees a program already registered, and the graph for
+    // the canvas actually on screen is never sent at all.
+    #[test]
+    fn a_register_answered_after_a_re_lay_is_released_rather_than_dispatched_against() {
+        let mut easel = Easel { registering: Some(Registering::Stale), ..Easel::default() };
+
+        easel.registered(Ok(7));
+        assert_eq!(easel.program_id, None, "a stale register must not become the program the easel dispatches");
+        assert!(easel.take_program_destroys().is_empty(), "nothing is released before the canvas' own graph is live");
+
+        easel.registered(Ok(9));
+        assert_eq!(easel.program_id, Some(9), "the register after it answers for the canvas' own graph");
+        assert_eq!(
+            easel.take_program_destroys().into_iter().map(|destroy| destroy.program_id).collect::<Vec<u32>>(),
+            vec![7],
+            "the graph left behind is released once its replacement is live",
+        );
     }
 }
