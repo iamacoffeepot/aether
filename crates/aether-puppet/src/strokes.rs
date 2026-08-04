@@ -33,7 +33,7 @@ use aether_render::{
 
 use crate::easel::View;
 use crate::easel::program::{sight, stroke};
-use crate::feature::Curve3;
+use crate::feature::Drawing;
 use crate::mesh::Mesh;
 
 /// A resource the render cap assigns an id to: nothing asked yet, an
@@ -84,6 +84,10 @@ impl Ordered {
 
 /// One frame's solved drawing, staged between the CPU solve and the
 /// mail that carries it.
+///
+/// The resident points are not here. They belong to the subject rather
+/// than to the frame, and they are staged in [`Strokes::resident_bytes`]
+/// beside the subject's own mesh.
 struct Solved {
     points: Vec<u8>,
     point_indices: Vec<u8>,
@@ -91,6 +95,11 @@ struct Solved {
     ribbon_indices: Vec<u8>,
     sight_uniforms: Vec<u8>,
     stroke_uniforms: Vec<u8>,
+    /// Whether the buffers above have already been moved out — by the
+    /// creates, which take the same staging the updates would. Shipping
+    /// the emptied vectors afterwards would replace the resident
+    /// drawing with nothing.
+    travelled: bool,
 }
 
 /// The ink layer's state machine.
@@ -109,6 +118,15 @@ pub struct Strokes {
     subject: Resident,
     /// The subject's packed bytes, waiting for the create or update.
     subject_bytes: Option<(Vec<u8>, Vec<u8>)>,
+    /// The resident points' packed bytes, waiting for the same create or
+    /// update the subject's do. Staged by the first solve after the
+    /// subject changed rather than by `subject_changed` itself, because
+    /// the pack needs the layout and the layout needs the curves the new
+    /// subject was extracted into.
+    resident_bytes: Option<(Vec<u8>, Vec<u8>)>,
+    /// Whether the resident points are still owed a re-pack. Set with
+    /// the subject, cleared by the solve that packs them.
+    resident_stale: bool,
     solved: Option<Solved>,
     /// At least one dispatch has landed, so the sheet holds ink rather
     /// than a writable texture's transparent clear.
@@ -132,8 +150,11 @@ const INK_DEPTH_FLOOR: f32 = 0.25;
 const PROGRAM_COUNT: usize = 2;
 /// The four field planes plus the ink sheet.
 const TEXTURE_COUNT: usize = sight::PLANE_COUNT + 1;
-/// Subject, points, ribbons.
-const GEOMETRY_COUNT: usize = 3;
+/// The field's three — subject, resident points, volatile points — then
+/// the ribbons.
+const GEOMETRY_COUNT: usize = sight::GEOMETRY_COUNT + 1;
+/// Where the ribbons sit among them.
+const RIBBONS: usize = sight::GEOMETRY_COUNT;
 
 impl Strokes {
     /// A canvas change orphans every texture in the set — the field's
@@ -168,9 +189,11 @@ impl Strokes {
     }
 
     /// A new subject: its geometry has to travel again before the next
-    /// prepass means anything.
+    /// prepass means anything, and so do the resident points, which are
+    /// the new surface's own curves.
     pub fn subject_changed(&mut self, mesh: &Mesh) {
         self.subject_bytes = Some((sight::subject_vertices(mesh), sight::subject_indices(mesh)));
+        self.resident_stale = true;
     }
 
     /// Whether the layer can be asked to draw at all. A refused
@@ -182,32 +205,50 @@ impl Strokes {
     }
 
     /// Solve one frame's drawing for the GPU: lay the field out over
-    /// the curves, pack the points the field is rasterized from and the
+    /// the drawing, pack the points the field is rasterized from and the
     /// ribbons the ink is rasterized from, and stage both uniform
     /// blobs.
+    ///
+    /// Only the volatile half of the points is packed here. The resident
+    /// half is packed once per subject and left on the GPU — its curves
+    /// do not move, and [`sight::layout`] gives them the same texels
+    /// every frame, so the buffer already up there is still the right
+    /// one. That is the whole of #4435: at the shipped framing the
+    /// resident half is 88% of the drawing's points, and it stops
+    /// travelling.
+    ///
+    /// The ribbons stay one buffer. Every rail is solved against the
+    /// eye, so a resident curve's ribbon vertices change with the camera
+    /// even where its points do not.
     ///
     /// Returns false when the drawing does not fit the field — the
     /// layout refuses a curve past the scan's depth or a drawing past
     /// the canvas' texel count — which leaves the caller on its CPU
     /// path for that frame rather than showing a wrong picture.
-    pub fn solve(&mut self, curves: &[Curve3], eye: Vec3, view_proj: Mat4, bias: f32, aspect: f32) -> bool {
+    pub fn solve(&mut self, drawing: Drawing<'_>, eye: Vec3, view_proj: Mat4, bias: f32, aspect: f32) -> bool {
         if self.disabled {
             return false;
         }
         let field = self.resolve_canvas(aspect);
         self.canvas = Some(field);
-        let Ok(layout) = sight::layout(curves, field) else {
+        let Ok(layout) = sight::layout(drawing, field) else {
             return false;
         };
 
-        let (ribbons, ribbon_indices) = stroke::ribbon_geometry(curves, &layout, eye);
+        if mem::take(&mut self.resident_stale) {
+            self.resident_bytes =
+                Some((sight::point_vertices(drawing, layout.resident()), sight::point_indices(layout.resident())));
+        }
+
+        let (ribbons, ribbon_indices) = stroke::ribbon_geometry(drawing, &layout, eye);
         self.solved = Some(Solved {
-            points: sight::point_vertices(curves, &layout),
-            point_indices: sight::point_indices(&layout),
+            points: sight::point_vertices(drawing, layout.volatile()),
+            point_indices: sight::point_indices(layout.volatile()),
             ribbons,
             ribbon_indices,
             sight_uniforms: sight::SightUniforms { view_proj, eye, field, bias }.encode(),
             stroke_uniforms: stroke::StrokeUniforms { view_proj, eye, bias, field }.encode(),
+            travelled: false,
         });
 
         true
@@ -311,21 +352,33 @@ impl Strokes {
         creates
     }
 
-    /// The three geometry creates, once, in slot order. The subject's
-    /// bytes have to be staged by then — a prepass with no subject
-    /// occludes nothing.
+    /// The four geometry creates, once, in slot order. The subject's
+    /// bytes and the resident points' have to be staged by then — a
+    /// prepass with no subject occludes nothing, and a dispatch names
+    /// one id per declared slot or warn-drops whole, so three of four
+    /// buffers is no create at all.
+    ///
+    /// Nothing is taken until every buffer is present, because a take
+    /// that then bailed would drop the subject's bytes on the floor and
+    /// leave the prepass blind for the session.
     pub fn take_geometry_creates(&mut self) -> Vec<CreateGeometry> {
         if self.disabled || self.geometries.asking || self.geometries.ready(GEOMETRY_COUNT) {
             return Vec::new();
         }
-        let (Some((vertices, indices)), Some(solved)) = (self.subject_bytes.take(), self.solved.as_mut()) else {
+        if self.subject_bytes.is_none() || self.resident_bytes.is_none() || self.solved.is_none() {
+            return Vec::new();
+        }
+        let (subject, resident) = (self.subject_bytes.take(), self.resident_bytes.take());
+        let (Some(subject), Some(resident), Some(solved)) = (subject, resident, self.solved.as_mut()) else {
             return Vec::new();
         };
 
         self.geometries.asking = true;
         self.subject = Resident::Creating;
+        solved.travelled = true;
         vec![
-            CreateGeometry { layout: sight::subject_slot().layout, vertices, indices },
+            CreateGeometry { layout: sight::subject_slot().layout, vertices: subject.0, indices: subject.1 },
+            CreateGeometry { layout: sight::points_slot().layout, vertices: resident.0, indices: resident.1 },
             CreateGeometry {
                 layout: sight::points_slot().layout,
                 vertices: mem::take(&mut solved.points),
@@ -339,10 +392,14 @@ impl Strokes {
         ]
     }
 
-    /// Every later frame's geometry, replacing the resident bytes in
-    /// place. The subject travels only when it changed; the points and
-    /// the ribbons travel every frame the eye moved, which is what they
-    /// were solved for.
+    /// Every later frame's geometry, replacing the buffers the GPU holds
+    /// in place.
+    ///
+    /// The subject and the resident points travel only when the subject
+    /// changed. The volatile points and the ribbons travel every frame
+    /// the eye moved, which is what they were solved for — and between
+    /// them they are the drawing's minority: 12% of its points at the
+    /// shipped framing.
     pub fn take_geometry_updates(&mut self) -> Vec<UpdateGeometry> {
         if !self.geometries.ready(GEOMETRY_COUNT) {
             return Vec::new();
@@ -350,24 +407,26 @@ impl Strokes {
         let ids = &self.geometries.ids;
 
         let mut updates = Vec::new();
-        if let Some((vertices, indices)) = self.subject_bytes.take() {
-            updates.push(UpdateGeometry { geometry_id: ids[0], vertices, indices });
+        for (slot, staged) in
+            [(sight::SUBJECT, self.subject_bytes.take()), (sight::RESIDENT, self.resident_bytes.take())]
+        {
+            if let Some((vertices, indices)) = staged {
+                updates.push(UpdateGeometry { geometry_id: ids[slot as usize], vertices, indices });
+            }
         }
-        // Moved out rather than cloned: the drawing is megabytes of
-        // vertex bytes at this scale and it is rebuilt every frame the
-        // eye moves, so a copy here is a copy of the whole drawing per
+        // Moved out rather than cloned: the volatile drawing is
+        // megabytes of vertex bytes at this scale and it is rebuilt
+        // every frame the eye moves, so a copy here is a copy of it per
         // frame. The dispatch that follows needs only the uniforms.
-        // Skipped once the bytes have already travelled — the creates
-        // move them out of the same staging, and shipping the emptied
-        // vectors would replace the resident drawing with nothing.
-        if let Some(solved) = self.solved.as_mut().filter(|solved| !solved.ribbons.is_empty()) {
+        if let Some(solved) = self.solved.as_mut().filter(|solved| !solved.travelled) {
+            solved.travelled = true;
             updates.push(UpdateGeometry {
-                geometry_id: ids[1],
+                geometry_id: ids[sight::VOLATILE as usize],
                 vertices: mem::take(&mut solved.points),
                 indices: mem::take(&mut solved.point_indices),
             });
             updates.push(UpdateGeometry {
-                geometry_id: ids[2],
+                geometry_id: ids[RIBBONS],
                 vertices: mem::take(&mut solved.ribbons),
                 indices: mem::take(&mut solved.ribbon_indices),
             });
@@ -397,13 +456,13 @@ impl Strokes {
             ProgramDispatch {
                 program_id: programs[0],
                 bindings: textures[..sight::PLANE_COUNT].to_vec(),
-                geometries: vec![geometries[0], geometries[1]],
+                geometries: geometries[..sight::GEOMETRY_COUNT].to_vec(),
                 uniforms: solved.sight_uniforms,
             },
             ProgramDispatch {
                 program_id: programs[1],
                 bindings: textures.clone(),
-                geometries: vec![geometries[2]],
+                geometries: vec![geometries[RIBBONS]],
                 uniforms: solved.stroke_uniforms,
             },
         ]

@@ -99,7 +99,7 @@ use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-use feature::Curve3;
+use feature::{Curve3, Drawing};
 use mesh::Mesh;
 
 /// Vertical field of view, in radians. Fixed rather than configurable:
@@ -191,7 +191,9 @@ pub struct Puppet {
     dragging: bool,
     cursor: Vec2,
     aspect: f32,
-    /// Last frame's triangles, and the eye they were solved for.
+    /// Last frame's view-dependent curves, and the eye they were solved
+    /// for: the silhouette, the charted face and the suggestive
+    /// contours. The other half of the drawing is `surface`.
     ///
     /// Keyed on the eye alone, which is sound only while the mesh is
     /// static: once a pose exists the eye can be unchanged while the
@@ -203,13 +205,15 @@ pub struct Puppet {
     /// The window redraws continuously whether or not anything moved, and
     /// without this every one of those redraws re-marched 868k faces and
     /// re-cast every occlusion ray to arrive at the identical answer.
-    curves: Vec<Curve3>,
+    volatile: Vec<Curve3>,
     drawn_from: Option<Vec3>,
     /// Held until extraction runs, because the answer is not known until
     /// both assets have landed.
     owed: Option<ReplyHandle>,
     /// The view-independent drawing: hatch and crease, welded, kept from
-    /// load. Rebuilt only when the subject changes.
+    /// load. Rebuilt only when the subject changes, which is what lets
+    /// its packed field points stay resident on the GPU across an orbit
+    /// (iamacoffeepot/aether#4435).
     surface: Vec<Curve3>,
     settings: extract::Settings,
     look: Look,
@@ -291,7 +295,7 @@ impl WasmActor for Puppet {
             dragging: false,
             cursor: Vec2::new(0.0, 0.0),
             aspect: ASPECT_UNTIL_MEASURED,
-            curves: Vec::new(),
+            volatile: Vec::new(),
             drawn_from: None,
             owed: None,
             surface: Vec::new(),
@@ -488,8 +492,8 @@ impl WasmActor for Puppet {
             aspect: self.aspect,
             field_of_view: FIELD_OF_VIEW,
         };
-        let (curves, eye) = (&self.curves, self.eye());
-        let split = || Self::split(subject, curves, eye);
+        let (drawing, eye) = (Drawing { resident: &self.surface, volatile: &self.volatile }, self.eye());
+        let split = || Self::split(subject, drawing, eye);
         let painted = easel::Subject { mesh: subject, scores, settings: &self.settings, drawn: &split, chart: None };
         let Some(planes) = self.easel.bake_planes(&painted, &view) else {
             tracing::warn!(target: "aether_puppet", "dump_planes: no canvas before the first resize");
@@ -531,11 +535,9 @@ impl WasmActor for Puppet {
             // over its own bridge and that is a question about where the
             // eye is. Suggestive contours are there for the same reason —
             // they are the silhouette one derivative out.
-            self.curves = self
-                .surface
-                .iter()
-                .cloned()
-                .chain(self.face(subject, eye))
+            self.volatile = self
+                .face(subject, eye)
+                .into_iter()
                 .chain(extract::suggestive(subject, self.labels.as_ref(), eye, &self.settings))
                 .chain(extract::silhouettes(subject, eye))
                 .collect();
@@ -546,12 +548,13 @@ impl WasmActor for Puppet {
             // field decides which of its points carry width (ADR-0172).
             // What is left on this side is the lay-out and the pack:
             // extraction above, and the rail solve inside `solve`.
-            if !self.strokes.solve(&self.curves, eye, self.view_matrix(), subject.surface_bias(), self.aspect)
+            let drawing = Drawing { resident: &self.surface, volatile: &self.volatile };
+            if !self.strokes.solve(drawing, eye, self.view_matrix(), subject.surface_bias(), self.aspect)
                 && self.strokes.live()
             {
                 tracing::warn!(
                     target: "aether_puppet",
-                    curves = self.curves.len(),
+                    curves = drawing.len(),
                     "the drawing does not fit the visibility field; no ink this frame",
                 );
             }
@@ -591,8 +594,8 @@ impl WasmActor for Puppet {
             // wash smears along the drawing's strokes, so it wants the
             // visible runs — and it wants them a hundred times less
             // often than the frame does.
-            let curves = &self.curves;
-            let split = || Self::split(subject, curves, eye);
+            let drawing = Drawing { resident: &self.surface, volatile: &self.volatile };
+            let split = || Self::split(subject, drawing, eye);
             let painted = easel::Subject { mesh: painted_mesh, scores, settings: &self.settings, drawn: &split, chart };
 
             self.easel.develop(&painted, &view, self.dragging);
@@ -674,9 +677,9 @@ impl WasmActor for Puppet {
     /// is asked per call is occlusion, and always of the fine mesh:
     /// what stands in front of a stroke is a question about the real
     /// surface.
-    fn split(subject: &Mesh, curves: &[Curve3], eye: Vec3) -> Vec<DrawTriangle> {
+    fn split(subject: &Mesh, drawing: Drawing<'_>, eye: Vec3) -> Vec<DrawTriangle> {
         let mut triangles = Vec::new();
-        for curve in curves {
+        for curve in drawing.curves() {
             for run in visibility::runs(
                 subject,
                 eye,

@@ -88,7 +88,7 @@ use aether_render::{
     SlotSpec, TextureFormat, VertexAttribute, VertexFormat,
 };
 
-use crate::feature::{Curve3, FeatureClass};
+use crate::feature::{Curve3, Drawing, FeatureClass};
 use crate::math3::hash64;
 use crate::mesh::Mesh;
 use crate::weld;
@@ -108,10 +108,22 @@ pub const TOTAL: u32 = 3;
 /// How many plane bindings a dispatch supplies.
 pub const PLANE_COUNT: usize = 4;
 
-/// Geometry slot indices: the subject the prepass rasterizes, and the
-/// drawing's points.
+/// Geometry slot indices: the subject the prepass rasterizes, then the
+/// drawing's points in two buffers.
+///
+/// The points divide by volatility rather than by class
+/// ([`Drawing`](crate::feature::Drawing)). [`RESIDENT`] carries the
+/// curves that do not depend on the eye and travels once per subject;
+/// [`VOLATILE`] carries the rest and travels per re-split. The two
+/// occupy disjoint texels, so the passes that rasterize them write into
+/// one plane with the second loading what the first laid down
+/// (iamacoffeepot/aether#4435).
 pub const SUBJECT: u32 = 0;
-pub const POINTS: u32 = 1;
+pub const RESIDENT: u32 = 1;
+pub const VOLATILE: u32 = 2;
+
+/// How many geometry slots a dispatch supplies.
+pub const GEOMETRY_COUNT: usize = 3;
 
 /// Doublings the reach scan runs, so it resolves any barrier within
 /// `2^REACH_STEPS - 1` points and saturates past it.
@@ -341,18 +353,36 @@ pub enum LayoutError {
 pub struct Layout {
     spans: Vec<Span>,
     by_curve: Vec<u32>,
+    /// How many leading spans belong to the resident region.
+    resident: usize,
     occupied: usize,
 }
 
 impl Layout {
-    /// The spans in field order — ascending `start`, which is also
-    /// ascending [`CurveId`].
+    /// The spans in field order — ascending `start`: the resident
+    /// region first, then the volatile one, each ordered by
+    /// [`CurveId`].
     #[must_use]
     pub fn spans(&self) -> &[Span] {
         &self.spans
     }
 
-    /// Where the drawing's `curve`th curve landed.
+    /// The resident region's spans — the texels that stay put while the
+    /// eye moves, and so the ones [`RESIDENT`]'s buffer is packed from.
+    #[must_use]
+    pub fn resident(&self) -> &[Span] {
+        &self.spans[..self.resident]
+    }
+
+    /// The volatile region's spans, packed into [`VOLATILE`]'s buffer
+    /// every re-split.
+    #[must_use]
+    pub fn volatile(&self) -> &[Span] {
+        &self.spans[self.resident..]
+    }
+
+    /// Where the drawing's `curve`th curve landed, indexed over the two
+    /// halves concatenated — [`Drawing::curves`]' own order.
     #[must_use]
     pub fn span_of(&self, curve: usize) -> Option<&Span> {
         self.spans.get(*self.by_curve.get(curve)? as usize)
@@ -366,45 +396,63 @@ impl Layout {
     }
 
     /// Points the drawing carries, which is also how many texel
-    /// triangles [`point_vertices`] packs.
+    /// triangles the two [`point_vertices`] calls pack between them.
     #[must_use]
     pub fn points(&self) -> usize {
-        self.spans.iter().map(|span| span.len as usize).sum()
+        points_of(&self.spans)
     }
+}
+
+/// Points a run of spans carries.
+fn points_of(spans: &[Span]) -> usize {
+    spans.iter().map(|span| span.len as usize).sum()
 }
 
 /// Place a drawing's curves in a field of `field` texels.
 ///
-/// Ordered by identity rather than by arrival, so the same drawing lays
-/// out the same way whatever order the extractor enumerated it in, and
-/// a re-split that finds the same curves puts them back in the same
-/// spans. Each span is preceded by one empty texel, including the
-/// first — that leading gap is what gives the first curve's first point
-/// a barrier behind it.
-pub fn layout(curves: &[Curve3], field: (u32, u32)) -> Result<Layout, LayoutError> {
+/// The resident half is placed first and the volatile half after it, so
+/// a resident curve's span depends on nothing but the resident half
+/// itself. That is what makes its packed points *resident*: the same
+/// curves lay out at the same texels every frame, whatever the eye did
+/// to the volatile half, so the buffer the GPU already holds is still
+/// the right one. It is also what the deferred persistent-allocator
+/// note on iamacoffeepot/aether#4428 was asking for — the two regions
+/// are the whole allocator, because the resident half only ever changes
+/// wholesale, with the subject.
+///
+/// Within each half the order is by identity rather than by arrival, so
+/// the same drawing lays out the same way whatever order the extractor
+/// enumerated it in. Each span is preceded by one empty texel,
+/// including the first — that leading gap is what gives the first
+/// curve's first point a barrier behind it, and the volatile region
+/// inherits the barrier the resident region's last span left.
+pub fn layout(drawing: Drawing<'_>, field: (u32, u32)) -> Result<Layout, LayoutError> {
     let capacity = field.0 as usize * field.1 as usize;
 
-    let mut order: Vec<(CurveId, u32)> =
-        curves.iter().enumerate().map(|(at, curve)| (curve_id(curve), at as u32)).collect();
-    order.sort_unstable();
-
-    let mut spans: Vec<Span> = Vec::with_capacity(order.len());
-    let mut by_curve = vec![0u32; curves.len()];
+    let mut spans: Vec<Span> = Vec::with_capacity(drawing.len());
+    let mut by_curve = vec![0u32; drawing.len()];
     let mut cursor = 1usize;
-    for (id, curve) in order {
-        let points = curves[curve as usize].points.len();
-        if points > MAX_CURVE_POINTS {
-            return Err(LayoutError::CurveTooLong { id, curve, points });
+    for half in [drawing.resident, drawing.volatile] {
+        let base = spans.len() as u32;
+        let mut order: Vec<(CurveId, u32)> =
+            half.iter().enumerate().map(|(at, curve)| (curve_id(curve), base + at as u32)).collect();
+        order.sort_unstable();
+
+        for (id, curve) in order {
+            let points = half[(curve - base) as usize].points.len();
+            if points > MAX_CURVE_POINTS {
+                return Err(LayoutError::CurveTooLong { id, curve, points });
+            }
+            by_curve[curve as usize] = spans.len() as u32;
+            spans.push(Span { id, curve, start: cursor as u32, len: points as u32 });
+            cursor += points + 1;
         }
-        by_curve[curve as usize] = spans.len() as u32;
-        spans.push(Span { id, curve, start: cursor as u32, len: points as u32 });
-        cursor += points + 1;
     }
     if cursor > capacity {
         return Err(LayoutError::OverCapacity { needed: cursor, capacity });
     }
 
-    Ok(Layout { spans, by_curve, occupied: cursor })
+    Ok(Layout { spans, by_curve, resident: drawing.resident.len(), occupied: cursor })
 }
 
 /// The subject's vertex buffer for the prepass: positions alone.
@@ -426,24 +474,36 @@ fn grazes(class: FeatureClass) -> bool {
     matches!(class, FeatureClass::Silhouette | FeatureClass::Decal)
 }
 
-/// The points' vertex buffer, packed for [`points_slot`]: three
+/// One region's vertex buffer, packed for [`points_slot`]: three
 /// identical vertices per point, differing only in the corner bits of
 /// `slot`.
 ///
-/// A drawing that laid out to nothing still packs one stand-in point,
+/// `spans` selects the region — [`Layout::resident`] or
+/// [`Layout::volatile`] — and the drawing addresses the curves, since a
+/// [`Span`] names its own by the index
+/// [`Drawing::curves`](crate::feature::Drawing::curves) gives it.
+///
+/// A region that laid out to nothing still packs one stand-in point,
 /// for the reason [`super::ink::vertices`] packs one stand-in triangle:
 /// a dispatch supplies one id per declared geometry slot or it
-/// warn-drops whole, so an empty drawing has to neutralize through the
-/// content rather than by restructuring the graph.
+/// warn-drops whole, so an empty region has to neutralize through the
+/// content rather than by restructuring the graph. The stand-in is
+/// three copies of one corner — a triangle of zero area, which
+/// rasterizes nothing wherever it lands. A stand-in placed *on* the
+/// field would not do: every texel of the field is either a point or
+/// the barrier that ends a curve, so writing a verdict into a free one
+/// would answer for a barrier that has to read as hidden.
 #[must_use]
-pub fn point_vertices(curves: &[Curve3], layout: &Layout) -> Vec<u8> {
+pub fn point_vertices(drawing: Drawing<'_>, spans: &[Span]) -> Vec<u8> {
     // One point's lanes in declared order, with the flat texel index
     // still bare where `slot` goes — the corner bits go in per vertex
     // below, which is the only thing three vertices of one point
     // disagree about.
-    let mut points: Vec<[f32; 11]> = Vec::with_capacity(layout.points());
-    for span in layout.spans() {
-        let curve = &curves[span.curve as usize];
+    let mut points: Vec<[f32; 11]> = Vec::with_capacity(points_of(spans));
+    for span in spans {
+        let Some(curve) = drawing.curve(span.curve as usize) else {
+            continue;
+        };
         let graze = f32::from(u8::from(grazes(curve.class)));
         let last = curve.points.len().saturating_sub(1);
         for (at, point) in curve.points.iter().enumerate() {
@@ -469,7 +529,8 @@ pub fn point_vertices(curves: &[Curve3], layout: &Layout) -> Vec<u8> {
             ]);
         }
     }
-    if points.is_empty() {
+    let stand_in = points.is_empty();
+    if stand_in {
         points.push([0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
     }
 
@@ -477,7 +538,12 @@ pub fn point_vertices(curves: &[Curve3], layout: &Layout) -> Vec<u8> {
     for point in points {
         for corner in 0..3u32 {
             let mut vertex = point;
-            vertex[6] = vertex[6] * 4.0 + corner as f32;
+            vertex[6] = vertex[6] * 4.0
+                + if stand_in {
+                    0.0
+                } else {
+                    corner as f32
+                };
             packed.extend(vertex.into_iter().flat_map(f32::to_le_bytes));
         }
     }
@@ -485,12 +551,13 @@ pub fn point_vertices(curves: &[Curve3], layout: &Layout) -> Vec<u8> {
     packed
 }
 
-/// The points' index buffer: sequential little-endian `u32`
-/// triangle-list indices. Nothing is shared — a point's three vertices
-/// differ in their corner bits, and no two points share a vertex.
+/// One region's index buffer: sequential little-endian `u32`
+/// triangle-list indices over the same `spans` [`point_vertices`] was
+/// handed. Nothing is shared — a point's three vertices differ in their
+/// corner bits, and no two points share a vertex.
 #[must_use]
-pub fn point_indices(layout: &Layout) -> Vec<u8> {
-    let count = u32::try_from(layout.points().max(1) * 3).unwrap_or(u32::MAX);
+pub fn point_indices(spans: &[Span]) -> Vec<u8> {
+    let count = u32::try_from(points_of(spans).max(1) * 3).unwrap_or(u32::MAX);
 
     (0..count).flat_map(u32::to_le_bytes).collect()
 }
@@ -501,6 +568,7 @@ fn draw(
     depth: Option<u32>,
     inputs: Vec<InputSlot>,
     output: OutputSlot,
+    load: PassLoad,
 ) -> ProgramPass {
     ProgramPass {
         stage: PassStage::Draw(DrawPass {
@@ -511,7 +579,7 @@ fn draw(
             },
             geometry,
             depth,
-            load: PassLoad::Clear,
+            load,
         }),
         entry_point: entry_point.to_owned(),
         inputs,
@@ -520,6 +588,20 @@ fn draw(
         uniform_length: SightUniforms::BYTES,
         repeat: None,
     }
+}
+
+/// One fragment stage run over both point buffers: the resident half
+/// clears the target and the volatile half loads what it left.
+///
+/// The two halves own disjoint texels — [`layout`] gives them disjoint
+/// spans — so which of them a texel's value came from is decided by the
+/// layout rather than by the draw order, and the pair together writes
+/// exactly what one pass over the whole drawing wrote.
+fn over_points(entry_point: &str, inputs: Vec<InputSlot>, output: OutputSlot) -> [ProgramPass; 2] {
+    [
+        draw(entry_point, RESIDENT, None, inputs.clone(), output, PassLoad::Clear),
+        draw(entry_point, VOLATILE, None, inputs, output, PassLoad::Load),
+    ]
 }
 
 fn scan(entry_point: &str, step: u32, inputs: Vec<InputSlot>, output: OutputSlot) -> ProgramPass {
@@ -549,15 +631,15 @@ pub fn program() -> ProgramRegister {
     let binding = |index: u32| OutputSlot::Binding { index };
     let bound = |index: u32| InputSlot::Binding { index };
 
-    let mut passes = vec![
-        draw("fs_depth", SUBJECT, Some(0), Vec::new(), transient(DEPTH)),
-        draw("fs_seen", POINTS, None, vec![read(DEPTH)], binding(SEEN)),
-        draw("fs_step", POINTS, None, Vec::new(), transient(STEP)),
-        draw("fs_head", POINTS, None, Vec::new(), transient(HEAD)),
-        draw("fs_tail", POINTS, None, Vec::new(), transient(TAIL)),
+    let mut passes = vec![draw("fs_depth", SUBJECT, Some(0), Vec::new(), transient(DEPTH), PassLoad::Clear)];
+    passes.extend(over_points("fs_seen", vec![read(DEPTH)], binding(SEEN)));
+    passes.extend(over_points("fs_step", Vec::new(), transient(STEP)));
+    passes.extend(over_points("fs_head", Vec::new(), transient(HEAD)));
+    passes.extend(over_points("fs_tail", Vec::new(), transient(TAIL)));
+    passes.extend([
         scan("fs_reach_seed", 0, vec![bound(SEEN)], transient(HEAD_SPREAD[0])),
         scan("fs_reach_seed", 0, vec![bound(SEEN)], transient(TAIL_SPREAD[0])),
-    ];
+    ]);
 
     // The reach scan, walked separately in each direction. Doubling `k`
     // relaxes each texel against the one `2^k` away and pays the arc
@@ -617,7 +699,7 @@ pub fn program() -> ProgramRegister {
         wgsl: SIGHT_WGSL.to_owned(),
         bindings: vec![plane_slot(); PLANE_COUNT],
         transients: vec![plane_slot(); TRANSIENT_COUNT],
-        geometries: vec![subject_slot(), points_slot()],
+        geometries: vec![subject_slot(), points_slot(), points_slot()],
         depth_transients: vec![SlotExtent::Full],
         passes,
     }
@@ -628,6 +710,12 @@ mod tests {
     use super::*;
     use crate::feature::{Pen, SurfacePoint};
     use aether_render::vertex_stride_bytes;
+
+    /// A drawing whose halves are not the point of the test: everything
+    /// volatile, which is what the layout did before it had two regions.
+    fn whole(curves: &[Curve3]) -> Drawing<'_> {
+        Drawing { resident: &[], volatile: curves }
+    }
 
     fn curve(seed: u64, at: f32, points: usize) -> Curve3 {
         Curve3 {
@@ -652,23 +740,56 @@ mod tests {
         assert_eq!(vertex_stride_bytes(&subject_slot().layout), SUBJECT_VERTEX_BYTES, "subject stride");
         assert_eq!(vertex_stride_bytes(&points_slot().layout), POINT_VERTEX_BYTES, "point stride");
 
-        let drawing = [curve(1, 0.0, 4), curve(2, 1.0, 7)];
-        let placed = layout(&drawing, (64, 64)).expect("fits");
-        assert_eq!(point_vertices(&drawing, &placed).len(), 11 * 3 * POINT_VERTEX_BYTES, "packed length");
-        assert_eq!(point_indices(&placed).len(), 11 * 3 * 4, "index length");
+        let curves = [curve(1, 0.0, 4), curve(2, 1.0, 7)];
+        let placed = layout(whole(&curves), (64, 64)).expect("fits");
+        assert_eq!(point_vertices(whole(&curves), placed.spans()).len(), 11 * 3 * POINT_VERTEX_BYTES, "packed length");
+        assert_eq!(point_indices(placed.spans()).len(), 11 * 3 * 4, "index length");
     }
 
-    /// Tripwire: an empty drawing still packs one point.
+    /// Tripwire: an empty region still packs one point, and that point
+    /// draws nothing.
     ///
     /// A dispatch supplies one id per declared geometry slot or it
-    /// warn-drops whole, so a drawing that laid out to nothing must
-    /// still produce a geometry the dispatch can name — otherwise the
-    /// field silently stops updating rather than updating to empty.
+    /// warn-drops whole, so a region that laid out to nothing must still
+    /// produce a geometry the dispatch can name — otherwise the field
+    /// silently stops updating rather than updating to empty. The
+    /// stand-in has to be inert as well as present: every texel of the
+    /// field is a point or the barrier that ends a curve, so a stand-in
+    /// that rasterized anywhere would answer for one of them. Three
+    /// copies of one corner is a triangle of zero area, which covers no
+    /// sample wherever it lands.
     #[test]
-    fn an_empty_drawing_still_packs_one_point() {
-        let placed = layout(&[], (64, 64)).expect("fits");
-        assert_eq!(point_vertices(&[], &placed).len(), 3 * POINT_VERTEX_BYTES);
-        assert_eq!(point_indices(&placed).len(), 3 * 4);
+    fn an_empty_region_packs_one_point_that_draws_nothing() {
+        let placed = layout(whole(&[]), (64, 64)).expect("fits");
+        let packed = point_vertices(whole(&[]), placed.spans());
+
+        assert_eq!(packed.len(), 3 * POINT_VERTEX_BYTES);
+        assert_eq!(point_indices(placed.spans()).len(), 3 * 4);
+        let (first, rest) = packed.split_at(POINT_VERTEX_BYTES);
+        assert_eq!(rest, [first, first].concat(), "the stand-in's three vertices are one corner");
+    }
+
+    /// Tripwire: a resident curve keeps its texels when the volatile
+    /// half changes underneath it.
+    ///
+    /// This is the whole basis of the residency (#4435). The resident
+    /// buffer is uploaded once and then left alone, so the GPU keeps
+    /// reading whatever spans it was packed against; the day a volatile
+    /// curve appearing or growing shifts a resident span, every resident
+    /// point silently addresses a texel belonging to some other stroke
+    /// and the drawing reads its occlusion off the wrong curves.
+    #[test]
+    fn a_resident_span_survives_the_volatile_half_changing() {
+        let resident = [curve(1, 0.0, 4), curve(2, 1.0, 7)];
+        let thin = [curve(3, 2.0, 3)];
+        let thick = [curve(3, 2.0, 9), curve(4, 3.0, 5)];
+
+        let before = layout(Drawing { resident: &resident, volatile: &thin }, (64, 64)).expect("fits");
+        let after = layout(Drawing { resident: &resident, volatile: &thick }, (64, 64)).expect("fits");
+
+        assert_eq!(before.resident(), after.resident(), "the resident region");
+        assert_eq!(before.volatile().len(), 1, "the volatile region is the volatile half");
+        assert_eq!(after.volatile().len(), 2);
     }
 
     /// Tripwire: every curve is flanked by an empty texel, and no two
@@ -680,8 +801,8 @@ mod tests {
     /// which looks like a stroke that simply never tapers.
     #[test]
     fn every_span_is_flanked_by_an_empty_texel() {
-        let drawing = [curve(1, 0.0, 4), curve(2, 1.0, 7), curve(3, 2.0, 2)];
-        let placed = layout(&drawing, (64, 64)).expect("fits");
+        let curves = [curve(1, 0.0, 4), curve(2, 1.0, 7), curve(3, 2.0, 2)];
+        let placed = layout(whole(&curves), (64, 64)).expect("fits");
 
         let mut previous_end = 0;
         for span in placed.spans() {
@@ -701,11 +822,11 @@ mod tests {
     /// added.
     #[test]
     fn a_span_follows_the_curve_not_its_arrival_order() {
-        let drawing = [curve(1, 0.0, 4), curve(2, 1.0, 7), curve(3, 2.0, 2)];
-        let shuffled = [drawing[2].clone(), drawing[0].clone(), drawing[1].clone()];
+        let curves = [curve(1, 0.0, 4), curve(2, 1.0, 7), curve(3, 2.0, 2)];
+        let shuffled = [curves[2].clone(), curves[0].clone(), curves[1].clone()];
 
-        let placed = layout(&drawing, (64, 64)).expect("fits");
-        let reordered = layout(&shuffled, (64, 64)).expect("fits");
+        let placed = layout(whole(&curves), (64, 64)).expect("fits");
+        let reordered = layout(whole(&shuffled), (64, 64)).expect("fits");
 
         for (at, was) in [(0usize, 1usize), (1, 2), (2, 0)] {
             let before = placed.span_of(at).expect("placed");
@@ -738,11 +859,11 @@ mod tests {
     fn the_layout_refuses_rather_than_truncates() {
         let long = [curve(1, 0.0, MAX_CURVE_POINTS + 1)];
         assert!(
-            matches!(layout(&long, (4096, 4096)), Err(LayoutError::CurveTooLong { points, .. }) if points == MAX_CURVE_POINTS + 1),
+            matches!(layout(whole(&long), (4096, 4096)), Err(LayoutError::CurveTooLong { points, .. }) if points == MAX_CURVE_POINTS + 1),
         );
 
         let many = [curve(1, 0.0, 40), curve(2, 1.0, 40)];
-        assert!(matches!(layout(&many, (8, 8)), Err(LayoutError::OverCapacity { capacity: 64, .. })));
+        assert!(matches!(layout(whole(&many), (8, 8)), Err(LayoutError::OverCapacity { capacity: 64, .. })));
     }
 
     /// Tripwire: the uniform blob lays one window down per scan
