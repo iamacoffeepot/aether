@@ -155,40 +155,74 @@ pub fn blur_in_place(field: &mut [f32], width: usize, height: usize, radius: f32
     }
 }
 
-/// One separable box average, in place, with clamped edges.
+/// One separable box average, in place, over a plane whose edge is a
+/// mirror ([`reflected`]).
 ///
 /// Both axes carry a running sum, so the cost is one add and one subtract
 /// per pixel per axis whatever the radius — a naive kernel would reread
 /// `2r + 1` samples for every one of them, and the loose wash blurs at a
-/// radius of tens of pixels.
+/// radius of tens of pixels. The window slides by exactly one sample
+/// whatever the edge rule, so the incremental form carries a reflected
+/// edge as faithfully as any other.
 fn box_blur_pass(field: &mut [f32], scratch: &mut [f32], width: usize, height: usize, radius: usize) {
     let span = (2 * radius + 1) as f32;
     let reach = radius as isize;
 
     for y in 0..height {
         let row = y * width;
-        let mut sum: f32 = (-reach..=reach).map(|x| field[row + clamped(x, width)]).sum();
+        let mut sum: f32 = (-reach..=reach).map(|x| field[row + reflected(x, width)]).sum();
 
         for x in 0..width {
             scratch[row + x] = sum / span;
-            sum +=
-                field[row + clamped(x as isize + reach + 1, width)] - field[row + clamped(x as isize - reach, width)];
+            sum += field[row + reflected(x as isize + reach + 1, width)]
+                - field[row + reflected(x as isize - reach, width)];
         }
     }
 
     for x in 0..width {
-        let mut sum: f32 = (-reach..=reach).map(|y| scratch[clamped(y, height) * width + x]).sum();
+        let mut sum: f32 = (-reach..=reach).map(|y| scratch[reflected(y, height) * width + x]).sum();
 
         for y in 0..height {
             field[y * width + x] = sum / span;
-            sum += scratch[clamped(y as isize + reach + 1, height) * width + x]
-                - scratch[clamped(y as isize - reach, height) * width + x];
+            sum += scratch[reflected(y as isize + reach + 1, height) * width + x]
+                - scratch[reflected(y as isize - reach, height) * width + x];
         }
     }
 }
 
-fn clamped(index: isize, extent: usize) -> usize {
-    index.clamp(0, extent as isize - 1) as usize
+/// The plane's edge as a mirror: index `-1` reads texel `0`, `-2` reads
+/// texel `1`, and the far edge folds the same way — half-sample
+/// symmetric.
+///
+/// Replicating the edge instead would answer every tap that falls off the
+/// plane with the edge texel itself, pulling a border average toward that
+/// one texel's own value rather than toward the neighbourhood it is meant
+/// to soften into. It also would not survive being filtered: a
+/// replicate-extended plane averages to something that is no longer
+/// replicate-extended, so iterating this pass would stop being the same
+/// operator as one sweep of those iterations convolved together. A
+/// symmetric extension is preserved by a symmetric kernel, so under
+/// reflection the two are one operator everywhere
+/// (iamacoffeepot/aether#4444).
+///
+/// One fold at each edge covers every window narrower than the plane. A
+/// window wider than that lands past the far edge again, and the clamp
+/// answers it — the wash never asks, and `puddle.wgsl` answers it the
+/// same way, so the two stay one operator there too.
+fn reflected(index: isize, extent: usize) -> usize {
+    let extent = extent as isize;
+    let under = if index < 0 {
+        -1 - index
+    } else {
+        index
+    };
+    let over = if under >= extent {
+        2 * extent - 1 - under
+    } else {
+        under
+    };
+
+    over.clamp(0, extent - 1) as usize
 }
 
 /// Cost of a diagonal step relative to an orthogonal one.
@@ -418,7 +452,7 @@ mod tests {
         for y in 0..height {
             for x in 0..width {
                 let sum: f32 =
-                    (-reach..=reach).map(|offset| field[y * width + clamped(x as isize + offset, width)]).sum();
+                    (-reach..=reach).map(|offset| field[y * width + reflected(x as isize + offset, width)]).sum();
                 horizontal[y * width + x] = sum / span;
             }
         }
@@ -427,7 +461,7 @@ mod tests {
         for y in 0..height {
             for x in 0..width {
                 let sum: f32 =
-                    (-reach..=reach).map(|offset| horizontal[clamped(y as isize + offset, height) * width + x]).sum();
+                    (-reach..=reach).map(|offset| horizontal[reflected(y as isize + offset, height) * width + x]).sum();
                 out[y * width + x] = sum / span;
             }
         }
@@ -439,7 +473,7 @@ mod tests {
     ///
     /// The incremental form is what makes a 30-pixel wash radius
     /// affordable, and it is also where a wash silently goes wrong: an
-    /// off-by-one in either window bound, or an edge clamped on the wrong
+    /// off-by-one in either window bound, or an edge folded on the wrong
     /// side, still produces a plausible-looking blur. Only the definition
     /// catches it.
     #[test]

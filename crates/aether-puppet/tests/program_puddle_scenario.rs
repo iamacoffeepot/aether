@@ -77,9 +77,9 @@ const TOLERANCE_STEPS: f32 = 3.0;
 /// carry-back add their own support to the window, and the carry-back
 /// resolves the reduced plane's curve as straight lines between its
 /// samples. Both are fractions of a step across the interior of a field
-/// this smooth. The plane's clamped border is where they are not: the
-/// sweep there repeats the reduced plane's last texel, which is already
-/// an average of the last few of the oracle's, so the two extend their
+/// this smooth. The plane's mirrored border is where they are not: the
+/// sweep there folds the reduced plane, whose last texels are already
+/// averages of the last few of the oracle's, so the two extend their
 /// edges differently and the border rows carry the whole budget. The
 /// mechanism bugs named below move whole neighbourhoods by tens of steps.
 const REDUCED_TOLERANCE_STEPS: f32 = 8.0;
@@ -295,7 +295,7 @@ fn edge_noise(salt: u64) -> Vec<f32> {
 /// Six authored sweeps (three iterations, horizontal then vertical) must
 /// average exactly the window the CPU running sum averages. The named
 /// bugs: a tap window sized `2r` or `2r + 2` (an off-by-one either side
-/// of a sweep's loop bounds), an edge clamped one texel short (the border
+/// of a sweep's loop bounds), an edge folded one texel short (the border
 /// rows drift while the interior stays plausible), the horizontal and
 /// vertical windows swapped so anisotropy sneaks into a square blur, and
 /// an iteration miscount (two or four box passes read as a blur but land
