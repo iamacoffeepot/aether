@@ -59,11 +59,12 @@ use aether_puppet::easel::accent;
 use aether_puppet::easel::field::{Planes, Sheet};
 use aether_puppet::easel::image::{self, Flow};
 use aether_puppet::easel::palette;
+use aether_puppet::easel::program::ink;
 use aether_puppet::easel::program::wash::{self, WashBindings};
 use aether_puppet::labels::{BROW, DRESS, EYE, HAIR, INNER_EAR, LIPS, SKIN, TUFT};
 use aether_render::{
-    CreateTexture, CreateTextureResult, DrawTexturedQuads, ProgramDispatch, ProgramRegisterResult, TextureFormat,
-    TextureSampling, TextureUsage, TexturedQuad,
+    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, ProgramDispatch,
+    ProgramRegisterResult, TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
 };
 
 /// The canvas the parity develops at: small enough that five hundred
@@ -205,6 +206,26 @@ fn create_texture(harness: &mut SubstrateHarness, label: &'static str, mail: &Cr
 }
 
 /// Upload one `f32` plane as an `R32Float` data texture.
+/// The ink pass' geometry slot, filled with the empty drawing's
+/// degenerate stand-in. This scenario feeds the flow from
+/// [`striped_ink`] rather than from the ink pass, so the pass has
+/// nothing to draw here — but a dispatch supplies one id per declared
+/// slot or it warn-drops whole.
+fn empty_ink_geometry(harness: &mut SubstrateHarness) -> u32 {
+    let mail = CreateGeometry {
+        layout: ink::geometry_slot().layout,
+        vertices: ink::vertices(&[]),
+        indices: ink::indices(&[]),
+    };
+    let created = harness
+        .execute(vec![("ink_geometry", HarnessOp::send_and_await_reply("aether.render", &mail))])
+        .expect("create_geometry sequence");
+    match created.reply::<CreateGeometryResult>("ink_geometry").expect("decode CreateGeometryResult") {
+        CreateGeometryResult::Ok { geometry_id } => geometry_id,
+        CreateGeometryResult::Err { reason } => panic!("create_geometry failed: {reason}"),
+    }
+}
+
 fn data_plane(harness: &mut SubstrateHarness, label: &'static str, plane: &[f32]) -> u32 {
     create_texture(
         harness,
@@ -354,8 +375,8 @@ fn the_wash_program_develops_the_cpu_sheet() {
     let dispatch = ProgramDispatch {
         program_id,
         bindings: bindings.to_vec(),
-        geometries: Vec::new(),
-        uniforms: program.uniforms(&sheet, Some(&flow), Some(&accents)),
+        geometries: vec![empty_ink_geometry(&mut harness)],
+        uniforms: program.uniforms(&sheet, Some(&flow), Some(&accents), camera()),
     };
     let pre = vec![
         envelope("aether.render", &dispatch),

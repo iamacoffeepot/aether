@@ -15,16 +15,20 @@
 //! composes them into the one registered wash program and encodes its
 //! per-develop uniform blob. Each module owns its own `.wgsl` and
 //! scenario files under this directory.
-
-//! [`bake`] (iamacoffeepot/aether#4411) is the other half of the same
-//! move and the only one that rasterizes: the painter's input maps,
-//! which [`super::regions`] walks the subject's faces for on the CPU,
-//! authored as draw passes over the subject's own geometry (ADR-0171).
-//! It stands beside the wash rather than under it — the wash still
-//! paints from CPU-baked planes, and the bake is held against that
-//! oracle until the switch-over.
+//!
+//! Two modules rasterize rather than paint fullscreen, and they are the
+//! two halves of the same move off the CPU (ADR-0171). [`bake`]
+//! (iamacoffeepot/aether#4411) authors the painter's input maps, which
+//! [`super::regions::rasterize`] walks the subject's faces for, as draw
+//! passes over the subject's own geometry; [`ink`]
+//! (iamacoffeepot/aether#4410) authors the coverage plane, which
+//! [`super::regions::ink`] walks the ribbon triangles for, as a draw
+//! pass over the drawing's own geometry. Both stand beside the wash
+//! rather than under it for now — it still paints from CPU-baked
+//! planes, and each is held against that oracle until the switch-over.
 
 pub mod bake;
+pub mod ink;
 pub mod pigment;
 pub mod puddle;
 pub mod sheet;
