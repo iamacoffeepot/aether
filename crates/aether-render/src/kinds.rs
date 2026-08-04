@@ -252,6 +252,135 @@ pub struct DestroyTexture {
     pub texture_id: u32,
 }
 
+/// Storage format of one vertex attribute in a geometry layout
+/// (ADR-0171). A closed set: the scalar and small-vector forms the
+/// authored vertex stages consume, including the integer and normalized
+/// shapes skinning needs, so a rigged mesh's layout is expressible
+/// without reopening the enum. Variant names match the
+/// `wgpu::VertexFormat` they realize as.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum VertexFormat {
+    /// Three 32-bit floats — positions and normals. 12 bytes.
+    Float32x3,
+    /// Two 32-bit floats — texture coordinates. 8 bytes.
+    Float32x2,
+    /// One 32-bit float — a scalar attribute (a class label, a weight).
+    /// 4 bytes.
+    Float32,
+    /// Four 8-bit unsigned integers — skinning joint indices. 4 bytes.
+    Uint8x4,
+    /// Four 8-bit unsigned normalized values sampled as `0.0..=1.0` —
+    /// skinning weights, packed colors. 4 bytes.
+    Unorm8x4,
+}
+
+impl VertexFormat {
+    /// Byte width of one attribute in this format. Every variant is a
+    /// multiple of four bytes, so a layout stride always satisfies
+    /// wgpu's four-byte buffer alignment.
+    #[must_use]
+    pub const fn bytes(self) -> usize {
+        match self {
+            Self::Float32x3 => 12,
+            Self::Float32x2 => 8,
+            Self::Float32 | Self::Uint8x4 | Self::Unorm8x4 => 4,
+        }
+    }
+}
+
+/// One declared vertex attribute (ADR-0171): the WGSL `@location` index
+/// the authored vertex stage binds it at, plus its storage format.
+/// Attributes pack in declaration order with no padding — the layout's
+/// stride is the sum of its formats' bytes ([`vertex_stride_bytes`]).
+/// Not a kind on its own — only addressable inside
+/// `CreateGeometry.layout`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub struct VertexAttribute {
+    pub location: u32,
+    pub format: VertexFormat,
+}
+
+/// Byte stride of one vertex under `layout`: the sum of its attribute
+/// formats' bytes, in declaration order with no padding. The single
+/// source of the stride rule — create/update validation divides the
+/// staged vertex bytes by it, and the draw-pass stage (ADR-0171) builds
+/// its `wgpu::VertexBufferLayout` from it.
+#[must_use]
+pub fn vertex_stride_bytes(layout: &[VertexAttribute]) -> usize {
+    layout.iter().map(|attribute| attribute.format.bytes()).sum()
+}
+
+/// `aether.render.create_geometry` — register a geometry in the render
+/// cap's session-scoped geometry registry (ADR-0171). `layout` declares
+/// the vertex attributes; `vertices` is the packed attribute bytes
+/// (length a multiple of the layout stride) and `indices` the 32-bit
+/// little-endian triangle-list indices (length a multiple of four, each
+/// within the vertex count). The cap validates at create — an empty
+/// layout, a vertex length off the stride, an index length off four,
+/// or an out-of-range index each reject with a distinguishable
+/// reason — assigns the next `geometry_id` past any previously created
+/// geometry (the same id-assignment shape as texture ids), stages the
+/// bytes CPU-side, and replies as soon as the id is assigned; the wgpu
+/// vertex/index buffers are realized lazily at first GPU use. Geometry
+/// uploads happen at subject-load cadence — deformation is program
+/// content riding the uniform blob, never per-frame re-creation. Reply:
+/// `CreateGeometryResult`. Desktop-only — the headless chassis replies
+/// `Err` (fail-fast, ADR-0105).
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.create_geometry")]
+pub struct CreateGeometry {
+    pub layout: Vec<VertexAttribute>,
+    #[serde(with = "aether_data::bytes")]
+    pub vertices: Vec<u8>,
+    #[serde(with = "aether_data::bytes")]
+    pub indices: Vec<u8>,
+}
+
+/// Reply to `CreateGeometry`. `Ok` carries the assigned `geometry_id` —
+/// thread it into `UpdateGeometry.geometry_id` and
+/// `DestroyGeometry.geometry_id` (and the draw-pass geometry binding,
+/// ADR-0171). `Err` carries a human-readable reason naming its
+/// validation class: an empty layout, a vertex byte length that does
+/// not divide by the layout stride, an index byte length that does not
+/// divide by four, or an index outside the vertex count.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.create_geometry_result")]
+pub enum CreateGeometryResult {
+    Ok { geometry_id: u32 },
+    Err { reason: String },
+}
+
+/// `aether.render.update_geometry` — replace a previously-created
+/// geometry's vertex and index bytes in place (ADR-0171). The layout is
+/// fixed at create; the replacement is validated against it under the
+/// same rules as `CreateGeometry` and swaps wholesale (the byte lengths
+/// may change). Fire-and-forget; an unknown `geometry_id` or an invalid
+/// replacement logs and drops, leaving the previous content staged. The
+/// staged bytes update immediately; the GPU buffers re-realize at the
+/// next GPU use. Per-frame updates are for view-dependent geometry that
+/// is small by nature (the ink ribbons) — a deforming mesh poses
+/// through the uniform blob instead.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.update_geometry")]
+pub struct UpdateGeometry {
+    pub geometry_id: u32,
+    #[serde(with = "aether_data::bytes")]
+    pub vertices: Vec<u8>,
+    #[serde(with = "aether_data::bytes")]
+    pub indices: Vec<u8>,
+}
+
+/// `aether.render.destroy_geometry` — release a previously-created
+/// geometry from the render cap's session-scoped geometry registry,
+/// mirroring `destroy_texture`. Fire-and-forget; an unknown
+/// `geometry_id` logs and drops. Dropping the registry entry releases
+/// the staged bytes and any realized GPU buffers.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.destroy_geometry")]
+pub struct DestroyGeometry {
+    pub geometry_id: u32,
+}
+
 /// One textured quad in a `DrawTexturedQuads` batch. `(x, y)` is the
 /// top-left corner and `(width, height)` the size, both in the unit
 /// the batch's `space` selects — window pixels for `Screen`, pixel

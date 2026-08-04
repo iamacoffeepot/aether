@@ -15,9 +15,9 @@ use aether_substrate::chassis::error::BootError;
 
 use crate::headless::HeadlessRenderCapability;
 use crate::{
-    CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
-    DrawTexturedQuads, DrawTriangle, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult,
-    UpdateTexture, ViewProjection,
+    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DestroyGeometry, DestroyTexture,
+    DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, ProgramDestroy,
+    ProgramDispatch, ProgramRegister, ProgramRegisterResult, UpdateGeometry, UpdateTexture, ViewProjection,
 };
 
 /// `HeadlessRenderCapability` runtime state, which is nothing at all — the
@@ -100,6 +100,32 @@ impl NativeActor for HeadlessRenderCapability {
     #[handler::single]
     fn on_destroy_texture(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DestroyTexture) {}
 
+    /// `CreateGeometry` replies `Err` so an agent that creates a
+    /// geometry against a headless chassis fails fast instead of waiting
+    /// on a reply that never comes (ADR-0171) — mirrors
+    /// `on_create_texture`, including the `#[handler::single]`-with-reply
+    /// declaration that keeps `describe_handlers` deduped against the
+    /// pumped runtime.
+    #[handler::single]
+    fn on_create_geometry(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: CreateGeometry,
+    ) -> CreateGeometryResult {
+        CreateGeometryResult::Err { reason: "unsupported on headless chassis — no GPU".to_owned() }
+    }
+
+    /// `UpdateGeometry` lands here as a no-op (ADR-0171) for the same
+    /// reason as `on_update_texture` — fire-and-forget kinds are
+    /// absorbed, not failed.
+    #[handler::single]
+    fn on_update_geometry(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UpdateGeometry) {}
+
+    /// `DestroyGeometry` lands here as a no-op (ADR-0171) for the same
+    /// reason as `on_update_geometry`.
+    #[handler::single]
+    fn on_destroy_geometry(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DestroyGeometry) {}
+
     /// `DrawTexturedQuads` lands here as a no-op for the same reason
     /// as `on_update_texture`.
     #[handler::single]
@@ -150,7 +176,7 @@ mod headless_tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::{TextureFormat, TextureSampling, TextureUsage};
+    use crate::{TextureFormat, TextureSampling, TextureUsage, VertexAttribute, VertexFormat};
     use aether_data::MailboxId;
     use aether_substrate::actor::native::NativeCtx;
     use aether_substrate::actor::native::binding::NativeBinding;
@@ -190,6 +216,39 @@ mod headless_tests {
             }
             CreateTextureResult::Ok { .. } => {
                 panic!("headless create_texture must reply Err, not assign an id")
+            }
+        }
+    }
+
+    /// ADR-0171: `create_geometry` against a headless chassis replies
+    /// `Err` (fail-fast, no GPU) rather than hanging on a reply that
+    /// never comes — the same shape as `create_texture` above, asserted
+    /// on the returned value directly.
+    #[test]
+    fn headless_create_geometry_replies_err() {
+        let (mailer, _rx) = test_mailer_and_rx();
+        let mut state = HeadlessRenderCapabilityState;
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+        let mut ctx =
+            NativeCtx::new(&transport, aether_data::Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
+        let result = HeadlessRenderCapability::on_create_geometry(
+            &mut state,
+            &mut ctx,
+            CreateGeometry {
+                layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }],
+                vertices: vec![0u8; 36],
+                indices: (0u32..3).flat_map(u32::to_le_bytes).collect(),
+            },
+        );
+        match result {
+            CreateGeometryResult::Err { reason } => {
+                assert!(
+                    reason.contains("headless"),
+                    "headless create_geometry reason should name the chassis; got {reason}",
+                );
+            }
+            CreateGeometryResult::Ok { .. } => {
+                panic!("headless create_geometry must reply Err, not assign an id")
             }
         }
     }

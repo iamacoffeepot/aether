@@ -23,10 +23,11 @@
 //! `QuadSpace` / `QuadScale` projection types the `aether.text` kinds share.
 //!
 //! The runtime decomposes along cohesion seams: `pipeline` (GPU bundle +
-//! shared record helpers), `texture` (the texture registry), `quad` (the
-//! quad-batch accumulator), `material` (the material-batch accumulator),
-//! `surface` (the wgpu surface / offscreen boot), and `capture` (the
-//! similarity-reference resolver).
+//! shared record helpers), `texture` (the texture registry), `geometry`
+//! (the ADR-0171 geometry registry), `quad` (the quad-batch accumulator),
+//! `material` (the material-batch accumulator), `surface` (the wgpu
+//! surface / offscreen boot), and `capture` (the similarity-reference
+//! resolver).
 //!
 //! [`HeadlessRenderCapability`] is the chassis-without-GPU companion:
 //! same `aether.render` mailbox, no-op `DrawTriangle` / `ViewProjection`
@@ -67,8 +68,8 @@ use aether_kinds::CaptureFrame;
 // `kinds` module (re-exported above).
 #[cfg(feature = "runtime")]
 pub use runtime::{
-    DEFAULT_CLEAR_COLOR, RenderCapabilityState, RenderParams, RenderTuningConfig, RenderTuningConfigLayer,
-    RenderTuningOverlay, WHITE_TEXTURE_ID,
+    DEFAULT_CLEAR_COLOR, GeometryRegistry, RealizedGeometry, RenderCapabilityState, RenderParams, RenderTuningConfig,
+    RenderTuningConfigLayer, RenderTuningOverlay, StagedGeometry, WHITE_TEXTURE_ID,
 };
 
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123
