@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 pub struct ForwardEnvelope {
     pub mailbox: MailboxId,
     pub kind: KindId,
+    #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,
 }
 

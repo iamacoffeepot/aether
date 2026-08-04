@@ -57,8 +57,17 @@ pub struct Read {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.read_result")]
 pub enum ReadResult {
-    Ok { namespace: String, path: String, bytes: Vec<u8> },
-    Err { namespace: String, path: String, error: FsError },
+    Ok {
+        namespace: String,
+        path: String,
+        #[serde(with = "aether_data::bytes")]
+        bytes: Vec<u8>,
+    },
+    Err {
+        namespace: String,
+        path: String,
+        error: FsError,
+    },
 }
 
 /// `aether.fs.write` — request the substrate write `bytes` to
@@ -71,6 +80,7 @@ pub enum ReadResult {
 pub struct Write {
     pub namespace: String,
     pub path: String,
+    #[serde(with = "aether_data::bytes")]
     pub bytes: Vec<u8>,
 }
 
@@ -287,6 +297,7 @@ pub enum FsFetchResult {
         output_kind: Option<KindId>,
         /// Wire-encoded output: raw file bytes when `output_kind` is
         /// `None`, or the last transform's encoded output value.
+        #[serde(with = "aether_data::bytes")]
         data: Vec<u8>,
     },
     Err {

@@ -117,6 +117,7 @@ pub struct Fetch {
     pub url: String,
     pub method: HttpMethod,
     pub headers: Vec<HttpHeader>,
+    #[serde(with = "aether_data::bytes")]
     pub body: Vec<u8>,
     pub timeout_ms: Option<u32>,
 }
@@ -134,8 +135,19 @@ pub struct Fetch {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.http.fetch_result")]
 pub enum FetchResult {
-    Ok { request_id: u64, url: String, status: u16, headers: Vec<HttpHeader>, body: Vec<u8> },
-    Err { request_id: u64, url: String, error: HttpError },
+    Ok {
+        request_id: u64,
+        url: String,
+        status: u16,
+        headers: Vec<HttpHeader>,
+        #[serde(with = "aether_data::bytes")]
+        body: Vec<u8>,
+    },
+    Err {
+        request_id: u64,
+        url: String,
+        error: HttpError,
+    },
 }
 
 // ADR-0108 HTTP server kinds. Two public kinds shared by the server
@@ -158,6 +170,7 @@ pub struct HttpServerRequest {
     pub path: String,
     pub query: String,
     pub headers: Vec<HttpHeader>,
+    #[serde(with = "aether_data::bytes")]
     pub body: Vec<u8>,
     pub peer_addr: String,
 }
@@ -171,6 +184,7 @@ pub struct HttpServerRequest {
 pub struct HttpServerResponse {
     pub status: u16,
     pub headers: Vec<HttpHeader>,
+    #[serde(with = "aether_data::bytes")]
     pub body: Vec<u8>,
 }
 
@@ -224,6 +238,7 @@ pub struct HttpStreamCredit {
 #[kind(name = "aether.http.server.response_chunk")]
 pub struct HttpResponseChunk {
     pub stream_id: u64,
+    #[serde(with = "aether_data::bytes")]
     pub body: Vec<u8>,
 }
 
@@ -281,6 +296,7 @@ pub struct HttpRequestStreamOpen {
 #[kind(name = "aether.http.server.request_chunk")]
 pub struct HttpRequestChunk {
     pub stream_id: u64,
+    #[serde(with = "aether_data::bytes")]
     pub body: Vec<u8>,
 }
 
@@ -364,6 +380,7 @@ pub struct WebSocketAccept {
 pub struct WebSocketMessage {
     pub stream_id: u64,
     pub binary: bool,
+    #[serde(with = "aether_data::bytes")]
     pub data: Vec<u8>,
 }
 

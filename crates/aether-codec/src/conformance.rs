@@ -128,6 +128,7 @@ struct Collections {
     maybe_some: Option<u64>,
     maybe_none: Option<u64>,
     triple: [u32; 3],
+    #[serde(with = "aether_data::bytes")]
     blob: Vec<u8>,
     nested: Inner,
 }

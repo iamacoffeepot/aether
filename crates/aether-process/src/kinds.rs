@@ -73,6 +73,7 @@ pub struct Run {
     pub binary: String,
     pub args: Vec<String>,
     pub env: Vec<EnvVar>,
+    #[serde(with = "aether_data::bytes")]
     pub stdin: Vec<u8>,
     pub timeout_millis: u32,
 }
@@ -92,7 +93,20 @@ pub struct Run {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.process.run_result")]
 pub enum RunResult {
-    Ok { exit_code: Option<i32>, stdout: Vec<u8>, stderr: Vec<u8> },
-    TimedOut { stdout: Vec<u8>, stderr: Vec<u8> },
-    Err { error: ProcessError },
+    Ok {
+        exit_code: Option<i32>,
+        #[serde(with = "aether_data::bytes")]
+        stdout: Vec<u8>,
+        #[serde(with = "aether_data::bytes")]
+        stderr: Vec<u8>,
+    },
+    TimedOut {
+        #[serde(with = "aether_data::bytes")]
+        stdout: Vec<u8>,
+        #[serde(with = "aether_data::bytes")]
+        stderr: Vec<u8>,
+    },
+    Err {
+        error: ProcessError,
+    },
 }

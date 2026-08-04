@@ -43,6 +43,7 @@ pub struct LoadFont {
 #[kind(name = "aether.text.load_font_bytes")]
 pub struct LoadFontBytes {
     pub name: String,
+    #[serde(with = "aether_data::bytes")]
     pub bytes: Vec<u8>,
 }
 

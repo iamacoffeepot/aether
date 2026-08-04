@@ -35,6 +35,7 @@ pub struct RouteEnvelope {
     pub engine_id: String,
     pub mailbox: MailboxId,
     pub kind: KindId,
+    #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,
 }
 

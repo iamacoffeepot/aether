@@ -57,6 +57,40 @@ fn vec_is_u32_count_then_elements() {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+struct Blob {
+    #[serde(with = "crate::bytes")]
+    payload: Vec<u8>,
+}
+
+// Tripwire: the wire layout of a `Bytes` field is the `u32` little-endian
+// count then the raw byte run — and the `serialize_bytes` fast path must emit
+// exactly the bytes the per-element seq path emits for the same data, or the
+// fast path is a silent format break for every peer still on the seq path.
+#[test]
+fn bytes_field_is_count_then_raw_and_matches_the_seq_path() {
+    let blob = Blob { payload: vec![9, 8, 7] };
+    let fast = to_vec(&blob).unwrap();
+    assert_eq!(fast, vec![3, 0, 0, 0, 9, 8, 7]);
+    assert_eq!(fast, to_vec(&vec![9u8, 8, 7]).unwrap(), "fast path and seq path diverge on the same payload");
+}
+
+#[test]
+fn bytes_fast_path_and_seq_path_decode_each_other() {
+    let blob = Blob { payload: vec![0, 1, 254, 255] };
+    assert_eq!(from_bytes::<Vec<u8>>(&to_vec(&blob).unwrap()).unwrap(), blob.payload);
+    assert_eq!(from_bytes::<Blob>(&to_vec(&blob.payload).unwrap()).unwrap(), blob);
+}
+
+#[test]
+fn bytes_fast_path_roundtrips_a_large_buffer() {
+    let payload: Vec<u8> = (0u32..1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let blob = Blob { payload };
+    let bytes = to_vec(&blob).unwrap();
+    assert_eq!(bytes.len(), 4 + blob.payload.len());
+    assert_eq!(from_bytes::<Blob>(&bytes).unwrap(), blob);
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 struct Point {
     x: i32,
     y: i32,

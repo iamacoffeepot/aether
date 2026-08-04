@@ -491,6 +491,7 @@ pub struct BehaviorHostSpec {
     pub wrapped: WidgetKind,
     /// The wrapped widget's own config, pre-encoded (as a direct slot's
     /// `config` would be).
+    #[serde(with = "aether_data::bytes")]
     pub wrapped_config: Vec<u8>,
     /// The behavior script.
     pub script: ScriptRef,
@@ -519,6 +520,7 @@ pub struct WidgetChildSpec {
     pub kind: WidgetKind,
     pub origin: [f32; 2],
     pub clip: Option<WidgetClipRect>,
+    #[serde(with = "aether_data::bytes")]
     pub config: Vec<u8>,
 }
 

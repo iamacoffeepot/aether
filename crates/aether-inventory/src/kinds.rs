@@ -48,7 +48,10 @@ pub enum ParamKindWire {
     /// The hole ranges over every [`NameEntryWire`] whose `domain`
     /// equals `domain` (`aether-root-{NAMESPACE}` over the declared
     /// mailbox namespaces).
-    Declared { domain: Vec<u8> },
+    Declared {
+        #[serde(with = "aether_data::bytes")]
+        domain: Vec<u8>,
+    },
     /// Instances are minted at runtime from an unbounded parameter
     /// (`aether-instanced-{full_name}`). The template declares only
     /// the family's existence + shape; individual instances reverse
@@ -63,6 +66,7 @@ pub enum ParamKindWire {
 /// `domain` to recover the id space exactly.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct NameEntryWire {
+    #[serde(with = "aether_data::bytes")]
     pub domain: Vec<u8>,
     pub name: String,
 }
@@ -76,6 +80,7 @@ pub struct NameEntryWire {
 /// families it cannot enumerate.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 pub struct TemplateEntryWire {
+    #[serde(with = "aether_data::bytes")]
     pub domain: Vec<u8>,
     pub template: String,
     pub param: ParamKindWire,
