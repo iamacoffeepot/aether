@@ -15,8 +15,8 @@
 //! inside its own pass graph, against a depth image of a mesh nobody
 //! sees.
 //!
-//! Three planes come out, and between them they carry everything the
-//! CPU run-splitter produced:
+//! The planes that come out carry, between them, everything the CPU
+//! run-splitter and the CPU rail solve produced:
 //!
 //! - [`SEEN`] — the verdict per point, the same conjunction
 //!   `visibility::drawn` reaches.
@@ -28,13 +28,21 @@
 //!   the quantity `visibility::whole_or_nothing` divides, so the
 //!   whole-or-nothing rule an authored mark passes (`CHART_COVERAGE`)
 //!   becomes a comparison against this plane.
+//! - [`REFERENCE`] — one texel per curve rather than per point:
+//!   [`crate::ribbon::reference_depth`], the stroke's own average
+//!   distance to the eye, with the sign carrying whether the curve is
+//!   drawn at this eye at all. That is everything the eye decides about
+//!   a curve rather than about one of its points, and delivering it
+//!   here is what lets the ink pass solve its rails in the vertex stage
+//!   from a ribbon buffer that never travels
+//!   (iamacoffeepot/aether#4440).
 //!
 //! # What this module is not
 //!
-//! It does not draw. Nothing consumes these planes yet: the CPU path
-//! stays production, and this stands beside it held against
-//! `visibility::runs` by `tests/program_sight_scenario.rs`, the same
-//! land-behind-the-path shape [`super::bake`] and [`super::ink`] took.
+//! It does not draw. The planes are read by [`super::stroke`], whose
+//! vertex stage folds them into stroke widths, and this side's own
+//! answers are held against `visibility::runs` by
+//! `tests/program_sight_scenario.rs`.
 //!
 //! # The field's layout, and why it has no rows
 //!
@@ -91,7 +99,7 @@ use aether_render::{
 use crate::feature::{Curve3, Drawing, FeatureClass};
 use crate::math3::hash64;
 use crate::mesh::Mesh;
-use crate::weld;
+use crate::{ribbon, weld};
 
 /// The field's own WGSL: the prepass, the point rasterization, and the
 /// two scan chains.
@@ -104,12 +112,13 @@ pub const SEEN: u32 = 0;
 pub const REACH: u32 = 1;
 pub const COVERAGE: u32 = 2;
 pub const TOTAL: u32 = 3;
+pub const REFERENCE: u32 = 4;
 
 /// How many plane bindings a dispatch supplies.
-pub const PLANE_COUNT: usize = 4;
+pub const PLANE_COUNT: usize = 5;
 
 /// Geometry slot indices: the subject the prepass rasterizes, then the
-/// drawing's points in two buffers.
+/// drawing's points in two buffers, then one texel per curve.
 ///
 /// The points divide by volatility rather than by class
 /// ([`Drawing`]). [`RESIDENT`] carries the
@@ -118,12 +127,17 @@ pub const PLANE_COUNT: usize = 4;
 /// occupy disjoint texels, so the passes that rasterize them write into
 /// one plane with the second loading what the first laid down
 /// (iamacoffeepot/aether#4435).
+///
+/// [`CURVES`] is neither: it carries one value per curve rather than
+/// per point, so the whole drawing's worth of it is smaller than either
+/// half's points and dividing it would buy nothing.
 pub const SUBJECT: u32 = 0;
 pub const RESIDENT: u32 = 1;
 pub const VOLATILE: u32 = 2;
+pub const CURVES: u32 = 3;
 
 /// How many geometry slots a dispatch supplies.
-pub const GEOMETRY_COUNT: usize = 3;
+pub const GEOMETRY_COUNT: usize = 4;
 
 /// Doublings the reach scan runs, so it resolves any barrier within
 /// `2^REACH_STEPS - 1` points and saturates past it.
@@ -562,7 +576,78 @@ pub fn point_indices(spans: &[Span]) -> Vec<u8> {
     (0..count).flat_map(u32::to_le_bytes).collect()
 }
 
+/// The drawing's curves, one texel-sized triangle each, carrying the
+/// one number the eye decides per curve.
+///
+/// `slot` packs the same way a point's does — the flat field index
+/// shifted up two bits with the corner in the low pair — because the
+/// two rasterize through the same placement.
+#[must_use]
+pub fn curves_slot() -> GeometrySlotSpec {
+    GeometrySlotSpec {
+        layout: vec![
+            VertexAttribute { location: 0, format: VertexFormat::Float32 },
+            VertexAttribute { location: 1, format: VertexFormat::Float32 },
+        ],
+    }
+}
+
+/// Bytes one curve vertex occupies: the packed slot and the reference.
+pub const CURVE_VERTEX_BYTES: usize = 4 + 4;
+
+/// The whole drawing's per-curve buffer, packed for [`curves_slot`]:
+/// [`ribbon::reference_depth`] written at each curve's own first texel.
+///
+/// Not divided by volatility, unlike the points. The value is per curve
+/// and per eye at once — a resident curve's reference depth changes
+/// with the camera exactly as a volatile one's does — so there is no
+/// half of it that stays put, and at one float per curve against a
+/// point's eleven there is nothing to gain by splitting the walk.
+///
+/// A drawing that laid out to nothing still packs one stand-in, for the
+/// reason [`point_vertices`] does, and by the same means: three copies
+/// of one corner, which is a triangle of zero area.
+#[must_use]
+pub fn curve_vertices(drawing: Drawing<'_>, layout: &Layout, eye: Vec3) -> Vec<u8> {
+    let mut curves: Vec<[f32; 2]> = Vec::with_capacity(layout.spans().len());
+    for span in layout.spans() {
+        let Some(curve) = drawing.curve(span.curve as usize) else {
+            continue;
+        };
+        curves.push([span.start as f32, ribbon::reference_depth(curve, eye)]);
+    }
+    let stand_in = curves.is_empty();
+    if stand_in {
+        curves.push([0.0, ribbon::NOT_DRAWN]);
+    }
+
+    let mut packed: Vec<u8> = Vec::with_capacity(curves.len() * 3 * CURVE_VERTEX_BYTES);
+    for curve in curves {
+        for corner in 0..3u32 {
+            let slot = curve[0] * 4.0
+                + if stand_in {
+                    0.0
+                } else {
+                    corner as f32
+                };
+            packed.extend([slot, curve[1]].into_iter().flat_map(f32::to_le_bytes));
+        }
+    }
+
+    packed
+}
+
+/// The per-curve index buffer, matching [`curve_vertices`]: sequential
+/// little-endian `u32` triangle-list indices, nothing shared.
+#[must_use]
+pub fn curve_indices(layout: &Layout) -> Vec<u8> {
+    let count = u32::try_from(layout.spans().len().max(1) * 3).unwrap_or(u32::MAX);
+
+    (0..count).flat_map(u32::to_le_bytes).collect()
+}
+
 fn draw(
+    vertex_entry_point: &str,
     entry_point: &str,
     geometry: u32,
     depth: Option<u32>,
@@ -571,16 +656,7 @@ fn draw(
     load: PassLoad,
 ) -> ProgramPass {
     ProgramPass {
-        stage: PassStage::Draw(DrawPass {
-            vertex_entry_point: if geometry == SUBJECT {
-                "vs_subject".to_owned()
-            } else {
-                "vs_point".to_owned()
-            },
-            geometry,
-            depth,
-            load,
-        }),
+        stage: PassStage::Draw(DrawPass { vertex_entry_point: vertex_entry_point.to_owned(), geometry, depth, load }),
         entry_point: entry_point.to_owned(),
         inputs,
         output,
@@ -599,8 +675,8 @@ fn draw(
 /// exactly what one pass over the whole drawing wrote.
 fn over_points(entry_point: &str, inputs: Vec<InputSlot>, output: OutputSlot) -> [ProgramPass; 2] {
     [
-        draw(entry_point, RESIDENT, None, inputs.clone(), output, PassLoad::Clear),
-        draw(entry_point, VOLATILE, None, inputs, output, PassLoad::Load),
+        draw("vs_point", entry_point, RESIDENT, None, inputs.clone(), output, PassLoad::Clear),
+        draw("vs_point", entry_point, VOLATILE, None, inputs, output, PassLoad::Load),
     ]
 }
 
@@ -631,11 +707,15 @@ pub fn program() -> ProgramRegister {
     let binding = |index: u32| OutputSlot::Binding { index };
     let bound = |index: u32| InputSlot::Binding { index };
 
-    let mut passes = vec![draw("fs_depth", SUBJECT, Some(0), Vec::new(), transient(DEPTH), PassLoad::Clear)];
+    let mut passes =
+        vec![draw("vs_subject", "fs_depth", SUBJECT, Some(0), Vec::new(), transient(DEPTH), PassLoad::Clear)];
     passes.extend(over_points("fs_seen", vec![read(DEPTH)], binding(SEEN)));
     passes.extend(over_points("fs_step", Vec::new(), transient(STEP)));
     passes.extend(over_points("fs_head", Vec::new(), transient(HEAD)));
     passes.extend(over_points("fs_tail", Vec::new(), transient(TAIL)));
+    // One texel per curve rather than per point, and so one pass rather
+    // than the pair the halves take: the value is per eye either way.
+    passes.push(draw("vs_curve", "fs_reference", CURVES, None, Vec::new(), binding(REFERENCE), PassLoad::Clear));
     passes.extend([
         scan("fs_reach_seed", 0, vec![bound(SEEN)], transient(HEAD_SPREAD[0])),
         scan("fs_reach_seed", 0, vec![bound(SEEN)], transient(TAIL_SPREAD[0])),
@@ -699,7 +779,7 @@ pub fn program() -> ProgramRegister {
         wgsl: SIGHT_WGSL.to_owned(),
         bindings: vec![plane_slot(); PLANE_COUNT],
         transients: vec![plane_slot(); TRANSIENT_COUNT],
-        geometries: vec![subject_slot(), points_slot(), points_slot()],
+        geometries: vec![subject_slot(), points_slot(), points_slot(), curves_slot()],
         depth_transients: vec![SlotExtent::Full],
         passes,
     }
@@ -739,11 +819,48 @@ mod tests {
     fn the_packed_vertices_match_the_declared_strides() {
         assert_eq!(vertex_stride_bytes(&subject_slot().layout), SUBJECT_VERTEX_BYTES, "subject stride");
         assert_eq!(vertex_stride_bytes(&points_slot().layout), POINT_VERTEX_BYTES, "point stride");
+        assert_eq!(vertex_stride_bytes(&curves_slot().layout), CURVE_VERTEX_BYTES, "curve stride");
 
         let curves = [curve(1, 0.0, 4), curve(2, 1.0, 7)];
         let placed = layout(whole(&curves), (64, 64)).expect("fits");
         assert_eq!(point_vertices(whole(&curves), placed.spans()).len(), 11 * 3 * POINT_VERTEX_BYTES, "packed length");
         assert_eq!(point_indices(placed.spans()).len(), 11 * 3 * 4, "index length");
+
+        let eye = Vec3::new(0.0, 0.0, 4.0);
+        assert_eq!(curve_vertices(whole(&curves), &placed, eye).len(), 2 * 3 * CURVE_VERTEX_BYTES, "curve length");
+        assert_eq!(curve_indices(&placed).len(), 2 * 3 * 4, "curve index length");
+    }
+
+    /// Tripwire: the length floor reaches the reference plane, as its
+    /// sign.
+    ///
+    /// The floor used to remove a curve's ribbon vertices outright.
+    /// Now the vertices are packed whatever the eye thinks and the
+    /// curve's reference is negated instead, so the ink pass collapses
+    /// them — which means a floor that stopped reaching this plane puts
+    /// every speck it exists to reject back on the paper at full
+    /// weight, with nothing having errored. The exemption is half the
+    /// rule and is checked with it: an authored mark of the same length
+    /// still draws.
+    #[test]
+    fn the_length_floor_arrives_as_a_negative_reference() {
+        let eye = Vec3::new(0.0, 0.0, 4.0);
+        let speck = |authored: bool| {
+            let mut one = curve(1, 0.0, 3);
+            one.points.iter_mut().enumerate().for_each(|(at, point)| {
+                point.pos = Vec3::new(at as f32 * 1.0e-4, 0.0, 0.0);
+                point.probe = point.pos;
+            });
+            one.authored = authored;
+            let drawn = [one];
+            let placed = layout(whole(&drawn), (64, 64)).expect("fits");
+            let packed = curve_vertices(whole(&drawn), &placed, eye);
+
+            f32::from_le_bytes(packed[4..8].try_into().expect("the reference lane"))
+        };
+
+        assert_eq!(speck(false), ribbon::NOT_DRAWN, "an extracted speck under the floor");
+        assert!(speck(true) > 0.0, "an authored mark of the same length");
     }
 
     /// Tripwire: an empty region still packs one point, and that point

@@ -171,10 +171,36 @@ pub struct Drawing<'a> {
     pub volatile: &'a [Curve3],
 }
 
+/// One of a [`Drawing`]'s two halves, for an operation that runs over
+/// the regions separately — the field's point buffers, the ink's ribbon
+/// buffers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Half {
+    Resident,
+    Volatile,
+}
+
 impl<'a> Drawing<'a> {
     /// The whole drawing in curve-index order.
     pub fn curves(&self) -> impl Iterator<Item = &'a Curve3> {
         self.resident.iter().chain(self.volatile)
+    }
+
+    /// One half's curves in the order they arrived, each paired with
+    /// the curve index it holds in the concatenation — which is what a
+    /// [`Layout`](crate::easel::program::sight::Layout) indexes, and so
+    /// how a curve here finds the span it was placed at.
+    ///
+    /// Arrival order rather than the field's own, because ribbons
+    /// composite in the order they are drawn and that order is the
+    /// drawing's.
+    pub fn half(&self, half: Half) -> impl Iterator<Item = (usize, &'a Curve3)> {
+        let (curves, base) = match half {
+            Half::Resident => (self.resident, 0),
+            Half::Volatile => (self.volatile, self.resident.len()),
+        };
+
+        curves.iter().enumerate().map(move |(at, curve)| (base + at, curve))
     }
 
     /// The `index`th curve of the concatenation — what a
