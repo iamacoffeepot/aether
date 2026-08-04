@@ -7,6 +7,8 @@
 
 use aether_math::Vec3;
 
+use crate::mesh::{Anchorage, Crossing};
+
 /// Which physical pen draws a stroke. A plotter changes pens between
 /// passes, so the emitter groups by this.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -119,12 +121,25 @@ pub struct SurfacePoint {
     /// means it survives welding and the visibility split, both of which
     /// cut curves up without knowing what they are.
     pub weight: f32,
+    /// Where the probe sits on the sculpt, so a pose can carry the point
+    /// without the level set being solved again
+    /// (iamacoffeepot/aether#4336).
+    ///
+    /// `None` for a point assembled by hand rather than found on a
+    /// surface, which a pose leaves where it is. Everything the renderer
+    /// extracts or plants carries one.
+    pub anchorage: Option<Anchorage>,
 }
 
 impl SurfacePoint {
     /// A point that is its own probe — everything read off the surface.
     pub fn on_surface(pos: Vec3, normal: Vec3) -> Self {
-        Self { pos, normal, probe: pos, weight: 1.0 }
+        Self { pos, normal, probe: pos, weight: 1.0, anchorage: None }
+    }
+
+    /// The same, addressed on the surface it was found on.
+    pub fn anchored(crossing: &Crossing) -> Self {
+        Self { anchorage: Some(crossing.at), ..Self::on_surface(crossing.pos, crossing.normal) }
     }
 }
 

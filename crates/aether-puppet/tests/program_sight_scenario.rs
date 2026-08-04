@@ -972,10 +972,10 @@ fn drawing(mesh: &Mesh, settings: &Settings, labels: Option<&Labels>, eye: Vec3)
     let drawn = |curves: Vec<Curve3>| curves.into_iter().filter(|curve| curve.points.len() >= 2).collect();
 
     Drawn {
-        resident: drawn(extract::surface(mesh, labels, anchors.as_ref(), settings)),
+        resident: drawn(extract::tone_gate(extract::surface(mesh, labels, anchors.as_ref(), settings), settings)),
         volatile: drawn(
             face.into_iter()
-                .chain(extract::suggestive(mesh, labels, eye, settings))
+                .chain(extract::suggestive(mesh, mesh, labels, eye, settings))
                 .chain(extract::silhouettes(mesh, eye))
                 .collect(),
         ),

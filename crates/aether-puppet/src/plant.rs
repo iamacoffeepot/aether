@@ -71,9 +71,8 @@ pub fn mark(mesh: &Mesh, mark: &Mark, front: f32) -> Vec<Vec<SurfacePoint>> {
             Some(surface) => {
                 current.push(SurfacePoint {
                     pos: on(plane, *p, mark.standoff),
-                    normal: surface.normal,
-                    probe: surface.pos,
                     weight,
+                    ..SurfacePoint::anchored(surface)
                 });
             }
             None if current.len() >= 2 => runs.push(mem::take(&mut current)),
@@ -182,6 +181,8 @@ fn fit(points: &[Vec3]) -> Option<Vec3> {
 mod tests {
     use super::*;
 
+    use crate::mesh::Anchorage;
+
     /// Depth of the skin a mark is meant to rest on, and of the fringe
     /// standing proud of it over the mark's outer end.
     const SKIN: f32 = 0.50;
@@ -248,7 +249,14 @@ mod tests {
     fn the_trimmed_plane_ignores_what_stands_proud_of_the_skin() {
         let cast: Vec<Option<Crossing>> = hits(true)
             .into_iter()
-            .map(|pos| Some(Crossing { pos, normal: Vec3::new(0.0, 0.0, 1.0), strength: 0.0 }))
+            .map(|pos| {
+                Some(Crossing {
+                    pos,
+                    normal: Vec3::new(0.0, 0.0, 1.0),
+                    strength: 0.0,
+                    at: Anchorage { face: 0, u: 0.0, v: 0.0 },
+                })
+            })
             .collect();
 
         let untrimmed = at_outer(fit(&hits(true)).expect("the lattice spans both directions"));
