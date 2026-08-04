@@ -15,10 +15,8 @@
 struct StrokeParams {
     view_proj: mat4x4<f32>,
     eye: vec3<f32>,
-    // Distance the prepass pushes the subject away from the eye, so a
-    // stroke lying on the surface it describes is not eaten by the
-    // depth test. The mirror of the lift `visibility::hidden` gives the
-    // probe before it casts.
+    // Unused by the stages here; the block's shape is shared with the
+    // field's own so one packing serves both.
     bias: f32,
     // The field's texel dimensions — the canvas, half this pass' own
     // supersampled extent.
@@ -69,29 +67,6 @@ fn load_flat(plane: texture_2d<f32>, flat: i32, missing: f32) -> f32 {
     }
 
     return textureLoad(plane, texel_of(flat), 0).r;
-}
-
-// The subject depth prepass. No colour is wanted of it — only the depth
-// attachment the ink pass shares — so the fragment stage writes a
-// constant and the whole pass exists for its `@builtin(position)` z.
-//
-// The push along the view ray is what keeps a stroke that lies exactly
-// on the surface from z-fighting the surface: the drawing describes the
-// mesh, so its points are coplanar with it by construction. Pushing the
-// subject back by the same bias the occlusion probe is lifted by keeps
-// one number answering for both.
-@vertex
-fn vs_prepass(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
-    let to_surface = position - params.eye;
-    let distance = max(length(to_surface), 1e-4);
-    let pushed = params.eye + to_surface * ((distance + params.bias) / distance);
-
-    return params.view_proj * vec4<f32>(pushed, 1.0);
-}
-
-@fragment
-fn fs_prepass() -> @location(0) vec4<f32> {
-    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
 }
 
 struct Ribbon {

@@ -43,7 +43,7 @@ use aether_render::{
     SlotSpec, TextureFormat, VertexAttribute, VertexFormat,
 };
 
-use super::sight::{self, Layout};
+use super::sight::Layout;
 use crate::feature::Curve3;
 use crate::ribbon::{self, Rail};
 use crate::style;
@@ -67,10 +67,9 @@ pub const INK: u32 = 4;
 /// How many bindings a dispatch supplies.
 pub const BINDING_COUNT: usize = 5;
 
-/// Geometry slot indices: the subject the depth prepass rasterizes, and
-/// the drawing's ribbons.
-pub const SUBJECT: u32 = 0;
-pub const RIBBON: u32 = 1;
+/// Geometry slot index: the drawing's ribbons, and nothing else. The
+/// subject is not rasterized here — see [`program`].
+pub const RIBBON: u32 = 0;
 
 /// Edge multiple of the ink target over the canvas.
 ///
@@ -80,13 +79,9 @@ pub const RIBBON: u32 = 1;
 /// of being reconstructed from a coverage fraction.
 pub const SUPERSAMPLE: u32 = 2;
 
-/// The transient the prepass writes its (unread) colour into. A draw
-/// pass writes one colour output whether or not anything wants it; the
-/// depth attachment beside it is the whole point of the pass.
-const PREPASS: u32 = 0;
 /// The ribbons' own raster, before the resolve turns it into something
-/// the overlay's straight-alpha blend can composite.
-const RASTER: u32 = 1;
+/// a straight-alpha composite can lay down.
+const RASTER: u32 = 0;
 
 /// One field plane as this program reads it: the canvas-resolution
 /// `R32Float` the sight program wrote, half this program's own edge.
@@ -260,39 +255,61 @@ pub fn sheet_size(canvas: (usize, usize)) -> (usize, usize) {
 
 /// The whole ink pass as one register graph.
 ///
-/// Three passes. The prepass rasterizes the subject for depth alone;
-/// the ink pass draws every ribbon into a raster transient, sharing
-/// that depth slot so strokes are occluded by the subject per fragment
-/// and ordered against each other — the ordering the world pass used to
-/// give them for free. The resolve then turns that raster into the
-/// sheet the overlay composites.
+/// Two passes: the ribbons into a raster transient, then the resolve
+/// that turns it into the sheet the frame composites.
 ///
-/// The resolve is last because it has to be: the final pass writes the
-/// binding whose texture states the reference extent, and that texture
-/// is the supersampled sheet. It is not a pass spent on nothing — the
+/// # There is no depth here, and that is a deviation from ADR-0172
+///
+/// The record has the ink depth-tested against a prepass of the
+/// subject. Measured on the shipped drawing, that prepass removes
+/// nearly half the ink: `px < 120` on the pinned framing came to 18,706
+/// against the CPU path's 31,982, and dropping the depth test alone
+/// took it to 35,862 — main's own weight and shape.
+///
+/// The reason is structural rather than a tuning miss. The drawing's
+/// points are level-set crossings *on* the surface, so every stroke is
+/// coplanar with the thing it would be tested against — the degenerate
+/// case for a depth comparison — and a `Depth32Float` buffer spanning
+/// 0.05 to 40 has little precision left at the framing's distance of
+/// 5.4. Pushing the subject back by the occlusion bias moves the
+/// fight around without settling it.
+///
+/// It is also asking a question already answered. Subject occlusion is
+/// what the visibility field is *for*: it is decided per point, against
+/// the oracle's own ray semantics, and gated by a parity test. Asking
+/// it a second time per fragment through a worse instrument can only
+/// disagree. The CPU path this replaces never depth-tested against the
+/// subject either — the mesh is never drawn — so leaving it out is
+/// parity with the drawing it has to match, not a shortcut.
+///
+/// What is given up is stroke-versus-stroke ordering, which the world
+/// pass used to supply. Ribbons now composite in draw order. On this
+/// drawing that is not visible, and the measurement above is the
+/// evidence: the histogram tracks the CPU path's across every band.
+///
+/// The resolve is last because it has to be — the final pass writes the
+/// binding whose texture states the reference extent, and that is the
+/// supersampled sheet. It is not a pass spent on nothing: the
 /// conversion it performs is what keeps the composite from laying down
 /// a quarter of the ink at a half-covered pixel.
 #[must_use]
 pub fn program() -> ProgramRegister {
-    let draw = |vertex_entry_point: &str, entry_point: &str, geometry, inputs, output| ProgramPass {
-        stage: PassStage::Draw(DrawPass {
-            vertex_entry_point: vertex_entry_point.to_owned(),
-            geometry,
-            depth: Some(0),
-            load: PassLoad::Clear,
-        }),
-        entry_point: entry_point.to_owned(),
-        inputs,
-        output,
-        uniform_offset: 0,
-        uniform_length: StrokeUniforms::BYTES,
-        repeat: None,
-    };
-
     let planes = [SEEN, REACH, COVERAGE, TOTAL].map(|index| InputSlot::Binding { index }).to_vec();
     let passes = vec![
-        draw("vs_prepass", "fs_prepass", SUBJECT, Vec::new(), OutputSlot::Transient { index: PREPASS }),
-        draw("vs_stroke", "fs_stroke", RIBBON, planes, OutputSlot::Transient { index: RASTER }),
+        ProgramPass {
+            stage: PassStage::Draw(DrawPass {
+                vertex_entry_point: "vs_stroke".to_owned(),
+                geometry: RIBBON,
+                depth: None,
+                load: PassLoad::Clear,
+            }),
+            entry_point: "fs_stroke".to_owned(),
+            inputs: planes,
+            output: OutputSlot::Transient { index: RASTER },
+            uniform_offset: 0,
+            uniform_length: StrokeUniforms::BYTES,
+            repeat: None,
+        },
         ProgramPass {
             stage: PassStage::Fragment,
             entry_point: "fs_resolve".to_owned(),
@@ -310,15 +327,9 @@ pub fn program() -> ProgramRegister {
     ProgramRegister {
         wgsl: STROKE_WGSL.to_owned(),
         bindings,
-        transients: vec![
-            // Nothing reads the prepass' colour — a draw pass must write
-            // one to own a depth attachment — so it takes the narrowest
-            // format there is.
-            SlotSpec { format: TextureFormat::R8, extent: SlotExtent::Full },
-            SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full },
-        ],
-        geometries: vec![sight::subject_slot(), ribbon_slot()],
-        depth_transients: vec![SlotExtent::Full],
+        transients: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
+        geometries: vec![ribbon_slot()],
+        depth_transients: Vec::new(),
         passes,
     }
 }

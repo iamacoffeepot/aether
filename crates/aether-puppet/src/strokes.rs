@@ -26,13 +26,13 @@
 
 use std::mem;
 
-use aether_kinds::QuadSpace;
-use aether_math::{Mat4, Vec3};
+use aether_math::{Mat4, Rgba, Vec3};
 use aether_render::{
-    CreateGeometry, CreateTexture, DestroyTexture, DrawTexturedQuads, ProgramDispatch, ProgramRegister, TextureFormat,
-    TextureSampling, TextureUsage, TexturedQuad, UpdateGeometry,
+    CreateGeometry, CreateTexture, DestroyTexture, DrawMaterialTextured, MaterialRect, MaterialTexturedRect,
+    ProgramDispatch, ProgramRegister, QuadBlend, TextureFormat, TextureSampling, TextureUsage, UpdateGeometry,
 };
 
+use crate::easel::View;
 use crate::easel::program::{sight, stroke};
 use crate::feature::Curve3;
 use crate::mesh::Mesh;
@@ -98,6 +98,10 @@ struct Solved {
 #[derive(Default)]
 pub struct Strokes {
     window: Option<(u32, u32)>,
+    /// The canvas the field and the sheet are sized to — the window
+    /// when one has been announced, and otherwise a frustum-shaped
+    /// stand-in. Resolved at solve time and held for the creates.
+    canvas: Option<(u32, u32)>,
     programs: Ordered,
     textures: Ordered,
     /// The canvas the current textures were created at.
@@ -115,6 +119,16 @@ pub struct Strokes {
     disabled: bool,
 }
 
+/// Long edge of the stand-in canvas used before a window is announced.
+const CANVAS_EDGE: u32 = 1200;
+
+/// How far in front of the subject's near side the ink stands.
+const INK_STANDOFF: f32 = 0.05;
+
+/// Nearest the ink is ever placed, comfortably clear of the 0.05 near
+/// plane.
+const INK_DEPTH_FLOOR: f32 = 0.25;
+
 /// Programs registered, in send order.
 const PROGRAM_COUNT: usize = 2;
 /// The four field planes plus the ink sheet.
@@ -127,6 +141,31 @@ impl Strokes {
     /// capacity and the sheet's size both follow it.
     pub fn resized(&mut self, width: u32, height: u32) {
         self.window = Some((width, height));
+    }
+
+    /// The canvas to solve at.
+    ///
+    /// The window when one has been announced. Otherwise a stand-in of
+    /// the same shape as the frustum, which is all the ink needs: it
+    /// composites as a world-space billboard spanning the frustum's own
+    /// cross-section, so the sheet's *resolution* is a quality choice
+    /// and only its *aspect* has to agree with the view. That is the
+    /// difference from a screen-space quad, which cannot be placed
+    /// without knowing the window in pixels.
+    fn resolve_canvas(&self, aspect: f32) -> (u32, u32) {
+        if let Some(window) = self.window {
+            return window;
+        }
+        let aspect = if aspect.is_finite() && aspect > 0.0 {
+            aspect
+        } else {
+            1.0
+        };
+        if aspect >= 1.0 {
+            (CANVAS_EDGE, ((CANVAS_EDGE as f32 / aspect).round() as u32).max(1))
+        } else {
+            (((CANVAS_EDGE as f32 * aspect).round() as u32).max(1), CANVAS_EDGE)
+        }
     }
 
     /// A new subject: its geometry has to travel again before the next
@@ -152,13 +191,12 @@ impl Strokes {
     /// layout refuses a curve past the scan's depth or a drawing past
     /// the canvas' texel count — which leaves the caller on its CPU
     /// path for that frame rather than showing a wrong picture.
-    pub fn solve(&mut self, curves: &[Curve3], eye: Vec3, view_proj: Mat4, bias: f32) -> bool {
+    pub fn solve(&mut self, curves: &[Curve3], eye: Vec3, view_proj: Mat4, bias: f32, aspect: f32) -> bool {
         if self.disabled {
             return false;
         }
-        let Some(field) = self.window else {
-            return false;
-        };
+        let field = self.resolve_canvas(aspect);
+        self.canvas = Some(field);
         let Ok(layout) = sight::layout(curves, field) else {
             return false;
         };
@@ -225,7 +263,7 @@ impl Strokes {
     /// The textures whose size no longer matches the window, released
     /// before the next creates.
     pub fn take_destroys(&mut self) -> Vec<DestroyTexture> {
-        if self.textures.asking || self.sized == self.window || self.sized.is_none() {
+        if self.textures.asking || self.sized == self.canvas || self.sized.is_none() {
             return Vec::new();
         }
 
@@ -246,7 +284,7 @@ impl Strokes {
         if self.disabled || !self.programs.ready(PROGRAM_COUNT) || self.textures.asking || self.sized.is_some() {
             return Vec::new();
         }
-        let Some((width, height)) = self.window else {
+        let Some((width, height)) = self.canvas else {
             return Vec::new();
         };
 
@@ -281,7 +319,7 @@ impl Strokes {
         if self.disabled || self.geometries.asking || self.geometries.ready(GEOMETRY_COUNT) {
             return Vec::new();
         }
-        let (Some((vertices, indices)), Some(solved)) = (self.subject_bytes.take(), self.solved.as_ref()) else {
+        let (Some((vertices, indices)), Some(solved)) = (self.subject_bytes.take(), self.solved.as_mut()) else {
             return Vec::new();
         };
 
@@ -291,13 +329,13 @@ impl Strokes {
             CreateGeometry { layout: sight::subject_slot().layout, vertices, indices },
             CreateGeometry {
                 layout: sight::points_slot().layout,
-                vertices: solved.points.clone(),
-                indices: solved.point_indices.clone(),
+                vertices: mem::take(&mut solved.points),
+                indices: mem::take(&mut solved.point_indices),
             },
             CreateGeometry {
                 layout: stroke::ribbon_slot().layout,
-                vertices: solved.ribbons.clone(),
-                indices: solved.ribbon_indices.clone(),
+                vertices: mem::take(&mut solved.ribbons),
+                indices: mem::take(&mut solved.ribbon_indices),
             },
         ]
     }
@@ -316,16 +354,23 @@ impl Strokes {
         if let Some((vertices, indices)) = self.subject_bytes.take() {
             updates.push(UpdateGeometry { geometry_id: ids[0], vertices, indices });
         }
-        if let Some(solved) = self.solved.as_ref() {
+        // Moved out rather than cloned: the drawing is megabytes of
+        // vertex bytes at this scale and it is rebuilt every frame the
+        // eye moves, so a copy here is a copy of the whole drawing per
+        // frame. The dispatch that follows needs only the uniforms.
+        // Skipped once the bytes have already travelled — the creates
+        // move them out of the same staging, and shipping the emptied
+        // vectors would replace the resident drawing with nothing.
+        if let Some(solved) = self.solved.as_mut().filter(|solved| !solved.ribbons.is_empty()) {
             updates.push(UpdateGeometry {
                 geometry_id: ids[1],
-                vertices: solved.points.clone(),
-                indices: solved.point_indices.clone(),
+                vertices: mem::take(&mut solved.points),
+                indices: mem::take(&mut solved.point_indices),
             });
             updates.push(UpdateGeometry {
                 geometry_id: ids[2],
-                vertices: solved.ribbons.clone(),
-                indices: solved.ribbon_indices.clone(),
+                vertices: mem::take(&mut solved.ribbons),
+                indices: mem::take(&mut solved.ribbon_indices),
             });
         }
 
@@ -359,40 +404,71 @@ impl Strokes {
             ProgramDispatch {
                 program_id: programs[1],
                 bindings: textures.clone(),
-                geometries: vec![geometries[0], geometries[2]],
+                geometries: vec![geometries[2]],
                 uniforms: solved.stroke_uniforms,
             },
         ]
     }
 
-    /// The ink sheet over the window, one screen-space quad.
+    /// The ink, standing in front of the wash and facing the eye.
     ///
-    /// Screen space rather than the wash's camera-facing billboard: the
-    /// overlay pass runs after the material pass and carries no depth,
-    /// so the ink lands in front of the sheet by the pass order itself
-    /// instead of by a standoff distance that has to be kept correct.
+    /// The same billboard the sheet uses, at a nearer standoff: it spans
+    /// the frustum's cross-section exactly at its own depth, so the
+    /// drawing — rasterized through this very matrix — projects back
+    /// onto the window pixel for pixel whatever resolution the sheet was
+    /// rendered at. Nothing needs the window in pixels, which is the
+    /// reason this is a billboard rather than a screen rect.
+    ///
+    /// The material pass does not write depth, so the two rects do not
+    /// fight: this one is sent after the sheet and blends over it.
+    ///
+    /// `Premultiplied` because the sheet is a render program's own
+    /// output, and a fragment pass writing `Rgba8` onto a transparent
+    /// clear stores colour already scaled by its coverage. Compositing
+    /// it straight would weight it a second time and lay a quarter of
+    /// the ink at a half-covered pixel — which, at one- to two-pixel
+    /// strokes, is very nearly every inked pixel there is.
     #[must_use]
-    pub fn present(&self) -> Option<DrawTexturedQuads> {
+    pub fn draw(&self, view: &View, subject_radius: f32) -> Option<DrawMaterialTextured> {
         if !self.drawn {
             return None;
         }
-        let (width, height) = self.window?;
         let texture_id = *self.textures.ids.get(sight::PLANE_COUNT)?;
 
-        Some(DrawTexturedQuads {
+        let forward = (view.target - view.eye).normalize_or(Vec3::new(0.0, 0.0, -1.0));
+        // In front of the subject's near side, and so in front of the
+        // sheet standing behind its far one. Floored well clear of the
+        // near plane for a camera pushed inside the subject's radius.
+        let depth = ((view.target - view.eye).length() - subject_radius - INK_STANDOFF).max(INK_DEPTH_FLOOR);
+        let centre = view.eye + forward * depth;
+        let right = forward.cross(Vec3::new(0.0, 1.0, 0.0)).normalize_or(Vec3::new(1.0, 0.0, 0.0));
+        let up = right.cross(forward);
+
+        let half_height = depth * (view.field_of_view * 0.5).tan();
+        let half_width = half_height * view.aspect;
+        let origin = centre - right * half_width - up * half_height;
+
+        Some(DrawMaterialTextured {
             texture_id,
-            space: QuadSpace::Screen,
-            clip: None,
-            quads: vec![TexturedQuad {
-                x: 0.0,
-                y: 0.0,
-                width: width as f32,
-                height: height as f32,
+            blend: QuadBlend::Premultiplied,
+            rects: vec![MaterialTexturedRect {
+                rect: MaterialRect {
+                    x: origin.x,
+                    y: origin.y,
+                    z: origin.z,
+                    width: half_width * 2.0,
+                    height: half_height * 2.0,
+                    right: right.to_array(),
+                    up: up.to_array(),
+                },
+                // The canvas' first row is the top of the view and the
+                // rect's `v` runs up from its origin corner, so the
+                // vertical axis flips here exactly as the sheet's does.
                 u0: 0.0,
-                v0: 0.0,
+                v0: 1.0,
                 u1: 1.0,
-                v1: 1.0,
-                tint: aether_math::Rgba::new(1.0, 1.0, 1.0, 1.0),
+                v1: 0.0,
+                tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
             }],
         })
     }

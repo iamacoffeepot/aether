@@ -546,7 +546,8 @@ impl WasmActor for Puppet {
             // field decides which of its points carry width (ADR-0172).
             // What is left on this side is the lay-out and the pack:
             // extraction above, and the rail solve inside `solve`.
-            if !self.strokes.solve(&self.curves, eye, self.view_matrix(), subject.surface_bias()) && self.strokes.live()
+            if !self.strokes.solve(&self.curves, eye, self.view_matrix(), subject.surface_bias(), self.aspect)
+                && self.strokes.live()
             {
                 tracing::warn!(
                     target: "aether_puppet",
@@ -657,7 +658,9 @@ impl WasmActor for Puppet {
         for dispatch in self.strokes.take_dispatches() {
             render.send(&dispatch);
         }
-        if let Some(ink) = self.strokes.present() {
+        // After the sheet, and blending over it: the material pass
+        // writes no depth, so the two billboards compose in send order.
+        if let Some(ink) = self.strokes.draw(&view, subject_radius) {
             render.send(&ink);
         }
     }
