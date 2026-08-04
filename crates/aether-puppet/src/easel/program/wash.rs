@@ -225,18 +225,35 @@ impl SpillUniforms {
     }
 }
 
+/// One blur chain's slice of the plan. The radius and the extent are
+/// resolved when the graph is laid rather than when the blob is written:
+/// both follow from the wash's params and the canvas alone, and the
+/// extent has to be known at register time regardless, so resolving them
+/// together is what keeps the two in step.
+struct BlurPlan {
+    window: u32,
+    half_width_texels: f32,
+    divisor: u32,
+}
+
+impl BlurPlan {
+    fn encode(&self) -> [u8; puddle::BoxBlurUniforms::BYTES as usize] {
+        puddle::BoxBlurUniforms { half_width_texels: self.half_width_texels, divisor: self.divisor }.encode()
+    }
+}
+
 /// One pour's uniform windows, in pass order along its chain.
 struct PourPlan {
     /// `None` when the chain never resamples (a tight wash's single
     /// full-size pour, which the CPU also skips).
     shrink: Option<u32>,
-    soft_blur: u32,
+    soft_blur: BlurPlan,
     /// `None` for a wash on a level sheet.
     sag: Option<u32>,
     threshold: u32,
     /// `None` for a wash that holds its whole edge.
     lost: Option<u32>,
-    interior_blur: u32,
+    interior_blur: BlurPlan,
     rim: u32,
     accumulate: u32,
 }
@@ -246,8 +263,8 @@ struct PourPlan {
 struct ChainPlan {
     /// `None` for a wash that carries pigment uniformly (no value plane,
     /// so no support blurs at all).
-    support_value_blur: Option<u32>,
-    support_reference_blur: Option<u32>,
+    support_value_blur: Option<BlurPlan>,
+    support_reference_blur: Option<BlurPlan>,
     pours: Vec<PourPlan>,
     granulate: u32,
     /// `None` for a wash that never spatters.
@@ -258,8 +275,8 @@ struct ChainPlan {
 /// the displaced spill cut, then a wash like any other.
 struct AtmospherePlan {
     figure: u32,
-    halo_blur: u32,
-    standing_blur: u32,
+    halo_blur: BlurPlan,
+    standing_blur: BlurPlan,
     spill: u32,
     chain: ChainPlan,
     coat: u32,
@@ -295,16 +312,19 @@ pub struct WashProgram {
     ink_plane: u32,
     ink_window: u32,
     uniform_bytes: u32,
+    canvas_height: usize,
 }
 
 /// The graph under construction: passes in sequence, one fresh transient
 /// per intermediate (the executor pools them by live range), and a
-/// bump-allocated uniform layout.
-#[derive(Default)]
+/// bump-allocated uniform layout. `canvas_height` is what every authored
+/// radius resolves through, so it is the one thing the structure — not
+/// only the blob — depends on.
 struct Graph {
     passes: Vec<ProgramPass>,
     transients: Vec<SlotSpec>,
     uniform_bytes: u32,
+    canvas_height: usize,
 }
 
 const fn binding(index: u32) -> InputSlot {
@@ -316,8 +336,17 @@ const fn transient(index: u32) -> InputSlot {
 }
 
 impl Graph {
+    fn new(canvas_height: usize) -> Self {
+        Self { passes: Vec::new(), transients: Vec::new(), uniform_bytes: 0, canvas_height }
+    }
+
     fn plane(&mut self) -> u32 {
         self.transients.push(puddle::plane_slot());
+        (self.transients.len() - 1) as u32
+    }
+
+    fn reduced_plane(&mut self, divisor: u32) -> u32 {
+        self.transients.push(puddle::reduced_plane_slot(divisor));
         (self.transients.len() - 1) as u32
     }
 
@@ -332,19 +361,27 @@ impl Graph {
         at
     }
 
-    /// One full `image::blur` chain into a fresh transient; returns the
-    /// blurred plane and its radius window.
-    fn blur(&mut self, source: InputSlot) -> (InputSlot, u32) {
-        let window = self.window(puddle::BoxBlurUniforms::BYTES);
-        let (scratch, carry, out) = (self.plane(), self.plane(), self.plane());
-        self.passes.extend(puddle::box_blur_passes(
-            source,
-            scratch,
-            carry,
-            OutputSlot::Transient { index: out },
-            window,
-        ));
-        (transient(out), window)
+    /// One full `image::blur` chain into a fresh full-extent transient,
+    /// softening by `radius_pixels` of the reference sheet. The chain
+    /// sweeps at whatever extent that radius affords on this canvas
+    /// (iamacoffeepot/aether#4437): the wider the softening, the fewer
+    /// texels it needs to carry it. Returns the blurred plane and the
+    /// plan its window is written from.
+    fn blur(&mut self, source: InputSlot, radius_pixels: f32) -> (InputSlot, BlurPlan) {
+        let tuned = image::tuned(radius_pixels, self.canvas_height);
+        let divisor = puddle::blur_divisor(tuned);
+        let plan = BlurPlan {
+            window: self.window(puddle::BoxBlurUniforms::BYTES),
+            half_width_texels: puddle::box_half_width(tuned, divisor),
+            divisor,
+        };
+
+        let chain =
+            puddle::BoxBlurChain { scratch: self.reduced_plane(divisor), carry: self.reduced_plane(divisor), divisor };
+        let out = self.plane();
+        self.passes.extend(puddle::box_blur_passes(source, &chain, OutputSlot::Transient { index: out }, plan.window));
+
+        (transient(out), plan)
     }
 
     fn glue(
@@ -371,11 +408,12 @@ impl Graph {
     /// params. Structure follows the params alone — pour count, sag,
     /// lost, spatter — never the develop's data.
     fn wash_chain(&mut self, mask: InputSlot, value: Option<InputSlot>, params: &WashParams) -> (InputSlot, ChainPlan) {
-        let support = value.map(|plane| self.blur(plane));
-        let reference = value.map(|_| self.blur(mask));
-        let (support_value, support_value_blur) = support.map_or((mask, None), |(plane, window)| (plane, Some(window)));
+        let margin = params.water + field::SUPPORT_MARGIN;
+        let support = value.map(|plane| self.blur(plane, margin));
+        let reference = value.map(|_| self.blur(mask, margin));
+        let (support_value, support_value_blur) = support.map_or((mask, None), |(plane, plan)| (plane, Some(plan)));
         let (support_reference, support_reference_blur) =
-            reference.map_or((mask, None), |(plane, window)| (plane, Some(window)));
+            reference.map_or((mask, None), |(plane, plan)| (plane, Some(plan)));
 
         let mut density: Option<InputSlot> = None;
         let mut pours = Vec::with_capacity(params.pours.len());
@@ -391,7 +429,7 @@ impl Graph {
             });
             let (source, shrink) = placed.map_or((mask, None), |(plane, window)| (plane, Some(window)));
 
-            let (blurred, soft_blur) = self.blur(source);
+            let (blurred, soft_blur) = self.blur(source, params.water);
             let (soft, sag) = if params.sag {
                 let window = self.window(pigment::SagUniforms::BYTES);
                 let out = self.plane();
@@ -421,7 +459,7 @@ impl Graph {
                 (hard, None)
             };
 
-            let (interior, interior_blur) = self.blur(alpha);
+            let (interior, interior_blur) = self.blur(alpha, params.water * field::RIM_SPREAD + field::SUPPORT_MARGIN);
             let rim = self.window(puddle::RimUniforms::BYTES);
             let rim_plane = {
                 let out = self.plane();
@@ -478,11 +516,17 @@ impl Graph {
     }
 }
 
-/// Lay the whole develop as one register graph. Static by construction:
-/// the structure depends only on the palette and the wash constructors,
-/// so it is the same graph for every develop at every canvas size.
-pub fn program() -> WashProgram {
-    let mut graph = Graph::default();
+/// Lay the whole develop as one register graph, for a canvas
+/// `canvas_height` pixels tall. Static across develops by construction:
+/// the structure depends only on the palette, the wash constructors and
+/// that height, never on a develop's own data — so one laid graph
+/// serves every develop of every subject at that canvas, and only a
+/// resize re-lays it. The height enters because a blur's extent does
+/// (iamacoffeepot/aether#4437): how few texels a softening can be swept
+/// on is a question about how many pixels it covers. A blob written by
+/// [`WashProgram::uniforms`] belongs to the graph laid for its own sheet.
+pub fn program(canvas_height: usize) -> WashProgram {
+    let mut graph = Graph::new(canvas_height);
 
     // The ink coverage plane, rasterized from resident ribbon geometry
     // (iamacoffeepot/aether#4410). It is laid first so it is written
@@ -556,11 +600,11 @@ pub fn program() -> WashProgram {
             (plan, coat)
         });
 
-        let atmosphere = material.atmosphere.as_ref().map(|_| {
+        let atmosphere = material.atmosphere.as_ref().map(|policy| {
             let figure_window = graph.window(MaskUniforms::BYTES);
             let figure = graph.glue("fs_mask", vec![binding(CLASSES)], figure_window, MaskUniforms::BYTES);
-            let (halo, halo_blur) = graph.blur(mask);
-            let (standing, standing_blur) = graph.blur(figure);
+            let (halo, halo_blur) = graph.blur(mask, policy.halo);
+            let (standing, standing_blur) = graph.blur(figure, field::ATMOSPHERE_FIGURE);
             let spill_window = graph.window(SpillUniforms::BYTES);
             let spill = graph.glue("fs_atmosphere_spill", vec![halo, standing], spill_window, SpillUniforms::BYTES);
 
@@ -587,7 +631,15 @@ pub fn program() -> WashProgram {
         passes: graph.passes,
     };
 
-    WashProgram { register, materials, blush_coat, ink_plane, ink_window, uniform_bytes: graph.uniform_bytes }
+    WashProgram {
+        register,
+        materials,
+        blush_coat,
+        ink_plane,
+        ink_window,
+        uniform_bytes: graph.uniform_bytes,
+        canvas_height,
+    }
 }
 
 /// The uniform blob under construction: windows written at the offsets
@@ -626,6 +678,14 @@ impl WashProgram {
         self.ink_plane
     }
 
+    /// The canvas height this graph was laid for. A sheet of any other
+    /// height wants its own graph: the blur extents were chosen against
+    /// this one.
+    #[must_use]
+    pub fn canvas_height(&self) -> usize {
+        self.canvas_height
+    }
+
     /// The uniform blob for one develop of `sheet` — the dispatch-side
     /// half of [`Sheet::coats`]: the same seed rolls the same accidents
     /// in the same order, every tuned radius is resolved at the sheet's
@@ -643,6 +703,7 @@ impl WashProgram {
     ) -> Vec<u8> {
         let planes = sheet.planes();
         let (width, height) = (planes.width, planes.height);
+        debug_assert_eq!(height, self.canvas_height, "a develop must ride the graph laid for its own canvas");
         let mut blob = Blob(vec![0u8; self.uniform_bytes as usize]);
         let mut rng = Rng::new(sheet.seed());
 
@@ -711,8 +772,8 @@ impl WashProgram {
 
             if let (Some(policy), Some(atmosphere)) = (material.atmosphere.as_ref(), plan.atmosphere.as_ref()) {
                 blob.window(atmosphere.figure, &MaskUniforms { material_class: 0, figure: true }.encode());
-                blob.window(atmosphere.halo_blur, &blur_radius(policy.halo, height).encode());
-                blob.window(atmosphere.standing_blur, &blur_radius(field::ATMOSPHERE_FIGURE, height).encode());
+                blob.window(atmosphere.halo_blur.window, &atmosphere.halo_blur.encode());
+                blob.window(atmosphere.standing_blur.window, &atmosphere.standing_blur.encode());
                 let drift = Vec2::new(image::tuned(policy.drift.0, height), image::tuned(policy.drift.1, height));
                 blob.window(atmosphere.spill, &SpillUniforms { drift }.encode());
 
@@ -740,23 +801,15 @@ impl WashProgram {
     }
 }
 
-/// A blur window at a reference-sheet radius: tuned to this canvas, then
-/// through the same box mapping the CPU blur rounds with.
-fn blur_radius(radius_pixels: f32, height: usize) -> puddle::BoxBlurUniforms {
-    puddle::BoxBlurUniforms { radius_texels: puddle::box_radius_texels(image::tuned(radius_pixels, height)) }
-}
-
 /// Write one wash's windows: roll its accidents exactly when the CPU
 /// would (a mask with a centroid), and zero every strength when it would
 /// not, so an absent region deposits nothing anywhere along its chain.
+/// The blur windows are the graph's own — radius and extent were settled
+/// together when it was laid — so nothing here re-derives them.
 fn encode_chain(blob: &mut Blob, plan: &ChainPlan, data: &ChainData<'_>, rng: &mut Rng, width: usize, height: usize) {
     let params = data.params;
-    let margin = params.water + field::SUPPORT_MARGIN;
-    if let Some(window) = plan.support_value_blur {
-        blob.window(window, &blur_radius(margin, height).encode());
-    }
-    if let Some(window) = plan.support_reference_blur {
-        blob.window(window, &blur_radius(margin, height).encode());
+    for blur in [plan.support_value_blur.as_ref(), plan.support_reference_blur.as_ref()].into_iter().flatten() {
+        blob.window(blur.window, &blur.encode());
     }
 
     let accidents = data.centre.map(|_| field::WashAccidents::roll(params, width, height, rng));
@@ -768,7 +821,7 @@ fn encode_chain(blob: &mut Blob, plan: &ChainPlan, data: &ChainData<'_>, rng: &m
             let jitter = accident.map_or(Vec2::new(0.0, 0.0), |accident| accident.jitter);
             blob.window(window, &puddle::ShrinkUniforms { centre, jitter, scale: pour.scale }.encode());
         }
-        blob.window(pour_plan.soft_blur, &blur_radius(params.water, height).encode());
+        blob.window(pour_plan.soft_blur.window, &pour_plan.soft_blur.encode());
         if let Some(window) = pour_plan.sag {
             blob.window(window, &pigment::SagUniforms::for_canvas(height).encode());
         }
@@ -786,10 +839,7 @@ fn encode_chain(blob: &mut Blob, plan: &ChainPlan, data: &ChainData<'_>, rng: &m
             blob.window(window, &LostEdgeParams { centre, angle }.encode());
         }
 
-        blob.window(
-            pour_plan.interior_blur,
-            &blur_radius(params.water * field::RIM_SPREAD + field::SUPPORT_MARGIN, height).encode(),
-        );
+        blob.window(pour_plan.interior_blur.window, &pour_plan.interior_blur.encode());
         let strength = if accidents.is_some() {
             params.rim * params.load * field::RIM_GAIN
         } else {

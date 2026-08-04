@@ -872,6 +872,91 @@ pub struct ProgramDestroy {
     pub program_id: u32,
 }
 
+/// Which pipeline shape a timed pass ran, flattened from
+/// [`PassStage`] — the `Draw` declaration itself is register-time
+/// authoring detail a timing reader has no use for, and carrying it
+/// would make the reply grow with the graph's vertex layouts.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PassStageKind {
+    Fragment,
+    Draw,
+}
+
+/// One pass's measured GPU duration, in the shape `actor_cost` reports a
+/// handler's execution cost: an exponentially-weighted mean, the
+/// mean-absolute deviation around it, and the folded-sample count, all
+/// integer nanos. `samples: 0` is the neutral seed — a pass the graph
+/// declares that has not yet been measured — which is what distinguishes
+/// "known but unrun" from "absent", so a zero mean is never mistaken for
+/// a free pass.
+///
+/// **`mean_nanos` is marginal, and rows add up.** A pass is charged the
+/// interval between the pass before it retiring and itself retiring, not
+/// its own begin-to-end span. A GPU that keeps many passes in flight
+/// gives every pass a span covering its predecessors' work as well as
+/// its own, so spans overlap and summing them overcounts the frame
+/// severalfold; the marginal chain sums to the frame's GPU envelope
+/// instead. Summing a program's rows therefore gives that program's
+/// share of the frame's GPU time, and comparing two rows compares what
+/// removing one or the other would actually save.
+///
+/// The identity fields answer *which* pass and *at what size*, because
+/// that is what a pass-merging or extent decision keys on: `pass` is the
+/// index into the registered graph's pass list, `label` its WGSL entry
+/// point, `width` / `height` the extent its output slot resolved to on
+/// the most recent dispatch, and `divisor` the declared
+/// [`SlotExtent`] that extent came from (`1` for `Full`). `iterations`
+/// is the pass's repeat count — one row covers all of a repeated pass's
+/// iterations, so a large mean over a large `iterations` is a chain, not
+/// a single expensive pass.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PassTimingRow {
+    pub pass: u32,
+    pub label: String,
+    pub stage: PassStageKind,
+    pub width: u32,
+    pub height: u32,
+    pub divisor: u32,
+    pub iterations: u32,
+    pub mean_nanos: u64,
+    pub mad_nanos: u64,
+    pub samples: u64,
+}
+
+/// `aether.render.program.timings` — read the per-pass GPU duration
+/// table a registered program has accumulated. Durations only: the
+/// instrument brackets each recorded pass with wgpu timestamp queries,
+/// resolves them a frame later off the frame's critical path, and folds
+/// the deltas into per-pass EWMAs. Nothing of the program's pixels is
+/// read back.
+///
+/// Reply: [`ProgramTimingsResult`]. The instrument needs wgpu's
+/// `TIMESTAMP_QUERY` feature, which the render device requests whenever
+/// the selected adapter offers it; where the adapter does not, or where
+/// the operator turned the instrument off, the reply is `Absent` with
+/// the reason rather than a table of zeros.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.program.timings")]
+pub struct ProgramTimings {
+    pub program_id: u32,
+}
+
+/// Reply to [`ProgramTimings`]. `Ok` carries one [`PassTimingRow`] per
+/// declared pass, in graph order — including passes never measured
+/// (`samples: 0`), so the reply always describes the whole graph.
+/// `Absent` means the instrument is not running and says why (no
+/// adapter support, or disabled by configuration); it is not an error
+/// and a caller should read it as "this device cannot answer", not "this
+/// program is free". `Err` is a genuine failure — an unknown
+/// `program_id`, or no booted render GPU.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.render.program.timings_result")]
+pub enum ProgramTimingsResult {
+    Ok { program_id: u32, rows: Vec<PassTimingRow> },
+    Absent { reason: String },
+    Err { reason: String },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

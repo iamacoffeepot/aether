@@ -602,11 +602,16 @@ impl WasmActor for Puppet {
         }
 
         // The easel's mail for this frame, in dependency order: the
-        // program register (once per session), the destroys a resize
+        // programs a re-laid graph has finished with, the program
+        // register (at the first develop and after a re-lay), the
+        // texture destroys a resize
         // owes, the creates carrying a first develop at this size, then
         // the updates, the ribbon geometry the ink pass rasterizes, and
         // the dispatch that reads them all — to the same mailbox, so the
         // render cap sees them in exactly this order.
+        for destroy in self.easel.take_program_destroys() {
+            render.send(&destroy);
+        }
         if let Some(register) = self.easel.take_register() {
             self.awaiting.registers.push_back(Awaiting::Easel);
             render.send(register);

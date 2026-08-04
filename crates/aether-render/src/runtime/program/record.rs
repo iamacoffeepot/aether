@@ -21,6 +21,7 @@ use super::super::geometry::GeometryRegistry;
 use super::super::pipeline::RenderGpu;
 use super::super::texture::TextureRegistry;
 use super::cache::{BoundInput, CacheParts};
+use super::timing::FrameQueries;
 use super::validate::{ProgramPlan, ResolvedSlot, resolve_extent};
 use super::{PassGpu, RegisteredProgram, TransientKey};
 use crate::{PassLoad, ProgramDispatch, TextureSampling, TextureUsage};
@@ -40,11 +41,13 @@ pub(super) fn record_dispatch(
     textures: &mut TextureRegistry,
     geometries: &mut GeometryRegistry,
     dispatch: &ProgramDispatch,
+    queries: Option<FrameQueries<'_>>,
 ) {
-    let RegisteredProgram { plan, passes_gpu, cache } = program;
+    let RegisteredProgram { plan, passes_gpu, cache, timings } = program;
     let Some(reference) = check_dispatch(plan, textures, geometries, dispatch) else {
         return;
     };
+    timings.observe_reference(reference);
 
     for &texture_id in &dispatch.bindings {
         if let Some(entry) = textures.entries.get_mut(&texture_id) {
@@ -80,7 +83,7 @@ pub(super) fn record_dispatch(
         }
     }
 
-    encode_passes(gpu, encoder, plan, passes_gpu, &mut parts, pool, textures, geometries, dispatch);
+    encode_passes(gpu, encoder, plan, passes_gpu, &mut parts, pool, textures, geometries, dispatch, queries);
 }
 
 /// Run every dispatch-time check, warn-dropping on the first mismatch.
@@ -266,6 +269,7 @@ fn encode_passes(
     textures: &TextureRegistry,
     geometries: &GeometryRegistry,
     dispatch: &ProgramDispatch,
+    mut queries: Option<FrameQueries<'_>>,
 ) {
     cache.upload_uniforms(&gpu.device, &gpu.queue, plan, passes_gpu, &dispatch.uniforms);
 
@@ -342,7 +346,17 @@ fn encode_passes(
             ResolvedSlot::Binding(binding) => cache.binding_view(binding),
             ResolvedSlot::Transient(transient) => transient_view(transient),
         };
+        // The pass's timestamp pair, claimed once for the whole repeat:
+        // its first iteration opens the span and its last closes it, so
+        // one bracket attributes every iteration to the pass entry.
+        let bracket = queries
+            .as_mut()
+            .and_then(|queries| queries.open(dispatch.program_id, u32::try_from(pass).expect("pass index fits u32")));
+        let iterations = offsets.len();
         for (iteration, &uniform_offset) in offsets.iter().enumerate() {
+            let timestamps = bracket.and_then(|query| {
+                queries.as_ref().and_then(|queries| queries.timestamps(query, iteration, iterations))
+            });
             // The dispatch's first write to a slot clears it and every
             // later one loads it, so a chain accumulates; a repeat's
             // later iterations load for the same reason.
@@ -357,6 +371,7 @@ fn encode_passes(
                         uniform_bind_group,
                         uniform_offset,
                         inputs_bind_group,
+                        timestamps,
                     },
                 );
                 continue;
@@ -388,6 +403,7 @@ fn encode_passes(
                     vertex_buffer: &realized.vertex_buffer,
                     index_buffer: &realized.index_buffer,
                     index_count: realized.index_count,
+                    timestamps,
                 },
             );
         }

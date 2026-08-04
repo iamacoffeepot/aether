@@ -120,8 +120,8 @@ pub use self::texture::{TextureRegistry, WHITE_TEXTURE_ID};
 use super::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyGeometry,
     DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, Frame,
-    Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, RenderCapability,
-    UpdateGeometry, UpdateTexture, ViewProjection,
+    Occluded, PreSettled, ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings,
+    ProgramTimingsResult, RenderCapability, UpdateGeometry, UpdateTexture, ViewProjection,
 };
 
 /// Wedge-to-`Err` cap for a parked capture (ADR-0161): if a capture's
@@ -471,6 +471,10 @@ impl RenderCapabilityState {
         }
 
         self.last_submission = Some(queue.submit(iter::once(encoder.finish())));
+        // The timing readback is mapped only once its copy is submitted;
+        // the map completes on a later frame's poll, so nothing here
+        // waits on it (iamacoffeepot/aether#4423).
+        self.programs.after_frame_submit();
         if let Some(texture) = surface_texture {
             texture.present();
         }
@@ -544,7 +548,7 @@ impl NativeActor for RenderCapability {
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
             geometries: GeometryRegistry::new(),
-            programs: ProgramRegistry::new(),
+            programs: ProgramRegistry::new(config.pass_timings),
             pending_program_dispatches: Vec::new(),
             vertex_buffer_bytes: config.vertex_buffer_bytes,
             clear_color: {
@@ -693,6 +697,21 @@ impl NativeActor for RenderCapability {
     fn on_program_destroy(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ProgramDestroy) {
         state.observe(<ProgramDestroy as Kind>::ID);
         state.programs.destroy(&mail);
+    }
+
+    /// `ProgramTimings` (iamacoffeepot/aether#4423): the per-pass GPU
+    /// duration table one registered program has accumulated. Reads
+    /// already-folded state — the measurement itself resolves a frame
+    /// later off the frame's critical path — so the reply costs a walk
+    /// of the graph and never touches the device.
+    #[handler::single]
+    fn on_program_timings(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: ProgramTimings,
+    ) -> ProgramTimingsResult {
+        state.observe(<ProgramTimings as Kind>::ID);
+        state.programs.timings(&mail)
     }
 
     /// `DrawTexturedQuads` accumulator (ADR-0105), on the owned `quad_frame`.
@@ -1040,7 +1059,7 @@ mod tests {
             material_last_submitted: Vec::new(),
             textures: TextureRegistry::new(),
             geometries: GeometryRegistry::new(),
-            programs: ProgramRegistry::new(),
+            programs: ProgramRegistry::new(false),
             pending_program_dispatches: Vec::new(),
             vertex_buffer_bytes: 1024,
             clear_color: wgpu::Color { r: 0.05, g: 0.07, b: 0.12, a: 1.0 },

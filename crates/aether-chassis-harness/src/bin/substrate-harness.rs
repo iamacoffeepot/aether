@@ -112,6 +112,11 @@ fn main() -> anyhow::Result<()> {
         RenderTuningConfig {
             vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
             clear_color: aether_render::DEFAULT_CLEAR_COLOR.to_owned(),
+            // Operator-resolvable, unlike the two pinned knobs above:
+            // read through the cap's own ADR-0090 layer so
+            // `AETHER_RENDER_PASS_TIMINGS` reaches the instrument here
+            // the same way it does on a chassis.
+            pass_timings: RenderTuningConfig::from_env().pass_timings,
         },
         RenderParams {
             observed_kinds: None,
