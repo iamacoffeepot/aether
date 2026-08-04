@@ -91,7 +91,7 @@ use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
 use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Render, WindowSize};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::{Mat4, Vec2, Vec3};
-use aether_render::{CreateTextureResult, DrawTriangle, RenderCapability, ViewProjection};
+use aether_render::{CreateTextureResult, DrawTriangle, ProgramRegisterResult, RenderCapability, ViewProjection};
 use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 use serde::{Deserialize, Serialize};
 
@@ -485,9 +485,11 @@ impl WasmActor for Puppet {
         }
 
         // The easel, under everything above: develop when the view has
-        // settled, then stand the sheet behind the subject. The develop is
-        // the slow path and its gate keeps it off the frame cadence; the
-        // presentation costs one textured rect. It runs after the ribbons
+        // settled, then stand the sheet behind the subject. The develop
+        // rasterizes its planes on the CPU and paints them through the
+        // registered wash program (ADR-0170); the gate keeps the
+        // rasterize off the frame cadence, and the presentation costs
+        // one textured rect. It runs after the ribbons
         // rather than before because it reads them — the wash smears along
         // the drawing's own strokes, and the drawing has to be solved for
         // this eye first.
@@ -515,14 +517,25 @@ impl WasmActor for Puppet {
             self.easel.develop(&painted, &view, self.dragging);
         }
 
-        if let Some(destroy) = self.easel.take_destroy() {
+        // The easel's mail for this frame, in dependency order: the
+        // program register (once per session), the destroys a resize
+        // owes, the creates carrying a first develop at this size, then
+        // the updates and the dispatch that reads them — all to the same
+        // mailbox, so the render cap sees them in exactly this order.
+        if let Some(register) = self.easel.take_register() {
+            render.send(register);
+        }
+        for destroy in self.easel.take_destroys() {
             render.send(&destroy);
         }
-        if let Some(create) = self.easel.take_create() {
+        for create in self.easel.take_creates() {
             render.send(&create);
         }
-        if let Some(update) = self.easel.take_update() {
+        for update in self.easel.take_updates() {
             render.send(&update);
+        }
+        if let Some(dispatch) = self.easel.take_dispatch() {
+            render.send(&dispatch);
         }
         let subject_radius = (subject.max - subject.min).length() * 0.5;
         if let Some(sheet) = self.easel.draw(&view, subject_radius) {
@@ -530,9 +543,24 @@ impl WasmActor for Puppet {
         }
     }
 
-    /// The render cap answered the easel's create. `Err` is the headless
-    /// chassis' fail-fast reply, and it switches the easel off for the
-    /// session rather than letting it ask again every settle.
+    /// The render cap answered the easel's program register. `Err` is
+    /// the headless chassis' fail-fast reply (or a validation refusal),
+    /// and it switches the easel off for the session rather than letting
+    /// it ask again every settle.
+    #[handler::single]
+    fn on_program_registered(&mut self, _ctx: &mut WasmCtx<'_>, result: ProgramRegisterResult) {
+        match result {
+            ProgramRegisterResult::Ok { program_id } => self.easel.registered(Ok(program_id)),
+            ProgramRegisterResult::Err { reason } => {
+                tracing::info!(target: "aether_puppet", reason = %reason, "easel disabled: program register refused");
+                self.easel.registered(Err(()));
+            }
+        }
+    }
+
+    /// The render cap answered one of the easel's creates. `Err` is the
+    /// headless chassis' fail-fast reply, and it switches the easel off
+    /// for the session rather than letting it ask again every settle.
     #[handler::single]
     fn on_texture_created(&mut self, _ctx: &mut WasmCtx<'_>, result: CreateTextureResult) {
         match result {
