@@ -94,12 +94,12 @@ impl Mesh {
     }
 
     pub fn occluded(&self, origin: Vec3, dir: Vec3, distance: f32) -> bool {
-        self.bvh.occluded(&self.positions, &self.faces, origin, dir, 1e-4, distance)
+        self.bvh.occluded(origin, dir, 1e-4, distance)
     }
 
     /// First surface along the ray: its point and interpolated normal.
     pub fn hit(&self, origin: Vec3, dir: Vec3) -> Option<Crossing> {
-        let (t, face) = self.bvh.nearest(&self.positions, &self.faces, origin, dir, 1e-4, f32::MAX)?;
+        let (t, face) = self.bvh.nearest(origin, dir, 1e-4, f32::MAX)?;
         let pos = origin + dir * t;
 
         // Barycentric blend of the vertex normals, so a mark lies on the
