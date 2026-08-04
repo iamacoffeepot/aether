@@ -14,8 +14,11 @@
 //! frontal strength.
 //!
 //! [`ink`] bakes a fourth map from the drawing rather than from the
-//! surface: where the strokes themselves landed. It is what the wash reads
-//! to find which way the hair runs.
+//! surface: where the strokes themselves landed — the map the wash reads
+//! to find which way the hair runs. The frame's own copy of it is a
+//! reduction of the ink layer's raster (`program::stroke`), so this is
+//! the oracle the scenarios hold that reduction against rather than
+//! anything the frame path calls.
 //!
 //! One z-buffered barycentric pass over the triangles. The camera, mesh and
 //! light are the ones the ink drawing used, which is the point: the maps
@@ -219,6 +222,12 @@ const COVERAGE_SLACK: f32 = 0.5;
 ///
 /// `view_proj` must be the matrix the ribbons were solved for, so the
 /// coverage registers with the sheet the flow is applied to.
+///
+/// The oracle rather than the frame path (iamacoffeepot/aether#4451): the
+/// frame's plane is `fs_ink_plane`'s reduction of the raster the ink was
+/// drawn from, which needs no triangles and no CPU split. What this still
+/// answers is what that plane *ought* to hold, for the scenarios that hold
+/// the two together.
 pub fn ink(triangles: &[DrawTriangle], view_proj: &Mat4, width: usize, height: usize) -> Vec<f32> {
     let mut plane = vec![0.0; width * height];
     if plane.is_empty() {

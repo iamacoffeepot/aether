@@ -220,7 +220,7 @@ fn the_frame_paces_at_the_pinned_framing() {
         .expect("prime the pinned framing");
 
     if let Some(pinned) = photograph(&mut harness, "AETHER_PUPPET_GATE_PNG", "the pinned framing") {
-        compare_against_baseline(&pinned);
+        compare_against_baseline(&pinned, "AETHER_PUPPET_BASELINE_PNG", "AETHER_PUPPET_DIFF_PNG");
     }
     assert_the_develop_repeats(&mut harness);
 
@@ -242,7 +242,11 @@ fn the_frame_paces_at_the_pinned_framing() {
     harness
         .execute(vec![("turn", HarnessOp::send_and_settle(PUPPET, &look(turned))), ("settle", HarnessOp::advance(8))])
         .expect("settle the turned framing");
-    photograph(&mut harness, "AETHER_PUPPET_TURNED_PNG", &format!("azimuth {turned:.1} after the orbit"));
+    if let Some(turned) =
+        photograph(&mut harness, "AETHER_PUPPET_TURNED_PNG", &format!("azimuth {turned:.1} after the orbit"))
+    {
+        compare_against_baseline(&turned, "AETHER_PUPPET_TURNED_BASELINE_PNG", "AETHER_PUPPET_TURNED_DIFF_PNG");
+    }
 }
 
 /// Tripwire: a held view must develop the same sheet every frame.
@@ -308,13 +312,18 @@ fn handler_cost(harness: &mut SubstrateHarness, kind: aether_data::KindId) -> f6
 /// environment and both are optional, so an ordinary run does none of
 /// this — it is the A/B a change to the look is argued with.
 ///
+/// The variables are named by the caller rather than fixed, because the
+/// two framings this instrument photographs are two separate A/Bs: the
+/// pinned one is the gate, and the turned one is where a change that only
+/// shows once the camera has moved is caught.
+///
 /// Differences are reported in 8-bit steps of the worst channel, which
 /// is the same currency `program_wash_scenario` states its budgets in.
 /// The difference image is amplified so a change the eye would otherwise
 /// have to hunt for is visible at a glance; the numbers beside it are
 /// what the amplification must not be read instead of.
-fn compare_against_baseline(after: &Path) {
-    let (Ok(baseline), Ok(diff)) = (env::var("AETHER_PUPPET_BASELINE_PNG"), env::var("AETHER_PUPPET_DIFF_PNG")) else {
+fn compare_against_baseline(after: &Path, baseline_variable: &str, diff_variable: &str) {
+    let (Ok(baseline), Ok(diff)) = (env::var(baseline_variable), env::var(diff_variable)) else {
         return;
     };
     let read = |path: &Path| {

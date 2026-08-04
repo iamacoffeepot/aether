@@ -497,9 +497,9 @@ fn grazes(class: FeatureClass) -> bool {
 /// [`Span`] names its own by the index
 /// [`Drawing::curves`](crate::feature::Drawing::curves) gives it.
 ///
-/// A region that laid out to nothing still packs one stand-in point,
-/// for the reason [`super::ink::vertices`] packs one stand-in triangle:
-/// a dispatch supplies one id per declared geometry slot or it
+/// A region that laid out to nothing still packs one stand-in point, for
+/// the reason [`super::stroke::ribbon_geometry`] packs one stand-in
+/// vertex: a dispatch supplies one id per declared geometry slot or it
 /// warn-drops whole, so an empty region has to neutralize through the
 /// content rather than by restructuring the graph. The stand-in is
 /// three copies of one corner — a triangle of zero area, which

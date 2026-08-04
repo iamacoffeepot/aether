@@ -68,7 +68,8 @@ use crate::mesh::Mesh;
 pub(crate) const CANVAS_LONG_EDGE: usize = 1280;
 
 /// The canvas a window develops at — the window's own pixels, clamped to
-/// [`CANVAS_LONG_EDGE`].
+/// a long-edge ceiling of 1280, which is the resolution every distance in
+/// the engine was tuned at.
 ///
 /// Both layers resolve their canvas here and nowhere else. The wash reads
 /// its ink coverage plane out of a texture the ink layer's own program
