@@ -94,12 +94,12 @@ use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter,
 use aether_harness_substrate_capture::visual::decode_png;
 use aether_kinds::QuadSpace;
 use aether_math::{Mat4, Rgba, Vec3};
-use aether_puppet::easel::program::sight::{self, Layout, SightUniforms};
+use aether_puppet::easel::program::sight::{self, Layout, SightUniforms, ToneUniforms};
 use aether_puppet::extract::{self, Settings};
 use aether_puppet::feature::{Curve3, Drawing, FeatureClass, SurfacePoint};
 use aether_puppet::labels::Labels;
 use aether_puppet::mesh::Mesh;
-use aether_puppet::{anchor, chart, visibility};
+use aether_puppet::{anchor, chart, deform, visibility};
 use aether_render::QuadBlend;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot, OutputSlot,
@@ -424,7 +424,7 @@ impl Rig {
                 "create_subject",
                 &CreateGeometry {
                     layout: sight::subject_slot().layout,
-                    vertices: sight::subject_vertices(mesh),
+                    vertices: sight::subject_vertices(mesh, None),
                     indices: sight::subject_indices(mesh),
                 },
             ),
@@ -434,7 +434,7 @@ impl Rig {
                     "create_resident_points",
                     &CreateGeometry {
                         layout: sight::points_slot().layout,
-                        vertices: sight::point_vertices(drawing, layout.resident()),
+                        vertices: sight::point_vertices(drawing, layout.resident(), None),
                         indices: sight::point_indices(layout.resident()),
                     },
                 ),
@@ -443,7 +443,7 @@ impl Rig {
                     "create_volatile_points",
                     &CreateGeometry {
                         layout: sight::points_slot().layout,
-                        vertices: sight::point_vertices(drawing, layout.volatile()),
+                        vertices: sight::point_vertices(drawing, layout.volatile(), None),
                         indices: sight::point_indices(layout.volatile()),
                     },
                 ),
@@ -467,7 +467,19 @@ impl Rig {
             program_id: self.program_id,
             bindings: self.bindings.clone(),
             geometries: vec![self.subject, self.points[0], self.points[1], self.curves],
-            uniforms: SightUniforms { view_proj, eye, field: (self.width as u32, self.height as u32), bias }.encode(),
+            // The parity oracle is `visibility::runs`, which gates
+            // nothing on tone and poses nothing — so the bone table is
+            // the identity and the hatch gate is off, which is exactly
+            // what an unrigged subject dispatches.
+            uniforms: SightUniforms {
+                view_proj,
+                eye,
+                field: (self.width as u32, self.height as u32),
+                bias,
+                bones: deform::bone_uniform(&[]),
+                tone: ToneUniforms::of(&Settings::default(), false),
+            }
+            .encode(),
         }
     }
 
@@ -532,7 +544,7 @@ fn re_point(
                     "aether.render",
                     &UpdateGeometry {
                         geometry_id: rig.points[1],
-                        vertices: sight::point_vertices(drawing, layout.volatile()),
+                        vertices: sight::point_vertices(drawing, layout.volatile(), None),
                         indices: sight::point_indices(layout.volatile()),
                     },
                 ),
@@ -1083,7 +1095,7 @@ fn a_re_uploaded_subject_re_occludes_from_its_new_vertices() {
                 "aether.render",
                 &UpdateGeometry {
                     geometry_id: rig.subject,
-                    vertices: sight::subject_vertices(&posed),
+                    vertices: sight::subject_vertices(&posed, None),
                     indices: sight::subject_indices(&posed),
                 },
             ),

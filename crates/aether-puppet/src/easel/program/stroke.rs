@@ -55,7 +55,8 @@ use aether_render::{
 };
 
 use super::sight::Layout;
-use super::wash;
+use super::{SKIN_WGSL, wash};
+use crate::deform::{Anchored, BONE_LIMIT, Bound};
 use crate::feature::{Drawing, Half};
 use crate::ribbon::{self, Anchor};
 use crate::style;
@@ -147,13 +148,20 @@ pub fn ink_plane_slot() -> SlotSpec {
     SlotSpec { format: TextureFormat::R32Float, extent: SlotExtent::Divided { divisor: INK_PLANE_FOOTPRINT } }
 }
 
-/// The ribbon geometry's layout: [`ribbon::Anchor`] in full, the two
-/// field texels the vertex reads, and the ink colour.
+/// The ribbon geometry's layout: where the pen goes as an address on the
+/// sculpt, the chord across the point, the two field texels the vertex
+/// reads, and the ink colour.
 ///
 /// Every lane is a function of the curve alone, which is the whole
 /// point — the eye enters in the vertex stage, out of the uniform blob
-/// and the reference plane, so a curve that has not changed shape packs
-/// the same bytes from every angle.
+/// and the reference plane, and since iamacoffeepot/aether#4462 the
+/// *pose* enters the same way. So a curve that has not changed shape
+/// packs the same bytes from every angle and at every pose.
+///
+/// The pen's position rides as the same two-corner binding
+/// [`sight::points_slot`](super::sight::points_slot) carries, minus the
+/// normals: a ribbon vertex needs where the point is, not which way its
+/// surface faces.
 ///
 /// The two `address` lanes are texel indices. `x` is the point's own,
 /// with two bits stolen at the bottom for what a vertex stage cannot
@@ -163,19 +171,28 @@ pub fn ink_plane_slot() -> SlotSpec {
 /// reference depth.
 #[must_use]
 pub fn ribbon_slot() -> GeometrySlotSpec {
-    GeometrySlotSpec {
-        layout: vec![
-            VertexAttribute { location: 0, format: VertexFormat::Float32x3 },
-            VertexAttribute { location: 1, format: VertexFormat::Float32x3 },
-            VertexAttribute { location: 2, format: VertexFormat::Float32x2 },
-            VertexAttribute { location: 3, format: VertexFormat::Float32x2 },
-            VertexAttribute { location: 4, format: VertexFormat::Unorm8x4 },
-        ],
-    }
+    let corner = |location: u32| {
+        [
+            VertexAttribute { location, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: location + 1, format: VertexFormat::Uint8x4 },
+            VertexAttribute { location: location + 2, format: VertexFormat::Unorm8x4 },
+        ]
+    };
+    let mut layout = corner(0).to_vec();
+    layout.extend(corner(3));
+    layout.extend([
+        VertexAttribute { location: 6, format: VertexFormat::Float32x3 },
+        VertexAttribute { location: 7, format: VertexFormat::Float32x2 },
+        VertexAttribute { location: 8, format: VertexFormat::Float32x2 },
+        VertexAttribute { location: 9, format: VertexFormat::Float32 },
+        VertexAttribute { location: 10, format: VertexFormat::Unorm8x4 },
+    ]);
+
+    GeometrySlotSpec { layout }
 }
 
 /// Bytes one ribbon vertex packs, in [`ribbon_slot`] declaration order.
-pub const RIBBON_VERTEX_BYTES: usize = 12 + 12 + 8 + 8 + 4;
+pub const RIBBON_VERTEX_BYTES: usize = 2 * (12 + 4 + 4) + 12 + 8 + 8 + 4 + 4;
 
 /// Uniform window for both passes — the WGSL `StrokeParams` block.
 pub struct StrokeUniforms {
@@ -191,13 +208,19 @@ pub struct StrokeUniforms {
     /// The field's texel dimensions — the canvas, half this program's
     /// reference extent.
     pub field: (u32, u32),
+    /// This frame's pose, as [`deform::bone_uniform`] lays it out — the
+    /// same table the field's own blob carries, so the rails are solved
+    /// against the surface the verdicts were read off.
+    ///
+    /// [`deform::bone_uniform`]: crate::deform::bone_uniform
+    pub bones: [f32; BONE_LIMIT * 12],
 }
 
 impl StrokeUniforms {
     /// Bytes of one `StrokeParams` block: a `mat4x4<f32>`, a
-    /// `vec3<f32>`, a `vec2<f32>` and three scalars, rounded to the
-    /// struct's 16-byte alignment.
-    pub const BYTES: u32 = 96;
+    /// `vec3<f32>`, a `vec2<f32>`, three scalars and the bone table,
+    /// rounded to the struct's 16-byte alignment.
+    pub const BYTES: u32 = 96 + (BONE_LIMIT * 48) as u32;
 
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
@@ -216,6 +239,9 @@ impl StrokeUniforms {
             visibility::CHART_COVERAGE,
         ];
         for (lane, value) in window[64..96].chunks_exact_mut(4).zip(tail) {
+            lane.copy_from_slice(&value.to_le_bytes());
+        }
+        for (lane, value) in window[96..].chunks_exact_mut(4).zip(self.bones) {
             lane.copy_from_slice(&value.to_le_bytes());
         }
 
@@ -249,7 +275,12 @@ impl StrokeUniforms {
 /// stand-in point: a dispatch supplies one id per declared geometry
 /// slot or it warn-drops whole.
 #[must_use]
-pub fn ribbon_geometry(drawing: Drawing<'_>, layout: &Layout, half: Half) -> (Vec<u8>, Vec<u8>) {
+pub fn ribbon_geometry(
+    drawing: Drawing<'_>,
+    layout: &Layout,
+    half: Half,
+    bound: Option<Bound<'_>>,
+) -> (Vec<u8>, Vec<u8>) {
     let (mut vertices, mut indices) = (Vec::new(), Vec::new());
     let mut anchored = Vec::new();
     let mut base = 0u32;
@@ -265,10 +296,13 @@ pub fn ribbon_geometry(drawing: Drawing<'_>, layout: &Layout, half: Half) -> (Ve
         let colour = ribbon::ink(curve.pen);
         let channels = [colour.r, colour.g, colour.b, 1.0];
         let authored = u32::from(curve.authored);
-        for (at, anchor) in anchored.iter().enumerate() {
+        for (at, (anchor, point)) in anchored.iter().zip(&curve.points).enumerate() {
+            let pen = bound
+                .zip(point.anchorage)
+                .map_or_else(|| Anchored::posed(anchor.pos, Vec3::ZERO), |(bound, at)| bound.anchored(at));
             for side in 0..2u32 {
                 let address = [((span.start + at as u32) * 4 + authored * 2 + side) as f32, span.start as f32];
-                vertices.extend_from_slice(&pack(anchor, address, channels));
+                vertices.extend_from_slice(&pack(&pen, anchor, address, channels));
             }
         }
 
@@ -283,20 +317,41 @@ pub fn ribbon_geometry(drawing: Drawing<'_>, layout: &Layout, half: Half) -> (Ve
     }
 
     if vertices.is_empty() {
-        let inert = Anchor { pos: Vec3::new(0.0, 0.0, 0.0), along: Vec3::new(0.0, 0.0, 0.0), half: 0.0, drift: 0.0 };
-        vertices.extend_from_slice(&pack(&inert, [0.0, 0.0], [0.0; 4]));
+        let inert = Anchor { pos: Vec3::ZERO, along: Vec3::ZERO, half: 0.0, drift: 0.0 };
+        vertices.extend_from_slice(&pack(&Anchored::posed(Vec3::ZERO, Vec3::ZERO), &inert, [0.0, 0.0], [0.0; 4]));
         indices.extend([0u32; 3].into_iter().flat_map(u32::to_le_bytes));
     }
 
     (vertices, indices)
 }
 
-fn pack(anchor: &Anchor, address: [f32; 2], channels: [f32; 4]) -> [u8; RIBBON_VERTEX_BYTES] {
+/// One ribbon vertex: the pen's address on the sculpt, the rest chord
+/// across it, the two field texels, the two eye-free scalars, and the
+/// ink.
+///
+/// The chord travels as the rest curve's and is turned by the point's
+/// own blend in the vertex stage rather than being posed corner by
+/// corner. It is a *direction*, and the only thing the rail solve asks
+/// of it is a cross product with the view — so the two corners can
+/// disagree about how to turn it only by the weight gradient across one
+/// triangle edge, which is a fraction of a degree on a mesh of this
+/// density and reaches the picture nowhere.
+fn pack(pen: &Anchored, anchor: &Anchor, address: [f32; 2], channels: [f32; 4]) -> [u8; RIBBON_VERTEX_BYTES] {
+    let unorm = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
     let mut vertex = [0u8; RIBBON_VERTEX_BYTES];
+    let mut at = 0usize;
+    let mut lay = |bytes: &[u8]| {
+        vertex[at..at + bytes.len()].copy_from_slice(bytes);
+        at += bytes.len();
+    };
+    for corner in 0..2usize {
+        for value in pen.positions[corner].to_array() {
+            lay(&value.to_le_bytes());
+        }
+        lay(&pen.joints[corner]);
+        lay(&pen.shares[corner].map(unorm));
+    }
     let scalars = [
-        anchor.pos.x,
-        anchor.pos.y,
-        anchor.pos.z,
         anchor.along.x,
         anchor.along.y,
         anchor.along.z,
@@ -304,13 +359,12 @@ fn pack(anchor: &Anchor, address: [f32; 2], channels: [f32; 4]) -> [u8; RIBBON_V
         address[1],
         anchor.half,
         anchor.drift,
+        pen.between,
     ];
-    for (lane, value) in vertex[0..40].chunks_exact_mut(4).zip(scalars) {
-        lane.copy_from_slice(&value.to_le_bytes());
+    for value in scalars {
+        lay(&value.to_le_bytes());
     }
-    for (lane, value) in vertex[40..44].iter_mut().zip(channels) {
-        *lane = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
-    }
+    lay(&channels.map(unorm));
 
     vertex
 }
@@ -420,7 +474,10 @@ pub fn program() -> ProgramRegister {
     bindings.push(ink_plane_slot());
 
     ProgramRegister {
-        wgsl: STROKE_WGSL.to_owned(),
+        // The skinning prelude after this module's own source: the rail
+        // solve stands on a pen posed from the same bone table the
+        // field's verdicts were read through.
+        wgsl: format!("{STROKE_WGSL}\n{SKIN_WGSL}"),
         bindings,
         transients: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
         geometries: vec![ribbon_slot(); GEOMETRY_COUNT],
@@ -468,7 +525,7 @@ mod tests {
         let layout = sight::layout(drawing, (64, 64)).expect("fits");
 
         for half in [Half::Resident, Half::Volatile] {
-            let (vertices, indices) = ribbon_geometry(drawing, &layout, half);
+            let (vertices, indices) = ribbon_geometry(drawing, &layout, half, None);
             let count = (vertices.len() / RIBBON_VERTEX_BYTES) as u32;
             for corner in indices.chunks_exact(4) {
                 let at = u32::from_le_bytes(corner.try_into().expect("four bytes"));

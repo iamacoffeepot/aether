@@ -111,9 +111,11 @@ use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter,
 use aether_harness_substrate_capture::visual::decode_png;
 use aether_kinds::QuadSpace;
 use aether_math::{Mat4, Rgba, Vec3};
+use aether_puppet::deform;
 use aether_puppet::easel::image;
 use aether_puppet::easel::palette;
 use aether_puppet::easel::program::bake::{self, BakeUniforms};
+use aether_puppet::easel::program::sight::ToneUniforms;
 use aether_puppet::easel::regions::{self, RegionPlanes};
 use aether_puppet::extract::Settings;
 use aether_puppet::labels::{self, Labels};
@@ -302,7 +304,7 @@ fn create_targets(harness: &mut SubstrateHarness, width: usize, height: usize) -
 fn create_geometry(harness: &mut SubstrateHarness, mesh: &Mesh, scores: &[[f32; labels::CLASSES]]) -> u32 {
     let mail = CreateGeometry {
         layout: bake::geometry_slot().layout,
-        vertices: bake::vertices(mesh, scores, &settings()),
+        vertices: bake::vertices(mesh, scores, &settings(), None),
         indices: bake::indices(mesh),
     };
     let created = harness
@@ -425,7 +427,20 @@ impl Rig {
             program_id: self.program_id,
             bindings: self.bindings.clone(),
             geometries: vec![self.geometry],
-            uniforms: BakeUniforms { view_proj, eye }.encode().to_vec(),
+            // The oracle bakes tone per vertex and blends it, so `posed`
+            // is off and the shader reads the same attribute the oracle
+            // evaluated — which is what makes the tone channel parity by
+            // construction rather than by a second transcription. The
+            // bone table is the identity for the same reason: this
+            // subject carries no rig.
+            uniforms: BakeUniforms {
+                view_proj,
+                eye,
+                bones: deform::bone_uniform(&[]),
+                tone: ToneUniforms::of(&settings(), false),
+                posed: false,
+            }
+            .encode(),
         };
         let probe = self.bindings[PROBE as usize];
         let pre = vec![
@@ -792,7 +807,7 @@ fn a_re_uploaded_subject_re_bakes_from_its_new_vertices() {
                 "aether.render",
                 &UpdateGeometry {
                     geometry_id: rig.geometry,
-                    vertices: bake::vertices(&posed, &scores, &settings()),
+                    vertices: bake::vertices(&posed, &scores, &settings(), None),
                     indices: bake::indices(&posed),
                 },
             ),

@@ -31,6 +31,7 @@ pub mod nose;
 use aether_math::{Vec2, Vec3};
 
 use crate::anchor::{Anchor, Anchors};
+use crate::deform::Rigid;
 use crate::extract::Settings;
 use crate::feature::{Curve3, FeatureClass, Pen};
 use crate::mesh::Mesh;
@@ -171,6 +172,7 @@ pub fn marks(mesh: &Mesh, anchors: &Anchors, face: Face, settings: &Settings, ey
 /// ink's own marks do, so paint and ink cannot skew apart wherever the
 /// surface curves — an iris centred on the label blob instead looks past
 /// the viewer the moment she turns.
+#[derive(Clone)]
 pub struct EyeFrame {
     /// The iris centre, and the tips of its two radii. Projected, the pair
     /// of tips becomes the axes paint measures in, so foreshortening rides
@@ -183,6 +185,32 @@ pub struct EyeFrame {
     /// The aperture as a closed loop — the lid curves the ink draws, which
     /// is the only clip a painted iris may use.
     pub aperture: Vec<Vec3>,
+}
+
+impl EyeFrame {
+    /// The same frame carried through the head's own map.
+    ///
+    /// An eye is planted on the *rest* sculpt in the model's frontal
+    /// plane, because planting one on a head that has turned casts every
+    /// ray at a graze and slides the mark across her cheek. So the pose
+    /// is applied afterwards, and it is the head bone's map alone rather
+    /// than a skin: every point of an eye is bound wholly to the head,
+    /// which makes the blend at each of them the head's own transform.
+    ///
+    /// Without this the wash's accents keep painting an iris where the
+    /// eye used to be — invisible while the wash itself stood at rest,
+    /// and the first thing on screen once it stopped
+    /// (iamacoffeepot/aether#4462).
+    #[must_use]
+    pub fn posed(self, head: &Rigid) -> Self {
+        Self {
+            centre: head.point(self.centre),
+            width_tip: head.point(self.width_tip),
+            height_tip: head.point(self.height_tip),
+            aperture: self.aperture.into_iter().map(|at| head.point(at)).collect(),
+            ..self
+        }
+    }
 }
 
 /// How finely each lid is sampled around the aperture loop.

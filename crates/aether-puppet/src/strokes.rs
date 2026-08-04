@@ -41,11 +41,28 @@ use aether_render::{
     VertexAttribute,
 };
 
+use crate::deform::{BONE_LIMIT, Bound, Skin};
+use crate::easel::program::sight::ToneUniforms;
 use crate::easel::program::wash::BODY_DIVISOR;
 use crate::easel::program::{sight, stroke};
 use crate::easel::{View, wash_canvas};
 use crate::feature::{Drawing, Half};
 use crate::mesh::Mesh;
+
+/// The pose a frame is drawn at, as the two ink programs take it.
+///
+/// One value rather than three arguments because the three have to agree
+/// or the drawing comes apart: the bone table both dispatches skin from,
+/// the sculpt-and-rig the resident curves are packed against, and the
+/// tone gate that reads the normals the same table turned. `bound` is
+/// `None` for a subject with no rig, which is also the only case where
+/// the gate is already settled on the CPU.
+#[derive(Clone, Copy)]
+pub struct Posing<'a> {
+    pub bound: Option<Bound<'a>>,
+    pub bones: [f32; BONE_LIMIT * 12],
+    pub tone: ToneUniforms,
+}
 
 /// A resource the render cap assigns an id to: nothing asked yet, an
 /// ask in flight, or the id it answered with.
@@ -133,6 +150,12 @@ struct Standing {
     view_proj: Mat4,
     eye: Vec3,
     bias: f32,
+    /// The pose the standing drawing is posed to, and the gate its
+    /// hatching is read through. Both ride the dispatch's uniform blob,
+    /// which is the whole of what a pose ships
+    /// (iamacoffeepot/aether#4462).
+    bones: [f32; BONE_LIMIT * 12],
+    tone: ToneUniforms,
     /// Texels the layout occupied, gaps included. A canvas the drawing
     /// outgrew cannot be dispatched into: the texels past its end are
     /// not addressable, so the strokes that landed there would go
@@ -166,12 +189,12 @@ pub struct Strokes {
     sized: Option<(u32, u32)>,
     geometries: Ordered,
     subject: Resident,
-    /// The subject's packed bytes, waiting for the create or update.
+    /// The subject's packed bytes, waiting for the create.
+    ///
+    /// Once. The prepass' vertex stage poses the subject from the bone
+    /// table, so the buffer is the rest sculpt's and there is nothing a
+    /// pose can invalidate about it.
     subject_bytes: Option<Packed>,
-    /// The subject's index half, kept past the pack that built it: a pose
-    /// moves every vertex and no face, so this half is re-shipped
-    /// unchanged on every frame of a pose sweep.
-    subject_indices: Vec<u8>,
     /// The resident half's packed bytes, waiting for the same create or
     /// update the subject's do. Staged by the first solve after the
     /// subject changed rather than by `subject_changed` itself, because
@@ -289,32 +312,17 @@ impl Strokes {
         }
     }
 
-    /// A new subject: its geometry has to travel again before the next
-    /// prepass means anything, and so do the resident points, which are
-    /// the new surface's own curves.
-    pub fn subject_changed(&mut self, mesh: &Mesh) {
-        self.subject_indices = sight::subject_indices(mesh);
-        self.subject_bytes = Some((sight::subject_vertices(mesh), self.subject_indices.clone()));
-        self.resident_stale = true;
-        self.revision += 1;
-    }
-
-    /// The same subject at a new pose: every vertex moved, so the prepass
-    /// reads a stale depth until the buffer travels again.
+    /// A new subject: its geometry has to travel before the next prepass
+    /// means anything, and so do the resident points, which are the new
+    /// surface's own curves.
     ///
-    /// The face list is the one thing a pose does not touch, so it is
-    /// cloned from the pack the subject arrived with rather than rebuilt
-    /// per frame — an `update_geometry` swaps the buffer wholesale and
-    /// wants both halves, but at this density re-deriving the index half
-    /// from the face list costs several times what copying it does.
-    ///
-    /// `resident_stale` for the same reason as a new subject, and it is
-    /// the transition that needs it: posed, the drawing has no resident
-    /// half at all, so the buffer standing on the GPU has to be replaced
-    /// with the empty one or the rest pose's hatch keeps drawing under the
-    /// posed figure.
-    pub fn subject_posed(&mut self, mesh: &Mesh) {
-        self.subject_bytes = Some((sight::subject_vertices(mesh), self.subject_indices.clone()));
+    /// Both travel exactly once now. The subject arrives carrying its
+    /// bone binding and the resident curves arrive carrying theirs, so
+    /// what a pose changes about either is the uniform blob — which is
+    /// what made the pose sweep's whole-drawing re-upload disappear
+    /// rather than get faster (iamacoffeepot/aether#4462).
+    pub fn subject_changed(&mut self, mesh: &Mesh, skin: Option<&Skin>) {
+        self.subject_bytes = Some((sight::subject_vertices(mesh, skin), sight::subject_indices(mesh)));
         self.resident_stale = true;
         self.revision += 1;
     }
@@ -369,7 +377,15 @@ impl Strokes {
     /// path for that frame rather than showing a wrong picture.
     ///
     /// [`ribbon::reference_depth`]: crate::ribbon::reference_depth
-    pub fn solve(&mut self, drawing: Drawing<'_>, eye: Vec3, view_proj: Mat4, bias: f32, aspect: f32) -> bool {
+    pub fn solve(
+        &mut self,
+        drawing: Drawing<'_>,
+        eye: Vec3,
+        view_proj: Mat4,
+        bias: f32,
+        aspect: f32,
+        posing: Posing<'_>,
+    ) -> bool {
         if self.disabled {
             return false;
         }
@@ -379,19 +395,32 @@ impl Strokes {
             return false;
         };
 
+        // The resident half packs against the sculpt and its rig; the
+        // volatile half is re-solved on the CPU at whatever pose is
+        // running and stands for itself.
         if mem::take(&mut self.resident_stale) {
             self.resident = Some(Staged {
-                points: (sight::point_vertices(drawing, layout.resident()), sight::point_indices(layout.resident())),
-                ribbons: stroke::ribbon_geometry(drawing, &layout, Half::Resident),
+                points: (
+                    sight::point_vertices(drawing, layout.resident(), posing.bound),
+                    sight::point_indices(layout.resident()),
+                ),
+                ribbons: stroke::ribbon_geometry(drawing, &layout, Half::Resident, posing.bound),
             });
         }
 
         self.solved = Some(Solved {
-            points: (sight::point_vertices(drawing, layout.volatile()), sight::point_indices(layout.volatile())),
-            ribbons: stroke::ribbon_geometry(drawing, &layout, Half::Volatile),
+            points: (sight::point_vertices(drawing, layout.volatile(), None), sight::point_indices(layout.volatile())),
+            ribbons: stroke::ribbon_geometry(drawing, &layout, Half::Volatile, None),
             curves: (sight::curve_vertices(drawing, &layout, eye), sight::curve_indices(&layout)),
         });
-        self.standing = Some(Standing { view_proj, eye, bias, occupied: layout.occupied() });
+        self.standing = Some(Standing {
+            view_proj,
+            eye,
+            bias,
+            bones: posing.bones,
+            tone: posing.tone,
+            occupied: layout.occupied(),
+        });
         self.revision += 1;
 
         true
@@ -624,19 +653,19 @@ impl Strokes {
 
         self.drawn = true;
         self.dispatched = Some(self.revision);
-        let Standing { view_proj, eye, bias, .. } = standing;
+        let Standing { view_proj, eye, bias, bones, tone, .. } = standing;
         vec![
             ProgramDispatch {
                 program_id: programs[0],
                 bindings: textures[..sight::PLANE_COUNT].to_vec(),
                 geometries: geometries[..sight::GEOMETRY_COUNT].to_vec(),
-                uniforms: sight::SightUniforms { view_proj, eye, field, bias }.encode(),
+                uniforms: sight::SightUniforms { view_proj, eye, field, bias, bones, tone }.encode(),
             },
             ProgramDispatch {
                 program_id: programs[1],
                 bindings: textures.clone(),
                 geometries: RIBBONS.map(|slot| geometries[slot]).to_vec(),
-                uniforms: stroke::StrokeUniforms { view_proj, eye, bias, field }.encode(),
+                uniforms: stroke::StrokeUniforms { view_proj, eye, bias, field, bones }.encode(),
             },
         ]
     }
@@ -708,11 +737,20 @@ impl Strokes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deform::bone_uniform;
+    use crate::extract::Settings;
     use crate::feature::{Curve3, FeatureClass, Pen, SurfacePoint};
 
     /// A subject for the prepass to have something to stage. Its shape
     /// is not the point — the drawing below is not extracted from it.
     const TRIANGLE: &[u8] = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+
+    /// An unrigged subject at rest, which is what every case here is
+    /// about — the questions below are the layer's cadence, not its
+    /// posing.
+    fn still<'a>() -> Posing<'a> {
+        Posing { bound: None, bones: bone_uniform(&[]), tone: ToneUniforms::of(&Settings::default(), false) }
+    }
 
     fn curve(seed: u64) -> Curve3 {
         Curve3 {
@@ -735,8 +773,11 @@ mod tests {
     /// as, so an id here is its own slot.
     fn mounted(strokes: &mut Strokes, mesh: &Mesh, drawing: Drawing<'_>, canvas: (u32, u32)) {
         strokes.resized(canvas.0, canvas.1);
-        strokes.subject_changed(mesh);
-        assert!(strokes.solve(drawing, Vec3::new(0.0, 0.0, 3.0), Mat4::IDENTITY, 0.01, 1.0), "the first solve");
+        strokes.subject_changed(mesh, None);
+        assert!(
+            strokes.solve(drawing, Vec3::new(0.0, 0.0, 3.0), Mat4::IDENTITY, 0.01, 1.0, still()),
+            "the first solve"
+        );
 
         assert_eq!(strokes.take_registers().len(), PROGRAM_COUNT, "one register per program");
         for id in 0..PROGRAM_COUNT as u32 {
@@ -787,7 +828,10 @@ mod tests {
         }
         assert!(strokes.draw(&held_view(), 1.0).is_some(), "the sheet still holds the ink it was dispatched");
 
-        assert!(strokes.solve(drawing, Vec3::new(3.0, 1.0, -2.0), Mat4::IDENTITY, 0.01, 1.0), "the solve after a turn");
+        assert!(
+            strokes.solve(drawing, Vec3::new(3.0, 1.0, -2.0), Mat4::IDENTITY, 0.01, 1.0, still()),
+            "the solve after a turn"
+        );
         assert_eq!(strokes.take_dispatches().len(), 2, "a turn re-derives both");
     }
 
@@ -855,11 +899,11 @@ mod tests {
         let mesh = Mesh::from_obj_bytes(TRIANGLE, 0).expect("one triangle parses");
         let (resident, volatile) = ([curve(1)], [curve(2)]);
         let drawing = Drawing { resident: &resident, volatile: &volatile };
-        let solve = |strokes: &mut Strokes, eye| strokes.solve(drawing, eye, Mat4::IDENTITY, 0.01, 1.0);
+        let solve = |strokes: &mut Strokes, eye| strokes.solve(drawing, eye, Mat4::IDENTITY, 0.01, 1.0, still());
 
         let mut strokes = Strokes::default();
         strokes.resized(64, 64);
-        strokes.subject_changed(&mesh);
+        strokes.subject_changed(&mesh, None);
         assert!(solve(&mut strokes, Vec3::new(0.0, 0.0, 3.0)), "the first solve");
         assert_eq!(strokes.take_geometry_creates().len(), GEOMETRY_COUNT, "one create per declared slot");
         for id in 0..GEOMETRY_COUNT as u32 {

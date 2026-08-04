@@ -47,12 +47,14 @@ use aether_render::{
     TextureUsage, UpdateGeometry,
 };
 
+use program::sight::ToneUniforms;
 use program::wash::{self, Canvas, Faces, Frame, Placement, Presence, SeedUniforms, WashBindings, WashProgram};
 use program::{bake, face};
 use survey::Survey;
 
 use crate::anchor::Anchors;
 use crate::chart::{self, Face};
+use crate::deform::{BONE_LIMIT, Rigid, Skin};
 use crate::extract::Settings;
 use crate::labels;
 use crate::mesh::Mesh;
@@ -125,6 +127,17 @@ pub struct Chart<'a> {
     pub mesh: &'a Mesh,
     pub anchors: &'a Anchors,
     pub face: Face,
+    /// Where the head bone sends a point at this pose, and where the eye
+    /// stands in the head's own frame.
+    ///
+    /// The face is authored in the model's frontal plane and planted
+    /// along it, so it is planted on the rest sculpt above and carried
+    /// through this afterwards — and the aperture's occlusion is asked
+    /// of the rest sculpt from an eye brought back through the same map,
+    /// which is the same question at a rigidly turned head and the only
+    /// one a mesh with no ray accelerator can answer.
+    pub head: Rigid,
+    pub eye: Vec3,
 }
 
 /// Everything the easel reads of the subject for one development: the
@@ -133,7 +146,20 @@ pub struct Chart<'a> {
 /// solved for this eye, and the chart when the subject has a face.
 /// Borrowed for the call — the easel keeps none of it.
 pub struct Subject<'a> {
+    /// The *rest* sculpt: what the bake's vertex buffer is packed from,
+    /// and what the survey's per-vertex classes and areas are measured
+    /// on. Both are uploaded or solved once per subject, and the pose
+    /// reaches the bake through [`Subject::bones`] instead.
     pub mesh: &'a Mesh,
+    /// The same sculpt skinned to this frame's pose, when one is
+    /// running.
+    ///
+    /// What the develop's per-frame projections read: where each
+    /// material's centroid lands on the page, which is where the wash
+    /// places its stains. Those are a projection of vertices rather than
+    /// a buffer, so they follow the pose here for what a pass over the
+    /// vertices already cost.
+    pub posed: Option<&'a Mesh>,
     pub scores: &'a [[f32; labels::CLASSES]],
     pub settings: &'a Settings,
     /// The ink coverage plane for this eye: where the drawing landed,
@@ -148,6 +174,23 @@ pub struct Subject<'a> {
     /// the develop rather than painting from a plane that is not there.
     pub ink: Option<u32>,
     pub chart: Option<Chart<'a>>,
+    /// The rig binding the mesh, when the subject carries one. Its
+    /// per-vertex influences ride the bake's vertex buffer, uploaded
+    /// once with everything else there.
+    pub skin: Option<&'a Skin>,
+    /// This frame's pose, as [`deform::bone_uniform`] lays it out — the
+    /// same table the ink's dispatches carry.
+    ///
+    /// The wash bakes its subject plane once per subject and had no
+    /// update path for a buffer that moved, so while a pose ran it stood
+    /// on the rest mesh and read as a ghost behind the posed ink. There
+    /// is still no update path, and there does not have to be: the bake's
+    /// vertex stage poses the subject from here, so the once-uploaded
+    /// geometry stays correct and both layers pose from one source of
+    /// truth (iamacoffeepot/aether#4462).
+    ///
+    /// [`deform::bone_uniform`]: crate::deform::bone_uniform
+    pub bones: [f32; BONE_LIMIT * 12],
 }
 
 /// The two programs the develop registers, in the order it sends them —
@@ -202,14 +245,23 @@ struct DevelopKey {
     eye: [u32; 3],
     view_proj: [u32; 16],
     canvas: Canvas,
+    /// The pose the bake blob was encoded at.
+    ///
+    /// The subject's geometry no longer moves with the pose — the bake's
+    /// vertex stage poses it from this very table — so the pose enters
+    /// the develop through the uniform alone, and a key without it would
+    /// serve the blob from the frame before and leave the wash standing
+    /// on a pose the ink has left (iamacoffeepot/aether#4462).
+    bones: [u32; BONE_LIMIT * 12],
 }
 
 impl DevelopKey {
-    fn of(view: &View, canvas: Canvas) -> Self {
+    fn of(subject: &Subject<'_>, view: &View, canvas: Canvas) -> Self {
         Self {
             eye: view.eye.to_array().map(f32::to_bits),
             view_proj: view.view_proj.to_cols_array().map(f32::to_bits),
             canvas,
+            bones: subject.bones.map(f32::to_bits),
         }
     }
 }
@@ -470,38 +522,55 @@ impl Easel {
         };
         self.ink_plane = subject.ink;
 
-        let key = DevelopKey::of(view, canvas);
+        let key = DevelopKey::of(subject, view, canvas);
         if self.derived_for == Some(key) && self.uniforms.is_some() {
             self.staged = Some(canvas);
             return;
         }
 
         let (body_width, body_height) = canvas.body();
-        let Subject { mesh, scores, settings, chart, .. } = subject;
+        let Subject { mesh, posed, scores, settings, chart, skin, .. } = subject;
+        // The rest sculpt is what a buffer or a per-subject measurement
+        // is taken on; the posed copy is what a per-frame projection
+        // reads.
+        let surface = posed.unwrap_or(mesh);
 
         let survey = self.survey.get_or_insert_with(|| Survey::measure(mesh, scores));
         if self.packed[SUBJECT_GEOMETRY].is_none() && self.geometries[SUBJECT_GEOMETRY] == Resident::Absent {
-            self.packed[SUBJECT_GEOMETRY] =
-                Some(GeometryBytes { vertices: bake::vertices(mesh, scores, settings), indices: bake::indices(mesh) });
+            self.packed[SUBJECT_GEOMETRY] = Some(GeometryBytes {
+                vertices: bake::vertices(mesh, scores, settings, *skin),
+                indices: bake::indices(mesh),
+            });
         }
 
         // Where each material sits, off the surface that projects into it
         // rather than off the pixels it covered — the class plane lives on
         // the GPU and ADR-0170 declines a readback (see `survey`).
-        let centroids = survey.centroids(mesh, view.eye, &view.view_proj, body_width, body_height);
+        let centroids = survey.centroids(surface, view.eye, &view.view_proj, body_width, body_height);
 
         // The chart, asked afresh per frame rather than cached with the
         // anchors: gaze moves the iris inside its own aperture, so a frame
         // solved once at load would leave the paint looking where she used
         // to look.
-        let frames = chart
+        //
+        // Planted on the rest sculpt and carried through the head's map
+        // afterwards, which is how the ink's own marks reach the same
+        // pose — an eye planted on a head that has turned is planted at a
+        // graze.
+        let rested: Vec<chart::EyeFrame> = chart
             .as_ref()
             .map(|chart| chart::eye_frames(chart.mesh, chart.anchors, chart.face, settings.eye_style))
             .unwrap_or_default();
+        let head = chart.as_ref().map_or(Rigid::IDENTITY, |chart| chart.head);
+        let frames: Vec<chart::EyeFrame> = rested.iter().cloned().map(|frame| frame.posed(&head)).collect();
         let fine_eyes = accent::project(&frames, &view.view_proj, canvas.width, canvas.height);
         let body_eyes = accent::project(&frames, &view.view_proj, body_width, body_height);
+        // Asked of the rest sculpt from an eye brought back through the
+        // head's map, because a posed copy carries no ray accelerator and
+        // the two questions are the same one at a rigidly turned head.
+        let charting = chart.as_ref().map_or(view.eye, |chart| chart.eye);
         let presence: Vec<f32> =
-            fine_eyes.iter().map(|eye| survey::presence(mesh, view.eye, &frames[eye.frame()].aperture)).collect();
+            fine_eyes.iter().map(|eye| survey::presence(mesh, charting, &rested[eye.frame()].aperture)).collect();
 
         let stains = stain_centres(&centroids, body_height);
         let placement = Placement { centroids: &centroids, stains: &stains, iris: iris_centre(&fine_eyes) };
@@ -531,7 +600,14 @@ impl Easel {
         let frame = Frame { placement, faces };
 
         self.uniforms = Some(Uniforms {
-            bake: bake::BakeUniforms { view_proj: view.view_proj, eye: view.eye }.encode().to_vec(),
+            bake: bake::BakeUniforms {
+                view_proj: view.view_proj,
+                eye: view.eye,
+                bones: subject.bones,
+                tone: ToneUniforms::of(settings, skin.is_some()),
+                posed: skin.is_some(),
+            }
+            .encode(),
             wash: program.frame_uniforms(&slice, &frame),
         });
         self.packed[APERTURE_GEOMETRY] = Some(GeometryBytes {
@@ -865,6 +941,7 @@ fn iris_centre(eyes: &[accent::Eye]) -> Option<Vec2> {
 mod tests {
     use super::*;
 
+    use crate::deform::bone_uniform;
     use crate::labels::CLASSES;
     use crate::mesh::Mesh;
 
@@ -926,7 +1003,16 @@ mod tests {
         // Ten render stages is far more than the protocol needs — the
         // point is that it converges, not how fast.
         for _ in 0..10 {
-            let subject = Subject { mesh: &mesh, scores: &scores, settings: &settings, ink: Some(INK), chart: None };
+            let subject = Subject {
+                mesh: &mesh,
+                posed: None,
+                scores: &scores,
+                settings: &settings,
+                ink: Some(INK),
+                chart: None,
+                skin: None,
+                bones: bone_uniform(&[]),
+            };
             easel.develop(&subject, &view());
 
             for _ in easel.take_program_destroys() {}
@@ -970,7 +1056,16 @@ mod tests {
             next_id
         };
         for _ in 0..10 {
-            let subject = Subject { mesh, scores, settings, ink: Some(INK), chart: None };
+            let subject = Subject {
+                mesh,
+                posed: None,
+                scores,
+                settings,
+                ink: Some(INK),
+                chart: None,
+                skin: None,
+                bones: bone_uniform(&[]),
+            };
             easel.develop(&subject, at);
 
             for _ in easel.take_registers() {
@@ -1008,7 +1103,16 @@ mod tests {
         let mesh = quad();
         let scores = vec![[1.0; CLASSES]; mesh.positions.len()];
         let settings = Settings::default();
-        let subject = || Subject { mesh: &mesh, scores: &scores, settings: &settings, ink: Some(INK), chart: None };
+        let subject = || Subject {
+            mesh: &mesh,
+            posed: None,
+            scores: &scores,
+            settings: &settings,
+            ink: Some(INK),
+            chart: None,
+            skin: None,
+            bones: bone_uniform(&[]),
+        };
         let mut easel = converged(&mesh, &scores, &settings, &view());
 
         easel.develop(&subject(), &view());

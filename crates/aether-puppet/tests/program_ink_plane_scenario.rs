@@ -40,7 +40,8 @@ use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter,
 use aether_harness_substrate_capture::visual::decode_png;
 use aether_kinds::QuadSpace;
 use aether_math::{Mat4, Rgb, Rgba, Vec3};
-use aether_puppet::easel::program::stroke;
+use aether_puppet::deform;
+use aether_puppet::easel::program::{self, stroke};
 use aether_puppet::easel::regions;
 use aether_render::QuadBlend;
 use aether_render::{
@@ -169,7 +170,10 @@ fn probed_program() -> ProgramRegister {
     };
 
     ProgramRegister {
-        wgsl: format!("{}\n{PROBE_WGSL}", stroke::STROKE_WGSL),
+        // The skinning prelude rides along, as `stroke::program` appends
+        // it: the ribbon stage poses the pen from `params.bones`, so the
+        // module does not compile without it.
+        wgsl: format!("{}\n{}\n{PROBE_WGSL}", stroke::STROKE_WGSL, program::SKIN_WGSL),
         bindings: vec![full; 2],
         transients: vec![stroke::ink_plane_slot()],
         geometries: Vec::new(),
@@ -227,6 +231,7 @@ fn develop(harness: &mut SubstrateHarness, raster: &[f32]) -> Vec<f32> {
         eye: Vec3::new(0.0, 0.0, 5.0),
         bias: 0.0,
         field: (PLANE_WIDTH as u32, PLANE_HEIGHT as u32),
+        bones: deform::bone_uniform(&[]),
     }
     .encode();
     let dispatch = ProgramDispatch { program_id, bindings: vec![staged, output], geometries: Vec::new(), uniforms };

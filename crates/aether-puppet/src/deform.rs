@@ -41,6 +41,26 @@ use crate::mesh::{Anchorage, Mesh};
 /// doing something an ear does not do.
 pub const TWIST_LIMIT: f32 = 22.5;
 
+/// Bone slots the uniform blob carries, and so the most a rig may bind.
+///
+/// The blob is `BONE_LIMIT` affine maps at three `vec4` rows each — 384
+/// bytes, which is what "the pose rides the uniform" costs. Eight is the
+/// bust rig's six with room for a brow pair; a descriptor asking for more
+/// is refused by [`Skin::parse`] rather than silently posing a prefix of
+/// itself.
+pub const BONE_LIMIT: usize = 8;
+
+/// Bone influences one vertex carries into the vertex stage — the width
+/// of the `Uint8x4` / `Unorm8x4` attribute pair the closed vertex format
+/// set names for skinning.
+///
+/// Four is not a truncation of this rig. The solved weight matrix has at
+/// most four non-zero entries in every one of its 434,165 rows, seams
+/// included, so the sparse attribute carries the dense row exactly and
+/// the fifth influence a wider format would hold does not exist. See
+/// [`Skin::influences`].
+pub const INFLUENCES: usize = 4;
+
 /// Below this share of a vertex a bone is not blended in.
 ///
 /// Harmonic weights have global support, so every bone owns a little of
@@ -123,6 +143,129 @@ impl Rigid {
     }
 
     const ZERO: Self = Self { columns: [Vec3::ZERO; 3], translation: Vec3::ZERO };
+
+    /// The three rows a uniform block carries this map as: each the
+    /// linear part's row followed by that axis' translation, so a shader
+    /// poses a point by three dot products against `vec4(p, 1)` and a
+    /// direction by three against `vec4(v, 0)`.
+    ///
+    /// Rows rather than the columns the struct holds, because a row is
+    /// what a dot product wants and the transposition is free here and
+    /// per-vertex there.
+    fn rows(&self) -> [[f32; 4]; 3] {
+        let [x, y, z] = self.columns;
+        let t = self.translation;
+
+        [[x.x, y.x, z.x, t.x], [x.y, y.y, z.y, t.y], [x.z, y.z, z.z, t.z]]
+    }
+}
+
+/// The bone table a uniform blob carries, as little-endian `f32` lanes:
+/// [`BONE_LIMIT`] maps at three `vec4` rows each, identity past the end
+/// of the rig.
+///
+/// Identity rather than zero for the unbound slots. A vertex bound to a
+/// slot no rig fills would otherwise collapse to the origin, which is a
+/// figure with a spike through it rather than a figure that did not move
+/// — and the packer writes slot zero into the joint lanes an influence
+/// does not use, so those slots are read on every vertex.
+#[must_use]
+pub fn bone_uniform(transforms: &[Rigid]) -> [f32; BONE_LIMIT * 12] {
+    let mut lanes = [0.0f32; BONE_LIMIT * 12];
+    for bone in 0..BONE_LIMIT {
+        let rows = transforms.get(bone).copied().unwrap_or(Rigid::IDENTITY).rows();
+        for (row, values) in rows.into_iter().enumerate() {
+            lanes[bone * 12 + row * 4..bone * 12 + row * 4 + 4].copy_from_slice(&values);
+        }
+    }
+
+    lanes
+}
+
+/// A subject and the rig that binds it — everything a packer needs to
+/// hand a rest curve to a vertex stage that will pose it.
+///
+/// Borrowed for the pack. The mesh is the *rest* sculpt, because that is
+/// what an [`Anchorage`] addresses and what the shipped vertex buffer
+/// stands in: the pose reaches the GPU as a uniform, so the geometry is
+/// the sculpt and never travels again.
+#[derive(Clone, Copy)]
+pub struct Bound<'a> {
+    pub rest: &'a Mesh,
+    pub skin: &'a Skin,
+}
+
+/// One curve point's binding, as the vertex stage takes it: two corners
+/// of the face it sits in, and where between them it sits.
+///
+/// Two rather than the face's three because every curve carried to the
+/// GPU as *rest* geometry is a level set of a per-vertex scalar, and a
+/// level set crosses a face along an edge — so the third corner's
+/// barycentric share is exactly zero and carrying it would be carrying a
+/// zero. A point that genuinely sits inside a face is planted rather
+/// than extracted, is re-solved every frame anyway, and arrives through
+/// [`Anchored::posed`] with no binding at all.
+#[derive(Clone, Copy)]
+pub struct Anchored {
+    pub positions: [Vec3; 2],
+    pub normals: [Vec3; 2],
+    pub joints: [[u8; INFLUENCES]; 2],
+    pub shares: [[f32; INFLUENCES]; 2],
+    /// The second corner's barycentric share; the first takes the rest.
+    pub between: f32,
+}
+
+impl Anchored {
+    /// A point the CPU already posed, standing for itself.
+    ///
+    /// Both corners are the point and neither carries a share of any
+    /// bone, which is what an empty share row means to the vertex stage:
+    /// this position is the answer, do not pose it again.
+    #[must_use]
+    pub fn posed(pos: Vec3, normal: Vec3) -> Self {
+        Self {
+            positions: [pos; 2],
+            normals: [normal; 2],
+            joints: [[0; INFLUENCES]; 2],
+            shares: [[0.0; INFLUENCES]; 2],
+            between: 0.0,
+        }
+    }
+}
+
+impl Bound<'_> {
+    /// The two-corner binding at an address on the sculpt: the face's two
+    /// heaviest corners, each with its own bone row, and the share
+    /// between them.
+    ///
+    /// Ordered heaviest first and the share renormalised over the pair,
+    /// so an edge crossing — where the third share is zero — reproduces
+    /// its own rest position exactly under an identity pose.
+    #[must_use]
+    pub fn anchored(&self, at: Anchorage) -> Anchored {
+        let corners = self.rest.faces[at.face as usize];
+        let mut ranked: [(u32, f32); 3] = [0, 1, 2].map(|lane| (corners[lane], at.barycentric()[lane]));
+        ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+
+        let [(first, weight_first), (second, weight_second), ..] = ranked;
+        let pair = weight_first + weight_second;
+        let between = if pair > 0.0 {
+            weight_second / pair
+        } else {
+            0.0
+        };
+        let (first, second) = (first as usize, second as usize);
+        let (first_joints, first_shares) = self.skin.influences(first);
+        let (second_joints, second_shares) = self.skin.influences(second);
+
+        Anchored {
+            positions: [self.rest.positions[first], self.rest.positions[second]],
+            normals: [self.rest.normals[first], self.rest.normals[second]],
+            joints: [first_joints, second_joints],
+            shares: [first_shares, second_shares],
+            between,
+        }
+    }
 }
 
 /// One bone: what it is called, what it turns about, and its long axis
@@ -188,11 +331,58 @@ impl Skin {
             }
         }
 
-        (!bones.is_empty() && weights.len() == vertices * bones.len()).then_some(Self { weights, bones, neck_share })
+        let binds = !bones.is_empty() && bones.len() <= BONE_LIMIT && weights.len() == vertices * bones.len();
+
+        binds.then_some(Self { weights, bones, neck_share })
     }
 
     pub fn bones(&self) -> usize {
         self.bones.len()
+    }
+
+    /// One vertex's bone binding as the vertex stage takes it: the
+    /// [`INFLUENCES`] heaviest bones and their shares, renormalised so
+    /// the four sum to one.
+    ///
+    /// Exact rather than approximate on this rig, which is why the
+    /// sparse attribute pair was chosen over carrying the dense row. The
+    /// solver leaves at most four non-zero weights per vertex — measured
+    /// over every vertex of the shipped subject, ears and jaw included —
+    /// so what is dropped here is a run of exact zeroes and the
+    /// renormalisation divides by one.
+    ///
+    /// The shares come back as floats; the caller quantises them into
+    /// the `Unorm8x4` lane and the shader renormalises again after the
+    /// quantisation, which is what keeps the blend an affine partition
+    /// rather than a sum that drifts off one by a part in 255.
+    #[must_use]
+    pub fn influences(&self, vertex: usize) -> ([u8; INFLUENCES], [f32; INFLUENCES]) {
+        let row = &self.weights[vertex * self.bones.len()..(vertex + 1) * self.bones.len()];
+
+        // Selection over a fixed array rather than a sorted `Vec`. This
+        // runs once per vertex of the subject and twice per curve point,
+        // so an allocation here is half a million allocations at load.
+        let mut ranked = [(0u8, 0.0f32); BONE_LIMIT];
+        let mut held = 0usize;
+        for (bone, &weight) in row.iter().enumerate().take(BONE_LIMIT) {
+            ranked[held] = (bone as u8, weight);
+            held += 1;
+        }
+        ranked[..held].sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+
+        let kept = held.min(INFLUENCES);
+        let total: f32 = ranked[..kept].iter().map(|&(_, weight)| weight).sum();
+        let (mut joints, mut weights) = ([0u8; INFLUENCES], [0.0f32; INFLUENCES]);
+        for (lane, &(bone, weight)) in ranked[..kept].iter().enumerate() {
+            joints[lane] = bone;
+            weights[lane] = if total > 0.0 {
+                weight / total
+            } else {
+                0.0
+            };
+        }
+
+        (joints, weights)
     }
 
     fn pivot(&self, name: &str) -> Vec3 {
@@ -575,5 +765,123 @@ mod tests {
             moved = moved.max((point.pos - *was).length());
         }
         assert!(moved > 0.1, "the pose has to actually move the curve, and it moved it {moved}");
+    }
+
+    /// The blend the vertex stage performs, in Rust: pose each of the two
+    /// corners by its own bone row, then interpolate between them.
+    ///
+    /// A transcription of `skin.wgsl`'s `anchored_point`, and the only
+    /// way this side can hold that side to the order it claims. The
+    /// shares are the unquantised ones — what is under test is which
+    /// arithmetic runs in which order, not the eight-bit lane it rides
+    /// in.
+    fn as_the_vertex_stage_would(anchored: &Anchored, transforms: &[Rigid]) -> Vec3 {
+        let corner = |lane: usize| {
+            let (joints, shares) = (anchored.joints[lane], anchored.shares[lane]);
+            let total: f32 = shares.iter().sum();
+            if total <= 0.0 {
+                return anchored.positions[lane];
+            }
+            let posed = (0..INFLUENCES).fold(Vec3::ZERO, |sum, influence| {
+                sum + transforms[joints[influence] as usize].point(anchored.positions[lane]) * shares[influence]
+            });
+
+            posed / total
+        };
+
+        corner(0) * (1.0 - anchored.between) + corner(1) * anchored.between
+    }
+
+    /// Tripwire: the two-corner binding the vertex stage is handed poses
+    /// a curve point exactly where the CPU pass poses it.
+    ///
+    /// This is [`Skin::pose_curves`]' claim carried across to the GPU
+    /// path, and it is two claims at once. The binding has to name the
+    /// *right* two corners with the right share, or every hatch point
+    /// addresses a different place on its own face — a drawing that is
+    /// still a drawing and is on the wrong part of the surface. And the
+    /// blend has to pose each corner before interpolating: the other
+    /// order costs the same arithmetic, is exactly right at a vertex, and
+    /// under a shear puts the point off the posed triangle by a visible
+    /// fraction of the deformation. The strip shears rather than turning
+    /// rigidly, which is what makes both bite.
+    #[test]
+    fn the_two_corner_binding_poses_a_point_where_the_curve_pass_does() {
+        let (rest, skin) = strip();
+        let transforms = skin.transforms(&quarter_turn());
+        let bound = Bound { rest: &rest, skin: &skin };
+
+        let heights: Vec<f32> = rest.positions.iter().map(|p| p.y).collect();
+        let crossings = rest.level_set(&heights, &[], 0.5);
+        assert!(!crossings.is_empty(), "the level set crosses the strip");
+
+        let mut posed = rest.deformable();
+        skin.pose_surface(&transforms, &rest, &mut posed.positions, &mut posed.normals);
+
+        let mut moved = 0.0f32;
+        for crossing in crossings.into_iter().flatten() {
+            let anchored = bound.anchored(crossing.at);
+            assert!(
+                (as_the_vertex_stage_would(&anchored, &[Rigid::IDENTITY; BONE_LIMIT]) - crossing.pos).length() < 1e-5,
+                "the binding does not reproduce its own rest position",
+            );
+
+            let staged = as_the_vertex_stage_would(&anchored, &transforms);
+            let on_surface = posed.at(crossing.at);
+            assert!(
+                (staged - on_surface).length() < 1e-5,
+                "the vertex stage's blend puts the point at {staged:?} while its surface went to {on_surface:?}",
+            );
+            moved = moved.max((staged - crossing.pos).length());
+        }
+        assert!(moved > 0.1, "the pose has to actually move the curve, and it moved it {moved}");
+    }
+
+    /// Tripwire: a rig with more bones than the uniform blob carries is
+    /// refused.
+    ///
+    /// The blob is a fixed table of [`BONE_LIMIT`] maps and a joint index
+    /// is an eight-bit lane, so nothing about a ninth bone fails loudly:
+    /// the packer would emit index eight, the shader would read past the
+    /// array's end, and WGSL's own bounds behaviour would hand back some
+    /// other bone's row. That poses her by a transform nobody wrote, on
+    /// whichever vertices the ninth bone happened to own.
+    #[test]
+    fn a_rig_past_the_uniform_s_bone_slots_is_refused() {
+        let names = (0..=BONE_LIMIT).map(|bone| format!("b{bone}")).collect::<Vec<String>>().join(" ");
+        let wide = format!("bones {names}\n");
+        let fits = format!("bones {}\n", names.rsplit_once(' ').expect("more than one bone").0);
+
+        assert!(Skin::parse(&npy(&[0.0; BONE_LIMIT]), &fits, 1).is_some(), "a rig the blob has slots for");
+        assert!(Skin::parse(&npy(&[0.0; BONE_LIMIT + 1]), &wide, 1).is_none(), "one bone past the blob's table");
+    }
+
+    /// Tripwire: every influence the solver produced survives the sparse
+    /// attribute.
+    ///
+    /// [`Skin::influences`] keeps the four heaviest bones because the
+    /// vertex format carries four, and the claim that this is lossless is
+    /// a claim about the *rig* rather than about the code — so it is
+    /// checked against a row that fills all four and one that would
+    /// overflow them. The dropped mass is what a silent truncation would
+    /// cost, and it is reported rather than assumed.
+    #[test]
+    fn the_sparse_influences_carry_the_whole_row_when_it_fits() {
+        let names = ["a", "b", "c", "d", "e"];
+        let descriptor = format!("bones {}\n", names.join(" "));
+        let row = [0.4f32, 0.3, 0.2, 0.1, 0.0];
+        let skin = Skin::parse(&npy(&row), &descriptor, 1).expect("a one-vertex rig");
+
+        let (joints, shares) = skin.influences(0);
+        assert_eq!(joints, [0, 1, 2, 3], "the four heaviest bones, heaviest first");
+        for (lane, share) in shares.iter().enumerate() {
+            assert!((share - row[lane]).abs() < 1e-6, "share {lane} arrived as {share}");
+        }
+
+        let spread = [0.3f32, 0.25, 0.2, 0.15, 0.1];
+        let wider = Skin::parse(&npy(&spread), &descriptor, 1).expect("a one-vertex rig");
+        let (_, renormalised) = wider.influences(0);
+        let sum: f32 = renormalised.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-6, "a row past four influences is renormalised, and summed to {sum}");
     }
 }

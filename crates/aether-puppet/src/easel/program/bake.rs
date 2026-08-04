@@ -69,6 +69,9 @@ use aether_render::{
     TextureFormat, VertexAttribute, VertexFormat,
 };
 
+use super::sight::ToneUniforms;
+use super::{SKIN_WGSL, TONE_WGSL};
+use crate::deform::{BONE_LIMIT, INFLUENCES, Skin};
 use crate::extract::Settings;
 use crate::feature::SurfacePoint;
 use crate::labels::CLASSES;
@@ -87,11 +90,11 @@ pub const PACKED: u32 = 0;
 /// silent repack, so the split is pinned to the class count here.
 const _: () = assert!(CLASSES == 8, "the vertex layout packs exactly eight class indicators as 3 + 3 + 2 lanes");
 
-/// Bytes one vertex occupies: position, normal, tone, then the eight
-/// indicators. Attributes pack in declaration order with no padding
-/// (ADR-0171), so this is the sum of the formats' widths and
-/// [`vertices`] writes them in exactly this order.
-pub const VERTEX_BYTES: usize = 12 + 12 + 4 + 12 + 12 + 8;
+/// Bytes one vertex occupies: position, normal, tone, the eight
+/// indicators, then the bone binding. Attributes pack in declaration
+/// order with no padding (ADR-0171), so this is the sum of the formats'
+/// widths and [`vertices`] writes them in exactly this order.
+pub const VERTEX_BYTES: usize = 12 + 12 + 4 + 12 + 12 + 8 + 4 + 4;
 
 /// The geometry slot the draw pass binds: the subject, carrying
 /// everything the three channels blend.
@@ -111,6 +114,8 @@ pub fn geometry_slot() -> GeometrySlotSpec {
             VertexAttribute { location: 3, format: VertexFormat::Float32x3 },
             VertexAttribute { location: 4, format: VertexFormat::Float32x3 },
             VertexAttribute { location: 5, format: VertexFormat::Float32x2 },
+            VertexAttribute { location: 6, format: VertexFormat::Uint8x4 },
+            VertexAttribute { location: 7, format: VertexFormat::Unorm8x4 },
         ],
     }
 }
@@ -140,19 +145,55 @@ pub struct BakeUniforms {
     pub view_proj: Mat4,
     /// Where the viewer sits — what `facing` asks about.
     pub eye: Vec3,
+    /// This frame's pose, as [`deform::bone_uniform`] lays it out.
+    ///
+    /// The wash's own subject geometry follows the drawing's pose from
+    /// here rather than from a re-upload — which is what the easel never
+    /// had and what its rest-pose ghost was
+    /// (iamacoffeepot/aether#4462).
+    ///
+    /// [`deform::bone_uniform`]: crate::deform::bone_uniform
+    pub bones: [f32; BONE_LIMIT * 12],
+    /// `Settings::tone`'s authored numbers, and whether the shader has
+    /// to answer it. See `BakeParams::posed` in the WGSL.
+    pub tone: ToneUniforms,
+    pub posed: bool,
 }
 
 impl BakeUniforms {
-    /// Bytes of the `BakeParams` block: a `mat4x4<f32>` then a
-    /// `vec3<f32>`, rounded out to the struct's 16-byte alignment.
-    pub const BYTES: u32 = 80;
+    /// Bytes of the `BakeParams` block: a `mat4x4<f32>`, two `vec3<f32>`
+    /// and three scalars, then the bone table — rounded out to the
+    /// struct's 16-byte alignment.
+    pub const BYTES: u32 = 112 + (BONE_LIMIT * 48) as u32;
 
-    pub fn encode(&self) -> [u8; Self::BYTES as usize] {
-        let mut window = [0u8; Self::BYTES as usize];
+    /// Where the bone table starts. Sixteen-aligned, as an array of
+    /// `vec4<f32>` must be.
+    const BONES: usize = 112;
+
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut window = vec![0u8; Self::BYTES as usize];
         for (lane, value) in window[0..64].chunks_exact_mut(4).zip(self.view_proj.to_cols_array()) {
             lane.copy_from_slice(&value.to_le_bytes());
         }
+        // `eye` and `light` are each a `vec3<f32>` on a sixteen-byte
+        // boundary, so `eye` leaves a padding lane and `ambient` fills
+        // `light`'s.
         for (lane, value) in window[64..76].chunks_exact_mut(4).zip(self.eye.to_array()) {
+            lane.copy_from_slice(&value.to_le_bytes());
+        }
+        let lit = [
+            self.tone.light.x,
+            self.tone.light.y,
+            self.tone.light.z,
+            self.tone.ambient,
+            self.tone.face_lift,
+            f32::from(u8::from(self.posed)),
+        ];
+        for (lane, value) in window[80..].chunks_exact_mut(4).zip(lit) {
+            lane.copy_from_slice(&value.to_le_bytes());
+        }
+        for (lane, value) in window[Self::BONES..].chunks_exact_mut(4).zip(self.bones) {
             lane.copy_from_slice(&value.to_le_bytes());
         }
 
@@ -166,15 +207,17 @@ impl BakeUniforms {
 /// interpolates ([`crate::labels::Labels::vertex_scores`]), indexed the same
 /// way `mesh.positions` is.
 ///
-/// Called per frame, not per subject. Nothing here is cached and
-/// nothing is keyed on the mesh being the one from last frame: a pose
-/// that moves a vertex moves its normal and its key-light term with it,
-/// so the honest re-upload is the whole buffer through
-/// `aether.render.update_geometry`. ADR-0171 prefers a pose to ride the
-/// uniform blob where it can, and the layout leaves that door open —
-/// skinning joints and weights are expressible in the same closed
-/// format set — but a re-upload has to work first, and this is it.
-pub fn vertices(mesh: &Mesh, scores: &[[f32; CLASSES]], settings: &Settings) -> Vec<u8> {
+/// Called once per subject, not per frame. The mesh here is the *rest*
+/// sculpt and stays it: a pose moves every vertex, and the pose reaches
+/// the vertex stage through [`BakeUniforms::bones`] instead — which
+/// ADR-0171 already preferred and the closed vertex format set already
+/// named the two attributes for.
+///
+/// The baked `tone` is the rest pose's. It is what a subject with no rig
+/// paints from, and what `program_bake_scenario` holds the tone channel
+/// against; a rigged subject's shader derives its own from the normal it
+/// posed, since the rest pose's shading slides under a moving body.
+pub fn vertices(mesh: &Mesh, scores: &[[f32; CLASSES]], settings: &Settings, skin: Option<&Skin>) -> Vec<u8> {
     let mut packed = Vec::with_capacity(mesh.positions.len() * VERTEX_BYTES);
     for (index, (&position, &normal)) in mesh.positions.iter().zip(&mesh.normals).enumerate() {
         let tone = settings.tone(&SurfacePoint::on_surface(position, normal));
@@ -183,6 +226,9 @@ pub fn vertices(mesh: &Mesh, scores: &[[f32; CLASSES]], settings: &Settings) -> 
         for value in position.to_array().into_iter().chain(normal.to_array()).chain([tone]).chain(indicators) {
             packed.extend_from_slice(&value.to_le_bytes());
         }
+        let (joints, shares) = skin.map_or(([0; INFLUENCES], [0.0; INFLUENCES]), |skin| skin.influences(index));
+        packed.extend(joints);
+        packed.extend(shares.map(|share| (share.clamp(0.0, 1.0) * 255.0).round() as u8));
     }
 
     packed
@@ -202,7 +248,10 @@ pub fn indices(mesh: &Mesh) -> Vec<u8> {
 /// for every subject at every canvas size.
 pub fn program() -> ProgramRegister {
     ProgramRegister {
-        wgsl: BAKE_WGSL.to_owned(),
+        // The two preludes after this module's own source: the vertex
+        // stage poses the subject from the bone table, and answers
+        // `Settings::tone` against the normal that posing turned.
+        wgsl: format!("{BAKE_WGSL}\n{SKIN_WGSL}\n{TONE_WGSL}"),
         bindings: vec![packed_slot()],
         transients: Vec::new(),
         geometries: vec![geometry_slot()],
@@ -246,7 +295,7 @@ mod tests {
         let scores = vec![[0.0; CLASSES]; mesh.positions.len()];
 
         assert_eq!(
-            vertices(&mesh, &scores, &Settings::default()).len(),
+            vertices(&mesh, &scores, &Settings::default(), None).len(),
             mesh.positions.len() * VERTEX_BYTES,
             "packed length",
         );
