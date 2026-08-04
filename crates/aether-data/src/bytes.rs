@@ -12,13 +12,13 @@
 //! attribute is therefore a pure throughput change — old and new binaries
 //! agree on every payload — and a field that omits it stays correct, just
 //! slow. The deserialize side also accepts a seq of integers so
-//! self-describing formats that render bytes as an array (serde_json)
+//! self-describing formats that render bytes as an array (`serde_json`)
 //! keep decoding exactly as the plain `Vec<u8>` impl did.
 
 use alloc::vec::Vec;
 use core::fmt;
 
-use serde::de::{SeqAccess, Visitor};
+use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::{Deserializer, Serializer};
 
 /// Serialize a byte buffer through the serializer's `serialize_bytes` fast
@@ -43,11 +43,11 @@ impl<'de> Visitor<'de> for BytesVisitor {
         f.write_str("a byte buffer")
     }
 
-    fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> {
+    fn visit_bytes<E: DeError>(self, v: &[u8]) -> Result<Vec<u8>, E> {
         Ok(v.to_vec())
     }
 
-    fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> {
+    fn visit_byte_buf<E: DeError>(self, v: Vec<u8>) -> Result<Vec<u8>, E> {
         Ok(v)
     }
 
