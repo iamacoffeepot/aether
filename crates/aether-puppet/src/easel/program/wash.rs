@@ -4,9 +4,9 @@
 //! whole develop, with nothing left on the CPU that scales with the
 //! canvas.
 //!
-//! [`program`] lays the graph once, statically. The drawing's own
-//! coverage first ([`super::ink`]), then the three fields the develop
-//! used to be handed as uploaded planes — the flow off that coverage
+//! [`program`] lays the graph once, statically. First the three fields
+//! the develop used to be handed as uploaded planes — the flow off the
+//! ink coverage plane the ink layer derives
 //! ([`super::flow`]), how closely the hand is held off the bake's class
 //! channel ([`super::care`]), and the face paint off the chart's aperture
 //! loops ([`super::face`]) — and then, for every entry in
@@ -20,14 +20,15 @@
 //!
 //! # What a dispatch supplies
 //!
-//! Five sampled textures and one writable one ([`WashBindings`]), where
+//! Six sampled textures and one writable one ([`WashBindings`] plus the
+//! ink coverage plane), where
 //! there were thirteen. The class, tone and facing planes collapsed into
 //! the one packed plane the bake pass writes (#4420); care, flow, lift,
 //! iris and blush became passes here; and the paper's three noise fields
 //! are a pure function of the seed and the canvas, so they are pulped once
 //! when a canvas is created ([`field::paper`]) rather than re-derived and
 //! re-uploaded per develop. Nothing is staged per frame but the uniform
-//! blob and the two geometries the drawing and the chart move.
+//! blob and the one geometry the chart moves.
 //!
 //! # Two extents
 //!
@@ -53,7 +54,7 @@
 //! jitters, noise windows and drops the CPU develop consumes. None of it
 //! turns with the view, so it is rolled into a [`SeedUniforms`] slice once
 //! and re-placed per frame ([`WashProgram::frame_uniforms`]): what a frame
-//! writes is the two matrices, the two face frames, and one centroid per
+//! writes is the two face frames and one centroid per
 //! chain. Where those centroids come from is [`super::super::survey`] —
 //! the class plane lives on the GPU now and ADR-0170 declines a readback,
 //! so they are measured off the subject's own geometry instead.
@@ -61,7 +62,7 @@
 //! The CPU wash remains the oracle; `tests/program_wash_scenario.rs` holds
 //! the two whole-sheet develops together.
 
-use aether_math::{Mat4, Vec2};
+use aether_math::Vec2;
 use aether_render::{
     InputSlot, OutputSlot, PassStage, ProgramPass, ProgramRegister, SlotExtent, SlotSpec, TextureFormat,
 };
@@ -92,7 +93,6 @@ pub fn module() -> String {
         puddle::PUDDLE_WGSL,
         pigment::PIGMENT_WGSL,
         super::sheet::SHEET_WGSL,
-        super::ink::INK_WGSL,
         care::CARE_WGSL,
         flow::FLOW_WGSL,
         face::FACE_WGSL,
@@ -117,7 +117,7 @@ pub const BODY_DIVISOR: u32 = 2;
 const FINE: SlotExtent = SlotExtent::Full;
 
 /// Dispatch-binding indices, in the order [`program`] declares them and
-/// [`WashBindings::to_vec`] lists them.
+/// [`WashBindings::dispatched`] lists them.
 const PACKED: u32 = 0;
 const TOOTH: u32 = 1;
 const EDGE: u32 = 2;
@@ -125,19 +125,21 @@ const TOOTH_FINE: u32 = 3;
 const EDGE_FINE: u32 = 4;
 const PAPER_SHADE: u32 = 5;
 const SHEET: u32 = 6;
+const INK: u32 = 7;
 
-/// The geometry slots the program declares, filled by id per dispatch
-/// (ADR-0171): the ribbon triangles the ink pass rasterizes, and the
-/// chart's aperture loops the face pass fills.
-const INK_GEOMETRY: u32 = 0;
-const APERTURE_GEOMETRY: u32 = 1;
+/// The geometry slot the program declares, filled by id per dispatch
+/// (ADR-0171): the chart's aperture loops the face pass fills.
+const APERTURE_GEOMETRY: u32 = 0;
 
-/// The registry textures one develop dispatches over, named.
+/// The registry textures the easel itself creates for one canvas, named.
 ///
-/// Six, and only the last is written. Every one is created once with its
-/// canvas and outlives any number of develops: the packed plane is the
-/// bake program's own output (a `Writable` texture this program samples),
-/// and the four data planes are pulped from the seed when the canvas is.
+/// Seven, and only the last is written. Every one is created once with
+/// its canvas and outlives any number of develops: the packed plane is
+/// the bake program's own output (a `Writable` texture this program
+/// samples), and the four data planes are pulped from the seed when the
+/// canvas is. The eighth binding a dispatch supplies — the ink coverage
+/// plane — is the ink layer's, and joins these in
+/// [`WashBindings::dispatched`].
 pub struct WashBindings {
     /// The bake's packed plane at the body's extent: the region class in
     /// R, how the key light falls in G, how far the surface turns toward
@@ -160,9 +162,23 @@ pub struct WashBindings {
 }
 
 impl WashBindings {
-    /// The `ProgramDispatch::bindings` list, in declaration order.
-    pub fn to_vec(&self) -> Vec<u32> {
+    /// The seven textures the easel creates and releases with its own
+    /// canvas. The ink coverage plane is not among them — it belongs to
+    /// the ink layer, which writes it (see [`dispatched`]).
+    ///
+    /// [`dispatched`]: WashBindings::dispatched
+    pub fn owned(&self) -> Vec<u32> {
         vec![self.packed, self.tooth, self.edge, self.tooth_fine, self.edge_fine, self.paper_shade, self.sheet]
+    }
+
+    /// The `ProgramDispatch::bindings` list, in declaration order: the
+    /// easel's own seven, then the ink coverage plane the ink layer's
+    /// [`stroke`](super::stroke) program derived this frame.
+    pub fn dispatched(&self, ink: u32) -> Vec<u32> {
+        let mut bindings = self.owned();
+        bindings.push(ink);
+
+        bindings
     }
 }
 
@@ -480,7 +496,6 @@ pub struct WashProgram {
     care: u32,
     blush_coat: u32,
     seam: u32,
-    ink_window: u32,
     uniform_bytes: u32,
     canvas_height: usize,
 }
@@ -958,14 +973,14 @@ pub fn program_at(canvas_height: usize, divisor: u32) -> WashProgram {
     let mut graph = Graph::new(canvas_height, divisor);
     let body = graph.body;
 
-    // The ink coverage plane, rasterized from resident ribbon geometry
-    // (iamacoffeepot/aether#4410), and the flow solved off it — the two
-    // together are `regions::ink` plus `image::structure_tensor_flow`,
-    // which cost 33 ms on the CPU at the framing this is measured for.
-    let ink_window = graph.window(super::ink::InkUniforms::BYTES);
-    let ink_plane = graph.plane(body);
-    graph.passes.push(super::ink::coverage_pass(INK_GEOMETRY, OutputSlot::Transient { index: ink_plane }, ink_window));
-    let (flow_plan, [flow_x, flow_y, coherence]) = graph.flow_chain(transient(ink_plane));
+    // The flow, solved off where the frame's own ink stands
+    // (iamacoffeepot/aether#4451). The plane arrives as a binding rather
+    // than as a pass over ribbon geometry: the ink layer's stroke program
+    // already rasterizes every curve at twice the canvas with the hidden
+    // points collapsed, so the coverage the flow wants is a reduction of
+    // that raster and nothing here has to be handed a CPU split of the
+    // drawing to rasterize a second time.
+    let (flow_plan, [flow_x, flow_y, coherence]) = graph.flow_chain(binding(INK));
 
     // How closely the hand is held, flooded out of the bake's own class
     // channel rather than chamfered on the CPU.
@@ -1041,9 +1056,13 @@ pub fn program_at(canvas_height: usize, divisor: u32) -> WashProgram {
             plane_slot(FINE),
             plane_slot(FINE),
             sheet_slot(),
+            // Where the drawing itself landed, written by the ink
+            // layer's own program at exactly this extent
+            // ([`super::stroke::ink_plane_slot`]).
+            plane_slot(body),
         ],
         transients: graph.transients,
-        geometries: vec![super::ink::geometry_slot(), face::geometry_slot()],
+        geometries: vec![face::geometry_slot()],
         depth_transients: Vec::new(),
         passes: graph.passes,
     };
@@ -1057,7 +1076,6 @@ pub fn program_at(canvas_height: usize, divisor: u32) -> WashProgram {
         care: care_window,
         blush_coat,
         seam,
-        ink_window,
         uniform_bytes: graph.uniform_bytes,
         canvas_height,
     }
@@ -1161,9 +1179,6 @@ pub struct Faces<'a> {
 
 /// Everything one frame's uniforms carry that the seed slice could not.
 pub struct Frame<'a> {
-    /// The matrix the ribbons were solved for, which the ink pass' vertex
-    /// stage projects them through.
-    pub view_proj: Mat4,
     pub placement: Placement<'a>,
     /// `None` for a subject with no charted face — the accents neutralize
     /// through zeroed counts and a zeroed blush cap.
@@ -1203,7 +1218,7 @@ impl WashProgram {
     }
 
     /// Every window the seed and the canvas fix — which is all of them but
-    /// the two matrices, the two eye frames, and one centroid per chain.
+    /// the two eye frames and one centroid per chain.
     ///
     /// The same seed rolls the same accidents in the same order as
     /// `Sheet::coats`, and the palette's pigments and caps ride the coat
@@ -1305,9 +1320,9 @@ impl WashProgram {
     /// One frame's blob: the seed slice re-placed for this view.
     ///
     /// Everything written here turns with the camera and nothing else
-    /// does — the ink's matrix, the two eye frames, the iris lift and
-    /// blush gates, and the centroid every wash places its pours, its lost
-    /// edge and its thrown drops about. The rest is a memcpy.
+    /// does — the two eye frames, the iris lift and blush gates, and the
+    /// centroid every wash places its pours, its lost edge and its thrown
+    /// drops about. The rest is a memcpy.
     ///
     /// # Panics
     ///
@@ -1323,11 +1338,8 @@ impl WashProgram {
             "the seed slice was rolled for a different set of visible materials",
         );
         let canvas = seed.canvas;
-        let (body_width, body_height) = canvas.body_at(self.divisor);
+        let (_, body_height) = canvas.body_at(self.divisor);
         let mut blob = Blob(seed.blob.clone());
-
-        let half_size = Vec2::new(body_width as f32 * 0.5, body_height as f32 * 0.5);
-        blob.window(self.ink_window, &super::ink::InkUniforms { view_proj: frame.view_proj, half_size }.encode());
 
         let charted = frame.faces.as_ref();
         let fine_eyes = charted.map_or_else(Vec::new, |faces| face::eyes(faces.fine, faces.presence, canvas.height));

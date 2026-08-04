@@ -26,8 +26,7 @@
 //! twice a whole frame's budget) and the accident stream the uniform blob
 //! replays ([`wash::SeedUniforms`]). What is left per frame is the two
 //! matrices, the chart's two dozen points per eye, one pass over the
-//! vertices for the centroids, and the ribbon and aperture geometries the
-//! drawing and the chart move.
+//! vertices for the centroids, and the aperture geometry the chart moves.
 
 pub mod accent;
 #[cfg(test)]
@@ -43,13 +42,13 @@ use std::collections::VecDeque;
 
 use aether_math::{Mat4, Vec2, Vec3};
 use aether_render::{
-    CreateGeometry, CreateTexture, DestroyTexture, DrawMaterialTextured, DrawTriangle, GeometrySlotSpec, MaterialRect,
+    CreateGeometry, CreateTexture, DestroyTexture, DrawMaterialTextured, GeometrySlotSpec, MaterialRect,
     MaterialTexturedRect, ProgramDestroy, ProgramDispatch, ProgramRegister, QuadBlend, TextureFormat, TextureSampling,
     TextureUsage, UpdateGeometry,
 };
 
 use program::wash::{self, Canvas, Faces, Frame, Placement, Presence, SeedUniforms, WashBindings, WashProgram};
-use program::{bake, face, ink};
+use program::{bake, face};
 use survey::Survey;
 
 use crate::anchor::Anchors;
@@ -67,6 +66,30 @@ use crate::mesh::Mesh;
 /// dozen pixels across at this framing and its slit a fraction of one, so
 /// they are exactly the content the sheet's own pixels exist for.
 pub(crate) const CANVAS_LONG_EDGE: usize = 1280;
+
+/// The canvas a window develops at — the window's own pixels, clamped to
+/// [`CANVAS_LONG_EDGE`].
+///
+/// Both layers resolve their canvas here and nowhere else. The wash reads
+/// its ink coverage plane out of a texture the ink layer's own program
+/// writes (iamacoffeepot/aether#4451), and a program binding's size is
+/// checked against the extent it was declared at, so the two agree on that
+/// one texture exactly while they agree on the canvas it is derived from.
+/// Two clamps that happened to match at the shipped framing would not be
+/// an agreement; the dispatch that disagreed would warn-drop whole, and
+/// the frame would lose its paint or its ink rather than show a wrong one.
+#[must_use]
+pub fn wash_canvas(width: u32, height: u32) -> Canvas {
+    let (width, height) = ((width as usize).max(1), (height as usize).max(1));
+
+    let long = width.max(height);
+    if long <= CANVAS_LONG_EDGE {
+        return Canvas { width, height };
+    }
+    let scale = CANVAS_LONG_EDGE as f32 / long as f32;
+
+    Canvas { width: ((width as f32 * scale) as usize).max(1), height: ((height as f32 * scale) as usize).max(1) }
+}
 
 /// The studio's one seed — `Sumire` in ASCII — so the same view develops
 /// the same painting, today and tomorrow.
@@ -112,14 +135,17 @@ pub struct Subject<'a> {
     pub mesh: &'a Mesh,
     pub scores: &'a [[f32; labels::CLASSES]],
     pub settings: &'a Settings,
-    /// The drawing solved for this eye, asked for rather than handed
-    /// over: the frame's own ink is rasterized from the visibility field
-    /// (ADR-0172) and no CPU triangles exist for it, so the easel is the
-    /// only caller that still needs the visible runs — it rasterizes its
-    /// ink coverage plane from them, and the flow solve reads that plane.
-    /// A closure rather than a slice because a caller with no easel work
-    /// to do never pays for the split.
-    pub drawn: &'a dyn Fn() -> Vec<DrawTriangle>,
+    /// The ink coverage plane for this eye: where the drawing landed,
+    /// which the flow solve reads to find which way the hair runs.
+    ///
+    /// A texture id rather than triangles. The frame's own ink is
+    /// rasterized from the visibility field (ADR-0172), and since
+    /// iamacoffeepot/aether#4451 the plane is a reduction of that same
+    /// raster — so the wash yields boundary duty to the ink actually
+    /// drawn, and no caller splits the drawing on the CPU to hand it
+    /// over. `None` before the ink layer's textures stand, which holds
+    /// the develop rather than painting from a plane that is not there.
+    pub ink: Option<u32>,
     pub chart: Option<Chart<'a>>,
 }
 
@@ -131,17 +157,13 @@ const PROGRAMS: usize = 2;
 
 /// The geometry slots the develop keeps resident, in create order.
 const SUBJECT_GEOMETRY: usize = 0;
-const INK_GEOMETRY: usize = 1;
-const APERTURE_GEOMETRY: usize = 2;
-const GEOMETRIES: usize = 3;
+const APERTURE_GEOMETRY: usize = 1;
+const GEOMETRIES: usize = 2;
 
 /// Each slot beside the vertex layout its pass binds, in create order —
 /// which is the order the ids answer in.
-const GEOMETRY_SLOTS: [(usize, fn() -> GeometrySlotSpec); GEOMETRIES] = [
-    (SUBJECT_GEOMETRY, bake::geometry_slot),
-    (INK_GEOMETRY, ink::geometry_slot),
-    (APERTURE_GEOMETRY, face::geometry_slot),
-];
+const GEOMETRY_SLOTS: [(usize, fn() -> GeometrySlotSpec); GEOMETRIES] =
+    [(SUBJECT_GEOMETRY, bake::geometry_slot), (APERTURE_GEOMETRY, face::geometry_slot)];
 
 /// The sampled plane textures one canvas carries, before the writable
 /// sheet that completes the set.
@@ -277,6 +299,11 @@ pub struct Easel {
     /// The view the staged uniforms and packed geometries were derived
     /// for, so a develop at the same one re-derives nothing.
     derived_for: Option<DevelopKey>,
+    /// The ink coverage plane the last develop was handed, re-read every
+    /// frame rather than kept with the textures: the ink layer releases
+    /// and re-creates its own set on a resize, so the id outlives no
+    /// canvas change.
+    ink_plane: Option<u32>,
     /// The uniform blobs that key produced.
     uniforms: Option<Uniforms>,
     /// A develop is staged for this canvas, waiting for the mail. Cleared
@@ -370,7 +397,7 @@ impl Easel {
     }
 
     /// The reply to one requested geometry create. Ids arrive in send
-    /// order — the subject's, the drawing's, the chart's. `Err` disables
+    /// order — the subject's, then the chart's. `Err` disables
     /// the easel for the session, as a refused plane create does: every
     /// geometry here is bound by a declared pass, so a program without one
     /// develops nothing worth showing.
@@ -388,17 +415,8 @@ impl Easel {
     /// The window's own pixels, clamped to the long-edge ceiling.
     fn canvas(&self) -> Option<Canvas> {
         let (width, height) = self.window?;
-        let (width, height) = ((width as usize).max(1), (height as usize).max(1));
 
-        let long = width.max(height);
-        if long <= CANVAS_LONG_EDGE {
-            return Some(Canvas { width, height });
-        }
-        let scale = CANVAS_LONG_EDGE as f32 / long as f32;
-        Some(Canvas {
-            width: ((width as f32 * scale) as usize).max(1),
-            height: ((height as f32 * scale) as usize).max(1),
-        })
+        Some(wash_canvas(width, height))
     }
 
     /// The exact planes a develop at the current view would paint from,
@@ -434,9 +452,14 @@ impl Easel {
     /// a pure function of the eye, the matrix and the canvas over a
     /// subject that has not changed, so a develop at a view already
     /// derived for re-stages the uniform blobs the dispatch takes and
-    /// re-derives nothing: no occlusion split, no centroid pass over the
-    /// vertices, no re-pack, and — because the packed slots stay taken —
-    /// no geometry mail for buffers already holding those very bytes.
+    /// re-derives nothing: no centroid pass over the vertices, no
+    /// re-pack, and — because the packed slots stay taken — no geometry
+    /// mail for buffers already holding those very bytes.
+    ///
+    /// The ink coverage plane is read out of `subject` on every develop,
+    /// held view or not: it is an id the ink layer re-issues whenever its
+    /// own textures are re-created, and a develop the key skipped still
+    /// has to dispatch against the one standing now.
     pub fn develop(&mut self, subject: &Subject<'_>, view: &View) {
         if self.disabled {
             return;
@@ -444,6 +467,8 @@ impl Easel {
         let Some(canvas) = self.canvas() else {
             return;
         };
+        self.ink_plane = subject.ink;
+
         let key = DevelopKey::of(view, canvas);
         if self.derived_for == Some(key) && self.uniforms.is_some() {
             self.staged = Some(canvas);
@@ -451,11 +476,7 @@ impl Easel {
         }
 
         let (body_width, body_height) = canvas.body();
-        let Subject { mesh, scores, settings, drawn, chart } = subject;
-        // Past both gates, so this is the one place the CPU still splits
-        // the drawing into visible runs — once per view, not once per
-        // frame.
-        let drawn = &drawn();
+        let Subject { mesh, scores, settings, chart, .. } = subject;
 
         let survey = self.survey.get_or_insert_with(|| Survey::measure(mesh, scores));
         if self.packed[SUBJECT_GEOMETRY].is_none() && self.geometries[SUBJECT_GEOMETRY] == Resident::Absent {
@@ -506,14 +527,12 @@ impl Easel {
             .unwrap_or_else(|| program.seed_uniforms(SHEET_SEED, canvas, wanted));
 
         let faces = chart.as_ref().map(|_| Faces { fine: &fine_eyes, body: &body_eyes, presence: &presence });
-        let frame = Frame { view_proj: view.view_proj, placement, faces };
+        let frame = Frame { placement, faces };
 
         self.uniforms = Some(Uniforms {
             bake: bake::BakeUniforms { view_proj: view.view_proj, eye: view.eye }.encode().to_vec(),
             wash: program.frame_uniforms(&slice, &frame),
         });
-        self.packed[INK_GEOMETRY] =
-            Some(GeometryBytes { vertices: ink::vertices(drawn), indices: ink::indices(drawn) });
         self.packed[APERTURE_GEOMETRY] = Some(GeometryBytes {
             vertices: face::vertices(&fine_eyes, canvas.width, canvas.height),
             indices: face::indices(&fine_eyes, canvas.width, canvas.height),
@@ -573,7 +592,7 @@ impl Easel {
         let Some((bindings, _)) = self.textures.take() else {
             return Vec::new();
         };
-        bindings.to_vec().into_iter().map(|texture_id| DestroyTexture { texture_id }).collect()
+        bindings.owned().into_iter().map(|texture_id| DestroyTexture { texture_id }).collect()
     }
 
     /// The creates carrying this canvas' resident planes: the paper pulped
@@ -631,9 +650,9 @@ impl Easel {
     }
 
     /// The geometry creates, in the order [`Easel::geometry_created`]
-    /// collects their ids: the subject the bake rasterizes, the drawing
-    /// the ink pass does, and the chart's aperture loops the face pass
-    /// fills. One create each, then updated in place for the session.
+    /// collects their ids: the subject the bake rasterizes, then the
+    /// chart's aperture loops the face pass fills. One create each, then
+    /// updated in place for the session.
     ///
     /// The bytes are moved out of the packed slot rather than copied out
     /// of it. What the slot then says is the truth the frame wants: this
@@ -667,17 +686,16 @@ impl Easel {
         Vec::new()
     }
 
-    /// The two geometries that move with the eye, replacing the resident
+    /// The one geometry that moves with the eye, replacing the resident
     /// bytes in place. The subject's does not: nothing in its buffer turns
     /// with the view, so it is uploaded once and left alone.
     ///
     /// A slot only ships when it owes bytes *and* has an id to ship them
     /// against — so a develop that re-derived nothing sends no mail here
-    /// at all, which at the shipped framing is six megabytes a frame the
-    /// GPU already held (iamacoffeepot/aether#4447).
+    /// at all (iamacoffeepot/aether#4447).
     pub fn take_geometry_updates(&mut self) -> Vec<UpdateGeometry> {
         let mut updates = Vec::new();
-        for slot in [INK_GEOMETRY, APERTURE_GEOMETRY] {
+        for slot in [APERTURE_GEOMETRY] {
             let Some(geometry_id) = self.geometries[slot].id() else {
                 continue;
             };
@@ -697,6 +715,13 @@ impl Easel {
     /// and in this order — the wash samples what the bake wrote.
     pub fn take_dispatch(&mut self) -> Vec<ProgramDispatch> {
         let (Some(bake_id), Some(wash_id)) = (self.programs[BAKE], self.programs[WASH]) else {
+            return Vec::new();
+        };
+        // The wash reads where the ink stands, and the ink layer owns
+        // that texture. Before its own set is created there is nothing to
+        // bind, and a dispatch short one binding is dropped whole — so
+        // the develop waits rather than being dropped in the cap.
+        let Some(ink) = self.ink_plane else {
             return Vec::new();
         };
         let Some((bindings, canvas)) = self.textures.as_ref() else {
@@ -723,8 +748,8 @@ impl Easel {
             },
             ProgramDispatch {
                 program_id: wash_id,
-                bindings: bindings.to_vec(),
-                geometries: vec![ids[INK_GEOMETRY], ids[APERTURE_GEOMETRY]],
+                bindings: bindings.dispatched(ink),
+                geometries: vec![ids[APERTURE_GEOMETRY]],
                 uniforms: uniforms.wash.clone(),
             },
         ]
@@ -842,6 +867,11 @@ mod tests {
     use crate::labels::CLASSES;
     use crate::mesh::Mesh;
 
+    /// A stand-in for the ink layer's coverage plane. Nothing here reads
+    /// it — the render cap does — so any id the easel would not otherwise
+    /// hand out serves.
+    const INK: u32 = 9_000;
+
     /// A quad standing well inside the frame, every vertex skin.
     fn quad() -> Mesh {
         Mesh::from_obj_bytes(b"v -0.5 -0.5 0\nv 0.5 -0.5 0\nv 0.5 0.5 0\nv -0.5 0.5 0\nf 1 2 3\nf 1 3 4\n", 0)
@@ -883,7 +913,6 @@ mod tests {
         let mesh = quad();
         let scores = vec![[1.0; CLASSES]; mesh.positions.len()];
         let settings = Settings::default();
-        let drawn = Vec::new;
 
         let mut easel = Easel::default();
         easel.resized(160, 200);
@@ -896,7 +925,7 @@ mod tests {
         // Ten render stages is far more than the protocol needs — the
         // point is that it converges, not how fast.
         for _ in 0..10 {
-            let subject = Subject { mesh: &mesh, scores: &scores, settings: &settings, drawn: &drawn, chart: None };
+            let subject = Subject { mesh: &mesh, scores: &scores, settings: &settings, ink: Some(INK), chart: None };
             easel.develop(&subject, &view());
 
             for _ in easel.take_program_destroys() {}
@@ -931,7 +960,6 @@ mod tests {
     /// Drive one easel to convergence against a stand-in render cap, so a
     /// test past the reply protocol can ask what a steady frame does.
     fn converged(mesh: &Mesh, scores: &[[f32; CLASSES]], settings: &Settings, at: &View) -> Easel {
-        let drawn = Vec::new;
         let mut easel = Easel::default();
         easel.resized(160, 200);
 
@@ -941,7 +969,7 @@ mod tests {
             next_id
         };
         for _ in 0..10 {
-            let subject = Subject { mesh, scores, settings, drawn: &drawn, chart: None };
+            let subject = Subject { mesh, scores, settings, ink: Some(INK), chart: None };
             easel.develop(&subject, at);
 
             for _ in easel.take_registers() {
@@ -979,8 +1007,7 @@ mod tests {
         let mesh = quad();
         let scores = vec![[1.0; CLASSES]; mesh.positions.len()];
         let settings = Settings::default();
-        let drawn = Vec::new;
-        let subject = || Subject { mesh: &mesh, scores: &scores, settings: &settings, drawn: &drawn, chart: None };
+        let subject = || Subject { mesh: &mesh, scores: &scores, settings: &settings, ink: Some(INK), chart: None };
         let mut easel = converged(&mesh, &scores, &settings, &view());
 
         easel.develop(&subject(), &view());
@@ -993,8 +1020,8 @@ mod tests {
         easel.develop(&subject(), &view_from(Vec3::new(3.0, 1.0, 4.0)));
         assert_eq!(
             easel.take_geometry_updates().len(),
-            2,
-            "an eye that moved re-derives the drawing and the aperture, and both have to travel",
+            1,
+            "an eye that moved re-derives the aperture, and it has to travel",
         );
     }
 

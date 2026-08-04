@@ -205,6 +205,36 @@ fn fs_stroke(ribbon: Ribbon) -> @location(0) vec4<f32> {
     return ribbon.colour;
 }
 
+// Raster texels per ink-coverage texel on each axis — `SUPERSAMPLE`
+// times the wash's `BODY_DIVISOR`. Restated from Rust's
+// `INK_PLANE_FOOTPRINT`, which a WGSL module cannot import; the two must
+// move together.
+const INK_PLANE_FOOTPRINT: i32 = 4;
+
+// The wash's ink coverage plane: where ink stands, so the paint under it
+// can yield boundary duty to the drawing.
+//
+// The raster is a premultiplied coverage buffer whose alpha is one where
+// a ribbon landed and zero where none did, so the coverage of a wash
+// body texel is the greatest alpha over the block of raster texels it
+// covers — which claims it exactly when a stroke passes anywhere through
+// it. A mean, or one tap, would find only the strokes that happen to
+// pass near a sample: most of the drawing is thinner than a body texel,
+// and a structure tensor over a dashed lock still answers with a
+// confident orientation, just the wrong one.
+@fragment
+fn fs_ink_plane(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let base = vec2<i32>(position.xy) * INK_PLANE_FOOTPRINT;
+    var covered = 0.0;
+    for (var dy = 0; dy < INK_PLANE_FOOTPRINT; dy++) {
+        for (var dx = 0; dx < INK_PLANE_FOOTPRINT; dx++) {
+            covered = max(covered, textureLoad(source, base + vec2<i32>(dx, dy), 0).a);
+        }
+    }
+
+    return vec4<f32>(covered, 0.0, 0.0, 1.0);
+}
+
 // Straight alpha, with the colour dilated one texel into what the
 // ribbons did not cover.
 //
