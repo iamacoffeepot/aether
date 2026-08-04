@@ -333,6 +333,18 @@ fn pace_the_pose_sweep(harness: &mut SubstrateHarness) {
         overshoot.as_secs_f64() * 1000.0,
     );
 
+    // Held at a pose the sweep passed through, for the A/B against the
+    // pinned rest frame. Outside the timed loop, because a capture encodes
+    // a PNG synchronously (#4422).
+    let held_pose =
+        Pose { yaw: 22.0, pitch: -6.0, jaw: 7.0, ear_twist_left: 18.0, ear_twist_right: -18.0, ..Pose::default() };
+    harness
+        .execute(vec![("hold", HarnessOp::send_and_settle(PUPPET, &held_pose)), ("settle", HarnessOp::advance(8))])
+        .expect("settle the held pose");
+    if let Some(posed) = photograph(harness, "AETHER_PUPPET_POSED_PNG", "a held pose at the pinned framing") {
+        compare_against_baseline(&posed, "AETHER_PUPPET_BASELINE_PNG", "AETHER_PUPPET_POSED_DIFF_PNG");
+    }
+
     harness
         .execute(vec![
             ("rest", HarnessOp::send_and_settle(PUPPET, &Pose::default())),
