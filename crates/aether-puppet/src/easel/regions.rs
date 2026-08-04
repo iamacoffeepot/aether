@@ -26,7 +26,7 @@ use aether_render::DrawTriangle;
 
 use crate::extract::Settings;
 use crate::feature::SurfacePoint;
-use crate::labels::Labels;
+use crate::labels;
 use crate::mesh::Mesh;
 
 /// The three planes, each `width * height` long in row-major order.
@@ -94,7 +94,28 @@ pub fn on_canvas(view_proj: &Mat4, p: Vec3, width: usize, height: usize) -> Opti
     Some(Vec2::new(at.page_x, at.page_y))
 }
 
+/// The winning class of a blended score vector, `0` when nothing scored —
+/// argmax *after* interpolation, per spike 142.
+fn argmax_class(blended: &[f32; labels::CLASSES]) -> u8 {
+    let (mut class, mut best) = (0, 0.0);
+    for (index, &score) in blended.iter().enumerate() {
+        if score > best {
+            (class, best) = (index as u8 + 1, score);
+        }
+    }
+
+    class
+}
+
 /// Rasterize the three planes for one view of `mesh`.
+///
+/// `scores` is the per-vertex blurred-indicator matrix from
+/// [`labels::Labels::vertex_scores`]: the class plane blends each face's
+/// three score vectors barycentrically per pixel and argmaxes the blend,
+/// so a material boundary lands where the indicators actually cross —
+/// never a nearest-voxel read, which on a thin shell (an ear is two
+/// sheets around one labelled shell) blankets the outer sheet with the
+/// inner one's class.
 ///
 /// `eye` and `view_proj` are the camera the drawing was made from, passed
 /// apart because the eye is what `facing` asks about and the matrix is what
@@ -102,7 +123,7 @@ pub fn on_canvas(view_proj: &Mat4, p: Vec3, width: usize, height: usize) -> Opti
 /// drift from the drawing.
 pub fn rasterize(
     mesh: &Mesh,
-    labels: &Labels,
+    scores: &[[f32; labels::CLASSES]],
     settings: &Settings,
     eye: Vec3,
     view_proj: &Mat4,
@@ -134,6 +155,7 @@ pub fn rasterize(
             continue;
         }
 
+        let indicator = corners.map(|i| &scores[i]);
         let lit = corners.map(|i| settings.tone(&SurfacePoint::on_surface(mesh.positions[i], mesh.normals[i])));
         let confront =
             corners.map(|i| (eye - mesh.positions[i]).normalize_or(mesh.normals[i]).dot(mesh.normals[i]).max(0.0));
@@ -157,11 +179,16 @@ pub fn rasterize(
                 let at = y * width + x;
                 if z < depth[at] {
                     depth[at] = z;
-                    // Per pixel, not per face: the wash bakes off the
-                    // coarsened mesh, whose ear faces span many field cells
-                    // — one centroid class per face painted the whole rim
-                    // with the concha's flush (issue 4393).
-                    planes.class[at] = labels.sample(world[0] * wa + world[1] * wb + world[2] * wc);
+                    // Per pixel, not per face (issue 4393), and indicator
+                    // blend before argmax, never a label sample at the
+                    // pixel's own point (issue 4399): both quantisations
+                    // painted the ears' outer sheets with the concha's
+                    // flush.
+                    let mut blended = [0.0; labels::CLASSES];
+                    for (class, score) in blended.iter_mut().enumerate() {
+                        *score = wa * indicator[0][class] + wb * indicator[1][class] + wc * indicator[2][class];
+                    }
+                    planes.class[at] = argmax_class(&blended);
                     planes.tone[at] = wa * lit[0] + wb * lit[1] + wc * lit[2];
                     planes.facing[at] = wa * confront[0] + wb * confront[1] + wc * confront[2];
                 }
@@ -333,7 +360,9 @@ mod tests {
     }
 
     fn rasterize_fixture(mesh: &Mesh, view_proj: &Mat4) -> RegionPlanes {
-        rasterize(mesh, &split_field(), &settings(), EYE, view_proj, SIDE, SIDE)
+        let scores = split_field().vertex_scores(&mesh.positions);
+
+        rasterize(mesh, &scores, &settings(), EYE, view_proj, SIDE, SIDE)
     }
 
     /// Tripwire: the page's vertical axis runs opposite the world's. A
@@ -388,7 +417,8 @@ mod tests {
         let (x, y) = (8, 13);
         for faces in [[[0, 1, 2], [3, 4, 5]], [[3, 4, 5], [0, 1, 2]]] {
             let subject = mesh(&vertices, &faces);
-            let planes = rasterize(&subject, &depth_split_field(), &settings(), EYE, &orthographic(), SIDE, SIDE);
+            let scores = depth_split_field().vertex_scores(&subject.positions);
+            let planes = rasterize(&subject, &scores, &settings(), EYE, &orthographic(), SIDE, SIDE);
 
             assert_eq!(planes.class[y * SIDE + x], labels::SKIN, "the near z band is the SKIN one, order {faces:?}");
         }

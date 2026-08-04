@@ -142,6 +142,21 @@ struct LoadContext {
     path: String,
 }
 
+/// Diagnostic tap on the wash's inputs: bake the planes a develop at the
+/// current view would paint from and write them raw — `dims.txt`
+/// (`width height`), `label.bin` (u8 per pixel), `tone.bin` /
+/// `facing.bin` (little-endian f32 per pixel) — under `prefix` in
+/// `namespace`, for offline diff against the reference board's baked map
+/// and for cross-feeding the CPU wash oracle.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "aether.puppet.dump_planes")]
+pub struct DumpPlanes {
+    /// Writable `aether.fs` namespace to dump into, e.g. `save`.
+    namespace: String,
+    /// Directory prefix the four plane files are written under.
+    prefix: String,
+}
+
 pub struct Puppet {
     subject: Option<Mesh>,
     /// The subject again at a tenth of the faces, and the only thing the
@@ -159,6 +174,10 @@ pub struct Puppet {
     /// extraction waits until nothing is outstanding rather than running
     /// twice.
     labels: Option<labels::Labels>,
+    /// The subject's per-vertex blurred-indicator scores
+    /// ([`labels::Labels::vertex_scores`]), the wash's classification
+    /// signal. Solved once when mesh and field are both in.
+    class_scores: Option<Vec<[f32; labels::CLASSES]>>,
     awaiting_labels: Option<String>,
     /// Where the charted face goes on this subject, measured off the field
     /// when the subject changes. Neither the mesh nor the field moves, so
@@ -243,6 +262,7 @@ impl WasmActor for Puppet {
             subject: None,
             silhouette_subject: None,
             labels: None,
+            class_scores: None,
             awaiting_labels: None,
             anchors: None,
             dragging: false,
@@ -399,6 +419,7 @@ impl WasmActor for Puppet {
         // Where her features are, measured off the field before anything is
         // drawn on them. Placement is derived; only the shape is authored.
         self.anchors = self.labels.as_ref().and_then(|labels| anchor::Anchors::measure(subject, labels));
+        self.class_scores = self.labels.as_ref().map(|labels| labels.vertex_scores(&subject.positions));
 
         // Hatch and crease describe the surface, not the view, so they are
         // solved once here rather than every frame.
@@ -421,6 +442,45 @@ impl WasmActor for Puppet {
     #[handler::single]
     fn on_look(&mut self, _ctx: &mut WasmCtx<'_>, mail: Look) {
         self.look = mail;
+    }
+
+    /// Bake and dump the easel's planes at the current view — the
+    /// diagnostic [`DumpPlanes`] asks for. Fire-and-forget: the planes
+    /// land as files, the harness reads them off the disk.
+    #[handler::single]
+    fn on_dump_planes(&mut self, ctx: &mut WasmCtx<'_>, dump: DumpPlanes) {
+        let Some((subject, scores)) = self.subject.as_ref().zip(self.class_scores.as_ref()) else {
+            tracing::warn!(target: "aether_puppet", "dump_planes: no subject loaded");
+            return;
+        };
+        let view = easel::View {
+            eye: self.eye(),
+            target: self.target(),
+            view_proj: self.view_matrix(),
+            aspect: self.aspect,
+            field_of_view: FIELD_OF_VIEW,
+        };
+        let painted =
+            easel::Subject { mesh: subject, scores, settings: &self.settings, drawn: &self.drawn, chart: None };
+        let Some(planes) = self.easel.bake_planes(&painted, &view) else {
+            tracing::warn!(target: "aether_puppet", "dump_planes: no canvas before the first resize");
+            return;
+        };
+
+        let fs = ctx.actor::<FsCapability>();
+        fs.write(&dump.namespace, format!("{}/dims.txt", dump.prefix), format!("{} {}", planes.width, planes.height));
+        fs.write(&dump.namespace, format!("{}/label.bin", dump.prefix), planes.class.clone());
+        for (name, plane) in [("tone", &planes.tone), ("facing", &planes.facing)] {
+            let bytes: Vec<u8> = plane.iter().flat_map(|at| at.to_le_bytes()).collect();
+            fs.write(&dump.namespace, format!("{}/{name}.bin", dump.prefix), bytes);
+        }
+        tracing::info!(
+            target: "aether_puppet",
+            width = planes.width,
+            height = planes.height,
+            prefix = %dump.prefix,
+            "dump_planes written",
+        );
     }
 
     /// One frame: publish the camera, add the view-dependent lines to the
@@ -500,19 +560,22 @@ impl WasmActor for Puppet {
             aspect: self.aspect,
             field_of_view: FIELD_OF_VIEW,
         };
-        if let Some(labels) = self.labels.as_ref() {
-            // The wash bakes off the coarse mesh and the accents plant on
-            // the fine one, which is the mesh the ink plants on: the paint
-            // has to come to rest on the ink's own fitted plane, and the
-            // wash only ever asks the surface what material it is.
-            let painted_mesh = self.silhouette_subject.as_ref().unwrap_or(subject);
+        if let Some(scores) = self.class_scores.as_ref() {
+            // The wash bakes off the fine mesh — the one the ink plants on.
+            // Baked off the coarse silhouette mesh instead, the mask's edge
+            // disagrees with the drawn contour by a few pixels at a tight
+            // silhouette, and a wash concentrates pigment at its mask's
+            // edge, so the disagreement rendered as flush tracing the ears'
+            // outline (issue 4399). Paint in the lines requires the mask
+            // and the lines to agree about where the surface ends.
+            let painted_mesh = subject;
             let chart = self.anchors.as_ref().zip(self.settings.face).map(|(anchors, face)| easel::Chart {
                 mesh: subject,
                 anchors,
                 face,
             });
             let painted =
-                easel::Subject { mesh: painted_mesh, labels, settings: &self.settings, drawn: &self.drawn, chart };
+                easel::Subject { mesh: painted_mesh, scores, settings: &self.settings, drawn: &self.drawn, chart };
 
             self.easel.develop(&painted, &view, self.dragging);
         }

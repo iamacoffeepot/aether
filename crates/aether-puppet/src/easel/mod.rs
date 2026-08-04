@@ -22,6 +22,8 @@
 //! writable `Rgba8` sheet the billboard samples.
 
 pub mod accent;
+#[cfg(test)]
+mod crossfeed;
 pub mod field;
 pub mod image;
 pub mod palette;
@@ -39,7 +41,7 @@ use program::wash::{self, WashBindings, WashProgram};
 use crate::anchor::Anchors;
 use crate::chart::{self, Face};
 use crate::extract::Settings;
-use crate::labels::Labels;
+use crate::labels;
 use crate::mesh::Mesh;
 
 /// Frames the view must hold still before the sheet re-develops — about
@@ -95,12 +97,14 @@ pub struct Chart<'a> {
 }
 
 /// Everything the easel reads of the subject for one development: the
-/// surface the wash bakes off, its material field, the drawing solved for
-/// this eye (the flow's source), and the chart when the subject has a
-/// face. Borrowed for the call — the easel keeps none of it.
+/// surface the wash bakes off, its per-vertex material scores
+/// ([`labels::Labels::vertex_scores`], solved once at load), the drawing
+/// solved for this eye (the flow's source), and the chart when the
+/// subject has a face. Borrowed for the call — the easel keeps none of
+/// it.
 pub struct Subject<'a> {
     pub mesh: &'a Mesh,
-    pub labels: &'a Labels,
+    pub scores: &'a [[f32; labels::CLASSES]],
     pub settings: &'a Settings,
     pub drawn: &'a [DrawTriangle],
     pub chart: Option<Chart<'a>>,
@@ -249,6 +253,23 @@ impl Easel {
         Some((((width as f32 * scale) as usize).max(1), ((height as f32 * scale) as usize).max(1)))
     }
 
+    /// The exact planes a develop at the current view would paint from,
+    /// for the dump diagnostic — same canvas clamp, same rasterize, no
+    /// settle gate and no paint. `None` before the first resize.
+    pub fn bake_planes(&self, subject: &Subject<'_>, view: &View) -> Option<regions::RegionPlanes> {
+        let (width, height) = self.canvas()?;
+
+        Some(regions::rasterize(
+            subject.mesh,
+            subject.scores,
+            subject.settings,
+            view.eye,
+            &view.view_proj,
+            width,
+            height,
+        ))
+    }
+
     /// Re-develop the sheet if the view has settled somewhere unpainted.
     /// The CPU keeps only the rasterize — planes, flow, accents, the
     /// paper's noise — and the accident stream the uniform blob replays;
@@ -273,9 +294,9 @@ impl Easel {
         let Some((width, height)) = self.canvas() else {
             return;
         };
-        let Subject { mesh, labels, settings, drawn, chart } = subject;
+        let Subject { mesh, scores, settings, drawn, chart } = subject;
 
-        let regions = regions::rasterize(mesh, labels, settings, view.eye, &view.view_proj, width, height);
+        let regions = regions::rasterize(mesh, scores, settings, view.eye, &view.view_proj, width, height);
         let planes =
             field::Planes { classes: &regions.class, tone: &regions.tone, facing: &regions.facing, width, height };
 
