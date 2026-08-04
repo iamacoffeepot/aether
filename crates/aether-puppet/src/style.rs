@@ -30,6 +30,10 @@ pub fn wander(seed: u64, at: Vec3) -> f32 {
     (at.dot(a) * f1 + p1).sin() * 0.72 + (at.dot(b) * f2 + p2).sin() * 0.28
 }
 
+/// The pressure ramp, in radians of arc, matching the units `ribbon`
+/// measures length in.
+pub const RAMP: f32 = 0.0064;
+
 /// Pencil pressure: light at the entry, full through the middle, tapering
 /// out at the exit.
 ///
@@ -37,10 +41,11 @@ pub fn wander(seed: u64, at: Vec3) -> f32 {
 /// which matters more than it sounds. A proportional taper turns every
 /// short stroke into a lens — and a hatch field is mostly short strokes, so
 /// the whole drawing would read as dots.
+///
+/// The ink pass reads the same ramp out of the uniform blob and applies
+/// this curve in its vertex stage, so the constant is shared rather
+/// than restated (ADR-0172).
 pub fn pressure(travelled: f32, total: f32) -> f32 {
-    /// In radians of arc, matching the units `ribbon` measures length in.
-    const RAMP: f32 = 0.0064;
-
     let ramp = RAMP.min(total * 0.45);
     if ramp <= 1e-6 {
         return 1.0;

@@ -41,4 +41,5 @@ pub mod pigment;
 pub mod puddle;
 pub mod sheet;
 pub mod sight;
+pub mod stroke;
 pub mod wash;

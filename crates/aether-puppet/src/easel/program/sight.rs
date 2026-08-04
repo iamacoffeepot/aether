@@ -103,9 +103,10 @@ pub const SIGHT_WGSL: &str = include_str!("sight.wgsl");
 pub const SEEN: u32 = 0;
 pub const REACH: u32 = 1;
 pub const COVERAGE: u32 = 2;
+pub const TOTAL: u32 = 3;
 
 /// How many plane bindings a dispatch supplies.
-pub const PLANE_COUNT: usize = 3;
+pub const PLANE_COUNT: usize = 4;
 
 /// Geometry slot indices: the subject the prepass rasterizes, and the
 /// drawing's points.
@@ -142,9 +143,10 @@ const STEP: u32 = 1;
 const HEAD: u32 = 2;
 const TAIL: u32 = 3;
 const ARC: [u32; 2] = [4, 5];
-const SPREAD: [u32; 2] = [6, 7];
+const HEAD_SPREAD: [u32; 2] = [6, 7];
 const SUM: [u32; 2] = [8, 9];
-const TRANSIENT_COUNT: usize = 10;
+const TAIL_SPREAD: [u32; 2] = [10, 11];
+const TRANSIENT_COUNT: usize = 12;
 
 /// One plane's slot: full-extent `R32Float`, the format the wash's own
 /// data planes already ride (ADR-0170) and the only one that carries an
@@ -553,26 +555,46 @@ pub fn program() -> ProgramRegister {
         draw("fs_step", POINTS, None, Vec::new(), transient(STEP)),
         draw("fs_head", POINTS, None, Vec::new(), transient(HEAD)),
         draw("fs_tail", POINTS, None, Vec::new(), transient(TAIL)),
-        scan("fs_reach_seed", 0, vec![bound(SEEN)], transient(SPREAD[0])),
+        scan("fs_reach_seed", 0, vec![bound(SEEN)], transient(HEAD_SPREAD[0])),
+        scan("fs_reach_seed", 0, vec![bound(SEEN)], transient(TAIL_SPREAD[0])),
     ];
 
-    // The reach scan. Doubling `k` relaxes each texel against the two
-    // `2^k` away and pays the arc between them, which is the arc chain
-    // at its own `k` — so the two advance in step, the arc's next
-    // doubling laid down right after the reach pass that consumed this
-    // one.
-    let mut spread = 0usize;
+    // The reach scan, walked separately in each direction. Doubling `k`
+    // relaxes each texel against the one `2^k` away and pays the arc
+    // between them, which is the arc chain at its own `k` — so the
+    // three advance in step, the arc's next doubling laid down right
+    // after the pair of reach passes that consumed this one.
+    //
+    // Two directions rather than one symmetric relaxation because the
+    // taper needs the run's arc, not only the nearest barrier: a `min`
+    // taken inside the scan cannot be un-taken, and
+    // `head + tail` is the run. The arc chain is shared, so the second
+    // direction costs the reach passes alone.
+    let mut head = 0usize;
+    let mut tail = 0usize;
     let mut arc = STEP;
     for step in 0..REACH_STEPS {
-        passes.push(scan("fs_reach_step", step, vec![read(SPREAD[spread]), read(arc)], transient(SPREAD[1 - spread])));
-        spread = 1 - spread;
+        passes.push(scan(
+            "fs_head_step",
+            step,
+            vec![read(HEAD_SPREAD[head]), read(arc)],
+            transient(HEAD_SPREAD[1 - head]),
+        ));
+        head = 1 - head;
+        passes.push(scan(
+            "fs_tail_step",
+            step,
+            vec![read(TAIL_SPREAD[tail]), read(arc)],
+            transient(TAIL_SPREAD[1 - tail]),
+        ));
+        tail = 1 - tail;
         if step + 1 < REACH_STEPS {
             let next = ARC[(step % 2) as usize];
             passes.push(scan("fs_arc_step", step, vec![read(arc)], transient(next)));
             arc = next;
         }
     }
-    let reached = SPREAD[spread];
+    let (headed, tailed) = (HEAD_SPREAD[head], TAIL_SPREAD[tail]);
 
     // The coverage scan: a segmented prefix sum along each curve of the
     // points that survive in a run of at least two, which is the
@@ -586,9 +608,10 @@ pub fn program() -> ProgramRegister {
     let summed = SUM[sum];
 
     passes.push(scan("fs_cover_gather", 0, vec![read(summed), read(HEAD), read(TAIL)], binding(COVERAGE)));
+    passes.push(scan("fs_total_out", 0, vec![read(headed), read(tailed)], binding(TOTAL)));
     // Last, because a program's final pass writes the binding whose
     // texture is the reference extent every other slot resolves from.
-    passes.push(scan("fs_reach_out", 0, vec![read(reached)], binding(REACH)));
+    passes.push(scan("fs_reach_out", 0, vec![read(headed), read(tailed)], binding(REACH)));
 
     ProgramRegister {
         wgsl: SIGHT_WGSL.to_owned(),

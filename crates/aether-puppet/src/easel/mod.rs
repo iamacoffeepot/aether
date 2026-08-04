@@ -107,7 +107,14 @@ pub struct Subject<'a> {
     pub mesh: &'a Mesh,
     pub scores: &'a [[f32; labels::CLASSES]],
     pub settings: &'a Settings,
-    pub drawn: &'a [DrawTriangle],
+    /// The drawing solved for this eye, asked for rather than handed
+    /// over: since ADR-0172 the frame's ink is rasterized from the
+    /// visibility field and no CPU triangles exist per frame, so the
+    /// only consumer left is the flow bake below — and it runs at
+    /// develop cadence, behind the settle gate. Passing a slice would
+    /// put the split back on every frame to serve a call made on one in
+    /// a hundred.
+    pub drawn: &'a dyn Fn() -> Vec<DrawTriangle>,
     pub chart: Option<Chart<'a>>,
 }
 
@@ -358,6 +365,10 @@ impl Easel {
             return;
         };
         let Subject { mesh, scores, settings, drawn, chart } = subject;
+        // Past the gate, so this is the one place the CPU still splits
+        // the drawing into visible runs — once per develop, not once
+        // per frame.
+        let drawn = &drawn();
 
         let regions = regions::rasterize(mesh, scores, settings, view.eye, &view.view_proj, width, height);
         let planes =
