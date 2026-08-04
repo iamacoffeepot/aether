@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 #[kind(name = "aether.source.claim_seal")]
 pub struct ClaimSeal {
     /// The `aether_data::wire`-encoded claiming [`BloomId`](crate::ids::BloomId).
+    #[serde(with = "aether_data::bytes")]
     pub bloom: Vec<u8>,
     /// One `aether_data::wire`-encoded [`WorkpieceId`](crate::ids::WorkpieceId) per member.
     pub workpieces: Vec<Vec<u8>>,
@@ -50,8 +51,10 @@ pub struct ClaimSeal {
 #[kind(name = "aether.source.transfer_seal")]
 pub struct TransferSeal {
     /// The `aether_data::wire`-encoded predecessor [`BloomId`](crate::ids::BloomId).
+    #[serde(with = "aether_data::bytes")]
     pub predecessor: Vec<u8>,
     /// The `aether_data::wire`-encoded successor [`BloomId`](crate::ids::BloomId).
+    #[serde(with = "aether_data::bytes")]
     pub successor: Vec<u8>,
     /// The workpieces fast-forwarded from predecessor to successor, each
     /// `aether_data::wire`-encoded [`WorkpieceId`](crate::ids::WorkpieceId).
@@ -69,6 +72,7 @@ pub struct TransferSeal {
 #[kind(name = "aether.source.release_seal")]
 pub struct ReleaseSeal {
     /// The `aether_data::wire`-encoded releasing [`BloomId`](crate::ids::BloomId).
+    #[serde(with = "aether_data::bytes")]
     pub bloom: Vec<u8>,
     /// One `aether_data::wire`-encoded [`WorkpieceId`](crate::ids::WorkpieceId) per member.
     pub workpieces: Vec<Vec<u8>>,
@@ -111,10 +115,13 @@ pub enum EnumerateClaimsResult {
 #[kind(name = "aether.source.complete_transfer")]
 pub struct CompleteTransfer {
     /// The `aether_data::wire`-encoded predecessor [`BloomId`](crate::ids::BloomId).
+    #[serde(with = "aether_data::bytes")]
     pub predecessor: Vec<u8>,
     /// The `aether_data::wire`-encoded successor [`BloomId`](crate::ids::BloomId).
+    #[serde(with = "aether_data::bytes")]
     pub successor: Vec<u8>,
     /// The `aether_data::wire`-encoded [`ClaimRefKind`](crate::port::ClaimRefKind) to move.
+    #[serde(with = "aether_data::bytes")]
     pub ref_kind: Vec<u8>,
 }
 
@@ -130,8 +137,10 @@ pub struct CompleteTransfer {
 pub struct CompleteRelease {
     /// The `aether_data::wire`-encoded expected-holder [`BloomId`](crate::ids::BloomId),
     /// or **empty** for the holder-agnostic tombstone sweep (`None`).
+    #[serde(with = "aether_data::bytes")]
     pub bloom: Vec<u8>,
     /// The `aether_data::wire`-encoded [`ClaimRefKind`](crate::port::ClaimRefKind) to release.
+    #[serde(with = "aether_data::bytes")]
     pub ref_kind: Vec<u8>,
 }
 
@@ -149,8 +158,10 @@ pub enum ClaimResult {
     /// refused (rolled back to leave no partial claim).
     Held {
         /// The `aether_data::wire`-encoded conflicting [`ClaimRefKind`](crate::port::ClaimRefKind).
+        #[serde(with = "aether_data::bytes")]
         ref_kind: Vec<u8>,
         /// The `aether_data::wire`-encoded [`BloomId`](crate::ids::BloomId) holding it.
+        #[serde(with = "aether_data::bytes")]
         held_by: Vec<u8>,
     },
     /// The operation failed for a non-refusal reason.

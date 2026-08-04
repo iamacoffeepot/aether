@@ -524,6 +524,7 @@ mod engine {
     pub enum ResolveComponentResult {
         Ok {
             hash: String,
+            #[serde(with = "aether_data::bytes")]
             wasm: Vec<u8>,
             name: Option<String>,
             manifest: ComponentManifest,
@@ -588,6 +589,7 @@ mod control_plane {
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.component.load")]
     pub struct LoadComponent {
+        #[serde(with = "aether_data::bytes")]
         pub wasm: Vec<u8>,
         pub name: Option<String>,
         /// ADR-0090 (issue 1257): optional init-config bytes handed to
@@ -598,6 +600,7 @@ mod control_plane {
         /// kind, so the substrate stays byte-transparent: the hub /
         /// MCP encode the config struct to bytes at the edge
         /// (SDK-typed, not wire-typed), matching `wasm`'s `Vec<u8>`.
+        #[serde(with = "aether_data::bytes")]
         pub config: Vec<u8>,
         /// ADR-0096 / ADR-0138: which exported actor type to instantiate
         /// from a multi-actor module, named by its `Addressable::NAMESPACE`.
@@ -751,12 +754,14 @@ mod control_plane {
     #[kind(name = "aether.component.replace")]
     pub struct ReplaceComponent {
         pub mailbox_id: aether_data::MailboxId,
+        #[serde(with = "aether_data::bytes")]
         pub wasm: Vec<u8>,
         pub drain_timeout_ms: Option<u32>,
         /// ADR-0090 (issue 1257): optional init-config bytes for the
         /// replacement instance, threaded through to its typed `init`
         /// the same way [`LoadComponent::config`] is on first load. An
         /// empty vec means "no config".
+        #[serde(with = "aether_data::bytes")]
         pub config: Vec<u8>,
         /// ADR-0096: which exported actor type to instantiate from the
         /// replacement module, named by its `Addressable::NAMESPACE`. `None`
@@ -913,6 +918,7 @@ mod control_plane {
     pub struct NamedMail {
         pub recipient_name: String,
         pub kind_name: String,
+        #[serde(with = "aether_data::bytes")]
         pub payload: Vec<u8>,
         pub count: u32,
     }
@@ -933,6 +939,7 @@ mod control_plane {
     #[kind(name = "aether.render.capture_frame_result")]
     pub enum CaptureFrameResult {
         Ok {
+            #[serde(with = "aether_data::bytes")]
             png: Vec<u8>,
             verdict: Option<FrameVerdict>,
             /// Normalised MAE score `[0.0, 1.0]`; `None` when no
@@ -1191,6 +1198,7 @@ mod control_plane {
     pub struct KindDescriptorWire {
         pub id: aether_data::KindId,
         pub name: String,
+        #[serde(with = "aether_data::bytes")]
         pub schema_wire: Vec<u8>,
     }
 

@@ -23,6 +23,7 @@ pub struct AppendEvent {
     pub idempotency_key: String,
     /// The event's canonical `aether_data::wire` bytes (an encoded
     /// [`aether_bloomery::Event`]).
+    #[serde(with = "aether_data::bytes")]
     pub event: Vec<u8>,
 }
 
@@ -51,6 +52,7 @@ pub enum AppendEventResult {
 #[kind(name = "aether.store.claim_seal")]
 pub struct ClaimSeal {
     /// The sealing bloom's id (its digest's raw bytes).
+    #[serde(with = "aether_data::bytes")]
     pub bloom: Vec<u8>,
     /// The workpieces the bloom claims.
     pub members: Vec<String>,
@@ -84,8 +86,10 @@ pub enum ClaimSealResult {
 #[kind(name = "aether.store.supersede")]
 pub struct Supersede {
     /// The predecessor bloom whose memberships are released.
+    #[serde(with = "aether_data::bytes")]
     pub predecessor: Vec<u8>,
     /// The successor bloom that claims the new membership set.
+    #[serde(with = "aether_data::bytes")]
     pub successor: Vec<u8>,
     /// The successor's workpieces.
     pub members: Vec<String>,
@@ -115,6 +119,7 @@ pub enum SupersedeResult {
 #[kind(name = "aether.store.release_membership")]
 pub struct ReleaseMembership {
     /// The bloom whose memberships are released.
+    #[serde(with = "aether_data::bytes")]
     pub bloom: Vec<u8>,
 }
 
@@ -142,6 +147,7 @@ pub struct EnqueueOutbox {
     /// kind name), so a republisher can route it.
     pub topic: String,
     /// The opaque payload bytes to republish.
+    #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,
 }
 
@@ -195,6 +201,7 @@ pub struct OutboxEntry {
     /// The caller-defined topic.
     pub topic: String,
     /// The opaque payload bytes.
+    #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,
 }
 
@@ -254,6 +261,7 @@ pub enum AckOutboxResult {
 #[kind(name = "aether.store.record_dispatch_description")]
 pub struct RecordDispatchDescription {
     /// The sealed bloom's id (its digest's raw bytes).
+    #[serde(with = "aether_data::bytes")]
     pub bloom: Vec<u8>,
     /// The member workpiece the description belongs to.
     pub workpiece: String,

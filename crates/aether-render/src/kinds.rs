@@ -203,6 +203,7 @@ pub struct CreateTexture {
     pub format: TextureFormat,
     pub sampling: TextureSampling,
     pub usage: TextureUsage,
+    #[serde(with = "aether_data::bytes")]
     pub pixels: Vec<u8>,
 }
 
@@ -236,6 +237,7 @@ pub struct UpdateTexture {
     pub y: u32,
     pub width: u32,
     pub height: u32,
+    #[serde(with = "aether_data::bytes")]
     pub pixels: Vec<u8>,
 }
 
@@ -715,6 +717,7 @@ pub enum ProgramRegisterResult {
 pub struct ProgramDispatch {
     pub program_id: u32,
     pub bindings: Vec<u32>,
+    #[serde(with = "aether_data::bytes")]
     pub uniforms: Vec<u8>,
 }
 

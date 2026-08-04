@@ -137,6 +137,7 @@ pub struct MailEnvelope {
     pub from: Option<MailboxAddress>,
     pub kind: KindId,
     pub correlation_id: Option<u64>,
+    #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,
 }
 

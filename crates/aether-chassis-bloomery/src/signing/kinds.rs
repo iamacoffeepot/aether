@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 #[kind(name = "aether.signing.verify")]
 pub struct Verify {
     /// The `aether_data::wire`-encoded [`aether_bloomery::Statement`] to verify.
+    #[serde(with = "aether_data::bytes")]
     pub statement: Vec<u8>,
 }
 

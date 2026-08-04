@@ -33,6 +33,7 @@ pub struct SetChunk {
     pub chunk_x: i32,
     pub chunk_z: i32,
     /// Underlay plane — 256 raw material bytes (`Material as u8`).
+    #[serde(with = "aether_data::bytes")]
     pub underlay: Vec<u8>,
     /// Underlay material-point plane — up to [`UNDERLAY_POINTS_PER_CHUNK`]
     /// bytes (`256 * SUB²`; 65536 at `SUB = 16`), one point per subcell in
@@ -40,6 +41,7 @@ pub struct SetChunk {
     /// [`Material`] or the [`UNDERLAY_POINT_INHERIT`] sentinel; a short
     /// vector leaves the remaining points inheriting, so an empty vector is
     /// the all-inherit default.
+    #[serde(with = "aether_data::bytes")]
     pub underlay_points: Vec<u8>,
     /// Height-delta plane — up to [`HEIGHT_POINTS_PER_CHUNK`] `i16` octimeter
     /// deltas, one per subcell in the same layout as `underlay_points`. Each
@@ -48,12 +50,14 @@ pub struct SetChunk {
     /// (`0`, no relief), so an empty vector is the flat default.
     pub height_points: Vec<i16>,
     /// Overlay plane — 256 raw material bytes. `0` = no overlay.
+    #[serde(with = "aether_data::bytes")]
     pub overlay: Vec<u8>,
     /// Overlay subcell coverage plane — [`OVERLAY_MASK_WIRE_BYTES`] bytes
     /// (`256 * SUB²`; 65536 at `SUB = 16`), one coverage byte per subcell in
     /// row-major cell order (`z*SUB + x` within a cell). A short vector
     /// leaves the remaining samples uncovered, so an empty vector is the
     /// no-coverage default.
+    #[serde(with = "aether_data::bytes")]
     pub overlay_mask: Vec<u8>,
     /// Elevation plane — 256 octimeter values.
     pub height: Vec<i32>,
@@ -63,6 +67,7 @@ pub struct SetChunk {
     /// `0` = the datum-0 level; meaningful only under a water cell.
     pub water_plane: Vec<u32>,
     /// Smoothing-profile-id plane — 256 raw bytes. `0` = no override.
+    #[serde(with = "aether_data::bytes")]
     pub smoothing: Vec<u8>,
 }
 
@@ -129,6 +134,7 @@ impl SetChunk {
 pub struct SetCellPoints {
     pub x: i32,
     pub z: i32,
+    #[serde(with = "aether_data::bytes")]
     pub points: Vec<u8>,
 }
 

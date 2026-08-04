@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 #[kind(name = "aether.source.snapshot")]
 pub struct Snapshot {
     /// The `aether_data::wire`-encoded base [`aether_bloomery::Digest`].
+    #[serde(with = "aether_data::bytes")]
     pub base: Vec<u8>,
 }
 
@@ -33,6 +34,7 @@ pub enum SnapshotResult {
     /// The snapshot succeeded.
     Ok {
         /// The `aether_data::wire`-encoded [`aether_bloomery::SourceSnapshot`].
+        #[serde(with = "aether_data::bytes")]
         snapshot: Vec<u8>,
     },
     /// The snapshot failed.
@@ -48,8 +50,10 @@ pub enum SnapshotResult {
 #[kind(name = "aether.source.checkpoint")]
 pub struct RecordCheckpoint {
     /// The `aether_data::wire`-encoded [`aether_bloomery::BloomId`].
+    #[serde(with = "aether_data::bytes")]
     pub bloom: Vec<u8>,
     /// The `aether_data::wire`-encoded integrated tree [`aether_bloomery::Digest`].
+    #[serde(with = "aether_data::bytes")]
     pub tree: Vec<u8>,
 }
 
@@ -60,6 +64,7 @@ pub enum RecordCheckpointResult {
     /// The checkpoint was recorded.
     Ok {
         /// The `aether_data::wire`-encoded [`aether_bloomery::Checkpoint`].
+        #[serde(with = "aether_data::bytes")]
         checkpoint: Vec<u8>,
     },
     /// The checkpoint failed.
@@ -74,6 +79,7 @@ pub enum RecordCheckpointResult {
 #[kind(name = "aether.source.checkpoints")]
 pub struct ListCheckpoints {
     /// The `aether_data::wire`-encoded [`aether_bloomery::BloomId`].
+    #[serde(with = "aether_data::bytes")]
     pub bloom: Vec<u8>,
 }
 
@@ -99,10 +105,13 @@ pub enum ListCheckpointsResult {
 #[kind(name = "aether.source.integrate")]
 pub struct Integrate {
     /// The `aether_data::wire`-encoded [`aether_bloomery::BloomId`].
+    #[serde(with = "aether_data::bytes")]
     pub bloom: Vec<u8>,
     /// The `aether_data::wire`-encoded candidate [`aether_bloomery::Digest`].
+    #[serde(with = "aether_data::bytes")]
     pub candidate: Vec<u8>,
     /// The `aether_data::wire`-encoded expected [`aether_bloomery::Checkpoint`].
+    #[serde(with = "aether_data::bytes")]
     pub expected: Vec<u8>,
 }
 
@@ -113,19 +122,23 @@ pub enum IntegrateResult {
     /// The candidate integrated; the branch now carries this tree.
     Integrated {
         /// The `aether_data::wire`-encoded resulting [`aether_bloomery::Digest`].
+        #[serde(with = "aether_data::bytes")]
         tree: Vec<u8>,
         /// The `aether_data::wire`-encoded landable head commit's
         /// [`aether_bloomery::Digest`], distinct from `tree` (issue #3615).
+        #[serde(with = "aether_data::bytes")]
         head: Vec<u8>,
     },
     /// The candidate conflicted and was not integrated.
     Conflict {
         /// The `aether_data::wire`-encoded conflicting [`aether_bloomery::Digest`].
+        #[serde(with = "aether_data::bytes")]
         at: Vec<u8>,
     },
     /// The expected checkpoint was stale.
     StaleCheckpoint {
         /// The `aether_data::wire`-encoded actual [`aether_bloomery::Digest`].
+        #[serde(with = "aether_data::bytes")]
         actual: Vec<u8>,
     },
     /// The integrate failed.
@@ -141,10 +154,13 @@ pub enum IntegrateResult {
 #[kind(name = "aether.source.land")]
 pub struct Land {
     /// The `aether_data::wire`-encoded [`aether_bloomery::BloomId`].
+    #[serde(with = "aether_data::bytes")]
     pub bloom: Vec<u8>,
     /// The `aether_data::wire`-encoded expected base [`aether_bloomery::Digest`].
+    #[serde(with = "aether_data::bytes")]
     pub expected_base: Vec<u8>,
     /// The `aether_data::wire`-encoded new head [`aether_bloomery::Digest`].
+    #[serde(with = "aether_data::bytes")]
     pub new_head: Vec<u8>,
 }
 
@@ -155,13 +171,16 @@ pub enum LandResult {
     /// The swap succeeded; mainline moved and a receipt was issued.
     Landed {
         /// The `aether_data::wire`-encoded [`aether_bloomery::LandingReceipt`].
+        #[serde(with = "aether_data::bytes")]
         receipt: Vec<u8>,
     },
     /// The swap was refused: mainline had moved off the expected base.
     BaseMoved {
         /// The `aether_data::wire`-encoded base the caller expected.
+        #[serde(with = "aether_data::bytes")]
         expected: Vec<u8>,
         /// The `aether_data::wire`-encoded base mainline was actually at.
+        #[serde(with = "aether_data::bytes")]
         actual: Vec<u8>,
     },
     /// The land failed.
