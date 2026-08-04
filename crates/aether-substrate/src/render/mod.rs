@@ -47,7 +47,7 @@ pub use quad::{
     push_screen_quad_vertices, push_world_quad_vertices, realize_texture, realize_writable_texture,
     record_quad_overlay_pass, upload_texture_full,
 };
-pub use targets::Targets;
+pub use targets::{Targets, record_resolve_pass};
 
 /// Bytes per vertex on the wire: `vec3<f32> position + vec3<f32>
 /// color` = 24. Both chassis upload exactly this stride; the vertex
@@ -75,6 +75,20 @@ pub const CAMERA_UNIFORM_BYTES: u64 = 64;
 /// in front" convention components use (floors at z=0, foreground at
 /// z=0.1+).
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// Sample count of the shared world color + depth targets, and so of
+/// every pipeline that draws into them: the world pass, the material
+/// pass, the quad overlay, and the chassis-side wireframe overlay.
+/// WebGPU guarantees 4x on every backend, so this needs no adapter
+/// negotiation. The passes draw into the multisampled pair and
+/// [`record_resolve_pass`] resolves once into the single-sample
+/// offscreen texture the swapchain blit and the capture readback both
+/// consume.
+///
+/// Program passes (ADR-0170 / ADR-0171) are deliberately *not* covered:
+/// they render into their own transients, which later passes sample as
+/// ordinary textures, so they stay single-sample.
+pub const MSAA_SAMPLE_COUNT: u32 = 4;
 
 /// Row-byte alignment wgpu's `copy_texture_to_buffer` requires for
 /// `bytes_per_row`. Capture readback pads each row up to this
@@ -143,9 +157,11 @@ fn uniform_bind_group_layout(device: &wgpu::Device, label: &str, bytes: u64) -> 
     })
 }
 
-/// Load-preserving color attachment over the frame's color target —
-/// how the material and quad-overlay passes draw over the main pass
-/// output without clearing it.
+/// Load-preserving color attachment over the frame's multisampled color
+/// target — how the material and quad-overlay passes draw over the main
+/// pass output without clearing it. No `resolve_target`: the samples
+/// stay multisampled for whatever pass comes next, and the chain
+/// resolves once at the end via [`record_resolve_pass`].
 fn load_color_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttachment<'_> {
     wgpu::RenderPassColorAttachment {
         view,

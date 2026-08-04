@@ -2,14 +2,24 @@
 //! the capture path uses. Owned per-chassis (the `Gpu` struct holds a
 //! `Targets`); resized by the chassis on surface change (desktop) or
 //! a control mail (substrate-harness).
+//!
+//! Three textures, two of them multisampled. The world / material /
+//! overlay passes rasterize into the [`MSAA_SAMPLE_COUNT`]-sample color
+//! and depth pair; [`record_resolve_pass`] then resolves the color
+//! samples once into the single-sample `offscreen` texture, which is
+//! what desktop blits to the swapchain and what the capture readback
+//! copies. Depth is never resolved — nothing downstream reads it.
 
-use super::DEPTH_FORMAT;
+use super::{DEPTH_FORMAT, MSAA_SAMPLE_COUNT};
 
 /// Sized offscreen color + depth pair plus a lazy readback buffer
 /// for the capture path. The chassis-owned `Gpu` struct holds one of
 /// these; `record_main_pass` and `prepare_capture_copy` borrow it.
 pub struct Targets {
     pub(super) offscreen: OffscreenTarget,
+    /// Multisampled color target every draw pass attaches; resolved into
+    /// `offscreen` at the end of the chain.
+    pub(super) msaa: MsaaTarget,
     pub(super) depth: DepthTarget,
     /// Lazily-allocated readback buffer. Reallocated on resize or the
     /// first capture after dimensions change.
@@ -25,6 +35,13 @@ pub(super) struct OffscreenTarget {
     pub(super) view: wgpu::TextureView,
     pub(super) width: u32,
     pub(super) height: u32,
+}
+
+pub(super) struct MsaaTarget {
+    /// Keep the texture alive; only the view is attached in a pass.
+    #[allow(dead_code)]
+    pub(super) texture: wgpu::Texture,
+    pub(super) view: wgpu::TextureView,
 }
 
 pub(super) struct DepthTarget {
@@ -53,20 +70,22 @@ impl Targets {
         let height = height.max(1);
         Self {
             offscreen: create_offscreen(device, color_format, width, height),
+            msaa: create_msaa(device, color_format, width, height),
             depth: create_depth(device, width, height),
             readback: None,
             color_format,
         }
     }
 
-    /// Reallocate the offscreen + depth textures at the new size and
-    /// invalidate the readback buffer. No-op on zero dimensions
-    /// (matches winit's `Resized(0, 0)` events on minimize).
+    /// Reallocate the offscreen + multisampled + depth textures at the
+    /// new size and invalidate the readback buffer. No-op on zero
+    /// dimensions (matches winit's `Resized(0, 0)` events on minimize).
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
         self.offscreen = create_offscreen(device, self.color_format, width, height);
+        self.msaa = create_msaa(device, self.color_format, width, height);
         self.depth = create_depth(device, width, height);
         self.readback = None;
     }
@@ -83,12 +102,22 @@ impl Targets {
         self.offscreen.height
     }
 
-    /// The `wgpu::TextureView` the main render pass attaches to.
-    /// Exposed for chassis-side passes that want to draw into the
-    /// same offscreen (e.g. substrate-harness's diagnostic clears).
+    /// The single-sample view the multisampled color target resolves
+    /// into — the resolve destination, not a draw attachment. A pass
+    /// that rasterizes wants [`Targets::msaa_view`] instead; drawing
+    /// straight into this one would be overwritten by the frame's
+    /// resolve.
     #[must_use]
     pub fn color_view(&self) -> &wgpu::TextureView {
         &self.offscreen.view
+    }
+
+    /// The multisampled `wgpu::TextureView` every rasterizing pass in
+    /// the frame chain attaches to. Exposed for chassis-side passes
+    /// that want to draw into the same target as the world pass.
+    #[must_use]
+    pub fn msaa_view(&self) -> &wgpu::TextureView {
+        &self.msaa.view
     }
 
     /// The offscreen color texture itself. Desktop reaches for this
@@ -118,7 +147,7 @@ fn create_offscreen(device: &wgpu::Device, format: wgpu::TextureFormat, width: u
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        // RENDER_ATTACHMENT: the triangle pass writes here.
+        // RENDER_ATTACHMENT: the multisampled color target resolves here.
         // COPY_SRC: both desktop's swapchain blit and the readback
         // copy read from this texture.
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
@@ -128,12 +157,31 @@ fn create_offscreen(device: &wgpu::Device, format: wgpu::TextureFormat, width: u
     OffscreenTarget { texture, view, width, height }
 }
 
+fn create_msaa(device: &wgpu::Device, format: wgpu::TextureFormat, width: u32, height: u32) -> MsaaTarget {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("multisampled color target"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: MSAA_SAMPLE_COUNT,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        // Attachment only: the samples never leave the GPU — they are
+        // resolved into the offscreen texture, which owns COPY_SRC.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    MsaaTarget { texture, view }
+}
+
 fn create_depth(device: &wgpu::Device, width: u32, height: u32) -> DepthTarget {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth target"),
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1,
-        sample_count: 1,
+        // Matches the color attachment it is paired with — wgpu requires
+        // every attachment in a pass to agree on sample count.
+        sample_count: MSAA_SAMPLE_COUNT,
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -141,4 +189,29 @@ fn create_depth(device: &wgpu::Device, width: u32, height: u32) -> DepthTarget {
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     DepthTarget { texture, view }
+}
+
+/// Resolve the frame's multisampled color samples into the single-sample
+/// offscreen texture. Recorded once, after the last rasterizing pass:
+/// the world / material / overlay passes are individually conditional,
+/// so no one of them can own the resolve, and resolving from each in
+/// turn would pay the bandwidth two or three times over.
+///
+/// The pass issues no draws — attaching the pair is the whole operation.
+/// `StoreOp::Discard` is the resolve-and-forget idiom: the resolve runs
+/// regardless of the store op, and nothing reads the samples afterwards.
+pub fn record_resolve_pass(encoder: &mut wgpu::CommandEncoder, targets: &Targets) {
+    drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("aether msaa resolve pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &targets.msaa.view,
+            resolve_target: Some(&targets.offscreen.view),
+            depth_slice: None,
+            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Discard },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    }));
 }

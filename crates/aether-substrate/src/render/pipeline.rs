@@ -10,7 +10,8 @@
 
 use super::targets::Targets;
 use super::{
-    CAMERA_UNIFORM_BYTES, DEPTH_FORMAT, IDENTITY_VIEW_PROJ, MAIN_SHADER_WGSL, VERTEX_STRIDE, vertex_buffer_layout,
+    CAMERA_UNIFORM_BYTES, DEPTH_FORMAT, IDENTITY_VIEW_PROJ, MAIN_SHADER_WGSL, MSAA_SAMPLE_COUNT, VERTEX_STRIDE,
+    vertex_buffer_layout,
 };
 use std::slice;
 
@@ -123,7 +124,7 @@ pub fn build_main_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState { count: MSAA_SAMPLE_COUNT, ..wgpu::MultisampleState::default() },
         multiview_mask: None,
         cache: None,
     });
@@ -195,7 +196,7 @@ pub fn record_main_pass(
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("aether triangle pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: targets.color_view(),
+            view: targets.msaa_view(),
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store },

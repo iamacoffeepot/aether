@@ -7,7 +7,7 @@
 use std::slice;
 use std::sync::Arc;
 
-use aether_substrate::render::{DEPTH_FORMAT, vertex_buffer_layout};
+use aether_substrate::render::{DEPTH_FORMAT, MSAA_SAMPLE_COUNT, vertex_buffer_layout};
 
 /// Resolved first wgpu surface + shared device context. The render runtime
 /// retains the instance and adapter so later windows can attach compatible
@@ -344,7 +344,9 @@ pub fn build_wireframe_overlay_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState { constant: -1, slope_scale: -1.0, clamp: 0.0 },
         }),
-        multisample: wgpu::MultisampleState::default(),
+        // Drawn as an extra inside the world pass, so it shares that
+        // pass's multisampled attachments.
+        multisample: wgpu::MultisampleState { count: MSAA_SAMPLE_COUNT, ..wgpu::MultisampleState::default() },
         multiview_mask: None,
         cache: None,
     })

@@ -260,7 +260,7 @@ pub fn build_quad_pipeline(
         // Overlay quads draw on top of the world pass with no depth
         // interaction at all — the main pass already resolved depth.
         depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState { count: super::MSAA_SAMPLE_COUNT, ..wgpu::MultisampleState::default() },
         multiview_mask: None,
         cache: None,
     });
@@ -567,7 +567,7 @@ pub fn record_quad_overlay_pass(
 
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("aether quad overlay pass"),
-        color_attachments: &[Some(super::load_color_attachment(targets.color_view()))],
+        color_attachments: &[Some(super::load_color_attachment(targets.msaa_view()))],
         depth_stencil_attachment: None,
         timestamp_writes: None,
         occlusion_query_set: None,
