@@ -120,15 +120,6 @@ pub struct Settings {
     pub suggestive_gate: f32,
     /// How far the tick's lower end kicks away from the midline.
     pub nose_bend: f32,
-    /// Lattice resolution the silhouette mesh is clustered to, along the
-    /// subject's longest axis. Zero solves the silhouette on the fine mesh.
-    ///
-    /// The silhouette is the only per-frame geometry pass, so this is the
-    /// number that decides whether the drawing holds a frame rate — and it
-    /// is a large-scale feature by definition, being where the surface
-    /// turns away from the eye, so it does not need the faces the carving
-    /// does. Creases and occlusion stay fine.
-    pub silhouette_cells: u32,
     /// Which material classes get their creases inked.
     ///
     /// Everything except `hair`, `skin` and `dress`. Hair is the class that
@@ -170,12 +161,6 @@ impl Default for Settings {
             // past about 0.4 it reads as a contour and starts competing
             // with the profile for the same job.
             nose_bend: 0.0,
-            // Measured on the sculpt rather than picked. At 128 the
-            // drawing is indistinguishable from the fine solve at normal
-            // framing, on an eighth of the faces, and the whole per-frame
-            // path drops from 23.8ms to 3.7ms. 256 is the next rung and
-            // costs 8.1ms for no visible gain.
-            silhouette_cells: 128,
             crease_classes: vec![labels::EYE, labels::BROW, labels::LIPS, labels::INNER_EAR, labels::TUFT],
         }
     }
@@ -224,30 +209,6 @@ pub fn silhouettes(mesh: &Mesh, eye: Vec3) -> Vec<Curve3> {
         Curve3 { points: Vec::new(), class: FeatureClass::Silhouette, pen: Pen::Ink, seed: 0, authored: false };
 
     weld::curves(to_points(mesh.level_set(&mesh.facing(eye), &[], 0.0)), &template)
-}
-
-/// Longest arc, in world units of the subject, an all-ear silhouette loop
-/// can span and still be reconstruction noise. Sits an order of magnitude
-/// above the concha bumps' loops and well under the ear rim's own run;
-/// verified against captures at the drawing's framing.
-const EAR_NOISE_ARC: f32 = 0.35;
-
-/// Whether a silhouette curve is reconstruction noise inside the ear.
-///
-/// The sculpt's concha carries small carved bumps, and wherever one turns
-/// away from the eye the level set honestly closes a little loop around it
-/// — which a drawing does not want: a pen draws an ear as its rim and a
-/// fold, not as the fur's own topography. A short curve whose every point
-/// lies in the inner-ear or tuft labels is that noise. The rim itself
-/// borders hair and skin, so it samples its way out of the test, and a
-/// subject loaded without a field skips the question entirely.
-pub fn ear_noise(curve: &Curve3, labels: &Labels) -> bool {
-    let arc: f32 = curve.points.windows(2).map(|pair| (pair[1].pos - pair[0].pos).length()).sum();
-    if arc > EAR_NOISE_ARC {
-        return false;
-    }
-
-    curve.points.iter().all(|point| matches!(labels.sample(point.pos), labels::INNER_EAR | labels::TUFT))
 }
 
 /// Hatching as three crossing families of world-space plane cuts.
@@ -497,49 +458,4 @@ fn lit_runs(curve: &Curve3, keep: impl Fn(&SurfacePoint) -> bool) -> Vec<Curve3>
     }
 
     runs
-}
-
-#[cfg(test)]
-mod tests {
-    use aether_math::TAU;
-
-    use super::*;
-
-    /// A field whose every cell is one class, over the unit cube. Ten
-    /// bytes of `.npy` preamble, of which only the header length at
-    /// [8..10] is read; zero puts the cells first.
-    fn field_of(class: u8) -> Labels {
-        let mut bytes = vec![0u8; 10];
-        bytes.extend([class; 8]);
-
-        Labels::parse(&bytes, Vec3::splat(-1.0), Vec3::splat(1.0), 0.0).expect("fixture field")
-    }
-
-    fn loop_of(radius: f32) -> Curve3 {
-        let points = (0..8)
-            .map(|step| {
-                let angle = step as f32 / 8.0 * TAU;
-                SurfacePoint::on_surface(
-                    Vec3::new(radius * angle.cos(), radius * angle.sin(), 0.0),
-                    Vec3::new(0.0, 0.0, 1.0),
-                )
-            })
-            .collect();
-
-        Curve3 { points, class: FeatureClass::Silhouette, pen: Pen::Ink, seed: 0, authored: false }
-    }
-
-    /// Tripwire: the noise gate is a conjunction — all-ear AND short.
-    /// Dropping either clause silently eats the ear's own rim (long, still
-    /// all-ear at a coarse lattice) or fur loops out in the hair.
-    #[test]
-    fn only_a_short_all_ear_loop_is_noise() {
-        let small = loop_of(0.02);
-        assert!(ear_noise(&small, &field_of(labels::INNER_EAR)), "a concha bump's loop is noise");
-        assert!(!ear_noise(&small, &field_of(labels::HAIR)), "the same loop in the hair is a real feature");
-        assert!(
-            !ear_noise(&loop_of(0.4), &field_of(labels::TUFT)),
-            "a run long enough to be the rim survives whatever it samples",
-        );
-    }
 }
