@@ -26,10 +26,19 @@
 //! pass over the drawing's own geometry. Both stand beside the wash
 //! rather than under it for now — it still paints from CPU-baked
 //! planes, and each is held against that oracle until the switch-over.
+//!
+//! [`sight`] (iamacoffeepot/aether#4418, ADR-0172) is the third of that
+//! shape and the one that does not answer to the wash at all: it
+//! rasterizes the subject into a depth image and turns
+//! [`crate::visibility::runs`] — the ray-per-point occlusion walk that
+//! is the frame budget's binding constraint — into a field over each
+//! stroke's own parameterization. It stands beside `visibility::runs`
+//! the way the two above stand beside their oracles.
 
 pub mod bake;
 pub mod ink;
 pub mod pigment;
 pub mod puddle;
 pub mod sheet;
+pub mod sight;
 pub mod wash;
