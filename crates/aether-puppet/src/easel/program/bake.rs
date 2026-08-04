@@ -1,5 +1,5 @@
 //! The painter's input maps as an authored draw pass
-//! (iamacoffeepot/aether#4411, ADR-0171).
+//! (iamacoffeepot/aether#4411, #4412, ADR-0171).
 //!
 //! [`super::super::regions::rasterize`] walks 434k faces on the CPU to
 //! answer three questions per pixel — what material is this, how lit is
@@ -10,8 +10,26 @@
 //! module hands the whole bake to the hardware: the subject uploads as
 //! a geometry whose vertex layout carries the blurred class indicators
 //! ([`crate::labels::Labels::vertex_scores`]) and the key-light term alongside
-//! position and normal, and three draw passes interpolate them into
-//! three `R32Float` planes.
+//! position and normal, and one draw pass interpolates them into the
+//! three channels of one [`packed_slot`] plane.
+//!
+//! # One pass, three channels
+//!
+//! The three answers come off one interpolated surface, so they cost one
+//! rasterization, not three. ADR-0171 declines multiple render targets on
+//! exactly that ground — one pass filling one target's channels already
+//! covers every consumer — and the offline bake proved the packing (R
+//! class, G tone, B facing) long before this module existed. Filling
+//! three single-channel `R32Float` planes from three passes instead put
+//! the subject through the rasterizer three times for one surface: 10.7
+//! ms per frame at 900x1200 against the 4.0 ms the packed pass costs.
+//!
+//! The channel contract lives in `bake.wgsl`'s header, next to the code
+//! that writes it. In brief: the class rides as `class / 255`, which an
+//! 8-bit unorm carries exactly and returns as the same integer so long as
+//! nothing linear-filters it; tone and facing quantize to about one part
+//! in 255, which is the quantization the parity readback already carried.
+//! Tone clips at one, and every consumer saturates below that.
 //!
 //! The classification fit is exact rather than analogous. Spike 142's
 //! rule is to blur each class's indicator volume, sample the blurred
@@ -28,7 +46,11 @@
 //! It does not develop the wash. The easel still bakes its planes on
 //! the CPU and paints from those; this is the bake alone, held against
 //! the oracle by `tests/program_bake_scenario.rs` so the switch-over
-//! lands on a proven surface rather than proving itself in flight.
+//! lands on a proven surface rather than proving itself in flight. The
+//! switch itself waits on the class plane's other CPU consumers — the
+//! care field, the accents, and the centroids that place every wash's
+//! accidents — all of which move together in
+//! iamacoffeepot/aether#4387.
 //!
 //! # Single-sample, deliberately
 //!
@@ -52,19 +74,12 @@ use crate::feature::SurfacePoint;
 use crate::labels::CLASSES;
 use crate::mesh::Mesh;
 
-/// The bake's WGSL: one vertex entry feeding three fragment entries.
+/// The bake's WGSL: one vertex entry feeding one fragment entry.
 pub const BAKE_WGSL: &str = include_str!("bake.wgsl");
 
-/// Dispatch-binding indices, in the order [`program`] declares them.
-/// Each is a full-extent `R32Float` plane — the same shape the wash
-/// already binds its uploaded `classes` and `tone` planes at, so the
-/// switch-over is a change of producer and not of contract.
-pub const CLASS: u32 = 0;
-pub const TONE: u32 = 1;
-pub const FACING: u32 = 2;
-
-/// How many plane bindings a dispatch supplies.
-pub const PLANE_COUNT: usize = 3;
+/// The dispatch binding [`program`] declares — the one packed plane a
+/// dispatch supplies and the pass fills.
+pub const PACKED: u32 = 0;
 
 /// The vertex layout splits the eight class scores three-three-two
 /// because `VertexFormat` has no four-lane float (ADR-0171's closed
@@ -78,8 +93,8 @@ const _: () = assert!(CLASSES == 8, "the vertex layout packs exactly eight class
 /// [`vertices`] writes them in exactly this order.
 pub const VERTEX_BYTES: usize = 12 + 12 + 4 + 12 + 12 + 8;
 
-/// The geometry slot the draw passes bind: the subject, carrying
-/// everything the three planes blend.
+/// The geometry slot the draw pass binds: the subject, carrying
+/// everything the three channels blend.
 ///
 /// Locations match `bake.wgsl`'s `vs_bake` parameters. `tone` is a
 /// baked attribute rather than a shader derivation because the oracle
@@ -100,11 +115,17 @@ pub fn geometry_slot() -> GeometrySlotSpec {
     }
 }
 
-/// One baked plane's slot: full-extent `R32Float`, so a plane never
-/// quantizes on its way to whatever samples it and the depth-resolved
-/// class survives as the integer it is.
-pub fn plane_slot() -> SlotSpec {
-    SlotSpec { format: TextureFormat::R32Float, extent: SlotExtent::Full }
+/// The baked plane's slot: full-extent `Rgba8`, carrying class, tone and
+/// facing in R, G and B.
+///
+/// A texture bound here must be created `TextureSampling::Nearest`. The
+/// class channel is an integer in disguise, and a linear filter across a
+/// material boundary averages the labels either side into a third the
+/// surface never carried. Consumers reaching it through `textureLoad`
+/// take no sampler and are safe either way; the create is where the
+/// guarantee is cheap to make and expensive to omit.
+pub fn packed_slot() -> SlotSpec {
+    SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }
 }
 
 /// Uniform window for every pass — the WGSL `BakeParams` block.
@@ -173,45 +194,36 @@ pub fn indices(mesh: &Mesh) -> Vec<u8> {
     mesh.faces.iter().flatten().flat_map(|corner| corner.to_le_bytes()).collect()
 }
 
-/// The whole bake as one register graph: three draw passes over one
-/// geometry, sharing one depth slot and one uniform window.
+/// The whole bake as one register graph: one draw pass over one
+/// geometry, through one depth slot and one uniform window.
 ///
 /// Static by construction, like the wash's own graph — the structure
 /// depends on nothing but the plane vocabulary, so it is the same graph
 /// for every subject at every canvas size.
 pub fn program() -> ProgramRegister {
-    let planes = [(CLASS, "fs_class"), (TONE, "fs_tone"), (FACING, "fs_facing")];
-    let passes = planes
-        .into_iter()
-        .map(|(binding, entry_point)| ProgramPass {
-            // One shared depth slot across all three: the first pass to
-            // name it clears it to the far plane and the rest load it,
-            // and `LessEqual` re-admits the identical geometry at the
-            // identical depth — so every plane resolves the same
-            // surface, which is what makes them a registered set rather
-            // than three separate answers.
+    ProgramRegister {
+        wgsl: BAKE_WGSL.to_owned(),
+        bindings: vec![packed_slot()],
+        transients: Vec::new(),
+        geometries: vec![geometry_slot()],
+        // The depth slot resolves which surface each pixel's answers come
+        // from. One pass needs it no less than three did: the subject is
+        // a closed shell, so most pixels are covered front and back.
+        depth_transients: vec![SlotExtent::Full],
+        passes: vec![ProgramPass {
             stage: PassStage::Draw(DrawPass {
                 vertex_entry_point: "vs_bake".to_owned(),
                 geometry: 0,
                 depth: Some(0),
                 load: PassLoad::Clear,
             }),
-            entry_point: entry_point.to_owned(),
+            entry_point: "fs_packed".to_owned(),
             inputs: Vec::new(),
-            output: OutputSlot::Binding { index: binding },
+            output: OutputSlot::Binding { index: PACKED },
             uniform_offset: 0,
             uniform_length: BakeUniforms::BYTES,
             repeat: None,
-        })
-        .collect();
-
-    ProgramRegister {
-        wgsl: BAKE_WGSL.to_owned(),
-        bindings: vec![plane_slot(); PLANE_COUNT],
-        transients: Vec::new(),
-        geometries: vec![geometry_slot()],
-        depth_transients: vec![SlotExtent::Full],
-        passes,
+        }],
     }
 }
 

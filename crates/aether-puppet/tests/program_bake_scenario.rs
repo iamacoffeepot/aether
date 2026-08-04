@@ -1,22 +1,46 @@
 //! GPU-versus-CPU parity for the plane bake (iamacoffeepot/aether#4411,
-//! ADR-0171): `easel/program/bake.rs`'s three draw passes driven through
-//! the `aether.render` mail surface against `easel::regions::rasterize`
-//! on the identical mesh, scores, settings and camera.
+//! #4412, ADR-0171): `easel/program/bake.rs`'s channel-packed draw pass
+//! driven through the `aether.render` mail surface against
+//! `easel::regions::rasterize` on the identical mesh, scores, settings
+//! and camera.
 //!
 //! # What is being compared, and in what space
 //!
-//! The bake writes three `R32Float` planes, and nothing reads float
-//! pixels back to the CPU — the only pixel exit in the engine is the
-//! frame capture. So the planes are observed the way every parity
-//! scenario here observes one: a test-only probe pass packs the three
-//! into an `Rgba8` writable binding, the overlay draws that texture
+//! The bake writes one `Rgba8` plane — R class, G tone, B facing — and
+//! nothing reads pixels back to the CPU, the only pixel exit in the
+//! engine being the frame capture. So the plane is observed the way
+//! every parity scenario here observes one: a test-only probe pass
+//! copies it into a second `Rgba8` binding, the overlay draws that
 //! texel-for-pixel, and the capture's bytes are decoded back through the
-//! inverse sRGB transfer. The instrument's own floor, stated: `class`
-//! rides as `class / 255`, which an `Rgba8Unorm` store carries exactly
-//! and the sRGB round trip returns to the same integer with margin to
-//! spare, so the class plane is compared *exactly*; `tone` and `facing`
-//! quantize once at the store and once at the encode, about one part in
-//! 255 of their encoded range each.
+//! inverse sRGB transfer.
+//!
+//! The probe used to do the packing — three `R32Float` planes into one
+//! texel — and now does nothing but force alpha to one ([`PROBE_WGSL`]
+//! says why the capture needs that and the plane's consumers do not). So
+//! what is compared is the shipped texel's own three channels rather
+//! than a re-encoding of them.
+//!
+//! The instrument's own floor, stated: `class` rides as `class / 255`,
+//! which an `Rgba8Unorm` store carries exactly and the sRGB round trip
+//! returns to the same integer with margin to spare, so the class plane
+//! is compared *exactly*. `tone` and `facing` quantize once at the store
+//! and once at the encode, about one part in 255 of their range each —
+//! the same floor the probe carried, since the probe quantized into the
+//! same eight bits.
+//!
+//! # Tone is compared against a clamped oracle
+//!
+//! `Settings::tone` is unclamped by contract: the face lift carries it
+//! past one, and the CPU plane holds whatever it computes. An 8-bit
+//! unorm channel cannot, so the packed plane clips at one and the
+//! comparison below clips the oracle the same way. That is a restatement
+//! of the plane's declared range, not a widened tolerance — every
+//! consumer runs tone through `smoothstep(lit, SHADOWED, tone)` whose
+//! largest `lit` across the palette is 0.92, so a tone at or above one
+//! already saturates and nothing downstream can tell 1.0 from 1.6.
+//! [`the_packed_tone_channel_clips_below_every_consumer`] pins that
+//! claim so a palette edit past one cannot quietly make the clip
+//! observable.
 //!
 //! # The tolerance that matters
 //!
@@ -117,10 +141,9 @@ const FIELD_OF_VIEW: f32 = 0.454;
 /// the lattice (`LABEL_PAD`).
 const LABEL_PAD: f32 = 0.12;
 
-/// `tone` is unclamped by contract — the face lift carries it past one —
-/// so the probe halves it into the `[0, 1]` an `Rgba8` channel can hold
-/// and the decode doubles it back. One recovered tone step is `2 / 255`.
-const TONE_SCALE: f32 = 0.5;
+/// Ceiling the packed plane's tone channel clips at, and so the ceiling
+/// the oracle is compared through. See the module header.
+const TONE_CEILING: f32 = 1.0;
 
 /// How far the water softens a region before its edge is cut
 /// (`field::held_params`'s tight `water`), in pixels. The drift is
@@ -163,11 +186,19 @@ const GRADIENT_FRACTION: f32 = 0.25;
 /// sits with room on both sides of it.
 const DRIFT_BUDGET: f32 = 1.0;
 
+/// Ceiling on the share of the page that may carry a different class at
+/// all, as a fraction. One percent: the honest disagreement is a scatter
+/// along the silhouettes — zero on the synthetic fixture, 0.0012% on the
+/// shipped subject — so this sits three orders of magnitude clear of the
+/// fringe while still catching anything plane-wide.
+const FRINGE_BUDGET: f32 = 0.01;
+
 /// Ceiling on the mean absolute difference of the `tone` and `facing`
-/// planes over the drawn figure, in their own units. Both are pure
+/// channels over the drawn figure, in their own units. Both are pure
 /// interpolations of a per-vertex scalar, so the only honest sources of
-/// difference are the readback's two quantizations (about `2 / 255` for
-/// tone, `1 / 255` for facing) and the edge fringe.
+/// difference are the two quantizations each takes — one at the packed
+/// store, one at the capture's encode, about `1 / 255` apiece — and the
+/// edge fringe.
 const SURFACE_BUDGET: f32 = 0.02;
 
 fn require_wgpu_only() -> bool {
@@ -180,45 +211,47 @@ fn require_wgpu_only() -> bool {
     false
 }
 
-/// The test-only probe appended to the bake module: the three baked
-/// planes packed into one `Rgba8` texel so a single overlay rect carries
-/// all of them out through the capture. Bindings are positional — input
-/// `n` at `@binding(2 * n)` — and every read is a `textureLoad`, so the
-/// paired samplers go undeclared.
+/// The test-only opacity probe.
+///
+/// A draw pass shades the pixels its geometry covers and leaves the rest
+/// at `PassLoad::Clear`, which is transparent black — so off the subject
+/// the packed plane carries alpha 0, which is exactly right for its
+/// consumers (they `textureLoad` a class-0, tone-0, facing-0 texel) and
+/// exactly wrong for this instrument (the overlay alpha-blends, so those
+/// texels would come back as whatever the framebuffer already held
+/// instead of as zero). This pass carries the three channels through
+/// untouched and forces alpha to one, so the capture reads the plane's
+/// own bytes everywhere rather than only where the subject stands.
+///
+/// One `textureLoad` and no arithmetic on the quantities: what is
+/// compared below is the shipped texel, not a re-encoding of it. When
+/// the bake filled three `R32Float` planes the probe here did the
+/// packing as well, so a cost measured with this pass in place stays
+/// comparable to the one measured with that.
 const PROBE_WGSL: &str = r"
-@group(1) @binding(0) var baked_class: texture_2d<f32>;
-@group(1) @binding(2) var baked_tone: texture_2d<f32>;
-@group(1) @binding(4) var baked_facing: texture_2d<f32>;
+@group(1) @binding(0) var baked_packed: texture_2d<f32>;
 
 @fragment
 fn fs_probe(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    let at = vec2<i32>(position.xy);
-    let material = textureLoad(baked_class, at, 0).r;
-    let tone = textureLoad(baked_tone, at, 0).r;
-    let facing = textureLoad(baked_facing, at, 0).r;
-
-    return vec4<f32>(material / 255.0, tone * 0.5, facing, 1.0);
+    return vec4<f32>(textureLoad(baked_packed, vec2<i32>(position.xy), 0).rgb, 1.0);
 }
 ";
 
-/// The bake's own graph plus the probe: one more binding for the `Rgba8`
-/// the probe writes, and one more pass reading the three planes the draw
-/// passes just filled.
+/// Which binding the probe writes: the packed plane the bake fills, then
+/// the opaque copy the overlay draws.
+const PROBE: u32 = bake::PACKED + 1;
+
+/// The bake's own graph plus the opacity probe: one more `Rgba8` binding
+/// and one fragment pass reading the plane the draw pass just filled.
 fn probed_program() -> ProgramRegister {
     let mut register = bake::program();
     register.wgsl = format!("{}\n{PROBE_WGSL}", register.wgsl);
-    register
-        .bindings
-        .push(aether_render::SlotSpec { format: TextureFormat::Rgba8, extent: aether_render::SlotExtent::Full });
+    register.bindings.push(bake::packed_slot());
     register.passes.push(ProgramPass {
         stage: PassStage::Fragment,
         entry_point: "fs_probe".to_owned(),
-        inputs: vec![
-            InputSlot::Binding { index: bake::CLASS },
-            InputSlot::Binding { index: bake::TONE },
-            InputSlot::Binding { index: bake::FACING },
-        ],
-        output: OutputSlot::Binding { index: bake::PLANE_COUNT as u32 },
+        inputs: vec![InputSlot::Binding { index: bake::PACKED }],
+        output: OutputSlot::Binding { index: PROBE },
         uniform_offset: 0,
         uniform_length: 0,
         repeat: None,
@@ -237,44 +270,32 @@ fn create_texture(harness: &mut SubstrateHarness, label: &'static str, mail: &Cr
     }
 }
 
-/// The four writable textures one bake dispatches into: three
-/// `R32Float` planes (nearest — `R32Float` refuses a filtering sampler,
-/// and the values are quantities either way) and the probe's `Rgba8`.
+/// The two writable textures one bake dispatches into: the packed plane
+/// and the probe's opaque copy of it.
+///
+/// Both nearest, as [`bake::packed_slot`] requires — the class channel is
+/// an integer in disguise and a filter across a material boundary would
+/// average the labels either side into a third. The overlay draws
+/// texel-for-pixel, so the sampler returns each texel exactly and the
+/// choice costs the readback nothing either way.
 fn create_targets(harness: &mut SubstrateHarness, width: usize, height: usize) -> Vec<u32> {
-    const PLANE_LABELS: [&str; bake::PLANE_COUNT] = ["create_class", "create_tone", "create_facing"];
-    let (width, height) = (width as u32, height as u32);
-
-    let mut targets: Vec<u32> = PLANE_LABELS
+    ["create_packed", "create_probe"]
         .into_iter()
         .map(|label| {
             create_texture(
                 harness,
                 label,
                 &CreateTexture {
-                    width,
-                    height,
-                    format: TextureFormat::R32Float,
+                    width: width as u32,
+                    height: height as u32,
+                    format: TextureFormat::Rgba8,
                     sampling: TextureSampling::Nearest,
                     usage: TextureUsage::Writable,
                     pixels: Vec::new(),
                 },
             )
         })
-        .collect();
-    targets.push(create_texture(
-        harness,
-        "create_probe",
-        &CreateTexture {
-            width,
-            height,
-            format: TextureFormat::Rgba8,
-            sampling: TextureSampling::Linear,
-            usage: TextureUsage::Writable,
-            pixels: Vec::new(),
-        },
-    ));
-
-    targets
+        .collect()
 }
 
 fn create_geometry(harness: &mut SubstrateHarness, mesh: &Mesh, scores: &[[f32; labels::CLASSES]]) -> u32 {
@@ -357,7 +378,7 @@ fn settings() -> Settings {
     Settings { light: Vec3::new(0.3, 0.6, 1.0), ambient: 0.25, ..Settings::default() }
 }
 
-/// The three planes as the GPU baked them, decoded out of one capture.
+/// The three channels as the GPU baked them, decoded out of one capture.
 struct Baked {
     class: Vec<u8>,
     tone: Vec<f32>,
@@ -365,9 +386,9 @@ struct Baked {
 }
 
 /// Everything one bake dispatches against, mounted once and held: the
-/// registered program, the four writable targets in binding order, and
-/// the uploaded subject. Kept together because a dispatch names all of
-/// them and nothing here ever holds one without the others.
+/// registered program, the writable target, and the uploaded subject.
+/// Kept together because a dispatch names all of them and nothing here
+/// ever holds one without the others.
 struct Rig {
     program_id: u32,
     bindings: Vec<u32>,
@@ -393,10 +414,10 @@ impl Rig {
         }
     }
 
-    /// One dispatch of the probed bake, plus the overlay and capture
-    /// that carry its planes back. The subject is already uploaded; the
-    /// camera rides the uniform blob alone, which is the point — a turn
-    /// costs eighty bytes and no re-upload at all.
+    /// One dispatch of the bake, plus the overlay and capture that carry
+    /// its plane back. The subject is already uploaded; the camera rides
+    /// the uniform blob alone, which is the point — a turn costs eighty
+    /// bytes and no re-upload at all.
     fn read_planes(&self, harness: &mut SubstrateHarness, eye: Vec3, view_proj: Mat4) -> Baked {
         let dispatch = ProgramDispatch {
             program_id: self.program_id,
@@ -404,7 +425,7 @@ impl Rig {
             geometries: vec![self.geometry],
             uniforms: BakeUniforms { view_proj, eye }.encode().to_vec(),
         };
-        let probe = *self.bindings.last().expect("the probe binding is last");
+        let probe = self.bindings[PROBE as usize];
         let pre = vec![
             envelope("aether.render", &dispatch),
             envelope("aether.render", &overlay(probe, self.width, self.height)),
@@ -425,7 +446,7 @@ impl Rig {
             for x in 0..self.width {
                 let texel = rgba_at(&image, x as u32, y as u32);
                 baked.class.push((srgb_byte_to_linear(texel[0]) * 255.0).round() as u8);
-                baked.tone.push(srgb_byte_to_linear(texel[1]) / TONE_SCALE);
+                baked.tone.push(srgb_byte_to_linear(texel[1]));
                 baked.facing.push(srgb_byte_to_linear(texel[2]));
             }
         }
@@ -534,18 +555,34 @@ fn assert_parity(context: &str, oracle: &RegionPlanes, baked: &Baked, width: usi
     let classes = drawn_classes(oracle);
     assert!(!classes.is_empty(), "{context}: the oracle drew nothing, so there is no parity to measure");
 
-    // The raw disagreement is reported, never asserted: a pixel whose
-    // centre sits on a triangle edge is resolved by two different
-    // tie-break rules and is expected to differ. It is here so the
-    // level-set numbers below are readable as "and this is what that
-    // fringe does to the boundary" rather than as an unexplained zero.
+    // A pixel whose centre sits on a triangle edge is resolved by two
+    // different tie-break rules and is expected to differ, so this is
+    // not asserted per-pixel — but it is asserted in bulk. The fringe
+    // is a scatter along the silhouettes, bounded by their perimeter,
+    // and it measures zero on this fixture and 0.0012% of the page on
+    // the shipped subject; a whole-page disagreement is a different
+    // animal entirely. The ceiling sits far above any fringe and far
+    // below any systematic difference, because the level-set check
+    // below cannot see one: it walks only the classes the oracle drew,
+    // so a plane that came back wrong *everything else* — a mis-decoded
+    // background, a readback reading the wrong texture — leaves every
+    // drift at zero while the picture is garbage. That is the bug this
+    // line catches, and it caught it.
     let differing = oracle.class.iter().zip(&baked.class).filter(|(expected, actual)| expected != actual).count();
     let drawn = oracle.class.iter().filter(|&&class| class != 0).count();
+    let share = differing as f32 / oracle.class.len() as f32;
     eprintln!(
         "{context}: {differing} of {} pixels carry a different class ({:.4}% of the page, {:.4}% of the figure)",
         oracle.class.len(),
-        100.0 * differing as f32 / oracle.class.len() as f32,
+        100.0 * share,
         100.0 * differing as f32 / drawn.max(1) as f32,
+    );
+    assert!(
+        share <= FRINGE_BUDGET,
+        "{context}: {:.2}% of the page carries a different class, past the {:.2}% an edge fringe can accou\
+         nt for — that is a plane-wide difference, not a rasterization tie-break",
+        100.0 * share,
+        100.0 * FRINGE_BUDGET,
     );
 
     let mut worst_drift = 0.0f32;
@@ -569,7 +606,12 @@ fn assert_parity(context: &str, oracle: &RegionPlanes, baked: &Baked, width: usi
     // and every `continue` above fires.
     assert!(measured > 0, "{context}: no class carried a blur-then-threshold boundary, so nothing was measured");
 
-    for (plane, cpu, gpu) in [("tone", &oracle.tone, &baked.tone), ("facing", &oracle.facing, &baked.facing)] {
+    // Tone through the packed channel's own ceiling: the plane clips
+    // there and so must the oracle it is held against, or the comparison
+    // charges the bake for a range it never claimed to carry. `facing`
+    // is in `[0, 1]` already and passes through untouched.
+    let clipped: Vec<f32> = oracle.tone.iter().map(|&at| at.min(TONE_CEILING)).collect();
+    for (plane, cpu, gpu) in [("tone", &clipped, &baked.tone), ("facing", &oracle.facing, &baked.facing)] {
         let (worst, mean) = surface_drift(cpu, gpu, &oracle.class);
         eprintln!("{context}: {plane} drift — worst {worst:.4}, mean {mean:.4}");
         assert!(
@@ -648,6 +690,30 @@ fn split_field(mesh: &Mesh) -> Labels {
     bytes.extend([labels::SKIN; 4]);
 
     Labels::parse(&bytes, mesh.min, mesh.max, LABEL_PAD).expect("split field")
+}
+
+/// Tripwire: the packed tone channel's ceiling stays above every
+/// consumer's saturation point.
+///
+/// Packing tone into an 8-bit unorm clips it at one, and the parity
+/// check above clips the oracle to match. That is honest only while no
+/// consumer can see past the clip — every one of them runs tone through
+/// `smoothstep(lit, SHADOWED, tone)`, which saturates at `lit`. Raise a
+/// material's `shade_lit` to or past one and the clipped range becomes
+/// observable: the wash would shade that material off a tone the plane
+/// can no longer distinguish, while the parity scenario keeps passing
+/// because it clips the oracle too. Nothing else would notice.
+#[test]
+fn the_packed_tone_channel_clips_below_every_consumer() {
+    for material in palette::MATERIALS {
+        let lit = material.shade_lit.unwrap_or(palette::LIT);
+        assert!(
+            lit < TONE_CEILING,
+            "material class {} is fully lit at {lit}, at or past the {TONE_CEILING} the packed tone channel clips \
+             at — the bake can no longer carry the tone this material shades from",
+            material.class,
+        );
+    }
 }
 
 /// Tripwire: the GPU bake and the CPU oracle place the same boundaries.
@@ -788,30 +854,46 @@ fn crossfeed_the_gpu_bake_against_the_cpu_oracle() {
         .expect("harness");
     let rig = Rig::mount(&mut harness, &mesh, &scores, CROSSFEED_WIDTH, CROSSFEED_HEIGHT);
 
+    // The two costs are measured in separate blocks, bare first, and
+    // never interleaved.
+    //
+    // Interleaving them — one bare capture after each dispatch frame, to
+    // difference the two — reads almost zero however expensive the bake
+    // is, and the reason is worth stating because the shape of it recurs
+    // anywhere a GPU is timed from the CPU. A capture blocks on the
+    // device queue, so the bare capture that follows a dispatch waits out
+    // the dispatch's own work: measured here, a bare capture costs 6 ms
+    // cold and 58 ms taken straight after a dispatch frame that itself
+    // costs 60 ms. Differencing those two reports a couple of
+    // milliseconds — noise between two nearly equal numbers — for work
+    // that takes tens. The bare block therefore runs first, before any
+    // dispatch has been issued, and the difference below is the honest
+    // one.
+    let mut bare = 0.0;
+    for _ in 0..COST_SAMPLES {
+        let started = Instant::now();
+        harness.execute(vec![("bare", HarnessOp::capture())]).expect("bare capture");
+        bare += started.elapsed().as_secs_f64() * 1000.0;
+    }
+    let bare_millis = bare / f64::from(COST_SAMPLES);
+
     // Warm: the first use realizes the vertex and index buffers, which
     // is a geometry-upload cost and not a per-frame one.
     let baked = rig.read_planes(&mut harness, eye, view_proj);
 
-    // The bake's own cost is the frame's cost with it minus the frame's
-    // cost without it — the capture and present around it are the same
-    // work either way, so the difference is the three draw passes plus
-    // the probe.
-    let mut with_bake = 0.0;
-    let mut without_bake = 0.0;
+    let mut dispatched = 0.0;
     for _ in 0..COST_SAMPLES {
         let started = Instant::now();
         rig.read_planes(&mut harness, eye, view_proj);
-        with_bake += started.elapsed().as_secs_f64() * 1000.0;
-
-        let started = Instant::now();
-        harness.execute(vec![("bare", HarnessOp::capture())]).expect("bare capture");
-        without_bake += started.elapsed().as_secs_f64() * 1000.0;
+        dispatched += started.elapsed().as_secs_f64() * 1000.0;
     }
-    let per_frame = (with_bake - without_bake) / f64::from(COST_SAMPLES);
+    let dispatched_millis = dispatched / f64::from(COST_SAMPLES);
 
     let worst = assert_parity("crossfeed", &oracle, &baked, CROSSFEED_WIDTH, CROSSFEED_HEIGHT);
     eprintln!(
-        "crossfeed: worst level-0.5 drift {worst:.3} px over every class; the bake adds {per_frame:.2} ms per frame \
-         at {CROSSFEED_WIDTH}x{CROSSFEED_HEIGHT} against a {oracle_millis:.1} ms CPU bake",
+        "crossfeed: worst level-0.5 drift {worst:.3} px over every class; a bake frame costs \
+         {dispatched_millis:.2} ms at {CROSSFEED_WIDTH}x{CROSSFEED_HEIGHT} against a {bare_millis:.2} ms bare \
+         capture — {:.2} ms for the bake, against a {oracle_millis:.1} ms CPU bake",
+        dispatched_millis - bare_millis,
     );
 }
