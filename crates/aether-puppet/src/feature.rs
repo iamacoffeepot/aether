@@ -145,3 +145,51 @@ pub struct Curve3 {
     /// strands reads as dirt on the paper, not as an eye.
     pub authored: bool,
 }
+
+/// One frame's drawing, divided by whether a curve depends on the eye.
+///
+/// The division is the drawing's own: hatch and crease describe the
+/// surface and are extracted once at load, while the silhouette, the
+/// charted face and the suggestive contours are re-solved every time
+/// the eye moves. Carrying it as a type rather than as an index into a
+/// concatenated list is what lets the layout give the resident half
+/// the same texels every frame, and the packer send it to the GPU once
+/// (iamacoffeepot/aether#4435).
+///
+/// The two halves concatenate — resident first — wherever the whole
+/// drawing is wanted, and that order is what every curve index in a
+/// [`Layout`](crate::easel::program::sight::Layout) means.
+///
+/// The split is by volatility rather than by class, which is what
+/// carries it into animation: a deforming pose moves curves from the
+/// resident half to the volatile one and nothing else has to change.
+#[derive(Clone, Copy)]
+pub struct Drawing<'a> {
+    /// View-independent, and so uploaded once per subject.
+    pub resident: &'a [Curve3],
+    /// Re-solved per eye, and so uploaded per re-split.
+    pub volatile: &'a [Curve3],
+}
+
+impl<'a> Drawing<'a> {
+    /// The whole drawing in curve-index order.
+    pub fn curves(&self) -> impl Iterator<Item = &'a Curve3> {
+        self.resident.iter().chain(self.volatile)
+    }
+
+    /// The `index`th curve of the concatenation — what a
+    /// [`Span`](crate::easel::program::sight::Span) names.
+    pub fn curve(&self, index: usize) -> Option<&'a Curve3> {
+        self.resident.get(index).or_else(|| self.volatile.get(index.checked_sub(self.resident.len())?))
+    }
+
+    /// How many curves the drawing carries.
+    pub fn len(&self) -> usize {
+        self.resident.len() + self.volatile.len()
+    }
+
+    /// Whether the drawing has no curves at all.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}

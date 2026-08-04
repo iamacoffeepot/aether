@@ -96,7 +96,7 @@ use aether_kinds::QuadSpace;
 use aether_math::{Mat4, Rgba, Vec3};
 use aether_puppet::easel::program::sight::{self, Layout, SightUniforms};
 use aether_puppet::extract::{self, Settings};
-use aether_puppet::feature::{Curve3, FeatureClass, SurfacePoint};
+use aether_puppet::feature::{Curve3, Drawing, FeatureClass, SurfacePoint};
 use aether_puppet::labels::Labels;
 use aether_puppet::mesh::Mesh;
 use aether_puppet::{anchor, chart, visibility};
@@ -395,7 +395,9 @@ struct Rig {
     program_id: u32,
     bindings: Vec<u32>,
     subject: u32,
-    points: u32,
+    /// The two point buffers the field is rasterized from, in slot
+    /// order: the resident half and the volatile one.
+    points: [u32; 2],
     width: usize,
     height: usize,
 }
@@ -404,7 +406,7 @@ impl Rig {
     fn mount(
         harness: &mut SubstrateHarness,
         mesh: &Mesh,
-        curves: &[Curve3],
+        drawing: Drawing<'_>,
         layout: &Layout,
         width: usize,
         height: usize,
@@ -421,15 +423,26 @@ impl Rig {
                     indices: sight::subject_indices(mesh),
                 },
             ),
-            points: create_geometry(
-                harness,
-                "create_points",
-                &CreateGeometry {
-                    layout: sight::points_slot().layout,
-                    vertices: sight::point_vertices(curves, layout),
-                    indices: sight::point_indices(layout),
-                },
-            ),
+            points: [
+                create_geometry(
+                    harness,
+                    "create_resident_points",
+                    &CreateGeometry {
+                        layout: sight::points_slot().layout,
+                        vertices: sight::point_vertices(drawing, layout.resident()),
+                        indices: sight::point_indices(layout.resident()),
+                    },
+                ),
+                create_geometry(
+                    harness,
+                    "create_volatile_points",
+                    &CreateGeometry {
+                        layout: sight::points_slot().layout,
+                        vertices: sight::point_vertices(drawing, layout.volatile()),
+                        indices: sight::point_indices(layout.volatile()),
+                    },
+                ),
+            ],
             width,
             height,
         }
@@ -439,7 +452,7 @@ impl Rig {
         ProgramDispatch {
             program_id: self.program_id,
             bindings: self.bindings.clone(),
-            geometries: vec![self.subject, self.points],
+            geometries: vec![self.subject, self.points[0], self.points[1]],
             uniforms: SightUniforms { view_proj, eye, field: (self.width as u32, self.height as u32), bias }.encode(),
         }
     }
@@ -480,20 +493,21 @@ impl Rig {
 }
 
 /// Mount the rig, or re-point the one already mounted at a freshly
-/// laid-out drawing. The subject never moves between eyes, so only the
-/// point geometry is replaced — which is the shape the shipped path
-/// re-splits in.
+/// laid-out drawing. The subject never moves between eyes, and neither
+/// does the resident half of the drawing — so only the volatile point
+/// buffer is replaced, which is the shape the shipped path re-splits in
+/// (iamacoffeepot/aether#4435).
 fn re_point(
     harness: &mut SubstrateHarness,
     held: Option<Rig>,
     mesh: &Mesh,
-    curves: &[Curve3],
+    drawing: Drawing<'_>,
     layout: &Layout,
     width: usize,
     height: usize,
 ) -> Rig {
     let Some(rig) = held else {
-        return Rig::mount(harness, mesh, curves, layout, width, height);
+        return Rig::mount(harness, mesh, drawing, layout, width, height);
     };
 
     harness
@@ -502,9 +516,9 @@ fn re_point(
             HarnessOp::send_and_settle(
                 "aether.render",
                 &UpdateGeometry {
-                    geometry_id: rig.points,
-                    vertices: sight::point_vertices(curves, layout),
-                    indices: sight::point_indices(layout),
+                    geometry_id: rig.points[1],
+                    vertices: sight::point_vertices(drawing, layout.volatile()),
+                    indices: sight::point_indices(layout.volatile()),
                 },
             ),
         )])
@@ -694,14 +708,14 @@ fn assert_verdicts(
     mesh: &Mesh,
     eye: Vec3,
     bias: f32,
-    curves: &[Curve3],
+    drawing: Drawing<'_>,
     layout: &Layout,
     field: &Field,
 ) -> usize {
     let (mut differing, mut total, mut settled) = (0usize, 0usize, Vec::new());
     let (mut oracle_seen, mut field_seen) = (0usize, 0usize);
     for span in layout.spans() {
-        let curve = &curves[span.curve as usize];
+        let curve = drawing.curve(span.curve as usize).expect("a span names a curve of the drawing");
         let oracle = split_verdicts(mesh, eye, curve, bias);
         let measured = gathered(field, span);
         total += oracle.len();
@@ -769,12 +783,12 @@ fn assert_verdicts(
 /// Hold `reach` and `coverage` against the same derivation run on the
 /// CPU over the GPU's own verdict plane, so a scan bug is measured
 /// without the bias difference in the way.
-fn assert_derived(context: &str, eye: Vec3, curves: &[Curve3], layout: &Layout, field: &Field) {
+fn assert_derived(context: &str, eye: Vec3, drawing: Drawing<'_>, layout: &Layout, field: &Field) {
     let (mut worst_reach, mut total_reach, mut counted) = (0.0f32, 0.0f32, 0usize);
     let mut worst_coverage = 0.0f32;
 
     for span in layout.spans() {
-        let curve = &curves[span.curve as usize];
+        let curve = drawing.curve(span.curve as usize).expect("a span names a curve of the drawing");
         let expected = derive(curve, eye, &gathered(field, span));
 
         for (at, &want) in expected.reach.iter().enumerate() {
@@ -898,29 +912,47 @@ fn settings() -> Settings {
     Settings { hatch_spacing: 0.11, light: Vec3::new(0.3, 0.6, 1.0), ambient: 0.25, ..Settings::default() }
 }
 
-/// The drawing at one eye, assembled the way `Puppet::on_render` does:
-/// the cached view-independent surface, the charted face, the
-/// suggestive contours, then the silhouette.
+/// The drawing at one eye, kept as the two halves `Puppet::on_render`
+/// keeps it in: the cached view-independent surface, then the charted
+/// face, the suggestive contours and the silhouette.
 ///
+/// Held apart rather than concatenated because that division is what
+/// the field's layout is asked about — the resident half has to land on
+/// the same texels at every eye, and a helper that handed over one list
+/// could not state which curves those are.
+struct Drawn {
+    resident: Vec<Curve3>,
+    volatile: Vec<Curve3>,
+}
+
+impl Drawn {
+    fn as_drawing(&self) -> Drawing<'_> {
+        Drawing { resident: &self.resident, volatile: &self.volatile }
+    }
+}
+
 /// The whole drawing rather than a slice of it, because the authored
 /// marks are the only curves the whole-or-nothing rule reaches — a
 /// coverage plane held against an oracle over hatching alone would
 /// never exercise the case it exists for.
-fn drawing(mesh: &Mesh, settings: &Settings, labels: Option<&Labels>, eye: Vec3) -> Vec<Curve3> {
+fn drawing(mesh: &Mesh, settings: &Settings, labels: Option<&Labels>, eye: Vec3) -> Drawn {
     let anchors = labels.and_then(|labels| anchor::Anchors::measure(mesh, labels));
     let face = anchors
         .as_ref()
         .zip(settings.face)
         .map(|(anchors, face)| chart::marks(mesh, anchors, face, settings, eye))
         .unwrap_or_default();
+    let drawn = |curves: Vec<Curve3>| curves.into_iter().filter(|curve| curve.points.len() >= 2).collect();
 
-    extract::surface(mesh, labels, anchors.as_ref(), settings)
-        .into_iter()
-        .chain(face)
-        .chain(extract::suggestive(mesh, labels, eye, settings))
-        .chain(extract::silhouettes(mesh, eye))
-        .filter(|curve| curve.points.len() >= 2)
-        .collect()
+    Drawn {
+        resident: drawn(extract::surface(mesh, labels, anchors.as_ref(), settings)),
+        volatile: drawn(
+            face.into_iter()
+                .chain(extract::suggestive(mesh, labels, eye, settings))
+                .chain(extract::silhouettes(mesh, eye))
+                .collect(),
+        ),
+    }
 }
 
 /// Tripwire: the field says what the split says, at four eyes.
@@ -951,19 +983,25 @@ fn the_gpu_field_splits_the_drawing_where_the_cpu_oracle_does() {
     let mut mounted: Option<Rig> = None;
     for azimuth in AZIMUTHS {
         let (eye, view_proj) = camera(azimuth, CANVAS_WIDTH, CANVAS_HEIGHT);
-        let curves = drawing(&mesh, &settings, None, eye);
-        let layout = sight::layout(&curves, (CANVAS_WIDTH as u32, CANVAS_HEIGHT as u32)).expect("the drawing fits");
+        let drawn = drawing(&mesh, &settings, None, eye);
+        let drawing = drawn.as_drawing();
+        let layout = sight::layout(drawing, (CANVAS_WIDTH as u32, CANVAS_HEIGHT as u32)).expect("the drawing fits");
         assert!(layout.points() > 500, "azimuth {azimuth}: a fixture this thin proves nothing");
+        assert!(!layout.resident().is_empty() && !layout.volatile().is_empty(), "both halves carry curves");
 
         // The silhouette is a different curve at every eye, so the
-        // drawing is re-laid-out and re-uploaded per azimuth — which is
-        // the re-split cadence the shipped path runs at.
-        let rig = re_point(&mut harness, mounted.take(), &mesh, &curves, &layout, CANVAS_WIDTH, CANVAS_HEIGHT);
+        // volatile half is re-laid-out and re-uploaded per azimuth —
+        // which is the re-split cadence the shipped path runs at. The
+        // resident half is uploaded once, at the first azimuth, and the
+        // verdicts below are read back through it at all four: a
+        // resident span that moved with the volatile half would show up
+        // here as the whole surface reading someone else's occlusion.
+        let rig = re_point(&mut harness, mounted.take(), &mesh, drawing, &layout, CANVAS_WIDTH, CANVAS_HEIGHT);
 
         let field = rig.read_field(&mut harness, eye, view_proj, bias);
         let context = format!("azimuth {azimuth}");
-        assert_verdicts(&context, &mesh, eye, bias, &curves, &layout, &field);
-        assert_derived(&context, eye, &curves, &layout, &field);
+        assert_verdicts(&context, &mesh, eye, bias, drawing, &layout, &field);
+        assert_derived(&context, eye, drawing, &layout, &field);
         mounted = Some(rig);
     }
 }
@@ -988,15 +1026,16 @@ fn a_re_uploaded_subject_re_occludes_from_its_new_vertices() {
     let settings = settings();
     let bias = mesh.surface_bias();
     let (eye, view_proj) = camera(0.0, CANVAS_WIDTH, CANVAS_HEIGHT);
-    let curves = drawing(&mesh, &settings, None, eye);
-    let layout = sight::layout(&curves, (CANVAS_WIDTH as u32, CANVAS_HEIGHT as u32)).expect("the drawing fits");
+    let drawn = drawing(&mesh, &settings, None, eye);
+    let drawing = drawn.as_drawing();
+    let layout = sight::layout(drawing, (CANVAS_WIDTH as u32, CANVAS_HEIGHT as u32)).expect("the drawing fits");
 
     let mut harness = SubstrateHarness::builder()
         .size(CANVAS_WIDTH as u32, CANVAS_HEIGHT as u32)
         .with_render()
         .build()
         .expect("harness");
-    let rig = Rig::mount(&mut harness, &mesh, &curves, &layout, CANVAS_WIDTH, CANVAS_HEIGHT);
+    let rig = Rig::mount(&mut harness, &mesh, drawing, &layout, CANVAS_WIDTH, CANVAS_HEIGHT);
     let before = rig.read_field(&mut harness, eye, view_proj, bias);
 
     // The pose: the slab swung across to the other side of her, so it
@@ -1028,8 +1067,8 @@ fn a_re_uploaded_subject_re_occludes_from_its_new_vertices() {
     let moved = before.seen.iter().zip(&after.seen).filter(|(was, now)| was != now).count();
     assert!(moved > 0, "a re-uploaded subject must re-occlude; not one of the field's texels moved");
 
-    assert_verdicts("posed", &posed, eye, bias, &curves, &layout, &after);
-    assert_derived("posed", eye, &curves, &layout, &after);
+    assert_verdicts("posed", &posed, eye, bias, drawing, &layout, &after);
+    assert_derived("posed", eye, drawing, &layout, &after);
 }
 
 /// The shipped subject, at the size and framing the easel develops at.
@@ -1090,28 +1129,31 @@ fn crossfeed_the_gpu_field_against_the_cpu_oracle() {
     let mut mounted: Option<Rig> = None;
     for azimuth in AZIMUTHS {
         let (eye, view_proj) = camera(azimuth, CROSSFEED_WIDTH, CROSSFEED_HEIGHT);
-        let curves = drawing(&mesh, &settings, Some(&labels), eye);
-        let layout = sight::layout(&curves, (CROSSFEED_WIDTH as u32, CROSSFEED_HEIGHT as u32)).expect("fits");
+        let drawn = drawing(&mesh, &settings, Some(&labels), eye);
+        let drawing = drawn.as_drawing();
+        let layout = sight::layout(drawing, (CROSSFEED_WIDTH as u32, CROSSFEED_HEIGHT as u32)).expect("fits");
         eprintln!(
-            "crossfeed azimuth {azimuth}: {} curves, {} points, {} of {} texels occupied",
+            "crossfeed azimuth {azimuth}: {} curves ({} resident), {} points ({} resident), {} of {} texels occupied",
             layout.spans().len(),
+            layout.resident().len(),
             layout.points(),
+            layout.resident().iter().map(|span| span.len as usize).sum::<usize>(),
             layout.occupied(),
             CROSSFEED_WIDTH * CROSSFEED_HEIGHT,
         );
 
         let started = Instant::now();
-        for curve in &curves {
+        for curve in drawing.curves() {
             visibility::runs(&mesh, eye, curve, &|_| true, visibility::Mode::Opaque, 1, bias);
         }
         let oracle_millis = started.elapsed().as_secs_f64() * 1000.0;
 
-        let rig = re_point(&mut harness, mounted.take(), &mesh, &curves, &layout, CROSSFEED_WIDTH, CROSSFEED_HEIGHT);
+        let rig = re_point(&mut harness, mounted.take(), &mesh, drawing, &layout, CROSSFEED_WIDTH, CROSSFEED_HEIGHT);
 
         let field = rig.read_field(&mut harness, eye, view_proj, bias);
         let context = format!("crossfeed azimuth {azimuth}");
-        assert_verdicts(&context, &mesh, eye, bias, &curves, &layout, &field);
-        assert_derived(&context, eye, &curves, &layout, &field);
+        assert_verdicts(&context, &mesh, eye, bias, drawing, &layout, &field);
+        assert_derived(&context, eye, drawing, &layout, &field);
         eprintln!("{context}: the CPU oracle split the drawing in {oracle_millis:.1} ms at stride 1");
 
         if azimuth == 0.0 {

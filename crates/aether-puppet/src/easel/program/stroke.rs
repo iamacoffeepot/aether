@@ -44,7 +44,7 @@ use aether_render::{
 };
 
 use super::sight::Layout;
-use crate::feature::Curve3;
+use crate::feature::Drawing;
 use crate::ribbon::{self, Rail};
 use crate::style;
 use crate::visibility;
@@ -172,9 +172,15 @@ impl StrokeUniforms {
 /// The drawing's ribbons, packed for [`ribbon_slot`].
 ///
 /// Two vertices a point — the two rails — so a segment is the quad
-/// between consecutive pairs. The curve list and the layout are the
-/// same pair the field was built from, which is what makes the packed
-/// texel index address this point's own verdict.
+/// between consecutive pairs. The drawing and the layout are the same
+/// pair the field was built from, which is what makes the packed texel
+/// index address this point's own verdict.
+///
+/// One buffer rather than the two the points divide into (#4435): every
+/// rail here is solved against the eye — the perpendicular, the depth
+/// weighting, the wobble's world argument — so a resident curve's
+/// ribbon vertices change with the camera even though the curve does
+/// not.
 ///
 /// A curve the rail solve declines (under two points, or under its
 /// class' length floor) contributes no vertices and no indices. Its
@@ -185,11 +191,11 @@ impl StrokeUniforms {
 /// the expensive half and runs every frame the eye moves — asking for
 /// the two separately would solve the whole drawing twice.
 #[must_use]
-pub fn ribbon_geometry(curves: &[Curve3], layout: &Layout, eye: Vec3) -> (Vec<u8>, Vec<u8>) {
+pub fn ribbon_geometry(drawing: Drawing<'_>, layout: &Layout, eye: Vec3) -> (Vec<u8>, Vec<u8>) {
     let (mut vertices, mut indices) = (Vec::new(), Vec::new());
     let mut solved = Vec::new();
     let mut base = 0u32;
-    for (index, curve) in curves.iter().enumerate() {
+    for (index, curve) in drawing.curves().enumerate() {
         solved.clear();
         let Some(span) = layout.span_of(index) else {
             continue;
