@@ -237,7 +237,7 @@ mod headless_tests {
             CreateGeometry {
                 layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }],
                 vertices: vec![0u8; 36],
-                indices: (0u32..3).flat_map(|index| index.to_le_bytes()).collect(),
+                indices: (0u32..3).flat_map(u32::to_le_bytes).collect(),
             },
         );
         match result {
