@@ -317,8 +317,8 @@ const SPATTER_STRENGTH: (f32, f32) = (0.4, 0.7);
 
 /// Distances from the face over which the hand relaxes: cut to the line
 /// this close, wholly free past this far.
-const CARE_NEAR: f32 = 160.0;
-const CARE_FAR: f32 = 600.0;
+pub(crate) const CARE_NEAR: f32 = 160.0;
+pub(crate) const CARE_FAR: f32 = 600.0;
 
 /// Fraction of its granulation a material keeps in its tight coat.
 ///

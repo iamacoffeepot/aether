@@ -29,6 +29,7 @@ pub mod image;
 pub mod palette;
 pub mod program;
 pub mod regions;
+pub mod survey;
 
 use aether_math::{Mat4, Vec3};
 use aether_render::{
@@ -60,7 +61,7 @@ const SETTLE_FRAMES: u32 = 120;
 /// now develops at the window's own pixels up to this ceiling — which is
 /// the resolution every distance in the engine was tuned at — and the
 /// settle gate keeps the extra cost off the frame path.
-const CANVAS_LONG_EDGE: usize = 1280;
+pub(crate) const CANVAS_LONG_EDGE: usize = 1280;
 
 /// The studio's one seed — `Sumire` in ASCII — so the same view develops
 /// the same painting, today and tomorrow.

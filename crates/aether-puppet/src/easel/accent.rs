@@ -35,7 +35,7 @@ use crate::labels::{EYE, SKIN};
 /// Soft rather than hard because the polygon is a straight-edged sample of
 /// a curve: thresholding a blurred fill puts the boundary back on the curve
 /// the chart meant instead of on the chords it handed over.
-const CLIP_BLUR: f32 = 1.6;
+pub const CLIP_BLUR: f32 = 1.6;
 const CLIP_EDGE: (f32, f32) = (0.3, 0.6);
 
 /// Clip strength under which a pixel is outside the eye and not worth
@@ -105,8 +105,8 @@ const FACING: (f32, f32) = (0.42, 0.62);
 
 /// How far the skin mask and the flush itself are softened, in
 /// reference-sheet pixels, and how much of the flush survives.
-const SKIN_BLUR: f32 = 4.0;
-const FLUSH_BLUR: f32 = 8.0;
+pub const SKIN_BLUR: f32 = 4.0;
+pub const FLUSH_BLUR: f32 = 8.0;
 const FLUSH_STRENGTH: f32 = 0.55;
 
 /// One eye's frame on the canvas: the chart's planted frame after the
@@ -124,17 +124,39 @@ pub struct Eye {
 }
 
 impl Eye {
+    /// Where the iris centre landed on the canvas.
+    pub fn centre(&self) -> Vec2 {
+        self.centre
+    }
+
+    /// Pupil half-axes as fractions of the iris radius.
+    pub fn pupil(&self) -> Vec2 {
+        self.pupil
+    }
+
+    /// The lid loop, projected onto the canvas.
+    pub fn aperture(&self) -> &[Vec2] {
+        &self.aperture
+    }
+
+    /// How far out from the centre this eye is measured, in canvas
+    /// pixels — the box [`irises`] walks and the GPU iris pass tests
+    /// against.
+    pub fn reach(&self, height: usize) -> f32 {
+        self.size() * IRIS_REACH + image::tuned(IRIS_MARGIN, height)
+    }
+
     /// How big this eye reads on the canvas — the longer of its two
     /// projected radii, which is the unit every accent hung off it is
     /// measured in.
-    fn size(&self) -> f32 {
+    pub fn size(&self) -> f32 {
         self.width.length().max(self.height.length())
     }
 
     /// The projected frame inverted, as the two rows that take a canvas
     /// offset to iris coordinates — where the unit circle is the iris' own
     /// rim. `None` once the two axes have collapsed onto one line.
-    fn inverse(&self) -> Option<(Vec2, Vec2)> {
+    pub fn inverse(&self) -> Option<(Vec2, Vec2)> {
         let determinant = self.width.x * self.height.y - self.width.y * self.height.x;
 
         (determinant.abs() > DEGENERATE).then(|| {
@@ -175,14 +197,15 @@ impl Accents {
 pub fn paint(frames: &[EyeFrame], view_proj: &Mat4, planes: &Planes<'_>) -> Accents {
     let eyes = project(frames, view_proj, planes.width, planes.height);
     let (iris, lift) = irises(&eyes, planes);
+    let presence = presences(&eyes, planes);
 
-    Accents { iris, lift, blush: blush(&eyes, planes) }
+    Accents { iris, lift, blush: blush(&eyes, planes, &presence) }
 }
 
 /// The planted frames through the develop's camera. An eye the near plane
 /// has eaten drops out entirely, which is the same thing that happens to
 /// its ink.
-fn project(frames: &[EyeFrame], view_proj: &Mat4, width: usize, height: usize) -> Vec<Eye> {
+pub fn project(frames: &[EyeFrame], view_proj: &Mat4, width: usize, height: usize) -> Vec<Eye> {
     let on_canvas = |p| regions::on_canvas(view_proj, p, width, height);
 
     frames
@@ -211,7 +234,7 @@ fn irises(eyes: &[Eye], planes: &Planes<'_>) -> (Vec<f32>, Vec<f32>) {
         let Some((across, down)) = eye.inverse() else {
             continue;
         };
-        let reach = eye.size() * IRIS_REACH + image::tuned(IRIS_MARGIN, height);
+        let reach = eye.reach(height);
 
         for y in span(eye.centre.y, reach, height) {
             for x in span(eye.centre.x, reach, width) {
@@ -301,34 +324,74 @@ fn span(centre: f32, reach: f32, extent: usize) -> RangeInclusive<usize> {
     first..=last
 }
 
+/// Where the eyes agree the face's middle is.
+///
+/// Outward is decided against this rather than against her own left and
+/// right, so it stays outward under a camera that has swapped which of
+/// the two is nearer.
+#[must_use]
+pub fn midline(eyes: &[Eye]) -> f32 {
+    if eyes.is_empty() {
+        return 0.0;
+    }
+
+    eyes.iter().map(|eye| eye.centre.x).sum::<f32>() / eyes.len() as f32
+}
+
+/// Where one eye's cheek apple sits and how far it reaches — the single
+/// statement of the placement, read by the CPU flush and by the GPU one.
+#[must_use]
+pub fn apple_of(eye: &Eye, midline: f32) -> (Vec2, Vec2) {
+    let size = eye.size();
+    let outward = if eye.centre.x < midline {
+        -1.0
+    } else {
+        1.0
+    };
+
+    (
+        eye.centre + Vec2::new(outward * size * APPLE.0, size * APPLE.1),
+        Vec2::new(size * APPLE_RADII.0, size * APPLE_RADII.1),
+    )
+}
+
+/// How much blush each eye has earned, counted off the label plane: the
+/// visible fraction of its own aperture area, through the presence ramp.
+///
+/// Split out so both develops read one set of numbers. The GPU develop
+/// has no label plane to count — the class plane lives on the GPU now —
+/// so it measures the same question by casting the aperture against the
+/// subject instead (see [`Easel`](crate::easel::Easel)); the parity
+/// scenarios feed it these, so the two are held together on the accent
+/// placement rather than on the presence policy.
+#[must_use]
+pub fn presences(eyes: &[Eye], planes: &Planes<'_>) -> Vec<f32> {
+    let seen = palette::mask_of(planes.classes, EYE);
+
+    eyes.iter()
+        .map(|eye| {
+            let size = eye.size();
+
+            image::smoothstep(PRESENCE.0, PRESENCE.1, visible(eye, &seen, planes) / (PI * size * size))
+        })
+        .collect()
+}
+
 /// The cheek flush, hung off both eye frames.
-fn blush(eyes: &[Eye], planes: &Planes<'_>) -> Vec<f32> {
+fn blush(eyes: &[Eye], planes: &Planes<'_>, presence: &[f32]) -> Vec<f32> {
     let (width, height) = (planes.width, planes.height);
     let mut flush = vec![0.0; width * height];
     if eyes.is_empty() {
         return flush;
     }
 
-    // Outward is decided against the eyes' shared midline rather than
-    // against her own left and right, so it stays outward under a camera
-    // that has swapped which of the two is nearer.
-    let midline = eyes.iter().map(|eye| eye.centre.x).sum::<f32>() / eyes.len() as f32;
-    let seen = palette::mask_of(planes.classes, EYE);
+    let midline = midline(eyes);
 
-    for eye in eyes {
-        let size = eye.size();
-        let presence = image::smoothstep(PRESENCE.0, PRESENCE.1, visible(eye, &seen, planes) / (PI * size * size));
+    for (eye, &presence) in eyes.iter().zip(presence) {
         if presence <= 0.0 {
             continue;
         }
-
-        let outward = if eye.centre.x < midline {
-            -1.0
-        } else {
-            1.0
-        };
-        let apple = eye.centre + Vec2::new(outward * size * APPLE.0, size * APPLE.1);
-        let radii = Vec2::new(size * APPLE_RADII.0, size * APPLE_RADII.1);
+        let (apple, radii) = apple_of(eye, midline);
 
         for y in span(apple.y, radii.y, height) {
             for x in span(apple.x, radii.x, width) {
