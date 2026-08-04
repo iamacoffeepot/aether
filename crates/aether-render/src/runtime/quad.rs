@@ -5,7 +5,7 @@
 
 use aether_kinds::{ClipRect, QuadSpace};
 
-use super::super::kinds::{DrawSolidQuads, DrawTexturedQuads, SolidQuad, TexturedQuad};
+use super::super::kinds::{DrawSolidQuads, DrawTexturedQuads, QuadBlend, SolidQuad, TexturedQuad};
 use super::texture::TextureRegistry;
 
 /// One accumulated `draw_textured_quads` batch (ADR-0105): the
@@ -18,6 +18,7 @@ pub struct QuadBatch {
     pub texture_id: u32,
     pub space: QuadSpace,
     pub clip: Option<ClipRect>,
+    pub blend: QuadBlend,
     pub quads: Vec<TexturedQuad>,
 }
 
@@ -25,7 +26,7 @@ impl QuadBatch {
     /// The batch a `draw_textured_quads` submission accumulates to — a direct
     /// carry of the mail's fields.
     pub fn textured(mail: DrawTexturedQuads) -> Self {
-        Self { texture_id: mail.texture_id, space: mail.space, clip: mail.clip, quads: mail.quads }
+        Self { texture_id: mail.texture_id, space: mail.space, clip: mail.clip, blend: mail.blend, quads: mail.quads }
     }
 
     /// The batch a `draw_solid_quads` submission accumulates to (ADR-0107 §4).
@@ -50,6 +51,14 @@ impl QuadBatch {
                 tint: color,
             })
             .collect();
-        Self { texture_id: super::texture::WHITE_TEXTURE_ID, space: mail.space, clip: mail.clip, quads }
+        // A solid quad is a flat colour, so its colour was never
+        // scaled by a coverage it does not have.
+        Self {
+            texture_id: super::texture::WHITE_TEXTURE_ID,
+            space: mail.space,
+            clip: mail.clip,
+            blend: QuadBlend::Straight,
+            quads,
+        }
     }
 }

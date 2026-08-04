@@ -23,6 +23,7 @@ use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter,
 use aether_harness_substrate_capture::visual::{background_top_left, decode_png};
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
+use aether_render::QuadBlend;
 use aether_render::{
     CreateTexture, CreateTextureResult, DrawSolidQuads, DrawTexturedQuads, InputSlot, OutputSlot, PassStage,
     ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, SlotExtent, SlotSpec, SolidQuad,
@@ -131,6 +132,7 @@ fn register_err(harness: &mut SubstrateHarness, label: &'static str, mail: &Prog
 fn output_overlay(texture_id: u32) -> DrawTexturedQuads {
     DrawTexturedQuads {
         texture_id,
+        blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
         quads: vec![TexturedQuad {

@@ -4,6 +4,7 @@
 //! leaves depth writes off, and alpha-blends into the shared offscreen
 //! color target.
 
+use super::quad::CompositeBlend;
 use super::targets::Targets;
 use super::{DEPTH_FORMAT, MSAA_SAMPLE_COUNT, Pipeline};
 use crate::render::TextureBindings;
@@ -21,6 +22,7 @@ pub const MATERIAL_SHADER_WGSL: &str = include_str!("material.wgsl");
 #[allow(clippy::struct_field_names)]
 pub struct MaterialPipelines {
     textured: wgpu::RenderPipeline,
+    textured_premultiplied: wgpu::RenderPipeline,
     coverage: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     textured_params_buffer: wgpu::Buffer,
@@ -34,6 +36,9 @@ pub struct MaterialDraw<'a> {
     pub first_vertex: u32,
     pub vertex_count: u32,
     pub params_offset: u32,
+    /// Only read for a `Textured` draw — a coverage material builds its
+    /// own colour from bands rather than compositing a source image.
+    pub blend: CompositeBlend,
 }
 
 pub enum MaterialPassDraw<'a> {
@@ -78,6 +83,17 @@ pub fn build_material_pipelines(
         color_format,
         "fs_textured",
         &vertex_layout,
+        wgpu::BlendState::ALPHA_BLENDING,
+    );
+    let textured_premultiplied = material_pipeline(
+        device,
+        &shader,
+        &textured_layout,
+        "aether textured material premultiplied pipeline",
+        color_format,
+        "fs_textured",
+        &vertex_layout,
+        wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
     );
     let coverage = material_pipeline(
         device,
@@ -87,6 +103,7 @@ pub fn build_material_pipelines(
         color_format,
         "fs_coverage",
         &vertex_layout,
+        wgpu::BlendState::ALPHA_BLENDING,
     );
 
     let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -114,6 +131,7 @@ pub fn build_material_pipelines(
 
     MaterialPipelines {
         textured,
+        textured_premultiplied,
         coverage,
         vertex_buffer,
         textured_params_buffer,
@@ -178,6 +196,10 @@ fn material_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     super::vertex_layout(MATERIAL_VERTEX_STRIDE, ATTRIBUTES)
 }
 
+// Seven descriptor knobs plus the blend, all of them things one
+// pipeline differs from its sibling by; a struct for the three call
+// sites in this module would name them twice and clarify nothing.
+#[allow(clippy::too_many_arguments)]
 fn material_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -186,8 +208,9 @@ fn material_pipeline(
     color_format: wgpu::TextureFormat,
     fragment_entry: &'static str,
     vertex_layout: &wgpu::VertexBufferLayout<'_>,
+    blend: wgpu::BlendState,
 ) -> wgpu::RenderPipeline {
-    let fragment_targets = [Some(super::color_target_state(color_format, wgpu::BlendState::ALPHA_BLENDING))];
+    let fragment_targets = [Some(super::color_target_state(color_format, blend))];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
@@ -357,7 +380,10 @@ pub fn record_material_pass(encoder: &mut wgpu::CommandEncoder, record: Material
     for draw in draws {
         match draw {
             MaterialPassDraw::Textured(draw) => {
-                pass.set_pipeline(&pipeline.textured);
+                pass.set_pipeline(match draw.blend {
+                    CompositeBlend::Straight => &pipeline.textured,
+                    CompositeBlend::Premultiplied => &pipeline.textured_premultiplied,
+                });
                 pass.set_bind_group(1, draw.bind_group, &[]);
                 pass.set_bind_group(2, &pipeline.textured_params_bind_group, &[draw.params_offset]);
                 pass.draw(draw.first_vertex..draw.first_vertex + draw.vertex_count, 0..1);

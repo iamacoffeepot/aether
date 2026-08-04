@@ -48,6 +48,7 @@ use aether_puppet::easel::program::sheet::{
     CoatParams, LostEdgeParams, SHEET_PARAMS_BYTES, SHEET_WGSL, care_mix_pass, coat_absorb_pass, light_prime_pass,
     lost_edge_pass, paper_composite_pass, plane_slot, sheet_slot,
 };
+use aether_render::QuadBlend;
 use aether_render::{
     CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot, OutputSlot, PassStage, ProgramDispatch,
     ProgramPass, ProgramRegister, ProgramRegisterResult, TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
@@ -180,6 +181,7 @@ const RECT_TOP: u32 = 8;
 fn overlay(texture_id: u32, left: f32, side: usize) -> DrawTexturedQuads {
     DrawTexturedQuads {
         texture_id,
+        blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
         quads: vec![TexturedQuad {

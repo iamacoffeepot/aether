@@ -52,6 +52,7 @@ use aether_puppet::easel::program::puddle::{
     ThresholdUniforms, box_blur_passes, box_radius_texels, plane_slot, rim_pass, shrink_pass, threshold_pass,
 };
 use aether_puppet::math3::hash_unit;
+use aether_render::QuadBlend;
 use aether_render::{
     CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot, OutputSlot, ProgramDispatch, ProgramPass,
     ProgramRegister, ProgramRegisterResult, SlotExtent, SlotSpec, TextureFormat, TextureSampling, TextureUsage,
@@ -179,6 +180,7 @@ fn develop(
     // each texel exactly.
     let overlay = DrawTexturedQuads {
         texture_id: output_id,
+        blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
         quads: vec![TexturedQuad {

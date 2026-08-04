@@ -26,6 +26,7 @@ use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter,
 use aether_harness_substrate_capture::visual::decode_png;
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
+use aether_render::QuadBlend;
 use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawSolidQuads, DrawTexturedQuads, InputSlot, OutputSlot,
     PassRepeat, PassStage, ProgramPass, ProgramRegister, ProgramRegisterResult, SlotExtent, SlotSpec, SolidQuad,
@@ -285,6 +286,7 @@ fn destroyed_texture_ids_drop_cleanly_and_are_never_reissued() {
     // frame: the control quad in the same capture still draws.
     let stale_draw = DrawTexturedQuads {
         texture_id: first,
+        blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
         quads: vec![TexturedQuad {

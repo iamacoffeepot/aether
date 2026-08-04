@@ -33,7 +33,7 @@ pub mod regions;
 use aether_math::{Mat4, Vec3};
 use aether_render::{
     CreateGeometry, CreateTexture, DestroyTexture, DrawMaterialTextured, DrawTriangle, MaterialRect,
-    MaterialTexturedRect, ProgramDispatch, ProgramRegister, TextureFormat, TextureSampling, TextureUsage,
+    MaterialTexturedRect, ProgramDispatch, ProgramRegister, QuadBlend, TextureFormat, TextureSampling, TextureUsage,
     UpdateGeometry, UpdateTexture,
 };
 
@@ -569,6 +569,9 @@ impl Easel {
 
         Some(DrawMaterialTextured {
             texture_id: bindings.sheet,
+            // The developed sheet is opaque, so the two blends agree on
+            // it; it stays what it has always been.
+            blend: QuadBlend::Straight,
             rects: vec![MaterialTexturedRect {
                 rect: MaterialRect {
                     x: origin.x,

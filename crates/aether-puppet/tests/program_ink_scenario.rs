@@ -40,6 +40,7 @@ use aether_kinds::QuadSpace;
 use aether_math::{Mat4, Rgb, Rgba, Vec2, Vec3};
 use aether_puppet::easel::program::ink;
 use aether_puppet::easel::regions;
+use aether_render::QuadBlend;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, DrawTriangle,
     InputSlot, OutputSlot, PassStage, ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, SlotExtent,
@@ -198,6 +199,7 @@ fn develop(harness: &mut SubstrateHarness, triangles: &[DrawTriangle]) -> Vec<f3
     // centre lands on a texel centre and the sampler returns it exactly.
     let overlay = DrawTexturedQuads {
         texture_id: output,
+        blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
         quads: vec![TexturedQuad {

@@ -62,6 +62,7 @@ use aether_puppet::easel::palette;
 use aether_puppet::easel::program::ink;
 use aether_puppet::easel::program::wash::{self, WashBindings};
 use aether_puppet::labels::{BROW, DRESS, EYE, HAIR, INNER_EAR, LIPS, SKIN, TUFT};
+use aether_render::QuadBlend;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, ProgramDispatch,
     ProgramRegisterResult, TextureFormat, TextureSampling, TextureUsage, TexturedQuad,
@@ -267,6 +268,7 @@ fn rgba_nearest(harness: &mut SubstrateHarness, label: &'static str, pixels: Vec
 fn overlay(texture_id: u32, left: u32) -> DrawTexturedQuads {
     DrawTexturedQuads {
         texture_id,
+        blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
         quads: vec![TexturedQuad {

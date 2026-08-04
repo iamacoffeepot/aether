@@ -52,8 +52,8 @@ the `RenderCapability` actor. It handles these payload kinds:
 | `aether.render.create_texture` | `{ width, height, format, sampling, usage, pixels }` → `create_texture_result` | register an `Rgba8`, `R8`, or `R32Float` texture; reply carries the `texture_id` |
 | `aether.render.update_texture` | `{ texture_id, x, y, width, height, pixels }` | overwrite a sub-rect of a texture (atlas growth) |
 | `aether.render.destroy_texture` | `{ texture_id }` | release a registered texture; fire-and-forget |
-| `aether.render.draw_textured_quads` | `{ texture_id, space, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
-| `aether.render.material.textured` | `{ texture_id, rects }` | per-tick depth-tested world-space textured rects |
+| `aether.render.draw_textured_quads` | `{ texture_id, space, clip, blend, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
+| `aether.render.material.textured` | `{ texture_id, blend, rects }` | per-tick depth-tested world-space textured rects |
 | `aether.render.material.coverage` | `{ texture_id, rects }` | per-tick depth-tested world-space coverage bands from an R8 texture |
 | `aether.render.capture_frame` | `{ mails, after_mails }` | atomic "set state, read back a PNG, clean up" |
 | `aether.render.program.register` | `{ wgsl, bindings, transients, passes }` → `program.register_result` | register an authored render program (ADR-0170); reply carries the `program_id` |
@@ -73,6 +73,19 @@ and an RGBA tint. `R8` samples contribute their scalar value in the red channel
 sprite/text atlas callers use `Rgba8`. `destroy_texture` releases a registered
 texture when the producer knows it is no longer used; headless absorbs it as a
 no-op.
+
+`blend` picks how the sampled texel lays over what is already there, and the
+choice is about what the source's colour channels already carry. `Straight` —
+the default, and what an uploaded image or a glyph atlas wants — treats colour
+and coverage as independent and weights one by the other. `Premultiplied` is for
+a source whose colour has already been scaled by its own coverage, which is what
+a texture written by a [render program](render-programs.md) always is: a
+fragment pass alpha-blends onto a transparent clear, so writing `(colour, a)`
+stores `(colour * a, a)`. Compositing that as `Straight` weights it a second
+time and squares its coverage, so a half-covered texel arrives at a quarter
+strength. `material.textured` carries the same field with the same meaning. An
+opaque source is unaffected either way, which is why the distinction only
+surfaces once a program's output is partially transparent.
 
 The create carries two role knobs (ADR-0170). `sampling` selects `Linear`
 filtering for color content or `Nearest` for label planes whose texel values

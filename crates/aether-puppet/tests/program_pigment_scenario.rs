@@ -56,6 +56,7 @@ use aether_puppet::easel::program::pigment::{
     GranulateUniforms, PIGMENT_WGSL, SMEAR_PASSES, SagUniforms, SmearSlots, SmearUniforms, SpatterUniforms,
     granulate_pass, plane_slot, sag_pass, smear_passes, spatter_pass,
 };
+use aether_render::QuadBlend;
 use aether_render::{
     CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot, OutputSlot, PassStage, ProgramDispatch,
     ProgramPass, ProgramRegister, ProgramRegisterResult, SlotExtent, SlotSpec, TextureFormat, TextureSampling,
@@ -198,6 +199,7 @@ fn developed_plane(
 ) -> Vec<f32> {
     let overlay = DrawTexturedQuads {
         texture_id: shown_output_id,
+        blend: QuadBlend::Straight,
         space: QuadSpace::Screen,
         clip: None,
         quads: vec![TexturedQuad {
