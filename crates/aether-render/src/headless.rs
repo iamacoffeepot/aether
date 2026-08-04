@@ -14,7 +14,8 @@ use aether_kinds::CaptureFrame;
 use crate::kinds::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DestroyGeometry, DestroyTexture,
     DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, ProgramDestroy,
-    ProgramDispatch, ProgramRegister, ProgramRegisterResult, UpdateGeometry, UpdateTexture, ViewProjection,
+    ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult, UpdateGeometry,
+    UpdateTexture, ViewProjection,
 };
 
 /// `HeadlessRenderCapability` **identity** (ADR-0122 identity/runtime

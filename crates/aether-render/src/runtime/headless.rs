@@ -17,7 +17,8 @@ use crate::headless::HeadlessRenderCapability;
 use crate::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DestroyGeometry, DestroyTexture,
     DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, ProgramDestroy,
-    ProgramDispatch, ProgramRegister, ProgramRegisterResult, UpdateGeometry, UpdateTexture, ViewProjection,
+    ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult, UpdateGeometry,
+    UpdateTexture, ViewProjection,
 };
 
 /// `HeadlessRenderCapability` runtime state, which is nothing at all — the
@@ -169,6 +170,21 @@ impl NativeActor for HeadlessRenderCapability {
     /// reason as `on_program_dispatch`.
     #[handler::single]
     fn on_program_destroy(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ProgramDestroy) {}
+
+    /// `ProgramTimings` replies `Absent`, not `Err`
+    /// (iamacoffeepot/aether#4423): a headless chassis has no GPU to time
+    /// passes on, which is exactly the "this device cannot answer" the
+    /// `Absent` arm exists to say. `Err` is reserved for a request that
+    /// was wrong — an unknown program id — and no program can be
+    /// registered here to be wrong about.
+    #[handler::single]
+    fn on_program_timings(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: ProgramTimings,
+    ) -> ProgramTimingsResult {
+        ProgramTimingsResult::Absent { reason: "unsupported on headless chassis — no GPU".to_owned() }
+    }
 }
 
 #[cfg(all(test, feature = "runtime"))]

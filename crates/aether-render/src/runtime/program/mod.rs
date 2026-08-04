@@ -18,13 +18,18 @@ use super::geometry::{GeometryRegistry, wgpu_vertex_attributes};
 use super::pipeline::RenderGpu;
 use super::texture::TextureRegistry;
 use crate::kinds::vertex_stride_bytes;
-use crate::{ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, TextureFormat};
+use crate::{
+    ProgramDestroy, ProgramDispatch, ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult,
+    TextureFormat,
+};
 
 mod cache;
 mod record;
+mod timing;
 mod validate;
 
 use cache::DispatchCache;
+use timing::{Availability, PassCosts, PassTimingInstrument};
 use validate::ProgramPlan;
 
 /// Minimum bytes a pass binds for its uniform window: a zero-length
@@ -41,6 +46,11 @@ struct RegisteredProgram {
     plan: ProgramPlan,
     passes_gpu: Vec<PassGpu>,
     cache: DispatchCache,
+    /// Per-pass GPU duration EWMAs (iamacoffeepot/aether#4423), held
+    /// here for the same reason the cache is: they describe this
+    /// program's graph, so `program_destroy` releases them with it and a
+    /// re-register starts unmeasured under a fresh id.
+    timings: PassCosts,
 }
 
 /// Per-pass GPU resources: the compiled pipeline and the layouts the
@@ -70,12 +80,30 @@ pub struct ProgramRegistry {
     /// Pooled transient intermediates keyed by resolved extent + format,
     /// persistent across dispatches so a repaint reuses its allocations.
     transient_pool: HashMap<TransientKey, Vec<wgpu::TextureView>>,
+    /// Whether the operator wants per-pass GPU timings measured
+    /// (iamacoffeepot/aether#4423). Resolved at boot; the instrument
+    /// itself needs a device, so it is built on first use.
+    timings_enabled: bool,
+    /// The session's timestamp-query machinery, built against the device
+    /// the first time a frame records — the registry outlives the lazy
+    /// GPU boot, so it cannot be built in `new`.
+    timings: Option<PassTimingInstrument>,
 }
 
 impl ProgramRegistry {
+    /// A registry with the per-pass timing instrument enabled or
+    /// disabled. Disabled brackets nothing and allocates no query
+    /// machinery at all, and reports `Absent` with that as the reason.
     #[must_use]
-    pub fn new() -> Self {
-        Self { next_id: 0, entries: HashMap::new(), fullscreen_module: None, transient_pool: HashMap::new() }
+    pub fn new(timings_enabled: bool) -> Self {
+        Self {
+            next_id: 0,
+            entries: HashMap::new(),
+            fullscreen_module: None,
+            transient_pool: HashMap::new(),
+            timings_enabled,
+            timings: None,
+        }
     }
 
     /// Register a program: validate (naga, then the graph), then build
@@ -150,8 +178,35 @@ impl ProgramRegistry {
         let program_id = self.next_id;
         self.next_id += 1;
         let cache = DispatchCache::new(&plan);
-        self.entries.insert(program_id, RegisteredProgram { plan, passes_gpu, cache });
+        let timings = PassCosts::new(&plan);
+        self.entries.insert(program_id, RegisteredProgram { plan, passes_gpu, cache, timings });
         ProgramRegisterResult::Ok { program_id }
+    }
+
+    /// The per-pass GPU duration table one registered program has
+    /// accumulated (iamacoffeepot/aether#4423). `Absent` when the
+    /// instrument is not running — an adapter without `TIMESTAMP_QUERY`
+    /// or an operator who turned it off — so a caller can tell "this
+    /// device cannot answer" from "these passes cost nothing".
+    pub fn timings(&self, mail: &ProgramTimings) -> ProgramTimingsResult {
+        let reason = match self.timings.as_ref().map(PassTimingInstrument::availability) {
+            Some(Availability::Running { .. }) => None,
+            Some(Availability::Absent { reason }) => Some(reason.clone()),
+            // No frame has recorded yet, so the instrument has not met a
+            // device. Whether it will measure is not yet knowable, and
+            // saying so beats guessing either way.
+            None if self.timings_enabled => {
+                Some("no frame has recorded yet, so the timing instrument has not met the render device".to_owned())
+            }
+            None => Some("per-pass gpu timings are disabled by configuration".to_owned()),
+        };
+        if let Some(reason) = reason {
+            return ProgramTimingsResult::Absent { reason };
+        }
+        let Some(program) = self.entries.get(&mail.program_id) else {
+            return ProgramTimingsResult::Err { reason: format!("unknown program id {}", mail.program_id) };
+        };
+        ProgramTimingsResult::Ok { program_id: mail.program_id, rows: program.timings.rows(&program.plan) }
     }
 
     /// Release a registered program, mirroring `destroy_texture`: an
@@ -178,7 +233,22 @@ impl ProgramRegistry {
         geometries: &mut GeometryRegistry,
         dispatches: &[ProgramDispatch],
     ) {
-        let Self { entries, transient_pool, .. } = self;
+        // Fold whatever the device finished mapping since the last frame
+        // before this frame claims a readback slot, then open the frame's
+        // query budget against the passes the pending dispatches declare.
+        let enabled = self.timings_enabled;
+        let instrument =
+            self.timings.get_or_insert_with(|| PassTimingInstrument::new(&gpu.device, &gpu.queue, enabled));
+        instrument.harvest(&gpu.device, &mut self.entries);
+        let declared: usize = dispatches
+            .iter()
+            .filter_map(|dispatch| self.entries.get(&dispatch.program_id))
+            .map(|program| program.plan.passes.len())
+            .sum();
+        let measuring = instrument.begin_frame(&gpu.device, declared);
+
+        let Self { entries, transient_pool, timings, .. } = self;
+        let instrument = timings.as_mut().expect("the instrument was inserted above");
         for dispatch in dispatches {
             let Some(program) = entries.get_mut(&dispatch.program_id) else {
                 tracing::warn!(
@@ -188,7 +258,18 @@ impl ProgramRegistry {
                 );
                 continue;
             };
-            record::record_dispatch(gpu, encoder, program, transient_pool, textures, geometries, dispatch);
+            let queries = measuring.then(|| instrument.frame()).flatten();
+            record::record_dispatch(gpu, encoder, program, transient_pool, textures, geometries, dispatch, queries);
+        }
+        instrument.end_frame(encoder);
+    }
+
+    /// Request the map of the timing readback the frame just submitted.
+    /// Separate from [`Self::record`] because a buffer still named by
+    /// unsubmitted commands cannot be mapped.
+    pub fn after_frame_submit(&mut self) {
+        if let Some(instrument) = self.timings.as_mut() {
+            instrument.after_submit();
         }
     }
 }

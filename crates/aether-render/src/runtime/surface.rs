@@ -142,6 +142,18 @@ fn resolve_wireframe(
     (polygon_mode, wants_overlay, required_features)
 }
 
+/// The optional features the render device takes whenever the adapter
+/// offers them (iamacoffeepot/aether#4423). `TIMESTAMP_QUERY` is what
+/// the per-pass timing instrument brackets passes with; requesting it
+/// opportunistically rather than requiring it is what keeps a device
+/// that lacks it booting exactly as before, reporting the instrument
+/// absent-with-reason instead of failing. Nothing else in the runtime
+/// consults it, so a device that grants it and an operator who leaves
+/// the instrument off costs the same as one that never had it.
+fn opportunistic_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+    adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+}
+
 /// Boot a surfaceless wgpu device for the offscreen pumped render runtime
 /// (ADR-0161 slice R4). No surface, no swapchain — the substrate harness
 /// owns no window, so the runtime records into the offscreen targets
@@ -168,7 +180,7 @@ pub fn boot_offscreen(wireframe: Option<&str>) -> BootedOffscreen {
 
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("aether-render offscreen device"),
-        required_features,
+        required_features: required_features | opportunistic_features(&adapter),
         required_limits: render_limits(),
         experimental_features: wgpu::ExperimentalFeatures::default(),
         memory_hints: wgpu::MemoryHints::default(),
@@ -262,7 +274,7 @@ pub fn boot_surface(
 
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("aether-substrate device"),
-        required_features,
+        required_features: required_features | opportunistic_features(&adapter),
         required_limits: limits,
         experimental_features: wgpu::ExperimentalFeatures::default(),
         memory_hints: wgpu::MemoryHints::default(),
