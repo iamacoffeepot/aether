@@ -133,7 +133,10 @@ fn a_loaded_mesh_draws_from_two_angles() {
     harness
         .execute(vec![(
             "subject",
-            HarnessOp::send_and_settle(PUPPET, &Load { namespace: "assets".to_owned(), path, labels: String::new() }),
+            HarnessOp::send_and_settle(
+                PUPPET,
+                &Load { namespace: "assets".to_owned(), path, labels: String::new(), rig: String::new() },
+            ),
         )])
         .expect("the subject load settles");
 

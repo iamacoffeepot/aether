@@ -168,6 +168,10 @@ pub struct Strokes {
     subject: Resident,
     /// The subject's packed bytes, waiting for the create or update.
     subject_bytes: Option<Packed>,
+    /// The subject's index half, kept past the pack that built it: a pose
+    /// moves every vertex and no face, so this half is re-shipped
+    /// unchanged on every frame of a pose sweep.
+    subject_indices: Vec<u8>,
     /// The resident half's packed bytes, waiting for the same create or
     /// update the subject's do. Staged by the first solve after the
     /// subject changed rather than by `subject_changed` itself, because
@@ -289,7 +293,28 @@ impl Strokes {
     /// prepass means anything, and so do the resident points, which are
     /// the new surface's own curves.
     pub fn subject_changed(&mut self, mesh: &Mesh) {
-        self.subject_bytes = Some((sight::subject_vertices(mesh), sight::subject_indices(mesh)));
+        self.subject_indices = sight::subject_indices(mesh);
+        self.subject_bytes = Some((sight::subject_vertices(mesh), self.subject_indices.clone()));
+        self.resident_stale = true;
+        self.revision += 1;
+    }
+
+    /// The same subject at a new pose: every vertex moved, so the prepass
+    /// reads a stale depth until the buffer travels again.
+    ///
+    /// The face list is the one thing a pose does not touch, so it is
+    /// cloned from the pack the subject arrived with rather than rebuilt
+    /// per frame — an `update_geometry` swaps the buffer wholesale and
+    /// wants both halves, but at this density re-deriving the index half
+    /// from the face list costs several times what copying it does.
+    ///
+    /// `resident_stale` for the same reason as a new subject, and it is
+    /// the transition that needs it: posed, the drawing has no resident
+    /// half at all, so the buffer standing on the GPU has to be replaced
+    /// with the empty one or the rest pose's hatch keeps drawing under the
+    /// posed figure.
+    pub fn subject_posed(&mut self, mesh: &Mesh) {
+        self.subject_bytes = Some((sight::subject_vertices(mesh), self.subject_indices.clone()));
         self.resident_stale = true;
         self.revision += 1;
     }

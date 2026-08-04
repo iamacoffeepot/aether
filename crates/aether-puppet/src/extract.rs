@@ -198,10 +198,7 @@ fn face_weight(p: Vec3) -> f32 {
 }
 
 fn to_points(segments: Vec<[Crossing; 2]>) -> Vec<[SurfacePoint; 2]> {
-    segments
-        .into_iter()
-        .map(|[a, b]| [SurfacePoint::on_surface(a.pos, a.normal), SurfacePoint::on_surface(b.pos, b.normal)])
-        .collect()
+    segments.into_iter().map(|[a, b]| [SurfacePoint::anchored(&a), SurfacePoint::anchored(&b)]).collect()
 }
 
 pub fn silhouettes(mesh: &Mesh, eye: Vec3) -> Vec<Curve3> {
@@ -323,7 +320,14 @@ pub fn creases(mesh: &Mesh, labels: Option<&Labels>, settings: &Settings) -> Vec
 /// and unreadable — a hair seam really is about to turn away, there are
 /// just hundreds of them. Skin is where the criterion earns its place: the
 /// nose, the brow ridge, the turn of a cheek.
-pub fn suggestive(mesh: &Mesh, labels: Option<&Labels>, eye: Vec3, settings: &Settings) -> Vec<Curve3> {
+/// `rest` is the sculpt the material field was placed against. The
+/// contours are solved on `mesh`, which is the posed surface when a rig is
+/// driving one — but the field's lattice sits on the rest sculpt, so the
+/// mask is asked where each crossing sits *there*, through the anchorage
+/// the crossing carries. Sampling a posed position against a rest lattice
+/// reads whichever material has drifted under it, which on an ear that
+/// swung is a different one entirely.
+pub fn suggestive(mesh: &Mesh, rest: &Mesh, labels: Option<&Labels>, eye: Vec3, settings: &Settings) -> Vec<Curve3> {
     if settings.suggestive <= 0.0 {
         return Vec::new();
     }
@@ -339,7 +343,9 @@ pub fn suggestive(mesh: &Mesh, labels: Option<&Labels>, eye: Vec3, settings: &Se
         .suggestive(eye, settings.suggestive, settings.suggestive_gate)
         .into_iter()
         .filter(|[a, b]| {
-            labels.is_none_or(|field| field.is(a.pos, &[labels::SKIN]) && field.is(b.pos, &[labels::SKIN]))
+            labels.is_none_or(|field| {
+                field.is(rest.at(a.at), &[labels::SKIN]) && field.is(rest.at(b.at), &[labels::SKIN])
+            })
         })
         .collect();
 
@@ -396,21 +402,26 @@ fn nose_creases(mesh: &Mesh, labels: &Labels, window: &Anchor, settings: &Settin
 /// silhouette, the charted face, the suggestive contours and the visibility
 /// split. The offline renderer recomputes all of it every frame because it
 /// has no reason not to; here that difference is most of the budget.
-pub fn surface(mesh: &Mesh, labels: Option<&Labels>, anchors: Option<&Anchors>, settings: &Settings) -> Vec<Curve3> {
-    // Tone-gate the hatching here, once, rather than every frame.
-    //
-    // View-independent, not pose-independent: it reads each point's normal,
-    // and skinning changes normals. Once she can be posed this has to come
-    // back onto a per-frame path over the curve points —
-    // iamacoffeepot/aether#4336.
-    //
-    // Which hatch families survive at a point is decided by the light and
-    // the point's own normal and position — not by where the eye is. So the
-    // gate belongs with the other view-independent work, and leaving it on
-    // the per-frame path made every redraw recompute a lambert term, a
-    // face-lift falloff and a noise sample for every point of every hatch
-    // curve, to reach the same verdict as the frame before.
-    let mut out: Vec<Curve3> = hatching(mesh, settings)
+///
+/// Ungated. Every point carries the [`Anchorage`](crate::mesh::Anchorage)
+/// it was found at, so a pose skins these curves rather than re-solving
+/// them, and [`tone_gate`] then runs against the normals the pose gave
+/// them. A subject with no rig gates once, here at load, and never again.
+/// Which hatch families survive at each point, given the light and the
+/// point's own normal and position.
+///
+/// Not a function of the eye, which is why a still subject gates once at
+/// load rather than on every redraw — the gate costs a lambert term, a
+/// face-lift falloff and a noise sample for every point of every hatch
+/// curve, all of it reaching the same verdict as the frame before.
+///
+/// Not a function of the eye, but a function of the *pose*: it reads each
+/// point's normal, and skinning turns normals. So a posed subject gates
+/// after every skinning pass instead (iamacoffeepot/aether#4336) — left at
+/// load, the shading freezes to the rest pose and slides under a moving
+/// body.
+pub fn tone_gate(curves: Vec<Curve3>, settings: &Settings) -> Vec<Curve3> {
+    curves
         .into_iter()
         .flat_map(|curve| {
             let limit = match curve.class {
@@ -420,7 +431,11 @@ pub fn surface(mesh: &Mesh, labels: Option<&Labels>, anchors: Option<&Anchors>, 
 
             lit_runs(&curve, |point| settings.tone(point) < limit + noise(point.pos) * DITHER)
         })
-        .collect();
+        .collect()
+}
+
+pub fn surface(mesh: &Mesh, labels: Option<&Labels>, anchors: Option<&Anchors>, settings: &Settings) -> Vec<Curve3> {
+    let mut out = hatching(mesh, settings);
 
     out.extend(creases(mesh, labels, settings));
 

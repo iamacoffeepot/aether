@@ -94,7 +94,7 @@ fn the_sheet_stands_behind_the_ink() {
                 "subject",
                 HarnessOp::send_and_settle(
                     PUPPET,
-                    &Load { namespace: "assets".to_owned(), path: subject, labels: field },
+                    &Load { namespace: "assets".to_owned(), path: subject, labels: field, rig: String::new() },
                 ),
             ),
         ])

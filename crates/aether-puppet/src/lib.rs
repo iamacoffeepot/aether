@@ -72,6 +72,7 @@
 
 pub mod anchor;
 pub mod chart;
+pub mod deform;
 pub mod easel;
 pub mod extract;
 pub mod feature;
@@ -97,6 +98,7 @@ use aether_render::{
     CreateGeometryResult, CreateTextureResult, ProgramRegisterResult, RenderCapability, ViewProjection,
 };
 use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
+use core::mem;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
@@ -176,14 +178,9 @@ pub struct Puppet {
     dragging: bool,
     cursor: Vec2,
     aspect: f32,
-    /// Last frame's view-dependent curves, and the eye they were solved
+    /// Last frame's view-dependent curves, and the frame they were solved
     /// for: the silhouette, the charted face and the suggestive
     /// contours. The other half of the drawing is `surface`.
-    ///
-    /// Keyed on the eye alone, which is sound only while the mesh is
-    /// static: once a pose exists the eye can be unchanged while the
-    /// drawing is not, and this would serve a stale frame. The key has to
-    /// carry the pose too — iamacoffeepot/aether#4336.
     ///
     /// Silhouette and visibility are the only view-dependent work, so a
     /// frame drawn from an eye we have already solved is the same frame.
@@ -191,7 +188,7 @@ pub struct Puppet {
     /// without this every one of those redraws re-marched 868k faces and
     /// re-cast every occlusion ray to arrive at the identical answer.
     volatile: Vec<Curve3>,
-    drawn_from: Option<Vec3>,
+    drawn_from: Option<Frame>,
     /// Held until extraction runs, because the answer is not known until
     /// both assets have landed.
     owed: Option<ReplyHandle>,
@@ -200,6 +197,23 @@ pub struct Puppet {
     /// its packed field points stay resident on the GPU across an orbit
     /// (iamacoffeepot/aether#4435).
     surface: Vec<Curve3>,
+    /// The rig this subject was loaded with, and what it is currently
+    /// doing. Without a rig the pose is inert and every frame is the rest
+    /// frame.
+    skin: Option<deform::Skin>,
+    /// Staging for the rig's two files, which settle independently of each
+    /// other and of the mesh they have to be checked against.
+    rig: Rig,
+    pose: Pose,
+    /// The subject skinned to `posed_at`, and the surface curves carried
+    /// onto it and re-gated against the normals it gave them. Both are
+    /// `None` at rest, where the rest subject *is* the posed one.
+    posed: Option<Mesh>,
+    posed_surface: Vec<Curve3>,
+    posed_at: Option<Pose>,
+    /// Where each bone sends a point at `posed_at`. Solved once per pose
+    /// and read by both skinning passes and by the chart's frame.
+    transforms: Vec<deform::Rigid>,
     settings: extract::Settings,
     look: Look,
     /// The wash layer under the ink (#4349): a painted sheet standing
@@ -213,6 +227,58 @@ pub struct Puppet {
     /// the replies carry no sender — so the answer is position: the
     /// render cap replies to one kind in the order that kind was sent.
     awaiting: Awaiting3,
+}
+
+/// Everything the cached drawing is a function of.
+///
+/// Keyed on the eye alone this was sound only while the mesh was static:
+/// once a pose exists the eye can be unchanged while the drawing is not,
+/// and the cache would serve a stale frame. So the key carries whatever
+/// produced the geometry, not just whatever produced the view
+/// (iamacoffeepot/aether#4336).
+#[derive(Clone, Copy, PartialEq)]
+struct Frame {
+    eye: Vec3,
+    pose: Pose,
+}
+
+/// The rig's two files, held until the mesh they describe is in.
+///
+/// They arrive as separate mail in whichever order the reads settle, and
+/// the weights cannot be checked against a vertex count that has not
+/// landed yet — so the bytes wait here and the rig is built once nothing
+/// is outstanding, exactly as the material field waits for its bounds.
+#[derive(Default)]
+struct Rig {
+    weights: Option<Vec<u8>>,
+    descriptor: Option<String>,
+    awaiting_weights: Option<String>,
+    awaiting_descriptor: Option<String>,
+}
+
+impl Rig {
+    /// Whether `path` is one of the rig's two outstanding reads.
+    fn claims(&self, path: &str) -> bool {
+        [&self.awaiting_weights, &self.awaiting_descriptor].into_iter().any(|owed| owed.as_deref() == Some(path))
+    }
+
+    fn accept(&mut self, path: &str, bytes: Vec<u8>) {
+        if self.awaiting_weights.as_deref() == Some(path) {
+            self.awaiting_weights = None;
+            self.weights = Some(bytes);
+        } else {
+            self.awaiting_descriptor = None;
+            self.descriptor = String::from_utf8(bytes).ok();
+        }
+    }
+
+    fn outstanding(&self) -> bool {
+        self.awaiting_weights.is_some() || self.awaiting_descriptor.is_some()
+    }
+
+    fn build(&self, vertices: usize) -> Option<deform::Skin> {
+        deform::Skin::parse(self.weights.as_ref()?, self.descriptor.as_ref()?, vertices)
+    }
 }
 
 /// The layer an in-flight ask belongs to.
@@ -264,6 +330,122 @@ impl Puppet {
 
         chart::marks(subject, anchors, face, &self.settings, eye)
     }
+
+    /// The surface the drawing is solved against: the posed copy while a
+    /// rig is driving one, and the sculpt itself otherwise.
+    fn drawn_surface(&self) -> &Mesh {
+        let subject = self.subject.as_ref().expect("a surface is only asked for once a subject is in");
+
+        self.posed.as_ref().filter(|_| !self.pose.is_rest()).unwrap_or(subject)
+    }
+
+    /// Where the eye stands in her own frame.
+    ///
+    /// The chart is authored in the model's frontal plane and planted
+    /// along it, so a head that has turned is drawn by carrying the viewer
+    /// back through the head's rotation rather than by planting a face on
+    /// a turned head — which casts every ray at a graze and slides the
+    /// marks across her cheek as she moves. It is also the frame the turn
+    /// gate wants: "is the profile over her bridge yet" is a question
+    /// about where the eye is *relative to her*.
+    fn charting_eye(&self, eye: Vec3) -> Vec3 {
+        self.skin
+            .as_ref()
+            .filter(|_| !self.pose.is_rest())
+            .map_or(eye, |skin| skin.head(&self.pose).inverse().point(eye))
+    }
+
+    /// Bring the posed surface and the posed curves up to the current
+    /// pose, if they are not there already.
+    ///
+    /// Two skinning passes, and the second is the point of the whole
+    /// exercise: the surface pass is per vertex and pays for the
+    /// silhouette, which is the one feature a pose cannot be cached
+    /// through; the curve pass is per *curve point* and stands in for
+    /// re-solving hatch and crease, which would be a march over the whole
+    /// sculpt.
+    fn repose(&mut self) {
+        if self.posed_at == Some(self.pose) {
+            return;
+        }
+        let (Some(skin), Some(subject), Some(posed)) = (self.skin.as_ref(), self.subject.as_ref(), self.posed.as_mut())
+        else {
+            return;
+        };
+
+        self.transforms = skin.transforms(&self.pose);
+        skin.pose_surface(&self.transforms, subject, &mut posed.positions, &mut posed.normals);
+        posed.rebound();
+        self.posed_surface = deform::posed_surface(skin, &self.transforms, posed, &self.surface, &self.settings);
+        self.posed_at = Some(self.pose);
+
+        // The prepass reads the surface the ink is drawn on, so it has to
+        // be the posed one — a depth buffer left at the rest pose culls
+        // strokes on an ear that swung out of it and passes strokes on a
+        // cheek that turned away.
+        self.strokes.subject_posed(posed);
+    }
+
+    /// Everything the frame's drawing is: the surface posed, the curves
+    /// carried onto it, and the view-dependent features re-solved.
+    fn resolve(&mut self, frame: Frame) {
+        self.repose();
+
+        let subject = self.subject.as_ref().expect("a frame is only resolved once a subject is in");
+        let posed = !self.pose.is_rest() && self.posed.is_some();
+        let surface = self.drawn_surface();
+        let bias = surface.surface_bias();
+
+        // The face rides the per-eye path rather than the cached surface,
+        // because the nose bar retires once her face turns over its own
+        // bridge and that is a question about where the eye is. Suggestive
+        // contours are there for the same reason — they are the silhouette
+        // one derivative out.
+        let mut face = self.face(subject, self.charting_eye(frame.eye));
+        if let (Some(skin), true) = (self.skin.as_ref(), posed) {
+            skin.pose_curves(&self.transforms, surface, &mut face);
+        }
+
+        let solved: Vec<Curve3> = face
+            .into_iter()
+            .chain(extract::suggestive(surface, subject, self.labels.as_ref(), frame.eye, &self.settings))
+            .chain(extract::silhouettes(surface, frame.eye))
+            .collect();
+        self.volatile = if posed {
+            // Posed, the surface curves are volatile too — every one of
+            // them moved. They lead, so the drawing keeps the order it
+            // composites in.
+            self.posed_surface.iter().cloned().chain(solved).collect()
+        } else {
+            solved
+        };
+        self.drawn_from = Some(frame);
+
+        // A posed subject has no resident half. The buffer #4435 leaves on
+        // the GPU across an orbit is exactly the buffer a pose invalidates
+        // — and the split is by volatility rather than by class precisely
+        // so a pose moves curves from one half to the other and nothing
+        // else has to change.
+        let resident: &[Curve3] = if posed {
+            &[]
+        } else {
+            &self.surface
+        };
+
+        // Occlusion is no longer asked here. The drawing goes to the GPU
+        // whole — every curve, unsplit — and the visibility field decides
+        // which of its points carry width (ADR-0172). What is left on this
+        // side is the lay-out and the pack: extraction above, and the rail
+        // solve inside `solve`.
+        let drawing = Drawing { resident, volatile: &self.volatile };
+        if !self.strokes.solve(drawing, frame.eye, self.view_matrix(), bias, self.aspect) && self.strokes.live() {
+            tracing::warn!(
+                target: "aether_puppet",
+                curves = drawing.len(),
+                "the drawing does not fit the visibility field; no ink this frame",
+            );
+        }
+    }
 }
 
 #[actor]
@@ -284,6 +466,13 @@ impl WasmActor for Puppet {
             drawn_from: None,
             owed: None,
             surface: Vec::new(),
+            skin: None,
+            rig: Rig::default(),
+            pose: Pose::default(),
+            posed: None,
+            posed_surface: Vec::new(),
+            posed_at: None,
+            transforms: Vec::new(),
             settings: extract::Settings::default(),
             easel: easel::Easel::default(),
             strokes: strokes::Strokes::default(),
@@ -377,14 +566,27 @@ impl WasmActor for Puppet {
     fn on_load(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: Load) {
         self.owed = ctx.reply_target();
 
+        let fetch = |path: String| {
+            let context = LoadContext { reply: None, namespace: mail.namespace.clone(), path };
+            ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
+        };
+
         if !mail.labels.is_empty() {
             self.awaiting_labels = Some(mail.labels.clone());
-            let context = LoadContext { reply: None, namespace: mail.namespace.clone(), path: mail.labels.clone() };
-            ctx.actor::<FsCapability>().with_context(&context).read(&mail.namespace, &mail.labels);
+            fetch(mail.labels.clone());
+        }
+        if !mail.rig.is_empty() {
+            self.skin = None;
+            self.rig = Rig {
+                awaiting_weights: Some(format!("{}/weights.npy", mail.rig)),
+                awaiting_descriptor: Some(format!("{}/rig.txt", mail.rig)),
+                ..Rig::default()
+            };
+            fetch(format!("{}/weights.npy", mail.rig));
+            fetch(format!("{}/rig.txt", mail.rig));
         }
 
-        let context = LoadContext { reply: None, namespace: mail.namespace, path: mail.path };
-        ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
+        fetch(mail.path.clone());
     }
 
     /// Answer the load, once, with whatever actually happened.
@@ -416,8 +618,12 @@ impl WasmActor for Puppet {
         };
 
         // Which asset this is, decided by the path the reply echoes rather
-        // than by arrival order — the two reads settle independently.
-        if self.awaiting_labels.as_deref() == Some(path.as_str()) {
+        // than by arrival order — the reads settle independently.
+        if self.rig.claims(&path) {
+            // Held rather than parsed: the weights are only meaningful
+            // against a vertex count, and the mesh may not be in yet.
+            self.rig.accept(&path, bytes);
+        } else if self.awaiting_labels.as_deref() == Some(path.as_str()) {
             self.awaiting_labels = None;
             let bounds = self.subject.as_ref().map_or((Vec3::splat(-1.0), Vec3::splat(1.0)), |m| (m.min, m.max));
             self.labels = labels::Labels::parse(&bytes, bounds.0, bounds.1, LABEL_PAD);
@@ -439,7 +645,7 @@ impl WasmActor for Puppet {
         let Some(subject) = self.subject.as_ref() else {
             return;
         };
-        if self.awaiting_labels.is_some() {
+        if self.awaiting_labels.is_some() || self.rig.outstanding() {
             return;
         }
 
@@ -458,6 +664,24 @@ impl WasmActor for Puppet {
         // Hatch and crease describe the surface, not the view, so they are
         // solved once here rather than every frame.
         self.surface = extract::surface(subject, self.labels.as_ref(), self.anchors.as_ref(), &self.settings);
+
+        // The rig, checked against the mesh it claims to bind. A refused
+        // one leaves her unposable rather than posing her wrongly, and the
+        // reply says so.
+        self.skin = self.rig.build(subject.positions.len());
+        if self.rig.weights.is_some() && self.skin.is_none() {
+            tracing::warn!(target: "aether_puppet", "the rig does not bind this subject; she stays in the rest pose");
+        }
+
+        // Ungated when a rig is in: the gate reads each point's normal and
+        // skinning turns normals, so it runs after every skinning pass
+        // instead. With no rig nothing turns, and the load-time gate is
+        // the whole of it.
+        if self.skin.is_none() {
+            self.surface = extract::tone_gate(mem::take(&mut self.surface), &self.settings);
+        }
+        self.posed = self.skin.as_ref().map(|_| subject.deformable());
+        self.posed_at = None;
         self.drawn_from = None;
         self.easel.subject_changed();
         self.strokes.subject_changed(subject);
@@ -466,12 +690,24 @@ impl WasmActor for Puppet {
             faces = subject.faces.len(),
             curves = self.surface.len(),
             masked = self.labels.is_some(),
+            bones = self.skin.as_ref().map_or(0, deform::Skin::bones),
             eyes = self.anchors.as_ref().map_or(0, |at| at.eyes.len()),
             "subject loaded",
         );
 
-        let settled = LoadResult::Ok { vertices: subject.positions.len() as u32, faces: subject.faces.len() as u32 };
+        let settled = LoadResult::Ok {
+            vertices: subject.positions.len() as u32,
+            faces: subject.faces.len() as u32,
+            bones: self.skin.as_ref().map_or(0, deform::Skin::bones) as u32,
+        };
         self.settle(ctx, &settled);
+    }
+
+    /// Drive the rig. Fire-and-forget: the pose is state, and the frame
+    /// that follows draws it.
+    #[handler::single]
+    fn on_pose(&mut self, _ctx: &mut WasmCtx<'_>, pose: Pose) {
+        self.pose = pose;
     }
 
     #[handler::single]
@@ -531,41 +767,16 @@ impl WasmActor for Puppet {
         let render = ctx.actor::<RenderCapability>();
         render.send(&self.view_projection());
 
-        let Some(subject) = self.subject.as_ref() else {
+        if self.subject.is_none() {
             return;
-        };
+        }
 
         let eye = self.eye();
-        if self.drawn_from != Some(eye) {
-            // The face rides the per-eye path rather than the cached
-            // surface, because the nose bar retires once her face turns
-            // over its own bridge and that is a question about where the
-            // eye is. Suggestive contours are there for the same reason —
-            // they are the silhouette one derivative out.
-            self.volatile = self
-                .face(subject, eye)
-                .into_iter()
-                .chain(extract::suggestive(subject, self.labels.as_ref(), eye, &self.settings))
-                .chain(extract::silhouettes(subject, eye))
-                .collect();
-            self.drawn_from = Some(eye);
-
-            // Occlusion is no longer asked here. The drawing goes to the
-            // GPU whole — every curve, unsplit — and the visibility
-            // field decides which of its points carry width (ADR-0172).
-            // What is left on this side is the lay-out and the pack:
-            // extraction above, and the rail solve inside `solve`.
-            let drawing = Drawing { resident: &self.surface, volatile: &self.volatile };
-            if !self.strokes.solve(drawing, eye, self.view_matrix(), subject.surface_bias(), self.aspect)
-                && self.strokes.live()
-            {
-                tracing::warn!(
-                    target: "aether_puppet",
-                    curves = drawing.len(),
-                    "the drawing does not fit the visibility field; no ink this frame",
-                );
-            }
+        let frame = Frame { eye, pose: self.pose };
+        if self.drawn_from != Some(frame) {
+            self.resolve(frame);
         }
+        let subject = self.subject.as_ref().expect("a subject that was there a moment ago");
 
         // The easel, under everything above: develop this view, then stand
         // the sheet behind the subject. Every frame — the whole develop is
@@ -589,6 +800,16 @@ impl WasmActor for Puppet {
             // edge, so the disagreement rendered as flush tracing the ears'
             // outline (issue 4399). Paint in the lines requires the mask
             // and the lines to agree about where the surface ends.
+            //
+            // The *rest* fine mesh while a pose is running, which is a
+            // known gap rather than a choice: the easel bakes its subject
+            // plane once per subject and has no re-upload path for a
+            // buffer that moved, so handing it a posed surface would put
+            // its per-develop terms (the material centroids, the chart's
+            // eye frames) on a pose its baked mask is not on. Coherently
+            // behind is the honest place to stand until the wash's own
+            // subject geometry can follow — iamacoffeepot/aether#4387's
+            // subtree owns that buffer.
             let painted_mesh = subject;
             let chart = self.anchors.as_ref().zip(self.settings.face).map(|(anchors, face)| easel::Chart {
                 mesh: subject,

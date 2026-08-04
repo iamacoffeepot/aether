@@ -31,10 +31,37 @@ pub struct Mesh {
     pub normals: Vec<Vec3>,
     pub min: Vec3,
     pub max: Vec3,
-    bvh: Bvh,
+    /// Absent on a posed copy, which is never asked a ray question — see
+    /// [`Self::deformable`].
+    bvh: Option<Bvh>,
     /// Cached, because the occlusion bias reads it once per ray sample and
     /// the honest computation walks every face.
     mean_edge: f32,
+}
+
+/// Where on the surface a point was found: which face, and where inside
+/// it.
+///
+/// This is what makes a pose cheap. A curve point is not a free-floating
+/// position — it is an address on the sculpt, recorded when the level set
+/// or the planting ray found it. Carrying the address means the point can
+/// be re-evaluated against a posed surface for the cost of a barycentric
+/// blend, instead of the level set being solved again
+/// (iamacoffeepot/aether#4336).
+#[derive(Clone, Copy, Debug)]
+pub struct Anchorage {
+    pub face: u32,
+    /// Shares of the face's second and third corners; the first takes the
+    /// remainder.
+    pub u: f32,
+    pub v: f32,
+}
+
+impl Anchorage {
+    /// The three corner shares, in the face's own corner order.
+    pub fn barycentric(self) -> [f32; 3] {
+        [1.0 - self.u - self.v, self.u, self.v]
+    }
 }
 
 /// A point where a level set crosses an edge.
@@ -45,6 +72,8 @@ pub struct Crossing {
     /// An auxiliary field sampled at the crossing, when one was supplied.
     /// Creases use it to carry how steeply the relief was changing there.
     pub strength: f32,
+    /// Where this crossing sits on the surface, so a pose can carry it.
+    pub at: Anchorage,
 }
 
 impl Mesh {
@@ -56,8 +85,49 @@ impl Mesh {
         (!raw.faces.is_empty()).then(|| Self::build(raw.positions, raw.faces, normal_relaxation))
     }
 
-    pub fn posed(&self, positions: Vec<Vec3>, normal_relaxation: usize) -> Self {
-        Self::build(positions, self.faces.clone(), normal_relaxation)
+    /// A copy of this mesh for a pose to be written into, sharing its
+    /// faces and carrying no ray accelerator.
+    ///
+    /// The positions and normals arrive as the rest ones and are
+    /// overwritten by [`Skin::pose_surface`]; [`Self::rebound`] closes the
+    /// pose off. No accelerator because nothing asks the posed surface a
+    /// ray question: the chart plants its face in the model's own frontal
+    /// plane, which is a question about the sculpt, and the eye is carried
+    /// into that frame rather than the face being planted on a head that
+    /// has turned.
+    ///
+    /// The mean edge length rides along rather than being re-measured. A
+    /// bust rig is near-isometric, and this length sets the occlusion bias
+    /// — a bias that jittered frame to frame with the pose would flicker
+    /// self-occlusion along every long curve.
+    ///
+    /// [`Skin::pose_surface`]: crate::deform::Skin::pose_surface
+    pub fn deformable(&self) -> Self {
+        Self {
+            positions: self.positions.clone(),
+            faces: self.faces.clone(),
+            normals: self.normals.clone(),
+            min: self.min,
+            max: self.max,
+            bvh: None,
+            mean_edge: self.mean_edge,
+        }
+    }
+
+    /// Re-measure the bounds after the positions were posed in place.
+    pub fn rebound(&mut self) {
+        (self.min, self.max) = bounds_of(&self.positions);
+    }
+
+    /// Where an anchorage sits on *this* mesh.
+    ///
+    /// The address is the sculpt's, so asking it of the rest mesh and of a
+    /// posed copy of it is how a point found on one is read on the other.
+    pub fn at(&self, anchorage: Anchorage) -> Vec3 {
+        self.faces[anchorage.face as usize]
+            .iter()
+            .zip(anchorage.barycentric())
+            .fold(Vec3::ZERO, |sum, (&corner, share)| sum + self.positions[corner as usize] * share)
     }
 
     fn build(positions: Vec<Vec3>, faces: Vec<[u32; 3]>, normal_relaxation: usize) -> Self {
@@ -67,12 +137,7 @@ impl Mesh {
             normals = relax(&normals, &raw.faces);
         }
 
-        let (min, max) = raw.positions.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), p| {
-            (
-                Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z)),
-                Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z)),
-            )
-        });
+        let (min, max) = bounds_of(&raw.positions);
 
         // Orientation check: for a closed surface the outward normal
         // agrees with the direction from the centroid. Near +1 is outward,
@@ -84,7 +149,7 @@ impl Mesh {
                 / raw.positions.len() as f32;
         tracing::debug!(target: "aether_puppet", agreement, "normal orientation");
 
-        let bvh = Bvh::build(&raw.positions, &raw.faces);
+        let bvh = Some(Bvh::build(&raw.positions, &raw.faces));
         let mean_edge = mean_edge_length(&raw.positions, &raw.faces);
         Self { positions: raw.positions, faces: raw.faces, normals, min, max, bvh, mean_edge }
     }
@@ -94,12 +159,12 @@ impl Mesh {
     }
 
     pub fn occluded(&self, origin: Vec3, dir: Vec3, distance: f32) -> bool {
-        self.bvh.occluded(origin, dir, 1e-4, distance)
+        self.bvh.as_ref().is_some_and(|bvh| bvh.occluded(origin, dir, 1e-4, distance))
     }
 
     /// First surface along the ray: its point and interpolated normal.
     pub fn hit(&self, origin: Vec3, dir: Vec3) -> Option<Crossing> {
-        let (t, face) = self.bvh.nearest(origin, dir, 1e-4, f32::MAX)?;
+        let (t, face) = self.bvh.as_ref()?.nearest(origin, dir, 1e-4, f32::MAX)?;
         let pos = origin + dir * t;
 
         // Barycentric blend of the vertex normals, so a mark lies on the
@@ -112,9 +177,10 @@ impl Mesh {
             ((b - pos).cross(c - pos).length() / total, (c - pos).cross(a - pos).length() / total)
         };
         let [na, nb, nc] = self.faces[face].map(|i| self.normals[i as usize]);
-        let normal = (na * wa + nb * wb + nc * (1.0 - wa - wb).max(0.0)).normalize_or(na);
+        let wc = (1.0 - wa - wb).max(0.0);
+        let normal = (na * wa + nb * wb + nc * wc).normalize_or(na);
 
-        Some(Crossing { pos, normal, strength: 0.0 })
+        Some(Crossing { pos, normal, strength: 0.0, at: Anchorage { face: face as u32, u: wb, v: wc } })
     }
 
     /// Where an edge crosses `iso`, evaluated from the lower vertex index
@@ -124,13 +190,17 @@ impl Mesh {
     /// faces meeting at an edge each emit an endpoint there, and if they
     /// interpolate in opposite directions the two results differ in the
     /// last bit and the seam never closes. Sorted, they are identical.
-    fn crossing(&self, values: &[f32], aux: &[f32], iso: f32, a: u32, b: u32) -> Crossing {
-        let (lo, hi) = if a < b {
-            (a, b)
+    /// `i` and `j` name the edge's two corners *within* `face`, so the
+    /// crossing can report where inside the face it landed as well as
+    /// where in the world — the [`Anchorage`] a pose carries it by.
+    fn crossing(&self, face: usize, i: usize, j: usize, values: &[f32], aux: &[f32], iso: f32) -> Crossing {
+        let corners = self.faces[face];
+        let (lo_corner, hi_corner) = if corners[i] < corners[j] {
+            (i, j)
         } else {
-            (b, a)
+            (j, i)
         };
-        let (lo, hi) = (lo as usize, hi as usize);
+        let (lo, hi) = (corners[lo_corner] as usize, corners[hi_corner] as usize);
 
         let span = values[hi] - values[lo];
         let t = if span.abs() < 1e-20 {
@@ -139,6 +209,10 @@ impl Mesh {
             (iso - values[lo]) / span
         };
 
+        let mut shares = [0.0f32; 3];
+        shares[lo_corner] = 1.0 - t;
+        shares[hi_corner] = t;
+
         Crossing {
             pos: self.positions[lo].lerp(self.positions[hi], t),
             normal: self.normals[lo].lerp(self.normals[hi], t).normalize_or(self.normals[lo]),
@@ -146,6 +220,7 @@ impl Mesh {
                 [] => 0.0,
                 field => field[lo] + (field[hi] - field[lo]) * t,
             },
+            at: Anchorage { face: face as u32, u: shares[1], v: shares[2] },
         }
     }
 
@@ -164,9 +239,9 @@ impl Mesh {
             [x, _, z] if x == z => 1,
             _ => 0,
         };
-        let (a, b) = (corners[(odd + 1) % 3], corners[(odd + 2) % 3]);
+        let (a, b) = ((odd + 1) % 3, (odd + 2) % 3);
 
-        Some([self.crossing(values, aux, iso, corners[odd], a), self.crossing(values, aux, iso, corners[odd], b)])
+        Some([self.crossing(face, odd, a, values, aux, iso), self.crossing(face, odd, b, values, aux, iso)])
     }
 
     /// Every segment of the single level set `values = iso`.
@@ -415,6 +490,12 @@ impl Mesh {
     }
 }
 
+fn bounds_of(positions: &[Vec3]) -> (Vec3, Vec3) {
+    positions.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), p| {
+        (Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z)), Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z)))
+    })
+}
+
 fn mean_edge_length(positions: &[Vec3], faces: &[[u32; 3]]) -> f32 {
     let total: f32 = faces
         .iter()
@@ -491,4 +572,46 @@ fn relax(normals: &[Vec3], faces: &[[u32; 3]]) -> Vec<Vec3> {
     }
 
     sum.iter().map(|&n| n.normalize_or(Vec3::new(0.0, 1.0, 0.0))).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tripwire: the address a crossing records is the address the
+    /// crossing is at.
+    ///
+    /// [`Anchorage`] is the whole basis of posing a drawing without
+    /// re-extracting it, and the address is derived beside the position
+    /// rather than from it — `crossing` interpolates along the edge from
+    /// the lower *vertex index*, while the barycentric shares are written
+    /// into the face's own *corner slots*, and the two orders agree only
+    /// because the mapping between them is made explicitly. Get that
+    /// mapping wrong and every crossing still lands in the right place,
+    /// still reports a plausible address, and still draws an identical
+    /// rest frame — the drawing only detaches from the surface once
+    /// something poses it, a file away from the mistake.
+    ///
+    /// The strip's two faces name their corners in different orders and
+    /// the level set cuts both, so a shares-to-slots mapping that happens
+    /// to work for one of them is caught by the other.
+    #[test]
+    fn a_crossing_is_where_its_anchorage_says_it_is() {
+        const OBJ: &[u8] = b"v -1 0 0\nv 1 0 0\nv -1 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n";
+        let mesh = Mesh::from_obj_bytes(OBJ, 0).expect("a strip is a mesh");
+
+        let heights: Vec<f32> = mesh.positions.iter().map(|p| p.y).collect();
+        let segments = mesh.level_set(&heights, &[], 0.3);
+        assert_eq!(segments.len(), 2, "the level set crosses both faces");
+
+        for crossing in segments.iter().flatten() {
+            let addressed = mesh.at(crossing.at);
+            assert!(
+                (crossing.pos - addressed).length() < 1e-6,
+                "a crossing at {:?} addresses {addressed:?} on face {}",
+                crossing.pos,
+                crossing.at.face,
+            );
+        }
+    }
 }
