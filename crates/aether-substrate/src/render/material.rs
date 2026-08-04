@@ -5,7 +5,7 @@
 //! color target.
 
 use super::targets::Targets;
-use super::{DEPTH_FORMAT, Pipeline};
+use super::{DEPTH_FORMAT, MSAA_SAMPLE_COUNT, Pipeline};
 use crate::render::TextureBindings;
 use std::slice;
 
@@ -214,7 +214,7 @@ fn material_pipeline(
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState { count: MSAA_SAMPLE_COUNT, ..wgpu::MultisampleState::default() },
         multiview_mask: None,
         cache: None,
     })
@@ -342,7 +342,7 @@ pub fn record_material_pass(encoder: &mut wgpu::CommandEncoder, record: Material
 
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("aether material pass"),
-        color_attachments: &[Some(super::load_color_attachment(targets.color_view()))],
+        color_attachments: &[Some(super::load_color_attachment(targets.msaa_view()))],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: &targets.depth.view,
             depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),

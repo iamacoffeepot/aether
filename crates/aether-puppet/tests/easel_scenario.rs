@@ -61,6 +61,14 @@ fn load_puppet(harness: &mut SubstrateHarness, wasm_path: &Path) {
     }
 }
 
+/// Ink reads as "clearly darker than paper", not as an absolute black: the
+/// strokes are hairlines, and 4x MSAA resolves a partly-covered stroke pixel
+/// against the bright sheet behind it, so the darkest ink lands near 100 per
+/// channel rather than under it. This ceiling sits well below the paper
+/// [`the_sheet_stands_behind_the_ink`] pins above 180, so a pixel under it is
+/// ink in front of the sheet and cannot be paper.
+const INK_CEILING: u8 = 170;
+
 #[test]
 fn the_sheet_stands_behind_the_ink() {
     let Some(wasm_path) = require_runtime("aether_puppet") else {
@@ -109,7 +117,7 @@ fn the_sheet_stands_behind_the_ink() {
     let inked = (0..img.width)
         .flat_map(|x| (0..img.height).map(move |y| (x, y)))
         .map(|(x, y)| rgba_at(&img, x, y))
-        .filter(|pixel| pixel[0] < 100 && pixel[1] < 100 && pixel[2] < 100)
+        .filter(|pixel| pixel[0] < INK_CEILING && pixel[1] < INK_CEILING && pixel[2] < INK_CEILING)
         .count();
     assert!(inked > 0, "the ink must win the depth test over the sheet, and no dark stroke pixels survived");
 }

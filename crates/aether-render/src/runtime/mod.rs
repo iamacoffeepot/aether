@@ -55,6 +55,7 @@ use aether_substrate::mail::registry::Registry;
 use aether_substrate::render::visual;
 use aether_substrate::render::{
     CaptureMeta, IDENTITY_VIEW_PROJ, RenderError, encode_png, map_capture_rgba, prepare_capture_copy, record_main_pass,
+    record_resolve_pass,
 };
 #[cfg(feature = "desktop")]
 use winit::window::Window;
@@ -412,6 +413,13 @@ impl RenderCapabilityState {
                 self.camera_state,
                 Some(&self.overlay_observation),
             );
+        }
+        // Every pass above rasterized into the multisampled pair; resolve
+        // once, here at the end of the chain, into the single-sample
+        // texture the swapchain blit and the capture readback consume.
+        {
+            let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+            record_resolve_pass(encoder, &targets);
         }
         Ok(())
     }
