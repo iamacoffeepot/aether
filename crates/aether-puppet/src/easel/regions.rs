@@ -3,7 +3,7 @@
 //! Before a brush touches paper a painter has answered two questions per
 //! patch of the subject: what is this, and how lit is it. [`rasterize`]
 //! bakes both answers per pixel — `class` carries the material at the
-//! nearest surface (`0` background, then the [`labels`](crate::labels)
+//! nearest surface (`0` background, then the [`labels`]
 //! ids), `tone` carries the key light there — so a wash engine downstream
 //! places pigment by material and reserves paper by light instead of
 //! guessing from the strokes.

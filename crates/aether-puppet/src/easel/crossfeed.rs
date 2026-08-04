@@ -71,9 +71,15 @@ fn crossfeed_the_wash_with_external_planes() {
 
     for (run, facing) in [("real", &facing), ("flat", &flat)] {
         let planes = Planes { classes: &classes, tone: &tone, facing, width, height };
-        for coat in Sheet::new(planes, SEED).coats(None, None) {
-            write_f32_plane(&dir.join(format!("density-{run}-{}.bin", coat.class)), &coat.density);
+        let sheet = Sheet::new(planes, SEED);
+        let coats = sheet.coats(None, None);
+        for (index, coat) in coats.iter().enumerate() {
+            write_f32_plane(&dir.join(format!("density-{run}-{index}-{}.bin", coat.class)), &coat.density);
         }
-        eprintln!("{run}: densities written to {}", dir.display());
+
+        fs::write(dir.join(format!("composite-{run}.bin")), super::palette::composite(&coats, sheet.paper_shade()))
+            .expect("write composite");
+        write_f32_plane(&dir.join(format!("care-{run}.bin")), sheet.care());
+        eprintln!("{run}: {} coats, composite and care written to {}", coats.len(), dir.display());
     }
 }

@@ -40,7 +40,7 @@ pub const CLASSES: usize = EYE as usize;
 /// over its neighbourhood and the sheet behind it gets a vote.
 const SCORE_SIGMA: f32 = 1.2;
 
-/// Gather radius for [`SCORE_SIGMA`], in cells. At 2.5 sigma the kernel
+/// Gather radius for `SCORE_SIGMA`, in cells. At 2.5 sigma the kernel
 /// is under half a percent of its peak.
 const SCORE_REACH: i32 = 3;
 
@@ -84,12 +84,26 @@ impl Labels {
             return None;
         }
 
+        let mut labels = Self { cells, n, origin: Vec3::splat(0.0), spacing: 1.0 };
+        labels.place_against(min, max, pad);
+
+        Some(labels)
+    }
+
+    /// Re-place the lattice against a mesh's bounds.
+    ///
+    /// The two loads settle in either order, and a field that lands
+    /// before its mesh is first placed against stand-in bounds. Those
+    /// bounds scale the whole lattice, so a 5% span error displaces a
+    /// sample by cells — most at the crown, where the ear tips then read
+    /// the concha's labels (issue 4401). Whoever holds the mesh calls
+    /// this again once the real bounds are in.
+    pub fn place_against(&mut self, min: Vec3, max: Vec3, pad: f32) {
         let centre = (min + max) * 0.5;
         let span = (max - min).to_array().into_iter().fold(f32::MIN, f32::max);
-        let origin = centre - Vec3::splat(span * (0.5 + pad));
-        let spacing = span * (1.0 + 2.0 * pad) / (n - 1) as f32;
 
-        Some(Self { cells, n, origin, spacing })
+        self.origin = centre - Vec3::splat(span * (0.5 + pad));
+        self.spacing = span * (1.0 + 2.0 * pad) / (self.n - 1) as f32;
     }
 
     fn at(&self, ix: i32, iy: i32, iz: i32) -> u8 {
@@ -146,7 +160,7 @@ impl Labels {
     /// pipeline's classification signal (spikes 139/142).
     ///
     /// Equivalent to gaussian-blurring each class's indicator volume at
-    /// [`SCORE_SIGMA`] and reading the result at `p`, computed as a
+    /// `SCORE_SIGMA` and reading the result at `p`, computed as a
     /// gather so no blurred volume is ever materialized. The consumer
     /// interpolates these scores across a face and argmaxes *after*
     /// interpolation — argmaxing here would reduce the whole exercise to

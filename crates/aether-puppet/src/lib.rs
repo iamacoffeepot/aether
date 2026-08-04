@@ -416,6 +416,13 @@ impl WasmActor for Puppet {
             return;
         }
 
+        // The field's lattice is placed against the mesh's own bounds, and
+        // a field that settled before its mesh was placed against stand-in
+        // bounds — re-place it now that both are in (issue 4401).
+        if let Some(labels) = self.labels.as_mut() {
+            labels.place_against(subject.min, subject.max, LABEL_PAD);
+        }
+
         // Where her features are, measured off the field before anything is
         // drawn on them. Placement is derived; only the shape is authored.
         self.anchors = self.labels.as_ref().and_then(|labels| anchor::Anchors::measure(subject, labels));
