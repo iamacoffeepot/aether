@@ -14,6 +14,7 @@
 //! alternative threads a counter through every op signature for a
 //! number only an instrument reads.
 
+use std::env;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -99,7 +100,7 @@ pub fn backoff_cap() -> Duration {
         // measuring harness itself, not capability config — there is no
         // cap whose ADR-0090 layer this would belong to.
         #[allow(clippy::disallowed_methods)]
-        let raw = std::env::var("AETHER_HARNESS_POLL_CAP_MICROS").ok();
+        let raw = env::var("AETHER_HARNESS_POLL_CAP_MICROS").ok();
         parse_cap(raw.as_deref())
     })
 }

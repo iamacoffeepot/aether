@@ -41,6 +41,7 @@ use aether_trace::walk::TreeWalk;
 // `push_to_mailbox` encodes any sent kind through the descriptor-aware
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape);
 // `encode_empty` builds the zero-byte payload for unit lifecycle kinds.
+use crate::pump_stats;
 use crate::settlement_config::SettlementConfig;
 use aether_actor::{Addressable, Root};
 use aether_fs::NamespaceRoots;
@@ -1216,7 +1217,7 @@ impl SubstrateHarness {
         // observed up to a whole capped sleep after it actually finished,
         // and that lag is indistinguishable from work at this seam.
         const BACKOFF_FLOOR: Duration = Duration::from_micros(50);
-        let backoff_cap = crate::pump_stats::backoff_cap();
+        let backoff_cap = pump_stats::backoff_cap();
         // Wall-clock budget for consecutive quiet (no-progress) time
         // before giving up — a deadlock/livelock backstop, not the gate a
         // healthy reply meets, so it reads the runtime-configurable
@@ -1310,7 +1311,7 @@ impl SubstrateHarness {
                     return Err(SubstrateHarnessError::Timeout { expected, pumped_iterations: iterations });
                 }
                 thread::sleep(backoff);
-                crate::pump_stats::record_sleep(backoff, backoff >= backoff_cap);
+                pump_stats::record_sleep(backoff, backoff >= backoff_cap);
                 backoff = (backoff * 2).min(backoff_cap);
             }
         }
