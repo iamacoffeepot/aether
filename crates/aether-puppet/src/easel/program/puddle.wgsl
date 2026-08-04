@@ -2,7 +2,7 @@
 // ADR-0170): the wash's water vocabulary from easel/field.rs and
 // easel/image.rs re-spoken as WGSL, one entry point per op. The CPU
 // implementations stay the oracle, so every formula here is a transcription
-// rather than an approximation: the box average reads the same clamped
+// rather than an approximation: the box average reads the same mirrored
 // window the running sum averages, the shrink resample is the same bilinear
 // with everything off the plane reading as zero, and the threshold band is
 // the same hermite ramp over the same displaced noise window.
@@ -21,10 +21,24 @@
 // pass pipeline binds only its own window (aether-render builds one
 // pipeline per pass over this shared module).
 
-// The CPU planes' clamp-at-edge read: image.rs `clamped` applied per axis.
-fn load_clamped(plane: texture_2d<f32>, at: vec2<i32>) -> f32 {
+// The CPU planes' mirror-at-edge read: image.rs `reflected` applied per
+// axis — half-sample symmetric, so index -1 reads texel 0. Replicating
+// the edge instead would pull a border average toward the edge texel's
+// own value, and would not survive being filtered: iterating a sweep
+// would stop being the same operator as one sweep of those iterations
+// convolved (iamacoffeepot/aether#4444).
+fn load_reflected(plane: texture_2d<f32>, at: vec2<i32>) -> f32 {
     let extent = vec2<i32>(textureDimensions(plane));
-    return textureLoad(plane, clamp(at, vec2<i32>(0, 0), extent - vec2<i32>(1, 1)), 0).r;
+    let zero = vec2<i32>(0, 0);
+    // One fold at each edge, which is every fold a window narrower than
+    // the plane can want; the clamp answers the degenerate wider one, and
+    // answers it the same way image.rs does. Folding by selects rather
+    // than by a periodic remainder is deliberate — an integer division
+    // per axis per tap costs more here than every other instruction in
+    // the sweep put together.
+    let under = select(at, -vec2<i32>(1, 1) - at, at < zero);
+    let over = select(under, 2 * extent - vec2<i32>(1, 1) - under, under >= extent);
+    return textureLoad(plane, clamp(over, zero, extent - vec2<i32>(1, 1)), 0).r;
 }
 
 // The CPU `sample_bilinear` corner read: everything off the plane is zero.
@@ -90,13 +104,13 @@ fn fs_box_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32>
 
     var sum = 0.0;
     for (var tap = 1 - reach; tap < reach; tap++) {
-        sum += load_clamped(box_blur_source, at + axis * tap);
+        sum += load_reflected(box_blur_source, at + axis * tap);
     }
     if reach == 0 {
-        sum = load_clamped(box_blur_source, at);
+        sum = load_reflected(box_blur_source, at);
     } else {
         sum += straddle
-            * (load_clamped(box_blur_source, at - axis * reach) + load_clamped(box_blur_source, at + axis * reach));
+            * (load_reflected(box_blur_source, at - axis * reach) + load_reflected(box_blur_source, at + axis * reach));
     }
     return plane_out(sum / (2.0 * half_width));
 }
@@ -109,7 +123,7 @@ fn fs_box_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32>
 // downsample averages each divisor-square block — the same box average
 // the sweeps do, so the reduction is itself part of the softening rather
 // than a resample laid on top — and the upsample carries the result back
-// bilinearly, edges clamped exactly as the sweeps clamp theirs.
+// bilinearly, edges mirrored exactly as the sweeps mirror theirs.
 struct ScaleParams {
     divisor: i32,
 }
@@ -124,7 +138,7 @@ fn fs_box_downsample(@builtin(position) position: vec4<f32>) -> @location(0) vec
     var sum = 0.0;
     for (var down = 0; down < box_scale.divisor; down++) {
         for (var across = 0; across < box_scale.divisor; across++) {
-            sum += load_clamped(box_scale_source, base + vec2<i32>(across, down));
+            sum += load_reflected(box_scale_source, base + vec2<i32>(across, down));
         }
     }
     return plane_out(sum / f32(box_scale.divisor * box_scale.divisor));
@@ -143,13 +157,13 @@ fn fs_box_upsample(@builtin(position) position: vec4<f32>) -> @location(0) vec4<
     let x0 = i32(corner.x);
     let y0 = i32(corner.y);
     let upper = mix(
-        load_clamped(box_scale_source, vec2<i32>(x0, y0)),
-        load_clamped(box_scale_source, vec2<i32>(x0 + 1, y0)),
+        load_reflected(box_scale_source, vec2<i32>(x0, y0)),
+        load_reflected(box_scale_source, vec2<i32>(x0 + 1, y0)),
         fraction.x,
     );
     let lower = mix(
-        load_clamped(box_scale_source, vec2<i32>(x0, y0 + 1)),
-        load_clamped(box_scale_source, vec2<i32>(x0 + 1, y0 + 1)),
+        load_reflected(box_scale_source, vec2<i32>(x0, y0 + 1)),
+        load_reflected(box_scale_source, vec2<i32>(x0 + 1, y0 + 1)),
         fraction.x,
     );
     return plane_out(mix(upper, lower, fraction.y));
