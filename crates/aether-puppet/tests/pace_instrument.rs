@@ -603,16 +603,22 @@ fn the_drawing_divides_by_volatility() {
         let drawing = Drawing { resident: &resident, volatile: &volatile };
         let layout = sight::layout(drawing, canvas()).expect("the drawing fits");
         let both = |packed: (Vec<u8>, Vec<u8>)| packed.0.len() + packed.1.len();
-        let points = |spans: &[sight::Span]| both((sight::point_vertices(drawing, spans), sight::point_indices(spans)));
-        let ribbons = |half| both(stroke::ribbon_geometry(drawing, &layout, half));
+        // Each half through its own packer, as the layer ships it: the
+        // resident one carries the anchorage its vertex stage poses from,
+        // the volatile one is posed already and carries none.
+        let resting =
+            both((sight::point_vertices(drawing, layout.resident(), None), sight::point_indices(layout.resident())));
+        let moving =
+            both((sight::posed_point_vertices(drawing, layout.volatile()), sight::point_indices(layout.volatile())));
+        let ribbons = |half| both(stroke::ribbon_geometry(drawing, &layout, half, None));
         let curves = both((sight::curve_vertices(drawing, &layout, eye), sight::curve_indices(&layout)));
 
         // The drawing's two halves, each carrying its points and its
         // ribbons, and the per-curve references that belong to neither
         // — a reference depth is the eye's for a resident curve as
         // much as for a volatile one (#4440).
-        let staying = points(layout.resident()) + ribbons(Half::Resident);
-        let travelling = points(layout.volatile()) + ribbons(Half::Volatile) + curves;
+        let staying = resting + ribbons(Half::Resident);
+        let travelling = moving + ribbons(Half::Volatile) + curves;
         let megabytes = |bytes: usize| bytes as f64 / 1.0e6;
 
         eprintln!(
@@ -622,7 +628,7 @@ fn the_drawing_divides_by_volatility() {
             volatile.len(),
             megabytes(staying),
             megabytes(travelling),
-            megabytes(points(layout.volatile())),
+            megabytes(moving),
             megabytes(ribbons(Half::Volatile)),
             megabytes(curves),
             megabytes(staying + travelling),
@@ -678,10 +684,20 @@ fn the_render_handler_divides_by_phase() {
     let (width, height) = canvas();
     let canvas = Canvas { width: width as usize, height: height as usize };
 
+    // Both sizes of the resident half, because a rigged subject holds
+    // the ungated one: the tone gate reads normals the vertex stage
+    // poses, so it runs there and the CPU keeps every point it might yet
+    // want. What that costs per frame is `ribbon::reference_depth`,
+    // which walks the whole drawing's points for one float a curve.
+    let points = |curves: &[Curve3]| curves.iter().map(|curve| curve.points.len()).sum::<usize>();
     eprintln!(
-        "phase: at {width}x{height}, {} resident curves + {} volatile, over {PHASE_REPEATS} repeats",
+        "phase: at {width}x{height}, {} resident curves + {} volatile, over {PHASE_REPEATS} repeats — the resident half \
+         is {} points gated and {} ungated, over {} curves",
         at.resident.len(),
         volatile.len(),
+        points(&at.resident),
+        points(&at.ungated),
+        at.ungated.len(),
     );
     time_the_develop(&at, &view, canvas);
     time_the_eye_moved_half(&at, drawing, &view);
@@ -696,19 +712,24 @@ const PHASE_YAW: f32 = 18.0;
 
 /// The half only a pose pays, and what the coarse-mesh question turns on.
 ///
-/// Four terms, and they scale with two different things. The surface skin
-/// and the prepass pack scale with the *mesh* — a coarse subject cuts them
-/// directly. The curve skin, the gate and the strokes pack scale with the
-/// *drawing*, and the drawing's point count is the level set's arc length
-/// over the triangle size, so a coarse mesh thins it rather than cutting
-/// it in proportion.
+/// Two groups, and the split between them is the whole of
+/// iamacoffeepot/aether#4462.
 ///
-/// The pack is timed over the whole drawing rather than the volatile half
-/// because that is what a posed frame ships: every curve moved, so the
-/// resident buffer #4435 leaves on the GPU across an orbit is exactly what
-/// a pose invalidates. Read it against the same pack in
-/// `time_the_eye_moved_half`, which is the same work over the 12% an orbit
-/// re-ships.
+/// **What a posed frame still pays** is the `pose —` rows: one skinning
+/// pass over the mesh's vertices and a silhouette re-extracted off the
+/// result. The silhouette is the zero set of `view . normal` and depends
+/// on the pose *and* the eye, so it is the one feature a pose cannot be
+/// cached through; the skin survives to feed it.
+///
+/// **What it no longer pays** is the `retired —` rows: the curve skin and
+/// its tone re-gate, the prepass pack, and the pack of the whole drawing
+/// as volatile. Those were 82% of a posed frame. The skin now runs in the
+/// vertex stage from a bone table that rides the uniform blob, the gate
+/// runs beside it against the normal that stage posed, and the drawing's
+/// geometry stays resident through a pose exactly as it stays resident
+/// through an orbit. They are still timed because they are still the
+/// oracle every one of those GPU answers is held against, and because a
+/// number nobody re-measures is a number nobody notices growing.
 fn time_the_pose_moved_half(at: &Subject, skin: &deform::Skin, view: &View) {
     let pose = Pose { yaw: PHASE_YAW, ..Pose::default() };
     let transforms = skin.transforms(&pose);
@@ -718,25 +739,42 @@ fn time_the_pose_moved_half(at: &Subject, skin: &deform::Skin, view: &View) {
         skin.pose_surface(&transforms, &at.mesh, &mut posed.positions, &mut posed.normals);
     });
     posed.rebound();
+    phase("pose — silhouette off the posed surface", PHASE_REPEATS, || extract::silhouettes(&posed, view.eye));
 
-    let carried = phase("pose — the curve skin and the tone gate, per curve point", PHASE_REPEATS, || {
+    // What a posed frame packs now: the volatile half alone, against the
+    // resident half that stays on the GPU. The same pack
+    // `time_the_eye_moved_half` prices for an orbit, which is the point —
+    // a pose and a turn ship the same bytes.
+    let volatile = at.volatile_at(view.eye);
+    let resting = Drawing { resident: &at.resident, volatile: &volatile };
+    phase("pose — strokes pack, the volatile half against a resident drawing", PHASE_REPEATS, || {
+        pack(resting, view.eye)
+    });
+
+    let carried = phase("retired — the curve skin and the tone gate, per curve point", PHASE_REPEATS, || {
         deform::posed_surface(skin, &transforms, &posed, &at.ungated, &at.settings)
     });
-    phase("pose — silhouette off the posed surface", PHASE_REPEATS, || extract::silhouettes(&posed, view.eye));
-    phase("pose — the prepass subject pack, per vertex", PHASE_REPEATS, || sight::subject_vertices(&posed));
+    phase("retired — the prepass subject pack, per vertex", PHASE_REPEATS, || sight::subject_vertices(&posed, None));
 
-    let volatile: Vec<Curve3> = carried.into_iter().chain(at.volatile_at(view.eye)).collect();
-    let drawing = Drawing { resident: &[], volatile: &volatile };
-    phase("pose — strokes pack, the WHOLE drawing volatile", PHASE_REPEATS, || {
-        let layout = sight::layout(drawing, canvas()).expect("the drawing fits");
-        (
-            sight::point_vertices(drawing, layout.volatile()),
-            sight::point_indices(layout.volatile()),
-            sight::curve_vertices(drawing, &layout, view.eye),
-            stroke::ribbon_geometry(drawing, &layout, Half::Volatile),
-        )
-    });
-    eprintln!("phase: posed, the drawing is {} curves, all of them volatile", volatile.len());
+    let whole: Vec<Curve3> = carried.into_iter().chain(at.volatile_at(view.eye)).collect();
+    let moved = Drawing { resident: &[], volatile: &whole };
+    phase("retired — strokes pack, the WHOLE drawing volatile", PHASE_REPEATS, || pack(moved, view.eye));
+    eprintln!("phase: posed, the drawing is {} curves — {} of which stay resident now", whole.len(), at.resident.len());
+}
+
+/// The field's and the ink's volatile buffers for one drawing: what a
+/// re-solve ships, whether the eye moved or the subject did.
+type Volatile = (Vec<u8>, Vec<u8>, Vec<u8>, (Vec<u8>, Vec<u8>));
+
+fn pack(drawing: Drawing<'_>, eye: Vec3) -> Volatile {
+    let layout = sight::layout(drawing, canvas()).expect("the drawing fits");
+
+    (
+        sight::posed_point_vertices(drawing, layout.volatile()),
+        sight::point_indices(layout.volatile()),
+        sight::curve_vertices(drawing, &layout, eye),
+        stroke::ribbon_geometry(drawing, &layout, Half::Volatile, None),
+    )
 }
 
 /// The phases `Easel::develop` runs, in the order it runs them — the ones
@@ -771,7 +809,16 @@ fn time_the_develop(at: &Subject, view: &View, canvas: Canvas) {
     let frame = Frame { placement, faces: Some(Faces { fine: &fine_eyes, body: &body_eyes, presence: &presence }) };
     let wash_uniforms =
         phase("frame_uniforms — the wash blob", PHASE_REPEATS, || program.frame_uniforms(&slice, &frame));
-    phase("bake uniforms", PHASE_REPEATS, || bake::BakeUniforms { view_proj: view.view_proj, eye: view.eye }.encode());
+    phase("bake uniforms", PHASE_REPEATS, || {
+        bake::BakeUniforms {
+            view_proj: view.view_proj,
+            eye: view.eye,
+            bones: deform::bone_uniform(&[]),
+            tone: sight::ToneUniforms::of(&at.settings, at.skin.is_some()),
+            posed: at.skin.is_some(),
+        }
+        .encode()
+    });
 
     let aperture_bytes = phase("aperture pack", PHASE_REPEATS, || {
         (
@@ -780,7 +827,7 @@ fn time_the_develop(at: &Subject, view: &View, canvas: Canvas) {
         )
     });
     phase("bake pack — per subject", 1, || {
-        (bake::vertices(&at.mesh, &at.scores, &at.settings), bake::indices(&at.mesh))
+        (bake::vertices(&at.mesh, &at.scores, &at.settings, at.skin.as_ref()), bake::indices(&at.mesh))
     });
 
     let megabytes = |bytes: usize| bytes as f64 / 1.0e6;
@@ -797,15 +844,7 @@ fn time_the_develop(at: &Subject, view: &View, canvas: Canvas) {
 /// skippable — an orbit frame genuinely re-solves both.
 fn time_the_eye_moved_half(at: &Subject, drawing: Drawing<'_>, view: &View) {
     phase("volatile extraction — the eye-moved half", PHASE_REPEATS, || at.volatile_at(view.eye));
-    phase("strokes pack — the volatile field and ribbon buffers", PHASE_REPEATS, || {
-        let layout = sight::layout(drawing, canvas()).expect("the drawing fits");
-        (
-            sight::point_vertices(drawing, layout.volatile()),
-            sight::point_indices(layout.volatile()),
-            sight::curve_vertices(drawing, &layout, view.eye),
-            stroke::ribbon_geometry(drawing, &layout, Half::Volatile),
-        )
-    });
+    phase("strokes pack — the volatile field and ribbon buffers", PHASE_REPEATS, || pack(drawing, view.eye));
 }
 
 /// The subject the phases are measured against, assembled once — the

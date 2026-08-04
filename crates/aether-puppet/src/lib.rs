@@ -206,17 +206,26 @@ pub struct Puppet {
     /// other and of the mesh they have to be checked against.
     rig: Rig,
     pose: Pose,
-    /// The subject skinned to `posed_at`, and the surface curves carried
-    /// onto it and re-gated against the normals it gave them. Neither is
-    /// read at rest, where the sculpt itself *is* the posed surface and
-    /// `surface` is the drawing; `posed` is allocated once with the rig so
-    /// a pose writes into it rather than reallocating a mesh per frame.
+    /// The subject skinned to `posed_at`. Not read at rest, where the
+    /// sculpt itself *is* the posed surface; allocated once with the rig
+    /// so a pose writes into it rather than reallocating a mesh per
+    /// frame.
+    ///
+    /// One consumer remains, and it is the one a pose cannot be cached
+    /// through: the silhouette is the zero set of `view . normal` and
+    /// depends on the pose *and* the eye, so it is genuinely re-extracted
+    /// off a posed surface. Everything else the pose used to be carried
+    /// onto — the surface curves, their tone gate, the prepass depth,
+    /// the wash's own subject — is posed in a vertex stage now, from a
+    /// bone table that rides the uniform blob
+    /// (iamacoffeepot/aether#4462).
     posed: Option<Mesh>,
-    posed_surface: Vec<Curve3>,
     posed_at: Option<Pose>,
-    /// Where each bone sends a point at `posed_at`. Solved once per pose
-    /// and read by both skinning passes and by the chart's frame.
+    /// Where each bone sends a point at `posed_at`, and the same table as
+    /// the uniform lanes every vertex stage skins from. Empty at rest,
+    /// where every bone is the identity.
     transforms: Vec<deform::Rigid>,
+    bones: [f32; deform::BONE_LIMIT * 12],
     settings: extract::Settings,
     look: Look,
     /// The wash layer under the ink (#4349): a painted sheet standing
@@ -334,14 +343,6 @@ impl Puppet {
         chart::marks(subject, anchors, face, &self.settings, eye)
     }
 
-    /// The surface the drawing is solved against: the posed copy while a
-    /// rig is driving one, and the sculpt itself otherwise.
-    fn drawn_surface(&self) -> &Mesh {
-        let subject = self.subject.as_ref().expect("a surface is only asked for once a subject is in");
-
-        self.posed.as_ref().filter(|_| !self.pose.is_rest()).unwrap_or(subject)
-    }
-
     /// Where the eye stands in her own frame.
     ///
     /// The chart is authored in the model's frontal plane and planted
@@ -352,21 +353,38 @@ impl Puppet {
     /// gate wants: "is the profile over her bridge yet" is a question
     /// about where the eye is *relative to her*.
     fn charting_eye(&self, eye: Vec3) -> Vec3 {
+        self.skin.as_ref().filter(|_| !self.pose.is_rest()).map_or(eye, |_| self.head_at_pose().inverse().point(eye))
+    }
+
+    /// Where the head bone sends a point at this pose, and the identity
+    /// while nothing is driving it.
+    ///
+    /// The wash's accents want this rather than the whole bone table: an
+    /// eye is bound wholly to the head, so its blend at every point is
+    /// the head's own map, and the paint reaches the pose by one
+    /// transform of a couple of dozen planted points.
+    fn head_at_pose(&self) -> deform::Rigid {
         self.skin
             .as_ref()
             .filter(|_| !self.pose.is_rest())
-            .map_or(eye, |skin| skin.head(&self.pose).inverse().point(eye))
+            .map_or(deform::Rigid::IDENTITY, |skin| skin.head(&self.pose))
     }
 
-    /// Bring the posed surface and the posed curves up to the current
-    /// pose, if they are not there already.
+    /// Bring the posed surface up to the current pose, if it is not there
+    /// already.
     ///
-    /// Two skinning passes, and the second is the point of the whole
-    /// exercise: the surface pass is per vertex and pays for the
-    /// silhouette, which is the one feature a pose cannot be cached
-    /// through; the curve pass is per *curve point* and stands in for
-    /// re-solving hatch and crease, which would be a march over the whole
-    /// sculpt.
+    /// One skinning pass now, where there were two, and it survives for
+    /// the one consumer a pose cannot be cached through: the silhouette
+    /// is re-extracted off the posed surface every frame because it is
+    /// the zero set of `view . normal`, so it wants posed positions and
+    /// posed normals on this side. The curve pass that stood in for
+    /// re-solving hatch and crease is gone — those curves are packed
+    /// against their anchorages and posed in the vertex stage, which is
+    /// what stopped a posed frame from shipping the whole drawing.
+    ///
+    /// The bone table is the pose's whole footprint on everything else:
+    /// the prepass depth, the ink's rails and the wash's own subject all
+    /// read it out of their dispatch's uniform blob.
     fn repose(&mut self) {
         if self.posed_at == Some(self.pose) {
             return;
@@ -377,26 +395,18 @@ impl Puppet {
         };
         self.posed_at = Some(self.pose);
 
-        // Back at rest the sculpt itself is the surface again, so the
-        // prepass buffer goes back to it and the resident half is refilled
-        // — the return trip has to ship as much as the outbound one did,
-        // or she stands still in the pose she was last driven to.
+        self.transforms = if self.pose.is_rest() {
+            Vec::new()
+        } else {
+            skin.transforms(&self.pose)
+        };
+        self.bones = deform::bone_uniform(&self.transforms);
         if self.pose.is_rest() {
-            self.posed_surface.clear();
-            self.strokes.subject_posed(subject);
             return;
         }
 
-        self.transforms = skin.transforms(&self.pose);
         skin.pose_surface(&self.transforms, subject, &mut posed.positions, &mut posed.normals);
         posed.rebound();
-        self.posed_surface = deform::posed_surface(skin, &self.transforms, posed, &self.surface, &self.settings);
-
-        // The prepass reads the surface the ink is drawn on, so it has to
-        // be the posed one — a depth buffer left at the rest pose culls
-        // strokes on an ear that swung out of it and passes strokes on a
-        // cheek that turned away.
-        self.strokes.subject_posed(posed);
     }
 
     /// Everything the frame's drawing is: the surface posed, the curves
@@ -404,9 +414,11 @@ impl Puppet {
     fn resolve(&mut self, frame: Frame) {
         self.repose();
 
+        let view_proj = self.view_matrix();
+        let charting_eye = self.charting_eye(frame.eye);
         let subject = self.subject.as_ref().expect("a frame is only resolved once a subject is in");
         let posed = !self.pose.is_rest() && self.posed.is_some();
-        let surface = self.drawn_surface();
+        let surface = self.posed.as_ref().filter(|_| posed).unwrap_or(subject);
         let bias = surface.surface_bias();
 
         // The face rides the per-eye path rather than the cached surface,
@@ -414,44 +426,48 @@ impl Puppet {
         // bridge and that is a question about where the eye is. Suggestive
         // contours are there for the same reason — they are the silhouette
         // one derivative out.
-        let mut face = self.face(subject, self.charting_eye(frame.eye));
+        let mut face = self.face(subject, charting_eye);
         if let (Some(skin), true) = (self.skin.as_ref(), posed) {
             skin.pose_curves(&self.transforms, surface, &mut face);
         }
 
-        let solved: Vec<Curve3> = face
+        // The volatile half is solved on the CPU at whatever pose is
+        // running and so arrives already posed — a few hundred charted
+        // points carried onto the surface above, and a silhouette
+        // extracted off it. It is the resident half that a pose used to
+        // move here wholesale, and no longer does.
+        self.volatile = face
             .into_iter()
             .chain(extract::suggestive(surface, subject, self.labels.as_ref(), frame.eye, &self.settings))
             .chain(extract::silhouettes(surface, frame.eye))
             .collect();
-        self.volatile = if posed {
-            // Posed, the surface curves are volatile too — every one of
-            // them moved. They lead, so the drawing keeps the order it
-            // composites in.
-            self.posed_surface.iter().cloned().chain(solved).collect()
-        } else {
-            solved
-        };
         self.drawn_from = Some(frame);
 
-        // A posed subject has no resident half. The buffer #4435 leaves on
-        // the GPU across an orbit is exactly the buffer a pose invalidates
-        // — and the split is by volatility rather than by class precisely
-        // so a pose moves curves from one half to the other and nothing
-        // else has to change.
-        let resident: &[Curve3] = if posed {
-            &[]
-        } else {
-            &self.surface
-        };
-
-        // Occlusion is no longer asked here. The drawing goes to the GPU
+        // A pose no longer costs the drawing its residency. Every surface
+        // curve is packed against the anchorage it was extracted at and
+        // posed in the vertex stage, so the buffer #4435 left on the GPU
+        // across an orbit is the same buffer a pose sweep leaves there —
+        // and what travels per frame is the volatile minority and a bone
+        // table (iamacoffeepot/aether#4462).
+        //
+        // Occlusion is not asked here either. The drawing goes to the GPU
         // whole — every curve, unsplit — and the visibility field decides
         // which of its points carry width (ADR-0172). What is left on this
         // side is the lay-out and the pack: extraction above, and the rail
         // solve inside `solve`.
-        let drawing = Drawing { resident, volatile: &self.volatile };
-        if !self.strokes.solve(drawing, frame.eye, self.view_matrix(), bias, self.aspect) && self.strokes.live() {
+        //
+        // `bound` is `Some` only for a rigged subject, and it decides two
+        // things at once: what the resident curves are packed against, so
+        // their vertex stage can pose them, and whether the tone gate
+        // runs on the GPU at all — an unrigged subject's curves were
+        // gated at load, against normals nothing turns.
+        let posing = strokes::Posing {
+            bound: self.skin.as_ref().map(|skin| deform::Bound { rest: subject, skin }),
+            bones: self.bones,
+            tone: easel::program::sight::ToneUniforms::of(&self.settings, self.skin.is_some()),
+        };
+        let drawing = Drawing { resident: &self.surface, volatile: &self.volatile };
+        if !self.strokes.solve(drawing, frame.eye, view_proj, bias, self.aspect, posing) && self.strokes.live() {
             tracing::warn!(
                 target: "aether_puppet",
                 curves = drawing.len(),
@@ -483,9 +499,9 @@ impl WasmActor for Puppet {
             rig: Rig::default(),
             pose: Pose::default(),
             posed: None,
-            posed_surface: Vec::new(),
             posed_at: None,
             transforms: Vec::new(),
+            bones: deform::bone_uniform(&[]),
             settings: extract::Settings::default(),
             easel: easel::Easel::default(),
             strokes: strokes::Strokes::default(),
@@ -687,9 +703,11 @@ impl WasmActor for Puppet {
         }
 
         // Ungated when a rig is in: the gate reads each point's normal and
-        // skinning turns normals, so it runs after every skinning pass
-        // instead. With no rig nothing turns, and the load-time gate is
-        // the whole of it.
+        // skinning turns normals, so it moves to the vertex stage that
+        // poses them (`sight.wgsl`'s `hatched`). With no rig nothing
+        // turns, and the load-time gate is the whole of it — which is why
+        // the shader's own gate is switched off for that subject rather
+        // than asked to agree with this one.
         if self.skin.is_none() {
             self.surface = extract::tone_gate(mem::take(&mut self.surface), &self.settings);
         }
@@ -698,9 +716,11 @@ impl WasmActor for Puppet {
         // already staged it, so the first frame owes no skinning at all.
         self.posed_at = Some(Pose::default());
         self.pose = Pose::default();
+        self.transforms = Vec::new();
+        self.bones = deform::bone_uniform(&[]);
         self.drawn_from = None;
         self.easel.subject_changed();
-        self.strokes.subject_changed(subject);
+        self.strokes.subject_changed(subject, self.skin.as_ref());
         tracing::info!(
             target: "aether_puppet",
             faces = subject.faces.len(),
@@ -749,10 +769,13 @@ impl WasmActor for Puppet {
         };
         let painted = easel::Subject {
             mesh: subject,
+            posed: self.posed.as_ref().filter(|_| !self.pose.is_rest()),
             scores,
             settings: &self.settings,
             ink: self.strokes.ink_plane(),
             chart: None,
+            skin: self.skin.as_ref(),
+            bones: self.bones,
         };
         let Some(planes) = self.easel.bake_planes(&painted, &view) else {
             tracing::warn!(target: "aether_puppet", "dump_planes: no canvas before the first resize");
@@ -817,27 +840,42 @@ impl WasmActor for Puppet {
             // outline (issue 4399). Paint in the lines requires the mask
             // and the lines to agree about where the surface ends.
             //
-            // The *rest* fine mesh while a pose is running, which is a
-            // known gap rather than a choice: the easel bakes its subject
-            // plane once per subject and has no re-upload path for a
-            // buffer that moved, so handing it a posed surface would put
-            // its per-develop terms (the material centroids, the chart's
-            // eye frames) on a pose its baked mask is not on. Coherently
-            // behind is the honest place to stand until the wash's own
-            // subject geometry can follow — iamacoffeepot/aether#4387's
-            // subtree owns that buffer.
+            // The *rest* fine mesh, and it stays the rest one under a
+            // pose: the bake's vertex stage poses it from the bone table
+            // below, so the buffer uploaded once per subject is still the
+            // right buffer and the wash's mask lands on the same pose the
+            // ink does. The alternative was a subject re-upload path,
+            // which would have been the per-frame whole-buffer upload
+            // iamacoffeepot/aether#4462 exists to delete.
+            //
+            // What still stands at rest is the develop's own per-frame
+            // terms — the material centroids, the chart's eye frames, the
+            // aperture cast — all of which are measured off the sculpt.
+            // They drift by the pose rather than by the frame, which is a
+            // smaller and separable gap than a mask on the wrong pose.
             let painted_mesh = subject;
             let chart = self.anchors.as_ref().zip(self.settings.face).map(|(anchors, face)| easel::Chart {
                 mesh: subject,
                 anchors,
                 face,
+                head: self.head_at_pose(),
+                eye: self.charting_eye(eye),
             });
             // Where the ink stands, named rather than re-derived: the
             // stroke program reduced it out of the very raster it drew
             // the frame's ink from, one dispatch ago in this same handler
             // (iamacoffeepot/aether#4451).
             let ink = self.strokes.ink_plane();
-            let painted = easel::Subject { mesh: painted_mesh, scores, settings: &self.settings, ink, chart };
+            let painted = easel::Subject {
+                mesh: painted_mesh,
+                posed: self.posed.as_ref().filter(|_| !self.pose.is_rest()),
+                scores,
+                settings: &self.settings,
+                ink,
+                chart,
+                skin: self.skin.as_ref(),
+                bones: self.bones,
+            };
 
             self.easel.develop(&painted, &view);
         }

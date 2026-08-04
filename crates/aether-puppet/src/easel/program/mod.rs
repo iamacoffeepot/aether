@@ -30,6 +30,22 @@
 //! off (iamacoffeepot/aether#4451) — so where paint yields boundary duty
 //! and where ink actually stands are one answer rather than two.
 
+/// The skinning prelude, appended after a program's own WGSL wherever a
+/// vertex stage stands on a posed surface (iamacoffeepot/aether#4462).
+///
+/// Concatenated rather than duplicated because three programs pose the
+/// same subject from the same bone table and a second transcription of a
+/// blend is a second thing to get wrong. It reads `params.bones`, so a
+/// program that appends it declares that member on its own uniform
+/// block; nothing here binds anything.
+pub const SKIN_WGSL: &str = include_str!("skin.wgsl");
+
+/// The lighting prelude, appended the same way wherever a stage has to
+/// answer `extract::Settings::tone` against a normal the pose turned.
+///
+/// It reads `params.light`, `params.ambient` and `params.face_lift`.
+pub const TONE_WGSL: &str = include_str!("tone.wgsl");
+
 pub mod bake;
 pub mod care;
 pub mod face;

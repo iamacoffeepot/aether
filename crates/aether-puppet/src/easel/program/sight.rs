@@ -96,6 +96,9 @@ use aether_render::{
     SlotSpec, TextureFormat, VertexAttribute, VertexFormat,
 };
 
+use super::{SKIN_WGSL, TONE_WGSL};
+use crate::deform::{Anchored, BONE_LIMIT, Bound, INFLUENCES, Skin};
+use crate::extract::Settings;
 use crate::feature::{Curve3, Drawing, FeatureClass};
 use crate::math3::hash64;
 use crate::mesh::Mesh;
@@ -182,23 +185,40 @@ pub fn plane_slot() -> SlotSpec {
     SlotSpec { format: TextureFormat::R32Float, extent: SlotExtent::Full }
 }
 
-/// The prepass' geometry: position alone.
+/// The prepass' geometry: a rest position and the bone binding that
+/// poses it.
 ///
 /// Nothing else is rasterized — the pass writes distance to the eye and
-/// tests depth, and the point that reads it back needs no shading. A
-/// pose arrives here as moved vertices or as a skinned vertex stage;
-/// either way the depth image is of whatever pose the stage produced,
-/// which is the property that makes this correct under animation with
-/// no index to rebuild.
+/// tests depth, and the point that reads it back needs no shading. The
+/// pose reaches the stage through the uniform blob instead of through
+/// the buffer, so the depth image is of this frame's pose while the
+/// buffer is uploaded once and never travels again
+/// (iamacoffeepot/aether#4462).
 #[must_use]
 pub fn subject_slot() -> GeometrySlotSpec {
-    GeometrySlotSpec { layout: vec![VertexAttribute { location: 0, format: VertexFormat::Float32x3 }] }
+    GeometrySlotSpec {
+        layout: vec![
+            VertexAttribute { location: 0, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 1, format: VertexFormat::Uint8x4 },
+            VertexAttribute { location: 2, format: VertexFormat::Unorm8x4 },
+        ],
+    }
 }
 
-/// Bytes one subject vertex occupies.
-pub const SUBJECT_VERTEX_BYTES: usize = 12;
+/// Bytes one subject vertex occupies: the rest position, then the four
+/// joint indices and the four shares.
+pub const SUBJECT_VERTEX_BYTES: usize = 12 + 4 + 4;
 
 /// The drawing's points, one texel-sized triangle each.
+///
+/// The first eight lanes are the point's *address on the sculpt*: two
+/// corners of the face it was found in, each carrying a rest position, a
+/// rest normal and its own bone binding — the `Uint8x4` joint indices
+/// and `Unorm8x4` shares the closed vertex format set names for skinning.
+/// `between` at the end says where between the two corners the point
+/// sits. That is what lets the pose ride the uniform blob: the vertex
+/// stage poses both corners and interpolates the results, and the buffer
+/// is the rest sculpt's, uploaded once (iamacoffeepot/aether#4462).
 ///
 /// `slot` is the point's flat field index shifted up two bits with its
 /// corner in the low pair, because a vertex stage has no way to ask
@@ -206,16 +226,59 @@ pub const SUBJECT_VERTEX_BYTES: usize = 12;
 /// is the index *value*, which three corners of one point would share.
 ///
 /// The two pairs after it are `ends` — points back to the curve's first
-/// and on to its last — and `along` — the world span to the next point,
-/// and whether the curve grazes the eye by definition.
+/// and on to its last — and `stroke` — the world span to the next point,
+/// and the curve's class as a code: negative where the class grazes the
+/// eye by definition (a silhouette or a decal, which neither the facing
+/// test nor the tone gate may reach), and otherwise the hatch family's
+/// own level, which is the threshold the gate compares against.
 ///
-/// Everything else is the point's own parameterization, and every field
-/// of it is view-independent — the arc a stroke spans is carried as a
-/// world length and divided by the camera in the shader. So this buffer
-/// is re-uploaded when the drawing is re-extracted and not when the eye
-/// moves, and a turn costs the uniform blob alone.
+/// Everything here is view-independent *and* pose-independent — the arc
+/// a stroke spans is carried as a world length and divided by the camera
+/// in the shader, and the corners are the rest sculpt's. So this buffer
+/// is re-uploaded when the drawing is re-extracted and neither when the
+/// eye moves nor when the subject poses.
 #[must_use]
 pub fn points_slot() -> GeometrySlotSpec {
+    let corner = |location: u32| {
+        [
+            VertexAttribute { location, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: location + 1, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: location + 2, format: VertexFormat::Uint8x4 },
+            VertexAttribute { location: location + 3, format: VertexFormat::Unorm8x4 },
+        ]
+    };
+    let mut layout = corner(0).to_vec();
+    layout.extend(corner(4));
+    layout.extend([
+        VertexAttribute { location: 8, format: VertexFormat::Float32 },
+        VertexAttribute { location: 9, format: VertexFormat::Float32x2 },
+        VertexAttribute { location: 10, format: VertexFormat::Float32x2 },
+        VertexAttribute { location: 11, format: VertexFormat::Float32 },
+    ]);
+
+    GeometrySlotSpec { layout }
+}
+
+/// Bytes one point vertex occupies: two corner bindings, then slot, ends,
+/// stroke and the share between the corners. Attributes pack in
+/// declaration order with no padding (ADR-0171), so this is the sum of
+/// the formats' widths and [`point_vertices`] writes them in exactly
+/// this order.
+pub const POINT_VERTEX_BYTES: usize = 2 * (12 + 12 + 4 + 4) + 4 + 8 + 8 + 4;
+
+/// The same points with no binding: where the point already *is*, rather
+/// than the address a vertex stage would pose it from.
+///
+/// The volatile half is re-solved on the CPU every frame it changes, at
+/// whatever pose is running, so it arrives posed and an anchorage would
+/// be two corners of a face it no longer sits on. Carrying one anyway
+/// costs it the binding's bytes — and the volatile half is the buffer
+/// that travels, so those bytes are per frame rather than per subject.
+/// Hence two slots and two vertex entry points over one fragment stage:
+/// [`RESIDENT`] is anchored on the sculpt, [`VOLATILE`] stands for
+/// itself.
+#[must_use]
+pub fn posed_points_slot() -> GeometrySlotSpec {
     GeometrySlotSpec {
         layout: vec![
             VertexAttribute { location: 0, format: VertexFormat::Float32x3 },
@@ -227,11 +290,9 @@ pub fn points_slot() -> GeometrySlotSpec {
     }
 }
 
-/// Bytes one point vertex occupies: probe, normal, slot, then the arc
-/// and end pairs. Attributes pack in declaration order with no padding
-/// (ADR-0171), so this is the sum of the formats' widths and
-/// [`point_vertices`] writes them in exactly this order.
-pub const POINT_VERTEX_BYTES: usize = 12 + 12 + 4 + 8 + 8;
+/// Bytes one already-posed point vertex occupies: probe, normal, slot,
+/// ends and stroke.
+pub const POSED_POINT_VERTEX_BYTES: usize = 12 + 12 + 4 + 8 + 8;
 
 /// Uniform window for every pass — the WGSL `SightParams` block.
 ///
@@ -254,13 +315,67 @@ pub struct SightUniforms {
     /// *point* came from, which is why it is supplied rather than
     /// derived (`visibility::runs`).
     pub bias: f32,
+    /// This frame's pose, as [`deform::bone_uniform`] lays it out.
+    ///
+    /// The whole of what a pose costs the frame. Every curve's geometry
+    /// is the rest sculpt's and stays on the GPU; what changes when she
+    /// turns her head is three hundred and eighty-four bytes.
+    ///
+    /// [`deform::bone_uniform`]: crate::deform::bone_uniform
+    pub bones: [f32; BONE_LIMIT * 12],
+    /// The tone gate's authored numbers: the key light's direction, the
+    /// shading floor, the face lift, and the three hatch thresholds.
+    pub tone: ToneUniforms,
+}
+
+/// What [`Settings::tone`] and the hatch gate are made of, carried into
+/// the shader that now has to answer them.
+///
+/// [`Settings::tone`]: crate::extract::Settings::tone
+#[derive(Clone, Copy)]
+pub struct ToneUniforms {
+    pub light: Vec3,
+    pub ambient: f32,
+    pub thresholds: [f32; 3],
+    pub face_lift: f32,
+    /// Whether the shader gates hatching at all.
+    ///
+    /// One or zero, and it is which side of the pose the gate stands on
+    /// rather than a preference. A subject with no rig turns no normals,
+    /// so its hatching is gated once at load and arrives here already
+    /// split into lit runs — gating a second time would re-decide a
+    /// settled question through a different `sin`. A rigged subject
+    /// carries its surface curves ungated precisely because the normals
+    /// the gate reads are the ones this stage just posed.
+    pub gate: bool,
+}
+
+impl ToneUniforms {
+    /// The gate, read off the settings a subject was extracted with.
+    #[must_use]
+    pub fn of(settings: &Settings, gate: bool) -> Self {
+        Self {
+            light: settings.light,
+            ambient: settings.ambient,
+            thresholds: settings.hatch_thresholds,
+            face_lift: settings.face_lift,
+            gate,
+        }
+    }
 }
 
 impl SightUniforms {
-    /// Bytes of one `SightParams` block: a `mat4x4<f32>`, a
-    /// `vec3<f32>`, a `vec2<f32>` and two scalars, rounded to the
-    /// struct's 16-byte alignment.
-    pub const BYTES: u32 = 96;
+    /// Bytes of one `SightParams` block: a `mat4x4<f32>`, the camera and
+    /// field scalars, the tone block, and the bone table — rounded to
+    /// the struct's 16-byte alignment.
+    pub const BYTES: u32 = 144 + (BONE_LIMIT * 48) as u32;
+
+    /// Where the tone block starts inside one window.
+    const TONE: usize = 96;
+
+    /// Where the bone table starts inside one window. Sixteen-aligned,
+    /// as an array of `vec4<f32>` must be.
+    const BONES: usize = 144;
 
     /// How many copies the blob carries — one per coverage doubling,
     /// which is the deeper of the two scans.
@@ -286,6 +401,27 @@ impl SightUniforms {
             }
             let tail = [self.field.0 as f32, self.field.1 as f32, self.bias, (1u32 << step) as f32];
             for (lane, value) in window[80..96].chunks_exact_mut(4).zip(tail) {
+                lane.copy_from_slice(&value.to_le_bytes());
+            }
+
+            // `light` is a `vec3<f32>` at a sixteen-byte boundary, so
+            // `ambient` fills its padding lane; `thresholds` is the next
+            // `vec3` and starts the following boundary.
+            let lit = [
+                self.tone.light.x,
+                self.tone.light.y,
+                self.tone.light.z,
+                self.tone.ambient,
+                self.tone.thresholds[0],
+                self.tone.thresholds[1],
+                self.tone.thresholds[2],
+                self.tone.face_lift,
+                f32::from(u8::from(self.tone.gate)),
+            ];
+            for (lane, value) in window[Self::TONE..].chunks_exact_mut(4).zip(lit) {
+                lane.copy_from_slice(&value.to_le_bytes());
+            }
+            for (lane, value) in window[Self::BONES..].chunks_exact_mut(4).zip(self.bones) {
                 lane.copy_from_slice(&value.to_le_bytes());
             }
         }
@@ -469,10 +605,48 @@ pub fn layout(drawing: Drawing<'_>, field: (u32, u32)) -> Result<Layout, LayoutE
     Ok(Layout { spans, by_curve, resident: drawing.resident.len(), occupied: cursor })
 }
 
-/// The subject's vertex buffer for the prepass: positions alone.
+/// The subject's vertex buffer for the prepass: the rest position and
+/// the bone binding that poses it.
+///
+/// Packed once per subject rather than once per pose. The whole point of
+/// the binding riding here is that this buffer never travels again: a
+/// pose moves every vertex, and re-uploading the mesh per frame was the
+/// prepass' share of what iamacoffeepot/aether#4462 deleted.
+///
+/// Without a rig every vertex packs an empty share row, which the vertex
+/// stage reads as "this position is already the answer".
 #[must_use]
-pub fn subject_vertices(mesh: &Mesh) -> Vec<u8> {
-    mesh.positions.iter().flat_map(|at| at.to_array()).flat_map(f32::to_le_bytes).collect()
+pub fn subject_vertices(mesh: &Mesh, skin: Option<&Skin>) -> Vec<u8> {
+    let mut packed = Vec::with_capacity(mesh.positions.len() * SUBJECT_VERTEX_BYTES);
+    for (vertex, position) in mesh.positions.iter().enumerate() {
+        packed.extend(position.to_array().into_iter().flat_map(f32::to_le_bytes));
+        let (joints, shares) = skin.map_or(([0; INFLUENCES], [0.0; INFLUENCES]), |skin| skin.influences(vertex));
+        packed.extend(joints);
+        packed.extend(shares.map(unorm));
+    }
+
+    packed
+}
+
+/// One share as the `Unorm8x4` lane carries it.
+fn unorm(share: f32) -> u8 {
+    (share.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// The class code a point's `stroke` lane carries: the hatch family's
+/// level, or negative where the class grazes the eye by definition.
+///
+/// One lane for two questions because they are the same partition.
+/// `visibility::drawn` exempts the silhouette and the decal from the
+/// facing test, and [`crate::extract::tone_gate`] hands those two classes
+/// straight back ungated — so what the shader needs to know is which
+/// side of that line the curve is on, and if it is on the hatch side,
+/// which of the three thresholds applies.
+fn stroke_class(class: FeatureClass) -> f32 {
+    match class {
+        FeatureClass::Silhouette | FeatureClass::Decal => -1.0,
+        FeatureClass::Hatch { level } => f32::from(level),
+    }
 }
 
 /// The subject's index buffer: the face list as little-endian `u32`
@@ -480,12 +654,6 @@ pub fn subject_vertices(mesh: &Mesh) -> Vec<u8> {
 #[must_use]
 pub fn subject_indices(mesh: &Mesh) -> Vec<u8> {
     mesh.faces.iter().flatten().flat_map(|corner| corner.to_le_bytes()).collect()
-}
-
-/// Whether a curve's class grazes the eye by definition, and so is
-/// never asked to face it — `visibility::drawn`'s own test.
-fn grazes(class: FeatureClass) -> bool {
-    matches!(class, FeatureClass::Silhouette | FeatureClass::Decal)
 }
 
 /// One region's vertex buffer, packed for [`points_slot`]: three
@@ -496,6 +664,21 @@ fn grazes(class: FeatureClass) -> bool {
 /// [`Layout::volatile`] — and the drawing addresses the curves, since a
 /// [`Span`] names its own by the index
 /// [`Drawing::curves`](crate::feature::Drawing::curves) gives it.
+///
+/// This is the [`RESIDENT`] region's layout, and it is the region rather
+/// than the rig that chooses it: a geometry slot is declared once when
+/// the program registers and cannot ask whether *this* subject carries a
+/// rig. So `bound` decides only whether the corners are real. Without a
+/// rig the point stands for itself, in an anchorage whose share row is
+/// empty — which the vertex stage reads as "this position is already the
+/// answer" and poses no further.
+///
+/// The resident half is the *rest* surface curves, so packing them
+/// against their anchorages is what lets the vertex stage pose them from
+/// the uniform blob — and what lets them stay resident through a pose as
+/// they already stayed resident through an orbit.
+/// [`posed_point_vertices`] is the volatile half's, which is re-solved
+/// on the CPU every frame against whatever pose is running.
 ///
 /// A region that laid out to nothing still packs one stand-in point, for
 /// the reason [`super::stroke::ribbon_geometry`] packs one stand-in
@@ -508,17 +691,36 @@ fn grazes(class: FeatureClass) -> bool {
 /// the barrier that ends a curve, so writing a verdict into a free one
 /// would answer for a barrier that has to read as hidden.
 #[must_use]
-pub fn point_vertices(drawing: Drawing<'_>, spans: &[Span]) -> Vec<u8> {
-    // One point's lanes in declared order, with the flat texel index
-    // still bare where `slot` goes — the corner bits go in per vertex
-    // below, which is the only thing three vertices of one point
-    // disagree about.
-    let mut points: Vec<[f32; 11]> = Vec::with_capacity(points_of(spans));
+pub fn point_vertices(drawing: Drawing<'_>, spans: &[Span], bound: Option<Bound<'_>>) -> Vec<u8> {
+    points(drawing, spans, bound, true)
+}
+
+/// The [`VOLATILE`] region's own layout: where each point already is.
+///
+/// See [`posed_points_slot`] for why the two regions divide.
+#[must_use]
+pub fn posed_point_vertices(drawing: Drawing<'_>, spans: &[Span]) -> Vec<u8> {
+    points(drawing, spans, None, false)
+}
+
+fn points(drawing: Drawing<'_>, spans: &[Span], bound: Option<Bound<'_>>, anchored_layout: bool) -> Vec<u8> {
+    // Assembled once per point on the stack and copied in three times
+    // with only the corner bits of `slot` patched between them, which is
+    // the only thing three vertices of one point disagree about. Written
+    // lane by lane instead it is a bounds check per byte over megabytes
+    // of drawing, and that showed up as whole milliseconds of the frame.
+    let stride = if anchored_layout {
+        POINT_VERTEX_BYTES
+    } else {
+        POSED_POINT_VERTEX_BYTES
+    };
+    let mut packed: Vec<u8> = Vec::with_capacity(points_of(spans).max(1) * 3 * stride);
+    let mut written = false;
     for span in spans {
         let Some(curve) = drawing.curve(span.curve as usize) else {
             continue;
         };
-        let graze = f32::from(u8::from(grazes(curve.class)));
+        let class = stroke_class(curve.class);
         let last = curve.points.len().saturating_sub(1);
         for (at, point) in curve.points.iter().enumerate() {
             // World span to the next point, which the shader divides by
@@ -526,44 +728,113 @@ pub fn point_vertices(drawing: Drawing<'_>, spans: &[Span]) -> Vec<u8> {
             // measure, arrived at without re-uploading when the camera
             // turns. Zero at the last point, so the empty texel after
             // it sits at zero arc and reads as the curve's end.
+            //
+            // Measured at rest for a bound curve, and left there. The
+            // rig is a composition of rotations about pivots, so it
+            // moves a chord between two neighbouring points by the
+            // weight gradient across one triangle edge — and the arc
+            // this feeds is a taper's ramp, not a position.
             let step = curve.points.get(at + 1).map_or(0.0, |next| (next.pos - point.pos).length());
-            let (probe, normal) = (point.probe, point.normal);
-            points.push([
-                probe.x,
-                probe.y,
-                probe.z,
-                normal.x,
-                normal.y,
-                normal.z,
-                (span.start + at as u32) as f32,
-                at as f32,
-                (last - at) as f32,
-                step,
-                graze,
-            ]);
+            let anchored = anchored_layout.then(|| {
+                bound
+                    .zip(point.anchorage)
+                    .map_or_else(|| Anchored::posed(point.probe, point.normal), |(bound, at)| bound.anchored(at))
+            });
+            let tail = [at as f32, (last - at) as f32, step, class];
+            let vertex = pack_point(anchored.as_ref(), point.probe, point.normal, span.start + at as u32, tail);
+            vertex.write(&mut packed);
+            written = true;
         }
     }
-    let stand_in = points.is_empty();
-    if stand_in {
-        points.push([0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
-    }
-
-    let mut packed: Vec<u8> = Vec::with_capacity(points.len() * 3 * POINT_VERTEX_BYTES);
-    for point in points {
-        for corner in 0..3u32 {
-            let mut vertex = point;
-            vertex[6] = vertex[6] * 4.0
-                + if stand_in {
-                    0.0
-                } else {
-                    corner as f32
-                };
-            packed.extend(vertex.into_iter().flat_map(f32::to_le_bytes));
-        }
+    if !written {
+        // A triangle of zero area, which rasterizes nothing wherever it
+        // lands. It has to carry the region's own layout, since which of
+        // the two the slot was declared with is what the vertex fetch
+        // reads it as.
+        let inert = anchored_layout.then(|| Anchored::posed(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0)));
+        pack_point(inert.as_ref(), Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), 0, [0.0; 4]).write_flat(&mut packed);
     }
 
     packed
 }
+
+/// One point's vertex bytes in whichever of the two layouts its region
+/// declared, with `slot` still holding the bare texel index.
+struct Point {
+    bytes: [u8; POINT_VERTEX_BYTES],
+    len: usize,
+    /// Where the `slot` lane starts, which is the one lane the three
+    /// corners disagree about.
+    slot: usize,
+}
+
+impl Point {
+    /// The point's three vertices, each with its own corner index folded
+    /// into the low bits of `slot`.
+    fn write(&self, packed: &mut Vec<u8>) {
+        let bare = f32::from_le_bytes(self.bytes[self.slot..self.slot + 4].try_into().expect("four bytes"));
+        for corner in 0..3u32 {
+            packed.extend_from_slice(&self.bytes[..self.slot]);
+            packed.extend_from_slice(&(bare + corner as f32).to_le_bytes());
+            packed.extend_from_slice(&self.bytes[self.slot + 4..self.len]);
+        }
+    }
+
+    /// The same three vertices as one corner — the stand-in's zero-area
+    /// triangle, which covers no sample wherever it lands.
+    fn write_flat(&self, packed: &mut Vec<u8>) {
+        for _ in 0..3 {
+            packed.extend_from_slice(&self.bytes[..self.len]);
+        }
+    }
+}
+
+fn pack_point(anchored: Option<&Anchored>, probe: Vec3, normal: Vec3, texel: u32, tail: [f32; 4]) -> Point {
+    let mut bytes = [0u8; POINT_VERTEX_BYTES];
+    let mut at = 0usize;
+    let mut lay = |written: &[u8]| {
+        bytes[at..at + written.len()].copy_from_slice(written);
+        at += written.len();
+    };
+    match anchored {
+        Some(anchored) => {
+            for corner in 0..2usize {
+                for value in
+                    anchored.positions[corner].to_array().into_iter().chain(anchored.normals[corner].to_array())
+                {
+                    lay(&value.to_le_bytes());
+                }
+                lay(&anchored.joints[corner]);
+                lay(&anchored.shares[corner].map(unorm));
+            }
+        }
+        None => {
+            for value in probe.to_array().into_iter().chain(normal.to_array()) {
+                lay(&value.to_le_bytes());
+            }
+        }
+    }
+    let slot = if anchored.is_some() {
+        POINT_SLOT
+    } else {
+        POSED_POINT_SLOT
+    };
+    lay(&((texel * 4) as f32).to_le_bytes());
+    for value in tail {
+        lay(&value.to_le_bytes());
+    }
+    if let Some(anchored) = anchored {
+        lay(&anchored.between.to_le_bytes());
+    }
+    let len = at;
+
+    Point { bytes, len, slot }
+}
+
+/// Where the `slot` lane starts in each of the two layouts: after the
+/// two corner bindings, or after the point's own position and normal.
+const POINT_SLOT: usize = 2 * (12 + 12 + 4 + 4);
+const POSED_POINT_SLOT: usize = 12 + 12;
 
 /// One region's index buffer: sequential little-endian `u32`
 /// triangle-list indices over the same `spans` [`point_vertices`] was
@@ -676,7 +947,7 @@ fn draw(
 fn over_points(entry_point: &str, inputs: Vec<InputSlot>, output: OutputSlot) -> [ProgramPass; 2] {
     [
         draw("vs_point", entry_point, RESIDENT, None, inputs.clone(), output, PassLoad::Clear),
-        draw("vs_point", entry_point, VOLATILE, None, inputs, output, PassLoad::Load),
+        draw("vs_point_posed", entry_point, VOLATILE, None, inputs, output, PassLoad::Load),
     ]
 }
 
@@ -776,10 +1047,13 @@ pub fn program() -> ProgramRegister {
     passes.push(scan("fs_reach_out", 0, vec![read(headed), read(tailed)], binding(REACH)));
 
     ProgramRegister {
-        wgsl: SIGHT_WGSL.to_owned(),
+        // The two preludes after this module's own source: the vertex
+        // stage poses the drawing from the bone table, and `fs_seen`
+        // gates hatching against the normal that posing produced.
+        wgsl: format!("{SIGHT_WGSL}\n{SKIN_WGSL}\n{TONE_WGSL}"),
         bindings: vec![plane_slot(); PLANE_COUNT],
         transients: vec![plane_slot(); TRANSIENT_COUNT],
-        geometries: vec![subject_slot(), points_slot(), points_slot(), curves_slot()],
+        geometries: vec![subject_slot(), points_slot(), posed_points_slot(), curves_slot()],
         depth_transients: vec![SlotExtent::Full],
         passes,
     }
@@ -788,6 +1062,7 @@ pub fn program() -> ProgramRegister {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deform::{bone_uniform, npy};
     use crate::feature::{Pen, SurfacePoint};
     use aether_render::vertex_stride_bytes;
 
@@ -809,6 +1084,37 @@ mod tests {
         }
     }
 
+    /// A strip and a rig binding its four corners — the smallest thing
+    /// the bound packer will take.
+    fn bound_fixture() -> (Mesh, Skin) {
+        const OBJ: &[u8] = b"v -1 0 0\nv 1 0 0\nv -1 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n";
+        let mesh = Mesh::from_obj_bytes(OBJ, 0).expect("a strip is a mesh");
+        let weights = npy(&[1.0, 0.0, 0.7, 0.3, 0.4, 0.6, 0.0, 1.0]);
+        let skin = Skin::parse(&weights, "bones chest head\npivot head 0.0 0.0 0.0\n", 4).expect("a four-vertex rig");
+
+        (mesh, skin)
+    }
+
+    /// A level set across that strip, so every point carries the
+    /// anchorage the bound packer reads.
+    fn anchored_curves(mesh: &Mesh) -> Vec<Curve3> {
+        let heights: Vec<f32> = mesh.positions.iter().map(|at| at.y).collect();
+        let template = Curve3 {
+            points: Vec::new(),
+            class: FeatureClass::Hatch { level: 0 },
+            pen: Pen::Pale,
+            seed: 0,
+            authored: false,
+        };
+        let crossings = mesh
+            .level_set(&heights, &[], 0.5)
+            .into_iter()
+            .map(|[a, b]| [SurfacePoint::anchored(&a), SurfacePoint::anchored(&b)])
+            .collect();
+
+        weld::curves(crossings, &template)
+    }
+
     /// Tripwire: the packers and the declared layouts must agree on
     /// their strides. They are two independent statements of one byte
     /// arrangement — the layout builds the vertex buffer layout, the
@@ -819,12 +1125,29 @@ mod tests {
     fn the_packed_vertices_match_the_declared_strides() {
         assert_eq!(vertex_stride_bytes(&subject_slot().layout), SUBJECT_VERTEX_BYTES, "subject stride");
         assert_eq!(vertex_stride_bytes(&points_slot().layout), POINT_VERTEX_BYTES, "point stride");
+        assert_eq!(vertex_stride_bytes(&posed_points_slot().layout), POSED_POINT_VERTEX_BYTES, "posed point stride");
         assert_eq!(vertex_stride_bytes(&curves_slot().layout), CURVE_VERTEX_BYTES, "curve stride");
 
         let curves = [curve(1, 0.0, 4), curve(2, 1.0, 7)];
         let placed = layout(whole(&curves), (64, 64)).expect("fits");
-        assert_eq!(point_vertices(whole(&curves), placed.spans()).len(), 11 * 3 * POINT_VERTEX_BYTES, "packed length");
+        assert_eq!(
+            posed_point_vertices(whole(&curves), placed.spans()).len(),
+            11 * 3 * POSED_POINT_VERTEX_BYTES,
+            "packed length"
+        );
         assert_eq!(point_indices(placed.spans()).len(), 11 * 3 * 4, "index length");
+
+        // And the bound region's, which is a second byte arrangement
+        // over the same points: a region packed at one stride into a
+        // slot declared at the other reads every lane one place along.
+        let (mesh, skin) = bound_fixture();
+        let anchored = anchored_curves(&mesh);
+        let bound = layout(whole(&anchored), (64, 64)).expect("fits");
+        assert_eq!(
+            point_vertices(whole(&anchored), bound.spans(), Some(Bound { rest: &mesh, skin: &skin })).len(),
+            bound.points() * 3 * POINT_VERTEX_BYTES,
+            "bound packed length",
+        );
 
         let eye = Vec3::new(0.0, 0.0, 4.0);
         assert_eq!(curve_vertices(whole(&curves), &placed, eye).len(), 2 * 3 * CURVE_VERTEX_BYTES, "curve length");
@@ -878,11 +1201,11 @@ mod tests {
     #[test]
     fn an_empty_region_packs_one_point_that_draws_nothing() {
         let placed = layout(whole(&[]), (64, 64)).expect("fits");
-        let packed = point_vertices(whole(&[]), placed.spans());
+        let packed = posed_point_vertices(whole(&[]), placed.spans());
 
-        assert_eq!(packed.len(), 3 * POINT_VERTEX_BYTES);
+        assert_eq!(packed.len(), 3 * POSED_POINT_VERTEX_BYTES);
         assert_eq!(point_indices(placed.spans()).len(), 3 * 4);
-        let (first, rest) = packed.split_at(POINT_VERTEX_BYTES);
+        let (first, rest) = packed.split_at(POSED_POINT_VERTEX_BYTES);
         assert_eq!(rest, [first, first].concat(), "the stand-in's three vertices are one corner");
     }
 
@@ -992,9 +1315,15 @@ mod tests {
     /// instead of thirty-one, and a coverage scan that sums fifteen.
     #[test]
     fn every_scan_window_carries_its_own_stride() {
-        let blob =
-            SightUniforms { view_proj: Mat4::IDENTITY, eye: Vec3::new(0.0, 0.0, 5.0), field: (900, 1200), bias: 0.006 }
-                .encode();
+        let blob = SightUniforms {
+            view_proj: Mat4::IDENTITY,
+            eye: Vec3::new(0.0, 0.0, 5.0),
+            field: (900, 1200),
+            bias: 0.006,
+            bones: bone_uniform(&[]),
+            tone: ToneUniforms::of(&Settings::default(), false),
+        }
+        .encode();
 
         assert_eq!(blob.len(), (SightUniforms::BYTES * SightUniforms::WINDOWS) as usize, "blob length");
         for step in 0..SightUniforms::WINDOWS {

@@ -61,6 +61,19 @@ struct SightParams {
     bias: f32,
     // The current scan's doubling step, in texels.
     stride: f32,
+    // The key light's direction, and the shading floor beneath it.
+    light: vec3<f32>,
+    ambient: f32,
+    // Tone below which each successive hatch family switches on.
+    thresholds: vec3<f32>,
+    // How far the face is lifted out of the hatching.
+    face_lift: f32,
+    // Whether the hatch gate runs here at all — see `hatched` below.
+    gate: f32,
+    // This frame's pose: one affine map per bone as three rows, which
+    // is the whole of what a pose costs the frame
+    // (iamacoffeepot/aether#4462).
+    bones: array<vec4<f32>, 24>,
 }
 @group(0) @binding(0) var<uniform> params: SightParams;
 
@@ -118,11 +131,21 @@ struct Surface {
     @location(0) world: vec3<f32>,
 }
 
+// The subject posed here rather than uploaded posed. The depth image is
+// therefore of this frame's pose while the buffer it came from is the
+// rest sculpt, uploaded once per subject — which is the property that
+// makes occlusion correct under animation with nothing to re-ship.
 @vertex
-fn vs_subject(@location(0) position: vec3<f32>) -> Surface {
+fn vs_subject(
+    @location(0) position: vec3<f32>,
+    @location(1) joints: vec4<u32>,
+    @location(2) shares: vec4<f32>,
+) -> Surface {
+    let posed = skin_point(joints, shares, position);
+
     var out: Surface;
-    out.clip = params.view_proj * vec4<f32>(position, 1.0);
-    out.world = position;
+    out.clip = params.view_proj * vec4<f32>(posed, 1.0);
+    out.world = posed;
 
     return out;
 }
@@ -148,9 +171,10 @@ struct Point {
     @location(0) @interpolate(flat) probe: vec3<f32>,
     @location(1) @interpolate(flat) normal: vec3<f32>,
     // The point's own parameterization: world span to the next point,
-    // points back to the curve's start, points on to its end, and
-    // whether the curve grazes (a silhouette or a decal, which the
-    // facing test must not reach).
+    // points back to the curve's start, points on to its end, and the
+    // curve's class as a code — negative where the class grazes (a
+    // silhouette or a decal, which neither the facing test nor the tone
+    // gate may reach), otherwise the hatch family's own level.
     @location(2) @interpolate(flat) stroke: vec4<f32>,
 }
 
@@ -175,24 +199,65 @@ fn texel_clip(slot: f32) -> vec4<f32> {
     return vec4<f32>(centre.x * 2.0 - 1.0, 1.0 - centre.y * 2.0, 0.0, 1.0);
 }
 
-// One stroke point over its own texel.
+// One stroke point over its own texel, posed on the way.
+//
+// The eight leading lanes are the point's address on the sculpt — two
+// corners of the face it was found in, each with its own bone binding —
+// and `between` says where along the edge between them it sits. Posing
+// is `anchored_point`: pose each corner, then interpolate. The other
+// order is the same arithmetic at a vertex and the drawing sliding off
+// the skin everywhere else.
 @vertex
 fn vs_point(
+    @location(0) a_pos: vec3<f32>,
+    @location(1) a_normal: vec3<f32>,
+    @location(2) a_joints: vec4<u32>,
+    @location(3) a_shares: vec4<f32>,
+    @location(4) b_pos: vec3<f32>,
+    @location(5) b_normal: vec3<f32>,
+    @location(6) b_joints: vec4<u32>,
+    @location(7) b_shares: vec4<f32>,
+    @location(8) slot: f32,
+    @location(9) ends: vec2<f32>,
+    @location(10) stroke: vec2<f32>,
+    @location(11) between: f32,
+) -> Point {
+    let at = Anchorage(a_joints, a_shares, b_joints, b_shares, between);
+
+    var out: Point;
+    out.clip = texel_clip(slot);
+    out.probe = anchored_point(at, a_pos, b_pos);
+    out.normal = anchored_normal(at, a_normal, b_normal);
+    // `stroke` is read as (span, head, tail, class) by every fragment
+    // stage below, and the two incoming pairs are grouped by meaning
+    // rather than by that order — so this is the one place the two
+    // spellings meet, and the one place a lane can slide.
+    out.stroke = vec4<f32>(stroke.x, ends.x, ends.y, stroke.y);
+
+    return out;
+}
+
+// The same point with no binding to pose it from.
+//
+// The volatile half is re-solved on the CPU at whatever pose is running,
+// so it arrives already posed and an anchorage would address a face it
+// no longer sits on. Two entry points over one fragment stage rather
+// than one entry point reading zeroed corners, because the difference is
+// the *buffer*: the volatile half is the one that travels every frame,
+// and a binding it cannot use is bytes on the wire per frame.
+@vertex
+fn vs_point_posed(
     @location(0) probe: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) slot: f32,
     @location(3) ends: vec2<f32>,
-    @location(4) along: vec2<f32>,
+    @location(4) stroke: vec2<f32>,
 ) -> Point {
     var out: Point;
     out.clip = texel_clip(slot);
     out.probe = probe;
     out.normal = normal;
-    // `stroke` is read as (span, head, tail, grazes) by every fragment
-    // stage below, and the two incoming pairs are grouped by meaning
-    // rather than by that order — so this is the one place the two
-    // spellings meet, and the one place a lane can slide.
-    out.stroke = vec4<f32>(along.x, ends.x, ends.y, along.y);
+    out.stroke = vec4<f32>(stroke.x, ends.x, ends.y, stroke.y);
 
     return out;
 }
@@ -226,17 +291,57 @@ fn occluded(probe: vec3<f32>, normal: vec3<f32>) -> bool {
     return front > 0.0 && front <= length(lifted - params.eye) - RAY_MIN;
 }
 
+// Threshold dither, so a hatch family's boundary breaks up instead of
+// slabbing into a hard edge across a flat region. `extract::DITHER`,
+// restated; the two must move together.
+const DITHER: f32 = 0.055;
+
+// Whether a hatch point survives the tone gate — `extract::tone_gate`'s
+// own predicate, asked here because this is where the posed normal it
+// reads exists.
+//
+// The gate was a load-time pass while the subject stood still and became
+// a per-pose CPU pass once the subject could turn (#4459). Now that the
+// skin is in the vertex stage above, the normal it wants exists nowhere
+// else: left on the CPU it would read the rest pose's shading and slide
+// under a moving body, and the CPU has no posed normal to hand it.
+//
+// The run structure the CPU gate produced by *splitting* curves is not
+// reproduced and does not have to be. A gated-out point reads as hidden,
+// which is the same barrier an occluded point is, so the reach scan ends
+// the run at it and `width_scale` drops the isolated survivors — which
+// is exactly what `lit_runs` did by discarding a run of one.
+//
+// `params.gate` is off for a subject with no rig, whose curves arrive
+// already split: nothing turns their normals, so the answer is settled
+// at load and re-deciding it through a second `sin` could only disagree.
+fn hatched(family: f32, p: vec3<f32>, n: vec3<f32>) -> bool {
+    if params.gate < 0.5 || family < 0.0 {
+        return true;
+    }
+    let level = i32(family);
+    var limit = params.thresholds.x;
+    if level == 1 {
+        limit = params.thresholds.y;
+    } else if level >= 2 {
+        limit = params.thresholds.z;
+    }
+
+    return tone_at(p, n) < limit + tone_noise(p) * DITHER;
+}
+
 // The verdict, one texel per point: drawn or not.
 //
-// The same conjunction `visibility::drawn` reaches, in the same order.
-// The tone gate is absent because it is not a per-frame question — the
-// shipped path gates hatching once at load and hands `runs` a predicate
-// that keeps every point.
+// The same conjunction `visibility::drawn` reaches, in the same order,
+// with the tone gate joining it as a third term.
 @fragment
 fn fs_seen(point: Point) -> @location(0) vec4<f32> {
-    let grazes = point.stroke.w > 0.5;
+    let grazes = point.stroke.w < 0.0;
     let faces = dot(point.normal, normalize(params.eye - point.probe)) >= FACING_FLOOR;
     if !grazes && !faces {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    if !hatched(point.stroke.w, point.probe, point.normal) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
     if occluded(point.probe, point.normal) {

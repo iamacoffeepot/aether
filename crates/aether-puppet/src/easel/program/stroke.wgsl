@@ -34,6 +34,11 @@ struct StrokeParams {
     // `visibility::whole_or_nothing`'s floor: an authored mark below
     // this surviving fraction leaves rather than crumbles.
     coverage_floor: f32,
+    // This frame's pose, one affine map per bone as three rows — the
+    // same table the field's own blob carries, so the rails are solved
+    // on the surface the verdicts were read off
+    // (iamacoffeepot/aether#4462).
+    bones: array<vec4<f32>, 24>,
 }
 
 @group(0) @binding(0) var<uniform> params: StrokeParams;
@@ -164,14 +169,14 @@ fn rail(origin: vec3<f32>, along: vec3<f32>, shape: vec2<f32>, reference: f32) -
     return out;
 }
 
-@vertex
-fn vs_stroke(
-    @location(0) origin: vec3<f32>,
-    @location(1) along: vec3<f32>,
-    @location(2) address: vec2<f32>,
-    @location(3) shape: vec2<f32>,
-    @location(4) colour: vec4<f32>,
-) -> Ribbon {
+// One rail vertex, once the pen has been placed: read the field at the
+// point's own texel, fold the verdicts into a width, and displace.
+//
+// Shared by the two entry points below because the only thing they
+// disagree about is *where the pen is* — one is handed an address on the
+// sculpt and poses it, the other is handed a position the CPU already
+// posed.
+fn ribbon_at(origin: vec3<f32>, along: vec3<f32>, address: vec2<f32>, shape: vec2<f32>, colour: vec4<f32>) -> Ribbon {
     // Two bits stolen from the point's texel index: which of the pair's
     // rails this vertex is, and whether the mark was authored. Neither
     // is askable of a vertex stage otherwise — `@builtin(vertex_index)`
@@ -198,6 +203,41 @@ fn vs_stroke(
     out.colour = colour;
 
     return out;
+}
+
+// The resident half: a pen addressed on the rest sculpt, posed here.
+@vertex
+fn vs_stroke(
+    @location(0) a_pos: vec3<f32>,
+    @location(1) a_joints: vec4<u32>,
+    @location(2) a_shares: vec4<f32>,
+    @location(3) b_pos: vec3<f32>,
+    @location(4) b_joints: vec4<u32>,
+    @location(5) b_shares: vec4<f32>,
+    @location(6) rest_along: vec3<f32>,
+    @location(7) address: vec2<f32>,
+    @location(8) shape: vec2<f32>,
+    @location(9) between: f32,
+    @location(10) colour: vec4<f32>,
+) -> Ribbon {
+    // Posed the same way the field posed the point whose verdict this
+    // vertex is about to read: both corners of the face, then the
+    // interpolation between them.
+    let at = Anchorage(a_joints, a_shares, b_joints, b_shares, between);
+
+    return ribbon_at(anchored_point(at, a_pos, b_pos), anchored_dir(at, rest_along), address, shape, colour);
+}
+
+// The volatile half: a pen the CPU already posed, standing for itself.
+@vertex
+fn vs_stroke_posed(
+    @location(0) origin: vec3<f32>,
+    @location(1) along: vec3<f32>,
+    @location(2) address: vec2<f32>,
+    @location(3) shape: vec2<f32>,
+    @location(4) colour: vec4<f32>,
+) -> Ribbon {
+    return ribbon_at(origin, along, address, shape, colour);
 }
 
 @fragment

@@ -52,8 +52,27 @@
 struct BakeParams {
     view_proj: mat4x4<f32>,
     eye: vec3<f32>,
+    // `Settings::tone`'s three authored numbers, for the pose that has
+    // to re-derive it — see `posed` below.
+    light: vec3<f32>,
+    ambient: f32,
+    face_lift: f32,
+    // Whether this subject is bound to a rig.
+    //
+    // Off, the tone channel comes off the vertex attribute the CPU
+    // oracle baked and the parity scenario measures against; nothing
+    // turns a still subject's normals, so the attribute is the answer
+    // and re-deriving it here could only disagree by a transcription.
+    // On, the normal this stage just posed is the only one there is, and
+    // the tone that reads it has to be derived where it lives.
+    posed: f32,
+    // This frame's pose, one affine map per bone as three rows — the
+    // same table the ink's blobs carry, which is what puts the wash's
+    // mask and the drawing over it on one pose
+    // (iamacoffeepot/aether#4462).
+    bones: array<vec4<f32>, 24>,
 }
-@group(0) @binding(0) var<uniform> bake_params: BakeParams;
+@group(0) @binding(0) var<uniform> params: BakeParams;
 
 // The interpolated surface, per pixel: the eight class indicators the
 // argmax runs over, then the two scalars the other two channels carry
@@ -77,28 +96,47 @@ struct Baked {
 // present, restating `(eye - p).normalize_or(n) . n` floored at zero.
 @vertex
 fn vs_bake(
-    @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
+    @location(0) rest_position: vec3<f32>,
+    @location(1) rest_normal: vec3<f32>,
     @location(2) tone: f32,
     @location(3) scores_low: vec3<f32>,
     @location(4) scores_mid: vec3<f32>,
     @location(5) scores_high: vec2<f32>,
+    @location(6) joints: vec4<u32>,
+    @location(7) shares: vec4<f32>,
 ) -> Baked {
+    // The subject posed here rather than re-uploaded. The easel bakes
+    // its subject plane once per subject and had no update path, so
+    // while a pose ran the wash stood on the rest mesh and read as a
+    // ghost behind the posed ink. Skinning from the ink's own bone table
+    // is what puts the two layers on one pose without a re-upload path
+    // ever existing (iamacoffeepot/aether#4462).
+    let position = skin_point(joints, shares, rest_position);
+    let turned = skin_dir(joints, shares, rest_normal);
+    var normal = rest_normal;
+    if length(turned) > 1e-12 {
+        normal = normalize(turned);
+    }
+
     var baked: Baked;
-    baked.clip = bake_params.view_proj * vec4<f32>(position, 1.0);
+    baked.clip = params.view_proj * vec4<f32>(position, 1.0);
     baked.scores_low = scores_low;
     baked.scores_mid = scores_mid;
     baked.scores_high = scores_high;
 
     // `normalize_or` keeps the normal when the eye has collapsed onto
     // the point and there is no direction to take.
-    let toward = bake_params.eye - position;
+    let toward = params.eye - position;
     let reach = dot(toward, toward);
     var direction = normal;
     if reach > 0.0 {
         direction = toward * inverseSqrt(reach);
     }
-    baked.surface = vec2<f32>(tone, max(dot(direction, normal), 0.0));
+    var lit = tone;
+    if params.posed > 0.5 {
+        lit = tone_at(position, normal);
+    }
+    baked.surface = vec2<f32>(lit, max(dot(direction, normal), 0.0));
 
     return baked;
 }
