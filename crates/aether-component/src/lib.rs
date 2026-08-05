@@ -55,7 +55,7 @@ extern crate alloc;
 pub mod component;
 pub mod trampoline;
 
-pub use component::{ComponentHostCapability, resolve_embedded};
+pub use component::{ComponentHostCapability, PeerCtxExt, resolve_embedded};
 // `ComponentHostParams` is wasmtime-bound (it holds `Arc<Engine>` /
 // `Arc<Linker<ComponentCtx>>`). Under the ADR-0122 split it lives behind
 // the `feature = "runtime"` gate (only the runtime half names it), so it

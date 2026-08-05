@@ -1,7 +1,7 @@
 //! Sender-side peer-addressing facades for loaded components —
 //! the "routing" seam of the `aether.component` capability.
 
-use aether_actor::{Addressable, WasmActorMailbox};
+use aether_actor::{Addressable, ReplyMode, WasmActorMailbox, WasmCtx};
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
@@ -56,6 +56,55 @@ pub trait ComponentHostNativeExt {
 impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> {
     fn loaded<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         let trampoline = self.resolve::<WasmTrampoline>(name);
+        trampoline.at(trampoline.mailbox_id().0)
+    }
+}
+
+/// The peer verb (iamacoffeepot/aether#4478): addressing a co-hosted
+/// component in one call off the receive ctx, so the send site reads the
+/// way it thinks — "my host's instance of `R`" — for the cost of one
+/// import.
+///
+/// That phrase is the whole contract. Embeddable means host-agnostic
+/// (iamacoffeepot/aether#4479): these verbs promise the peer under
+/// *whatever* embedded the caller, and the explicit
+/// [`ComponentHostCapability`] route in today's impl is a
+/// single-host-era detail — once the ctx carries the parent scope
+/// (#4479), the same verbs resolve against it and composite hosts
+/// (ADR-0113) get the correct answer with no call-site change.
+///
+/// `ctx.peer::<R>()` names the default-named instance — what a load with
+/// no `name` registers as. A component loaded under an explicit name (or
+/// a `replicas` fan-out, whose instances are all `{base}-{index}`) is
+/// named at the send site through [`PeerCtxExt::peer_named`], because a
+/// bare type cannot identify an instance — load names are runtime facts.
+///
+/// This trait carries no resolution of its own: both verbs delegate to
+/// [`loaded`](ComponentHostWasmExt::loaded), so the agreement the test
+/// below pins — bare-type, by-name, and by-carry addressing land on one
+/// `MailboxId` — extends to it by construction.
+pub trait PeerCtxExt {
+    /// The default-named instance of peer component `R` — the mailbox a
+    /// nameless load of `R`'s module registers.
+    fn peer<R: Addressable>(&self) -> WasmActorMailbox<'_, R>;
+
+    /// The instance of peer component `R` loaded under `name`.
+    fn peer_named<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R>;
+}
+
+impl<M: ReplyMode> PeerCtxExt for WasmCtx<'_, M> {
+    fn peer<R: Addressable>(&self) -> WasmActorMailbox<'_, R> {
+        self.peer_named::<R>(R::NAMESPACE)
+    }
+
+    // `loaded`'s body, restated over the mailbox primitives rather than
+    // called: its trait signature elides the returned lifetime to the
+    // borrow of the host handle, which here is a temporary this fn owns.
+    // The primitives return the handle's *binding* lifetime, which is the
+    // ctx borrow and outlives the return.
+    fn peer_named<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
+        let host = self.actor::<ComponentHostCapability>();
+        let trampoline = host.resolve::<WasmTrampoline>(name);
         trampoline.at(trampoline.mailbox_id().0)
     }
 }
