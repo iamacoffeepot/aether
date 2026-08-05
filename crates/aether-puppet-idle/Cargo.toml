@@ -1,0 +1,44 @@
+[package]
+name = "aether-puppet-idle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# A motor for the puppet's rig: one `aether.puppet.pose` per tick with each
+# channel on its own phase, so the subject is never quite still with nothing
+# crossing the wasm boundary after boot.
+#
+# Its own crate for the reason the turntable is one — the two have nothing to
+# say to the puppet beyond a kind (ADR-0066: peers share the kind crate, not
+# the module) — and a sibling of the turntable rather than a second export of
+# it because they drive different things: the turntable owns where the eye
+# is, this owns what the rig is doing, and a window usually wants both.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+# Guest faces only — this is a wasm component and addresses every capability
+# by mail, so each cap comes in marker-only with its runtime feature off.
+aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
+# The component host, for `loaded::<Puppet>` — the peer sits under the same
+# host lineage this motor does, and only the host can compose that address.
+aether-component = { path = "../aether-component", default-features = false }
+# The peer, for its `Pose` kind alone. `library` strips the puppet's own
+# `export!` entry surface so its `receive_p32` / `init` shims do not collide
+# with this crate's at link.
+aether-puppet = { path = "../aether-puppet", features = ["library"] }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-kinds = { path = "../aether-kinds" }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+tracing = { workspace = true, default-features = false }
+
+# Every crate that derives `Kind` needs `inventory` reachable on native
+# builds so the `aether.kinds` descriptor list picks up its types. Wasm
+# guests skip the submission via the derive's cfg gate.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = { workspace = true }
+
+[lints]
+workspace = true
