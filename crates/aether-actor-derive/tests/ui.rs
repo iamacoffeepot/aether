@@ -19,6 +19,7 @@
 fn ui() {
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/accepts_minimal_actor.rs");
+    t.pass("tests/ui/accepts_generic_local.rs");
     t.pass("tests/ui/accepts_actor_lineage_wasm.rs");
     t.pass("tests/ui/accepts_actor_composable_wasm.rs");
     t.compile_fail("tests/ui/rejects_actor_child_of_cardinality_native.rs");
