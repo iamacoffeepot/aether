@@ -214,6 +214,12 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     f.attrs.remove(idx);
                     fallback = Some(NativeFallbackFn { method: f });
                 } else if f.sig.ident == "init" {
+                    if init_method.is_some() {
+                        return Err(syn::Error::new_spanned(
+                            &f.sig.ident,
+                            "a native actor may declare only one `init` method",
+                        ));
+                    }
                     init_method = Some(f);
                 } else if f.sig.ident == "wire" || f.sig.ident == "unwire" {
                     lifecycle_methods.push(f);
@@ -1116,6 +1122,16 @@ fn emit_native_identity_markers(
 /// `aether_substrate`, so the identity survives a `--no-default-features` build
 /// where `mod runtime` is `#[cfg]`-stripped.
 pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::Result<TokenStream2> {
+    if let Some(handler_set) = &opts.handler_set {
+        return Err(syn::Error::new_spanned(
+            handler_set,
+            format!(
+                "handler_set(...) on a struct-hosted #[actor] belongs on the sibling runtime impl; \
+                 use #[runtime(handler_set({}))]",
+                quote!(#handler_set),
+            ),
+        ));
+    }
     if opts.composable {
         return Err(syn::Error::new_spanned(
             &item.ident,

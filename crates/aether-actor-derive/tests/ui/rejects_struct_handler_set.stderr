@@ -1,0 +1,5 @@
+error: handler_set(...) on a struct-hosted #[actor] belongs on the sibling runtime impl; use #[runtime(handler_set(SharedHandlers))]
+ --> tests/ui/rejects_struct_handler_set.rs:8:32
+  |
+8 | #[actor(singleton, handler_set(SharedHandlers))]
+  |                                ^^^^^^^^^^^^^^
