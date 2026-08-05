@@ -767,7 +767,7 @@ mod tests {
 
         let recipient = registry.lookup("test.spawn_thread.recipient").expect("recipient registered");
         let kind = <aether_kinds::Tick as Kind>::ID;
-        let payload = aether_data::encode_empty::<aether_kinds::Tick>();
+        let payload = aether_kinds::Tick::default().encode_into_bytes();
         mailer.push(Mail::new(recipient, KindId(kind.0), payload, 1));
 
         let captured = captured.lock().unwrap();
