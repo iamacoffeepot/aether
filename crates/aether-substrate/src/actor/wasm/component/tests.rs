@@ -1072,6 +1072,42 @@ fn instantiate_with_ctx(wat: &str, ctx: ComponentCtx) -> Component {
     Component::instantiate(&engine, &linker, &module, ctx, &[], None).unwrap()
 }
 
+fn wat_scoped_spawns(parent: MailboxId) -> String {
+    format!(
+        r#"
+        (module
+            (import "aether" "spawn_sibling_scoped_p32"
+                (func $spawn_sibling (param i64 i64 i32 i32 i32 i32 i32) (result i64)))
+            (import "aether" "spawn_inline_child_scoped_p32"
+                (func $spawn_inline (param i64 i32 i32 i32) (result i64)))
+            (memory (export "memory") 1)
+            (data (i32.const 32) "leaf")
+            (data (i32.const 48) "worker")
+            (data (i32.const 64) "cfg")
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
+                i32.const 200
+                i64.const {parent}
+                i32.const 0
+                i32.const 32
+                i32.const 4
+                call $spawn_inline
+                i64.store
+                i32.const 208
+                i64.const {parent}
+                i64.const 4660
+                i32.const 0
+                i32.const 48
+                i32.const 6
+                i32.const 64
+                i32.const 3
+                call $spawn_sibling
+                i64.store
+                i32.const 0))
+        "#,
+        parent = parent.0,
+    )
+}
+
 #[test]
 fn reply_mail_emits_session_addressed_frame() {
     use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
@@ -1343,6 +1379,78 @@ fn inline_alias_folded_id_matches_post_1920_convention() {
     let from_path =
         aether_data::mailbox_id_from_path("aether.component/aether.embedded:testparent/aether.embedded:widget");
     assert_eq!(folded, from_path, "the host-fn alias fold matches the rendered-name parse → fold");
+}
+
+/// Issue 4490: both scoped spawn imports accept a freshly prepared inline
+/// actor as the executing parent, extend that actor's lineage, and preserve
+/// the validated identity through the detached-spawn staging seam. Keeping
+/// the parent alias owner-unpublished exercises the immediate nested `wire`
+/// window as well as the ordinary handler path.
+#[test]
+fn scoped_wasm_spawns_extend_the_executing_inline_actor() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let root_name = "aether.component/aether.embedded:nested-root";
+    let root = aether_data::mailbox_id_from_path(root_name);
+    let (_captured, root_handler) = lineage_capture_handler();
+    registry
+        .try_register_inbox_with_id(&boot_authority(), root, root_name, root_handler)
+        .expect("register component root");
+
+    let parent_name = format!("{root_name}/{TRAMPOLINE_NAMESPACE}:branch");
+    let parent = aether_data::mailbox_id_from_path(&parent_name);
+    let mut ctx = ComponentCtx::new(root, Arc::clone(&registry), mailer, HubOutbound::disconnected());
+    ctx.stage_alias(PreparedAliasRoute::new(parent, parent_name.clone(), root));
+    let mut component = instantiate_with_ctx(&wat_scoped_spawns(parent), ctx);
+
+    component.deliver(&Mail::new(parent, aether_data::KindId(0), Vec::new(), 1)).expect("deliver nested spawn turn");
+
+    let expected_inline_name = format!("{parent_name}/{TRAMPOLINE_NAMESPACE}:leaf");
+    let expected_inline = aether_data::mailbox_id_from_path(&expected_inline_name);
+    let aliases = component.drain_pending_aliases();
+    let inline = aliases.iter().find(|alias| alias.alias == expected_inline).expect("nested inline alias staged");
+    assert_eq!(&*inline.rendered_name, expected_inline_name);
+    assert_eq!(inline.target_parent, root, "nested aliases still route to the physical trampoline root");
+
+    let expected_detached_name = format!("{parent_name}/{TRAMPOLINE_NAMESPACE}:worker");
+    let expected_detached = aether_data::mailbox_id_from_path(&expected_detached_name);
+    let spawns = component.drain_pending_spawns();
+    assert_eq!(spawns.len(), 1);
+    assert_eq!(spawns[0].parent, parent);
+    assert_eq!(spawns[0].parent_name, parent_name);
+    assert_eq!(spawns[0].subname, "worker");
+    assert_eq!(spawns[0].config, b"cfg");
+    let returned_inline = u64::from(component.read_u32(200)) | (u64::from(component.read_u32(204)) << 32);
+    let returned_detached = u64::from(component.read_u32(208)) | (u64::from(component.read_u32(212)) << 32);
+    assert_eq!(returned_inline, expected_inline.0, "guest receives the nested inline id");
+    assert_eq!(returned_detached, expected_detached.0, "guest receives the nested detached id");
+}
+
+/// The new scalar is guest-controlled input, not authority. A foreign
+/// mailbox must allocate neither an alias nor a detached birth and both
+/// imports return the zero sentinel.
+#[test]
+fn scoped_wasm_spawns_reject_a_foreign_parent() {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let root_name = "aether.component/aether.embedded:scoped-root";
+    let root = aether_data::mailbox_id_from_path(root_name);
+    let (_captured, root_handler) = lineage_capture_handler();
+    registry
+        .try_register_inbox_with_id(&boot_authority(), root, root_name, root_handler)
+        .expect("register component root");
+    let foreign = aether_data::mailbox_id_from_path("aether.component/aether.embedded:foreign");
+    let ctx = ComponentCtx::new(root, registry, mailer, HubOutbound::disconnected());
+    let mut component = instantiate_with_ctx(&wat_scoped_spawns(foreign), ctx);
+
+    component.deliver(&Mail::new(root, aether_data::KindId(0), Vec::new(), 1)).expect("deliver rejected spawn turn");
+
+    assert!(component.drain_pending_aliases().is_empty());
+    assert!(component.drain_pending_spawns().is_empty());
+    assert_eq!(component.read_u32(200), 0);
+    assert_eq!(component.read_u32(204), 0);
+    assert_eq!(component.read_u32(208), 0);
+    assert_eq!(component.read_u32(212), 0);
 }
 
 /// ADR-0114 + ADR-0165: a logical alias route follows the parent's `Inbox`

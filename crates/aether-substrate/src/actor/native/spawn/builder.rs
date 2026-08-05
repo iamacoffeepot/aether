@@ -1117,6 +1117,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
 
         let identity = spawner.prepare_identity::<A>(subname, Some(&parent))?;
         let key = ChildReservationKey::new(
+            parent.mailbox(),
             ActorId::singleton(A::NAMESPACE),
             ActorId::instanced(A::NAMESPACE, &identity.subname),
         );
@@ -1184,6 +1185,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             Err(error) => return Err((error, owed)),
         };
         let key = ChildReservationKey::new(
+            parent.mailbox(),
             ActorId::singleton(A::NAMESPACE),
             ActorId::instanced(A::NAMESPACE, &identity.subname),
         );
@@ -1592,6 +1594,7 @@ mod tests {
         correlation: u64,
     ) -> (PreparedSpawnCommit, DispatchId, ChildReservationKey) {
         let key = ChildReservationKey::new(
+            parent.self_mailbox(),
             ActorId::singleton(ActivationProbe::NAMESPACE),
             ActorId::instanced(ActivationProbe::NAMESPACE, name),
         );
@@ -1697,6 +1700,7 @@ mod tests {
         let parent_id = MailboxId::from_name("test.activation.owner-close-parent");
         let parent = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), parent_id));
         let key = ChildReservationKey::new(
+            parent_id,
             ActorId::singleton(ActivationProbe::NAMESPACE),
             ActorId::instanced(ActivationProbe::NAMESPACE, "owner-close-before-apply"),
         );

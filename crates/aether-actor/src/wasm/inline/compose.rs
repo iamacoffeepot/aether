@@ -290,8 +290,9 @@ where
         child.erased_on_rehydrate(&mut ctx, prior);
     }
 
-    // The alias remains folded on the instance carry, but relative
-    // addressing walks the logical parent link restored from the bundle.
+    // The persisted alias was originally folded under this same logical
+    // parent. Restoring both values keeps routing and relative addressing on
+    // one reconstructed lineage.
     registry.insert_child(
         to_reconstruct.alias,
         to_reconstruct.type_tag,
@@ -322,8 +323,8 @@ where
 /// *nested* by-tag spawn (an inline child spawning its own child, e.g. the
 /// behavior host wrapping a widget) parents the new child to that spawning
 /// actor rather than the cluster root, which is what lets the spawner's
-/// `ctx.child` resolve it (issue 2688). A top-level spawn passes the root's
-/// own id, so the flat-alias model is unchanged there.
+/// `ctx.child` resolve it (issue 2688) and gives the host-scoped alias fold
+/// the same parent seed.
 ///
 /// Returns [`SpawnError::InitFailed`] when `A::Config` cannot decode from
 /// `config_bytes` or `A::init` returns `Err`.
