@@ -500,8 +500,8 @@ The explicit component-host route remains useful when code already holds that
 host mailbox: `loaded::<Camera>(load_name)` folds from the held host regardless
 of the caller's own parent. Keep `LoadResult.mailbox_id` for direct by-id
 addressing. `LoadResult.name` is the canonical rendered address for
-external/string addressing; do not pass it to `loaded`, `peer_named`, or flat
-`resolve_actor`.
+external/string addressing; do not pass it to `loaded`, `peer_named`,
+`resolve_actor`, or `send_to_named`.
 
 Because the lineage is the address, two actors collide exactly when they would
 occupy the same position — same parent, same name. The substrate enforces one
@@ -559,6 +559,17 @@ sockets: a singleton listener accepts connections and spawns a session actor per
 connection with `ctx.spawn_child`
 ([ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)), then reaches a specific one by subname,
 `ctx.resolve_actor::<SessionActor>("42")`.
+
+That `resolve_actor::<R>(key)` spelling is typed keyed addressing, not a flat
+string escape hatch. It accepts only an instanced, caller-addressable `R`, asks
+`R::Resolver` whether to select the ctx's current, root, or logical-parent
+mailbox, and calls `R::resolve(selected_mailbox.0, key)`. The built-in `Many`
+resolver selects the current actor, so a child instance resolves beneath its
+caller; another keyed resolver can deliberately select a different declared
+scope. By contrast, `send_to_named(name, payload)` has no recipient type or
+resolver: it hashes `name` as one flat mailbox name. Use that only for an
+actually flat registered name, never for a rendered lineage path or as a
+substitute for keyed typed resolution.
 
 `ctx.spawn_child` works on both hosts. A native capability names only the child
 type, and can spawn an `Instanced` native actor when that child declares

@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aether_actor::{
-    Addressable, CallerAddressable, CallerScoped, HandlesKind, Manual, Multi, ReplyMode, Single, Singleton,
+    Addressable, CallerAddressable, CallerScoped, HandlesKind, Instanced, Manual, Multi, ReplyMode, Single, Singleton,
 };
 use aether_actor::{Emit, MailSender, OutboundReply};
 use core::marker::PhantomData;
@@ -152,16 +152,18 @@ macro_rules! native_sender_methods {
             )
         }
 
-        /// Multi-instance sender: resolve a typed [`NativeActorMailbox`]
-        /// from a runtime instance name. Captures the in-flight lineage
-        /// like [`Self::actor`].
-        // Runtime-name escape hatch: the instance name is only known at
-        // runtime, so there is no `R::resolve` lineage carry to route through.
+        /// Multi-instance sender: resolve a typed [`NativeActorMailbox`] from
+        /// a runtime instance key through `R`'s caller-scoped resolver.
+        /// Captures the in-flight lineage like [`Self::actor`].
         #[must_use]
-        #[allow(clippy::disallowed_methods)]
-        pub fn resolve_actor<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
+        pub fn resolve_actor<R: Instanced + CallerAddressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
             let (parent, root) = self.outbound_lineage();
-            NativeActorMailbox::__new_in_flight(mailbox_id_from_name(name).0, self.binding, parent, root)
+            NativeActorMailbox::__new_in_flight(
+                R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, name).0,
+                self.binding,
+                parent,
+                root,
+            )
         }
 
         /// Address an actor by a [`MailboxId`] already in hand — the id a
@@ -1021,7 +1023,7 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, M, A> {
         params: C::Params,
     ) -> super::spawn::HandlerSpawnBuilder<'b, C>
     where
-        C: aether_actor::ChildOf<A> + aether_actor::Instanced + NativeActor,
+        C: aether_actor::ChildOf<A> + Instanced + NativeActor,
     {
         let spawner = self
             .binding
@@ -1064,7 +1066,7 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, M, A> {
         params: C::Params,
     ) -> super::spawn::HandlerSpawnBuilder<'b, C>
     where
-        C: aether_actor::ChildOf<A> + aether_actor::Instanced + NativeActor,
+        C: aether_actor::ChildOf<A> + Instanced + NativeActor,
     {
         let spawner = self.binding.spawner().expect("NativeCtx::spawn_child_scoped requires a chassis-built binding");
         let sender =
@@ -1695,6 +1697,38 @@ mod tests {
 
     impl HandlesKind<CastOnly> for EmbeddedPeer {}
 
+    struct CurrentKeyedPeer;
+
+    impl Addressable for CurrentKeyedPeer {
+        const NAMESPACE: &'static str = "test.native.current_keyed_peer";
+        type Resolver = aether_actor::Many;
+    }
+
+    impl HandlesKind<CastOnly> for CurrentKeyedPeer {}
+
+    struct ParentKeyed;
+
+    impl aether_actor::Resolve for ParentKeyed {
+        type Args<'a> = &'a str;
+
+        fn resolve(caller_carry: u64, namespace: &str, name: &str) -> MailboxId {
+            <aether_actor::Many as aether_actor::Resolve>::resolve(caller_carry, namespace, name)
+        }
+    }
+
+    impl CallerScoped for ParentKeyed {
+        const SCOPE: aether_actor::CallerScope = aether_actor::CallerScope::Parent;
+    }
+
+    struct ParentKeyedPeer;
+
+    impl Addressable for ParentKeyedPeer {
+        const NAMESPACE: &'static str = "test.native.parent_keyed_peer";
+        type Resolver = ParentKeyed;
+    }
+
+    impl HandlesKind<CastOnly> for ParentKeyedPeer {}
+
     #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
     #[kind(name = "test.native_request_context")]
     struct NativeRequestContext {
@@ -1773,6 +1807,75 @@ mod tests {
 
         let delivered = rx.try_recv().expect("embedded peer send routes at ctx flush");
         assert_eq!(delivered.kind, CastOnly::ID);
+    }
+
+    /// Keyed typed construction selects the recipient resolver's declared
+    /// scope: built-in `Many` folds from the calling actor, while a test-only
+    /// keyed resolver can fold from its logical parent. Both returned handles
+    /// retain the binding and in-flight causal context, proven by delivery
+    /// under the handled mail's root and parent edge.
+    #[allow(clippy::disallowed_methods)] // test scaffolding — synthetic lineage IDs exercise scoped routing
+    #[test]
+    fn keyed_actor_resolution_selects_scope_and_retains_native_context() {
+        use crate::mail::registry::OwnedDispatch;
+        use crate::testing::{bare_substrate, boot_authority};
+        use std::sync::mpsc;
+
+        let (registry, mailer) = bare_substrate();
+        let parent = aether_data::mailbox_id_from_path("test.native.keyed_parent");
+        let current = aether_data::mailbox_id_from_path("test.native.keyed_parent/test.native.keyed_caller");
+        let current_target = CurrentKeyedPeer::resolve(current.0, "current");
+        let parent_target = ParentKeyedPeer::resolve(parent.0, "parent");
+        let (current_tx, current_rx) = mpsc::channel::<Envelope>();
+        let (parent_tx, parent_rx) = mpsc::channel::<Envelope>();
+
+        registry
+            .try_register_inbox_with_id(
+                &boot_authority(),
+                current_target,
+                "test.native.keyed_parent/test.native.keyed_caller/test.native.current_keyed_peer:current",
+                Arc::new(move |dispatch: OwnedDispatch| {
+                    dispatch.discharge();
+                    let _ = current_tx.send(dispatch);
+                }),
+            )
+            .expect("register current-scoped keyed peer");
+        registry
+            .try_register_inbox_with_id(
+                &boot_authority(),
+                parent_target,
+                "test.native.keyed_parent/test.native.parent_keyed_peer:parent",
+                Arc::new(move |dispatch: OwnedDispatch| {
+                    dispatch.discharge();
+                    let _ = parent_tx.send(dispatch);
+                }),
+            )
+            .expect("register parent-scoped keyed peer");
+
+        let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, parent));
+        let in_flight_root = MailId::new(MailboxId(0xC0), 7);
+        let in_flight_mail = MailId::new(MailboxId(0x99), 42);
+        let source = Source::with_correlation(SourceAddr::None, 0);
+
+        {
+            let ctx = NativeCtx::new(&binding, source, in_flight_mail, in_flight_root);
+            let current_peer = ctx.resolve_actor::<CurrentKeyedPeer>("current");
+            let parent_peer = ctx.resolve_actor::<ParentKeyedPeer>("parent");
+
+            assert_eq!(current_peer.mailbox_id(), current_target, "Many selects the current actor's mailbox");
+            assert_eq!(parent_peer.mailbox_id(), parent_target, "the custom keyed resolver selects the logical parent");
+
+            current_peer.send(&CastOnly { code: 21 });
+            parent_peer.send(&CastOnly { code: 22 });
+        }
+
+        let current_delivered = current_rx.try_recv().expect("current-scoped keyed send routes at ctx flush");
+        let parent_delivered = parent_rx.try_recv().expect("parent-scoped keyed send routes at ctx flush");
+        for delivered in [current_delivered, parent_delivered] {
+            assert_eq!(delivered.kind, CastOnly::ID);
+            assert_eq!(delivered.root, in_flight_root, "resolved handle retains the caller's root");
+            assert_eq!(delivered.parent_mail, Some(in_flight_mail), "resolved handle retains the handled mail parent");
+        }
     }
 
     /// ADR-0080 §7 (issue 1802): a handler's `ctx.actor::<R>().send()`

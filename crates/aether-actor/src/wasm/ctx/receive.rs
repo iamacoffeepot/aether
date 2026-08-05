@@ -8,11 +8,11 @@
 use core::marker::PhantomData;
 use core::ptr;
 
-use aether_data::{Kind, MailboxId, RequestId, Source, mailbox_id_from_name};
+use aether_data::{Kind, MailboxId, RequestId, Source};
 
 use crate::mail::ReplyHandle;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
-use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, Resolve, Singleton};
+use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, Instanced, Resolve, Singleton};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
 use crate::wasm::mailbox::WasmActorMailbox;
@@ -221,15 +221,17 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         )
     }
 
-    /// Multi-instance sender. Resolve a ctx-bound [`WasmActorMailbox`]
-    /// from a runtime instance name, carrying this actor's own id as the
-    /// send's `from` and the inline registry the send routes through.
-    // Runtime-name escape hatch: the instance name is only known at runtime,
-    // so there is no `R::resolve` lineage carry to route through.
+    /// Multi-instance sender. Resolve a ctx-bound [`WasmActorMailbox`] from a
+    /// runtime instance key through `R`'s caller-scoped resolver, carrying
+    /// this actor's own id as the send's `from` and the inline registry the
+    /// send routes through.
     #[must_use]
-    #[allow(clippy::disallowed_methods)]
-    pub fn resolve_actor<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
-        WasmActorMailbox::__new(mailbox_id_from_name(name).0, self.mailbox, self.inline)
+    pub fn resolve_actor<R: Instanced + CallerAddressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
+        WasmActorMailbox::__new(
+            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), name).0,
+            self.mailbox,
+            self.inline,
+        )
     }
 
     /// ADR-0063 fail-fast: bring the substrate down with `reason`.
