@@ -175,6 +175,24 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
     }
 
     //noinspection DuplicatedCode
+    fn send_detached<R, K>(&mut self, payload: &K)
+    where
+        R: Singleton + CallerAddressable + HandlesKind<K>,
+        K: Kind,
+    {
+        let bytes = payload.encode_into_bytes();
+        self.binding.send_mail_with_lineage(R::resolve(self.binding.carry(), ()).0, K::ID.0, &bytes, 1, None, None);
+    }
+
+    //noinspection DuplicatedCode
+    // Runtime-name detached escape hatch — the `send_to_named` counterpart.
+    #[allow(clippy::disallowed_methods)]
+    fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.binding.send_mail_with_lineage(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, None, None);
+    }
+
+    //noinspection DuplicatedCode
     // By-id detached send: `None` / `None` lineage mints a fresh root
     // rather than inheriting this ctx's captured chain (ADR-0080 §7).
     fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
@@ -237,6 +255,22 @@ impl<A: Addressable> MailSender for RootCtx<A> {
 
     fn prev_correlation(&self) -> u64 {
         self.binding.prev_correlation()
+    }
+
+    fn send_detached<R, K>(&mut self, payload: &K)
+    where
+        R: Singleton + CallerAddressable + HandlesKind<K>,
+        K: Kind,
+    {
+        let bytes = payload.encode_into_bytes();
+        self.binding.send_mail_with_lineage(R::resolve(self.binding.carry(), ()).0, K::ID.0, &bytes, 1, None, None);
+    }
+
+    // Runtime-name detached escape hatch — the `send_to_named` counterpart.
+    #[allow(clippy::disallowed_methods)]
+    fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.binding.send_mail_with_lineage(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, None, None);
     }
 
     //noinspection DuplicatedCode
@@ -339,6 +373,8 @@ mod tests {
         type Resolver = aether_actor::One;
     }
 
+    impl HandlesKind<aether_kinds::Tick> for StubActor {}
+
     #[derive(Clone, Debug)]
     struct CapturedDispatch {
         mail_id: MailId,
@@ -427,6 +463,38 @@ mod tests {
         assert!(dispatch.mail_id.correlation_id > 0, "fresh mail_id has a non-zero correlation");
     }
 
+    /// Explicit typed and named detached sends from `InheritCtx` cut the
+    /// captured lineage and each mint a fresh root.
+    #[test]
+    fn inherit_ctx_detached_sends_mint_fresh_roots() {
+        let (registry, mailer) = fresh_substrate();
+        let typed = register_capture(&registry, StubActor::NAMESPACE);
+        let named = register_capture(&registry, "test.spawn_thread.named_detached");
+
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0xAB)));
+        let inherited_root = MailId::new(MailboxId(0x1234), 7);
+        let inherited_mail_id = MailId::new(MailboxId(0x5678), 13);
+
+        let join = spawn_inherit::<StubActor, _>(binding, inherited_mail_id, inherited_root, move |mut inherit| {
+            <InheritCtx<StubActor> as MailSender>::send_detached::<StubActor, _>(&mut inherit, &aether_kinds::Tick);
+            <InheritCtx<StubActor> as MailSender>::send_detached_to_named(
+                &mut inherit,
+                "test.spawn_thread.named_detached",
+                &aether_kinds::Tick,
+            );
+        });
+        join.join().expect("inherit worker thread joins");
+
+        let typed = typed.lock().unwrap();
+        let named = named.lock().unwrap();
+        assert_eq!(typed.len(), 1, "one typed detached mail dispatched");
+        assert_eq!(named.len(), 1, "one named detached mail dispatched");
+        for dispatch in typed.iter().chain(named.iter()) {
+            assert_eq!(dispatch.parent_mail, None, "detached send has no parent");
+            assert_eq!(dispatch.root, dispatch.mail_id, "detached send is its own root");
+        }
+    }
+
     /// `RootCtx`-spawned thread's `send_to_named` mints a fresh root
     /// chain — root == its own `mail_id`, `parent_mail` = None.
     #[test]
@@ -456,6 +524,35 @@ mod tests {
             "fresh mail_id carries the binding's actor mailbox as producer"
         );
         let _ = dispatch.sender;
+    }
+
+    /// Explicit typed and named detached sends from `RootCtx` each mint a
+    /// fresh root, matching the ctx's root-producing ordinary sends.
+    #[test]
+    fn root_ctx_detached_sends_mint_fresh_roots() {
+        let (registry, mailer) = fresh_substrate();
+        let typed = register_capture(&registry, StubActor::NAMESPACE);
+        let named = register_capture(&registry, "test.spawn_thread.named_detached");
+
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0xBC)));
+        let join = spawn_detached::<StubActor, _>(binding, move |mut root| {
+            <RootCtx<StubActor> as MailSender>::send_detached::<StubActor, _>(&mut root, &aether_kinds::Tick);
+            <RootCtx<StubActor> as MailSender>::send_detached_to_named(
+                &mut root,
+                "test.spawn_thread.named_detached",
+                &aether_kinds::Tick,
+            );
+        });
+        join.join().expect("root worker thread joins");
+
+        let typed = typed.lock().unwrap();
+        let named = named.lock().unwrap();
+        assert_eq!(typed.len(), 1, "one typed detached mail dispatched");
+        assert_eq!(named.len(), 1, "one named detached mail dispatched");
+        for dispatch in typed.iter().chain(named.iter()) {
+            assert_eq!(dispatch.parent_mail, None, "detached send has no parent");
+            assert_eq!(dispatch.root, dispatch.mail_id, "detached send is its own root");
+        }
     }
 
     /// Multiple `RootCtx` sends each mint independent root chains.

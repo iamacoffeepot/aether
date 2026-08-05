@@ -185,6 +185,18 @@ mod tests {
             0
         }
 
+        fn send_detached<R, K>(&mut self, _payload: &K)
+        where
+            R: Singleton + CallerAddressable + HandlesKind<K>,
+            K: Kind,
+        {
+            unreachable!("stream handles send only via send_detached_to")
+        }
+
+        fn send_detached_to_named<K: Kind>(&mut self, _name: &str, _payload: &K) {
+            unreachable!("stream handles send only via send_detached_to")
+        }
+
         fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
             self.sent.push((id, K::ID, payload.encode_into_bytes()));
         }

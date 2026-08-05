@@ -83,27 +83,18 @@ pub trait MailSender {
     /// tree rather than the sender's. Reply-correlated requests always
     /// go through [`Self::send`].
     ///
-    /// The default body delegates to [`Self::send`], which now inherits
-    /// lineage — so every concrete ctx specialises this to actually
-    /// suppress the inheritance (native passes a `None`/`None` lineage
-    /// to the binding; the FFI ctx sets the detached flag on the
-    /// `send_mail` bridge so the host mints a fresh root). The default
-    /// is a fallback for a hypothetical impl that has no causal chain to
-    /// detach from.
+    /// Required rather than defaulted: every implementation must explicitly
+    /// choose the causal behavior that mints a fresh root for detached mail.
     fn send_detached<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind,
-    {
-        self.send::<R, K>(payload);
-    }
+        K: Kind;
 
     /// String-keyed counterpart to [`Self::send_detached`]. Same
-    /// fire-and-forget contract; each concrete ctx specialises it to
-    /// suppress lineage the same way as [`Self::send_detached`].
-    fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        self.send_to_named::<K>(name, payload);
-    }
+    /// fire-and-forget contract. Required so every implementation explicitly
+    /// chooses the causal behavior that suppresses lineage and mints a fresh
+    /// root.
+    fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K);
 
     /// By-id counterpart to [`Self::send_detached`]: fire-and-forget send
     /// of `payload` to the mailbox `id`, minting a fresh causal root
