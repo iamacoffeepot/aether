@@ -150,6 +150,18 @@ impl GeometryRegistry {
         Self { next_id: 0, entries: HashMap::new() }
     }
 
+    /// Drop every buffer realization built against the current device
+    /// while preserving ids, layouts, and CPU-authored bytes. Each entry
+    /// becomes upload-ready for lazy realization on the replacement
+    /// device.
+    #[allow(dead_code, reason = "device-loss runtime wiring lands in the next recovery slice")]
+    pub fn invalidate_device_resources(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.realized = None;
+            entry.dirty = true;
+        }
+    }
+
     /// Stage a new geometry, validating the layout and bytes before any
     /// id is consumed. A rejected create leaves `next_id` untouched, so
     /// ids stay dense over accepted geometries.
@@ -244,8 +256,11 @@ fn validate_geometry(layout: &[VertexAttribute], vertices: &[u8], indices: &[u8]
 
 #[cfg(test)]
 mod tests {
+    use aether_harness_substrate_capture::test_helpers::has_wgpu_adapter;
+
     use super::*;
     use crate::VertexFormat;
+    use crate::runtime::surface::boot_offscreen;
 
     /// The skinned-mesh layout ADR-0171 names as the reason the format
     /// set is closed: position + joint indices + weights, stride
@@ -360,5 +375,35 @@ mod tests {
 
         assert_eq!(registry.entries.len(), 1);
         assert!(registry.entries.contains_key(&geometry_id));
+    }
+
+    #[test]
+    fn device_invalidation_preserves_geometry_staging_and_ids() {
+        if !has_wgpu_adapter() {
+            return;
+        }
+        let booted = boot_offscreen(None);
+        let mut registry = GeometryRegistry::new();
+        let layout = skinned_layout();
+        let vertices = vec![7u8; 40];
+        let indices = indices_bytes(&[0, 1, 0]);
+        let CreateGeometryResult::Ok { geometry_id } =
+            registry.create(create(layout.clone(), vertices.clone(), indices.clone()))
+        else {
+            panic!("geometry create accepted");
+        };
+        registry.entries.get_mut(&geometry_id).expect("created entry").ensure_realized(&booted.device, &booted.queue);
+        assert!(registry.entries[&geometry_id].realized.is_some(), "precondition: geometry is realized");
+
+        registry.invalidate_device_resources();
+
+        assert_eq!(registry.next_id, 1, "device replacement must not rewind public ids");
+        assert_eq!(registry.entries.len(), 1);
+        let entry = &registry.entries[&geometry_id];
+        assert_eq!(entry.layout, layout);
+        assert_eq!(entry.vertices, vertices);
+        assert_eq!(entry.indices, indices);
+        assert!(entry.realized.is_none(), "old-device buffers must be released");
+        assert!(entry.dirty, "preserved bytes must be upload-ready for the replacement device");
     }
 }

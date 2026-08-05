@@ -134,6 +134,19 @@ impl TextureRegistry {
         Self { next_id: 0, entries: HashMap::new() }
     }
 
+    /// Drop every realization built against the current device while
+    /// preserving the session-scoped registry. Sampled textures retain
+    /// their CPU pixels and become upload-ready for the replacement
+    /// device; writable textures have no staging and therefore restart
+    /// unstaged, so their next realization clears them.
+    #[allow(dead_code, reason = "device-loss runtime wiring lands in the next recovery slice")]
+    pub fn invalidate_device_resources(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.realized = None;
+            entry.dirty = entry.usage == TextureUsage::Sampled;
+        }
+    }
+
     /// Stage a new texture, validating the declared dimensions, format,
     /// sampling, and `pixels` before any id is consumed. A rejected create
     /// leaves `next_id` untouched, so ids stay dense over accepted textures.
@@ -286,7 +299,11 @@ pub fn expected_pixel_bytes(width: u32, height: u32, format: TextureFormat) -> O
 
 #[cfg(test)]
 mod tests {
+    use aether_harness_substrate_capture::test_helpers::has_wgpu_adapter;
+    use aether_substrate::render::build_texture_bindings;
+
     use super::*;
+    use crate::runtime::surface::boot_offscreen;
 
     /// ADR-0105 + ADR-0140: `expected_pixel_bytes` is the single source
     /// of the per-format length rule. Zero dimensions and overflowing
@@ -441,5 +458,67 @@ mod tests {
         let entry = registry.entries.get(&texture_id).expect("entry survives the dropped update");
         assert!(entry.pixels.is_empty(), "a writable texture must never gain staged pixels");
         assert!(!entry.dirty, "a dropped update must not dirty a writable texture");
+    }
+
+    #[test]
+    fn device_invalidation_preserves_staging_and_restarts_writable_textures_cleared() {
+        if !has_wgpu_adapter() {
+            return;
+        }
+        let booted = boot_offscreen(None);
+        let bindings = build_texture_bindings(&booted.device);
+        let mut registry = TextureRegistry::new();
+        let sampled_pixels = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let CreateTextureResult::Ok { texture_id: sampled_id } = registry.create(CreateTexture {
+            width: 2,
+            height: 1,
+            format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Nearest,
+            usage: TextureUsage::Sampled,
+            pixels: sampled_pixels.clone(),
+        }) else {
+            panic!("sampled create accepted");
+        };
+        let CreateTextureResult::Ok { texture_id: writable_id } = registry.create(CreateTexture {
+            width: 3,
+            height: 2,
+            format: TextureFormat::R16Float,
+            sampling: TextureSampling::Nearest,
+            usage: TextureUsage::Writable,
+            pixels: Vec::new(),
+        }) else {
+            panic!("writable create accepted");
+        };
+        registry.ensure_white();
+        for entry in registry.entries.values_mut() {
+            entry.ensure_realized(&booted.device, &booted.queue, &bindings);
+            assert!(entry.realized.is_some(), "precondition: every entry is realized on the old device");
+        }
+
+        registry.invalidate_device_resources();
+
+        assert_eq!(registry.next_id, 2, "device replacement must not rewind public ids");
+        assert_eq!(registry.entries.len(), 3, "device replacement must preserve every registered id");
+        let sampled = &registry.entries[&sampled_id];
+        assert_eq!(sampled.width, 2);
+        assert_eq!(sampled.height, 1);
+        assert_eq!(sampled.format, TextureFormat::Rgba8);
+        assert_eq!(sampled.sampling, TextureSampling::Nearest);
+        assert_eq!(sampled.pixels, sampled_pixels);
+        assert!(sampled.realized.is_none(), "the old-device texture must be released");
+        assert!(sampled.dirty, "sampled pixels must be upload-ready for the replacement device");
+
+        let writable = &registry.entries[&writable_id];
+        assert_eq!(writable.width, 3);
+        assert_eq!(writable.height, 2);
+        assert_eq!(writable.format, TextureFormat::R16Float);
+        assert!(writable.pixels.is_empty(), "writable textures remain deliberately unstaged");
+        assert!(writable.realized.is_none(), "the old-device writable texture must be released");
+        assert!(!writable.dirty, "a writable texture must recreate cleared rather than attempt an upload");
+
+        let white = &registry.entries[&WHITE_TEXTURE_ID];
+        assert_eq!(white.pixels, vec![255, 255, 255, 255]);
+        assert!(white.realized.is_none());
+        assert!(white.dirty, "the internal sampled texture must rebuild with the rest of the registry");
     }
 }
