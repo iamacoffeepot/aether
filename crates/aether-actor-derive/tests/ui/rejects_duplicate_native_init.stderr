@@ -3,3 +3,9 @@ error: a native actor may declare only one `init` method
    |
 14 |     fn init() {}
    |        ^^^^
+
+error: a native actor may declare only one `init` method
+  --> tests/ui/rejects_duplicate_native_init.rs:27:8
+   |
+27 |     fn init() {}
+   |        ^^^^

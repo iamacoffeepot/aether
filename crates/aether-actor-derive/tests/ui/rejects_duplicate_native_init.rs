@@ -1,7 +1,7 @@
 //! A native actor's second init is rejected at the later method rather than
 //! silently replacing the first during expansion.
 
-use aether_actor::actor;
+use aether_actor::{actor, runtime};
 
 struct Cap;
 
@@ -15,3 +15,14 @@ impl aether_substrate::actor::native::NativeActor for Cap {
 }
 
 fn main() {}
+
+struct RuntimeCap;
+
+#[runtime]
+impl aether_substrate::actor::native::NativeActor for RuntimeCap {
+    type Config = ();
+
+    fn init() {}
+
+    fn init() {}
+}
