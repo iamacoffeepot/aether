@@ -261,7 +261,10 @@ pub fn build_actor_lineage_manifest_consts(self_ty: &Type, opts: &ActorOpts) -> 
         ::aether_actor::__macro_internals::ACTOR_LINEAGE_SECTION_VERSION
     };
 
-    if opts.root {
+    // A root record is an address anchor, so mirror native `RootEntry`:
+    // an instanced namespace cannot identify the one actor an anchor needs.
+    let anchors = opts.root && !matches!(opts.cardinality, Some(ActorCardinality::Instanced));
+    if anchors {
         len_terms.push(quote! {
             1 + ::aether_actor::__macro_internals::actor_lineage_root_len(
                 #actor_tag,
@@ -552,5 +555,28 @@ fn option_str_token(doc: Option<&String>) -> TokenStream2 {
         quote! { ::core::option::Option::Some(#lit) }
     } else {
         quote! { ::core::option::Option::None }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instanced_root_does_not_emit_a_lineage_anchor() {
+        let self_ty = syn::parse_quote!(Probe);
+        let singleton = build_actor_lineage_manifest_consts(
+            &self_ty,
+            &ActorOpts { cardinality: Some(ActorCardinality::Singleton), root: true, ..ActorOpts::default() },
+        )
+        .to_string();
+        let instanced = build_actor_lineage_manifest_consts(
+            &self_ty,
+            &ActorOpts { cardinality: Some(ActorCardinality::Instanced), root: true, ..ActorOpts::default() },
+        )
+        .to_string();
+
+        assert!(singleton.contains("write_actor_lineage_root"));
+        assert!(!instanced.contains("write_actor_lineage_root"));
     }
 }

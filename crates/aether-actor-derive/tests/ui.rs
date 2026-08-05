@@ -21,6 +21,9 @@ fn ui() {
     t.pass("tests/ui/accepts_minimal_actor.rs");
     t.pass("tests/ui/accepts_actor_lineage_wasm.rs");
     t.pass("tests/ui/accepts_actor_composable_wasm.rs");
+    t.compile_fail("tests/ui/rejects_actor_child_of_cardinality_native.rs");
+    t.compile_fail("tests/ui/rejects_actor_child_of_cardinality_wasm.rs");
+    t.compile_fail("tests/ui/rejects_actor_root_wasm.rs");
     t.compile_fail("tests/ui/rejects_duplicate_actor_lineage.rs");
     t.compile_fail("tests/ui/rejects_malformed_actor_lineage.rs");
     t.compile_fail("tests/ui/rejects_actor_composable_cardinality.rs");

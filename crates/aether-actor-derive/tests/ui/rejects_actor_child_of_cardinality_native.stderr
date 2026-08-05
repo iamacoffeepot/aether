@@ -1,0 +1,11 @@
+error: `child_of(...)` requires explicit instanced native cardinality; use `#[actor(instanced, child_of(Parent))]`
+ --> tests/ui/rejects_actor_child_of_cardinality_native.rs:8:22
+  |
+8 | impl NativeActor for ImplNative {}
+  |                      ^^^^^^^^^^
+
+error: `child_of(...)` requires explicit instanced native cardinality; use `#[actor(instanced, child_of(Parent))]`
+  --> tests/ui/rejects_actor_child_of_cardinality_native.rs:11:8
+   |
+11 | struct StructNative;
+   |        ^^^^^^^^^^^^

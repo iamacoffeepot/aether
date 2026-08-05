@@ -1,0 +1,11 @@
+error: `child_of(...)` requires explicit instanced Wasm cardinality; use `#[actor(instanced, child_of(Parent))]`
+ --> tests/ui/rejects_actor_child_of_cardinality_wasm.rs:8:34
+  |
+8 | impl aether_actor::WasmActor for DefaultChild {}
+  |                                  ^^^^^^^^^^^^
+
+error: `child_of(...)` requires explicit instanced Wasm cardinality; use `#[actor(instanced, child_of(Parent))]`
+  --> tests/ui/rejects_actor_child_of_cardinality_wasm.rs:13:34
+   |
+13 | impl aether_actor::WasmActor for SingletonChild {}
+   |                                  ^^^^^^^^^^^^^^

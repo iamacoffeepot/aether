@@ -623,7 +623,7 @@ impl Addressable for ReplyParentB {
     type Resolver = aether_actor::One;
 }
 
-#[aether_actor::actor(root, child_of(ReplyParentA), child_of(ReplyParentB))]
+#[aether_actor::actor(singleton, root)]
 impl NativeActor for ReplyMacroCap {
     type Config = ();
     const NAMESPACE: &'static str = "test.macro_native_actor.reply";
@@ -641,6 +641,24 @@ impl NativeActor for ReplyMacroCap {
     fn on_greet_reply(&self, _ctx: &mut NativeCtx<'_>, mail: Greet) -> Pong {
         Pong { echoed: mail.tag }
     }
+}
+
+/// An instanced child with two legal native parents. It keeps child-placement
+/// inventory independent from the singleton root that owns the reply handler.
+struct InstancedChildCap;
+
+#[aether_actor::actor(instanced, child_of(ReplyParentA), child_of(ReplyParentB))]
+impl NativeActor for InstancedChildCap {
+    type Config = ();
+    const NAMESPACE: &'static str = "test.macro_native_actor.instanced_child";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[allow(clippy::unused_self)]
+    #[aether_actor::handler::single]
+    fn on_greet(&self, _ctx: &mut NativeCtx<'_>, _mail: Greet) {}
 }
 
 /// ADR-0109 §5: the macro emits a link-time `HandlerEntry` for each
@@ -667,26 +685,33 @@ fn macro_emits_native_handler_reply_manifest() {
 }
 
 #[test]
-fn macro_emits_native_lineage_inventory_from_actor_types() {
+fn macro_emits_native_singleton_root_inventory_from_actor_type() {
     use aether_data::ActorId;
-    use aether_data::name_inventory::{child_entries, root_entries};
+    use aether_data::name_inventory::root_entries;
 
     fn root<T: aether_actor::Root>() {}
-    fn child_a<T: aether_actor::ChildOf<ReplyParentA>>() {}
-    fn child_b<T: aether_actor::ChildOf<ReplyParentB>>() {}
     root::<ReplyMacroCap>();
-    child_a::<ReplyMacroCap>();
-    child_b::<ReplyMacroCap>();
 
     let root = root_entries()
         .find(|entry| entry.namespace == ReplyMacroCap::NAMESPACE)
         .expect("the macro should submit a RootEntry");
     assert_eq!(root.actor, ActorId::singleton(ReplyMacroCap::NAMESPACE));
+}
+
+#[test]
+fn macro_emits_native_instanced_child_inventory_from_actor_types() {
+    use aether_data::ActorId;
+    use aether_data::name_inventory::child_entries;
+
+    fn child_a<T: aether_actor::ChildOf<ReplyParentA>>() {}
+    fn child_b<T: aether_actor::ChildOf<ReplyParentB>>() {}
+    child_a::<InstancedChildCap>();
+    child_b::<InstancedChildCap>();
 
     let mut parents = child_entries()
-        .filter(|entry| entry.child_namespace == ReplyMacroCap::NAMESPACE)
+        .filter(|entry| entry.child_namespace == InstancedChildCap::NAMESPACE)
         .map(|entry| {
-            assert_eq!(entry.child, ActorId::singleton(ReplyMacroCap::NAMESPACE));
+            assert_eq!(entry.child, ActorId::singleton(InstancedChildCap::NAMESPACE));
             assert_eq!(entry.parent, ActorId::singleton(entry.parent_namespace));
             entry.parent_namespace
         })
@@ -740,9 +765,6 @@ fn instanced_root_takes_placement_without_claiming_an_address_anchor() {
         !root_entries().any(|entry| entry.namespace == InstancedRootCap::NAMESPACE),
         "an instanced root must submit no RootEntry — it cannot anchor an abbreviated address"
     );
-    // The singleton sibling in this same binary still does, so the assertion
-    // above is about cardinality and not about inventory being empty.
-    assert!(root_entries().any(|entry| entry.namespace == ReplyMacroCap::NAMESPACE), "a singleton root still anchors");
 }
 
 // ADR-0109 deferred reply contract (#1805): a `-> Pending<R>` request

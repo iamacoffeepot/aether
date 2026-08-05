@@ -1,4 +1,4 @@
-//! ADR-0123 struct-hosted `#[actor]` happy path: `#[actor(singleton, rt_ok)]`
+//! ADR-0123 struct-hosted `#[actor]` happy path: `#[actor(instanced, rt_ok)]`
 //! on a capability *struct* reads the sibling `rt_ok.rs` runtime module off disk,
 //! selects its `impl NativeActor` (gap-1 trait filter), lifts the `NAMESPACE` +
 //! the `on_ping` handler's `Ping` kind, and emits the always-on addressing
@@ -28,7 +28,7 @@ impl Addressable for Parent {
     type Resolver = One;
 }
 
-#[actor(singleton, root, child_of(Parent), rt_ok)]
+#[actor(instanced, root, child_of(Parent), rt_ok)]
 pub struct Cap;
 
 fn main() {
