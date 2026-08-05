@@ -29,6 +29,19 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             "`composable` requires explicit instanced Wasm cardinality; use `#[actor(instanced, composable)]`",
         ));
     }
+    if opts.root {
+        return Err(syn::Error::new_spanned(
+            self_ty,
+            "`root` is unavailable to Wasm actors; loaded modules are embedded entries, not actor-tree roots (ADR-0166)",
+        ));
+    }
+    if !opts.child_of.is_empty() && !matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
+        return Err(syn::Error::new_spanned(
+            self_ty,
+            "`child_of(...)` requires explicit instanced Wasm cardinality; \
+             use `#[actor(instanced, child_of(Parent))]`",
+        ));
+    }
 
     let generics = &item.generics;
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();

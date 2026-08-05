@@ -1,0 +1,11 @@
+error: `root` is unavailable to Wasm actors; loaded modules are embedded entries, not actor-tree roots (ADR-0166)
+ --> tests/ui/rejects_actor_root_wasm.rs:6:34
+  |
+6 | impl aether_actor::WasmActor for DefaultRoot {}
+  |                                  ^^^^^^^^^^^
+
+error: `root` is unavailable to Wasm actors; loaded modules are embedded entries, not actor-tree roots (ADR-0166)
+  --> tests/ui/rejects_actor_root_wasm.rs:11:34
+   |
+11 | impl aether_actor::WasmActor for InstancedRoot {}
+   |                                  ^^^^^^^^^^^^^

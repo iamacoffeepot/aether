@@ -80,7 +80,7 @@ impl Addressable for SecondParent {
     type Resolver = One;
 }
 
-#[actor(root, child_of(FirstParent), child_of(SecondParent))]
+#[actor(instanced, child_of(FirstParent), child_of(SecondParent))]
 impl WasmActor for ManifestProbe {
     const NAMESPACE: &'static str = "manifest_probe";
 
@@ -248,7 +248,6 @@ fn lineage_manifest_const_round_trips_to_actor_owned_names_and_tags() {
     assert_eq!(
         records,
         vec![
-            ActorLineageRecord::Root { actor, namespace: ManifestProbe::NAMESPACE.into() },
             ActorLineageRecord::Child {
                 parent: first,
                 child: actor,
@@ -266,12 +265,17 @@ fn lineage_manifest_const_round_trips_to_actor_owned_names_and_tags() {
 
     assert_eq!(
         ManifestProbe::__AETHER_PLACEMENT,
-        WasmPlacementFacts { is_instanced: false, module_child: false, exact_parent_tags: EXACT_PARENT_TAGS },
+        WasmPlacementFacts { is_instanced: true, module_child: false, exact_parent_tags: EXACT_PARENT_TAGS },
         "runtime placement facts must derive from the same exact parents as the wire records"
     );
 
-    let expected_root = ActorLineageRecord::Root { actor, namespace: ManifestProbe::NAMESPACE.into() };
-    let runtime = wire::to_vec(&expected_root).expect("runtime lineage encoding");
+    let expected_child = ActorLineageRecord::Child {
+        parent: first,
+        child: actor,
+        parent_namespace: FirstParent::NAMESPACE.into(),
+        child_namespace: ManifestProbe::NAMESPACE.into(),
+    };
+    let runtime = wire::to_vec(&expected_child).expect("runtime lineage encoding");
     assert_eq!(
         &ManifestProbe::__AETHER_LINEAGE_MANIFEST[1..=runtime.len()],
         runtime,

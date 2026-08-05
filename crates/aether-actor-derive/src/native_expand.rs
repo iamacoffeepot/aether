@@ -55,6 +55,18 @@ fn reject_generic_native_lineage(generics: &syn::Generics, opts: &ActorOpts) -> 
     ))
 }
 
+fn validate_native_placement(target: &impl quote::ToTokens, opts: &ActorOpts) -> syn::Result<()> {
+    if !opts.child_of.is_empty() && !matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
+        return Err(syn::Error::new_spanned(
+            target,
+            "`child_of(...)` requires explicit instanced native cardinality; \
+             use `#[actor(instanced, child_of(Parent))]`",
+        ));
+    }
+
+    Ok(())
+}
+
 // Emits the full `NativeActor` surface in one walk: dispatch table,
 // `init` wrapper, `HandlesKind<K>` impls per handler, plus the
 // dispatch ABI plumbing. Splitting into helpers would force shared
@@ -68,6 +80,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                 "`composable` is available only to instanced Wasm actors; native actors must declare exact `child_of(...)` permissions",
             ));
         }
+        validate_native_placement(&item.self_ty, opts)?;
         reject_generic_native_lineage(&item.generics, opts)?;
     }
 
@@ -1109,6 +1122,7 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
             "`composable` is available only to instanced Wasm actors; native actors must declare exact `child_of(...)` permissions",
         ));
     }
+    validate_native_placement(&item.ident, opts)?;
     reject_generic_native_lineage(&item.generics, opts)?;
 
     let ident = &item.ident;
