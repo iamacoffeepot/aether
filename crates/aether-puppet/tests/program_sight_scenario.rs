@@ -99,7 +99,7 @@ use aether_puppet::extract::{self, Settings};
 use aether_puppet::feature::{Curve3, Drawing, FeatureClass, SurfacePoint};
 use aether_puppet::labels::Labels;
 use aether_puppet::mesh::Mesh;
-use aether_puppet::{anchor, chart, deform, visibility};
+use aether_puppet::{Pose, anchor, chart, deform, visibility};
 use aether_render::QuadBlend;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot, OutputSlot,
@@ -415,6 +415,7 @@ impl Rig {
         layout: &Layout,
         eye: Vec3,
         canvas: (usize, usize),
+        skin: Option<&deform::Skin>,
     ) -> Self {
         Self {
             program_id: register(harness, &probed_program()),
@@ -424,7 +425,7 @@ impl Rig {
                 "create_subject",
                 &CreateGeometry {
                     layout: sight::subject_slot().layout,
-                    vertices: sight::subject_vertices(mesh, None),
+                    vertices: sight::subject_vertices(mesh, skin),
                     indices: sight::subject_indices(mesh),
                 },
             ),
@@ -434,7 +435,11 @@ impl Rig {
                     "create_resident_points",
                     &CreateGeometry {
                         layout: sight::points_slot().layout,
-                        vertices: sight::point_vertices(drawing, layout.resident(), None),
+                        vertices: sight::point_vertices(
+                            drawing,
+                            layout.resident(),
+                            skin.map(|skin| deform::Bound { rest: mesh, skin }),
+                        ),
                         indices: sight::point_indices(layout.resident()),
                     },
                 ),
@@ -462,21 +467,28 @@ impl Rig {
         }
     }
 
-    fn dispatch(&self, eye: Vec3, view_proj: Mat4, bias: f32) -> ProgramDispatch {
+    fn dispatch(
+        &self,
+        eye: Vec3,
+        view_proj: Mat4,
+        bias: f32,
+        bones: &[f32; deform::BONE_LIMIT * 12],
+    ) -> ProgramDispatch {
         ProgramDispatch {
             program_id: self.program_id,
             bindings: self.bindings.clone(),
             geometries: vec![self.subject, self.points[0], self.points[1], self.curves],
             // The parity oracle is `visibility::runs`, which gates
-            // nothing on tone and poses nothing — so the bone table is
-            // the identity and the hatch gate is off, which is exactly
-            // what an unrigged subject dispatches.
+            // nothing on tone — the hatch gate is off, which is exactly
+            // what an unrigged subject dispatches. The bone table is the
+            // caller's: an unrigged arm passes the empty table, and the
+            // bone-posed arm below passes `Skin::transforms` of its pose.
             uniforms: SightUniforms {
                 view_proj,
                 eye,
                 field: (self.width as u32, self.height as u32),
                 bias,
-                bones: deform::bone_uniform(&[]),
+                bones: *bones,
                 tone: ToneUniforms::of(&Settings::default(), false),
             }
             .encode(),
@@ -487,10 +499,17 @@ impl Rig {
     /// back. The drawing is already uploaded; the camera rides the
     /// uniform blob alone, which is the point — a turn costs the blob
     /// and no re-upload at all.
-    fn read_field(&self, harness: &mut SubstrateHarness, eye: Vec3, view_proj: Mat4, bias: f32) -> Field {
+    fn read_field(
+        &self,
+        harness: &mut SubstrateHarness,
+        eye: Vec3,
+        view_proj: Mat4,
+        bias: f32,
+        bones: &[f32; deform::BONE_LIMIT * 12],
+    ) -> Field {
         let probe = *self.bindings.last().expect("the probe binding is last");
         let pre = vec![
-            envelope("aether.render", &self.dispatch(eye, view_proj, bias)),
+            envelope("aether.render", &self.dispatch(eye, view_proj, bias, bones)),
             envelope("aether.render", &overlay(probe, self.width, self.height)),
         ];
 
@@ -533,7 +552,7 @@ fn re_point(
     canvas: (usize, usize),
 ) -> Rig {
     let Some(rig) = held else {
-        return Rig::mount(harness, mesh, drawing, layout, eye, canvas);
+        return Rig::mount(harness, mesh, drawing, layout, eye, canvas, None);
     };
 
     harness
@@ -1037,7 +1056,7 @@ fn the_gpu_field_splits_the_drawing_where_the_cpu_oracle_does() {
         // here as the whole surface reading someone else's occlusion.
         let rig = re_point(&mut harness, mounted.take(), &mesh, drawing, &layout, eye, (CANVAS_WIDTH, CANVAS_HEIGHT));
 
-        let field = rig.read_field(&mut harness, eye, view_proj, bias);
+        let field = rig.read_field(&mut harness, eye, view_proj, bias, &deform::bone_uniform(&[]));
         let context = format!("azimuth {azimuth}");
         assert_verdicts(&context, &mesh, eye, bias, drawing, &layout, &field);
         assert_derived(&context, eye, drawing, &layout, &field);
@@ -1074,8 +1093,8 @@ fn a_re_uploaded_subject_re_occludes_from_its_new_vertices() {
         .with_render()
         .build()
         .expect("harness");
-    let rig = Rig::mount(&mut harness, &mesh, drawing, &layout, eye, (CANVAS_WIDTH, CANVAS_HEIGHT));
-    let before = rig.read_field(&mut harness, eye, view_proj, bias);
+    let rig = Rig::mount(&mut harness, &mesh, drawing, &layout, eye, (CANVAS_WIDTH, CANVAS_HEIGHT), None);
+    let before = rig.read_field(&mut harness, eye, view_proj, bias, &deform::bone_uniform(&[]));
 
     // The pose: the slab swung across to the other side of her, so it
     // hides the strokes it was clearing and clears the ones it hid.
@@ -1102,12 +1121,109 @@ fn a_re_uploaded_subject_re_occludes_from_its_new_vertices() {
         )])
         .expect("update_geometry sequence");
 
-    let after = rig.read_field(&mut harness, eye, view_proj, bias);
+    let after = rig.read_field(&mut harness, eye, view_proj, bias, &deform::bone_uniform(&[]));
     let moved = before.seen.iter().zip(&after.seen).filter(|(was, now)| was != now).count();
     assert!(moved > 0, "a re-uploaded subject must re-occlude; not one of the field's texels moved");
 
     assert_verdicts("posed", &posed, eye, bias, drawing, &layout, &after);
     assert_derived("posed", eye, drawing, &layout, &after);
+}
+
+/// A little-endian 1.0 `.npy` around `values` — the payload shape
+/// `Skin::parse` reads; the header dict is bytes it skips over.
+fn weights_npy(values: &[f32]) -> Vec<u8> {
+    let header = "{'descr': '<f4', 'fortran_order': False, 'shape': (0,), }\n";
+    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+    bytes.extend(u16::try_from(header.len()).expect("a short header").to_le_bytes());
+    bytes.extend(header.as_bytes());
+    bytes.extend(values.iter().flat_map(|value| value.to_le_bytes()));
+
+    bytes
+}
+
+/// The subject rebuilt at the positions the CPU skin sent it. `Mesh`
+/// indexes its triangles for the ray cast at construction, so the posed
+/// oracle must be *built* posed — positions written after the fact move
+/// what the GPU rasterizes and not what the oracle traverses.
+fn obj_of(positions: &[Vec3], faces: &[[u32; 3]]) -> Mesh {
+    let mut text = String::new();
+    for at in positions {
+        writeln!(text, "v {} {} {}", at.x, at.y, at.z).expect("format vertex");
+    }
+    for face in faces {
+        writeln!(text, "f {} {} {}", face[0] + 1, face[1] + 1, face[2] + 1).expect("format face");
+    }
+
+    Mesh::from_obj_bytes(text.as_bytes(), RELAXATION).expect("posed oracle mesh")
+}
+
+/// Tripwire: the field follows a subject the *bone table* poses, held
+/// against an oracle ray-casting the same pose.
+///
+/// Every other dispatch in this file carries the empty bone table, so
+/// the prepass' `skin_point`, the point stage's `anchored_point` and
+/// the `bone_row` indexing of the uniform window ship on the strength
+/// of rest arms alone. What this catches is any of them disagreeing
+/// with `Skin::transforms` about where a pose sends the occluder — a
+/// transposed row, a mis-strided window, a share lane off by one —
+/// failures no rest arm can see, and which present live as verdicts
+/// flickering while the subject moves.
+#[test]
+fn a_bone_posed_occluder_occludes_where_the_posed_oracle_says() {
+    if !require_wgpu_only() {
+        return;
+    }
+
+    let mesh = synthetic_subject(0.0);
+    let settings = settings();
+    let bias = mesh.surface_bias();
+    let (eye, view_proj) = camera(0.0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    let drawn = drawing(&mesh, &settings, None, eye);
+    let drawing = drawn.as_drawing();
+    let layout = sight::layout(drawing, (CANVAS_WIDTH as u32, CANVAS_HEIGHT as u32)).expect("the drawing fits");
+
+    // The rig: the sphere rides a bone no pose ever drives, so the
+    // drawing's geometry holds still and the reference depths stay the
+    // rest solve's; the slab rides the head, so the pose swings the
+    // occluder and nothing else. One-hot weights, so the u8 share lane
+    // is exact and the arm measures posing rather than quantization.
+    let vertices = mesh.positions.len();
+    let mut weights = vec![0.0f32; vertices * 2];
+    for (vertex, row) in weights.chunks_exact_mut(2).enumerate() {
+        row[usize::from(vertex >= vertices - 4)] = 1.0;
+    }
+    let descriptor = "bones chest head\npivot head -0.95 0.0 1.2";
+    let skin = deform::Skin::parse(&weights_npy(&weights), descriptor, vertices).expect("the rig binds");
+
+    let mut harness = SubstrateHarness::builder()
+        .size(CANVAS_WIDTH as u32, CANVAS_HEIGHT as u32)
+        .with_render()
+        .build()
+        .expect("harness");
+    let rig = Rig::mount(&mut harness, &mesh, drawing, &layout, eye, (CANVAS_WIDTH, CANVAS_HEIGHT), Some(&skin));
+
+    // At rest the table is live but every transform is the identity, so
+    // the skinning path must reproduce the rest arm exactly.
+    let rest = deform::bone_uniform(&skin.transforms(&Pose::default()));
+    let before = rig.read_field(&mut harness, eye, view_proj, bias, &rest);
+    assert_verdicts("bone-rest", &mesh, eye, bias, drawing, &layout, &before);
+    assert_derived("bone-rest", eye, drawing, &layout, &before);
+
+    // The pose: a head yaw swings the slab about its own left edge, so
+    // it hides strokes it was clearing and clears strokes it hid while
+    // staying over the page.
+    let pose = Pose { yaw: 25.0, ..Pose::default() };
+    let transforms = skin.transforms(&pose);
+    let (mut positions, mut normals) = (mesh.positions.clone(), mesh.normals.clone());
+    skin.pose_surface(&transforms, &mesh, &mut positions, &mut normals);
+    let oracle = obj_of(&positions, &mesh.faces);
+
+    let after = rig.read_field(&mut harness, eye, view_proj, bias, &deform::bone_uniform(&transforms));
+    let moved = before.seen.iter().zip(&after.seen).filter(|(was, now)| was != now).count();
+    assert!(moved > 0, "a bone-posed occluder must re-occlude; not one of the field's texels moved");
+
+    assert_verdicts("bone-posed", &oracle, eye, bias, drawing, &layout, &after);
+    assert_derived("bone-posed", eye, drawing, &layout, &after);
 }
 
 /// The shipped subject, at the size and framing the easel develops at.
@@ -1190,7 +1306,7 @@ fn crossfeed_the_gpu_field_against_the_cpu_oracle() {
         let rig =
             re_point(&mut harness, mounted.take(), &mesh, drawing, &layout, eye, (CROSSFEED_WIDTH, CROSSFEED_HEIGHT));
 
-        let field = rig.read_field(&mut harness, eye, view_proj, bias);
+        let field = rig.read_field(&mut harness, eye, view_proj, bias, &deform::bone_uniform(&[]));
         let context = format!("crossfeed azimuth {azimuth}");
         assert_verdicts(&context, &mesh, eye, bias, drawing, &layout, &field);
         assert_derived(&context, eye, drawing, &layout, &field);
@@ -1228,7 +1344,7 @@ fn crossfeed_the_gpu_field_against_the_cpu_oracle() {
 /// same geometry — which is nothing to do with the dispatch and swamps
 /// it (iamacoffeepot/aether#4422).
 fn report_cost(harness: &mut SubstrateHarness, rig: &Rig, eye: Vec3, view_proj: Mat4, bias: f32) {
-    let dispatch = rig.dispatch(eye, view_proj, bias);
+    let dispatch = rig.dispatch(eye, view_proj, bias, &deform::bone_uniform(&[]));
 
     let mut run = |dispatched: bool| {
         let mut millis = 0.0;
