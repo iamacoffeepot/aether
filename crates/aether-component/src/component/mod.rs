@@ -112,7 +112,7 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
     use aether_actor::wasm::NO_INBOUND_SOURCE;
     use aether_actor::wasm::inline::Registry as InlineRegistry;
-    use aether_actor::{Addressable, Embedded, Manual, WasmActorMailbox, WasmCtx};
+    use aether_actor::{Addressable, Embedded, Manual, Resolve, WasmActorMailbox, WasmCtx};
     use aether_data::mailbox_id_from_name;
     use aether_substrate::mail::registry::{Registry, noop_handler};
     use aether_substrate::testing::boot_authority;
@@ -139,15 +139,15 @@ mod tests {
         // resolution, so a throwaway registry and a zero sender suffice
         // (issue 1987).
         let registry = InlineRegistry::new();
-        let host = WasmActorMailbox::<ComponentHostCapability>::__new(
-            mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
-            0,
-            &registry,
-        );
+        let caller = resolve_embedded("test.component.caller");
+        let parent = mailbox_id_from_name(ComponentHostCapability::NAMESPACE);
+        registry.set_self_id(caller.0);
+        registry.set_parent_id(parent.0);
+        let host = WasmActorMailbox::<ComponentHostCapability>::__new(parent.0, 0, &registry);
         let name = Guest::NAMESPACE;
         let camera = host.loaded::<Guest>(name);
         let trampoline = host.resolve::<WasmTrampoline>(name);
-        let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0, &registry, NO_INBOUND_SOURCE);
+        let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(caller.0, &registry, NO_INBOUND_SOURCE);
         let default_peer = ctx.peer::<Guest>();
         let named_peer = ctx.peer_named::<Guest>(name);
 
@@ -155,6 +155,32 @@ mod tests {
         assert_eq!(camera.mailbox_id(), resolve_embedded(name));
         assert_eq!(camera.mailbox_id(), default_peer.mailbox_id());
         assert_eq!(camera.mailbox_id(), named_peer.mailbox_id());
+    }
+
+    /// Peer lookup follows the parent mailbox injected into each runtime
+    /// instance. The same guest type therefore resolves beneath nested host
+    /// instances and changes address when re-parented, while default and named
+    /// loads share one resolver path.
+    #[test]
+    fn peer_lookup_follows_nested_and_reparented_runtime_parents() {
+        let parent_a = aether_data::mailbox_id_from_path("test.root/test.composite:a");
+        let parent_b = aether_data::mailbox_id_from_path("test.root/test.composite:b");
+        let caller_a = Embedded::resolve(parent_a.0, "caller", ());
+        let caller_b = Embedded::resolve(parent_b.0, "caller", ());
+        let registry_a = InlineRegistry::new();
+        registry_a.set_self_id(caller_a.0);
+        registry_a.set_parent_id(parent_a.0);
+        let registry_b = InlineRegistry::new();
+        registry_b.set_self_id(caller_b.0);
+        registry_b.set_parent_id(parent_b.0);
+        let ctx_a: WasmCtx<'_, Manual> = WasmCtx::__new(caller_a.0, &registry_a, NO_INBOUND_SOURCE);
+        let ctx_b: WasmCtx<'_, Manual> = WasmCtx::__new(caller_b.0, &registry_b, NO_INBOUND_SOURCE);
+
+        assert_eq!(ctx_a.peer::<Guest>().mailbox_id(), Embedded::resolve(parent_a.0, Guest::NAMESPACE, ()));
+        assert_eq!(ctx_b.peer::<Guest>().mailbox_id(), Embedded::resolve(parent_b.0, Guest::NAMESPACE, ()));
+        assert_eq!(ctx_a.peer_named::<Guest>("camera-7").mailbox_id(), Embedded::resolve(parent_a.0, "camera-7", ()),);
+        assert_eq!(ctx_b.peer_named::<Guest>("camera-7").mailbox_id(), Embedded::resolve(parent_b.0, "camera-7", ()),);
+        assert_ne!(ctx_a.peer::<Guest>().mailbox_id(), ctx_b.peer::<Guest>().mailbox_id());
     }
 
     /// The external registry boundary expands abbreviated component

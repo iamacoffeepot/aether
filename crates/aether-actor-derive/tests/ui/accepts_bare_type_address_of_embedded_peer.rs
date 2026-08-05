@@ -1,23 +1,11 @@
-//! ADR-0119 amendment: `#[actor]` gives a wasm actor `type Resolver =
-//! Embedded`, whose fold is only correct against the component host's carry.
-//! The bare-type send surfaces pass the *caller's* carry, so both spellings —
-//! `ctx.actor::<Peer>()` and `MailSender::send::<Peer, _>` — must refuse an
-//! embedded target at compile time rather than resolving an address nothing
-//! registers and dropping the mail.
+//! ADR-0119 parent-scope amendment: `#[actor]` gives a wasm actor
+//! `type Resolver = Embedded`, so ordinary typed ctx and `MailSender` sends
+//! resolve its default-named instance beneath the caller's runtime parent.
 
-use aether_actor::{
-    ActorInitError, MailSender, Mail, WasmActor, WasmCtx, WasmInitCtx, actor,
-};
+use aether_actor::{ActorInitError, Mail, MailSender, WasmActor, WasmCtx, WasmInitCtx, actor};
 
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.embedded_peer.ping")]
 struct Ping {
     seq: u32,

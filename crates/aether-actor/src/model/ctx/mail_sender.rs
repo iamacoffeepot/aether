@@ -27,19 +27,20 @@ use crate::model::{CallerAddressable, HandlesKind, Singleton};
 ///
 /// `R: Singleton + CallerAddressable + HandlesKind<K>` is the compile-time
 /// gate: trying to send a kind the receiver doesn't handle is rejected at the
-/// call site, not silently warn-dropped at runtime, and so is addressing a
-/// receiver whose mailbox does not fold onto the sender's carry (ADR-0119
-/// amendment — an [`Embedded`](crate::Embedded) component is reached through
-/// its host's `loaded::<R>(name)`, never by bare type). The receiver's mailbox
-/// is resolved through `R::resolve(caller_carry)` (ADR-0099 §5) — the
-/// same lineage-aware path `ctx.actor::<R>()` walks — so a non-root
-/// receiver routes to the lineage-folded id, not the flat
-/// `hash(R::NAMESPACE)`. Wire shape (cast or structured) follows
-/// `Kind::encode_into_bytes` (issue #240).
+/// call site, not silently warn-dropped at runtime. The receiver's resolver
+/// selects which runtime routing mailbox seeds `R::resolve` (ADR-0099 §5,
+/// ADR-0119): root-pinned actors ignore lineage, caller-relative children use
+/// the current mailbox, and an [`Embedded`](crate::Embedded) peer uses the
+/// logical parent mailbox. This is the same lineage-aware path
+/// `ctx.actor::<R>()` walks, so a hosted receiver routes to the folded id, not
+/// the flat `hash(R::NAMESPACE)`. The tagged mailbox already preserves every
+/// routing bit a later fold consumes; no untagged carry or lookup is needed.
+/// Wire shape (cast or structured) follows `Kind::encode_into_bytes` (issue
+/// #240).
 pub trait MailSender {
     /// Send a single payload of kind `K` to the singleton instance of
-    /// receiver actor `R`, resolved via `R::resolve` against the
-    /// caller's lineage carry (ADR-0099 §5).
+    /// receiver actor `R`, resolved via `R::resolve` against the routing scope
+    /// selected by its resolver (ADR-0099 §5).
     ///
     /// Inherits the handler's in-flight causal chain by default
     /// (ADR-0080 §7): the recipient's work settles back into the
