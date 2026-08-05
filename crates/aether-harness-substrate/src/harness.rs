@@ -1018,12 +1018,7 @@ impl SubstrateHarness {
     /// afterward. Subscription is race-safe: `subscribe_settlement`
     /// pre-fires if the tree settled between the push and the subscribe.
     #[cfg(test)]
-    pub(crate) fn inject_root(
-        &self,
-        recipient: MailboxId,
-        kind: KindId,
-        payload: Vec<u8>,
-    ) -> (MailId, crossbeam_channel::Receiver<()>) {
+    pub(crate) fn inject_root(&self, recipient: MailboxId, kind: KindId, payload: Vec<u8>) -> (MailId, Receiver<()>) {
         let cid = self.fresh_correlation_id();
         let registry = self.passive.settlement_registry();
         let root = self.queue.push_chassis_root_mail(cid, recipient, kind, payload, 1);
