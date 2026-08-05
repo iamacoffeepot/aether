@@ -17,7 +17,7 @@ mod tests {
     use aether_data::Kind;
     use aether_test_fixtures_kinds::{
         Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
-        InlineProbe,
+        InlineProbe, TagSpawnQuery, TagSpawnReport,
     };
 
     use aether_harness_fleet::{FleetHarness, dist_component_available};
@@ -142,6 +142,71 @@ mod tests {
         // swap: the fix this issue makes.
         let after_replace = count(&mut harness, engine, &child_addr);
         assert_eq!(after_replace, expected_moved, "the typed-config child's moved state survives replace_component");
+    }
+
+    /// Replacement must evaluate the saved child's placement against the
+    /// replacement entry actor while retaining children whose current facts
+    /// still permit that parent. `InlineStatefulChild` is module-composable,
+    /// so its moved state survives a root change from `InlineStatefulParent`
+    /// to `InlineTagParent` at the same stable trampoline.
+    #[test]
+    fn fleetharness_replace_retains_child_under_currently_permitted_parent() {
+        const BUMPS: u32 = 4;
+        if !dist_component_available("aether_test_fixtures_bundle") {
+            return;
+        }
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        let parent = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.stateful_parent");
+        let child_addr = format!("{}/aether.embedded:widget", parent.addr);
+
+        for _ in 0..BUMPS {
+            harness.send(engine, &child_addr, &Bump);
+        }
+        assert_eq!(count(&mut harness, engine, &child_addr), BUMPS, "the child holds moved state before replacement");
+
+        harness.replace_export(engine, parent.mailbox_id, "aether_test_fixtures_bundle", "test.inline.tag_parent");
+
+        assert_eq!(
+            count(&mut harness, engine, &child_addr),
+            BUMPS,
+            "a module-composable child retains its state under the replacement entry actor",
+        );
+    }
+
+    /// `InlineConfiguredChild` permits only `InlineConfiguredParent`.
+    /// Replacing that entry with `InlineTagParent` must therefore leave the
+    /// old descendant alias unserved instead of reviving it under a newly
+    /// forbidden parent. A query to the new root proves the replacement is
+    /// live while the rejected descendant stays absent.
+    #[test]
+    fn fleetharness_replace_rejects_descendant_under_newly_disallowed_parent() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
+            return;
+        }
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        let parent = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.configured_parent");
+        let child_addr = format!("{}/aether.embedded:widget", parent.addr);
+
+        assert_eq!(
+            count(&mut harness, engine, &child_addr),
+            CONFIGURED_CHILD_INITIAL,
+            "the exact-placement child is resident before replacement",
+        );
+
+        harness.replace_export(engine, parent.mailbox_id, "aether_test_fixtures_bundle", "test.inline.tag_parent");
+
+        let child_replies = harness.send(engine, &child_addr, &CountQuery);
+        assert!(child_replies.is_empty(), "a child forbidden beneath the replacement entry actor must stay absent");
+
+        let parent_replies = harness.send(engine, &parent.addr, &TagSpawnQuery);
+        let parent_reply = match parent_replies.as_slice() {
+            [one] => one,
+            other => panic!("the replacement parent should reply exactly once, got {}", other.len()),
+        };
+        assert_eq!(parent_reply.kind, TagSpawnReport::ID, "the live replacement replies with TagSpawnReport");
+        TagSpawnReport::decode_from_bytes(&parent_reply.payload).expect("the replacement parent's report decodes");
     }
 
     /// Send a `CountQuery` to `recipient` and decode the single

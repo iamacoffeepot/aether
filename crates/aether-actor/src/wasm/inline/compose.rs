@@ -81,6 +81,7 @@ pub fn dehydrate(
             version,
             state_bytes,
             config_bytes: meta.config_bytes,
+            parent_id: Some(meta.parent.0),
         });
     }
 
@@ -133,10 +134,16 @@ pub struct InlineChildToReconstruct<'a> {
 /// `on_rehydrate` with the parent's saved `(version, bytes)` rebuilt as a
 /// [`PriorState`]. `registry` is the component's inline-child
 /// registry (the `export!`-emitted `static __AETHER_INLINE`), forwarded to
-/// each `reconstruct_child` call. `reconstruct_child` is the codegen
-/// callback that re-`init`s one child by type tag, restores its state, and
-/// re-registers it in that registry; it returns `false` for an unknown tag
-/// (logged + skipped by the callback).
+/// each `reconstruct_child` call together with the child's effective
+/// logical parent. `reconstruct_child` is the codegen callback that checks
+/// the replacement module's current placement facts, re-`init`s one child
+/// by type tag, restores its state, and re-registers it in that registry;
+/// it returns `false` when the child cannot be restored.
+///
+/// Modern parent links reconstruct in iterative eligible passes so a parent
+/// is resident before any descendant. A pass that makes no progress stops;
+/// explicit orphans are never re-parented. Legacy, absent, and unusable
+/// links fall back to the cluster root.
 ///
 /// For a childless bundle the decompose yields the raw parent
 /// `(version, bytes)` and no children, so the parent's `on_rehydrate`
@@ -146,41 +153,72 @@ pub fn reconstruct_inline_children(
     bytes: &[u8],
     registry: &Registry,
     run_parent_rehydrate: impl FnOnce(u32, &[u8]),
-    mut reconstruct_child: impl FnMut(&Registry, &InlineChildToReconstruct<'_>) -> bool,
+    mut reconstruct_child: impl FnMut(&Registry, MailboxId, &InlineChildToReconstruct<'_>) -> bool,
 ) {
     let decomposed = bundle::decompose(version, bytes);
 
     run_parent_rehydrate(decomposed.parent.version, &decomposed.parent.bytes);
 
-    for entry in &decomposed.children {
-        let to_reconstruct = InlineChildToReconstruct {
-            alias: MailboxId(entry.alias_id),
-            type_tag: entry.type_tag,
-            is_counter: entry.is_counter,
-            full_subname: &entry.full_subname,
-            state_version: entry.version,
-            state_bytes: &entry.state_bytes,
-            config_bytes: &entry.config_bytes,
-        };
-        if !reconstruct_child(registry, &to_reconstruct) {
-            // An unknown type tag (a replace that dropped a child type) or
-            // a failed re-`init`: skip it. The codegen callback has already
-            // logged; nothing else to do for this entry.
-            tracing::warn!(
-                target = "aether_actor::inline",
-                alias = to_reconstruct.alias.0,
-                type_tag = to_reconstruct.type_tag,
-                "inline child not reconstructed across replace_component (unknown type tag \
-                 or re-init failure); skipping",
-            );
+    let cluster_root = MailboxId(registry.self_id());
+    let mut pending = decomposed.children.iter().collect::<Vec<_>>();
+    while !pending.is_empty() {
+        let pending_count = pending.len();
+        let mut deferred = Vec::with_capacity(pending_count);
+
+        for entry in pending {
+            let parent =
+                entry.parent_id.filter(|parent_id| *parent_id != MailboxId::NONE.0).map_or(cluster_root, MailboxId);
+            if parent != cluster_root && registry.actor_type_tag(parent).is_none() {
+                deferred.push(entry);
+                continue;
+            }
+
+            let to_reconstruct = InlineChildToReconstruct {
+                alias: MailboxId(entry.alias_id),
+                type_tag: entry.type_tag,
+                is_counter: entry.is_counter,
+                full_subname: &entry.full_subname,
+                state_version: entry.version,
+                state_bytes: &entry.state_bytes,
+                config_bytes: &entry.config_bytes,
+            };
+            if !reconstruct_child(registry, parent, &to_reconstruct) {
+                // An unknown type tag, placement rejected by the replacement
+                // module's current facts, or a failed re-`init`: skip it.
+                // Descendants remain deferred because this alias never
+                // becomes resident.
+                tracing::warn!(
+                    target = "aether_actor::inline",
+                    alias = to_reconstruct.alias.0,
+                    parent = parent.0,
+                    type_tag = to_reconstruct.type_tag,
+                    "inline child not reconstructed across replace_component (unknown type tag, \
+                     invalid current placement, or re-init failure); skipping",
+                );
+            }
         }
+
+        if deferred.len() == pending_count {
+            for entry in deferred {
+                tracing::warn!(
+                    target = "aether_actor::inline",
+                    alias = entry.alias_id,
+                    parent = entry.parent_id.unwrap_or(cluster_root.0),
+                    type_tag = entry.type_tag,
+                    "inline child not reconstructed across replace_component because its \
+                     recorded parent is absent; leaving the orphan absent",
+                );
+            }
+            break;
+        }
+        pending = deferred;
     }
 }
 
-/// Re-`init` one inline child of concrete type `A`, restore its
-/// `type State`, and re-register it under `alias` in `registry` (ADR-0114
-/// §5). Called by the `export!`-generated reconstruct callback once it has
-/// matched the child's type tag to one of the module's exported types.
+/// Re-`init` one inline child of concrete type `A`, restore its `type State`,
+/// and re-register it under `alias` at the cluster root. Retains the legacy
+/// direct-call behavior; replacement uses [`reconstruct_one_child_at_parent`]
+/// after resolving the persisted effective parent.
 ///
 /// Decodes `A::Config` from `to_reconstruct.config_bytes` — the child's
 /// real encoded config, retained in the slot since spawn (issue 2690) — so
@@ -199,6 +237,24 @@ pub fn reconstruct_inline_children(
 /// step below (per #2690's design notes, §Sequencing with #2692).
 #[must_use]
 pub fn reconstruct_one_child<A>(registry: &Registry, to_reconstruct: &InlineChildToReconstruct<'_>) -> bool
+where
+    A: WasmActor + ErasedWasmActor,
+    <A as WasmActor>::State: ErasedWasmActor,
+{
+    reconstruct_one_child_at_parent::<A>(registry, MailboxId(registry.self_id()), to_reconstruct)
+}
+
+/// Re-`init` one inline child of concrete type `A`, restore its `type State`,
+/// and re-register it under `alias` with the supplied logical `parent`.
+/// Called by the `export!`-generated reconstruct callback after it matches
+/// the type tag and validates the replacement module's current placement
+/// facts.
+#[must_use]
+pub fn reconstruct_one_child_at_parent<A>(
+    registry: &Registry,
+    parent: MailboxId,
+    to_reconstruct: &InlineChildToReconstruct<'_>,
+) -> bool
 where
     A: WasmActor + ErasedWasmActor,
     // iamacoffeepot/aether#2311: `A::init` returns the runtime state, boxed as
@@ -234,17 +290,14 @@ where
         child.erased_on_rehydrate(&mut ctx, prior);
     }
 
-    // The flat-alias model folds every inline child on the instance carry,
-    // so a reconstructed child's logical parent is the cluster root (the
-    // instance's real `self_id`). The dehydrate bundle does not persist the
-    // parent link; it is re-derived here from the live registry. Per-parent
-    // nesting (the address-tree = slot-tree fold) is a follow-up.
+    // The alias remains folded on the instance carry, but relative
+    // addressing walks the logical parent link restored from the bundle.
     registry.insert_child(
         to_reconstruct.alias,
         to_reconstruct.type_tag,
         String::from(to_reconstruct.full_subname),
         to_reconstruct.is_counter,
-        registry.self_id(),
+        parent.0,
         to_reconstruct.config_bytes.to_vec(),
         Box::new(child),
     );
@@ -343,6 +396,32 @@ mod tests {
         fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
     }
 
+    fn child_entry(alias_id: u64, type_tag: u64, parent_id: Option<u64>) -> bundle::ChildEntry {
+        bundle::ChildEntry {
+            alias_id,
+            type_tag,
+            is_counter: false,
+            full_subname: String::from("child"),
+            version: 0,
+            state_bytes: Vec::new(),
+            config_bytes: Vec::new(),
+            parent_id,
+        }
+    }
+
+    fn install_reconstructed(registry: &Registry, parent: MailboxId, child: &InlineChildToReconstruct<'_>) -> bool {
+        registry.insert_child(
+            child.alias,
+            child.type_tag,
+            String::from(child.full_subname),
+            child.is_counter,
+            parent.0,
+            child.config_bytes.to_vec(),
+            Box::new(SavingChild { tag: 0 }),
+        );
+        true
+    }
+
     /// Step 3 coverage: a parent with two inline children yields a
     /// composite carrying both child entries plus the parent's own state,
     /// composed through one logical `save_state`.
@@ -351,14 +430,16 @@ mod tests {
         // Two children with distinct tags + type tags + aliases, in a
         // test-local registry (no shared-global aliasing across tests).
         let registry = Registry::new();
+        let root = MailboxId(0x7000);
         let id_a = MailboxId(0xA1);
         let id_b = MailboxId(0xB2);
+        registry.set_self_id(root.0);
         registry.insert_child(
             id_a,
             0xAAAA,
             String::from("a"),
             false,
-            0,
+            root.0,
             vec![0x11, 0x22],
             Box::new(SavingChild { tag: 0x1111_2222 }),
         );
@@ -367,7 +448,7 @@ mod tests {
             0xBBBB,
             String::from("b"),
             true,
-            0,
+            id_a.0,
             Vec::new(),
             Box::new(SavingChild { tag: 0x3333_4444 }),
         );
@@ -388,10 +469,12 @@ mod tests {
         assert_eq!(a.type_tag, 0xAAAA);
         assert_eq!(a.state_bytes, 0x1111_2222u32.to_le_bytes().to_vec());
         assert_eq!(a.config_bytes, vec![0x11, 0x22], "child a's config bytes ride the compose alongside its state");
+        assert_eq!(a.parent_id, Some(root.0), "child a's root parent rides the appended metadata trailer");
         let b = decomposed.children.iter().find(|c| c.alias_id == id_b.0).expect("child b present");
         assert!(b.is_counter, "child b's counter flag is carried");
         assert_eq!(b.state_bytes, 0x3333_4444u32.to_le_bytes().to_vec());
         assert!(b.config_bytes.is_empty(), "child b was spawned with no retained config bytes");
+        assert_eq!(b.parent_id, Some(id_a.0), "child b's nested parent rides the appended metadata trailer");
     }
 
     /// Step 4 coverage: each child entry is offered to the reconstruct
@@ -417,6 +500,7 @@ mod tests {
                 version: 1,
                 state_bytes: vec![1, 2, 3],
                 config_bytes: Vec::new(),
+                parent_id: None,
             },
             ChildEntry {
                 alias_id: 0xC2,
@@ -426,13 +510,15 @@ mod tests {
                 version: 2,
                 state_bytes: vec![4, 5],
                 config_bytes: Vec::new(),
+                parent_id: None,
             },
         ];
         let (version, bytes) = compose(5, &[7, 7], &children);
 
         let registry = Registry::new();
+        registry.set_self_id(0xC0);
         let mut parent_runs = 0u32;
-        let mut offered: Vec<(u64, Vec<u8>)> = Vec::new();
+        let mut offered: Vec<(u64, MailboxId, Vec<u8>)> = Vec::new();
         reconstruct_inline_children(
             version,
             &bytes,
@@ -442,8 +528,8 @@ mod tests {
                 assert_eq!(pb, &[7, 7], "parent bytes slice is carried");
                 parent_runs += 1;
             },
-            |_registry, child| {
-                offered.push((child.type_tag, child.state_bytes.to_vec()));
+            |_registry, parent, child| {
+                offered.push((child.type_tag, parent, child.state_bytes.to_vec()));
                 // An unknown tag is offered but the callback skips it.
                 child.type_tag != TAG_UNKNOWN
             },
@@ -451,8 +537,153 @@ mod tests {
 
         assert_eq!(parent_runs, 1, "the parent rehydrate runs exactly once");
         assert_eq!(offered.len(), 2, "both children are offered to the callback");
-        assert_eq!(offered[0].1, vec![1, 2, 3], "child a state is carried");
-        assert_eq!(offered[1].1, vec![4, 5], "child b state is carried");
+        assert_eq!(offered[0].1, MailboxId(0xC0), "legacy child a falls back to the cluster root");
+        assert_eq!(offered[1].1, MailboxId(0xC0), "legacy child b falls back to the cluster root");
+        assert_eq!(offered[0].2, vec![1, 2, 3], "child a state is carried");
+        assert_eq!(offered[1].2, vec![4, 5], "child b state is carried");
+    }
+
+    #[test]
+    fn legacy_bundle_reconstructs_children_under_cluster_root() {
+        let root = MailboxId(0x1000);
+        let child = MailboxId(0x1001);
+        let (version, bytes) = bundle::compose(0, &[], &[child_entry(child.0, 0xA001, None)]);
+        let registry = Registry::new();
+        registry.set_self_id(root.0);
+
+        reconstruct_inline_children(version, &bytes, &registry, |_, _| {}, install_reconstructed);
+
+        assert_eq!(registry.parent_of(child), Some(root), "a trailer-free legacy child keeps the root fallback");
+    }
+
+    #[test]
+    fn reconstruction_defers_descendant_recorded_before_parent() {
+        let root = MailboxId(0x2000);
+        let parent = MailboxId(0x2002);
+        let descendant = MailboxId(0x2001);
+        let children =
+            vec![child_entry(descendant.0, 0xA002, Some(parent.0)), child_entry(parent.0, 0xA001, Some(root.0))];
+        let (version, bytes) = bundle::compose(0, &[], &children);
+        let registry = Registry::new();
+        registry.set_self_id(root.0);
+        let mut order = Vec::new();
+
+        reconstruct_inline_children(
+            version,
+            &bytes,
+            &registry,
+            |_, _| {},
+            |registry, parent, child| {
+                order.push(child.alias);
+                install_reconstructed(registry, parent, child)
+            },
+        );
+
+        assert_eq!(order, vec![parent, descendant], "the parent reconstructs before its earlier-recorded descendant");
+    }
+
+    #[test]
+    fn reconstruction_restores_each_exact_parent_link() {
+        let root = MailboxId(0x3000);
+        let branch = MailboxId(0x3001);
+        let nested = MailboxId(0x3002);
+        let leaf = MailboxId(0x3003);
+        let children = vec![
+            child_entry(branch.0, 0xA001, Some(root.0)),
+            child_entry(nested.0, 0xA002, Some(branch.0)),
+            child_entry(leaf.0, 0xA003, Some(nested.0)),
+        ];
+        let (version, bytes) = bundle::compose(0, &[], &children);
+        let registry = Registry::new();
+        registry.set_self_id(root.0);
+
+        reconstruct_inline_children(version, &bytes, &registry, |_, _| {}, install_reconstructed);
+
+        assert_eq!(registry.parent_of(branch), Some(root));
+        assert_eq!(registry.parent_of(nested), Some(branch));
+        assert_eq!(registry.parent_of(leaf), Some(nested));
+    }
+
+    #[test]
+    fn rejected_and_missing_parents_leave_descendants_absent() {
+        let root = MailboxId(0x4000);
+        let rejected = MailboxId(0x4001);
+        let descendant = MailboxId(0x4002);
+        let missing_parent = MailboxId(0x4FFF);
+        let orphan = MailboxId(0x4003);
+        let children = vec![
+            child_entry(rejected.0, 0xA001, Some(root.0)),
+            child_entry(descendant.0, 0xA002, Some(rejected.0)),
+            child_entry(orphan.0, 0xA003, Some(missing_parent.0)),
+        ];
+        let (version, bytes) = bundle::compose(0, &[], &children);
+        let registry = Registry::new();
+        registry.set_self_id(root.0);
+        let mut offered = Vec::new();
+
+        reconstruct_inline_children(
+            version,
+            &bytes,
+            &registry,
+            |_, _| {},
+            |_registry, _parent, child| {
+                offered.push(child.alias);
+                false
+            },
+        );
+
+        assert_eq!(offered, vec![rejected], "only the eligible but rejected parent is offered");
+        assert!(registry.take(rejected).is_none());
+        assert!(registry.take(descendant).is_none(), "a rejected parent's descendant stays absent");
+        assert!(registry.take(orphan).is_none(), "an explicitly missing parent is never re-parented to the root");
+    }
+
+    #[test]
+    fn reconstruction_terminates_when_no_parent_can_progress() {
+        let root = MailboxId(0x5000);
+        let left = MailboxId(0x5001);
+        let right = MailboxId(0x5002);
+        let children = vec![child_entry(left.0, 0xA001, Some(right.0)), child_entry(right.0, 0xA002, Some(left.0))];
+        let (version, bytes) = bundle::compose(0, &[], &children);
+        let registry = Registry::new();
+        registry.set_self_id(root.0);
+        let mut offered = 0;
+
+        reconstruct_inline_children(
+            version,
+            &bytes,
+            &registry,
+            |_, _| {},
+            |_registry, _parent, _child| {
+                offered += 1;
+                true
+            },
+        );
+
+        assert_eq!(offered, 0, "a parent cycle reaches the no-progress exit without offering either child");
+    }
+
+    #[test]
+    fn blocked_branch_does_not_prevent_independent_reconstruction() {
+        let root = MailboxId(0x6000);
+        let orphan = MailboxId(0x6001);
+        let missing_parent = MailboxId(0x6FFF);
+        let valid_parent = MailboxId(0x6003);
+        let valid_child = MailboxId(0x6002);
+        let children = vec![
+            child_entry(orphan.0, 0xA001, Some(missing_parent.0)),
+            child_entry(valid_child.0, 0xA003, Some(valid_parent.0)),
+            child_entry(valid_parent.0, 0xA002, Some(root.0)),
+        ];
+        let (version, bytes) = bundle::compose(0, &[], &children);
+        let registry = Registry::new();
+        registry.set_self_id(root.0);
+
+        reconstruct_inline_children(version, &bytes, &registry, |_, _| {}, install_reconstructed);
+
+        assert!(registry.take(orphan).is_none(), "the blocked branch stays absent");
+        assert!(registry.take(valid_parent).is_some(), "the independent parent reconstructs");
+        assert!(registry.take(valid_child).is_some(), "the independent descendant reconstructs after its parent");
     }
 
     /// A typed (non-`()`) `Config` for step 5's reconstruct coverage: wraps

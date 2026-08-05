@@ -111,6 +111,10 @@ pub(crate) struct InlineChildMeta {
     pub(crate) full_subname: String,
     /// Whether the original spawn used a counter discriminator.
     pub(crate) is_counter: bool,
+    /// The real folded [`MailboxId`] of the child's logical parent,
+    /// captured from the resident slot so replacement reconstruction can
+    /// restore the same relative-addressing tree.
+    pub(crate) parent: MailboxId,
     /// The child's encoded `Config` bytes, carried into the dehydrate
     /// bundle's `ChildEntry` so reconstruct can re-init from the real
     /// config instead of empty bytes (issue 2690).
@@ -439,6 +443,7 @@ impl Registry {
                 type_tag: slot.type_tag,
                 full_subname: slot.full_subname.clone(),
                 is_counter: slot.is_counter,
+                parent: MailboxId(slot.parent),
                 config_bytes: slot.config_bytes.clone(),
             })
             .collect()
@@ -836,15 +841,24 @@ mod tests {
         assert!(registry.take(id).is_some(), "reinsert refills the slot for the next dispatch");
     }
 
-    /// Step 1 coverage: a spawned child's slot carries its actor-type tag
-    /// and resolved subname, surfaced through `child_metas` for the
-    /// dehydrate walk.
+    /// A spawned child's slot carries its actor-type tag, resolved subname,
+    /// and logical parent, surfaced through `child_metas` for the dehydrate
+    /// walk.
     #[test]
-    fn child_metas_carry_type_tag_and_subname() {
+    fn child_metas_carry_reconstruct_metadata() {
         let registry = Registry::new();
         let id = MailboxId(0x7777);
+        let parent = MailboxId(0x7000);
         let tag = 0xABCD_u64;
-        registry.insert_child(id, tag, String::from("widget"), false, 0, Vec::new(), Box::new(RecordingChild::new().0));
+        registry.insert_child(
+            id,
+            tag,
+            String::from("widget"),
+            false,
+            parent.0,
+            Vec::new(),
+            Box::new(RecordingChild::new().0),
+        );
 
         let metas = registry.child_metas();
         let [meta] = metas.as_slice() else {
@@ -854,6 +868,7 @@ mod tests {
         assert_eq!(meta.type_tag, tag, "the meta carries the actor-type tag");
         assert_eq!(meta.full_subname, "widget", "the meta carries the subname");
         assert!(!meta.is_counter, "a Named subname is not a counter");
+        assert_eq!(meta.parent, parent, "the meta carries the resident slot's logical parent");
     }
 
     #[test]
