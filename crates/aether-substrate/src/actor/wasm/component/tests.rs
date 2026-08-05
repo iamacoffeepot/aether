@@ -701,8 +701,8 @@ fn parent_and_params_init_receives_both_channels_without_losing_lineage() {
     assert_eq!(component.read_u32(200), 0x4c05);
     assert_eq!(component.read_u32(208), 0x4c06);
     assert_eq!(component.read_u32(216), component.small_ptr);
-    assert_eq!(component.read_u32(220), config.len() as u32);
-    assert_eq!(component.read_u32(224), params.len() as u32);
+    assert_eq!(component.read_u32(220), u32::try_from(config.len()).expect("config length fits u32"));
+    assert_eq!(component.read_u32(224), u32::try_from(params.len()).expect("params length fits u32"));
     assert_eq!(
         component.read_bytes(component.small_ptr as usize, config.len() + params.len()),
         vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee],
