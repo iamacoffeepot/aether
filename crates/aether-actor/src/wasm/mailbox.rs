@@ -194,6 +194,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
     {
         match self.inline.route_decision(self.mailbox) {
             RouteDecision::Local => {
+                self.send(payload);
                 tracing::warn!(
                     kind = <K as Kind>::NAME,
                     recipient = self.mailbox,

@@ -358,20 +358,21 @@ pub fn __validate_inline_child_placement(
     Ok(())
 }
 
-/// Allocate an inline child's first-class alias via the substrate's
-/// `spawn_inline_child` host fn (issue 2692). The `export!`-generated
-/// by-tag resolver calls this from its matched branch — before the shared
-/// [`inline::compose::spawn_one_child`] decode + init core — so a
-/// tag-selected child's alias is minted exactly as the typed
-/// [`WasmCtx::spawn_inline_child`] verb mints it, and an unmatched tag
-/// (which never reaches this call) orphans no alias. wasm32-only: the host
-/// build carries no FFI surface, and the resolver that calls this is itself
-/// emitted only in the wasm-cfg init shims.
+/// Validate the raw alias a host allocated for an inline child. A zero alias
+/// is the host's failure sentinel, not an address that can enter the inline
+/// registry, so validation occurs before configuration decode or child init.
+#[doc(hidden)]
+pub fn __validate_inline_child_alias(alias: aether_data::MailboxId) -> Result<aether_data::MailboxId, SpawnError> {
+    if alias == aether_data::MailboxId::NONE {
+        return Err(SpawnError::AliasAllocationFailed);
+    }
+    Ok(alias)
+}
+
 #[cfg(target_family = "wasm")]
 #[doc(hidden)]
-#[must_use]
-pub fn __alloc_inline_child_alias(is_counter: bool, subname: &str) -> aether_data::MailboxId {
-    aether_data::MailboxId(bridge::mail::spawn_inline_child(is_counter, subname))
+pub fn __alloc_inline_child_alias(is_counter: bool, subname: &str) -> Result<aether_data::MailboxId, SpawnError> {
+    __validate_inline_child_alias(aether_data::MailboxId(bridge::mail::spawn_inline_child(is_counter, subname)))
 }
 
 pub mod guest_alloc;
@@ -994,7 +995,7 @@ macro_rules! __export_internal {
                     let __aether_alias = $crate::wasm::__alloc_inline_child_alias(
                         __aether_is_counter,
                         __aether_subname,
-                    );
+                    )?;
                     return $crate::wasm::inline::compose::spawn_one_child::<$candidate>(
                         __aether_registry,
                         __aether_parent,

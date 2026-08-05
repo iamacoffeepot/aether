@@ -137,7 +137,7 @@ fn ctx_relative_verbs_resolve_and_route_in_place() {
 }
 
 #[test]
-fn send_tracked_local_route_returns_no_correlation_sentinel() {
+fn send_tracked_local_route_enqueues_and_returns_no_correlation() {
     let registry = Registry::new();
     let root = 0x7100_u64;
     registry.set_self_id(root);
@@ -148,4 +148,5 @@ fn send_tracked_local_route_returns_no_correlation_sentinel() {
     let mailbox = WasmActorMailbox::<SucceedingChild>::__new(child.0, root, &registry);
     let request = mailbox.send_tracked(&());
     assert_eq!(request.0, Source::NO_CORRELATION, "local inline sends have no host-minted request id");
+    assert_eq!(registry.queued_len(), 1, "local tracked sends enqueue their payload before returning the sentinel");
 }

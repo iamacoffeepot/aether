@@ -10,6 +10,8 @@ use super::{
 };
 use crate::model::Subname;
 use crate::model::ctx::Manual;
+use crate::wasm::__validate_inline_child_alias;
+use crate::wasm::inline::compose::spawn_one_child;
 use crate::wasm::inline::compose::{InlineChildToReconstruct, reconstruct_one_child};
 use aether_data::{Kind, MailboxId};
 use alloc::boxed::Box;
@@ -175,6 +177,34 @@ fn spawn_inline_child_by_tag_unknown_tag_errors_and_inserts_nothing() {
     assert!(registry.child_metas().is_empty(), "an unknown tag inserts no child");
 }
 
+#[test]
+fn by_tag_spawn_rejects_zero_host_alias_before_init() {
+    let registry = Registry::new();
+    registry.set_self_id(0x10);
+    registry.set_entry_actor_tag(ActorTypeTag::of::<NestingParent>());
+    registry.set_spawn_resolver(zero_alias_resolver);
+    STUB_INIT_CONFIG.set(None);
+
+    let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+    let result = ctx.spawn_inline_child_by_tag(
+        ActorTypeTag::of::<StubChild>(),
+        Subname::Named("tagged"),
+        &StubConfig { value: 0x1234_5678 }.encode_into_bytes(),
+    );
+
+    assert!(matches!(result, Err(SpawnError::AliasAllocationFailed)));
+    assert_eq!(STUB_INIT_CONFIG.get(), None, "a zero alias stops before child init");
+    assert!(registry.child_metas().is_empty(), "a zero alias stops before registry insertion");
+}
+
+#[test]
+fn inline_child_alias_validator_accepts_nonzero_alias() {
+    assert_eq!(
+        __validate_inline_child_alias(MailboxId(0xABCD_0001)).expect("a nonzero host alias is valid"),
+        MailboxId(0xABCD_0001),
+    );
+}
+
 /// Step 5(c): subname validation runs before the resolver — a
 /// separator-bearing `Named` is rejected with
 /// [`SpawnError::SubnameInvalid`] and the (panicking) resolver never
@@ -190,6 +220,31 @@ fn spawn_inline_child_by_tag_rejects_bad_subname_before_resolver() {
         matches!(result, Err(SpawnError::SubnameInvalid(_))),
         "a separator-bearing subname is rejected before the resolver runs, got {result:?}",
     );
+}
+
+fn zero_alias_resolver(
+    registry: &Registry,
+    parent: u64,
+    tag: ActorTypeTag,
+    is_counter: bool,
+    full_subname: &str,
+    config_bytes: &[u8],
+) -> Result<MailboxId, SpawnError> {
+    if tag == ActorTypeTag::of::<StubChild>() {
+        __validate_inline_child_placement(registry, parent, tag, StubChild::__AETHER_PLACEMENT)?;
+        let alias = __validate_inline_child_alias(MailboxId::NONE)?;
+        spawn_one_child::<StubChild>(
+            registry,
+            parent,
+            alias,
+            tag.0,
+            String::from(full_subname),
+            is_counter,
+            config_bytes,
+        )
+    } else {
+        Err(SpawnError::UnknownActorTag(tag))
+    }
 }
 
 #[test]

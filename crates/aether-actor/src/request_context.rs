@@ -126,6 +126,9 @@ impl RequestContextTable {
         let Some(count) = take_u32(&mut cursor) else {
             return false;
         };
+        if count as usize > self.capacity {
+            return false;
+        }
         let mut entries = Vec::with_capacity(count as usize);
         for _ in 0..count {
             let (Some(request), Some(kind), Some(insert_seq), Some(len)) =
@@ -310,6 +313,19 @@ mod tests {
         let mut restored = RequestContextTable::new();
         assert!(restored.restore_snapshot_bytes(&bytes));
         assert_eq!(restored.take::<TestContext>(RequestId(7)), Some(TestContext { value: 42 }));
+    }
+
+    #[test]
+    fn restore_snapshot_rejects_count_over_capacity_before_reserve() {
+        let mut table = RequestContextTable::new();
+        table.insert(RequestId(7), &TestContext { value: 42 });
+        let before = table.clone();
+        let mut bytes = Vec::new();
+        push_u64(&mut bytes, 9);
+        push_len(&mut bytes, table.capacity + 1);
+
+        assert!(!table.restore_snapshot_bytes(&bytes));
+        assert_eq!(table, before, "an over-capacity snapshot leaves existing contexts untouched");
     }
 
     #[test]
