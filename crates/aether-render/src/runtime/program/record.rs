@@ -25,7 +25,7 @@ use super::super::texture::TextureRegistry;
 use super::cache::{BoundInput, CacheParts};
 use super::timing::FrameQueries;
 use super::validate::{PassPlan, ProgramPlan, ResolvedSlot, resolve_extent};
-use super::{PassGpu, RegisteredProgram, TransientKey};
+use super::{PassGpu, ProgramDeviceState, RegisteredProgram, TransientKey};
 use crate::{PassLoad, ProgramDispatch, TextureSampling, TextureUsage};
 
 /// Execute one dispatch into `encoder`, or warn-drop it whole: the
@@ -45,7 +45,19 @@ pub(super) fn record_dispatch(
     dispatch: &ProgramDispatch,
     queries: Option<FrameQueries<'_>>,
 ) {
-    let RegisteredProgram { plan, passes_gpu, cache, timings } = program;
+    let RegisteredProgram { plan, state, timings, .. } = program;
+    let ProgramDeviceState::Ready { passes_gpu, cache } = state else {
+        let ProgramDeviceState::Quarantined { reason } = state else {
+            unreachable!("the ready state returned above")
+        };
+        tracing::warn!(
+            target: "aether_render",
+            program_id = dispatch.program_id,
+            %reason,
+            "program dispatch targets a replacement-device-quarantined program; dropping the dispatch",
+        );
+        return;
+    };
     let Some(reference) = check_dispatch(plan, textures, geometries, dispatch) else {
         return;
     };
