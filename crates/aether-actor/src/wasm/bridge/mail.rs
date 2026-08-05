@@ -135,6 +135,7 @@ pub fn reply_correlation() -> u64 {
 /// carry the host already holds; the spawn itself completes just
 /// after this call (ADR-0097 §4), so a spawn-time failure surfaces
 /// asynchronously rather than here.
+#[allow(dead_code, reason = "legacy guest ABI bridge retained during the scoped-spawn migration")]
 #[must_use]
 pub fn spawn_sibling(tag: u64, is_counter: bool, subname: &str, config: &[u8]) -> u64 {
     let subname_bytes = subname.as_bytes();
@@ -189,6 +190,7 @@ pub fn spawn_sibling_scoped(parent: u64, tag: u64, is_counter: bool, subname: &s
 /// (see [`crate::WasmCtx::spawn_inline_child`]). The returned id is the
 /// ADR-0099 §3 lineage fold, known synchronously; `0` on a host-side
 /// error.
+#[allow(dead_code, reason = "legacy guest ABI bridge retained during the scoped-spawn migration")]
 #[must_use]
 pub fn spawn_inline_child(is_counter: bool, subname: &str) -> u64 {
     let subname_bytes = subname.as_bytes();
