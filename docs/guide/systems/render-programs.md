@@ -515,6 +515,28 @@ the MCP `actor_logs` tool against mailbox `"aether.render"` (see
 [Logging](logging.md)). A `destroy` naming an unknown `program_id` warn-drops
 the same way.
 
+GPU errors raised after those CPU checks retain the same address. Resource
+setup is wrapped in validation, internal, and out-of-memory error scopes; each
+pass is wrapped in a fresh set around its bind-group and command recording.
+The resulting `aether_render` error includes the program id, error class,
+supplied texture and geometry bindings, and either `phase = "setup"` or the
+pass index, entry point, resolved input/output slots, and draw plan. A setup
+error drops that dispatch's pass recording; a pass error stops its remaining
+passes. Errors outside authored-program dispatches still reach the device's
+generic uncaptured-error handler.
+
+Because dispatch validation rejects every documented malformed input before
+command recording, there is no supported public API for deliberately producing
+one of these scoped GPU errors. The scopes diagnose backend validation failures
+that escape the CPU checks, not a consumer-triggerable error class. Consumers
+can verify log retrieval with a CPU warn-drop; deterministic exercise of GPU
+error attribution requires test-only fault injection.
+
+On the native wgpu-core backend these scope pops remove thread-local CPU scope
+entries and return ready futures; they do not wait for submitted GPU work. The
+ignored `empty_error_scope_cost` test is the repeatable adapter-backed
+instrument for the per-setup/per-pass CPU cost.
+
 ## Transient pooling
 
 Transients are pooled by resolved size and realized format, and the pool is
