@@ -39,7 +39,7 @@ use aether_data::Kind;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{Image, Rect, background_top_left, decode_png, target_color_stats};
-use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, QuadSpace};
+use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, QuadSpace, Tick};
 use aether_kit_widget::{
     PanelConfig, ScrollConfig, ScrollExtent, ScrollOffset, Theme, WidgetChildSpec, WidgetClipRect, WidgetConfig,
     WidgetDrawItem, WidgetKind,
@@ -212,8 +212,8 @@ fn load_scroll_panel(harness: &mut SubstrateHarness, wasm: &[u8], child: WidgetC
 fn tick_to_root() -> NamedMail {
     NamedMail {
         recipient_name: panel_address(),
-        kind_name: "aether.lifecycle.tick".to_owned(),
-        payload: Vec::new(),
+        kind_name: Tick::NAME.to_owned(),
+        payload: Tick::default().encode_into_bytes(),
         count: 1,
     }
 }

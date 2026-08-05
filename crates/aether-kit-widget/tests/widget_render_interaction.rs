@@ -385,7 +385,12 @@ fn warm_panel(harness: &mut SubstrateHarness) {
 /// as a capture's `mails` so the panel redraws with its current widget state the
 /// same frame the substrate reads back.
 fn tick_to_panel() -> NamedMail {
-    NamedMail { recipient_name: panel_address(), kind_name: Tick::NAME.to_owned(), payload: Vec::new(), count: 1 }
+    NamedMail {
+        recipient_name: panel_address(),
+        kind_name: Tick::NAME.to_owned(),
+        payload: Tick::default().encode_into_bytes(),
+        count: 1,
+    }
 }
 
 /// A left mouse-button press at `(x, y)`.

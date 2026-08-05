@@ -151,7 +151,12 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) {
 
 /// One synthesized frame tick addressed straight to the panel's mailbox.
 fn tick_to_panel() -> NamedMail {
-    NamedMail { recipient_name: panel_address(), kind_name: Tick::NAME.to_owned(), payload: Vec::new(), count: 1 }
+    NamedMail {
+        recipient_name: panel_address(),
+        kind_name: Tick::NAME.to_owned(),
+        payload: Tick::default().encode_into_bytes(),
+        count: 1,
+    }
 }
 
 /// A region-scoped `Centroid` check over the inclusive window rect

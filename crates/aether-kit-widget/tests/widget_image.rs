@@ -122,7 +122,12 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &ImageConfig)
 }
 
 fn tick_to(panel: &str) -> NamedMail {
-    NamedMail { recipient_name: panel.to_owned(), kind_name: Tick::NAME.to_owned(), payload: Vec::new(), count: 1 }
+    NamedMail {
+        recipient_name: panel.to_owned(),
+        kind_name: Tick::NAME.to_owned(),
+        payload: Tick::default().encode_into_bytes(),
+        count: 1,
+    }
 }
 
 fn capture(harness: &mut SubstrateHarness, panel: &str) -> Image {
