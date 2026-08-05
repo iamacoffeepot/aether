@@ -525,6 +525,13 @@ error drops that dispatch's pass recording; a pass error stops its remaining
 passes. Errors outside authored-program dispatches still reach the device's
 generic uncaptured-error handler.
 
+Because dispatch validation rejects every documented malformed input before
+command recording, there is no supported public API for deliberately producing
+one of these scoped GPU errors. The scopes diagnose backend validation failures
+that escape the CPU checks, not a consumer-triggerable error class. Consumers
+can verify log retrieval with a CPU warn-drop; deterministic exercise of GPU
+error attribution requires test-only fault injection.
+
 On the native wgpu-core backend these scope pops remove thread-local CPU scope
 entries and return ready futures; they do not wait for submitted GPU work. The
 ignored `empty_error_scope_cost` test is the repeatable adapter-backed
