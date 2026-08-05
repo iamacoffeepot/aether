@@ -12,9 +12,8 @@ use aether_data::{Kind, MailboxId, RequestId, Source, mailbox_id_from_name};
 
 use crate::mail::ReplyHandle;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
-use crate::model::{Addressable, CallerAddressable, CallerScoped, Singleton};
+use crate::model::{Addressable, CallerAddressable, Singleton};
 use crate::wasm::bridge::mail;
-use crate::wasm::ctx::RawCallerScopes;
 use crate::wasm::inline::Registry;
 use crate::wasm::mailbox::WasmActorMailbox;
 use alloc::string::String;
@@ -27,10 +26,6 @@ use alloc::string::String;
 #[allow(clippy::module_name_repetitions)]
 pub struct WasmCtx<'a, M: ReplyMode = Single> {
     pub(super) mailbox: u64,
-    /// Authoritative raw current/parent carries, distinct from `mailbox`.
-    /// Legacy entrypoints leave them unavailable rather than reusing the
-    /// tagged route id as fold state.
-    pub(super) scopes: RawCallerScopes,
     pub(super) sender: Option<ReplyHandle>,
     /// The inbound source — the folded [`MailboxId`] raw value of whoever
     /// sent the mail currently being dispatched, threaded onto the ctx at
@@ -84,24 +79,7 @@ impl<'a> WasmCtx<'a, Manual> {
     #[doc(hidden)]
     #[must_use]
     pub fn __new(mailbox: u64, inline: &'a Registry, source: u64) -> Self {
-        Self::__new_scoped(mailbox, RawCallerScopes::unavailable(), inline, source)
-    }
-
-    /// Scoped sibling of [`Self::__new`], used when the host or inline
-    /// registry has authoritative raw lineage carries.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn __new_scoped(mailbox: u64, scopes: RawCallerScopes, inline: &'a Registry, source: u64) -> Self {
-        Self {
-            mailbox,
-            scopes,
-            sender: None,
-            source,
-            host_dispatch: true,
-            inline,
-            _borrow: PhantomData,
-            _mode: PhantomData,
-        }
+        Self { mailbox, sender: None, source, host_dispatch: true, inline, _borrow: PhantomData, _mode: PhantomData }
     }
 
     /// Not part of the public API; inline-cluster drains build ctxs through
@@ -110,28 +88,7 @@ impl<'a> WasmCtx<'a, Manual> {
     #[doc(hidden)]
     #[must_use]
     pub fn __new_local_dispatch(mailbox: u64, inline: &'a Registry, source: u64) -> Self {
-        Self::__new_local_dispatch_scoped(mailbox, RawCallerScopes::unavailable(), inline, source)
-    }
-
-    /// Scoped sibling of [`Self::__new_local_dispatch`].
-    #[doc(hidden)]
-    #[must_use]
-    pub fn __new_local_dispatch_scoped(
-        mailbox: u64,
-        scopes: RawCallerScopes,
-        inline: &'a Registry,
-        source: u64,
-    ) -> Self {
-        Self {
-            mailbox,
-            scopes,
-            sender: None,
-            source,
-            host_dispatch: false,
-            inline,
-            _borrow: PhantomData,
-            _mode: PhantomData,
-        }
+        Self { mailbox, sender: None, source, host_dispatch: false, inline, _borrow: PhantomData, _mode: PhantomData }
     }
 
     /// ADR-0112 downgrade-only coercion: view this [`Manual`] ctx as a
@@ -237,8 +194,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// the inline registry the send routes through.
     #[must_use]
     pub fn actor<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R> {
-        let caller_carry = self.scopes.select(<<R as Addressable>::Resolver as CallerScoped>::SCOPE);
-        WasmActorMailbox::__from_resolved_carry(R::resolve_carry(caller_carry, ()), self.mailbox, self.inline)
+        WasmActorMailbox::__new(R::resolve(self.mailbox, ()).0, self.mailbox, self.inline)
     }
 
     /// Multi-instance sender. Resolve a ctx-bound [`WasmActorMailbox`]

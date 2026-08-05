@@ -300,8 +300,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         // takes `None`, so `unwire` is skipped and the slot removal stays a
         // clean no-op-then-`false`/`true` per the existing contract.
         if let Some(mut taken) = self.inline.take(child) {
-            let mut unwire_ctx: WasmCtx<'_, Manual> =
-                WasmCtx::__new_scoped(child.0, self.inline.raw_scopes(child), self.inline, NO_INBOUND_SOURCE);
+            let mut unwire_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(child.0, self.inline, NO_INBOUND_SOURCE);
             taken.erased_unwire(&mut unwire_ctx);
         }
         let removed = self.inline.remove(child);
@@ -383,22 +382,12 @@ where
     // the erased child. For an un-split component `State = Self`.
     <A as WasmActor>::State: ErasedWasmActor,
 {
-    let scopes = registry.child_raw_scopes::<A>(MailboxId(parent), &full_subname);
     let mut ctx = WasmInitCtx::__new(alias.0);
     // ADR-0156 §2: inline children resolve `Params` to the compiled default
     // (empty params for now), mirroring the `()`-config round-trip.
     let params = <A::Params as Default>::default();
     let child = A::init(config, params, &mut ctx).map_err(SpawnError::InitFailed)?;
-    registry.insert_child_scoped(
-        alias,
-        type_tag,
-        full_subname,
-        is_counter,
-        parent,
-        scopes,
-        config_bytes,
-        Box::new(child),
-    );
+    registry.insert_child(alias, type_tag, full_subname, is_counter, parent, config_bytes, Box::new(child));
     // Run the fresh child's `wire` (issue 2746). Take it back onto the stack
     // so its slot is empty for the duration — a `wire` that spawns a nested
     // inline child then re-enters the registry (a different slot) with no
@@ -407,7 +396,7 @@ where
     // yields `Some` here (the box was just inserted); the `if let` is a
     // defensive no-op rather than an `expect`.
     if let Some(mut fresh) = registry.take(alias) {
-        let mut wire_ctx: WasmCtx<'_, Manual> = WasmCtx::__new_scoped(alias.0, scopes, registry, NO_INBOUND_SOURCE);
+        let mut wire_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(alias.0, registry, NO_INBOUND_SOURCE);
         fresh.erased_wire(&mut wire_ctx);
         registry.reinsert(alias, fresh);
     }

@@ -47,11 +47,10 @@ use core::cell::{Cell, UnsafeCell};
 use aether_data::MailboxId;
 
 use crate::mail::{Mail, NO_REPLY_HANDLE};
-use crate::model::{Addressable, CallerScope, CallerScoped, EmbeddedMany, Resolve};
 use crate::request_context::RequestContextTable;
 use crate::wasm::ErasedWasmActor;
 use crate::wasm::bridge::mail;
-use crate::wasm::ctx::{ActorTypeTag, RawCallerScopes, SpawnError, WasmCtx};
+use crate::wasm::ctx::{ActorTypeTag, SpawnError, WasmCtx};
 
 mod bundle;
 pub mod compose;
@@ -90,9 +89,6 @@ struct InlineSlot {
     /// guest cannot reproduce a relative's id by folding; it looks the
     /// recorded id up instead).
     parent: u64,
-    /// Authoritative raw current/parent carries for contexts dispatched as
-    /// this child. Never derived from the tagged alias map key.
-    scopes: RawCallerScopes,
     /// The child's encoded `Config` bytes (`A::Config::encode_into_bytes`
     /// at spawn time). Retained so a `replace_component` swap can decode
     /// the real config on reconstruct (`reconstruct_one_child`) instead of
@@ -119,9 +115,6 @@ pub(crate) struct InlineChildMeta {
     /// captured from the resident slot so replacement reconstruction can
     /// restore the same relative-addressing tree.
     pub(crate) parent: MailboxId,
-    /// Raw scopes retained for the child's dehydrate context. They are not
-    /// persisted in the bundle; reconstruction re-derives them parent-first.
-    pub(crate) scopes: RawCallerScopes,
     /// The child's encoded `Config` bytes, carried into the dehydrate
     /// bundle's `ChildEntry` so reconstruct can re-init from the real
     /// config instead of empty bytes (issue 2690).
@@ -222,9 +215,6 @@ pub struct Registry {
     /// `wire`, which should not happen). The instance's runtime identity at
     /// any depth, not the ADR-0099 depth-1 fixed point.
     self_id: Cell<u64>,
-    /// Raw scopes for the cluster entry actor, supplied by the scoped guest
-    /// ABI or explicitly unavailable on the legacy path.
-    self_scopes: Cell<RawCallerScopes>,
     /// The logical actor type actually constructed in the module's entry
     /// slot. Combined with each [`InlineSlot::type_tag`], this lets a ctx
     /// recover the actor identity for its own mailbox at any cluster depth.
@@ -271,7 +261,6 @@ impl Registry {
         Self {
             inner: UnsafeCell::new(BTreeMap::new()),
             self_id: Cell::new(0),
-            self_scopes: Cell::new(RawCallerScopes::unavailable()),
             entry_actor_tag: Cell::new(None),
             queue: UnsafeCell::new(VecDeque::new()),
             request_contexts: UnsafeCell::new(RequestContextTable::new()),
@@ -322,48 +311,6 @@ impl Registry {
         self.self_id.get()
     }
 
-    /// Record authoritative raw scopes for the cluster entry actor.
-    pub fn set_raw_scopes(&self, scopes: RawCallerScopes) {
-        self.self_scopes.set(scopes);
-    }
-
-    /// Resolve raw scopes for the entry actor or one resident inline slot.
-    /// A missing/arbitrary mailbox returns unavailable state; its tagged id
-    /// is never reinterpreted as raw lineage.
-    #[must_use]
-    pub fn raw_scopes(&self, mailbox: MailboxId) -> RawCallerScopes {
-        if mailbox.0 == self.self_id.get() {
-            return self.self_scopes.get();
-        }
-        // SAFETY: see [`Self::insert_child`].
-        let map = unsafe { &*self.inner.get() };
-        map.get(&mailbox).map_or_else(RawCallerScopes::unavailable, |slot| slot.scopes)
-    }
-
-    /// Derive a child's raw scopes from its already-resident logical parent,
-    /// the child's selected resolver, and persisted/spawned subname. Legacy
-    /// unavailable state propagates without fabricating a carry from either
-    /// route mailbox id.
-    #[must_use]
-    pub(crate) fn child_raw_scopes<A>(&self, parent: MailboxId, subname: &str) -> RawCallerScopes
-    where
-        A: Addressable,
-    {
-        let parent_scopes = self.raw_scopes(parent);
-        // Every inline child admitted by the export-generated placement gate
-        // is instanced, and wasm instanced actors select EmbeddedMany. Keep
-        // the actor-owned namespace in the call even though that resolver's
-        // physical embed node is keyed solely by `subname`.
-        let scope = <EmbeddedMany as CallerScoped>::SCOPE;
-        let Some(base) = parent_scopes.try_select(scope) else {
-            return RawCallerScopes::unavailable();
-        };
-        RawCallerScopes::resolved(
-            <EmbeddedMany as Resolve>::resolve_carry(base, A::NAMESPACE, subname),
-            (scope != CallerScope::Root).then_some(base),
-        )
-    }
-
     /// Record the logical actor type actually constructed in the module's
     /// entry slot. The export-generated init paths call this only after the
     /// selected actor has initialized successfully.
@@ -410,7 +357,6 @@ impl Registry {
     /// alias). O(log n).
     // The parameters are the slot's reconstruct record (ADR-0114 §5); see
     // `install_inline_child` for the same shape on the spawn side.
-    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn insert_child(
         &self,
@@ -422,39 +368,11 @@ impl Registry {
         config_bytes: Vec<u8>,
         actor: Box<dyn ErasedWasmActor>,
     ) {
-        self.insert_child_scoped(
-            id,
-            type_tag,
-            full_subname,
-            is_counter,
-            parent,
-            RawCallerScopes::unavailable(),
-            config_bytes,
-            actor,
-        );
-    }
-
-    /// Register a child together with authoritative raw scope state.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn insert_child_scoped(
-        &self,
-        id: MailboxId,
-        type_tag: u64,
-        full_subname: String,
-        is_counter: bool,
-        parent: u64,
-        scopes: RawCallerScopes,
-        config_bytes: Vec<u8>,
-        actor: Box<dyn ErasedWasmActor>,
-    ) {
         // SAFETY: single-threaded guest + serialized delivery — no other
         // live borrow of the cell (the `Sync` argument). The borrow is
         // released before this returns, so it never spans a dispatch.
         let map = unsafe { &mut *self.inner.get() };
-        map.insert(
-            id,
-            InlineSlot { type_tag, full_subname, is_counter, parent, scopes, config_bytes, actor: Some(actor) },
-        );
+        map.insert(id, InlineSlot { type_tag, full_subname, is_counter, parent, config_bytes, actor: Some(actor) });
     }
 
     /// Take the child out for dispatch, leaving its slot (and its
@@ -526,7 +444,6 @@ impl Registry {
                 full_subname: slot.full_subname.clone(),
                 is_counter: slot.is_counter,
                 parent: MailboxId(slot.parent),
-                scopes: slot.scopes,
                 config_bytes: slot.config_bytes.clone(),
             })
             .collect()
@@ -717,7 +634,7 @@ where
     let id = MailboxId(recipient);
     match registry.take(id) {
         Some(mut child) => {
-            let mut ctx = WasmCtx::__new_local_dispatch_scoped(recipient, registry.raw_scopes(id), registry, source);
+            let mut ctx = WasmCtx::__new_local_dispatch(recipient, registry, source);
             let rc = child.erased_dispatch(&mut ctx, mail);
             registry.reinsert(id, child);
             rc

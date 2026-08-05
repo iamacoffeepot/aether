@@ -23,11 +23,10 @@
 
 use core::marker::PhantomData;
 
-use aether_data::{Kind, MailboxId, RequestId, Source, Tag, with_tag};
+use aether_data::{Kind, MailboxId, RequestId, Source};
 
-use crate::model::{Addressable, CallerScoped, ChildOf, HandlesKind, Instanced};
+use crate::model::{Addressable, ChildOf, HandlesKind, Instanced};
 use crate::wasm::bridge::mail;
-use crate::wasm::ctx::RawCallerScopes;
 use crate::wasm::inline::{ChainMode, Registry, RouteDecision};
 
 /// Phantom-typed receiver-actor handle for FFI guests, built by
@@ -45,11 +44,6 @@ use crate::wasm::inline::{ChainMode, Registry, RouteDecision};
 #[allow(clippy::module_name_repetitions)]
 pub struct WasmActorMailbox<'a, R> {
     mailbox: u64,
-    /// The recipient's authoritative raw lineage carry when this handle was
-    /// produced by typed resolution. Arbitrary-id and retyping constructors
-    /// leave it unavailable so they remain direct-send capable without
-    /// inventing fold state from a tagged route id.
-    carry: Option<u64>,
     /// The resolving actor's own folded [`MailboxId`] raw value —
     /// the "from" half threaded onto every send so the recipient's
     /// `ctx.source_mailbox()` resolves who sent it, and so the host stamps the
@@ -100,15 +94,7 @@ impl<'a, R> WasmActorMailbox<'a, R> {
     #[doc(hidden)]
     #[must_use]
     pub fn __new(mailbox: u64, sender: u64, inline: &'a Registry) -> Self {
-        Self { mailbox, carry: None, sender, inline, _r: PhantomData }
-    }
-
-    /// Build a handle from the raw carry returned by typed resolution,
-    /// retaining it for a subsequent child-resolution step.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn __from_resolved_carry(carry: u64, sender: u64, inline: &'a Registry) -> Self {
-        Self { mailbox: with_tag(Tag::Mailbox, carry), carry: Some(carry), sender, inline, _r: PhantomData }
+        Self { mailbox, sender, inline, _r: PhantomData }
     }
 
     /// The receiver's typed mailbox id. Exposed for callers that need
@@ -151,11 +137,8 @@ impl<'a, R> WasmActorMailbox<'a, R> {
     where
         R: Addressable,
         Child: ChildOf<R> + Instanced,
-        <Child as Addressable>::Resolver: CallerScoped,
     {
-        let scopes = RawCallerScopes::from_options(self.carry, None);
-        let caller_carry = scopes.select(<<Child as Addressable>::Resolver as CallerScoped>::SCOPE);
-        WasmActorMailbox::__from_resolved_carry(Child::resolve_carry(caller_carry, name), self.sender, self.inline)
+        self.at(Child::resolve(self.mailbox_id().0, name).0)
     }
 }
 
@@ -311,53 +294,12 @@ mod tests {
     #[test]
     fn resolve_uses_the_child_resolver_and_retains_context() {
         let inline = Registry::new();
-        let parent_carry = 0xCA11_AB1E;
-        let parent = WasmActorMailbox::<Parent>::__from_resolved_carry(parent_carry, 0x5EED, &inline);
+        let parent = WasmActorMailbox::<Parent>::__new(0xCA11_AB1E, 0x5EED, &inline);
 
         let child = parent.resolve::<Child>("camera");
 
-        assert_eq!(child.mailbox_id(), Child::resolve(parent_carry, "camera"));
-        assert_eq!(child.carry, Some(Child::resolve_carry(parent_carry, "camera")));
+        assert_eq!(child.mailbox_id(), Child::resolve(parent.mailbox_id().0, "camera"));
         assert_eq!(child.sender, parent.sender);
         assert!(ptr::eq(child.inline, parent.inline));
-    }
-
-    #[test]
-    fn chained_resolution_uses_the_raw_depth_two_carry() {
-        struct Grandchild;
-        impl Addressable for Grandchild {
-            const NAMESPACE: &'static str = "test.grandchild";
-            type Resolver = Many;
-        }
-        impl ChildOf<Child> for Grandchild {}
-
-        let inline = Registry::new();
-        let parent_carry = 0x0FED_CBA9_8765_4321;
-        let parent = WasmActorMailbox::<Parent>::__from_resolved_carry(parent_carry, 0x5EED, &inline);
-        let child = parent.resolve::<Child>("camera");
-        let grandchild = child.resolve::<Grandchild>("lens");
-        let child_carry = Child::resolve_carry(parent_carry, "camera");
-        let grandchild_carry = Grandchild::resolve_carry(child_carry, "lens");
-
-        assert_eq!(child.carry, Some(child_carry));
-        assert_eq!(grandchild.carry, Some(grandchild_carry));
-        assert_eq!(grandchild.mailbox_id(), MailboxId(with_tag(Tag::Mailbox, grandchild_carry)));
-    }
-
-    #[test]
-    #[should_panic(expected = "raw Current caller scope unavailable")]
-    fn arbitrary_id_handle_fails_chained_resolution_explicitly() {
-        let inline = Registry::new();
-        let parent = WasmActorMailbox::<Parent>::__new(0xCA11_AB1E, 0x5EED, &inline);
-        let _ = parent.resolve::<Child>("camera");
-    }
-
-    #[test]
-    #[should_panic(expected = "raw Current caller scope unavailable")]
-    fn retyped_handle_does_not_invent_a_raw_carry() {
-        let inline = Registry::new();
-        let resolved = WasmActorMailbox::<Parent>::__from_resolved_carry(0xCA11_AB1E, 0x5EED, &inline);
-        let retyped = resolved.at::<Parent>(resolved.mailbox_id().0);
-        let _ = retyped.resolve::<Child>("camera");
     }
 }

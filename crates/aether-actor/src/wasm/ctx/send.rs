@@ -11,7 +11,7 @@ use crate::model::ctx::emit::Emit;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode};
-use crate::model::{Addressable, CallerAddressable, CallerScoped, HandlesKind, Singleton};
+use crate::model::{CallerAddressable, HandlesKind, Singleton};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, RouteDecision};
 
@@ -113,7 +113,7 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
     {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(
-            R::resolve(self.scopes.select(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
+            R::resolve(self.mailbox, ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -130,7 +130,7 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         self.inline.route_or_enqueue(
-            R::resolve(self.scopes.select(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
+            R::resolve(self.mailbox, ()).0,
             K::ID.0,
             bytes,
             payloads.len() as u32,
@@ -167,7 +167,7 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
     {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(
-            R::resolve(self.scopes.select(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
+            R::resolve(self.mailbox, ()).0,
             K::ID.0,
             &bytes,
             1,

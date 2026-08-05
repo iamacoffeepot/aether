@@ -113,6 +113,7 @@ mod tests {
     use aether_actor::wasm::NO_INBOUND_SOURCE;
     use aether_actor::wasm::inline::Registry as InlineRegistry;
     use aether_actor::{Addressable, Embedded, Manual, WasmActorMailbox, WasmCtx};
+    use aether_data::mailbox_id_from_name;
     use aether_substrate::mail::registry::{Registry, noop_handler};
     use aether_substrate::testing::boot_authority;
 
@@ -138,8 +139,8 @@ mod tests {
         // resolution, so a throwaway registry and a zero sender suffice
         // (issue 1987).
         let registry = InlineRegistry::new();
-        let host = WasmActorMailbox::<ComponentHostCapability>::__from_resolved_carry(
-            ComponentHostCapability::resolve_carry(0, ()),
+        let host = WasmActorMailbox::<ComponentHostCapability>::__new(
+            mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
             0,
             &registry,
         );
@@ -164,8 +165,8 @@ mod tests {
     #[test]
     fn registry_resolves_typed_canonical_and_abbreviated_component_addresses_equally() {
         let inline_registry = InlineRegistry::new();
-        let host = WasmActorMailbox::<ComponentHostCapability>::__from_resolved_carry(
-            ComponentHostCapability::resolve_carry(0, ()),
+        let host = WasmActorMailbox::<ComponentHostCapability>::__new(
+            mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
             0,
             &inline_registry,
         );

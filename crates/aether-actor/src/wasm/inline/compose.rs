@@ -56,8 +56,7 @@ pub fn dehydrate(
     // Parent half: capture whatever the parent's `on_dehydrate` saves.
     let mut parent_capture = CapturedState::default();
     {
-        let mut ctx =
-            WasmDropCtx::__new_capturing(mailbox_id, registry.raw_scopes(MailboxId(mailbox_id)), &mut parent_capture);
+        let mut ctx = WasmDropCtx::__new_capturing(mailbox_id, &mut parent_capture);
         run_parent_dehydrate(&mut ctx);
     }
     let parent_saved = parent_capture.take();
@@ -70,7 +69,7 @@ pub fn dehydrate(
     for meta in metas {
         let mut child_capture = CapturedState::default();
         registry.with_child_mut(meta.id, |child| {
-            let mut ctx = WasmDropCtx::__new_capturing(meta.id.0, meta.scopes, &mut child_capture);
+            let mut ctx = WasmDropCtx::__new_capturing(meta.id.0, &mut child_capture);
             child.erased_on_dehydrate(&mut ctx);
         });
         let (version, state_bytes) = child_capture.take().unwrap_or((0, Vec::new()));
@@ -266,7 +265,6 @@ where
     let Some(config) = <A::Config as Kind>::decode_from_bytes(to_reconstruct.config_bytes) else {
         return false;
     };
-    let scopes = registry.child_raw_scopes::<A>(parent, to_reconstruct.full_subname);
     let mut init_ctx = WasmInitCtx::__new(to_reconstruct.alias.0);
     // ADR-0156 §2: empty params for now — resolve `Params` to the compiled
     // default, mirroring the real-config decode above.
@@ -279,7 +277,7 @@ where
     // registered, so the first inbound mail sees the rehydrated state.
     {
         // Rehydrate is not a mail dispatch — no inbound source on the ctx.
-        let mut ctx = WasmCtx::__new_scoped(to_reconstruct.alias.0, scopes, registry, NO_INBOUND_SOURCE);
+        let mut ctx = WasmCtx::__new(to_reconstruct.alias.0, registry, NO_INBOUND_SOURCE);
         // SAFETY: `state_bytes` lives for this call; `PriorState::__from_ptr`
         // forms a slice over it bounded by the borrow, never escaping.
         let prior = unsafe {
@@ -294,13 +292,12 @@ where
 
     // The alias remains folded on the instance carry, but relative
     // addressing walks the logical parent link restored from the bundle.
-    registry.insert_child_scoped(
+    registry.insert_child(
         to_reconstruct.alias,
         to_reconstruct.type_tag,
         String::from(to_reconstruct.full_subname),
         to_reconstruct.is_counter,
         parent.0,
-        scopes,
         to_reconstruct.config_bytes.to_vec(),
         Box::new(child),
     );
@@ -365,14 +362,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        InlineChildToReconstruct, Registry, dehydrate, reconstruct_inline_children, reconstruct_one_child,
-        reconstruct_one_child_at_parent,
-    };
+    use super::{InlineChildToReconstruct, Registry, dehydrate, reconstruct_inline_children, reconstruct_one_child};
     use crate::mail::{Mail, PriorState};
     use crate::wasm::ctx::{NO_INBOUND_SOURCE, WasmDropCtx, WasmInitCtx};
     use crate::wasm::inline::bundle;
-    use crate::wasm::{ActorInitError, ErasedWasmActor, RawCallerScopes, WasmActor, WasmCtx};
+    use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmCtx};
     use crate::{Addressable, Lifecycle, Manual};
     use aether_data::{Kind, KindId, MailboxId};
     use alloc::boxed::Box;
@@ -727,7 +721,7 @@ mod tests {
 
     impl Addressable for TypedConfigChild {
         const NAMESPACE: &'static str = "test.inline.typed_config_child";
-        type Resolver = crate::EmbeddedMany;
+        type Resolver = crate::Many;
     }
 
     impl Lifecycle<Self> for TypedConfigChild {
@@ -776,10 +770,6 @@ mod tests {
     #[test]
     fn reconstruct_one_child_reinits_typed_config_from_real_bytes() {
         let registry = Registry::new();
-        let root = MailboxId(0x9000);
-        let root_carry = 0xF123_4567_89AB_CDEF;
-        registry.set_self_id(root.0);
-        registry.set_raw_scopes(RawCallerScopes::available(root_carry, 0xE123_4567_89AB_CDEF));
         let alias = MailboxId(0x9001);
         let config = TypedConfig(0xDEAD_BEEF);
         let config_bytes = config.encode_into_bytes();
@@ -795,98 +785,15 @@ mod tests {
 
         let reconstructed = reconstruct_one_child::<TypedConfigChild>(&registry, &to_reconstruct);
         assert!(reconstructed, "a typed-config child with real config bytes must reconstruct");
-        assert_eq!(
-            registry.raw_scopes(alias),
-            RawCallerScopes::available(TypedConfigChild::resolve_carry(root_carry, "typed"), root_carry),
-            "reconstruction derives raw child scopes from the logical root, never from the tagged alias",
-        );
 
         let mut child = registry.take(alias).expect("the reconstructed child is registered under its alias");
         let code = child.erased_dispatch(
-            &mut WasmCtx::__new_scoped(alias.0, registry.raw_scopes(alias), &registry, NO_INBOUND_SOURCE),
+            &mut WasmCtx::__new(alias.0, &registry, NO_INBOUND_SOURCE),
             // SAFETY: a zero-length mail frame — ptr 0 with len 0 spans no
             // memory, and the probe child's dispatch reads no payload.
             unsafe { Mail::__from_ptr(0, 1, 0, 1, crate::NO_REPLY_HANDLE, alias.0) },
         );
         assert_eq!(code, 0xDEAD_BEEF, "the child's init decoded the real config value, not a default");
-    }
-
-    #[test]
-    fn parent_first_reconstruction_rederives_depth_two_raw_scopes() {
-        let registry = Registry::new();
-        let root = MailboxId(0xA000);
-        let parent = MailboxId(0xA001);
-        let descendant = MailboxId(0xA002);
-        let root_carry = 0xFABC_DEF0_1234_5678;
-        registry.set_self_id(root.0);
-        registry.set_raw_scopes(RawCallerScopes::available(root_carry, 0xEABC_DEF0_1234_5678));
-        let config_bytes = TypedConfig(7).encode_into_bytes();
-        let children = vec![
-            bundle::ChildEntry {
-                alias_id: descendant.0,
-                type_tag: 0xA102,
-                is_counter: false,
-                full_subname: String::from("descendant"),
-                version: 0,
-                state_bytes: Vec::new(),
-                config_bytes: config_bytes.clone(),
-                parent_id: Some(parent.0),
-            },
-            bundle::ChildEntry {
-                alias_id: parent.0,
-                type_tag: 0xA101,
-                is_counter: false,
-                full_subname: String::from("parent"),
-                version: 0,
-                state_bytes: Vec::new(),
-                config_bytes,
-                parent_id: Some(root.0),
-            },
-        ];
-        let (version, bytes) = bundle::compose(0, &[], &children);
-
-        reconstruct_inline_children(
-            version,
-            &bytes,
-            &registry,
-            |_, _| {},
-            |registry, logical_parent, child| {
-                reconstruct_one_child_at_parent::<TypedConfigChild>(registry, logical_parent, child)
-            },
-        );
-
-        let parent_carry = TypedConfigChild::resolve_carry(root_carry, "parent");
-        let descendant_carry = TypedConfigChild::resolve_carry(parent_carry, "descendant");
-        assert_eq!(registry.raw_scopes(parent), RawCallerScopes::available(parent_carry, root_carry),);
-        assert_eq!(
-            registry.raw_scopes(descendant),
-            RawCallerScopes::available(descendant_carry, parent_carry),
-            "the descendant folds from the restored parent's raw carry, not its tagged route id",
-        );
-    }
-
-    #[test]
-    fn legacy_reconstruction_keeps_raw_scopes_unavailable() {
-        let registry = Registry::new();
-        registry.set_self_id(0xB000);
-        let alias = MailboxId(0xB001);
-        let config_bytes = TypedConfig(9).encode_into_bytes();
-        let to_reconstruct = InlineChildToReconstruct {
-            alias,
-            type_tag: 0xB101,
-            is_counter: false,
-            full_subname: "legacy",
-            state_version: 0,
-            state_bytes: &[],
-            config_bytes: &config_bytes,
-        };
-
-        assert!(reconstruct_one_child::<TypedConfigChild>(&registry, &to_reconstruct));
-        assert_eq!(
-            registry.raw_scopes(alias),
-            RawCallerScopes::unavailable(),
-            "legacy state must not reinterpret either route id as a raw carry",
-        );
     }
 
     /// Step 5 coverage: an empty-bytes entry for a typed-config child still

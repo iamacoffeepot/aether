@@ -58,8 +58,7 @@ pub mod raw;
 // allows mirror the def-site allows on each type.
 #[allow(clippy::module_name_repetitions)]
 pub use ctx::{
-    ActorTypeTag, NO_INBOUND_SOURCE, RawCallerScopes, RelativeMailbox, SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx,
-    WireCtx,
+    ActorTypeTag, NO_INBOUND_SOURCE, RelativeMailbox, SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 #[allow(clippy::module_name_repetitions)]
 pub use mailbox::{WasmActorMailbox, WasmActorMailboxWithContext};
@@ -552,7 +551,6 @@ macro_rules! __export_internal {
             config_len: u32,
         ) -> u32 {
             $crate::wasm::install_guest_logging();
-            __AETHER_INLINE.set_raw_scopes($crate::wasm::RawCallerScopes::unavailable());
             // Build the config slice. Empty-len short-circuits to `&[]`
             // so a null/zero `config_ptr` is not dereferenced — mirrors
             // `PriorState::bytes`.
@@ -637,28 +635,6 @@ macro_rules! __export_internal {
         }
 
         /// # Safety
-        /// Scoped sibling of `init_with_config_p32`. The legacy arguments
-        /// remain the exact prefix; the authoritative raw current and parent
-        /// carries are appended for staged host rollout compatibility.
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(export_name = "init_with_config_scoped_p32")]
-        pub unsafe extern "C" fn init_with_config_scoped(
-            mailbox_id: u64,
-            config_ptr: u32,
-            config_len: u32,
-            current_carry: u64,
-            parent_carry: u64,
-        ) -> u32 {
-            let status = unsafe { init_with_config(mailbox_id, config_ptr, config_len) };
-            if status == 0 {
-                __AETHER_INLINE.set_raw_scopes(
-                    $crate::wasm::RawCallerScopes::available(current_carry, parent_carry),
-                );
-            }
-            status
-        }
-
-        /// # Safety
         /// ADR-0090: legacy zero-config `init` shim. Called by older
         /// substrate builds that don't know about `init_with_config_p32`. Reaches
         /// into `init_with_config` with empty config bytes, resolving typed
@@ -695,12 +671,7 @@ macro_rules! __export_internal {
             __AETHER_INLINE.set_self_id(mailbox_id);
             // ADR-0112: the runtime builds the `Manual` view; `wire`'s
             // default signature is `WasmCtx<'_>` (= Single), so downgrade.
-            let mut ctx = $crate::WasmCtx::__new_scoped(
-                mailbox_id,
-                __AETHER_INLINE.raw_scopes($crate::MailboxId(mailbox_id)),
-                &__AETHER_INLINE,
-                $crate::wasm::NO_INBOUND_SOURCE,
-            );
+            let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
             <$component as $crate::Lifecycle<$component>>::wire(instance, ctx.as_single());
             0
         }
@@ -716,12 +687,7 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx = $crate::WasmCtx::__new_scoped(
-                mailbox_id,
-                __AETHER_INLINE.raw_scopes($crate::MailboxId(mailbox_id)),
-                &__AETHER_INLINE,
-                $crate::wasm::NO_INBOUND_SOURCE,
-            );
+            let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
             <$component as $crate::Lifecycle<$component>>::unwire(instance, ctx.as_single());
             0
         }
@@ -735,43 +701,6 @@ macro_rules! __export_internal {
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "receive_p32")]
         pub unsafe extern "C" fn receive(
-            kind: u64,
-            ptr: u32,
-            byte_len: u32,
-            count: u32,
-            sender: u32,
-            recipient: u64,
-            source: u64,
-        ) -> u32 {
-            __AETHER_INLINE.set_raw_scopes($crate::wasm::RawCallerScopes::unavailable());
-            unsafe { __aether_receive(kind, ptr, byte_len, count, sender, recipient, source) }
-        }
-
-        /// # Safety
-        /// Scoped sibling of `receive_p32`; its seven legacy arguments are
-        /// the exact prefix and the two authoritative raw carries are
-        /// appended.
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(export_name = "receive_scoped_p32")]
-        pub unsafe extern "C" fn receive_scoped(
-            kind: u64,
-            ptr: u32,
-            byte_len: u32,
-            count: u32,
-            sender: u32,
-            recipient: u64,
-            source: u64,
-            current_carry: u64,
-            parent_carry: u64,
-        ) -> u32 {
-            __AETHER_INLINE.set_raw_scopes(
-                $crate::wasm::RawCallerScopes::available(current_carry, parent_carry),
-            );
-            unsafe { __aether_receive(kind, ptr, byte_len, count, sender, recipient, source) }
-        }
-
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        unsafe fn __aether_receive(
             kind: u64,
             ptr: u32,
             byte_len: u32,
@@ -823,12 +752,7 @@ macro_rules! __export_internal {
                 // an inline-child alias (ADR-0114) hands the child its source
                 // too, not just the cluster root.
                 $crate::wasm::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, source, move |__aether_mail| {
-                    let mut ctx = $crate::WasmCtx::__new_scoped(
-                        mailbox_id,
-                        __AETHER_INLINE.raw_scopes($crate::MailboxId(mailbox_id)),
-                        &__AETHER_INLINE,
-                        source,
-                    );
+                    let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, source);
                     instance.__aether_dispatch(&mut ctx, __aether_mail)
                 })
             };
@@ -846,12 +770,7 @@ macro_rules! __export_internal {
                     // — the slot was present for the top-level dispatch above.
                     let instance = unsafe { __AETHER_COMPONENT.get_mut() }
                         .expect("instance present for the cluster-queue drain");
-                    let mut ctx = $crate::WasmCtx::__new_local_dispatch_scoped(
-                        mailbox_id,
-                        __AETHER_INLINE.raw_scopes($crate::MailboxId(mailbox_id)),
-                        &__AETHER_INLINE,
-                        __aether_source,
-                    );
+                    let mut ctx = $crate::WasmCtx::__new_local_dispatch(mailbox_id, &__AETHER_INLINE, __aether_source);
                     instance.__aether_dispatch(&mut ctx, __aether_mail)
                 }
             });
@@ -936,10 +855,7 @@ macro_rules! __export_internal {
                 $crate::compose_state_envelope(__aether_contexts, __aether_user_state)
             };
             if let Some((version, bytes)) = __aether_state {
-                let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new_scoped(
-                    mailbox_id,
-                    __AETHER_INLINE.raw_scopes($crate::MailboxId(mailbox_id)),
-                );
+                let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id);
                 ctx.save_state(version, &bytes);
             }
             0
@@ -993,12 +909,7 @@ macro_rules! __export_internal {
                 &__aether_user_bytes,
                 &__AETHER_INLINE,
                 |parent_version, parent_bytes| {
-                    let mut ctx = $crate::WasmCtx::__new_scoped(
-                        mailbox_id,
-                        __AETHER_INLINE.raw_scopes($crate::MailboxId(mailbox_id)),
-                        &__AETHER_INLINE,
-                        $crate::wasm::NO_INBOUND_SOURCE,
-                    );
+                    let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
                     // SAFETY: `parent_bytes` lives for this closure call;
                     // `PriorState::__from_ptr` bounds the slice to it.
                     let parent_prior = unsafe {
@@ -1211,7 +1122,6 @@ macro_rules! __export_multi_internal {
             config_len: u32,
         ) -> u32 {
             $crate::wasm::install_guest_logging();
-            __AETHER_INLINE.set_raw_scopes($crate::wasm::RawCallerScopes::unavailable());
             let config_bytes: &[u8] = if config_len == 0 {
                 &[]
             } else {
@@ -1230,24 +1140,6 @@ macro_rules! __export_multi_internal {
                 $crate::__export_internal!(@spawn_inline_child_by_tag $($component),+),
             );
             $crate::__export_multi_internal!(@construct $default, mailbox_id, config_bytes)
-        }
-
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(export_name = "init_with_config_scoped_p32")]
-        pub unsafe extern "C" fn init_with_config_scoped(
-            mailbox_id: u64,
-            config_ptr: u32,
-            config_len: u32,
-            current_carry: u64,
-            parent_carry: u64,
-        ) -> u32 {
-            let status = unsafe { init_with_config(mailbox_id, config_ptr, config_len) };
-            if status == 0 {
-                __AETHER_INLINE.set_raw_scopes(
-                    $crate::wasm::RawCallerScopes::available(current_carry, parent_carry),
-                );
-            }
-            status
         }
 
         $crate::__export_multi_internal!(@shared_body $($component),+);
@@ -1281,23 +1173,10 @@ macro_rules! __export_multi_internal {
             _config_len: u32,
         ) -> u32 {
             $crate::wasm::install_guest_logging();
-            __AETHER_INLINE.set_raw_scopes($crate::wasm::RawCallerScopes::unavailable());
             $crate::wasm::stage_init_failure(
                 "guest init: module has no default entry (ADR-0138) — load a named export",
             );
             1
-        }
-
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(export_name = "init_with_config_scoped_p32")]
-        pub unsafe extern "C" fn init_with_config_scoped(
-            mailbox_id: u64,
-            config_ptr: u32,
-            config_len: u32,
-            _current_carry: u64,
-            _parent_carry: u64,
-        ) -> u32 {
-            unsafe { init_with_config(mailbox_id, config_ptr, config_len) }
         }
 
         $crate::__export_multi_internal!(@shared_body $($component),+);
@@ -1433,7 +1312,6 @@ macro_rules! __export_multi_internal {
             config_len: u32,
         ) -> u32 {
             $crate::wasm::install_guest_logging();
-            __AETHER_INLINE.set_raw_scopes($crate::wasm::RawCallerScopes::unavailable());
             let config_bytes: &[u8] = if config_len == 0 {
                 &[]
             } else {
@@ -1469,25 +1347,6 @@ macro_rules! __export_multi_internal {
         }
 
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(export_name = "init_typed_scoped_p32")]
-        pub unsafe extern "C" fn init_typed_scoped(
-            mailbox_id: u64,
-            type_tag: u64,
-            config_ptr: u32,
-            config_len: u32,
-            current_carry: u64,
-            parent_carry: u64,
-        ) -> u32 {
-            let status = unsafe { init_typed(mailbox_id, type_tag, config_ptr, config_len) };
-            if status == 0 {
-                __AETHER_INLINE.set_raw_scopes(
-                    $crate::wasm::RawCallerScopes::available(current_carry, parent_carry),
-                );
-            }
-            status
-        }
-
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn wire(mailbox_id: u64) -> u32 {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
@@ -1499,12 +1358,7 @@ macro_rules! __export_multi_internal {
             __AETHER_INLINE.set_self_id(mailbox_id);
             // ADR-0112: the boxed `ErasedWasmActor` seam carries the `Manual`
             // view; the synthesized impl downgrades to `Single` per hook.
-            let mut ctx = $crate::WasmCtx::__new_scoped(
-                mailbox_id,
-                __AETHER_INLINE.raw_scopes($crate::MailboxId(mailbox_id)),
-                &__AETHER_INLINE,
-                $crate::wasm::NO_INBOUND_SOURCE,
-            );
+            let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
             instance.erased_wire(&mut ctx);
             0
         }
@@ -1517,12 +1371,7 @@ macro_rules! __export_multi_internal {
             };
             // ADR-0112: the boxed `ErasedWasmActor` seam carries the `Manual`
             // view; the synthesized impl downgrades to `Single` per hook.
-            let mut ctx = $crate::WasmCtx::__new_scoped(
-                mailbox_id,
-                __AETHER_INLINE.raw_scopes($crate::MailboxId(mailbox_id)),
-                &__AETHER_INLINE,
-                $crate::wasm::NO_INBOUND_SOURCE,
-            );
+            let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
             instance.erased_unwire(&mut ctx);
             0
         }
@@ -1535,39 +1384,6 @@ macro_rules! __export_multi_internal {
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(export_name = "receive_p32")]
         pub unsafe extern "C" fn receive(
-            kind: u64,
-            ptr: u32,
-            byte_len: u32,
-            count: u32,
-            sender: u32,
-            recipient: u64,
-            source: u64,
-        ) -> u32 {
-            __AETHER_INLINE.set_raw_scopes($crate::wasm::RawCallerScopes::unavailable());
-            unsafe { __aether_receive(kind, ptr, byte_len, count, sender, recipient, source) }
-        }
-
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(export_name = "receive_scoped_p32")]
-        pub unsafe extern "C" fn receive_scoped(
-            kind: u64,
-            ptr: u32,
-            byte_len: u32,
-            count: u32,
-            sender: u32,
-            recipient: u64,
-            source: u64,
-            current_carry: u64,
-            parent_carry: u64,
-        ) -> u32 {
-            __AETHER_INLINE.set_raw_scopes(
-                $crate::wasm::RawCallerScopes::available(current_carry, parent_carry),
-            );
-            unsafe { __aether_receive(kind, ptr, byte_len, count, sender, recipient, source) }
-        }
-
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        unsafe fn __aether_receive(
             kind: u64,
             ptr: u32,
             byte_len: u32,
@@ -1615,12 +1431,7 @@ macro_rules! __export_multi_internal {
                 // an inline-child alias (ADR-0114) hands the child its source
                 // too, not just the cluster root.
                 $crate::wasm::inline::membrane_dispatch(mailbox_id, mail, &__AETHER_INLINE, source, move |__aether_mail| {
-                    let mut ctx = $crate::WasmCtx::__new_scoped(
-                        mailbox_id,
-                        __AETHER_INLINE.raw_scopes($crate::MailboxId(mailbox_id)),
-                        &__AETHER_INLINE,
-                        source,
-                    );
+                    let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, source);
                     instance.erased_dispatch(&mut ctx, __aether_mail)
                 })
             };
@@ -1635,12 +1446,7 @@ macro_rules! __export_multi_internal {
                     // iteration's borrow has dropped (the membrane returned).
                     let instance = unsafe { __AETHER_MULTI.get_mut() }
                         .expect("instance present for the cluster-queue drain");
-                    let mut ctx = $crate::WasmCtx::__new_local_dispatch_scoped(
-                        mailbox_id,
-                        __AETHER_INLINE.raw_scopes($crate::MailboxId(mailbox_id)),
-                        &__AETHER_INLINE,
-                        __aether_source,
-                    );
+                    let mut ctx = $crate::WasmCtx::__new_local_dispatch(mailbox_id, &__AETHER_INLINE, __aether_source);
                     instance.erased_dispatch(&mut ctx, __aether_mail)
                 }
             });
@@ -1714,10 +1520,7 @@ macro_rules! __export_multi_internal {
                 $crate::compose_state_envelope(__aether_contexts, __aether_user_state)
             };
             if let Some((version, bytes)) = __aether_state {
-                let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new_scoped(
-                    mailbox_id,
-                    __AETHER_INLINE.raw_scopes($crate::MailboxId(mailbox_id)),
-                );
+                let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id);
                 ctx.save_state(version, &bytes);
             }
             0
@@ -1771,12 +1574,7 @@ macro_rules! __export_multi_internal {
                 |parent_version, parent_bytes| {
                     // ADR-0112: the boxed `ErasedWasmActor` seam carries the
                     // `Manual` view; the synthesized impl downgrades per hook.
-                    let mut ctx = $crate::WasmCtx::__new_scoped(
-                        mailbox_id,
-                        __AETHER_INLINE.raw_scopes($crate::MailboxId(mailbox_id)),
-                        &__AETHER_INLINE,
-                        $crate::wasm::NO_INBOUND_SOURCE,
-                    );
+                    let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
                     // SAFETY: `parent_bytes` lives for this closure call.
                     let parent_prior = unsafe {
                         $crate::PriorState::__from_ptr(

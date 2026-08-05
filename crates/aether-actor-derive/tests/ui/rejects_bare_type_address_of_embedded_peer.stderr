@@ -2,7 +2,7 @@ error[E0277]: `Embedded` is not a caller-scoped resolution strategy
   --> tests/ui/rejects_bare_type_address_of_embedded_peer.rs:55:25
    |
 55 |     let _ = ctx.actor::<Peer>();
-   |                 -----   ^^^^ does not declare an authoritative caller scope for bare-type resolution
+   |                 -----   ^^^^ does not declare a caller-relative scope for bare-type resolution
    |                 |
    |                 required by a bound introduced by this call
    |
@@ -31,7 +31,7 @@ error[E0277]: `Embedded` is not a caller-scoped resolution strategy
   --> tests/ui/rejects_bare_type_address_of_embedded_peer.rs:59:24
    |
 59 |     MailSender::send::<Peer, Ping>(ctx, &Ping { seq: 1 });
-   |                        ^^^^ does not declare an authoritative caller scope for bare-type resolution
+   |                        ^^^^ does not declare a caller-relative scope for bare-type resolution
    |
    = help: the trait `CallerScoped` is not implemented for `Embedded`
    = note: `Embedded` folds the component host's carry, which a generic caller context cannot select, so a bare-type send would name a component embedded under the wrong parent

@@ -343,8 +343,7 @@ mod tests {
     #[test]
     fn wasm_facade_resolves_each_canonical_tcp_lineage() {
         let registry = Registry::new();
-        let capability =
-            WasmActorMailbox::<TcpCapability>::__from_resolved_carry(TcpCapability::resolve_carry(0, ()), 0, &registry);
+        let capability = WasmActorMailbox::<TcpCapability>::__new(TcpCapability::resolve(0, ()).0, 0, &registry);
 
         assert_canonical_route_ids(
             capability.listener::<RouteRecipient>(LISTENER_NAME).mailbox_id(),

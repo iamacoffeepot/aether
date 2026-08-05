@@ -172,17 +172,6 @@ mod tests {
             BUMPS,
             "a module-composable child retains its state under the replacement entry actor",
         );
-
-        // Drive the same canonical descendant route after reconstruction,
-        // then observe the mutation through it. This proves the surviving
-        // substrate alias routes to the newly reconstructed live slot rather
-        // than merely returning a stale pre-replacement observation.
-        harness.send(engine, &child_addr, &Bump);
-        assert_eq!(
-            count(&mut harness, engine, &child_addr),
-            BUMPS + 1,
-            "the post-replacement descendant route reaches the reconstructed mutable child",
-        );
     }
 
     /// `InlineConfiguredChild` permits only `InlineConfiguredParent`.

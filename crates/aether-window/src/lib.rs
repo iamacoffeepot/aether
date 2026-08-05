@@ -320,11 +320,8 @@ mod tests {
         use aether_substrate::testing::boot_authority;
 
         let inline = InlineRegistry::new();
-        let manager = WasmActorMailbox::<WindowCapability>::__from_resolved_carry(
-            WindowCapability::resolve_carry(0, ()),
-            0,
-            &inline,
-        );
+        let manager_id = WindowCapability::resolve(0, ());
+        let manager = WasmActorMailbox::<WindowCapability>::__new(manager_id.0, 0, &inline);
         let typed = manager.resolve::<WindowInstance>("main").mailbox_id();
         let canonical = "aether.window/aether.window.instance:main";
         let registry = Registry::new();
