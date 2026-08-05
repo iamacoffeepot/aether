@@ -111,6 +111,7 @@ use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter,
 use aether_harness_substrate_capture::visual::decode_png;
 use aether_kinds::QuadSpace;
 use aether_math::{Mat4, Rgba, Vec3};
+use aether_puppet::Pose;
 use aether_puppet::deform;
 use aether_puppet::easel::image;
 use aether_puppet::easel::palette;
@@ -301,10 +302,15 @@ fn create_targets(harness: &mut SubstrateHarness, width: usize, height: usize) -
         .collect()
 }
 
-fn create_geometry(harness: &mut SubstrateHarness, mesh: &Mesh, scores: &[[f32; labels::CLASSES]]) -> u32 {
+fn create_geometry(
+    harness: &mut SubstrateHarness,
+    mesh: &Mesh,
+    scores: &[[f32; labels::CLASSES]],
+    skin: Option<&deform::Skin>,
+) -> u32 {
     let mail = CreateGeometry {
         layout: bake::geometry_slot().layout,
-        vertices: bake::vertices(mesh, scores, &settings(), None),
+        vertices: bake::vertices(mesh, scores, &settings(), skin),
         indices: bake::indices(mesh),
     };
     let created = harness
@@ -408,11 +414,12 @@ impl Rig {
         scores: &[[f32; labels::CLASSES]],
         width: usize,
         height: usize,
+        skin: Option<&deform::Skin>,
     ) -> Self {
         Self {
             program_id: register(harness, &probed_program()),
             bindings: create_targets(harness, width, height),
-            geometry: create_geometry(harness, mesh, scores),
+            geometry: create_geometry(harness, mesh, scores, skin),
             width,
             height,
         }
@@ -422,25 +429,26 @@ impl Rig {
     /// its plane back. The subject is already uploaded; the camera rides
     /// the uniform blob alone, which is the point — a turn costs eighty
     /// bytes and no re-upload at all.
-    fn read_planes(&self, harness: &mut SubstrateHarness, eye: Vec3, view_proj: Mat4) -> Baked {
+    fn read_planes(
+        &self,
+        harness: &mut SubstrateHarness,
+        eye: Vec3,
+        view_proj: Mat4,
+        bones: &[f32; deform::BONE_LIMIT * 12],
+        posed: bool,
+    ) -> Baked {
         let dispatch = ProgramDispatch {
             program_id: self.program_id,
             bindings: self.bindings.clone(),
             geometries: vec![self.geometry],
-            // The oracle bakes tone per vertex and blends it, so `posed`
-            // is off and the shader reads the same attribute the oracle
-            // evaluated — which is what makes the tone channel parity by
-            // construction rather than by a second transcription. The
-            // bone table is the identity for the same reason: this
-            // subject carries no rig.
-            uniforms: BakeUniforms {
-                view_proj,
-                eye,
-                bones: deform::bone_uniform(&[]),
-                tone: ToneUniforms::of(&settings(), false),
-                posed: false,
-            }
-            .encode(),
+            // For the unrigged arms the oracle bakes tone per vertex and
+            // blends it, so `posed` is off and the shader reads the same
+            // attribute the oracle evaluated — tone parity by
+            // construction — and the bone table is the empty one. The
+            // bone-posed arm passes `Skin::transforms` of its pose with
+            // `posed` on, exactly as a rigged subject dispatches.
+            uniforms: BakeUniforms { view_proj, eye, bones: *bones, tone: ToneUniforms::of(&settings(), posed), posed }
+                .encode(),
         };
         let probe = self.bindings[PROBE as usize];
         let pre = vec![
@@ -758,9 +766,9 @@ fn the_gpu_bake_places_the_same_boundaries_as_the_cpu_oracle() {
         .with_render()
         .build()
         .expect("harness");
-    let rig = Rig::mount(&mut harness, &mesh, &scores, CANVAS_WIDTH, CANVAS_HEIGHT);
+    let rig = Rig::mount(&mut harness, &mesh, &scores, CANVAS_WIDTH, CANVAS_HEIGHT, None);
 
-    let baked = rig.read_planes(&mut harness, eye, view_proj);
+    let baked = rig.read_planes(&mut harness, eye, view_proj, &deform::bone_uniform(&[]), false);
 
     assert_parity("synthetic", &oracle, &baked, CANVAS_WIDTH, CANVAS_HEIGHT);
 }
@@ -791,8 +799,8 @@ fn a_re_uploaded_subject_re_bakes_from_its_new_vertices() {
         .with_render()
         .build()
         .expect("harness");
-    let rig = Rig::mount(&mut harness, &mesh, &scores, CANVAS_WIDTH, CANVAS_HEIGHT);
-    let before = rig.read_planes(&mut harness, eye, view_proj);
+    let rig = Rig::mount(&mut harness, &mesh, &scores, CANVAS_WIDTH, CANVAS_HEIGHT, None);
+    let before = rig.read_planes(&mut harness, eye, view_proj, &deform::bone_uniform(&[]), false);
 
     // The pose: every vertex swung a third of the frame to the left,
     // scores and all, exactly as a deforming subject would arrive.
@@ -814,11 +822,93 @@ fn a_re_uploaded_subject_re_bakes_from_its_new_vertices() {
         )])
         .expect("update_geometry sequence");
 
-    let after = rig.read_planes(&mut harness, eye, view_proj);
+    let after = rig.read_planes(&mut harness, eye, view_proj, &deform::bone_uniform(&[]), false);
     assert_ne!(before.class, after.class, "a re-uploaded subject must re-bake; the planes did not move at all");
 
     let oracle = regions::rasterize(&posed, &scores, &settings(), eye, &view_proj, CANVAS_WIDTH, CANVAS_HEIGHT);
     assert_parity("posed", &oracle, &after, CANVAS_WIDTH, CANVAS_HEIGHT);
+}
+
+/// A little-endian 1.0 `.npy` around `values` — the payload shape
+/// `Skin::parse` reads; the header dict is bytes it skips over.
+fn weights_npy(values: &[f32]) -> Vec<u8> {
+    let header = "{'descr': '<f4', 'fortran_order': False, 'shape': (0,), }\n";
+    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+    bytes.extend(u16::try_from(header.len()).expect("a short header").to_le_bytes());
+    bytes.extend(header.as_bytes());
+    bytes.extend(values.iter().flat_map(|value| value.to_le_bytes()));
+
+    bytes
+}
+
+/// Tripwire: the bake follows a subject the *bone table* poses, held
+/// against an oracle rasterizing the same pose — the class mask the
+/// wash stands on, at the pose the ink draws.
+///
+/// Every other dispatch in this file carries the empty bone table with
+/// `posed` off, so `vs_bake`'s `skin_point`, the joint/share vertex
+/// lanes and the `bone_row` indexing of the uniform window ship on the
+/// strength of rest arms alone. What this catches is any of them
+/// disagreeing with `Skin::transforms` about where the pose sends the
+/// subject — which presents live as the wash's pigment standing beside
+/// the flesh the ink drew.
+#[test]
+fn a_bone_posed_subject_bakes_where_the_posed_oracle_says() {
+    if !require_wgpu_only() {
+        return;
+    }
+
+    let mesh = synthetic_subject();
+    let scores = split_field(&mesh).vertex_scores(&mesh.positions);
+    let (eye, view_proj) = camera(AZIMUTH, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+    // The rig: the octahedron rides the head, so the pose turns it and
+    // its material boundary with it; the backdrop rides a bone no pose
+    // ever drives and holds the depth resolve still behind it. One-hot
+    // weights, so the u8 share lane is exact and the arm measures
+    // posing rather than quantization.
+    let vertices = mesh.positions.len();
+    let mut weights = vec![0.0f32; vertices * 2];
+    for (vertex, row) in weights.chunks_exact_mut(2).enumerate() {
+        row[usize::from(vertex < 6)] = 1.0;
+    }
+    let descriptor = "bones chest head\npivot head 0 0 0";
+    let skin = deform::Skin::parse(&weights_npy(&weights), descriptor, vertices).expect("the rig binds");
+
+    let mut harness = SubstrateHarness::builder()
+        .size(CANVAS_WIDTH as u32, CANVAS_HEIGHT as u32)
+        .with_render()
+        .build()
+        .expect("harness");
+    let rig = Rig::mount(&mut harness, &mesh, &scores, CANVAS_WIDTH, CANVAS_HEIGHT, Some(&skin));
+
+    let rest = deform::bone_uniform(&skin.transforms(&Pose::default()));
+    let before = rig.read_planes(&mut harness, eye, view_proj, &rest, true);
+
+    let pose = Pose { yaw: 25.0, ..Pose::default() };
+    let transforms = skin.transforms(&pose);
+    let (mut positions, mut normals) = (mesh.positions.clone(), mesh.normals.clone());
+    skin.pose_surface(&transforms, &mesh, &mut positions, &mut normals);
+
+    // The oracle is *built* posed — same faces, the positions the CPU
+    // skin produced — and then carries the CPU-posed normals verbatim,
+    // which are the rest normals turned by the blend: exactly the
+    // attribute stream the vertex stage interpolates.
+    let mut text = String::new();
+    for at in &positions {
+        writeln!(text, "v {} {} {}", at.x, at.y, at.z).expect("format vertex");
+    }
+    for face in &mesh.faces {
+        writeln!(text, "f {} {} {}", face[0] + 1, face[1] + 1, face[2] + 1).expect("format face");
+    }
+    let mut oracle_mesh = Mesh::from_obj_bytes(text.as_bytes(), 0).expect("posed oracle mesh");
+    oracle_mesh.normals = normals;
+
+    let after = rig.read_planes(&mut harness, eye, view_proj, &deform::bone_uniform(&transforms), true);
+    assert_ne!(before.class, after.class, "a bone-posed subject must re-bake; the class plane did not move at all");
+
+    let oracle = regions::rasterize(&oracle_mesh, &scores, &settings(), eye, &view_proj, CANVAS_WIDTH, CANVAS_HEIGHT);
+    assert_parity("bone-posed", &oracle, &after, CANVAS_WIDTH, CANVAS_HEIGHT);
 }
 
 /// The shipped subject, at the size and framing the easel develops at.
@@ -869,7 +959,7 @@ fn crossfeed_the_gpu_bake_against_the_cpu_oracle() {
         .with_render()
         .build()
         .expect("harness");
-    let rig = Rig::mount(&mut harness, &mesh, &scores, CROSSFEED_WIDTH, CROSSFEED_HEIGHT);
+    let rig = Rig::mount(&mut harness, &mesh, &scores, CROSSFEED_WIDTH, CROSSFEED_HEIGHT, None);
 
     // The two costs are measured in separate blocks, bare first, and
     // never interleaved.
@@ -896,12 +986,12 @@ fn crossfeed_the_gpu_bake_against_the_cpu_oracle() {
 
     // Warm: the first use realizes the vertex and index buffers, which
     // is a geometry-upload cost and not a per-frame one.
-    let baked = rig.read_planes(&mut harness, eye, view_proj);
+    let baked = rig.read_planes(&mut harness, eye, view_proj, &deform::bone_uniform(&[]), false);
 
     let mut dispatched = 0.0;
     for _ in 0..COST_SAMPLES {
         let started = Instant::now();
-        rig.read_planes(&mut harness, eye, view_proj);
+        rig.read_planes(&mut harness, eye, view_proj, &deform::bone_uniform(&[]), false);
         dispatched += started.elapsed().as_secs_f64() * 1000.0;
     }
     let dispatched_millis = dispatched / f64::from(COST_SAMPLES);
