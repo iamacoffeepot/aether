@@ -69,9 +69,11 @@ pub use runtime::ComponentHostParams;
 // (which names each handler's reply kind via `<R as Kind>::ID`) against the
 // identity, outside the `feature = "runtime"` gate — so both the input kinds
 // and the reply kinds must be in scope here, not behind the runtime gate.
+#[cfg(feature = "runtime")]
+use aether_kinds::LoadResult;
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, ListComponents, ListComponentsResult, LoadComponent,
-    LoadResult, ReplaceComponent, ReplaceResult,
+    ReplaceComponent, ReplaceResult,
 };
 
 // The `#[actor]` attribute sits on the capability struct (the struct-hosted

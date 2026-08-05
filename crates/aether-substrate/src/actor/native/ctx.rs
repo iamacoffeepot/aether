@@ -1737,6 +1737,7 @@ mod tests {
     /// and a send through that handle reaches the mailbox registered beneath
     /// that parent. The parent is already a tagged routable `MailboxId`; no raw
     /// carry is retained beside it.
+    #[allow(clippy::disallowed_methods)] // test scaffolding — synthetic lineage IDs exercise parent-relative routing
     #[test]
     fn embedded_actor_resolves_and_delivers_beneath_binding_parent() {
         use crate::mail::registry::OwnedDispatch;

@@ -90,6 +90,7 @@ fn ffi_ctx_layout_identical_across_modes() {
     assert_eq!(align_of::<WasmCtx<'static, Single>>(), align_of::<WasmCtx<'static, Manual>>(),);
 }
 
+#[allow(clippy::disallowed_methods)] // test scaffolding — synthetic lineage IDs exercise parent-relative routing
 #[test]
 fn embedded_actor_resolution_and_delivery_use_entry_and_inline_logical_parents() {
     let registry = Registry::new();
