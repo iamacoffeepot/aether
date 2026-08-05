@@ -13,11 +13,11 @@ const DEFAULT_POLL_CAP_MICROS: u64 = 10_000;
 
 /// Poll-granularity knob for the settle pump (issue 4453). The pump
 /// resets its backoff to a 50 µs floor on any drained event and doubles
-/// toward this ceiling only on genuine quiet, so a frame whose work keeps
-/// events flowing is unaffected by it — while a frame containing one long
-/// *silent* stretch (a wasm handler that emits nothing until it returns)
-/// is observed at whichever sleep catches its end, and this bounds how
-/// coarse that observation is.
+/// toward this ceiling only on genuine quiet. A frame's exact lifecycle
+/// chain remains at that floor while it is outstanding (issue 4454), so a
+/// long silent handler is not measured through this coarse ceiling. The
+/// ceiling applies once no exact chain is known outstanding, including
+/// slow capability and reply-only waits.
 ///
 /// The `#[derive(aether_substrate::Config)]` emits the env-shaped
 /// `PollConfigLayer`, the clap-shaped `PollOverlay`, the `FromArgvThenEnv`
@@ -29,9 +29,8 @@ const DEFAULT_POLL_CAP_MICROS: u64 = 10_000;
 pub struct PollConfig {
     /// Microseconds the pump's quiet backoff may reach; 0 restores the default.
     ///
-    /// Lowering it shrinks observation lag and pays CPU for the
-    /// resolution — the trade an instrument wants and a normal scenario
-    /// does not.
+    /// Lowering it shrinks observation lag for untracked and
+    /// post-settlement quiet and pays CPU for that resolution.
     #[config(env = "AETHER_HARNESS_POLL_CAP_MICROS", default = 10_000)]
     pub cap_micros: u64,
 }

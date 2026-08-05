@@ -1,10 +1,12 @@
 //! Poll accounting for the settle pump (issue 4453).
 //!
-//! `pump_until_event` observes a settled chain only when one of its
-//! sleeps ends, so a wait's measured duration is the truth rounded up to
-//! a poll boundary. Attributing a frame requires telling that observation
-//! lag apart from the work, which means the pump has to say where it
-//! slept — this is what it says.
+//! `pump_until_event` observes a reply only when one of its sleeps ends,
+//! so a wait's measured duration is the truth rounded up to a poll
+//! boundary. Exact lifecycle chains stay at the fine floor while
+//! outstanding (issue 4454); untracked and post-settlement waits may
+//! still reach the configured cap. Attributing a frame requires telling
+//! that observation lag apart from the work, which means the pump has to
+//! say where it slept — this is what it says.
 //!
 //! Per-harness state rather than process-global counters: the pump is a
 //! `&mut self` method, so the alternative costs a field rather than a
