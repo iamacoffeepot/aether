@@ -1309,11 +1309,9 @@ impl<'a> NativeInitCtx<'a> {
 // The per-stage capability trait impls (`MailSender` / `OutboundReply`).
 // `send` / `send_many` / `send_to_named` inherit this handler's
 // in-flight lineage (ADR-0080 §7); `send_detached` /
-// `send_detached_to_named` are spelled out below to suppress it (the
-// trait default delegates to the now-inheriting `send`, so it can't
-// detach on its own). `shutdown` / `monitor` are inherent methods on
-// `NativeCtx` that reach into the substrate-internal spawner + actor
-// registry.
+// `send_detached_to_named` explicitly suppress it. `shutdown` / `monitor`
+// are inherent methods on `NativeCtx` that reach into the
+// substrate-internal spawner + actor registry.
 
 impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
     //noinspection DuplicatedCode
@@ -1382,7 +1380,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
     {
         let bytes = payload.encode_into_bytes();
         // ADR-0080 §7: suppress the in-flight lineage so the recipient
-        // starts a fresh causal chain (the trait default would inherit).
+        // starts a fresh causal chain.
         self.binding.push_envelope_buffered(R::resolve(self.binding.carry(), ()).0, K::ID.0, &bytes, 1, None, None);
     }
 
