@@ -1343,8 +1343,7 @@ impl WashProgram {
                 blob.window(atmosphere.figure, &MaskUniforms { material_class: 0, figure: true }.encode());
                 blob.window(atmosphere.halo_blur.window, &atmosphere.halo_blur.encode());
                 blob.window(atmosphere.standing_blur.window, &atmosphere.standing_blur.encode());
-                let drift = Vec2::new(image::tuned(policy.drift.0, height), image::tuned(policy.drift.1, height));
-                blob.window(atmosphere.spill, &SpillUniforms { drift }.encode());
+                blob.window(atmosphere.spill, &SpillUniforms { drift: policy.carried(height) }.encode());
 
                 let mut air = Rng::new(seed ^ field::ATMOSPHERE_SEED ^ u64::from(material.class));
                 let stain_params = field::atmosphere_wash_params();

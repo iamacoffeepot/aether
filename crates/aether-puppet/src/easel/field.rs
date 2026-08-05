@@ -603,13 +603,13 @@ impl<'a> Sheet<'a> {
 
         let halo = image::blur(mask, width, height, image::tuned(policy.halo, height));
         let standing = image::blur(&figure, width, height, image::tuned(ATMOSPHERE_FIGURE, height));
-        let drift = (image::tuned(policy.drift.0, height), image::tuned(policy.drift.1, height));
+        let drift = policy.carried(height);
 
         let mut spill = vec![0.0; mask.len()];
         for y in 0..height {
-            let from_y = (y as f32 - drift.1).clamp(0.0, (height - 1) as f32) as usize * width;
+            let from_y = (y as f32 - drift.y).clamp(0.0, (height - 1) as f32) as usize * width;
             for x in 0..width {
-                let from_x = (x as f32 - drift.0).clamp(0.0, (width - 1) as f32) as usize;
+                let from_x = (x as f32 - drift.x).clamp(0.0, (width - 1) as f32) as usize;
                 let i = y * width + x;
 
                 spill[i] = f32::from(

@@ -13,6 +13,9 @@
 //! iris' mask, so the wash stops at the slit the ink drew instead of
 //! filling it.
 
+use aether_math::Vec2;
+
+use super::image;
 use crate::labels::{BROW, DRESS, HAIR, INNER_EAR, LIPS, SKIN, TUFT};
 
 /// The paper's own colour, in 8-bit channels. Everything painted is this
@@ -82,12 +85,51 @@ pub struct Atmosphere {
     /// presence rather than its shape.
     pub halo: f32,
     /// Where that presence is carried, across the sheet and down it.
+    ///
+    /// Read through [`Atmosphere::carried`], never taken raw: how far the
+    /// stain may actually run is a question about the halo as much as
+    /// about the drift.
     pub drift: (f32, f32),
     /// The pigment the stain is left in, and how far it may build.
     /// Greyer than the pigment it echoes: this is the region seen through
     /// air rather than the region.
     pub pigment: u32,
     pub cap: f32,
+}
+
+impl Atmosphere {
+    /// How far this stain is carried off the figure, in the texels of a
+    /// plane `height` tall — the authored drift, held to the reach of the
+    /// halo that softened it.
+    ///
+    /// The stain is a blur of the region's coverage read from one texel
+    /// away and cut where the figure stands, so what the level cuts is a
+    /// contour of that blur. While the run stays inside the halo's own
+    /// reach, the contour it cuts still overlaps the region it came from:
+    /// the mark hangs off her edge, thins as it goes, and reads as air.
+    /// Carried further than the halo reaches, the same contour clears the
+    /// region entirely and the cut lands on the region's own softened
+    /// silhouette, whole and detached — a second figure standing beside
+    /// the first rather than a stain (iamacoffeepot/aether#4468).
+    ///
+    /// So the run is held to the halo. The direction is the author's and
+    /// is kept exactly; only its length is answerable to the softening,
+    /// and it is held in the reference sheet's own pixels, before
+    /// [`image::tuned`] takes it to this plane's — the relation between
+    /// the two authored distances is a property of the palette rather
+    /// than of whatever canvas is being painted.
+    #[must_use]
+    pub fn carried(&self, height: usize) -> Vec2 {
+        let (across, down) = self.drift;
+        let run = across.hypot(down);
+        let held = if run > self.halo {
+            self.halo / run
+        } else {
+            1.0
+        };
+
+        Vec2::new(image::tuned(across * held, height), image::tuned(down * held, height))
+    }
 }
 
 /// One entry in the painter's box.
@@ -247,7 +289,7 @@ pub fn shade_of(material: &Material, tone: &[f32]) -> Vec<f32> {
     let lit = material.shade_lit.unwrap_or(LIT);
 
     tone.iter()
-        .map(|&at| material.shade_floor + (1.0 - material.shade_floor) * super::image::smoothstep(lit, SHADOWED, at))
+        .map(|&at| material.shade_floor + (1.0 - material.shade_floor) * image::smoothstep(lit, SHADOWED, at))
         .collect()
 }
 
@@ -321,5 +363,54 @@ mod tests {
 
         assert_eq!(skin, [1.0, 1.0, 0.0, 0.0], "lips must fall through into the skin wash");
         assert_eq!(mask_of(&classes, LIPS), [0.0; 4], "and must not also paint themselves");
+    }
+
+    /// Tripwire: no stain in the box outruns the halo that softened it.
+    ///
+    /// The failure this guards raises nothing and looks like a rendering
+    /// bug in some other layer: a stain carried past its own halo cuts a
+    /// contour that has cleared the region entirely, so the sheet
+    /// develops a detached copy of the figure's silhouette standing
+    /// beside her (iamacoffeepot/aether#4468). The reach is checked at
+    /// the reference sheet's own height, which is where both distances
+    /// were authored.
+    #[test]
+    fn a_stain_never_outruns_its_own_halo() {
+        let height = image::TUNED_HEIGHT as usize;
+        for material in MATERIALS {
+            let Some(policy) = material.atmosphere.as_ref() else {
+                continue;
+            };
+            let carried = policy.carried(height);
+            let reach = image::tuned(policy.halo, height);
+
+            assert!(
+                carried.x.hypot(carried.y) <= reach + 1e-3,
+                "{}: carried {carried:?} past a halo reaching {reach}",
+                material.name,
+            );
+        }
+    }
+
+    /// Tripwire: the hold above is doing work, and the direction it holds
+    /// in is the author's.
+    ///
+    /// A clamp that never binds is indistinguishable from no clamp, so
+    /// this pins that the box as authored does ask to be held — the
+    /// hair's drift runs more than twice its halo — and that holding it
+    /// shortens the run without turning it.
+    #[test]
+    fn the_hold_binds_on_the_box_as_authored_and_keeps_its_bearing() {
+        let hair = MATERIALS.iter().find(|material| material.class == HAIR).expect("the hair is in the box");
+        let policy = hair.atmosphere.as_ref().expect("the hair throws a stain");
+        let (across, down) = policy.drift;
+
+        assert!(across.hypot(down) > policy.halo, "the authored drift must outrun the halo for the hold to bind");
+
+        let carried = policy.carried(image::TUNED_HEIGHT as usize);
+        assert!(
+            (carried.x * down - carried.y * across).abs() < 1e-3,
+            "the hold shortens the run, it does not turn it: {carried:?} left the authored bearing",
+        );
     }
 }
