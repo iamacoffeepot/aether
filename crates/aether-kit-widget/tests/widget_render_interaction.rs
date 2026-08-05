@@ -374,8 +374,8 @@ fn warm_panel(harness: &mut SubstrateHarness) {
     let panel = panel_address();
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
-            ("prime", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("prime", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("warm-up");
@@ -1275,7 +1275,7 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
             ("focus", HarnessOp::send_and_settle(&panel, &press(50.0, text_top + 10.0))),
             ("focus_up", HarnessOp::send_and_settle(&panel, &release(50.0, text_top + 10.0))),
             ("type", HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "hix".to_owned() })),
-            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("focus + type");
@@ -1476,8 +1476,8 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     // the measured interactions.
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
-            ("prime", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("prime", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(4)),
         ])
         .expect("warm-up");
@@ -1496,7 +1496,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
                 "type",
                 HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: typed_text.to_owned() }),
             ),
-            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("focus + type");
@@ -1585,7 +1585,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
                     },
                 ),
             ),
-            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("ime preedit");
@@ -1630,7 +1630,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
                 "commit_text",
                 HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "Z".to_owned() }),
             ),
-            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("commit replacement text");
@@ -1694,8 +1694,8 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
     let panel = panel_address();
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
-            ("prime", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("prime", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(4)),
         ])
         .expect("warm text area and measured font");
@@ -1733,7 +1733,7 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
                 "line4",
                 HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "tail".to_owned() }),
             ),
-            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle_glyphs", HarnessOp::advance(2)),
         ])
         .expect("type five text-area lines");
@@ -1862,7 +1862,7 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
                     },
                 ),
             ),
-            ("rasterize_preedit", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("rasterize_preedit", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle_preedit", HarnessOp::advance(2)),
         ])
         .expect("multiline IME preedit");
@@ -2358,7 +2358,7 @@ fn nested_scroll_relays_live_font_theme_to_real_label_glyphs() {
                 "relay_theme",
                 HarnessOp::send_and_settle(&panel, &SetTheme { theme: Theme { font_id, ..Theme::DEFAULT } }),
             ),
-            ("prime_relayed_glyph", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("prime_relayed_glyph", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle_relayed_glyph", HarnessOp::advance(2)),
             ("capture_relayed_glyph", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])

@@ -257,8 +257,8 @@ fn panel_glyphs_sit_inside_their_row_frames() {
     // frame it reads back.
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
-            ("prime", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("prime", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("warm-up");

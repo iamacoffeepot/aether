@@ -91,7 +91,7 @@ mod tests {
 
         {
             let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, request, root);
-            OutboundReply::reply(&mut ctx, &Tick);
+            OutboundReply::reply(&mut ctx, &Tick::default());
             // ctx drops here; the reply already routed eagerly via the
             // Mailer (replies are not buffered), so the flush is a no-op.
         }
@@ -131,8 +131,8 @@ mod tests {
         let caller_source = Source::with_correlation(SourceAddr::Component(caller), 7);
         {
             let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, root, root);
-            OutboundReply::reply(&mut ctx, &Tick);
-            OutboundReply::reply(&mut ctx, &Tick);
+            OutboundReply::reply(&mut ctx, &Tick::default());
+            OutboundReply::reply(&mut ctx, &Tick::default());
         }
         assert_eq!(binding.prev_correlation(), 0, "replies must not advance the send correlation counter");
     }
@@ -161,7 +161,7 @@ mod tests {
         let caller_source = Source::with_correlation(SourceAddr::Component(caller), 7);
         {
             let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, root, root);
-            OutboundReply::reply(&mut ctx, &Tick);
+            OutboundReply::reply(&mut ctx, &Tick::default());
         }
 
         let reply_env = reply_rx.try_recv().expect("reply routed to the caller");

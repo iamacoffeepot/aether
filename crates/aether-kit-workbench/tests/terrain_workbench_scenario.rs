@@ -148,8 +148,8 @@ fn capture(harness: &mut SubstrateHarness, workbench: &str, world: &str, label: 
                 vec![
                     envelope(&viewport, &Render),
                     envelope(world, &Render),
-                    envelope(&panel, &Tick),
-                    envelope(&console, &Tick),
+                    envelope(&panel, &Tick::default()),
+                    envelope(&console, &Tick::default()),
                 ],
                 Vec::new(),
             ),

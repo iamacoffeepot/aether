@@ -38,7 +38,7 @@
 mod channel;
 mod kinds;
 
-pub use channel::{Authored, Shape, per_tick, shaped};
+pub use channel::{Authored, Shape, per_second, shaped};
 pub use kinds::*;
 
 use crate::{Pose, Puppet};
@@ -57,11 +57,11 @@ pub struct Idle {
     /// Each channel's position in its own cycle, in `[0, 1)`. Wrapped every
     /// tick rather than accumulated — see [`channel`] for why.
     phases: [f32; CHANNELS],
-    /// Phase advanced per tick, resolved once from the configured periods
-    /// and cadence. Zero for every channel the current [`Motion`] does not
-    /// drive, which is what makes a solo hold the other seven still without
-    /// a branch in the hot path.
-    steps: [f32; CHANNELS],
+    /// Phase advanced per elapsed second, resolved once from the configured
+    /// periods. Zero for every channel the current [`Motion`] does not drive,
+    /// which is what makes a solo hold the other seven still without a branch
+    /// in the hot path.
+    rates: [f32; CHANNELS],
     /// Where the puppet is, folded once from its type.
     ///
     /// [`resolve_embedded`] is the by-name carry-supplier: it reads the
@@ -85,18 +85,17 @@ impl WasmActor for Idle {
     const NAMESPACE: &'static str = "aether.puppet-idle";
 
     fn init(config: IdleConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        let steps = steps(&config);
-        if steps.iter().all(|step| *step == 0.0) && config.running {
+        let rates = rates(&config);
+        if rates.iter().all(|rate| *rate == 0.0) && config.running {
             tracing::warn!(
                 target: "aether_puppet_idle",
-                tick_hz = config.tick_hz,
                 motion = ?config.motion,
                 "idle motor resolved no live channel; the subject will hold still",
             );
         }
 
         let target = resolve_embedded(<Puppet as Addressable>::NAMESPACE);
-        Ok(Self { config, phases: [0.0; CHANNELS], steps, target, last: None, ticks: 0 })
+        Ok(Self { config, phases: [0.0; CHANNELS], rates, target, last: None, ticks: 0 })
     }
 
     /// Subscribe the frame stage. `wire` is the placement rather than `init`
@@ -114,8 +113,8 @@ impl WasmActor for Idle {
     /// names a puppet embedded under the motor — an address nothing
     /// registered, so the mail resolves cleanly and is silently dropped.
     #[handler::single]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
-        if let Some(pose) = self.advance() {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, tick: Tick) {
+        if let Some(pose) = self.advance(tick.delta_seconds()) {
             ctx.send_to(self.target, &pose);
         }
         self.sample();
@@ -125,13 +124,13 @@ impl WasmActor for Idle {
 impl Idle {
     /// Step every channel and return the pose to send, or `None` while
     /// parked or while the pose is unchanged.
-    fn advance(&mut self) -> Option<Pose> {
+    fn advance(&mut self, delta_seconds: f32) -> Option<Pose> {
         if !self.config.running {
             return None;
         }
 
-        for (phase, step) in self.phases.iter_mut().zip(self.steps) {
-            *phase = (*phase + step).rem_euclid(1.0);
+        for (phase, rate) in self.phases.iter_mut().zip(self.rates) {
+            *phase = (*phase + rate * delta_seconds).rem_euclid(1.0);
         }
 
         let pose = self.pose();
@@ -187,33 +186,35 @@ impl Idle {
     }
 }
 
-/// Per-tick phase step for every channel under the configured motion.
+/// Per-second phase rate for every channel under the configured motion.
 ///
 /// A channel the motion does not drive gets a zero step, which parks its
 /// phase at zero and therefore its contribution at whatever the shape reads
 /// there. Both shapes read zero at phase zero, so an undriven channel is a
 /// channel at rest.
-fn steps(config: &IdleConfig) -> [f32; CHANNELS] {
-    let mut steps = [0.0; CHANNELS];
+fn rates(config: &IdleConfig) -> [f32; CHANNELS] {
+    let mut rates = [0.0; CHANNELS];
     for channel in Channel::ALL {
-        steps[channel.slot()] = match config.motion {
-            Motion::Idle => per_tick(channel.authored().period_seconds, config.tick_hz),
-            Motion::Solo if channel == config.channel => per_tick(config.period_seconds, config.tick_hz),
+        rates[channel.slot()] = match config.motion {
+            Motion::Idle => per_second(channel.authored().period_seconds),
+            Motion::Solo if channel == config.channel => per_second(config.period_seconds),
             Motion::Solo => 0.0,
         };
     }
 
-    steps
+    rates
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const FRAME_SECONDS: f32 = 1.0 / 60.0;
+
     fn motor(config: IdleConfig) -> Idle {
-        let steps = steps(&config);
+        let rates = rates(&config);
         let target = resolve_embedded(<Puppet as Addressable>::NAMESPACE);
-        Idle { config, phases: [0.0; CHANNELS], steps, target, last: None, ticks: 0 }
+        Idle { config, phases: [0.0; CHANNELS], rates, target, last: None, ticks: 0 }
     }
 
     /// Whether this pose has one channel off rest. Zeroing the channel and
@@ -233,7 +234,7 @@ mod tests {
         // is left there.
         let mut parked = motor(IdleConfig { running: false, ..IdleConfig::default() });
         for _ in 0..1_000 {
-            assert!(parked.advance().is_none(), "a parked motor sends nothing");
+            assert!(parked.advance(FRAME_SECONDS).is_none(), "a parked motor sends nothing");
         }
     }
 
@@ -249,7 +250,7 @@ mod tests {
 
             let mut moved = [false; CHANNELS];
             for _ in 0..600 {
-                let Some(pose) = solo.advance() else {
+                let Some(pose) = solo.advance(FRAME_SECONDS) else {
                     continue;
                 };
                 for other in Channel::ALL {
@@ -277,9 +278,9 @@ mod tests {
         // is the thing components are supposed to stop doing.
         let mut still = motor(IdleConfig { liveliness: 0.0, ..IdleConfig::default() });
 
-        assert!(still.advance().is_some(), "the first pose is always news");
+        assert!(still.advance(FRAME_SECONDS).is_some(), "the first pose is always news");
         for _ in 0..1_000 {
-            assert!(still.advance().is_none(), "a pose that has not changed is not resent");
+            assert!(still.advance(FRAME_SECONDS).is_none(), "a pose that has not changed is not resent");
         }
     }
 
@@ -293,7 +294,7 @@ mod tests {
         let mut idle = motor(IdleConfig::default());
         let mut moved = [false; CHANNELS];
         for _ in 0..(60 * 15) {
-            let Some(pose) = idle.advance() else {
+            let Some(pose) = idle.advance(FRAME_SECONDS) else {
                 continue;
             };
             for channel in Channel::ALL {
@@ -322,13 +323,32 @@ mod tests {
         // silently freezes mid-session.
         let mut idle = motor(IdleConfig::default());
         for _ in 0..250_000 {
-            idle.advance();
+            idle.advance(FRAME_SECONDS);
             for phase in idle.phases {
                 assert!((0.0..1.0).contains(&phase), "a phase left its cycle: {phase}");
             }
         }
 
-        let still_moving = (0..60).any(|_| idle.advance().is_some());
+        let still_moving = (0..60).any(|_| idle.advance(FRAME_SECONDS).is_some());
         assert!(still_moving, "an hour in, the motor is still moving her");
+    }
+
+    #[test]
+    fn equal_elapsed_time_reaches_the_same_phase_at_different_cadences() {
+        let mut throttled = motor(IdleConfig::default());
+        let mut full = motor(IdleConfig::default());
+
+        for _ in 0..12 {
+            throttled.advance(0.083_335);
+        }
+        for _ in 0..60 {
+            full.advance(0.016_667);
+        }
+
+        for channel in Channel::ALL {
+            let slow = throttled.phases[channel.slot()];
+            let fast = full.phases[channel.slot()];
+            assert!((slow - fast).abs() < 1e-5, "{channel:?} diverged at equal elapsed time: {slow} vs {fast}");
+        }
     }
 }

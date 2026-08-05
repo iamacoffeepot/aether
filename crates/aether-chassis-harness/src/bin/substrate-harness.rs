@@ -19,7 +19,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
-use aether_data::{Kind, KindId, encode_empty, mailbox_id_from_name};
+use aether_data::{Kind, KindId, mailbox_id_from_name};
 use aether_fs::NamespaceRoots;
 use aether_kinds::{AdvanceResult, LifecycleAdvance};
 use aether_lifecycle::LifecycleCapability;
@@ -242,9 +242,9 @@ impl HarnessDriver {
                 },
             };
             match event {
-                ChassisEvent::Advance { reply_to, ticks } => {
+                ChassisEvent::Advance { reply_to, ticks, delta_micros } => {
                     for _ in 0..ticks {
-                        self.advance_frame();
+                        self.advance_frame(delta_micros);
                     }
                     self.outbound.send_reply(reply_to, &AdvanceResult::Ok { ticks_completed: ticks });
                     // A capture can become ready during an advance (its
@@ -263,12 +263,12 @@ impl HarnessDriver {
     /// the frame chain to settle while pumping the render slot (the draw mail
     /// the chain is gated on lands on this slot, so a non-pumping wait would
     /// deadlock — the ADR-0161 §Decision 2 rule), then record the frame.
-    fn advance_frame(&mut self) {
+    fn advance_frame(&mut self, delta_micros: u32) {
         let advance_root = self.queue.push_chassis_root_mail(
             next_chassis_correlation(&self.chassis_correlation),
             self.lifecycle_mailbox,
             self.kind_lifecycle_advance,
-            encode_empty::<LifecycleAdvance>(),
+            LifecycleAdvance { delta_micros }.encode_into_bytes(),
             1,
         );
         let pump_tx = self.pump_tx.clone();

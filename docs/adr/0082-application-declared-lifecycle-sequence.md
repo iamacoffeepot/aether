@@ -49,6 +49,16 @@
 > there is no load-time error — an un-migrated subscriber silently stops
 > receiving ticks.
 
+> **Amendment (2026-08-05, issue 4470).** `Tick` is the one stage that is no
+> longer an empty signal. It carries `delta_micros: u32`, copied from the
+> chassis's `LifecycleAdvance`, so time-based subscribers integrate elapsed
+> seconds instead of assuming 60 Hz. Desktop measures the interval between
+> frame ticks, headless uses its configured timer period, and
+> `SubstrateHarness` uses an explicit synthetic interval (16,667 µs through
+> `HarnessOp::advance`, or the duration supplied to `advance_by`). All other
+> stages remain empty signals; per-frame application state still rides its own
+> mail rather than widening lifecycle payloads.
+
 ## Context
 
 The chassis lifecycle today — `init` → repeated (`tick` → `render` → `present`) → `shutdown` — is encoded in hand-written driver code per chassis (`crates/aether-substrate-bundle/src/{desktop,headless,hub,test_bench}/`). ADR-0074 §Decision 5 layered a single `FRAME_BARRIER: bool` const on every actor to mark "drains within the per-frame barrier vs runs free," and that const is the only first-class structure naming the frame. Everything else — what stages exist, what they emit, what order they fire — is implicit.

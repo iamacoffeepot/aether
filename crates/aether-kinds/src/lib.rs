@@ -1423,10 +1423,10 @@ mod control_plane {
     // (`aether-kit-commons::mesh`), which is its home now.
 
     /// `aether.substrate_harness.advance` — request the substrate-harness chassis
-    /// step the world forward by `ticks` Tick events. Each tick
-    /// dispatches a `Tick` mail to every subscriber, drains the
-    /// resulting mail to quiescence, and renders one frame. Replies
-    /// with `AdvanceResult` once all ticks have completed.
+    /// step the world forward by `ticks` Tick events. Each tick carries
+    /// `delta_micros` elapsed time, dispatches to every subscriber, drains
+    /// the resulting mail to quiescence, and renders one frame. Replies with
+    /// `AdvanceResult` once all ticks have completed.
     ///
     /// The substrate-harness chassis is event-driven (ADR-0067): without
     /// an `advance` request the world doesn't tick at all. Smoke
@@ -1440,6 +1440,7 @@ mod control_plane {
     #[kind(name = "aether.substrate_harness.advance")]
     pub struct Advance {
         pub ticks: u32,
+        pub delta_micros: u32,
     }
 
     /// Reply to `Advance`. `Ok` echoes the number of ticks completed

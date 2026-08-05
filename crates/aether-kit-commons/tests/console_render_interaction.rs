@@ -165,7 +165,7 @@ fn coverage_in_region(
                 RenderCapability::NAMESPACE,
                 &CaptureFrame {
                     window: None,
-                    mails: vec![envelope(&console_address(), &Tick)],
+                    mails: vec![envelope(&console_address(), &Tick::default())],
                     after_mails: Vec::new(),
                     checks: vec![FrameCheck {
                         reduction: FrameReduction::Coverage,
@@ -199,7 +199,7 @@ fn history_text_differs_from_panel(harness: &mut SubstrateHarness, label: &'stat
                 RenderCapability::NAMESPACE,
                 &CaptureFrame {
                     window: None,
-                    mails: vec![envelope(&console_address(), &Tick)],
+                    mails: vec![envelope(&console_address(), &Tick::default())],
                     after_mails: Vec::new(),
                     checks: vec![FrameCheck {
                         reduction: FrameReduction::DiffersFromBackground,
