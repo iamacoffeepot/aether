@@ -132,6 +132,54 @@ the harness owns ordering.
 Use `CaptureWithMails` when geometry must land in the same frame as readback;
 separate send/capture steps describe a different temporal contract.
 
+## Measuring GPU program cost
+
+Do not measure GPU work by differencing the wall clock of two captures.
+Capture maps the frame and encodes PNG synchronously; deflate cost follows image
+entropy, so two frames with identical draw work but different pixels can report
+wildly different "GPU" costs.
+
+For authored render programs, opt into timestamp queries and read the folded
+per-pass table instead:
+
+```rust,ignore
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate_capture::{
+    ProgramTimingsResult, RenderHarnessBuilderExt, RenderHarnessExt,
+};
+
+let mut harness = SubstrateHarness::builder()
+    .size(900, 1200)
+    .with_render_pass_timings()
+    .build()?;
+
+// Register the program, then dispatch it over consecutive advance frames.
+// Keep capture out of this run; timestamp readback resolves asynchronously.
+for _ in 0..40 {
+    harness.execute(vec![("frame", HarnessOp::advance(1))])?;
+}
+
+match harness.program_gpu_timings(program_id)? {
+    ProgramTimingsResult::Ok { rows, .. } => report(rows),
+    ProgramTimingsResult::Absent { reason } => eprintln!("GPU timings unavailable: {reason}"),
+    ProgramTimingsResult::Err { reason } => return Err(reason.into()),
+}
+
+// If visual evidence is also needed, capture it only after the timing run.
+```
+
+Each row is one declared pass and carries marginal `mean_nanos`,
+`mad_nanos`, and `samples`; the row means add up to that program's share of
+the GPU frame envelope. `Absent` is not a zero measurement: it explains that
+timing was disabled, no frame has met the device yet, or the adapter lacks
+timestamp-query support.
+
+For a whole-frame wall-clock comparison rather than a program's GPU share,
+time consecutive `Advance` runs after warm-up. The render runtime has one
+submission in flight, so alternating conditions bills one frame's GPU wait to
+the other condition. Capture remains a correctness/evidence operation, never
+part of a timed run.
+
 Root actors also have a typed operation sender. It resolves the recipient from
 the actor identity and lets the event kind infer from `&mail`:
 
