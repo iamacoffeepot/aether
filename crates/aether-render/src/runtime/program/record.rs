@@ -543,11 +543,12 @@ mod gpu_error_scope_tests {
     #[ignore = "instrument; reports native wgpu error-scope overhead"]
     #[allow(clippy::print_stderr)]
     fn empty_error_scope_cost() {
+        const SAMPLES: u32 = 100_000;
+
         if !has_wgpu_adapter() {
             return;
         }
         let gpu = boot_offscreen(None);
-        const SAMPLES: u32 = 100_000;
         let started = Instant::now();
         for _ in 0..SAMPLES {
             let errors = GpuErrorScopes::push(&gpu.device).pop();
