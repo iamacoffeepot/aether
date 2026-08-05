@@ -8,7 +8,9 @@
 //! The checks run against the dispatch every time. Everything after them
 //! is derived state the program holds across dispatches in its dispatch
 //! cache, because a steady-state repaint rebinds the same resources
-//! every frame — see `super::cache` for what invalidates what.
+//! every frame — see `super::cache` for what invalidates what. GPU errors
+//! raised after those checks are scoped to setup or to the pass being
+//! recorded, before the dispatch address is lost to the device handler.
 
 use std::collections::HashMap;
 
@@ -22,7 +24,7 @@ use super::super::pipeline::RenderGpu;
 use super::super::texture::TextureRegistry;
 use super::cache::{BoundInput, CacheParts};
 use super::timing::FrameQueries;
-use super::validate::{ProgramPlan, ResolvedSlot, resolve_extent};
+use super::validate::{PassPlan, ProgramPlan, ResolvedSlot, resolve_extent};
 use super::{PassGpu, RegisteredProgram, TransientKey};
 use crate::{PassLoad, ProgramDispatch, TextureSampling, TextureUsage};
 
@@ -48,6 +50,15 @@ pub(super) fn record_dispatch(
         return;
     };
     timings.observe_reference(reference);
+
+    // Dispatch-time wgpu work used to escape only through the device's
+    // uncaptured handler, after its program/pass address had been lost
+    // (iamacoffeepot/aether#4426). On the native wgpu-core backend used by
+    // the render runtime, popping these scopes is a thread-local CPU-stack
+    // operation whose future is already ready; it does not poll or wait for
+    // the device. The ignored cost instrument below keeps that assumption
+    // measurable on a real adapter.
+    let setup_scopes = GpuErrorScopes::push(&gpu.device);
 
     for &texture_id in &dispatch.bindings {
         if let Some(entry) = textures.entries.get_mut(&texture_id) {
@@ -83,7 +94,92 @@ pub(super) fn record_dispatch(
         }
     }
 
+    parts.upload_uniforms(&gpu.device, &gpu.queue, plan, passes_gpu, &dispatch.uniforms);
+    if report_setup_gpu_errors(setup_scopes.pop(), dispatch) {
+        return;
+    }
+
     encode_passes(gpu, encoder, plan, passes_gpu, &mut parts, pool, textures, geometries, dispatch, queries);
+}
+
+/// The three WebGPU error classes a dispatch can produce. One nested scope
+/// per filter keeps every class out of the generic uncaptured handler while
+/// the work still has its program/pass address. Scopes must pop in reverse
+/// order; the field order below mirrors the explicit pop order.
+struct GpuErrorScopes {
+    validation: wgpu::ErrorScopeGuard,
+    internal: wgpu::ErrorScopeGuard,
+    out_of_memory: wgpu::ErrorScopeGuard,
+}
+
+impl GpuErrorScopes {
+    fn push(device: &wgpu::Device) -> Self {
+        let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        Self { validation, internal, out_of_memory }
+    }
+
+    fn pop(self) -> GpuErrors {
+        let validation = pollster::block_on(self.validation.pop());
+        let internal = pollster::block_on(self.internal.pop());
+        let out_of_memory = pollster::block_on(self.out_of_memory.pop());
+        GpuErrors { validation, internal, out_of_memory }
+    }
+}
+
+struct GpuErrors {
+    validation: Option<wgpu::Error>,
+    internal: Option<wgpu::Error>,
+    out_of_memory: Option<wgpu::Error>,
+}
+
+impl GpuErrors {
+    fn into_classified(self) -> impl Iterator<Item = (&'static str, wgpu::Error)> {
+        [("validation", self.validation), ("internal", self.internal), ("out_of_memory", self.out_of_memory)]
+            .into_iter()
+            .filter_map(|(class, error)| error.map(|error| (class, error)))
+    }
+}
+
+fn report_setup_gpu_errors(errors: GpuErrors, dispatch: &ProgramDispatch) -> bool {
+    let mut failed = false;
+    for (error_class, error) in errors.into_classified() {
+        failed = true;
+        tracing::error!(
+            target: "aether_render",
+            program_id = dispatch.program_id,
+            phase = "setup",
+            bindings = ?dispatch.bindings,
+            geometries = ?dispatch.geometries,
+            error_class,
+            %error,
+            "program dispatch gpu setup failed; dropping its pass recording",
+        );
+    }
+    failed
+}
+
+fn report_pass_gpu_errors(errors: GpuErrors, dispatch: &ProgramDispatch, pass: usize, pass_plan: &PassPlan) -> bool {
+    let mut failed = false;
+    for (error_class, error) in errors.into_classified() {
+        failed = true;
+        tracing::error!(
+            target: "aether_render",
+            program_id = dispatch.program_id,
+            pass,
+            entry_point = %pass_plan.entry_point,
+            input_slots = ?pass_plan.inputs,
+            output_slot = ?pass_plan.output,
+            draw = ?pass_plan.draw,
+            bindings = ?dispatch.bindings,
+            geometries = ?dispatch.geometries,
+            error_class,
+            %error,
+            "program dispatch gpu pass failed; dropping its remaining pass recording",
+        );
+    }
+    failed
 }
 
 /// Run every dispatch-time check, warn-dropping on the first mismatch.
@@ -271,8 +367,6 @@ fn encode_passes(
     dispatch: &ProgramDispatch,
     mut queries: Option<FrameQueries<'_>>,
 ) {
-    cache.upload_uniforms(&gpu.device, &gpu.queue, plan, passes_gpu, &dispatch.uniforms);
-
     let layout = cache.layout;
     let extent = cache.extent;
     let transient_view = |transient: u32| {
@@ -304,6 +398,7 @@ fn encode_passes(
     for (pass, ((pass_plan, pass_gpu), offsets)) in
         plan.passes.iter().zip(passes_gpu).zip(&layout.iteration_offsets).enumerate()
     {
+        let pass_scopes = GpuErrorScopes::push(&gpu.device);
         input_key.clear();
         input_key.extend(pass_plan.inputs.iter().map(bound_input));
         if cache.inputs_stale(pass, &input_key) {
@@ -361,7 +456,37 @@ fn encode_passes(
             // later one loads it, so a chain accumulates; a repeat's
             // later iterations load for the same reason.
             let first_write = layout.clears_output[pass] && iteration == 0;
-            let Some(draw) = &pass_plan.draw else {
+            if let Some(draw) = &pass_plan.draw {
+                // A draw pass's declared load is authoritative on its color
+                // output; its later repeat iterations load so a repeat
+                // accumulates rather than each iteration wiping the last.
+                // Depth follows the shared-slot rule: the dispatch's first
+                // reference to a slot clears it, later ones load it.
+                let depth = draw.depth.map(|slot| ProgramDepthAttachment {
+                    view: depth_view(slot),
+                    clear: layout.clears_depth[pass] && iteration == 0,
+                });
+                let realized = geometries.entries[&dispatch.geometries[draw.geometry as usize]]
+                    .realized
+                    .as_ref()
+                    .expect("realized before encode");
+                record_program_draw_pass(
+                    encoder,
+                    &ProgramDrawPass {
+                        pipeline: &pass_gpu.pipeline,
+                        target_view,
+                        clear_color: draw.load == PassLoad::Clear && iteration == 0,
+                        depth,
+                        uniform_bind_group,
+                        uniform_offset,
+                        inputs_bind_group,
+                        vertex_buffer: &realized.vertex_buffer,
+                        index_buffer: &realized.index_buffer,
+                        index_count: realized.index_count,
+                        timestamps,
+                    },
+                );
+            } else {
                 record_program_pass(
                     encoder,
                     &ProgramPassDraw {
@@ -374,38 +499,61 @@ fn encode_passes(
                         timestamps,
                     },
                 );
-                continue;
-            };
-
-            // A draw pass's declared load is authoritative on its color
-            // output; its later repeat iterations load so a repeat
-            // accumulates rather than each iteration wiping the last.
-            // Depth follows the shared-slot rule: the dispatch's first
-            // reference to a slot clears it, later ones load it.
-            let depth = draw.depth.map(|slot| ProgramDepthAttachment {
-                view: depth_view(slot),
-                clear: layout.clears_depth[pass] && iteration == 0,
-            });
-            let realized = geometries.entries[&dispatch.geometries[draw.geometry as usize]]
-                .realized
-                .as_ref()
-                .expect("realized before encode");
-            record_program_draw_pass(
-                encoder,
-                &ProgramDrawPass {
-                    pipeline: &pass_gpu.pipeline,
-                    target_view,
-                    clear_color: draw.load == PassLoad::Clear && iteration == 0,
-                    depth,
-                    uniform_bind_group,
-                    uniform_offset,
-                    inputs_bind_group,
-                    vertex_buffer: &realized.vertex_buffer,
-                    index_buffer: &realized.index_buffer,
-                    index_count: realized.index_count,
-                    timestamps,
-                },
-            );
+            }
         }
+        if report_pass_gpu_errors(pass_scopes.pop(), dispatch, pass, pass_plan) {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod gpu_error_scope_tests {
+    use std::time::Instant;
+
+    use aether_harness_substrate_capture::test_helpers::has_wgpu_adapter;
+
+    use super::*;
+    use crate::runtime::surface::boot_offscreen;
+
+    #[test]
+    fn nested_scopes_capture_a_dispatch_validation_error_by_class() {
+        if !has_wgpu_adapter() {
+            return;
+        }
+        let gpu = boot_offscreen(None);
+        let scopes = GpuErrorScopes::push(&gpu.device);
+        let _invalid = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("deliberately oversized dispatch resource"),
+            size: gpu.device.limits().max_buffer_size.checked_add(1).expect("buffer limit leaves room for test error"),
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+
+        let errors = scopes.pop();
+        assert!(errors.validation.is_some(), "the invalid resource must be caught as validation");
+        assert!(errors.internal.is_none(), "a validation error must not be misclassified as internal");
+        assert!(errors.out_of_memory.is_none(), "a validation error must not be misclassified as out-of-memory");
+    }
+
+    /// Manual cost instrument for issue #4426. It measures only the three
+    /// empty push/pop pairs the production path adds per setup/pass; no GPU
+    /// work is submitted, so the number isolates CPU bookkeeping.
+    #[test]
+    #[ignore = "instrument; reports native wgpu error-scope overhead"]
+    #[allow(clippy::print_stderr)]
+    fn empty_error_scope_cost() {
+        if !has_wgpu_adapter() {
+            return;
+        }
+        let gpu = boot_offscreen(None);
+        const SAMPLES: u32 = 100_000;
+        let started = Instant::now();
+        for _ in 0..SAMPLES {
+            let errors = GpuErrorScopes::push(&gpu.device).pop();
+            assert!(errors.into_classified().next().is_none());
+        }
+        let nanos = started.elapsed().as_nanos() / u128::from(SAMPLES);
+        eprintln!("three empty dispatch error scopes: {nanos} ns per push/pop set over {SAMPLES} samples");
     }
 }
