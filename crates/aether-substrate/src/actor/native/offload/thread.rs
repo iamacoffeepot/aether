@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use aether_actor::{Addressable, HandlesKind};
-use aether_actor::{MailSender, Singleton};
+use aether_actor::{CallerAddressable, MailSender, Singleton};
 use aether_data::{Kind, MailId, MailboxId, mailbox_id_from_name};
 
 use crate::actor::native::binding::NativeBinding;
@@ -119,7 +119,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
-        R: Singleton + HandlesKind<K>,
+        R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
@@ -136,7 +136,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
     //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
-        R: Singleton + HandlesKind<K>,
+        R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
@@ -205,7 +205,7 @@ impl<A> RootCtx<A> {
 impl<A: Addressable> MailSender for RootCtx<A> {
     fn send<R, K>(&mut self, payload: &K)
     where
-        R: Singleton + HandlesKind<K>,
+        R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
@@ -216,7 +216,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
 
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
-        R: Singleton + HandlesKind<K>,
+        R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);

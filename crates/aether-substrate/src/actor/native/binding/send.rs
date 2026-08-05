@@ -205,9 +205,8 @@ mod tests {
     // ADR-0119: the per-impl `Singleton::resolve` override (the
     // "folded-child singleton") is retired — resolution is the chosen
     // resolver, not an overridable method. `ctx.actor` carry-folding is now
-    // exercised through the `Embedded` resolver (aether-actor's resolve unit
-    // tests + the send-path test below), so the dedicated own-child ctx.actor
-    // test is dropped rather than retargeted.
+    // exercised through the fixture resolver in the send-path test below, so
+    // the dedicated own-child ctx.actor test is dropped rather than retargeted.
 
     /// ADR-0099 §5 own-child path through the generic `MailSender::send`
     /// surface: `send::<R>` resolves the receiver through
@@ -221,19 +220,30 @@ mod tests {
     fn mailsender_send_routes_through_resolve_not_flat_hash() {
         use crate::actor::native::ctx::NativeCtx;
         use aether_actor::model::HandlesKind;
-        use aether_actor::{Addressable, Embedded, MailSender};
-        use aether_data::mailbox_id_from_name;
+        use aether_actor::{Addressable, CallerScoped, MailSender, Resolve};
+        use aether_data::{ActorId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
         use aether_kinds::Tick;
+
+        /// A keyless strategy that folds the actor's own node onto whatever
+        /// carry it is handed — ADR-0166's deferred "relative singleton
+        /// resolver," declared here as a fixture. It is the only shape that can
+        /// witness the carry reaching `resolve` on the bare-type send surface:
+        /// `One` pins the root and ignores the carry, and `Embedded` folds the
+        /// component host's carry rather than the caller's, so it is not
+        /// [`CallerScoped`] and the surface refuses it (ADR-0119 amendment).
+        struct FoldedChild;
+        impl Resolve for FoldedChild {
+            type Args<'a> = ();
+            fn resolve(caller_carry: u64, namespace: &str, (): ()) -> MailboxId {
+                MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::singleton(namespace))))
+            }
+        }
+        impl CallerScoped for FoldedChild {}
 
         struct Child;
         impl Addressable for Child {
             const NAMESPACE: &'static str = "test.send_fold.child";
-            // ADR-0119: `Embedded` folds the caller carry under the embed
-            // scope, so a different caller carry resolves to a different
-            // mailbox — a carry-dependent target distinct from the flat hash.
-            // A send landing here proves the carry was threaded through
-            // `resolve` rather than dropped for `mailbox_id_from_name`.
-            type Resolver = Embedded;
+            type Resolver = FoldedChild;
         }
         impl HandlesKind<Tick> for Child {}
 

@@ -21,13 +21,16 @@
 
 use aether_data::{Kind, MailboxId};
 
-use crate::model::{HandlesKind, Singleton};
+use crate::model::{CallerAddressable, HandlesKind, Singleton};
 
 /// Outbound-mail surface every actor ctx exposes.
 ///
-/// `R: Singleton + HandlesKind<K>` is the compile-time gate: trying to
-/// send a kind the receiver doesn't handle is rejected at the call
-/// site, not silently warn-dropped at runtime. The receiver's mailbox
+/// `R: Singleton + CallerAddressable + HandlesKind<K>` is the compile-time
+/// gate: trying to send a kind the receiver doesn't handle is rejected at the
+/// call site, not silently warn-dropped at runtime, and so is addressing a
+/// receiver whose mailbox does not fold onto the sender's carry (ADR-0119
+/// amendment — an [`Embedded`](crate::Embedded) component is reached through
+/// its host's `loaded::<R>(name)`, never by bare type). The receiver's mailbox
 /// is resolved through `R::resolve(caller_carry)` (ADR-0099 §5) — the
 /// same lineage-aware path `ctx.actor::<R>()` walks — so a non-root
 /// receiver routes to the lineage-folded id, not the flat
@@ -46,14 +49,14 @@ pub trait MailSender {
     /// through [`Self::send_detached`].
     fn send<R, K>(&mut self, payload: &K)
     where
-        R: Singleton + HandlesKind<K>,
+        R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind;
 
     /// Send a slice of cast-shape payloads as a contiguous batch.
     /// Cast-only — structured kinds have no efficient batched wire shape.
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
-        R: Singleton + HandlesKind<K>,
+        R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit;
 
     /// String-keyed escape hatch for callers that genuinely don't
@@ -89,7 +92,7 @@ pub trait MailSender {
     /// detach from.
     fn send_detached<R, K>(&mut self, payload: &K)
     where
-        R: Singleton + HandlesKind<K>,
+        R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind,
     {
         self.send::<R, K>(payload);

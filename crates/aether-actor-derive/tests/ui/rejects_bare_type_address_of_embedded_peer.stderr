@@ -1,0 +1,54 @@
+error[E0277]: `Embedded` is not a caller-scoped resolution strategy
+  --> tests/ui/rejects_bare_type_address_of_embedded_peer.rs:55:25
+   |
+55 |     let _ = ctx.actor::<Peer>();
+   |                 -----   ^^^^ cannot be folded onto the sending actor's own lineage carry
+   |                 |
+   |                 required by a bound introduced by this call
+   |
+   = help: the trait `CallerScoped` is not implemented for `Embedded`
+   = note: `Embedded` folds the component host's carry, not the caller's, so a bare-type send would name a component embedded under the *sender* — an address nothing registers, which routes cleanly and drops
+   = note: address a loaded component through its host, by the name it was loaded under: `ctx.actor::<ComponentHostCapability>().loaded::<Peer>(name)`
+help: the following other types implement trait `CallerScoped`
+  --> $WORKSPACE/crates/aether-actor/src/model/mod.rs
+   |
+   | impl CallerScoped for One {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^ `aether_actor::One`
+   | impl CallerScoped for Many {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^ `Many`
+   | impl CallerScoped for EmbeddedMany {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EmbeddedMany`
+   = note: required for `Peer` to implement `CallerAddressable`
+note: required by a bound in `WasmCtx::<'_, M>::actor`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/receive.rs
+   |
+   |     pub fn actor<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R> {
+   |                                 ^^^^^^^^^^^^^^^^^ required by this bound in `WasmCtx::<'_, M>::actor`
+
+error[E0277]: `Embedded` is not a caller-scoped resolution strategy
+  --> tests/ui/rejects_bare_type_address_of_embedded_peer.rs:59:24
+   |
+59 |     MailSender::send::<Peer, Ping>(ctx, &Ping { seq: 1 });
+   |                        ^^^^ cannot be folded onto the sending actor's own lineage carry
+   |
+   = help: the trait `CallerScoped` is not implemented for `Embedded`
+   = note: `Embedded` folds the component host's carry, not the caller's, so a bare-type send would name a component embedded under the *sender* — an address nothing registers, which routes cleanly and drops
+   = note: address a loaded component through its host, by the name it was loaded under: `ctx.actor::<ComponentHostCapability>().loaded::<Peer>(name)`
+help: the following other types implement trait `CallerScoped`
+  --> $WORKSPACE/crates/aether-actor/src/model/mod.rs
+   |
+   | impl CallerScoped for One {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^ `aether_actor::One`
+   | impl CallerScoped for Many {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^ `Many`
+   | impl CallerScoped for EmbeddedMany {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EmbeddedMany`
+   = note: required for `Peer` to implement `CallerAddressable`
+note: required by a bound in `send`
+  --> $WORKSPACE/crates/aether-actor/src/model/ctx/mail_sender.rs
+   |
+   |     fn send<R, K>(&mut self, payload: &K)
+   |        ---- required by a bound in this associated function
+   |     where
+   |         R: Singleton + CallerAddressable + HandlesKind<K>,
+   |                        ^^^^^^^^^^^^^^^^^ required by this bound in `MailSender::send`

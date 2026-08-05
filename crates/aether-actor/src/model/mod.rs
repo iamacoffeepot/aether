@@ -82,12 +82,15 @@ pub const EMBEDDED_SCOPE: &str = "aether.embedded";
 /// Keyless embedded resolution (ADR-0119): folds
 /// `instanced(EMBEDDED_SCOPE, NAMESPACE)` onto the caller's carry — the
 /// component's own name as an instance under the reserved embed scope.
-/// Resolution is relative (ADR-0099 §5): in the embedding context the caller
-/// is the component host, whose carry is `aether.component`, so the result is
-/// the component's registered mailbox. The carry is supplied by the caller
-/// (`aether-component`'s `resolve_embedded` for by-name lookups), not
-/// re-derived here. Keyless (`Args<'a> = ()`), so an embedded actor is a
-/// [`Singleton`].
+/// The carry this folds onto is the **component host's**, not the calling
+/// actor's: the fold is only correct when the supplied carry is
+/// `aether.component`'s, which is a fact only that cap's owner
+/// (`aether-component`, through `resolve_embedded` / `loaded::<R>(name)`) may
+/// read. So `Embedded` is **not** [`CallerScoped`] — the bare-type send
+/// surfaces refuse it rather than folding the sender's carry and landing on an
+/// address nothing registers. Keyless (`Args<'a> = ()`), so an embedded actor
+/// is still a [`Singleton`] for the surfaces that supply the host carry
+/// themselves.
 pub struct Embedded;
 
 impl Resolve for Embedded {
@@ -109,6 +112,59 @@ impl Resolve for EmbeddedMany {
         MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, subname))))
     }
 }
+
+/// A [`Resolve`] strategy whose fold is correct when it is handed the
+/// **calling** actor's own lineage carry (ADR-0119 amendment, ADR-0099 §5
+/// "reconstructible from constants"). Every ctx send passes its own carry, so
+/// this is the property that makes bare-type addressing sound.
+///
+/// Implemented for the three strategies that hold it:
+///
+/// - [`One`] ignores the carry — a root cap sits at the root whoever asks.
+/// - [`Many`] folds a keyed child *of the caller*.
+/// - [`EmbeddedMany`] folds a spawned sibling, whose lineage extends the
+///   spawner's (ADR-0099 §Negative "sibling spawn nests").
+///
+/// [`Embedded`] is deliberately absent. An embedded component's node folds the
+/// **component host's** carry, not the caller's, so handing it a caller carry
+/// names a component embedded *under the sender* — an address nothing
+/// registers, which routes cleanly and drops. That target is addressed through
+/// the host instead; see [`CallerAddressable`].
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a caller-scoped resolution strategy",
+    label = "cannot be folded onto the sending actor's own lineage carry",
+    note = "`Embedded` folds the component host's carry, not the caller's, so a bare-type send \
+            would name a component embedded under the *sender* — an address nothing registers, \
+            which routes cleanly and drops",
+    note = "address a loaded component through its host, by the name it was loaded under: \
+            `ctx.actor::<ComponentHostCapability>().loaded::<Peer>(name)`"
+)]
+pub trait CallerScoped: Resolve {}
+
+impl CallerScoped for One {}
+impl CallerScoped for Many {}
+impl CallerScoped for EmbeddedMany {}
+
+/// An actor that can be addressed by bare type from a peer's ctx, because its
+/// [`Resolver`](Addressable::Resolver) is [`CallerScoped`] (ADR-0119
+/// amendment). Bounds every carry-passing send surface —
+/// [`MailSender::send`](crate::MailSender::send), `ctx.actor::<R>()`, and their
+/// batched / detached siblings — beside the cardinality marker.
+///
+/// Auto-implemented from the resolver with the constraint in **supertrait
+/// position** so it elaborates to call sites, the same mechanism
+/// [`Singleton`] / [`Instanced`] use. Nobody writes `impl CallerAddressable`.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be addressed by bare type — it is an embedded component",
+    label = "embedded component, not addressable from the caller's lineage",
+    note = "an embedded component's mailbox folds the component host's lineage carry, not the \
+            caller's, so a bare-type send would name a component embedded under the *sender* and \
+            the mail would drop",
+    note = "address it through the host by the name it was loaded under: \
+            `ctx.actor::<ComponentHostCapability>().loaded::<{Self}>(name)`"
+)]
+pub trait CallerAddressable: Addressable<Resolver: CallerScoped> {}
+impl<T: Addressable<Resolver: CallerScoped>> CallerAddressable for T {}
 
 /// The symmetric trait every actor implements: the recipient name it
 /// claims. Lifecycle methods (`boot` for native chassis caps, `init`
@@ -283,8 +339,10 @@ pub trait Lifecycle<S> {
 /// a shared prefix (instanced, name-keyed). ADR-0079.
 /// Derived from the resolver (ADR-0119): a keyless [`Resolver`](Addressable::Resolver)
 /// (`Args<'a> = ()` — [`One`] for root caps, [`Embedded`] for components)
-/// makes the actor a `Singleton`, reached by `ctx.actor::<R>()`. The blanket
-/// impl supplies it; nobody writes `impl Singleton`.
+/// makes the actor a `Singleton`. The blanket impl supplies it; nobody writes
+/// `impl Singleton`. Cardinality alone does not license bare-type addressing:
+/// `ctx.actor::<R>()` also asks for [`CallerAddressable`], which an
+/// [`Embedded`] component does not satisfy.
 pub trait Singleton: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>> {}
 impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>>> Singleton for T {}
 
@@ -444,6 +502,42 @@ mod tests {
         }
         fn requires_instanced<T: Instanced>() {}
         requires_instanced::<PerThing>();
+    }
+
+    /// ADR-0119 amendment: the three strategies whose fold is meaningful
+    /// against the sender's own carry stay on the bare-type send surface. The
+    /// spawn-sibling resolver is the one at risk — it shares the embed scope
+    /// with [`Embedded`], which the surface refuses, and a sibling's lineage
+    /// really does extend its spawner's (ADR-0099 §Negative), so dropping it
+    /// from [`CallerScoped`] would break sibling addressing rather than
+    /// tighten anything. The refusal side is golden-tested in
+    /// `aether-actor-derive`'s `rejects_bare_type_address_of_embedded_peer` UI
+    /// fixture — a negative bound has no positive witness.
+    #[test]
+    fn caller_scoped_admits_every_strategy_that_folds_the_senders_carry() {
+        fn requires_caller_addressable<T: CallerAddressable>() {}
+
+        struct RootCap;
+        impl Addressable for RootCap {
+            const NAMESPACE: &'static str = "test.caller_scoped.root";
+            type Resolver = One;
+        }
+
+        struct KeyedChild;
+        impl Addressable for KeyedChild {
+            const NAMESPACE: &'static str = "test.caller_scoped.child";
+            type Resolver = Many;
+        }
+
+        struct SpawnedSibling;
+        impl Addressable for SpawnedSibling {
+            const NAMESPACE: &'static str = "test.caller_scoped.sibling";
+            type Resolver = EmbeddedMany;
+        }
+
+        requires_caller_addressable::<RootCap>();
+        requires_caller_addressable::<KeyedChild>();
+        requires_caller_addressable::<SpawnedSibling>();
     }
 
     #[test]
