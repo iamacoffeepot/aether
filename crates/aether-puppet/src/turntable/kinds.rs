@@ -1,7 +1,7 @@
 //! The turntable's own configuration vocabulary.
 //!
 //! It drives the puppet through the puppet's existing
-//! [`Look`](aether_puppet::Look) kind, so there is no drive kind here — only
+//! [`Look`](crate::Look) kind, so there is no drive kind here — only
 //! [`TurntableConfig`], the init-config shape read once at instantiation
 //! (ADR-0090). A bare load with no `config_path` boots the compiled
 //! [`Default`], which is the framing the puppet itself starts at, turning.

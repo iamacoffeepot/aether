@@ -1,7 +1,7 @@
 //! The idle motor's own configuration vocabulary.
 //!
 //! It drives the puppet through the puppet's existing
-//! [`Pose`](aether_puppet::Pose) kind, so there is no drive kind here — only
+//! [`Pose`](crate::Pose) kind, so there is no drive kind here — only
 //! [`IdleConfig`] and the two enums it selects with, read once at
 //! instantiation (ADR-0090). A bare load with no `config_path` boots the
 //! compiled [`Default`], which is the authored idle at full strength.
@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// One of the rig's eight channels, in the order
-/// [`Pose`](aether_puppet::Pose) declares them.
+/// [`Pose`](crate::Pose) declares them.
 ///
 /// Named rather than indexed because the whole point of [`Motion::Solo`] is
 /// to answer "does this channel move the flesh it claims to" — a question
