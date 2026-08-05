@@ -11,12 +11,14 @@ on:
     paths:
       - 'docs/guide/**'
       - 'docs/evidence-viewer/**'
+      - 'docs/pipeline-deck/**'
       - 'docs/book.toml'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
       - 'docs/guide/**'
       - 'docs/evidence-viewer/**'
+      - 'docs/pipeline-deck/**'
       - 'docs/book.toml'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
@@ -43,6 +45,8 @@ jobs:
         run: mdbook build docs
       - name: Copy the evidence viewer
         run: cp -r docs/evidence-viewer docs/book/evidence
+      - name: Copy the pipeline deck
+        run: cp -r docs/pipeline-deck docs/book/pipeline
       - name: Archive the guide as a Pages artifact
         if: github.ref == 'refs/heads/main'
         run: |
