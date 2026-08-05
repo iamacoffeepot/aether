@@ -89,7 +89,7 @@ use aether_actor::{
 use aether_data::MailboxId;
 use aether_test_fixtures_kinds::{
     Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT,
-    InlineConfiguredChildConfig, InlineEcho, InlineProbe, TagSpawnQuery, TagSpawnReport,
+    InlineConfiguredChildConfig, InlineEcho, InlineProbe, SpawnNestedDetached, TagSpawnQuery, TagSpawnReport,
 };
 
 /// Durable state the `InlineStatefulChild` carries across `replace_component`.
@@ -400,6 +400,114 @@ impl WasmActor for InlineConfiguredChild {
     fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: self.count });
+        }
+    }
+}
+
+/// Issue 4490 entry fixture. Its inline child immediately spawns a second
+/// inline generation from `wire`, producing a true grandchild lineage while
+/// the first alias is still only locally prepared.
+pub struct NestedLineageParent;
+
+#[actor]
+impl WasmActor for NestedLineageParent {
+    const NAMESPACE: &'static str = "test.inline.nested_parent";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(NestedLineageParent)
+    }
+
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+        let _ = ctx.spawn_inline_child::<NestedLineageParent, NestedLineageChild>(Subname::Named("branch"), &());
+    }
+
+    #[fallback]
+    fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
+}
+
+/// First inline generation in the issue 4490 fixture. It spawns the durable
+/// inline leaf from `wire`, can spawn a detached wasm sibling on demand, and
+/// resolves the leaf from the reconstructed logical tree for teardown.
+pub struct NestedLineageChild;
+
+#[actor(instanced, child_of(NestedLineageParent))]
+impl WasmActor for NestedLineageChild {
+    const NAMESPACE: &'static str = "test.inline.nested_child";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(NestedLineageChild)
+    }
+
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+        let _ = ctx.spawn_inline_child::<NestedLineageChild, NestedLineageLeaf>(Subname::Named("leaf"), &());
+    }
+
+    #[handler::single]
+    fn on_spawn_detached(&mut self, ctx: &mut WasmCtx<'_>, _trigger: SpawnNestedDetached) {
+        let _ = ctx.spawn_child::<NestedLineageChild, NestedDetachedLeaf>(Subname::Named("worker"), &());
+    }
+
+    #[handler::single]
+    fn on_despawn(&mut self, ctx: &mut WasmCtx<'_>, _trigger: DespawnChild) {
+        if let Some(leaf) = ctx.child("leaf") {
+            let _ = ctx.despawn_inline_child(leaf.mailbox_id());
+        }
+    }
+}
+
+/// Stateful inline grandchild. Its count proves both delivery at the nested
+/// address and reconstruction under the persisted logical parent.
+pub struct NestedLineageLeaf {
+    count: u32,
+}
+
+#[actor(instanced, child_of(NestedLineageChild))]
+impl WasmActor for NestedLineageLeaf {
+    const NAMESPACE: &'static str = "test.inline.nested_leaf";
+    type State = InlineCounterState;
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(NestedLineageLeaf { count: 0 })
+    }
+
+    fn dehydrate(&self) -> InlineCounterState {
+        InlineCounterState { count: self.count }
+    }
+
+    fn rehydrate(&mut self, state: InlineCounterState) {
+        self.count = state.count;
+    }
+
+    #[handler::single]
+    fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
+        self.count += 1;
+    }
+
+    #[handler::manual]
+    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
+        if ctx.reply_target().is_some() {
+            ctx.reply(&CountReport { count: self.count });
+        }
+    }
+}
+
+/// Detached wasm child spawned by `NestedLineageChild`. It starts at a
+/// distinguishable value so an addressable reply proves the detached spawn
+/// registered and delivered under the inline actor's lineage.
+pub struct NestedDetachedLeaf;
+
+#[actor(instanced, child_of(NestedLineageChild))]
+impl WasmActor for NestedDetachedLeaf {
+    const NAMESPACE: &'static str = "test.inline.nested_detached_leaf";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(NestedDetachedLeaf)
+    }
+
+    #[handler::manual]
+    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
+        if ctx.reply_target().is_some() {
+            ctx.reply(&CountReport { count: 77 });
         }
     }
 }

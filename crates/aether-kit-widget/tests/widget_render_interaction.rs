@@ -135,7 +135,11 @@ fn panel_address() -> String {
 }
 
 fn child_address(subname: &str) -> String {
-    format!("{}/{}:{}", panel_address(), aether_component::WasmTrampoline::NAMESPACE, subname)
+    nested_child_address(&panel_address(), subname)
+}
+
+fn nested_child_address(parent: &str, subname: &str) -> String {
+    format!("{parent}/{}:{subname}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 /// The kit's `assets/` dir — where `RobotoMono.ttf` ships, resolved relative
@@ -2470,9 +2474,9 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
         .expect("nested wheel routing while button capture is held");
 
     let outer_address = child_address("outer");
-    // Inline aliases currently fold flat on the component carry even though
-    // the guest registry records the logical parent for `ctx.parent()`.
-    let inner_address = child_address("inner");
+    // The inner scroll is born from the outer scroll, so its alias extends
+    // that executing actor's lineage rather than restarting at the panel.
+    let inner_address = nested_child_address(&outer_address, "inner");
     let outer_id = mailbox_id_from_path(&outer_address).0;
     let inner_id = mailbox_id_from_path(&inner_address).0;
     let first_log = panel_log_messages(&mut harness);

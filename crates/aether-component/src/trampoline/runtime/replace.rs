@@ -100,12 +100,18 @@ impl WasmTrampolineState {
             wasm_bytes: Arc::clone(&self.wasm_bytes),
         };
         if let Err(e) = ctx
-            .spawn_child::<WasmTrampoline>(Subname::Named(&pending.subname), config, ())
-            .stage_with(SiblingSpawnContext { parent: self.mailbox, subname: pending.subname.clone(), capabilities })
+            .spawn_child_scoped::<WasmTrampoline>(
+                pending.parent,
+                Arc::from(pending.parent_name.as_str()),
+                Subname::Named(&pending.subname),
+                config,
+                (),
+            )
+            .stage_with(SiblingSpawnContext { parent: pending.parent, subname: pending.subname.clone(), capabilities })
         {
             tracing::warn!(
                 target: "aether_component",
-                parent = %self.mailbox,
+                parent = %pending.parent,
                 subname = %pending.subname,
                 "sibling spawn failed: {e:?}",
             );

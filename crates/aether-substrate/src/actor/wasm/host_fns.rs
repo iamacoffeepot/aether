@@ -197,7 +197,108 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 aether_data::Tag::Mailbox,
                 aether_data::fold_lineage(trampoline_carry, sibling_node),
             );
+            let parent = caller.data().sender;
+            let Some(parent_name) = caller.data().cluster_actor_name(parent) else {
+                tracing::warn!(target: "aether_substrate::component", "spawn_sibling: parent has no registered name");
+                return 0;
+            };
             caller.data_mut().pending_spawns.push(PendingSpawn {
+                parent,
+                parent_name,
+                tag,
+                subname: full_subname,
+                config,
+            });
+            mailbox_id
+        },
+    )?;
+
+    // Issue 4490: current SDK guests use the scoped import so a spawn from
+    // an inline actor extends that executing actor's lineage. The legacy
+    // import above stays registered for already-built guests and retains its
+    // component-root behavior.
+    linker.func_wrap(
+        "aether",
+        "spawn_sibling_scoped_p32",
+        |mut caller: Caller<'_, ComponentCtx>,
+         parent: u64,
+         tag: u64,
+         is_counter: u32,
+         subname_ptr: u32,
+         subname_len: u32,
+         config_ptr: u32,
+         config_len: u32|
+         -> u64 {
+            let parent = MailboxId(parent);
+            if parent != caller.data().sender && !is_own_cluster_alias(caller.data(), parent) {
+                tracing::warn!(
+                    target: "aether_substrate::component",
+                    %parent,
+                    component = %caller.data().sender,
+                    "spawn_sibling_scoped: parent is not an actor in this component cluster",
+                );
+                return 0;
+            }
+            let Some(parent_name) = caller.data().cluster_actor_name(parent) else {
+                tracing::warn!(
+                    target: "aether_substrate::component",
+                    %parent,
+                    "spawn_sibling_scoped: parent has no registered or prepared name",
+                );
+                return 0;
+            };
+
+            let copied = {
+                let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
+                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling_scoped: guest exports no memory");
+                    return 0;
+                };
+                let data = memory.data(&caller);
+                let read = |ptr: u32, len: u32| -> Option<&[u8]> {
+                    let start = ptr as usize;
+                    let end = start.checked_add(len as usize)?;
+                    (end <= data.len()).then(|| &data[start..end])
+                };
+                let (Some(subname_bytes), Some(config_bytes)) =
+                    (read(subname_ptr, subname_len), read(config_ptr, config_len))
+                else {
+                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling_scoped: subname/config pointer out of bounds");
+                    return 0;
+                };
+                let Ok(subname) = from_utf8(subname_bytes) else {
+                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling_scoped: subname is not valid UTF-8");
+                    return 0;
+                };
+                (subname.to_owned(), config_bytes.to_vec())
+            };
+            let (subname_prefix, config) = copied;
+            let full_subname = if is_counter == 0 {
+                subname_prefix
+            } else {
+                let Some(n) = caller
+                    .data()
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.spawner())
+                    .map(|spawner| spawner.next_counter())
+                else {
+                    tracing::warn!(target: "aether_substrate::component", "spawn_sibling_scoped: no spawner on the binding (counter subname unresolvable)");
+                    return 0;
+                };
+                n.to_string()
+            };
+
+            // A tagged MailboxId is a routing-equivalent fold seed
+            // (ADR-0099's routing-seed invariant), so no parallel raw carry
+            // crosses the ABI.
+            let sibling_node = aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, &full_subname);
+            let mailbox_id = aether_data::with_tag(
+                aether_data::Tag::Mailbox,
+                aether_data::fold_lineage(parent.0, sibling_node),
+            );
+            caller.data_mut().pending_spawns.push(PendingSpawn {
+                parent,
+                parent_name,
                 tag,
                 subname: full_subname,
                 config,
@@ -300,6 +401,84 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 return 0;
             };
             let target_parent = ctx.sender;
+            let alias_name = format!("{parent_name}/{TRAMPOLINE_NAMESPACE}:{full_subname}");
+            caller
+                .data_mut()
+                .stage_alias(PreparedAliasRoute::new(alias_id, alias_name, target_parent));
+            alias_id.0
+        },
+    )?;
+
+    // Issue 4490: nested inline births use the executing actor mailbox as
+    // their routing seed and rendered-name parent. The target endpoint stays
+    // the physical trampoline root; only logical route identity nests.
+    linker.func_wrap(
+        "aether",
+        "spawn_inline_child_scoped_p32",
+        |mut caller: Caller<'_, ComponentCtx>,
+         parent: u64,
+         is_counter: u32,
+         subname_ptr: u32,
+         subname_len: u32|
+         -> u64 {
+            let parent = MailboxId(parent);
+            if parent != caller.data().sender && !is_own_cluster_alias(caller.data(), parent) {
+                tracing::warn!(
+                    target: "aether_substrate::component",
+                    %parent,
+                    component = %caller.data().sender,
+                    "spawn_inline_child_scoped: parent is not an actor in this component cluster",
+                );
+                return 0;
+            }
+            let Some(parent_name) = caller.data().cluster_actor_name(parent) else {
+                tracing::warn!(
+                    target: "aether_substrate::component",
+                    %parent,
+                    "spawn_inline_child_scoped: parent has no registered or prepared name",
+                );
+                return 0;
+            };
+
+            let subname_prefix = {
+                let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
+                    tracing::warn!(target: "aether_substrate::component", "spawn_inline_child_scoped: guest exports no memory");
+                    return 0;
+                };
+                let data = memory.data(&caller);
+                let start = subname_ptr as usize;
+                let Some(end) = start.checked_add(subname_len as usize).filter(|end| *end <= data.len()) else {
+                    tracing::warn!(target: "aether_substrate::component", "spawn_inline_child_scoped: subname pointer out of bounds");
+                    return 0;
+                };
+                let Ok(subname) = from_utf8(&data[start..end]) else {
+                    tracing::warn!(target: "aether_substrate::component", "spawn_inline_child_scoped: subname is not valid UTF-8");
+                    return 0;
+                };
+                subname.to_owned()
+            };
+            let full_subname = if is_counter == 0 {
+                subname_prefix
+            } else {
+                let Some(n) = caller
+                    .data()
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.spawner())
+                    .map(|spawner| spawner.next_counter())
+                else {
+                    tracing::warn!(target: "aether_substrate::component", "spawn_inline_child_scoped: no spawner on the binding (counter subname unresolvable)");
+                    return 0;
+                };
+                n.to_string()
+            };
+
+            let child_node = aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, &full_subname);
+            let alias_id = MailboxId(aether_data::with_tag(
+                aether_data::Tag::Mailbox,
+                aether_data::fold_lineage(parent.0, child_node),
+            ));
+            let target_parent = caller.data().sender;
             let alias_name = format!("{parent_name}/{TRAMPOLINE_NAMESPACE}:{full_subname}");
             caller
                 .data_mut()

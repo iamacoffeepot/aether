@@ -7,19 +7,20 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
-use aether_data::ActorId;
+use aether_data::{ActorId, MailboxId};
 
 use crate::actor::native::binding::NativeBinding;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ChildReservationKey {
+    logical_parent: MailboxId,
     child_type: ActorId,
     child_node: ActorId,
 }
 
 impl ChildReservationKey {
-    pub(crate) fn new(child_type: ActorId, child_node: ActorId) -> Self {
-        Self { child_type, child_node }
+    pub(crate) fn new(logical_parent: MailboxId, child_type: ActorId, child_node: ActorId) -> Self {
+        Self { logical_parent, child_type, child_node }
     }
 }
 
@@ -147,13 +148,12 @@ impl Drop for LiveChildReservation {
 mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    use aether_data::MailboxId;
-
     use super::*;
     use crate::testing::bare_substrate;
 
     fn key(suffix: &str) -> ChildReservationKey {
         ChildReservationKey::new(
+            MailboxId(17),
             ActorId::singleton("test.child.prototype"),
             ActorId::instanced("test.child.prototype", suffix),
         )
@@ -162,6 +162,16 @@ mod tests {
     fn binding() -> Arc<NativeBinding> {
         let (_, mailer) = bare_substrate();
         Arc::new(NativeBinding::new_for_test(mailer, MailboxId(17)))
+    }
+
+    #[test]
+    fn one_physical_binding_allows_the_same_child_node_under_distinct_logical_parents() {
+        let mut table = ChildReservationTable::new();
+        let child_type = ActorId::singleton("test.child.prototype");
+        let child_node = ActorId::instanced("test.child.prototype", "same-name");
+
+        assert!(table.reserve(ChildReservationKey::new(MailboxId(0x401), child_type, child_node)));
+        assert!(table.reserve(ChildReservationKey::new(MailboxId(0x402), child_type, child_node)));
     }
 
     #[test]

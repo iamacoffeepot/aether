@@ -86,7 +86,7 @@ unsafe extern "C" {
     /// `Named` or the type-namespace prefix for `Counter`;
     /// `config_ptr/len` is the encoded `Config` kind. The host stages
     /// the request and returns the new instance's `MailboxId`
-    /// (the ADR-0099 §3 lineage fold of the trampoline's carry with the
+    /// (the ADR-0099 §3 lineage fold of the component root with the
     /// sibling's node); the spawn itself completes just after this
     /// returns (ADR-0097 §4). Bytes at
     /// `(subname_ptr, subname_len)` / `(config_ptr, config_len)` are
@@ -100,22 +100,44 @@ unsafe extern "C" {
         config_ptr: u32,
         config_len: u32,
     ) -> u64;
+    /// Issue 4490: scoped sibling-spawn ABI. `parent` is the executing
+    /// actor's current [`MailboxId`](aether_data::MailboxId), which the host
+    /// validates as this component's root or one of its inline aliases before
+    /// using it as the child's routing seed. The remaining arguments and
+    /// failure sentinel match [`spawn_sibling`]. The legacy import remains
+    /// available for already-built guests during the staged ABI transition.
+    #[link_name = "spawn_sibling_scoped_p32"]
+    pub fn spawn_sibling_scoped(
+        parent: u64,
+        tag: u64,
+        is_counter: u32,
+        subname_ptr: u32,
+        subname_len: u32,
+        config_ptr: u32,
+        config_len: u32,
+    ) -> u64;
     /// ADR-0114: register an inline child's alias route and return its
     /// `MailboxId`. Unlike [`spawn_sibling`] (which stages a detached
     /// spawn), this folds the alias id `with_tag(Mailbox,
     /// fold_lineage(parent_carry, instanced(aether.embedded, subname)))`
     /// and synchronously registers an alias `MailboxEntry` routing to the
-    /// parent trampoline's own dispatcher slot — the child is co-located
+    /// component root's own dispatcher slot — the child is co-located
     /// in the parent's wasm instance, so there is no new trampoline and no
     /// config (the guest runs `init` in-process). `is_counter` is `1` for
     /// `Subname::Counter` (the host appends a monotonic discriminator) or
     /// `0` for a caller-supplied name; `subname_ptr/len` is the bare
     /// `Named` segment (empty for `Counter`), copied out of guest memory
     /// before the call returns. The returned id is the ADR-0099 §3 lineage
-    /// fold of the trampoline's carry with the child's node; `0` on a
+    /// fold of the component root seed with the child's node; `0` on a
     /// host-side error (no memory, OOB, bad UTF-8, no binding/spawner).
     #[link_name = "spawn_inline_child_p32"]
     pub fn spawn_inline_child(is_counter: u32, subname_ptr: u32, subname_len: u32) -> u64;
+    /// Issue 4490: scoped inline-child alias allocation. `parent` is the
+    /// executing actor's current mailbox and is validated host-side before it
+    /// becomes the alias routing seed and rendered-name parent. The remaining
+    /// arguments and failure sentinel match [`spawn_inline_child`].
+    #[link_name = "spawn_inline_child_scoped_p32"]
+    pub fn spawn_inline_child_scoped(parent: u64, is_counter: u32, subname_ptr: u32, subname_len: u32) -> u64;
     /// ADR-0114 teardown (#4228): retire the alias route
     /// [`spawn_inline_child`] registered, because the child it addressed was
     /// despawned. `alias` is that call's returned `MailboxId` raw value. The
@@ -280,6 +302,28 @@ pub unsafe fn spawn_sibling(
     panic!("aether-actor: spawn_sibling called outside the FFI guest");
 }
 
+/// Host-side stub for the scoped sibling-spawn import (issue 4490).
+/// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn spawn_sibling_scoped(
+    _parent: u64,
+    _tag: u64,
+    _is_counter: u32,
+    _subname_ptr: u32,
+    _subname_len: u32,
+    _config_ptr: u32,
+    _config_len: u32,
+) -> u64 {
+    panic!("aether-actor: spawn_sibling_scoped called outside the FFI guest");
+}
+
 /// Host-side stub for the FFI `aether::spawn_inline_child` import
 /// (ADR-0114). Always panics — callers outside the FFI guest are
 /// misusing the SDK.
@@ -294,6 +338,20 @@ pub unsafe fn spawn_sibling(
 #[must_use]
 pub unsafe fn spawn_inline_child(_is_counter: u32, _subname_ptr: u32, _subname_len: u32) -> u64 {
     panic!("aether-actor: spawn_inline_child called outside the FFI guest");
+}
+
+/// Host-side stub for the scoped inline-child import (issue 4490).
+/// Always panics — callers outside the FFI guest are misusing the SDK.
+///
+/// # Safety
+/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
+///
+/// # Panics
+/// Always panics — fail-fast per ADR-0063.
+#[cfg(not(target_family = "wasm"))]
+#[must_use]
+pub unsafe fn spawn_inline_child_scoped(_parent: u64, _is_counter: u32, _subname_ptr: u32, _subname_len: u32) -> u64 {
+    panic!("aether-actor: spawn_inline_child_scoped called outside the FFI guest");
 }
 
 /// Host-side stub for the FFI `aether::despawn_inline_child` import

@@ -157,12 +157,15 @@ pub const TRAMPOLINE_NAMESPACE: &str = aether_actor::EMBEDDED_SCOPE;
 
 /// ADR-0097: a sibling-spawn request the `spawn_sibling` host fn stages
 /// onto [`ComponentCtx`] for the trampoline to drain and execute.
-/// `tag` selects the exported type at `init_typed_p32`; `subname` is the
-/// full trampoline subname (the spawned instance addresses as
-/// `aether.embedded:<subname>`); `config` is the encoded
-/// `Config` kind handed to the new instance.
+/// `parent` / `parent_name` are the validated executing actor identity the
+/// child extends, not necessarily the physical trampoline root. `tag`
+/// selects the exported type at `init_typed_p32`; `subname` is the resolved
+/// trampoline subname and `config` is the encoded `Config` kind handed to the
+/// new instance.
 #[derive(Debug, Clone)]
 pub struct PendingSpawn {
+    pub parent: MailboxId,
+    pub parent_name: String,
     pub tag: u64,
     pub subname: String,
     pub config: Vec<u8>,
@@ -216,6 +219,27 @@ impl ComponentCtx {
 
     pub(crate) fn has_pending_alias(&self, alias: MailboxId) -> bool {
         self.pending_aliases.iter().any(|pending| pending.alias == alias && pending.target_parent == self.sender)
+    }
+
+    /// Rendered identity for a validated actor in this component cluster.
+    /// A nested child may spawn from its immediate `wire` before the registry
+    /// owner publishes that child's alias, so consult locally prepared routes
+    /// before the owner-visible reverse map.
+    pub(crate) fn cluster_actor_name(&self, actor: MailboxId) -> Option<String> {
+        if actor == self.sender {
+            return self.registry.mailbox_name(actor);
+        }
+        self.pending_aliases
+            .iter()
+            .find(|pending| pending.alias == actor && pending.target_parent == self.sender)
+            .map(|pending| pending.rendered_name.to_string())
+            .or_else(|| {
+                if self.registry.is_alias_to(actor, self.sender) {
+                    self.registry.mailbox_name(actor)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Stage the retirement of `alias`, whose inline child the guest just
