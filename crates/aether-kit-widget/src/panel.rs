@@ -822,9 +822,9 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
     };
     let config = HostConfig {
         child: ChildSpec {
-            // The wrapped widget nests under the host at a slot-unique subname
-            // (the inline model folds children flat, so the discriminator must
-            // be cluster-unique).
+            // The wrapped widget nests under this host. Scoped inline folds
+            // let every behavior host own the same local slot shape without
+            // colliding elsewhere in the component cluster.
             type_tag,
             subname: alloc::format!("{}_wrapped", spec.subname),
             config: host_spec.wrapped_config,
