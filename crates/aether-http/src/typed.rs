@@ -166,7 +166,7 @@ impl<C> DerefMut for Ctx<'_, C> {
 ///
 /// - [`Reply`](Outcome::Reply) answers the request now with the carried
 ///   response.
-/// - [`Deferred`](Outcome::Deferred) is what `ctx.peer::<R>().defer(&request)`
+/// - [`Deferred`](Outcome::Deferred) is what `ctx.defer(&request).to::<R>()`
 ///   returns on the native transport: the request was forwarded to a peer over
 ///   an inherited send that holds the route's chain open, so a later
 ///   `#[http::reply]` route answers when the peer's reply lands.
@@ -177,7 +177,7 @@ impl<C> DerefMut for Ctx<'_, C> {
 pub enum Outcome {
     /// Answer the request now with this response.
     Reply(HttpServerResponse),
-    /// The request was forwarded to a peer by `ctx.peer::<R>().defer(&request)`;
+    /// The request was forwarded to a recipient by `ctx.defer(&request).to::<R>()`;
     /// a later `#[http::reply]` route answers when the peer replies.
     Deferred,
 }
