@@ -288,7 +288,7 @@ impl Strokes {
     /// up at the next solve left the field and the sheet standing at the
     /// old size until something else moved.
     ///
-    /// Resolved through [`windowed_canvas`] and not from the window's own
+    /// Resolved through `windowed_canvas` and not from the window's own
     /// pixels, because a desktop window announces its size every frame
     /// and this is therefore the *last* writer of the canvas on every
     /// frame that did not solve — so a second way of answering "what
