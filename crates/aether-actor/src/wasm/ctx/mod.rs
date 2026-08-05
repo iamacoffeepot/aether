@@ -22,12 +22,14 @@ use crate::model::CallerScope;
 /// Authoritative raw lineage carries available to a wasm lifecycle or
 /// receive context.
 ///
-/// Kept separate from the routable mailbox id because mailbox tagging
-/// overwrites the canonical carry's natural high nibble, which exact
-/// propagation and later host validation need. Built-in FNV folds can still
-/// reach the same low-60-bit routed mailbox from the tagged value, but that
-/// does not recover the authoritative full-`u64` carry. The legacy guest ABI
-/// constructs an unavailable value; scoped ABI siblings supply both carries.
+/// Kept separate from the routable mailbox id because route tagging a
+/// depth-two-or-deeper fold overwrites the rolling carry's natural high
+/// nibble, which exact propagation and later host validation need. Built-in
+/// FNV folds can still reach the same low-60-bit routed mailbox from the
+/// tagged value, but that does not recover the authoritative full-`u64`
+/// carry. ADR-0099's depth-one root carry remains its mailbox-tagged fixed
+/// point. The legacy guest ABI constructs an unavailable value; scoped ABI
+/// siblings supply both carries.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawCallerScopes {

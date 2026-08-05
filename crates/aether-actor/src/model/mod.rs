@@ -42,12 +42,14 @@ pub trait Resolve {
     /// Produce the raw lineage carry for `namespace` as this strategy sees
     /// it, given the selected caller scope and the strategy-specific `args`.
     ///
-    /// The raw carry must remain untagged after a lineage fold. Applying the
-    /// mailbox tag overwrites its natural high nibble, so a [`MailboxId`] is
-    /// not the authoritative full-`u64` carry required for exact propagation
-    /// and host validation. The built-in FNV folds can still produce the same
-    /// final low-60-bit route from either value; route equality does not make
-    /// the tagged value canonical lineage state.
+    /// Preserve the natural full-`u64` rolling state produced by a lineage
+    /// fold. Applying the route's mailbox tag to a depth-two-or-deeper fold
+    /// overwrites its natural high nibble, so that [`MailboxId`] is not the
+    /// authoritative parent carry required for exact propagation and host
+    /// validation. The built-in FNV folds can still produce the same final
+    /// low-60-bit route from either value; route equality does not make the
+    /// tagged value canonical lineage state. The depth-one root carry remains
+    /// the mailbox-tagged fixed point documented by ADR-0099.
     #[must_use]
     fn resolve_carry(caller_carry: u64, namespace: &str, args: Self::Args<'_>) -> u64;
 
@@ -129,12 +131,13 @@ impl Resolve for EmbeddedMany {
 
 /// Which authoritative raw lineage carry a caller-scoped resolver consumes.
 ///
-/// Route mailbox ids are deliberately not accepted as a substitute: their
-/// mailbox tag has overwritten the natural high nibble of the full-`u64`
-/// carry needed for exact propagation and host validation. Wasm contexts
-/// retain the available raw values separately and select one through this
-/// enum, even though the built-in FNV folds can preserve the same eventual
-/// low-60-bit route after tagging.
+/// Route mailbox ids are deliberately not accepted as a substitute for a
+/// depth-two-or-deeper rolling carry: their mailbox tag has overwritten its
+/// natural high nibble, which exact propagation and host validation need.
+/// Wasm contexts retain the available authoritative values separately and
+/// select one through this enum, even though the built-in FNV folds can
+/// preserve the same eventual low-60-bit route after tagging. The root scope
+/// remains ADR-0099's depth-one mailbox-tagged fixed point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallerScope {
     /// The resolver is root-pinned and does not consume caller lineage.
@@ -702,14 +705,14 @@ mod tests {
             type Resolver = Many;
         }
 
-        let root_carry = 0xF123_4567_89AB_CDEF;
-        let tagged_root = with_tag(Tag::Mailbox, root_carry);
-        assert_ne!(root_carry, tagged_root, "mailbox tagging replaces the canonical carry's high nibble");
+        let parent_carry = 0xF123_4567_89AB_CDEF;
+        let tagged_parent = with_tag(Tag::Mailbox, parent_carry);
+        assert_ne!(parent_carry, tagged_parent, "mailbox tagging replaces the rolling carry's high nibble");
 
-        let child_carry = Child::resolve_carry(root_carry, "one");
-        let child_carry_from_tagged = Child::resolve_carry(tagged_root, "one");
-        let child_mailbox = Child::resolve(root_carry, "one");
-        assert_eq!(child_carry, fold_lineage(root_carry, ActorId::instanced("test.raw_carry.child", "one")),);
+        let child_carry = Child::resolve_carry(parent_carry, "one");
+        let child_carry_from_tagged = Child::resolve_carry(tagged_parent, "one");
+        let child_mailbox = Child::resolve(parent_carry, "one");
+        assert_eq!(child_carry, fold_lineage(parent_carry, ActorId::instanced("test.raw_carry.child", "one")),);
         assert_ne!(
             child_carry, child_carry_from_tagged,
             "the natural high nibble remains part of the canonical raw fold",
@@ -717,7 +720,7 @@ mod tests {
         assert_eq!(child_mailbox.0, with_tag(Tag::Mailbox, child_carry));
         assert_eq!(
             child_mailbox,
-            Child::resolve(tagged_root, "one"),
+            Child::resolve(tagged_parent, "one"),
             "built-in FNV routing can mask a non-canonical parent carry after mailbox tagging",
         );
 
