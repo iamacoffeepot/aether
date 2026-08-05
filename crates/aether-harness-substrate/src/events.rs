@@ -20,10 +20,11 @@ use aether_substrate::Source;
 /// pumped render slot's mailbox wake (`RenderMail`), so the underlying mpsc
 /// channel tolerates the two.
 pub enum ChassisEvent {
-    /// `aether.substrate_harness.advance { ticks }`. The event loop runs
-    /// `ticks` full cycles (advance → frame mail → drain) then replies with
+    /// `aether.substrate_harness.advance { ticks, delta_micros }`. The event
+    /// loop runs `ticks` full cycles (advance → frame mail → drain), each
+    /// representing `delta_micros` elapsed time, then replies with
     /// `AdvanceResult::Ok { ticks_completed }`.
-    Advance { reply_to: Source, ticks: u32 },
+    Advance { reply_to: Source, ticks: u32, delta_micros: u32 },
     /// The pumped `aether.render` slot took mail — drain it (ADR-0161). A
     /// wake-only signal, mirroring desktop's `UserEvent::WindowMail`: the
     /// slot's wake sends it so a render mail landing while the loop is parked

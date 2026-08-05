@@ -281,7 +281,7 @@ mod tests {
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(parent_carry)));
         {
             let mut ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
-            <NativeCtx as MailSender>::send::<Child, Tick>(&mut ctx, &Tick);
+            <NativeCtx as MailSender>::send::<Child, Tick>(&mut ctx, &Tick::default());
             // ctx drops here → `flush_outbound` routes the buffered send.
         }
 

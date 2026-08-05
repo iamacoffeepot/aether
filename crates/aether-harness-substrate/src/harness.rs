@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty};
+use aether_data::{Kind, KindId, SessionToken, Uuid};
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
@@ -39,8 +39,7 @@ use aether_kinds::{LogTail, LogTailResult, Tick};
 #[cfg(test)]
 use aether_trace::walk::TreeWalk;
 // `push_to_mailbox` encodes any sent kind through the descriptor-aware
-// `Kind::encode_into_bytes` (cast or structured per the kind's shape);
-// `encode_empty` builds the zero-byte payload for unit lifecycle kinds.
+// `Kind::encode_into_bytes` (cast or structured per the kind's shape).
 use crate::poll_config::PollConfig;
 use crate::pump_stats::PumpStats;
 use crate::settlement_config::SettlementConfig;
@@ -1095,7 +1094,7 @@ impl SubstrateHarness {
     /// dispatches `Tick` to subscribers, drains the queue, and
     /// renders. Returns once the substrate has replied with
     /// `AdvanceResult::Ok`.
-    pub(crate) fn advance(&mut self, ticks: u32) -> Result<u32, SubstrateHarnessError> {
+    pub(crate) fn advance(&mut self, ticks: u32, delta_micros: u32) -> Result<u32, SubstrateHarnessError> {
         let cid = self.fresh_correlation_id();
         // Issue 603 Phase 4: advance migrated from `aether.control`
         // (chassis_handler closure) onto `aether.substrate_harness`
@@ -1105,7 +1104,7 @@ impl SubstrateHarness {
             // its well-known name — ctx-less driver-side push, no resolver here.
             #[allow(clippy::disallowed_methods)]
             aether_data::mailbox_id_from_name("aether.substrate_harness"),
-            &Advance { ticks },
+            &Advance { ticks, delta_micros },
             cid,
         );
         match self.pump_until_reply::<AdvanceResult>(cid, "AdvanceResult")? {
@@ -1399,10 +1398,10 @@ impl SubstrateHarness {
     #[allow(clippy::needless_pass_by_value)]
     fn dispatch_event(&mut self, event: ChassisEvent) -> Result<(), SubstrateHarnessError> {
         match event {
-            ChassisEvent::Advance { reply_to, ticks } => {
+            ChassisEvent::Advance { reply_to, ticks, delta_micros } => {
                 for _ in 0..ticks {
                     self.frame += 1;
-                    self.run_frame(/* dispatch_tick */ true)?;
+                    self.run_frame(delta_micros)?;
                 }
                 self.outbound.send_reply(reply_to, &AdvanceResult::Ok { ticks_completed: ticks });
             }
@@ -1419,86 +1418,84 @@ impl SubstrateHarness {
         Ok(())
     }
 
-    fn run_frame(&mut self, dispatch_tick: bool) -> Result<(), SubstrateHarnessError> {
-        if dispatch_tick {
-            // ADR-0082 PR 3b: SubstrateHarness pushes `LifecycleAdvance` to the
-            // lifecycle driver, which broadcasts the `Tick` stage directly
-            // to its stage subscribers (issue 1490 retired the
-            // `Tick → aether.input` relay; components subscribe `Tick` on
-            // `aether.lifecycle`). The chain rooted at this advance's
-            // `MailId` covers the whole subtree — the stage fanout,
-            // subscriber handlers, the tick_observed broadcasts those
-            // subscribers emit, the broadcast cap's egress to outbound.
-            //
-            // iamacoffeepot/aether#999: gate the per-tick wait on the
-            // driver's `LifecycleAdvanceComplete` reply rather than the
-            // raw broadcast-root settlement channel. The driver's
-            // `on_advance` sets `pending = Some(..)` and clears it only
-            // in `on_settled`, which runs on the driver's own actor
-            // thread after it dequeues the synthesised `Settled` mail —
-            // and only then does it reply `LifecycleAdvanceComplete`.
-            // Waiting on the raw settlement channel woke the harness (and
-            // let it push the next tick's advance) *before* the driver
-            // had cleared `pending`, so under parallel-nextest load the
-            // next advance hit `pending.is_some()` and warn-dropped one
-            // tick (199 broadcasts, not 200). Correlating on the
-            // `LifecycleAdvanceComplete` reply — emitted strictly after
-            // `pending` clears — closes that race: by the time the reply
-            // lands, the driver is ready for the next advance and the
-            // whole broadcast subtree has settled (the reply is gated on
-            // settlement). Reuses the same reply-correlated loopback wait
-            // (`pump_until_reply`) the `advance()` / `capture()` API
-            // methods already use, rather than a bespoke channel.
-            // ADR-0082 §11 / issue 1378: the frame graph is `Tick →
-            // Render → Tick`, so one requested tick drives a full
-            // two-stage cycle. Each iteration pushes one `LifecycleAdvance`
-            // (broadcasting the cap's current stage) and blocks on its
-            // `LifecycleAdvanceComplete` reply, reading `next` to learn the
-            // cap's resolved next stage; the loop exits once it returns to
-            // `Tick` (cycle complete) or reaches a terminal (`next == 0`).
-            // The reply gate is exactly the #999 fix below — emitted only
-            // after the cap clears `pending`, so the next iteration's
-            // advance never races the overlap guard.
-            loop {
-                let cid = self.fresh_correlation_id();
-                // Mint a chassis-root `LifecycleAdvance` (so the trace
-                // pipeline tracks the broadcast subtree and `on_settled`
-                // fires) that *also* carries this harness's session as the
-                // reply target — the driver routes `LifecycleAdvanceComplete`
-                // there via `on_settled`'s `ctx.reply_to`. `push_chassis_root_mail`
-                // doesn't take a reply target, so the chassis-root push is
-                // open-coded here (mint id → record `Sent` → push with both
-                // lineage and reply-to), mirroring its three steps.
-                let advance_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, self.fresh_correlation_id());
-                self.queue.record_sent(
-                    advance_root,
-                    advance_root,
-                    None,
-                    MailboxId::CHASSIS_MAILBOX_ID,
+    fn run_frame(&mut self, delta_micros: u32) -> Result<(), SubstrateHarnessError> {
+        // ADR-0082 PR 3b: SubstrateHarness pushes `LifecycleAdvance` to the
+        // lifecycle driver, which broadcasts the `Tick` stage directly
+        // to its stage subscribers (issue 1490 retired the
+        // `Tick → aether.input` relay; components subscribe `Tick` on
+        // `aether.lifecycle`). The chain rooted at this advance's
+        // `MailId` covers the whole subtree — the stage fanout,
+        // subscriber handlers, the tick_observed broadcasts those
+        // subscribers emit, the broadcast cap's egress to outbound.
+        //
+        // iamacoffeepot/aether#999: gate the per-tick wait on the
+        // driver's `LifecycleAdvanceComplete` reply rather than the
+        // raw broadcast-root settlement channel. The driver's
+        // `on_advance` sets `pending = Some(..)` and clears it only
+        // in `on_settled`, which runs on the driver's own actor
+        // thread after it dequeues the synthesised `Settled` mail —
+        // and only then does it reply `LifecycleAdvanceComplete`.
+        // Waiting on the raw settlement channel woke the harness (and
+        // let it push the next tick's advance) *before* the driver
+        // had cleared `pending`, so under parallel-nextest load the
+        // next advance hit `pending.is_some()` and warn-dropped one
+        // tick (199 broadcasts, not 200). Correlating on the
+        // `LifecycleAdvanceComplete` reply — emitted strictly after
+        // `pending` clears — closes that race: by the time the reply
+        // lands, the driver is ready for the next advance and the
+        // whole broadcast subtree has settled (the reply is gated on
+        // settlement). Reuses the same reply-correlated loopback wait
+        // (`pump_until_reply`) the `advance()` / `capture()` API
+        // methods already use, rather than a bespoke channel.
+        // ADR-0082 §11 / issue 1378: the frame graph is `Tick →
+        // Render → Tick`, so one requested tick drives a full
+        // two-stage cycle. Each iteration pushes one `LifecycleAdvance`
+        // (broadcasting the cap's current stage) and blocks on its
+        // `LifecycleAdvanceComplete` reply, reading `next` to learn the
+        // cap's resolved next stage; the loop exits once it returns to
+        // `Tick` (cycle complete) or reaches a terminal (`next == 0`).
+        // The reply gate is exactly the #999 fix below — emitted only
+        // after the cap clears `pending`, so the next iteration's
+        // advance never races the overlap guard.
+        loop {
+            let cid = self.fresh_correlation_id();
+            // Mint a chassis-root `LifecycleAdvance` (so the trace
+            // pipeline tracks the broadcast subtree and `on_settled`
+            // fires) that *also* carries this harness's session as the
+            // reply target — the driver routes `LifecycleAdvanceComplete`
+            // there via `on_settled`'s `ctx.reply_to`. `push_chassis_root_mail`
+            // doesn't take a reply target, so the chassis-root push is
+            // open-coded here (mint id → record `Sent` → push with both
+            // lineage and reply-to), mirroring its three steps.
+            let advance_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, self.fresh_correlation_id());
+            self.queue.record_sent(
+                advance_root,
+                advance_root,
+                None,
+                MailboxId::CHASSIS_MAILBOX_ID,
+                self.lifecycle_mailbox,
+                self.kind_lifecycle_advance,
+            );
+            let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
+            self.queue.push(
+                Mail::new(
                     self.lifecycle_mailbox,
                     self.kind_lifecycle_advance,
-                );
-                let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
-                self.queue.push(
-                    Mail::new(
-                        self.lifecycle_mailbox,
-                        self.kind_lifecycle_advance,
-                        encode_empty::<aether_kinds::LifecycleAdvance>(),
-                        1,
-                    )
-                    .with_lineage(advance_root, advance_root, None)
-                    .with_reply_to(reply_to),
-                );
-                // Block until the driver replies `LifecycleAdvanceComplete`
-                // for this advance. A `Timeout` here means the chain never
-                // settled (a genuine in_flight leak in some downstream cap)
-                // or the driver never replied — same fail-loud disposition
-                // the prior `SettlementTimeout` had.
-                let complete =
-                    self.pump_until_reply::<aether_kinds::LifecycleAdvanceComplete>(cid, "LifecycleAdvanceComplete")?;
-                if complete.next == <Tick as Kind>::ID.0 || complete.next == 0 {
-                    break;
-                }
+                    aether_kinds::LifecycleAdvance { delta_micros }.encode_into_bytes(),
+                    1,
+                )
+                .with_lineage(advance_root, advance_root, None)
+                .with_reply_to(reply_to),
+            );
+            // Block until the driver replies `LifecycleAdvanceComplete`
+            // for this advance. A `Timeout` here means the chain never
+            // settled (a genuine in_flight leak in some downstream cap)
+            // or the driver never replied — same fail-loud disposition
+            // the prior `SettlementTimeout` had.
+            let complete =
+                self.pump_until_reply::<aether_kinds::LifecycleAdvanceComplete>(cid, "LifecycleAdvanceComplete")?;
+            if complete.next == <Tick as Kind>::ID.0 || complete.next == 0 {
+                break;
             }
         }
         // ADR-0082 §6 / PR 3c: the advance settlement above already waited

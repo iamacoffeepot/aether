@@ -22,7 +22,7 @@ use super::{
     Drive, KeepUp, Ping, Relay, RelayConfig, Stats, TickSource, Tier, Topology, drive_for_tier, max_out_degree,
     relay_id, scheduler_tuning_from_env, summarize, ticksrc_id,
 };
-use crate::SubstrateHarness;
+use crate::{DEFAULT_TICK_DELTA_MICROS, SubstrateHarness};
 
 /// One measured cell's **raw** samples (per worker count × topology),
 /// before percentile collapse. The latency spans are nanosecond
@@ -274,14 +274,14 @@ pub fn run_cell(
             let period = Duration::from_secs_f64(1.0 / hz as f64);
             for _ in 0..frames {
                 let f = Instant::now();
-                let _ = tb.advance(1);
+                let _ = tb.advance(1, DEFAULT_TICK_DELTA_MICROS);
                 if let Some(rem) = period.checked_sub(f.elapsed()) {
                     thread::sleep(rem);
                 }
             }
         }
         Drive::Latency { pace_hz: None } => {
-            let _ = tb.advance(frames);
+            let _ = tb.advance(frames, DEFAULT_TICK_DELTA_MICROS);
         }
         // Saturate: the tick source bursts `backlog` roots onto
         // relay 0's inbox on a single tick, and one `advance(1)`
@@ -296,7 +296,7 @@ pub fn run_cell(
         // rings, tripping the truncation gate below and nulling the
         // rate (the bug the `frames > 1` regression test guards).
         Drive::Saturate { .. } => {
-            let _ = tb.advance(1);
+            let _ = tb.advance(1, DEFAULT_TICK_DELTA_MICROS);
         }
     }
     let drive_elapsed = drive_start.elapsed();

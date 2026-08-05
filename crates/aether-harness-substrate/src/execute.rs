@@ -50,6 +50,11 @@ pub const DEFAULT_POLL_BUDGET: Duration = Duration::from_secs(10);
 /// on. Matches the pump's own quiet-poll ceiling.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// Synthetic elapsed time represented by [`HarnessOp::advance`]. Tests that
+/// exercise cadence-sensitive behavior use [`HarnessOp::advance_by`] to state
+/// another value explicitly.
+pub const DEFAULT_TICK_DELTA_MICROS: u32 = 16_667;
+
 /// One atomic step in a [`SubstrateHarness::execute`] sequence. Each variant
 /// resolves via an existing settlement-gated primitive on
 /// [`SubstrateHarness`]; the sequencer waits for the op's causal chain to
@@ -92,8 +97,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// count standing in for an ordering. Both hold only while the box is
 /// fast enough, and both measure the runner rather than the outcome.
 pub enum HarnessOp {
-    /// Run `ticks` complete frames. Build with [`HarnessOp::advance`].
-    Advance { ticks: u32 },
+    /// Run `ticks` complete frames at the stated synthetic elapsed time per
+    /// tick. Build with [`HarnessOp::advance`] or [`HarnessOp::advance_by`].
+    Advance { ticks: u32, delta_micros: u32 },
     /// Send a mail and wait for its whole causal chain to settle — the
     /// recipient's handler and every mail descended from it have run
     /// (`Settled { root }`, ADR-0080 §6). No reply is stored. Build with
@@ -188,7 +194,16 @@ impl HarnessOp {
     /// Run `ticks` complete frames.
     #[must_use]
     pub fn advance(ticks: u32) -> Self {
-        Self::Advance { ticks }
+        Self::Advance { ticks, delta_micros: DEFAULT_TICK_DELTA_MICROS }
+    }
+
+    /// Run `ticks` complete frames, each representing `delta` elapsed time.
+    /// This is the deterministic cadence seam for testing motion and other
+    /// time-based subscribers without sleeping the test thread.
+    #[must_use]
+    pub fn advance_by(ticks: u32, delta: Duration) -> Self {
+        let delta_micros = u32::try_from(delta.as_micros()).unwrap_or(u32::MAX);
+        Self::Advance { ticks, delta_micros }
     }
 
     /// Capture the current frame.
@@ -217,7 +232,7 @@ impl HarnessOp {
     /// use aether_kinds::Tick;
     /// use aether_window::SyntheticWindowCapability;
     ///
-    /// let _ = HarnessOp::actor::<SyntheticWindowCapability>().send(&Tick);
+    /// let _ = HarnessOp::actor::<SyntheticWindowCapability>().send(&Tick::default());
     /// ```
     #[must_use]
     pub fn actor<R>() -> HarnessActor<R>
@@ -499,7 +514,9 @@ impl SubstrateHarness {
             let failed = |error| ExecutionError::OpFailed { label: label.to_owned(), error };
 
             let output = match op {
-                HarnessOp::Advance { ticks } => self.advance(ticks).map(|_| HarnessOutput::Advanced).map_err(failed),
+                HarnessOp::Advance { ticks, delta_micros } => {
+                    self.advance(ticks, delta_micros).map(|_| HarnessOutput::Advanced).map_err(failed)
+                }
                 HarnessOp::SendAndSettle { recipient, kind, payload } => {
                     self.send_bytes(&recipient, kind, payload).map(|()| HarnessOutput::Mailed).map_err(failed)
                 }
@@ -594,6 +611,18 @@ mod tests {
     use aether_window::{ListWindows, ListWindowsResult, WindowCapability};
 
     use super::*;
+
+    #[test]
+    fn advance_states_its_synthetic_elapsed_time() {
+        assert!(matches!(
+            HarnessOp::advance(3),
+            HarnessOp::Advance { ticks: 3, delta_micros: DEFAULT_TICK_DELTA_MICROS }
+        ));
+        assert!(matches!(
+            HarnessOp::advance_by(12, Duration::from_micros(83_335)),
+            HarnessOp::Advance { ticks: 12, delta_micros: 83_335 }
+        ));
+    }
 
     /// Cast reply kind with a non-`f32` field — its wire image is the
     /// raw cast bytes, which a structured reader would misdecode.

@@ -26,7 +26,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
-use aether_data::{Kind, KindId, encode_empty, mailbox_id_from_name};
+use aether_data::{Kind, KindId, mailbox_id_from_name};
 use aether_kinds::LifecycleAdvance;
 use aether_lifecycle::LifecycleCapability;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
@@ -174,6 +174,7 @@ impl DriverRunning for HeadlessTimerRunning {
         // per-actor counter on `NativeBinding`. Skipping 0 keeps the
         // sentinel slot reserved.
         let chassis_correlation = AtomicU64::new(1);
+        let delta_micros = u32::try_from(tick_period.as_micros()).unwrap_or(u32::MAX);
 
         let mut next_deadline = Instant::now() + tick_period;
         // Checked at the top of each iteration so a SIGINT/SIGTERM
@@ -199,7 +200,7 @@ impl DriverRunning for HeadlessTimerRunning {
                 next_chassis_correlation(&chassis_correlation),
                 lifecycle_mailbox,
                 kind_lifecycle_advance,
-                encode_empty::<LifecycleAdvance>(),
+                LifecycleAdvance { delta_micros }.encode_into_bytes(),
                 1,
             );
         }

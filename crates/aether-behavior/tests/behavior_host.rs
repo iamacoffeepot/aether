@@ -244,7 +244,7 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
 
     // First tick spawns the host, which spawns + frames the wrapped slider.
     // Then S1/S2/S3: one drag through the `intercept_slider` script.
-    let mut ops = vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick))];
+    let mut ops = vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))];
     ops.extend(drag(&panel));
     harness.execute(ops).expect("spawn + S1 drag");
     let (phase1, cursor) = read_panel_log(&mut harness, None);

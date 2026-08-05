@@ -63,11 +63,6 @@ pub struct Turntable {
     /// every time it doubles, so a turntable left running overnight would
     /// visibly step rather than sweep.
     azimuth: f32,
-    /// Degrees per tick, resolved once from the configured rate and cadence.
-    /// Zero whenever the cadence is not a positive number, which keeps a
-    /// nonsense config a still subject rather than a `NaN` pose the puppet
-    /// would project into an empty frame.
-    step: f32,
     /// Where the puppet is, folded once from its type and the shared
     /// component-host lineage.
     target: MailboxId,
@@ -81,18 +76,16 @@ impl WasmActor for Turntable {
     const NAMESPACE: &'static str = "aether.puppet-turntable";
 
     fn init(config: TurntableConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        let step = per_tick(config.degrees_per_second, config.tick_hz);
-        if step == 0.0 && config.running {
+        if !config.degrees_per_second.is_finite() && config.running {
             tracing::warn!(
                 target: "aether_puppet_turntable",
                 degrees_per_second = config.degrees_per_second,
-                tick_hz = config.tick_hz,
-                "turntable resolved a zero step; the subject will hold still",
+                "turntable rate is not finite; the subject will hold still",
             );
         }
 
         let target = resolve_embedded(<Puppet as Addressable>::NAMESPACE);
-        Ok(Self { azimuth: config.azimuth.rem_euclid(FULL_TURN), config, step, target, ticks: 0 })
+        Ok(Self { azimuth: config.azimuth.rem_euclid(FULL_TURN), config, target, ticks: 0 })
     }
 
     /// Subscribe the frame stage. `wire` is the placement rather than `init`
@@ -104,8 +97,8 @@ impl WasmActor for Turntable {
     /// Advance the sweep one tick and restate the pose. A parked turntable
     /// returns without sending, allocating, or touching the peer.
     #[handler::single]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
-        if let Some(look) = self.advance() {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, tick: Tick) {
+        if let Some(look) = self.advance(tick.delta_seconds()) {
             ctx.send_to(self.target, &look);
         }
         self.sample();
@@ -114,12 +107,17 @@ impl WasmActor for Turntable {
 
 impl Turntable {
     /// Step the azimuth and return the pose to send, or `None` while parked.
-    fn advance(&mut self) -> Option<Look> {
+    fn advance(&mut self, delta_seconds: f32) -> Option<Look> {
         if !self.config.running {
             return None;
         }
 
-        self.azimuth = (self.azimuth + self.step).rem_euclid(FULL_TURN);
+        let step = if self.config.degrees_per_second.is_finite() {
+            self.config.degrees_per_second * delta_seconds
+        } else {
+            0.0
+        };
+        self.azimuth = (self.azimuth + step).rem_euclid(FULL_TURN);
 
         Some(Look {
             azimuth: self.azimuth,
@@ -147,29 +145,15 @@ impl Turntable {
     }
 }
 
-/// Degrees per tick from a rate in degrees per second and a tick cadence.
-///
-/// A cadence that is not finite and positive resolves to a still subject:
-/// dividing by it would hand the puppet an infinite or `NaN` azimuth, and a
-/// `NaN` runs straight through the view matrix into a frame with nothing in
-/// it — a failure that looks like the renderer breaking rather than like the
-/// config being wrong.
-fn per_tick(degrees_per_second: f32, tick_hz: f32) -> f32 {
-    if tick_hz.is_finite() && tick_hz > 0.0 && degrees_per_second.is_finite() {
-        degrees_per_second / tick_hz
-    } else {
-        0.0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const FRAME_SECONDS: f32 = 1.0 / 60.0;
+
     fn turntable(config: TurntableConfig) -> Turntable {
-        let step = per_tick(config.degrees_per_second, config.tick_hz);
         let target = resolve_embedded(<Puppet as Addressable>::NAMESPACE);
-        Turntable { azimuth: config.azimuth.rem_euclid(FULL_TURN), config, step, target, ticks: 0 }
+        Turntable { azimuth: config.azimuth.rem_euclid(FULL_TURN), config, target, ticks: 0 }
     }
 
     #[test]
@@ -186,7 +170,7 @@ mod tests {
         // pose to send however long it is left there.
         let mut parked = turntable(TurntableConfig { running: false, ..TurntableConfig::default() });
         for _ in 0..1_000 {
-            assert!(parked.advance().is_none(), "a parked turntable sends nothing");
+            assert!(parked.advance(FRAME_SECONDS).is_none(), "a parked turntable sends nothing");
         }
         assert!((parked.azimuth - TurntableConfig::default().azimuth).abs() < 1e-6, "and does not drift");
     }
@@ -196,10 +180,10 @@ mod tests {
         // Tripwire: the rate conversion. `degrees_per_second` is divided by
         // the cadence, not multiplied by it — inverted, a 30°/s sweep at 60 Hz
         // would spin at 1800°/s and read as a strobe rather than a turn.
-        let config = TurntableConfig { azimuth: 0.0, degrees_per_second: 30.0, tick_hz: 60.0, ..Default::default() };
+        let config = TurntableConfig { azimuth: 0.0, degrees_per_second: 30.0, ..Default::default() };
         let mut motor = turntable(config);
         for _ in 0..60 {
-            motor.advance().expect("a running turntable sends every tick");
+            motor.advance(FRAME_SECONDS).expect("a running turntable sends every tick");
         }
 
         assert!((motor.azimuth - 30.0).abs() < 1e-3, "one second sweeps 30 degrees; got {}", motor.azimuth);
@@ -211,12 +195,12 @@ mod tests {
         // divide the circle has to land inside one turn and stay smooth —
         // an accumulator would be past 3.6 million by here, where a single
         // f32 step of 0.36 no longer changes the value at all.
-        let config = TurntableConfig { azimuth: 0.0, degrees_per_second: 21.6, tick_hz: 60.0, ..Default::default() };
+        let config = TurntableConfig { azimuth: 0.0, degrees_per_second: 21.6, ..Default::default() };
         let mut motor = turntable(config);
         let mut previous = 0.0;
         let mut stepped = 0;
         for _ in 0..1_000_000 {
-            let look = motor.advance().expect("a running turntable sends every tick");
+            let look = motor.advance(FRAME_SECONDS).expect("a running turntable sends every tick");
             assert!((0.0..FULL_TURN).contains(&look.azimuth), "azimuth stays inside one turn; got {}", look.azimuth);
             if (look.azimuth - previous).abs() > 1e-4 {
                 stepped += 1;
@@ -232,10 +216,10 @@ mod tests {
         // Tripwire: the wrap is Euclidean. A plain `%` leaves a negative
         // azimuth, which is a legal angle but not one inside the stated
         // `[0, 360)` range the field documents.
-        let config = TurntableConfig { azimuth: 0.0, degrees_per_second: -30.0, tick_hz: 60.0, ..Default::default() };
+        let config = TurntableConfig { azimuth: 0.0, degrees_per_second: -30.0, ..Default::default() };
         let mut motor = turntable(config);
         for _ in 0..600 {
-            let look = motor.advance().expect("a running turntable sends every tick");
+            let look = motor.advance(FRAME_SECONDS).expect("a running turntable sends every tick");
             assert!((0.0..FULL_TURN).contains(&look.azimuth), "azimuth stays inside one turn; got {}", look.azimuth);
         }
 
@@ -243,22 +227,30 @@ mod tests {
     }
 
     #[test]
-    fn a_nonsense_cadence_holds_the_subject_still() {
-        // Tripwire: the cadence guard. Dividing by a zero or negative
-        // cadence hands the puppet an infinite azimuth, `rem_euclid` turns
-        // that into `NaN`, and a `NaN` pose projects to an empty frame —
-        // a config mistake that presents as the renderer failing.
-        for cadence in [0.0, -60.0, f32::NAN, f32::INFINITY] {
-            let config = TurntableConfig { tick_hz: cadence, ..TurntableConfig::default() };
+    fn a_nonsense_rate_holds_the_subject_still() {
+        for rate in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let config = TurntableConfig { degrees_per_second: rate, ..TurntableConfig::default() };
             let mut motor = turntable(config);
             for _ in 0..10 {
-                let look = motor.advance().expect("a running turntable sends every tick");
-                assert!(look.azimuth.is_finite(), "cadence {cadence} produced a non-finite azimuth");
+                let look = motor.advance(FRAME_SECONDS).expect("a running turntable sends every tick");
+                assert!(look.azimuth.is_finite(), "rate {rate} produced a non-finite azimuth");
             }
-            assert!(
-                (motor.azimuth - TurntableConfig::default().azimuth).abs() < 1e-6,
-                "cadence {cadence} moved the eye"
-            );
+            assert!((motor.azimuth - TurntableConfig::default().azimuth).abs() < 1e-6, "rate {rate} moved the eye");
         }
+    }
+
+    #[test]
+    fn equal_elapsed_time_reaches_the_same_azimuth_at_different_cadences() {
+        let mut throttled = turntable(TurntableConfig::default());
+        let mut full = turntable(TurntableConfig::default());
+
+        for _ in 0..12 {
+            throttled.advance(0.083_335);
+        }
+        for _ in 0..60 {
+            full.advance(0.016_667);
+        }
+
+        assert!((throttled.azimuth - full.azimuth).abs() < 1e-4, "{} vs {}", throttled.azimuth, full.azimuth);
     }
 }

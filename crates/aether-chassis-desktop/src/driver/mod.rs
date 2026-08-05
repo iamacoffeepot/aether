@@ -114,6 +114,9 @@ pub struct DesktopRenderIntegration {
     render_pump_tx: Sender<PumpWake>,
     render_pump_rx: Receiver<PumpWake>,
     started: Option<Instant>,
+    /// Start instant of the previous Tick stage. The desktop cadence is
+    /// frame-driven, so this is the source of Tick's elapsed-time payload.
+    last_tick: Option<Instant>,
     frame: u64,
     /// ADR-0080 §6 chassis-root correlation counter (issue
     /// iamacoffeepot/aether#723). Bumped per chassis-source push so
@@ -166,7 +169,7 @@ impl DesktopRenderIntegration {
     /// target): mint id → record `Sent` for the trace subtree → push with
     /// both the chassis-root lineage and the reply-to. Returns the minted
     /// chain root so the caller can subscribe its settlement.
-    fn push_lifecycle_advance(&self) -> MailId {
+    fn push_lifecycle_advance(&self, delta_micros: u32) -> MailId {
         let mut correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
         if correlation == 0 {
             correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
@@ -185,7 +188,7 @@ impl DesktopRenderIntegration {
             Mail::new(
                 self.lifecycle_mailbox,
                 self.kind_lifecycle_advance,
-                encode_empty::<aether_kinds::LifecycleAdvance>(),
+                aether_kinds::LifecycleAdvance { delta_micros }.encode_into_bytes(),
                 1,
             )
             .with_lineage(advance_root, advance_root, None)
@@ -249,9 +252,9 @@ impl DesktopRenderIntegration {
     /// latter. Reading `LifecycleAdvanceComplete.next` (not the raw
     /// settlement) gates the next advance on the cap clearing its
     /// pending-advance guard (iamacoffeepot/aether#999).
-    fn run_frame_advance(&mut self) -> bool {
+    fn run_frame_advance(&mut self, delta_micros: u32) -> bool {
         loop {
-            let advance_root = self.push_lifecycle_advance();
+            let advance_root = self.push_lifecycle_advance(delta_micros);
             if let WaitOutcome::Wedged(wedge) = self.pump_while_settling(advance_root) {
                 runtime_lifecycle::fatal_abort(&self.outbound, wedge.reason());
             }
@@ -289,7 +292,9 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
             .host_turn(|state, _ctx| state.attach_window(id, window))
             .ok_or_else(|| "render actor is unavailable during window attachment".to_owned())?;
         attachment?;
-        self.started.get_or_insert_with(Instant::now);
+        let attached = Instant::now();
+        self.started.get_or_insert(attached);
+        self.last_tick.get_or_insert(attached);
         Ok(())
     }
 
@@ -307,7 +312,12 @@ impl DesktopWindowIntegration for DesktopRenderIntegration {
         if self.terminal_reached {
             return;
         }
-        self.terminal_reached = self.run_frame_advance();
+        let now = Instant::now();
+        let delta_micros = self
+            .last_tick
+            .replace(now)
+            .map_or(0, |last_tick| u32::try_from(now.duration_since(last_tick).as_micros()).unwrap_or(u32::MAX));
+        self.terminal_reached = self.run_frame_advance(delta_micros);
         self.send_render_and_drain(&Frame { replay_cache_when_idle: false, windows: windows.to_vec() });
         self.frame += 1;
     }
@@ -521,6 +531,7 @@ impl DriverCapability for DesktopDriverCapability {
             render_pump_tx,
             render_pump_rx,
             started: None,
+            last_tick: None,
             frame: 0,
             // 0 is the "no correlation" sentinel; mirror NativeBinding's
             // start-at-1 convention.

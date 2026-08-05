@@ -89,7 +89,11 @@ impl NativeActor for SubstrateHarnessCapability {
     #[handler::single]
     fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Advance) {
         let sender = ctx.reply_target();
-        if state.events.send(ChassisEvent::Advance { reply_to: sender, ticks: mail.ticks }).is_err() {
+        if state
+            .events
+            .send(ChassisEvent::Advance { reply_to: sender, ticks: mail.ticks, delta_micros: mail.delta_micros })
+            .is_err()
+        {
             state.outbound.send_reply(
                 sender,
                 &AdvanceResult::Err { error: "substrate-harness chassis shutting down — advance aborted".to_owned() },

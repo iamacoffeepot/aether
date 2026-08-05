@@ -33,7 +33,7 @@ use aether_actor::runtime;
 use aether_kinds::trace::Settled;
 use aether_kinds::{
     LifecycleAdvance, LifecycleSubscribe, LifecycleSubscribeResult, LifecycleSubscribeSelf, LifecycleUnsubscribe,
-    LifecycleUnsubscribeAll, LifecycleUnsubscribeSelf, MonitorNotice, Quit,
+    LifecycleUnsubscribeAll, LifecycleUnsubscribeSelf, MonitorNotice, Quit, Tick,
 };
 use aether_substrate::actor::monitor::MonitorHandle;
 
@@ -47,6 +47,17 @@ pub use aether_substrate::mail::mailer::Mailer;
 pub use std::collections::{BTreeMap, BTreeSet};
 pub use std::sync::Arc;
 pub use std::time::{Duration, Instant};
+
+/// Resolve the typed payload for one lifecycle stage. Keeping this seam pure
+/// makes the Tick wire contract deterministic without coupling its test to
+/// the runtime's settlement machinery.
+fn stage_payload(stage: KindId, delta_micros: u32) -> Vec<u8> {
+    if stage == Tick::ID {
+        Tick { delta_micros }.encode_into_bytes()
+    } else {
+        Vec::new()
+    }
+}
 
 /// `aether.lifecycle` runtime state (ADR-0082). Owns the lifecycle data
 /// graph, the subscriber table, the state pointer, and the settlement
@@ -461,11 +472,11 @@ impl NativeActor for LifecycleCapability {
     /// warn-drop rather than skipping ahead through unsettled states.
     ///
     /// # Agent
-    /// `LifecycleAdvance {}`. Sent by the chassis main loop each
+    /// `LifecycleAdvance { delta_micros }`. Sent by the chassis main loop each
     /// frame. Reply: [`LifecycleAdvanceComplete`] once the broadcast
     /// root settles.
     #[handler::manual]
-    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _payload: LifecycleAdvance) {
+    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, payload: LifecycleAdvance) {
         if state.terminal_reached {
             // Already done — reply immediately with zeros so the
             // chassis main loop unblocks and can break on `next == 0`.
@@ -523,11 +534,12 @@ impl NativeActor for LifecycleCapability {
             }
         };
 
-        // Broadcast first — children inherit the inbound's chain root
-        // and parent edge. ADR-0080 settlement counts each child as
-        // in-flight against the root. Stage payloads are empty
-        // signals.
-        broadcast_to_subscribers(ctx, &state.subscribers, broadcast);
+        // Broadcast first — children inherit the inbound's chain root and
+        // parent edge. ADR-0080 settlement counts each child as in-flight
+        // against the root. Tick carries the chassis cadence's elapsed time;
+        // every other stage remains an empty signal (issue 4470).
+        let stage_payload = stage_payload(broadcast, payload.delta_micros);
+        broadcast_to_subscribers(ctx, &state.subscribers, broadcast, &stage_payload);
 
         // Subscribe settlement on the inbound's chain root. The
         // broadcast subtree is part of that chain; settlement fires
@@ -614,6 +626,13 @@ impl NativeActor for LifecycleCapability {
 mod tests {
     use super::*;
     use aether_kinds::{Present, Render, Tick};
+
+    #[test]
+    fn tick_payload_carries_elapsed_time_while_other_stages_stay_empty() {
+        let bytes = stage_payload(Tick::ID, 83_335);
+        assert_eq!(Tick::decode_from_bytes(&bytes), Some(Tick { delta_micros: 83_335 }));
+        assert!(stage_payload(Render::ID, 83_335).is_empty());
+    }
 
     #[test]
     fn on_unsubscribe_all_purges_mailbox_from_every_stage() {

@@ -112,7 +112,9 @@ not express. Reach for `poll_until` there instead.
 `SubstrateHarness::execute` runs labelled `HarnessOp`s and centralizes the settlement
 discipline:
 
-- `Advance` drives complete frames;
+- `Advance` drives complete frames. `HarnessOp::advance(n)` represents
+  16,667 µs per frame; use `HarnessOp::advance_by(n, duration)` when elapsed
+  time is part of the behavior under test;
 - `SendAndSettle` sends typed mail and waits for its whole causal chain to
   settle — the strongest barrier;
 - `SendAndAwaitReply` stores a typed reply for later decode, and waits for

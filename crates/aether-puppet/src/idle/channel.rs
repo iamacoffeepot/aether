@@ -1,7 +1,7 @@
 //! What each channel does with time.
 //!
 //! A channel is a phase in `[0, 1)` and a shape that reads a value out of
-//! it. The phase advances by a constant every tick and wraps rather than
+//! it. The phase advances by elapsed time every tick and wraps rather than
 //! accumulating, for the reason the turntable's azimuth does: an unwrapped
 //! counter loses a bit of mantissa every time it doubles, so a motor left
 //! running overnight steps instead of moving.
@@ -150,16 +150,16 @@ fn flick(phase: f32) -> f32 {
     }
 }
 
-/// Phase advanced per tick for a period stated in seconds.
+/// Phase advanced per elapsed second for a period stated in seconds.
 ///
-/// A cadence or period that is not finite and positive resolves to a still
-/// channel. Dividing by it would hand the puppet an infinite or `NaN`
-/// angle, and a `NaN` runs straight through the skin into a frame with
-/// nothing in it — a config mistake that presents as the renderer failing.
+/// A period that is not finite and positive resolves to a still channel.
+/// Dividing by it would hand the puppet an infinite or `NaN` angle, and a
+/// `NaN` runs straight through the skin into a frame with nothing in it — a
+/// config mistake that presents as the renderer failing.
 #[must_use]
-pub fn per_tick(period_seconds: f32, tick_hz: f32) -> f32 {
-    if tick_hz.is_finite() && tick_hz > 0.0 && period_seconds.is_finite() && period_seconds > 0.0 {
-        1.0 / (period_seconds * tick_hz)
+pub fn per_second(period_seconds: f32) -> f32 {
+    if period_seconds.is_finite() && period_seconds > 0.0 {
+        1.0 / period_seconds
     } else {
         0.0
     }
@@ -255,16 +255,13 @@ mod tests {
     }
 
     #[test]
-    fn a_nonsense_cadence_holds_the_channel_still() {
-        // Tripwire: the guard. Dividing by a zero or negative cadence hands
+    fn a_nonsense_period_holds_the_channel_still() {
+        // Tripwire: the guard. Dividing by a zero or negative period hands
         // the puppet an infinite phase, which becomes `NaN` on the wrap and
         // projects to an empty frame — a config mistake that presents as
         // the renderer breaking.
-        for cadence in [0.0, -60.0, f32::NAN, f32::INFINITY] {
-            assert_eq!(per_tick(6.5, cadence), 0.0, "cadence {cadence} produced a live step");
-        }
         for period in [0.0, -6.5, f32::NAN, f32::INFINITY] {
-            assert_eq!(per_tick(period, 60.0), 0.0, "period {period} produced a live step");
+            assert_eq!(per_second(period), 0.0, "period {period} produced a live step");
         }
     }
 }
