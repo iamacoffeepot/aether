@@ -324,6 +324,11 @@ fn watcher_close_prunes_targets_forward_index() {
     }
     assert!(chassis.actor_registry().is_tombstoned(watcher_id), "watcher tombstoned");
     assert!(chassis.actor_registry().is_live(target_id), "target should still be Live (watcher closed, not target)");
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while chassis.actor_registry().monitor_count(target_id) != 0 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
     assert_eq!(
         chassis.actor_registry().monitor_count(target_id),
         0,
