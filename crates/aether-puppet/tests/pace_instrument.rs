@@ -62,6 +62,9 @@ use aether_render::{PassTimingRow, ProgramTimings, ProgramTimingsResult};
 
 /// The address a loaded component registers at (ADR-0099).
 const PUPPET: &str = "aether.component/aether.embedded:aether.puppet";
+/// ADR-0138: the merged three-actor module is defaultless, so every load
+/// names the actor it wants.
+const PUPPET_EXPORT: &str = "aether.puppet";
 
 /// The canvas every visual A/B is pinned to. A comparison between two
 /// framings is unmeasured rather than a result, so this stays fixed and
@@ -185,7 +188,7 @@ fn mounted_with(dir: &Path, wasm: &Path, pass_timings: bool) -> SubstrateHarness
                     wasm: fs::read(wasm).expect("read the puppet wasm"),
                     name: None,
                     config: Vec::new(),
-                    export: None,
+                    export: Some(PUPPET_EXPORT.to_owned()),
                 },
             ),
         )])

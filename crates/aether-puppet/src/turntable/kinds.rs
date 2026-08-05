@@ -1,15 +1,15 @@
 //! The turntable's own configuration vocabulary.
 //!
 //! It drives the puppet through the puppet's existing
-//! [`Look`](aether_puppet::Look) kind, so there is no drive kind here — only
+//! [`Look`](crate::Look) kind, so there is no drive kind here — only
 //! [`TurntableConfig`], the init-config shape read once at instantiation
 //! (ADR-0090). A bare load with no `config_path` boots the compiled
 //! [`Default`], which is the framing the puppet itself starts at, turning.
 
 use serde::{Deserialize, Serialize};
 
-/// Init-config for [`Turntable`](crate::Turntable): which puppet to turn, how
-/// fast, and the rest of the pose it holds fixed while the azimuth sweeps.
+/// Init-config for [`Turntable`](crate::Turntable): how fast to turn and the
+/// rest of the pose it holds fixed while the azimuth sweeps.
 ///
 /// # Agent
 /// Encode one of these to the turntable's `Config` shape and pass it as the
@@ -19,11 +19,6 @@ use serde::{Deserialize, Serialize};
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.puppet-turntable.config")]
 pub struct TurntableConfig {
-    /// Mailbox address of the puppet to turn. A loaded component answers at
-    /// its `/`-rendered lineage address (ADR-0099), which is what the default
-    /// spells; a second puppet loaded under another name is reachable by
-    /// swapping the trailing segment.
-    pub target: String,
     /// Whether the motor is engaged. `false` parks the turntable — it stays
     /// loaded, holds the pose it was configured with, and sends nothing at
     /// all, so a parked turntable costs the frame nothing beyond an empty
@@ -54,7 +49,7 @@ pub struct TurntableConfig {
     /// Emit one log line every `n` ticks, carrying the tick counter and the
     /// azimuth. `0` disables it, which is the default.
     ///
-    /// This is the crate's second job. Per-actor log entries are stamped with
+    /// This is the actor's second job. Per-actor log entries are stamped with
     /// a host wall-clock millisecond as they land in the ring (ADR-0081), and
     /// on a frame-driven chassis one tick is one frame — so the differences
     /// between consecutive entries are the frame periods of a window nothing
@@ -67,7 +62,6 @@ pub struct TurntableConfig {
 impl Default for TurntableConfig {
     fn default() -> Self {
         Self {
-            target: String::from("aether.component/aether.embedded:aether.puppet"),
             running: true,
             // A twelve-second revolution: slow enough to read the drawing as
             // it turns, quick enough that a recording of one full turn is

@@ -55,6 +55,9 @@ const CUBE_OBJ: &[u8] = include_bytes!("fixtures/cube.obj");
 /// The address a loaded component registers at (ADR-0099), for the mail
 /// that drives it after the load.
 const PUPPET: &str = "aether.component/aether.embedded:aether.puppet";
+/// ADR-0138: the merged three-actor module is defaultless, so every load
+/// names the actor it wants.
+const PUPPET_EXPORT: &str = "aether.puppet";
 
 /// Lit-versus-background tolerance. Strokes are anti-aliased ribbons, so
 /// their edge pixels sit close to the clear color; a tolerance this tight
@@ -70,7 +73,7 @@ fn load_puppet(harness: &mut SubstrateHarness, wasm_path: &Path) {
             "load",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &LoadComponent { wasm, name: None, config: Vec::new(), export: None },
+                &LoadComponent { wasm, name: None, config: Vec::new(), export: Some(PUPPET_EXPORT.to_owned()) },
             ),
         )])
         .expect("load sequence");

@@ -76,6 +76,7 @@ pub mod deform;
 pub mod easel;
 pub mod extract;
 pub mod feature;
+pub mod idle;
 mod kinds;
 pub mod labels;
 pub mod math3;
@@ -84,10 +85,13 @@ pub mod plant;
 pub mod ribbon;
 pub mod strokes;
 pub mod style;
+pub mod turntable;
 pub mod visibility;
 pub mod weld;
 
+pub use idle::*;
 pub use kinds::*;
+pub use turntable::*;
 
 use aether_actor::{ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
@@ -1016,4 +1020,4 @@ impl WasmActor for Puppet {
     }
 }
 
-aether_actor::export!(Puppet);
+aether_actor::export!(Puppet, Idle, Turntable);
