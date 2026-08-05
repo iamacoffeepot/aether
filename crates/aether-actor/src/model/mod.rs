@@ -373,17 +373,17 @@ pub trait Lifecycle<S> {
 /// `aether.component/aether.embedded:NAME` — is a path of nodes, so it
 /// belongs only to the string surfaces that parse one
 /// (`mailbox_id_from_path`: the registry's name lookup, the MCP
-/// `recipient_name` surface). Handing it to `ctx.resolve_actor::<R>(name)`
-/// or `ctx.send_to_named(name, …)` misses, because those hash their
-/// argument as a single segment (`mailbox_id_from_name`): a `/` trips that
-/// hasher's debug assertion, and a release build resolves an id nothing
-/// registered, so the mail routes cleanly and drops. What those two
-/// spellings do address is the depth-1 fixed point (ADR-0099 §3) — a
-/// mailbox sitting at the root under exactly the name given, which is
-/// every chassis cap and anything else registered flat. The id beside
-/// that name (`LoadResult.mailbox_id`) has no such problem: a caller
-/// already holding one sends to it directly, through the guest's
-/// `ctx.send_to(id, &mail)` or the native `ctx.actor_at::<R>(id)`.
+/// `recipient_name` surface). Handing it to `ctx.send_to_named(name, …)`
+/// misses, because that flat escape hatch hashes its argument as one root
+/// name (`mailbox_id_from_name`): a `/` trips that hasher's debug assertion,
+/// and a release build resolves an id nothing registered, so the mail routes
+/// cleanly and drops. `ctx.resolve_actor::<R>(key)` is different: it is a
+/// typed keyed route available only to [`Instanced`] actors, and delegates
+/// the key plus the resolver-selected current / root / parent scope to
+/// `R::resolve`. The id beside a rendered name (`LoadResult.mailbox_id`) has
+/// no such ambiguity: a caller already holding one sends to it directly,
+/// through the guest's `ctx.send_to(id, &mail)` or the native
+/// `ctx.actor_at::<R>(id)`.
 ///
 /// Mutually exclusive with [`Instanced`] at the type level: an actor is
 /// either one-of-a-kind within a scope (singleton) or N-instances under
@@ -396,16 +396,21 @@ pub trait Lifecycle<S> {
 pub trait Singleton: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>> {}
 impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>>> Singleton for T {}
 
-/// Cardinality marker: many instances of this actor type can be live
-/// per substrate, each under its own subname. `R::NAMESPACE` is a
-/// **prefix** — full mailbox names take the form
-/// `"{NAMESPACE}:{subname}"` (e.g. `aether.net.session:42`). The `:`
-/// separator is structural; subnames may not contain it.
+/// Cardinality marker: many instances of this actor type can be live under a
+/// resolver-selected scope, each under its own subname. `R::NAMESPACE` is a
+/// **prefix** — the node's [`ActorId`] takes the form
+/// `hash("{NAMESPACE}:{subname}")` (e.g. `aether.net.session:42`) before its
+/// resolver places it in the mailbox lineage. The `:` separator is structural;
+/// subnames may not contain it.
 ///
 /// Forcing function is socket actors (ADR-0079): a singleton listener
 /// (e.g. `NetCapability`) accepts connections and spawns one
-/// `SessionActor` per accepted socket via `ctx.spawn_child`. Senders
-/// address an instance by name through `ctx.resolve_actor::<R>(subname)`.
+/// `SessionActor` per accepted socket via `ctx.spawn_child`. Senders address
+/// an instance by key through `ctx.resolve_actor::<R>(subname)`. That typed
+/// route requires [`CallerAddressable`], selects
+/// [`CallerScoped::SCOPE`] from the runtime context, then calls
+/// `R::resolve(selected_mailbox.0, subname)`; it is not the flat string
+/// addressing performed by `MailSender::send_to_named`.
 ///
 /// Mutually exclusive with [`Singleton`] at the type level. ADR-0079.
 /// Derived from the resolver (ADR-0119): a keyed [`Resolver`](Addressable::Resolver)
@@ -413,6 +418,48 @@ impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>>> Singleton for T {
 /// siblings) makes the actor an `Instanced`, reached by
 /// `ctx.resolve_actor::<R>(subname)`. The blanket impl supplies it; nobody
 /// writes `impl Instanced`.
+///
+/// A singleton cannot use the keyed construction surface:
+///
+/// ```compile_fail
+/// use aether_actor::{Addressable, One, WasmCtx};
+///
+/// struct RootCap;
+/// impl Addressable for RootCap {
+///     const NAMESPACE: &'static str = "example.root";
+///     type Resolver = One;
+/// }
+///
+/// fn keyed_singleton(ctx: &WasmCtx<'_>) {
+///     let _ = ctx.resolve_actor::<RootCap>("instance");
+/// }
+/// ```
+///
+/// A keyed custom resolver must also declare a caller scope before a ctx can
+/// select its routing seed:
+///
+/// ```compile_fail
+/// use aether_actor::{Addressable, MailboxId, Resolve, WasmCtx};
+///
+/// struct UnscopedKeyed;
+/// impl Resolve for UnscopedKeyed {
+///     type Args<'a> = &'a str;
+///
+///     fn resolve(carry: u64, _namespace: &str, _key: &str) -> MailboxId {
+///         MailboxId(carry)
+///     }
+/// }
+///
+/// struct Peer;
+/// impl Addressable for Peer {
+///     const NAMESPACE: &'static str = "example.peer";
+///     type Resolver = UnscopedKeyed;
+/// }
+///
+/// fn unscoped_keyed(ctx: &WasmCtx<'_>) {
+///     let _ = ctx.resolve_actor::<Peer>("instance");
+/// }
+/// ```
 pub trait Instanced: Addressable<Resolver: for<'a> Resolve<Args<'a> = &'a str>> {}
 impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = &'a str>>> Instanced for T {}
 
@@ -497,7 +544,7 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
 /// handler kind. Authors never write these by hand.
 ///
 /// Gates `ActorMailbox<'_, R, T>::send::<K>` (constructed via
-/// `ctx.actor::<R>()` / `ctx.resolve_actor::<R>(name)`) so the compiler
+/// `ctx.actor::<R>()` / `ctx.resolve_actor::<R>(key)`) so the compiler
 /// rejects sends to a kind the receiver doesn't handle.
 /// The single source of truth is the handler list on the actor's
 /// `impl` block; adding a `#[handler]` updates senders' compile-time

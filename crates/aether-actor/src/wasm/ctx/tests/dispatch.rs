@@ -3,13 +3,17 @@
 //! class's emit, and the relative verbs' in-place routing.
 
 use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child};
+use crate::mail::{Mail, PriorState};
 use crate::model::ctx::{Emit, Manual, Multi, Single};
-use crate::model::{Addressable, Embedded, HandlesKind, Resolve};
-use crate::wasm::WasmActorMailbox;
-use crate::wasm::inline::RouteDecision;
+use crate::model::{Addressable, CallerScope, CallerScoped, Embedded, HandlesKind, Many, Resolve};
+use crate::wasm::inline::{RouteDecision, drain_cluster_queue};
+use crate::wasm::{ErasedWasmActor, WasmActorMailbox, WasmDropCtx};
 use aether_data::{MailboxId, Source, mailbox_id_from_path};
+use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::mem::{align_of, size_of};
 
 struct EmbeddedPeer;
@@ -20,6 +24,79 @@ impl Addressable for EmbeddedPeer {
 }
 
 impl HandlesKind<()> for EmbeddedPeer {}
+
+struct CurrentKeyedPeer;
+
+impl Addressable for CurrentKeyedPeer {
+    const NAMESPACE: &'static str = "test.wasm.current_keyed_peer";
+    type Resolver = Many;
+}
+
+impl HandlesKind<()> for CurrentKeyedPeer {}
+
+struct ParentKeyed;
+
+impl Resolve for ParentKeyed {
+    type Args<'a> = &'a str;
+
+    fn resolve(caller_carry: u64, namespace: &str, name: &str) -> MailboxId {
+        Many::resolve(caller_carry, namespace, name)
+    }
+}
+
+impl CallerScoped for ParentKeyed {
+    const SCOPE: CallerScope = CallerScope::Parent;
+}
+
+struct ParentKeyedPeer;
+
+impl Addressable for ParentKeyedPeer {
+    const NAMESPACE: &'static str = "test.wasm.parent_keyed_peer";
+    type Resolver = ParentKeyed;
+}
+
+impl HandlesKind<()> for ParentKeyedPeer {}
+
+struct RecordingTarget {
+    dispatches: Rc<Cell<u32>>,
+    source: Rc<Cell<Option<MailboxId>>>,
+}
+
+struct RecordingTargetProbe {
+    actor: Box<dyn ErasedWasmActor>,
+    dispatches: Rc<Cell<u32>>,
+    source: Rc<Cell<Option<MailboxId>>>,
+}
+
+impl ErasedWasmActor for RecordingTarget {
+    fn erased_namespace(&self) -> &'static str {
+        "test.wasm.recording_target"
+    }
+
+    fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+        self.dispatches.set(self.dispatches.get() + 1);
+        self.source.set(ctx.source_mailbox());
+        0
+    }
+
+    fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+
+    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
+
+    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+}
+
+fn recording_target() -> RecordingTargetProbe {
+    let dispatches = Rc::new(Cell::new(0));
+    let source = Rc::new(Cell::new(None));
+    RecordingTargetProbe {
+        actor: Box::new(RecordingTarget { dispatches: Rc::clone(&dispatches), source: Rc::clone(&source) }),
+        dispatches,
+        source,
+    }
+}
 
 /// Issue 2001: `source_mailbox()` is a single read of the ctx's
 /// `source` field on the top-level path — the host threads the resolved
@@ -88,6 +165,54 @@ fn ffi_ctx_layout_identical_for_multi_mode() {
 fn ffi_ctx_layout_identical_across_modes() {
     assert_eq!(size_of::<WasmCtx<'static, Single>>(), size_of::<WasmCtx<'static, Manual>>(),);
     assert_eq!(align_of::<WasmCtx<'static, Single>>(), align_of::<WasmCtx<'static, Manual>>(),);
+}
+
+/// Keyed typed construction selects the recipient resolver's declared scope:
+/// built-in `Many` folds from the calling actor, while a test-only keyed
+/// resolver can fold from its logical parent. Both returned handles retain
+/// the ctx's sender and inline registry, proven by local delivery observing
+/// the current actor as its source.
+#[allow(clippy::disallowed_methods)] // test scaffolding — synthetic lineage IDs exercise scoped routing
+#[test]
+fn keyed_actor_resolution_selects_scope_and_retains_wasm_context() {
+    let registry = Registry::new();
+    let parent = mailbox_id_from_path("test.wasm.keyed_parent");
+    let current = mailbox_id_from_path("test.wasm.keyed_parent/test.wasm.keyed_caller");
+    let current_target = CurrentKeyedPeer::resolve(current.0, "current");
+    let parent_target = ParentKeyedPeer::resolve(parent.0, "parent");
+    let current_probe = recording_target();
+    let parent_probe = recording_target();
+
+    registry.set_self_id(current.0);
+    registry.set_parent_id(parent.0);
+    registry.insert_child(
+        current_target,
+        0,
+        String::from("current"),
+        false,
+        current.0,
+        Vec::new(),
+        current_probe.actor,
+    );
+    registry.insert_child(parent_target, 0, String::from("parent"), false, parent.0, Vec::new(), parent_probe.actor);
+
+    let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(current.0, &registry, NO_INBOUND_SOURCE);
+    let current_peer = ctx.resolve_actor::<CurrentKeyedPeer>("current");
+    let parent_peer = ctx.resolve_actor::<ParentKeyedPeer>("parent");
+
+    assert_eq!(current_peer.mailbox_id(), current_target, "Many selects the current actor's mailbox");
+    assert_eq!(parent_peer.mailbox_id(), parent_target, "the custom keyed resolver selects the logical parent");
+
+    current_peer.send(&());
+    parent_peer.send(&());
+    drain_cluster_queue(&registry, |source| {
+        move |_mail| -> u32 { panic!("keyed target unexpectedly dispatched to cluster root from {source:#x}") }
+    });
+
+    assert_eq!(current_probe.dispatches.get(), 1, "the current-scoped handle retains the inline registry");
+    assert_eq!(parent_probe.dispatches.get(), 1, "the parent-scoped handle retains the inline registry");
+    assert_eq!(current_probe.source.get(), Some(current), "the current-scoped handle retains the ctx sender");
+    assert_eq!(parent_probe.source.get(), Some(current), "the parent-scoped handle retains the ctx sender");
 }
 
 #[allow(clippy::disallowed_methods)] // test scaffolding — synthetic lineage IDs exercise parent-relative routing
