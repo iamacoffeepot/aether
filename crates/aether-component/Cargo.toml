@@ -62,7 +62,6 @@ tracing = { workspace = true, optional = true, features = ["std", "attributes"] 
 inventory = { workspace = true }
 
 [dev-dependencies]
-trybuild = "1"
 # iamacoffeepot/aether#3769: the component scenario tests (load / replace /
 # drop lifecycle, module boot, inline children, typed config, guest ctx
 # surface) rehomed here from aether-substrate-bundle. They boot the

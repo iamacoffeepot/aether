@@ -1,0 +1,21 @@
+[package]
+name = "aether-component-ui-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Compile-time contracts for the component routing surface. This package is
+# deliberately separate from `aether-component`: trybuild promotes its host
+# package's dev-dependencies into each generated fixture project, so keeping
+# only the dependencies named by the fixture prevents unrelated component
+# integration harnesses and wasm fixtures from entering the nested cold build
+# (iamacoffeepot/aether#4515).
+[dev-dependencies]
+trybuild = "1"
+aether-actor = { path = "../aether-actor" }
+aether-component = { path = "../aether-component" }
+aether-substrate = { path = "../aether-substrate" }
+
+[lints]
+workspace = true
