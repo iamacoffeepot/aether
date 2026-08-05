@@ -57,7 +57,9 @@ use aether_puppet::extract::{self, Settings};
 use aether_puppet::feature::{Curve3, Drawing, Half};
 use aether_puppet::labels::{CLASSES, Labels};
 use aether_puppet::mesh::Mesh;
-use aether_puppet::{Load, LoadResult as PuppetLoadResult, Look, Pose, anchor, chart, deform};
+use aether_puppet::{
+    Channel, IdleConfig, Load, LoadResult as PuppetLoadResult, Look, Motion, Pose, anchor, chart, deform,
+};
 use aether_render::{PassTimingRow, ProgramTimings, ProgramTimingsResult};
 
 /// The address a loaded component registers at (ADR-0099).
@@ -65,6 +67,7 @@ const PUPPET: &str = "aether.component/aether.embedded:aether.puppet";
 /// ADR-0138: the merged three-actor module is defaultless, so every load
 /// names the actor it wants.
 const PUPPET_EXPORT: &str = "aether.puppet";
+const IDLE_EXPORT: &str = "aether.puppet-idle";
 
 /// The canvas every visual A/B is pinned to. A comparison between two
 /// framings is unmeasured rather than a result, so this stays fixed and
@@ -314,6 +317,124 @@ fn the_frame_paces_at_the_pinned_framing() {
     if dir.join("rig").is_dir() {
         pace_the_pose_sweep(&mut harness);
     }
+}
+
+/// Produce the visual hold for issue 4470: the same solo yaw pose after the
+/// same 1.00002 seconds, once at 12 coarse ticks and once at 60 frame-like
+/// ticks. The raw captures are preserved alongside a side-by-side contact
+/// sheet (throttled on the left, full cadence on the right).
+///
+/// ```text
+/// AETHER_CROSSFEED_DIR=/path/to/dir \
+/// AETHER_PUPPET_MOTION_THROTTLED_PNG=/path/throttled.png \
+/// AETHER_PUPPET_MOTION_FULL_PNG=/path/full.png \
+/// AETHER_PUPPET_MOTION_CONTACT_PNG=/path/contact.png \
+/// cargo test -p aether-puppet --release --test pace_instrument \
+///     -- --ignored --nocapture equal_elapsed_motion_frames
+/// ```
+#[test]
+#[ignore = "visual hold; needs the shipped rigged subject and a release-profile component wasm"]
+fn equal_elapsed_motion_frames() {
+    let (Some(wasm), Some(dir)) = (require_runtime("aether_puppet"), subject_dir()) else {
+        return;
+    };
+    assert!(dir.join("rig").is_dir(), "motion evidence needs the shipped rig directory");
+
+    let throttled = motion_frame(&dir, &wasm, 12, Duration::from_micros(83_335));
+    let full = motion_frame(&dir, &wasm, 60, Duration::from_micros(16_667));
+    let throttled_path = required_output("AETHER_PUPPET_MOTION_THROTTLED_PNG");
+    let full_path = required_output("AETHER_PUPPET_MOTION_FULL_PNG");
+    let contact_path = required_output("AETHER_PUPPET_MOTION_CONTACT_PNG");
+
+    fs::write(&throttled_path, &throttled).expect("write the raw throttled frame");
+    fs::write(&full_path, &full).expect("write the raw full-cadence frame");
+    fs::write(&contact_path, motion_contact_sheet(&throttled, &full)).expect("write the motion contact sheet");
+    eprintln!(
+        "pace: wrote equal-elapsed motion evidence — throttled {} (left), full {} (right), contact {}",
+        throttled_path.display(),
+        full_path.display(),
+        contact_path.display(),
+    );
+}
+
+fn motion_frame(dir: &Path, wasm: &Path, ticks: u32, delta: Duration) -> Vec<u8> {
+    let mut harness = mounted(dir, wasm);
+    harness
+        .execute(vec![("frame", HarnessOp::send_and_settle(PUPPET, &look(AZIMUTH))), ("prime", HarnessOp::advance(24))])
+        .expect("prime the resting subject before loading the motor");
+
+    let config = IdleConfig {
+        motion: Motion::Solo,
+        channel: Channel::Yaw,
+        degrees: 12.0,
+        period_seconds: 4.0,
+        ..IdleConfig::default()
+    };
+    let loaded = harness
+        .execute(vec![(
+            "motor",
+            HarnessOp::send_and_await_reply(
+                "aether.component",
+                &LoadComponent {
+                    wasm: fs::read(wasm).expect("read the puppet wasm for its idle export"),
+                    name: None,
+                    config: config.encode_into_bytes(),
+                    export: Some(IDLE_EXPORT.to_owned()),
+                },
+            ),
+        )])
+        .expect("load the idle motor");
+    match loaded.reply::<LoadResult>("motor").expect("decode the idle LoadResult") {
+        LoadResult::Ok { .. } => {}
+        LoadResult::Err { error } => panic!("load_component(idle): {error}"),
+    }
+
+    harness
+        .execute(vec![("motion", HarnessOp::advance_by(ticks, delta)), ("capture", HarnessOp::capture())])
+        .expect("advance and capture the equal-elapsed pose")
+        .captured("capture")
+        .expect("the capture step ran")
+        .to_vec()
+}
+
+fn required_output(variable: &str) -> PathBuf {
+    let path = PathBuf::from(env::var(variable).unwrap_or_else(|_| panic!("{variable} must name an output PNG")));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|error| panic!("create {}: {error}", parent.display()));
+    }
+    path
+}
+
+fn motion_contact_sheet(throttled_png: &[u8], full_png: &[u8]) -> Vec<u8> {
+    const GAP: u32 = 24;
+
+    let throttled = decode_png(throttled_png).expect("decode the throttled frame");
+    let full = decode_png(full_png).expect("decode the full-cadence frame");
+    assert_eq!(
+        (throttled.width, throttled.height),
+        (full.width, full.height),
+        "equal-elapsed frames must share one framing",
+    );
+
+    let width = throttled.width.checked_mul(2).and_then(|both| both.checked_add(GAP)).expect("contact width");
+    let height = throttled.height;
+    let mut rgba = vec![0xf4; width as usize * height as usize * 4];
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[0xf4, 0xef, 0xe4, 0xff]);
+    }
+
+    let source_row_bytes = throttled.width as usize * 4;
+    let contact_row_bytes = width as usize * 4;
+    let full_offset = (throttled.width + GAP) as usize * 4;
+    for row in 0..height as usize {
+        let source = row * source_row_bytes;
+        let target = row * contact_row_bytes;
+        rgba[target..target + source_row_bytes].copy_from_slice(&throttled.rgba[source..source + source_row_bytes]);
+        rgba[target + full_offset..target + full_offset + source_row_bytes]
+            .copy_from_slice(&full.rgba[source..source + source_row_bytes]);
+    }
+
+    encode_png(&rgba, width, height).expect("encode the motion contact sheet")
 }
 
 /// Degrees of yaw a pose-sweep frame moves by. Every frame is a genuine
