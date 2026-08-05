@@ -1,7 +1,7 @@
 //! Sender-side peer-addressing facades for loaded components —
 //! the "routing" seam of the `aether.component` capability.
 
-use aether_actor::{Addressable, ReplyMode, WasmActorMailbox, WasmCtx};
+use aether_actor::{Addressable, Embedded, ReplyMode, WasmActorMailbox, WasmCtx};
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
@@ -20,20 +20,21 @@ use crate::trampoline::WasmTrampoline;
 /// `.loaded::<R>(name)` traverses the declared host-to-trampoline edge, then
 /// exposes that same physical mailbox under the guest recipient type.
 ///
-/// `R: Addressable` is the peer's actor type, supplied by the caller (same
-/// as today's `WasmCtx::resolve_actor` surface). Type-checks at the
-/// send site — `peer.send::<K>(&mail)` compiles only when
-/// `R: HandlesKind<K>`.
+/// `R: Addressable<Resolver = Embedded>` is the peer component's actor type,
+/// supplied by the caller. The trampoline mailbox is physically an embedded
+/// component route, so root, caller-relative, and embedded-many recipients
+/// cannot be retyped onto it. Type-checks at the send site —
+/// `peer.send::<K>(&mail)` compiles only when `R: HandlesKind<K>`.
 pub trait ComponentHostWasmExt {
     /// Resolve a typed peer-component mailbox for the loaded component
     /// named `name`. The resolved handle inherits this handle's ctx binding
     /// (`sender` + inline registry), so its sends stamp the same origin
     /// (issue 1987).
-    fn loaded<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R>;
+    fn loaded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R>;
 }
 
 impl ComponentHostWasmExt for WasmActorMailbox<'_, ComponentHostCapability> {
-    fn loaded<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
+    fn loaded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R> {
         let trampoline = self.resolve::<WasmTrampoline>(name);
         trampoline.at(trampoline.mailbox_id().0)
     }
@@ -49,12 +50,12 @@ impl ComponentHostWasmExt for WasmActorMailbox<'_, ComponentHostCapability> {
 pub trait ComponentHostNativeExt {
     /// Resolve a typed peer-component mailbox for the loaded component
     /// named `name`.
-    fn loaded<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R>;
+    fn loaded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> NativeActorMailbox<'_, R>;
 }
 
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> {
-    fn loaded<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
+    fn loaded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         let trampoline = self.resolve::<WasmTrampoline>(name);
         trampoline.at(trampoline.mailbox_id().0)
     }
@@ -86,14 +87,14 @@ impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> 
 pub trait PeerCtxExt {
     /// The default-named instance of peer component `R` — the mailbox a
     /// nameless load of `R`'s module registers.
-    fn peer<R: Addressable>(&self) -> WasmActorMailbox<'_, R>;
+    fn peer<R: Addressable<Resolver = Embedded>>(&self) -> WasmActorMailbox<'_, R>;
 
     /// The instance of peer component `R` loaded under `name`.
-    fn peer_named<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R>;
+    fn peer_named<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R>;
 }
 
 impl<M: ReplyMode> PeerCtxExt for WasmCtx<'_, M> {
-    fn peer<R: Addressable>(&self) -> WasmActorMailbox<'_, R> {
+    fn peer<R: Addressable<Resolver = Embedded>>(&self) -> WasmActorMailbox<'_, R> {
         self.peer_named::<R>(R::NAMESPACE)
     }
 
@@ -102,7 +103,7 @@ impl<M: ReplyMode> PeerCtxExt for WasmCtx<'_, M> {
     // borrow of the host handle, which here is a temporary this fn owns.
     // The primitives return the handle's *binding* lifetime, which is the
     // ctx borrow and outlives the return.
-    fn peer_named<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
+    fn peer_named<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R> {
         let host = self.actor::<ComponentHostCapability>();
         let trampoline = host.resolve::<WasmTrampoline>(name);
         trampoline.at(trampoline.mailbox_id().0)
@@ -127,6 +128,6 @@ impl<M: ReplyMode> PeerCtxExt for WasmCtx<'_, M> {
 /// (ADR-0029 client-side no-lookup).
 #[must_use]
 pub fn resolve_embedded(name: &str) -> aether_data::MailboxId {
-    use aether_actor::{Addressable, Embedded, Resolve};
+    use aether_actor::Resolve;
     Embedded::resolve(<ComponentHostCapability as Addressable>::resolve(0, ()).0, name, ())
 }

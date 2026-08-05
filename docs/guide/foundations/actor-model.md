@@ -483,11 +483,18 @@ rendered with one `/` per node as
 (the `NAMESPACE` unless the load overrode it). The string is a display rendering
 of the lineage; the `MailboxId` is the fold over the nodes
 (`mailbox_id_from_path` on the string side), never a hash of the joined string.
-You reach a loaded component through its lineage: pass `LoadResult.name` to
-`resolve_actor`, or use the `loaded` helper below. What you cannot do is name it
-by bare type. `ctx.actor::<Camera>()` supplies the *calling* actor's lineage
-carry, and a component's node folds the component host's — so the two disagree
-for every caller but the host, and the call is a compile error naming
+You reach a loaded component through the component host's embedded route, not
+flat `resolve_actor`: use `loaded::<Camera>(LoadResult.name)`, or retain
+`LoadResult.mailbox_id` when a raw mailbox id is what the caller needs. From a
+component receive context, `peer::<Camera>()` names the default load and
+`peer_named::<Camera>(name)` names an explicit load. These helpers accept only
+`Addressable<Resolver = Embedded>` recipients because they physically retype a
+component trampoline mailbox; root (`One`), caller-relative (`Many`), and
+spawned embedded (`EmbeddedMany`) actor types do not describe that route. What
+you cannot do is name a loaded component by bare type.
+`ctx.actor::<Camera>()` supplies the *calling* actor's lineage carry, and a
+component's node folds the component host's — so the two disagree for every
+caller but the host, and the call is a compile error naming
 `loaded::<Camera>(name)` rather than a mailbox nothing registered. Which
 instance a bare type meant was never answerable anyway: the load name is a
 runtime choice, and `replicas` fans one component out over `camera-0`,
@@ -519,10 +526,12 @@ typed methods on the mailbox handle that stand in for raw kind sends.
 (from `WindowManagerMailboxExt`), and
 `ctx.actor::<ComponentHostCapability>().loaded::<Camera>("camera")` is the
 loaded-component lookup just mentioned (from `ComponentHostWasmExt` in a
-component, `ComponentHostNativeExt` in a capability). Each helper is available
-on both the component and the capability handle, so the same call reads the
-same whichever host you write from. Underneath, it first follows the declared
-typed child edge with
+component, `ComponentHostNativeExt` in a capability). In a component,
+`ctx.peer::<Camera>()` and `ctx.peer_named::<Camera>("camera")` offer the same
+embedded-only route for default and explicit loads. Each helper is available on
+both the component and the capability handle, so the same call reads the same
+whichever host you write from. Underneath, it first follows the declared typed
+child edge with
 `ctx.actor::<ComponentHostCapability>().resolve::<WasmTrampoline>("camera")`.
 The helper then intentionally retypes that trampoline mailbox as `Camera`:
 the trampoline and its loaded guest share one physical mailbox, while the

@@ -40,7 +40,9 @@
 //!   substrate / wasmtime imports, and the free `forward_to_trampoline`.
 //! - `route.rs` — the send-side peer-addressing facades
 //!   ([`ComponentHostWasmExt`], [`ComponentHostNativeExt`],
-//!   [`resolve_embedded`]).
+//!   [`PeerCtxExt`], [`resolve_embedded`]). Every component-retyping route
+//!   accepts only `Addressable<Resolver = Embedded>` recipients, matching the
+//!   physical trampoline mailbox it exposes.
 //! - `load.rs` — the `handle_load` sequence as a method on the state; the
 //!   state fields carry `pub` so this sibling reaches
 //!   them.
@@ -108,13 +110,14 @@ mod tests {
     // trampoline-address fold against the flat name hash — the primitive is
     // the reference value under test, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
+    use aether_actor::wasm::NO_INBOUND_SOURCE;
     use aether_actor::wasm::inline::Registry as InlineRegistry;
-    use aether_actor::{Addressable, Embedded, WasmActorMailbox};
+    use aether_actor::{Addressable, Embedded, Manual, WasmActorMailbox, WasmCtx};
     use aether_data::mailbox_id_from_name;
     use aether_substrate::mail::registry::{Registry, noop_handler};
     use aether_substrate::testing::boot_authority;
 
-    use super::{ComponentHostCapability, ComponentHostWasmExt, resolve_embedded};
+    use super::{ComponentHostCapability, ComponentHostWasmExt, PeerCtxExt, resolve_embedded};
     use crate::trampoline::WasmTrampoline;
 
     struct Guest;
@@ -127,8 +130,9 @@ mod tests {
     /// A loaded component's id is the ADR-0099 §3 lineage fold over
     /// `[aether.component, aether.embedded:<name>]`. The loaded facade first
     /// traverses the declared host-to-trampoline edge, then exposes that same
-    /// mailbox under the guest recipient type. Direct typed resolution and
-    /// `resolve_embedded` must agree with it.
+    /// mailbox under the guest recipient type. Direct typed resolution,
+    /// default and named peer lookup, and `resolve_embedded` must agree with
+    /// it.
     #[test]
     fn loaded_composes_the_canonical_trampoline_address() {
         // The ctx binding (sender + inline registry) is irrelevant to id
@@ -143,9 +147,14 @@ mod tests {
         let name = Guest::NAMESPACE;
         let camera = host.loaded::<Guest>(name);
         let trampoline = host.resolve::<WasmTrampoline>(name);
+        let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0, &registry, NO_INBOUND_SOURCE);
+        let default_peer = ctx.peer::<Guest>();
+        let named_peer = ctx.peer_named::<Guest>(name);
 
         assert_eq!(camera.mailbox_id(), trampoline.mailbox_id());
         assert_eq!(camera.mailbox_id(), resolve_embedded(name));
+        assert_eq!(camera.mailbox_id(), default_peer.mailbox_id());
+        assert_eq!(camera.mailbox_id(), named_peer.mailbox_id());
     }
 
     /// The external registry boundary expands abbreviated component
