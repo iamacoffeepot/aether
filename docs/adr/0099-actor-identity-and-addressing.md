@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-07
 - **Accepted:** 2026-06-08 (implementation arc iamacoffeepot/aether#1429 landed)
+- **Last amended:** 2026-08-05
 
 ## Context
 
@@ -126,6 +127,14 @@ The native actor graph is the whole graph: an embedding host is a native actor, 
 `aether.embedded` is claimed by more than one type — every concrete embedding host — which a per-namespace uniqueness check reads as a collision. It is not. The hosts are instanced (one per embedded component) and partition the name space by the embedded actor's own name: `aether.embedded:camera` and `aether.embedded:widget` are distinct instances, and two host *types* registering under the shared class namespace collide only if they would instantiate the same logical actor — the intended single identity, not a conflict.
 
 This is a second kind of namespace sharing. The chassis render caps share `aether.render` across **mutually exclusive** variants — exactly one is composed, a double-claim is a build error. Embedding hosts instead **coexist**: a substrate may host wasm and dynamic-library components at once, so several host types legitimately claim `aether.embedded` together. Uniqueness for this class is per-instance (per subname), enforced at registration, not per-type at composition. The reserved namespace is shared by design.
+
+## Amendment (2026-08-05, iamacoffeepot/aether#4491): runtime routing mailboxes select the embedded parent
+
+Section 5's "static" contract means resolution performs no registry lookup, I/O, or transport round-trip at the send site; it does not mean every placement seed is a compile-time constant. Actor creation already fixes lineage at runtime. The binding now retains the actor's routable current and logical-parent `MailboxId`s, injected by boot/spawn on native and wasm paths, and a resolver selects the one its placement rule consumes. `Embedded` selects the logical parent. A default typed send folds `aether.embedded:<R::NAMESPACE>` onto that parent; a named peer folds the caller-supplied runtime load name onto the same parent.
+
+The retained value is the tagged routing mailbox itself, not a second raw FNV carry. Section 3's modulo-`2^60` invariant means `with_tag` changes no seed bit that can affect the low 60 bits of a later fold, so current and parent `MailboxId`s are sufficient routing seeds. Resolution remains a pure client-side fold, and this amendment adds no lookup, wire field, or FFI ABI slot.
+
+The runtime parent, rather than a hard-coded `aether.component` root, is therefore the current host-class source of truth. The same embedded actor can run beneath a nested or replacement host and typed peer sends follow that placement without naming the host type. Explicit APIs that deliberately start from a held component-host mailbox still fold from that mailbox; they are not reinterpreted as caller-parent routes.
 
 ## Consequences
 

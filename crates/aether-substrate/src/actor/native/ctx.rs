@@ -1686,6 +1686,15 @@ mod tests {
 
     impl HandlesKind<CastOnly> for StubActor {}
 
+    struct EmbeddedPeer;
+
+    impl Addressable for EmbeddedPeer {
+        const NAMESPACE: &'static str = "test.native.embedded_peer";
+        type Resolver = aether_actor::Embedded;
+    }
+
+    impl HandlesKind<CastOnly> for EmbeddedPeer {}
+
     #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
     #[kind(name = "test.native_request_context")]
     struct NativeRequestContext {
@@ -1722,6 +1731,48 @@ mod tests {
             binding.take_request_context::<NativeRequestContext>(RequestId(mail_id.correlation_id)),
             Some(context)
         );
+    }
+
+    /// A typed embedded recipient resolves from the binding's logical parent,
+    /// and a send through that handle reaches the mailbox registered beneath
+    /// that parent. The parent is already a tagged routable `MailboxId`; no raw
+    /// carry is retained beside it.
+    #[allow(clippy::disallowed_methods)] // test scaffolding — synthetic lineage IDs exercise parent-relative routing
+    #[test]
+    fn embedded_actor_resolves_and_delivers_beneath_binding_parent() {
+        use crate::mail::registry::OwnedDispatch;
+        use crate::testing::{bare_substrate, boot_authority};
+        use std::sync::mpsc;
+
+        let (registry, mailer) = bare_substrate();
+        let parent = aether_data::mailbox_id_from_path("test.native.parent");
+        let current = aether_data::mailbox_id_from_path("test.native.parent/test.native.caller");
+        let recipient = EmbeddedPeer::resolve(parent.0, ());
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        registry
+            .try_register_inbox_with_id(
+                &boot_authority(),
+                recipient,
+                "test.native.parent/test.embedded_peer",
+                Arc::new(move |dispatch: OwnedDispatch| {
+                    dispatch.discharge();
+                    let _ = tx.send(dispatch);
+                }),
+            )
+            .expect("register embedded peer beneath the runtime parent");
+        let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, parent));
+        assert_eq!(binding.parent_mailbox(), parent);
+
+        {
+            let ctx =
+                NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 0), MailId::NONE, MailId::NONE);
+            let peer = ctx.actor::<EmbeddedPeer>();
+            assert_eq!(peer.mailbox_id(), recipient);
+            peer.send(&CastOnly { code: 17 });
+        }
+
+        let delivered = rx.try_recv().expect("embedded peer send routes at ctx flush");
+        assert_eq!(delivered.kind, CastOnly::ID);
     }
 
     /// ADR-0080 §7 (issue 1802): a handler's `ctx.actor::<R>().send()`

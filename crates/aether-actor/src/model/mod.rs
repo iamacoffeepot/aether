@@ -80,17 +80,15 @@ impl Resolve for Many {
 pub const EMBEDDED_SCOPE: &str = "aether.embedded";
 
 /// Keyless embedded resolution (ADR-0119): folds
-/// `instanced(EMBEDDED_SCOPE, NAMESPACE)` onto the caller's carry — the
+/// `instanced(EMBEDDED_SCOPE, NAMESPACE)` onto the selected parent carry — the
 /// component's own name as an instance under the reserved embed scope.
-/// The carry this folds onto is the **component host's**, not the calling
-/// actor's: the fold is only correct when the supplied carry is
-/// `aether.component`'s, which is a fact only that cap's owner
-/// (`aether-component`, through `resolve_embedded` / `loaded::<R>(name)`) may
-/// read. So `Embedded` is **not** [`CallerScoped`] — the bare-type send
-/// surfaces refuse it rather than folding the sender's carry and landing on an
-/// address nothing registers. Keyless (`Args<'a> = ()`), so an embedded actor
-/// is still a [`Singleton`] for the surfaces that supply the host carry
-/// themselves.
+/// The runtime retains the calling actor's logical parent mailbox and
+/// [`CallerScoped`] selects it as the routing seed. This makes the same actor
+/// type resolve beneath whichever host actually embedded it, without naming a
+/// concrete host or looking one up. Keyless (`Args<'a> = ()`), so an embedded
+/// actor is a [`Singleton`]; bare-type addressing selects its default
+/// [`Addressable::NAMESPACE`], while a named peer supplies its runtime load
+/// namespace through the same resolver.
 pub struct Embedded;
 
 impl Resolve for Embedded {
@@ -151,27 +149,21 @@ impl CallerScope {
 /// consumes. Every ctx send selects [`Self::SCOPE`] rather than assuming that
 /// all resolvers consume the calling actor's own lineage.
 ///
-/// Implemented for the three strategies that hold it:
+/// Implemented for the four built-in strategies:
 ///
 /// - [`One`] declares [`CallerScope::Root`] and ignores caller lineage.
 /// - [`Many`] declares [`CallerScope::Current`] for a keyed child of the
 ///   caller.
+/// - [`Embedded`] declares [`CallerScope::Parent`] for a co-hosted embedded
+///   singleton beneath the caller's runtime parent.
 /// - [`EmbeddedMany`] declares [`CallerScope::Current`] for a spawned sibling
 ///   whose lineage extends the spawner's (ADR-0099 §Negative "sibling spawn
 ///   nests").
-///
-/// [`Embedded`] is deliberately absent. An embedded component's node folds the
-/// **component host's** carry, not the caller's, so handing it a caller carry
-/// names a component embedded *under the sender* — an address nothing
-/// registers, which routes cleanly and drops. That target is addressed through
-/// the host instead; see [`CallerAddressable`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a caller-scoped resolution strategy",
     label = "does not declare a caller-relative scope for bare-type resolution",
-    note = "`Embedded` folds the component host's carry, which a generic caller context cannot \
-            select, so a bare-type send would name a component embedded under the wrong parent",
-    note = "address a loaded component through its host, by the name it was loaded under: \
-            `ctx.actor::<ComponentHostCapability>().loaded::<Peer>(name)`"
+    note = "a resolver used by a typed ctx must select `Root`, `Current`, or `Parent`; use an \
+            explicit by-name or by-id route when no caller-relative scope describes the target"
 )]
 pub trait CallerScoped: Resolve {
     /// The caller-relative scope this resolver consumes.
@@ -183,6 +175,9 @@ impl CallerScoped for One {
 }
 impl CallerScoped for Many {
     const SCOPE: CallerScope = CallerScope::Current;
+}
+impl CallerScoped for Embedded {
+    const SCOPE: CallerScope = CallerScope::Parent;
 }
 impl CallerScoped for EmbeddedMany {
     const SCOPE: CallerScope = CallerScope::Current;
@@ -198,13 +193,10 @@ impl CallerScoped for EmbeddedMany {
 /// position** so it elaborates to call sites, the same mechanism
 /// [`Singleton`] / [`Instanced`] use. Nobody writes `impl CallerAddressable`.
 #[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be addressed by bare type — it is an embedded component",
-    label = "embedded component, not addressable from the caller's lineage",
-    note = "an embedded component's mailbox folds the component host's lineage carry, not the \
-            caller's, so a bare-type send would name a component embedded under the *sender* and \
-            the mail would drop",
-    note = "address it through the host by the name it was loaded under: \
-            `ctx.actor::<ComponentHostCapability>().loaded::<{Self}>(name)`"
+    message = "`{Self}` cannot be addressed by bare type from this context",
+    label = "its resolver does not declare a caller-relative scope",
+    note = "use an explicit by-name or by-id route when the target cannot select `Root`, \
+            `Current`, or `Parent` from the caller's runtime context"
 )]
 pub trait CallerAddressable: Addressable<Resolver: CallerScoped> {}
 impl<T: Addressable<Resolver: CallerScoped>> CallerAddressable for T {}
@@ -368,20 +360,14 @@ pub trait Lifecycle<S> {
 ///
 /// Root-scoped singletons — every chassis cap, including catch-alls like
 /// `BroadcastCapability` — have full name `== NAMESPACE`, so a sender
-/// type-addresses them with `ctx.actor::<R>()`. A singleton hosted inside
-/// a parent (a wasm component under its component-host, a per-session
-/// actor under a listener) is reached **through that parent** instead:
-/// its id is the lineage fold, which only the holder of the parent's
-/// carry can compute.
-///
-/// For a loaded component that holder is the component-host, and the
-/// spelling is its by-name facade —
-/// `ctx.actor::<ComponentHostCapability>().loaded::<R>(name)`, where
-/// `name` is the load name alone (`NAME`, the last segment of the
-/// rendered address). It folds the [`Embedded`] node onto the host's own
-/// carry, which is the carry that resolution wants. A multi-instance load
-/// is the same call once per instance name (`base-0`, `base-1`, …), since
-/// each replica registers under its own.
+/// type-addresses them with `ctx.actor::<R>()`. A singleton hosted inside a
+/// parent resolves from the runtime-retained parent mailbox. For a loaded
+/// component, `ctx.actor::<R>()` selects the default load name
+/// (`R::NAMESPACE`) and a component's `peer_named::<R>(name)` facade supplies
+/// an explicit runtime load name. The component-host's `loaded::<R>(name)`
+/// facade remains the explicit root-host route for callers that already hold
+/// that host mailbox. Replicas remain explicitly named (`base-0`, `base-1`,
+/// …), since no default-named instance exists.
 ///
 /// The rendered address itself — `LoadResult.name`, e.g.
 /// `aether.component/aether.embedded:NAME` — is a path of nodes, so it
@@ -405,9 +391,8 @@ pub trait Lifecycle<S> {
 /// Derived from the resolver (ADR-0119): a keyless [`Resolver`](Addressable::Resolver)
 /// (`Args<'a> = ()` — [`One`] for root caps, [`Embedded`] for components)
 /// makes the actor a `Singleton`. The blanket impl supplies it; nobody writes
-/// `impl Singleton`. Cardinality alone does not license bare-type addressing:
-/// `ctx.actor::<R>()` also asks for [`CallerAddressable`], which an
-/// [`Embedded`] component does not satisfy.
+/// `impl Singleton`. Typed addressing also asks for [`CallerAddressable`];
+/// [`Embedded`] satisfies it by selecting [`CallerScope::Parent`].
 pub trait Singleton: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>> {}
 impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>>> Singleton for T {}
 
@@ -576,15 +561,10 @@ mod tests {
         requires_instanced::<PerThing>();
     }
 
-    /// ADR-0119 amendment: each strategy admitted to the bare-type send
-    /// surface declares its caller-relative scope. The spawn-sibling resolver
-    /// is the one at risk — it shares the embed scope with [`Embedded`], which
-    /// the surface refuses, and a sibling's lineage really does extend its
-    /// spawner's (ADR-0099 §Negative), so dropping it from [`CallerScoped`]
-    /// would break sibling addressing rather than tighten anything. The
-    /// refusal side is golden-tested in
-    /// `aether-actor-derive`'s `rejects_bare_type_address_of_embedded_peer` UI
-    /// fixture — a negative bound has no positive witness.
+    /// ADR-0119 amendments: every built-in strategy admitted to the typed send
+    /// surface declares its caller-relative scope. Embedded singletons select
+    /// the runtime parent; spawned embedded siblings still select the current
+    /// spawner whose lineage they extend (ADR-0099 §Negative).
     #[test]
     fn caller_scoped_declares_each_admitted_strategys_scope() {
         fn requires_caller_addressable<T: CallerAddressable>() {}
@@ -607,12 +587,20 @@ mod tests {
             type Resolver = EmbeddedMany;
         }
 
+        struct EmbeddedPeer;
+        impl Addressable for EmbeddedPeer {
+            const NAMESPACE: &'static str = "test.caller_scoped.embedded";
+            type Resolver = Embedded;
+        }
+
         requires_caller_addressable::<RootCap>();
         requires_caller_addressable::<KeyedChild>();
+        requires_caller_addressable::<EmbeddedPeer>();
         requires_caller_addressable::<SpawnedSibling>();
 
         assert_eq!(<One as CallerScoped>::SCOPE, CallerScope::Root);
         assert_eq!(<Many as CallerScoped>::SCOPE, CallerScope::Current);
+        assert_eq!(<Embedded as CallerScoped>::SCOPE, CallerScope::Parent);
         assert_eq!(<EmbeddedMany as CallerScoped>::SCOPE, CallerScope::Current);
     }
 

@@ -32,12 +32,10 @@ fn ui() {
     t.compile_fail("tests/ui/rejects_actor_composable_native.rs");
     t.compile_fail("tests/ui/rejects_malformed_actor_composable.rs");
     t.compile_fail("tests/ui/rejects_wasm_child_spawn_without_placement.rs");
-    // ADR-0119 amendment: the resolver `#[actor]` gives a wasm actor
-    // (`Embedded`) folds the component host's carry, not the caller's, so the
-    // bare-type send surfaces refuse it and name `loaded::<R>(name)` instead.
-    // Golden-tested here because the trap is the macro's emission meeting
-    // `aether-actor`'s send bound — neither half shows it alone.
-    t.compile_fail("tests/ui/rejects_bare_type_address_of_embedded_peer.rs");
+    // ADR-0119 parent-scope amendment: a wasm actor's macro-emitted
+    // `Embedded` resolver is admitted on ordinary typed ctx and MailSender
+    // surfaces, which select the caller's runtime parent mailbox.
+    t.pass("tests/ui/accepts_bare_type_address_of_embedded_peer.rs");
     t.compile_fail("tests/ui/rejects_generic_native_lineage_impl.rs");
     t.compile_fail("tests/ui/rejects_generic_native_lineage_struct.rs");
     // ADR-0112: the manual reply class compiles. The native manual-class

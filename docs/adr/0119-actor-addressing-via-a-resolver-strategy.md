@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-18
 - **Accepted:** 2026-06-19 (implementation arc iamacoffeepot/aether#2063 landed)
-- **Last amended:** 2026-08-04
+- **Last amended:** 2026-08-05
 
 ## Context
 
@@ -117,6 +117,14 @@ This is a scope-selection failure, not loss of routing information in `with_tag`
 Refusing is not merely the cheaper half of a trade. A component's load name is a runtime fact — `load_component(name = …)`, and `replicas: N` produces `base-0 … base-N` and no default-named instance at all — so a bare type reference could only ever have meant "the instance loaded under its default name," a guess the by-name verb states outright. The surfaces that already supply the host carry (`resolve_embedded`, `ComponentHost{Wasm,Native}Ext::loaded`, `aether-http`'s `Ctx::defer(&request).to::<R>()`) are unchanged and remain the way to reach a loaded component.
 
 Nothing about identity moves: no resolver arithmetic changes, no `MailboxId` changes, no wire or FFI ABI change. What changes is which spellings compile. One consequence worth naming: with `Embedded` off the keyless surface, `One` is the only strategy it admits, so `ctx.actor::<R>()` reads no carry today and means exactly "the root-pinned singleton `R`." The parameter stays for the keyless caller-relative strategy ADR-0166 defers ("a true keyless singleton beneath a native parent requires a relative singleton resolver"), which joins by implementing `CallerScoped`.
+
+## Amendment (2026-08-05, iamacoffeepot/aether#4491): `Embedded` selects the runtime parent
+
+The 2026-08-04 refusal above was correct for the context available then, but its premise is now superseded. Native bindings and wasm registries retain the calling actor's logical-parent `MailboxId`, and typed sends ask each resolver which scope to select. `Embedded` is therefore `CallerScoped` with `CallerScope::Parent`: `ctx.actor::<Peer>()` resolves the default load namespace beneath the actual runtime parent, and the component `peer_named::<Peer>(name)` facade supplies a runtime namespace to that same typed resolver path. `One` remains root-selected; `Many` and `EmbeddedMany` remain current-selected.
+
+The selected parent is already a tagged routing mailbox. Its low 60 bits contain every bit a later lineage fold can observe, so passing it directly to `Embedded::resolve` is equivalent to retaining a separate untagged FNV state. No resolver arithmetic, wire representation, FFI ABI, or per-send lookup changes. What changes is scope selection and the compile contract: embedded recipients now satisfy `CallerAddressable`, including `MailSender::{send, send_many, send_detached}` and typed actor construction.
+
+Default-name and explicit-name component-peer routes are distinct only at the namespace argument. The default typed path uses `R::NAMESPACE`; `peer_named` uses its supplied load name. `ComponentHost{Wasm,Native}Ext::loaded` and `resolve_embedded` remain explicit routes from a component-host mailbox, and HTTP deferral keeps using the stored component-host handle where its caller deliberately chose that root.
 
 ## Related
 

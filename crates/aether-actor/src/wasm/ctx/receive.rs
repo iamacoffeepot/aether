@@ -12,7 +12,7 @@ use aether_data::{Kind, MailboxId, RequestId, Source, mailbox_id_from_name};
 
 use crate::mail::ReplyHandle;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
-use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, Singleton};
+use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, Resolve, Singleton};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
 use crate::wasm::mailbox::WasmActorMailbox;
@@ -198,8 +198,24 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// the inline registry the send routes through.
     #[must_use]
     pub fn actor<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R> {
+        self.__actor_with_namespace::<R>(R::NAMESPACE)
+    }
+
+    /// Namespace-aware typed actor construction for cap-owned facades whose
+    /// recipient namespace is a runtime fact. Uses the same resolver-selected
+    /// root/current/parent routing scope as [`Self::actor`]; unlike
+    /// [`Self::resolve_actor`], this does not flatten `namespace` into a root
+    /// mailbox name.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __actor_with_namespace<R: Singleton + CallerAddressable>(&self, namespace: &str) -> WasmActorMailbox<'_, R> {
         WasmActorMailbox::__new(
-            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
+            <<R as Addressable>::Resolver as Resolve>::resolve(
+                self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE),
+                namespace,
+                (),
+            )
+            .0,
             self.mailbox,
             self.inline,
         )
