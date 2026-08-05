@@ -925,8 +925,8 @@ macro_rules! __export_internal {
                         parent_prior,
                     );
                 },
-                |registry, child| {
-                    $crate::__export_internal!(@reconstruct_child registry, child ; $component)
+                |registry, parent, child| {
+                    $crate::__export_internal!(@reconstruct_child registry, parent, child ; $component)
                 },
             );
             0
@@ -935,10 +935,12 @@ macro_rules! __export_internal {
 
     // Reconstruct one inline child by matching its persisted type tag
     // against the module's exported type set (ADR-0114 §5). For each
-    // candidate type whose `hash(NAMESPACE)` matches, re-`init` it and
-    // restore its state via `inline::compose::reconstruct_one_child`. An
-    // unmatched tag returns `false` so the caller logs + skips it.
-    (@reconstruct_child $registry:ident, $child:ident ; $($candidate:ty),+) => {{
+    // candidate type whose `hash(NAMESPACE)` matches, validate the
+    // replacement module's current placement facts against the effective
+    // parent, then re-`init` it and restore its state through the
+    // parent-aware compose helper. An unmatched or rejected child returns
+    // `false` so the caller logs + skips it.
+    (@reconstruct_child $registry:ident, $parent:ident, $child:ident ; $($candidate:ty),+) => {{
         let mut __aether_reconstructed = false;
         $(
             if $child.type_tag
@@ -947,9 +949,17 @@ macro_rules! __export_internal {
                 )
                 .0
             {
+                let __aether_child_tag = $crate::ActorTypeTag($child.type_tag);
                 __aether_reconstructed =
-                    $crate::wasm::inline::compose::reconstruct_one_child::<$candidate>(
-                        $registry, $child,
+                    $crate::wasm::__validate_inline_child_placement(
+                        $registry,
+                        $parent.0,
+                        __aether_child_tag,
+                        <$candidate>::__AETHER_PLACEMENT,
+                    )
+                    .is_ok()
+                    && $crate::wasm::inline::compose::reconstruct_one_child_at_parent::<$candidate>(
+                        $registry, $parent, $child,
                     );
             }
         )+
@@ -1575,8 +1585,8 @@ macro_rules! __export_multi_internal {
                     };
                     instance.erased_on_rehydrate(&mut ctx, parent_prior);
                 },
-                |registry, child| {
-                    $crate::__export_internal!(@reconstruct_child registry, child ; $($component),+)
+                |registry, parent, child| {
+                    $crate::__export_internal!(@reconstruct_child registry, parent, child ; $($component),+)
                 },
             );
             0

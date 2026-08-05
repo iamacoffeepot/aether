@@ -36,10 +36,24 @@
 //!   state_bytes:  state_len bytes
 //!   config_len:   u32 LE
 //!   config_bytes: config_len bytes
+//! optional parent-link trailer:
+//!   magic:         4 bytes = PARENT_TRAILER_MAGIC ("AEIP")
+//!   version:       u32 LE
+//!   link_count:    u32 LE
+//!   per link:
+//!     alias_id:    u64 LE
+//!     parent_id:   u64 LE
 //! ```
+//!
+//! The composite header and every child record end exactly where they did
+//! before parent links were added. The self-identifying trailer is appended
+//! after all records, so legacy decoders ignore it and the legacy frame is a
+//! byte-for-byte prefix of a modern frame.
 
+use alloc::collections::{BTreeMap, btree_map::Entry};
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::mem::size_of;
 
 /// Reserved `StateBundle::version` value the composite frame is tagged
 /// with. Distinct from the macro-generated hooks' `version = 0` and from
@@ -51,6 +65,14 @@ pub const COMPOSITE_VERSION: u32 = 0xAE11_B0D1;
 /// Inline Composite" — so a raw parent blob that happens to carry
 /// `version == COMPOSITE_VERSION` still can't be mistaken for one.
 const COMPOSITE_MAGIC: [u8; 4] = *b"AEIC";
+
+/// Magic opening the optional alias-to-parent trailer appended after every
+/// legacy child record — AEIP, for "Aether Inline Parents".
+const PARENT_TRAILER_MAGIC: [u8; 4] = *b"AEIP";
+
+/// Version of the optional alias-to-parent trailer. An unknown version is
+/// ignored independently of the legacy composite prefix.
+const PARENT_TRAILER_VERSION: u32 = 1;
 
 /// One inline child's saved entry in a composite bundle.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +97,11 @@ pub struct ChildEntry {
     /// `config_bytes`), so reconstruct can re-init the child from its real
     /// config instead of empty bytes (issue 2690).
     pub config_bytes: Vec<u8>,
+    /// The child's logical parent alias when a modern parent-link trailer
+    /// supplied one. `None` for legacy bundles and for an absent, unknown,
+    /// or malformed trailer; reconstruction then applies the cluster-root
+    /// compatibility fallback.
+    pub parent_id: Option<u64>,
 }
 
 /// The parent half of a decomposed bundle — exactly the `(version,
@@ -124,7 +151,28 @@ pub fn compose(parent_version: u32, parent_bytes: &[u8], children: &[ChildEntry]
         out.extend_from_slice(&len_u32(child.config_bytes.len()).to_le_bytes());
         out.extend_from_slice(&child.config_bytes);
     }
+    append_parent_trailer(&mut out, children);
     (COMPOSITE_VERSION, out)
+}
+
+/// Append the optional alias-to-parent extension without changing any byte
+/// in the legacy composite prefix. Entries without a parent link are simply
+/// absent from the trailer and retain the legacy root-parent fallback.
+fn append_parent_trailer(out: &mut Vec<u8>, children: &[ChildEntry]) {
+    let link_count = children.iter().filter(|child| child.parent_id.is_some()).count();
+    if link_count == 0 {
+        return;
+    }
+
+    out.extend_from_slice(&PARENT_TRAILER_MAGIC);
+    out.extend_from_slice(&PARENT_TRAILER_VERSION.to_le_bytes());
+    out.extend_from_slice(&len_u32(link_count).to_le_bytes());
+    for child in children {
+        if let Some(parent_id) = child.parent_id {
+            out.extend_from_slice(&child.alias_id.to_le_bytes());
+            out.extend_from_slice(&parent_id.to_le_bytes());
+        }
+    }
 }
 
 /// Decompose a migration bundle handed to `on_rehydrate`.
@@ -181,9 +229,57 @@ fn parse_framed(bytes: &[u8]) -> Option<Decomposed> {
             version,
             state_bytes,
             config_bytes,
+            parent_id: None,
         });
     }
+    if let Some(parent_links) = parse_parent_trailer(cursor.remaining()) {
+        apply_parent_links(&mut children, &parent_links);
+    }
     Some(Decomposed { parent: ParentState { version: parent_version, bytes: parent_bytes }, children })
+}
+
+/// Parse a complete, supported parent-link trailer. Any absent, unknown, or
+/// truncated trailer is ignored as one unit so a partial extension cannot
+/// corrupt the byte-identical legacy prefix.
+fn parse_parent_trailer(bytes: &[u8]) -> Option<BTreeMap<u64, Option<u64>>> {
+    let mut cursor = Cursor::new(bytes);
+    if cursor.take(PARENT_TRAILER_MAGIC.len())? != PARENT_TRAILER_MAGIC {
+        return None;
+    }
+    if cursor.read_u32()? != PARENT_TRAILER_VERSION {
+        return None;
+    }
+    let link_count = cursor.read_u32()? as usize;
+    let links_len = link_count.checked_mul(size_of::<u64>() * 2)?;
+    if cursor.remaining().len() < links_len {
+        return None;
+    }
+
+    let mut links = BTreeMap::new();
+    for _ in 0..link_count {
+        let alias_id = cursor.read_u64()?;
+        let parent_id = cursor.read_u64()?;
+        match links.entry(alias_id) {
+            Entry::Vacant(entry) => {
+                entry.insert(Some(parent_id));
+            }
+            Entry::Occupied(mut entry) => {
+                entry.insert(None);
+            }
+        }
+    }
+    Some(links)
+}
+
+/// Apply only unambiguous mappings for aliases present in the legacy child
+/// records. A missing or duplicate mapping remains `None`, which preserves
+/// the root-parent compatibility fallback instead of guessing.
+fn apply_parent_links(children: &mut [ChildEntry], links: &BTreeMap<u64, Option<u64>>) {
+    for child in children {
+        if let Some(Some(parent_id)) = links.get(&child.alias_id) {
+            child.parent_id = Some(*parent_id);
+        }
+    }
 }
 
 /// Narrow a `usize` length to the `u32` the frame stores. A bundle that
@@ -228,11 +324,18 @@ impl<'a> Cursor<'a> {
         buf.copy_from_slice(self.take(8)?);
         Some(u64::from_le_bytes(buf))
     }
+
+    fn remaining(&self) -> &'a [u8] {
+        &self.bytes[self.pos..]
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{COMPOSITE_VERSION, ChildEntry, Decomposed, ParentState, compose, decompose};
+    use super::{
+        COMPOSITE_VERSION, ChildEntry, Decomposed, PARENT_TRAILER_MAGIC, PARENT_TRAILER_VERSION, ParentState, compose,
+        decompose,
+    };
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
@@ -247,6 +350,7 @@ mod tests {
             version: 0,
             state_bytes: state.to_vec(),
             config_bytes: Vec::new(),
+            parent_id: Some(0xF000),
         }
     }
 
@@ -293,6 +397,89 @@ mod tests {
             "the parent state survives the composite round-trip",
         );
         assert_eq!(decomposed.children, children, "every child entry survives the composite round-trip");
+    }
+
+    /// A trailer-free legacy composite still decodes every legacy field and
+    /// leaves each parent absent for reconstruction's cluster-root fallback.
+    #[test]
+    fn legacy_multi_child_bundle_round_trips_with_absent_parent_links() {
+        let children = vec![
+            ChildEntry { parent_id: None, ..child(0x1111, 0xAAAA, "widget", &[9, 8, 7]) },
+            ChildEntry { is_counter: true, parent_id: None, ..child(0x2222, 0xBBBB, "0", &[]) },
+        ];
+
+        let (version, bytes) = compose(5, &[1, 2, 3], &children);
+        let decomposed = decompose(version, &bytes);
+
+        assert_eq!(decomposed.children, children, "legacy child records decode without invented parent links");
+    }
+
+    /// The modern frame appends parent metadata after the complete legacy
+    /// frame, keeping the composite header and every child record byte-exact.
+    #[test]
+    fn parent_trailer_preserves_the_legacy_frame_as_a_byte_prefix() {
+        let modern_children = vec![
+            child(0x1111, 0xAAAA, "widget", &[9, 8, 7]),
+            ChildEntry { is_counter: true, parent_id: Some(0x1111), ..child(0x2222, 0xBBBB, "0", &[]) },
+        ];
+        let legacy_children =
+            modern_children.iter().cloned().map(|child| ChildEntry { parent_id: None, ..child }).collect::<Vec<_>>();
+
+        let (_, legacy_bytes) = compose(5, &[1, 2, 3], &legacy_children);
+        let (_, modern_bytes) = compose(5, &[1, 2, 3], &modern_children);
+
+        assert!(modern_bytes.starts_with(&legacy_bytes), "the complete legacy frame is an unchanged byte prefix");
+        assert_eq!(
+            &modern_bytes[legacy_bytes.len()..legacy_bytes.len() + PARENT_TRAILER_MAGIC.len()],
+            &PARENT_TRAILER_MAGIC,
+            "the self-identifying parent trailer begins immediately after the legacy records",
+        );
+    }
+
+    /// A known trailer that ends mid-link is ignored without discarding the
+    /// already-complete parent and child records.
+    #[test]
+    fn truncated_parent_trailer_falls_back_to_root_links() {
+        let entry = child(0x1111, 0xAAAA, "widget", &[9, 8, 7]);
+        let legacy_entry = ChildEntry { parent_id: None, ..entry.clone() };
+        let (_, legacy_bytes) = compose(5, &[1, 2, 3], slice::from_ref(&legacy_entry));
+        let (version, mut modern_bytes) = compose(5, &[1, 2, 3], slice::from_ref(&entry));
+        modern_bytes.truncate(modern_bytes.len() - 1);
+
+        let decomposed = decompose(version, &modern_bytes);
+
+        assert!(modern_bytes.starts_with(&legacy_bytes), "only the appended trailer was truncated");
+        assert_eq!(decomposed.children, vec![legacy_entry], "the legacy child survives with no usable parent link");
+    }
+
+    /// An extension carrying the known magic but an unknown version is
+    /// ignored, leaving legacy children on the root-parent fallback.
+    #[test]
+    fn unknown_parent_trailer_version_is_ignored() {
+        let legacy_entry = ChildEntry { parent_id: None, ..child(0x1111, 0xAAAA, "widget", &[9, 8, 7]) };
+        let (version, mut bytes) = compose(5, &[1, 2, 3], slice::from_ref(&legacy_entry));
+        bytes.extend_from_slice(&PARENT_TRAILER_MAGIC);
+        bytes.extend_from_slice(&(PARENT_TRAILER_VERSION + 1).to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&legacy_entry.alias_id.to_le_bytes());
+        bytes.extend_from_slice(&0xF000u64.to_le_bytes());
+
+        let decomposed = decompose(version, &bytes);
+
+        assert_eq!(decomposed.children, vec![legacy_entry], "an unknown trailer version supplies no parent links");
+    }
+
+    /// Unrecognized trailing bytes are not mistaken for parent metadata.
+    #[test]
+    fn unknown_trailer_magic_is_ignored() {
+        let legacy_entry = ChildEntry { parent_id: None, ..child(0x1111, 0xAAAA, "widget", &[9, 8, 7]) };
+        let (version, mut bytes) = compose(5, &[1, 2, 3], slice::from_ref(&legacy_entry));
+        bytes.extend_from_slice(b"NOPE");
+        bytes.extend_from_slice(&[0xAA; 24]);
+
+        let decomposed = decompose(version, &bytes);
+
+        assert_eq!(decomposed.children, vec![legacy_entry], "an unknown trailer supplies no parent links");
     }
 
     /// Step 2 tripwire: a child's non-empty `config_bytes` survive the
