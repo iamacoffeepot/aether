@@ -53,7 +53,7 @@
 mod route;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use route::ComponentHostNativeExt;
-pub use route::{ComponentHostWasmExt, resolve_embedded};
+pub use route::{ComponentHostWasmExt, PeerCtxExt, resolve_embedded};
 
 // `load` (the `handle_load` sequence) and `config` (the `ComponentHostParams`
 // init bundle) now live under the `runtime` directory beside the rest of the
