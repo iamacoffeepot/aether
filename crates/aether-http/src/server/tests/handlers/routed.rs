@@ -245,7 +245,7 @@ impl NativeActor for EchoPeer {
 }
 
 /// A peer that receives `EchoAsk` and never replies — the downstream a
-/// deferred route's `504` settlement net catches.
+/// deferred route's `502` settlement net catches.
 pub struct SilentPeer;
 pub struct SilentPeerState;
 
@@ -267,7 +267,7 @@ impl NativeActor for SilentPeer {
 
 /// A deferred-route handler (ADR-0154 §2): `/echo` forwards to
 /// [`EchoPeer`] and answers on its `EchoSay` reply; `/blackhole`
-/// forwards to [`SilentPeer`] and is answered `504` by the settlement
+/// forwards to [`SilentPeer`] and is answered `502` by the settlement
 /// net when that chain settles without a reply.
 pub struct DeferRouteHandler;
 pub struct DeferRouteHandlerState;
@@ -284,17 +284,17 @@ impl NativeActor for DeferRouteHandler {
     }
 
     /// `GET /echo` — forward to the echo peer by type, answer on its
-    /// reply. `peer::<R>()` names the peer; `.defer` forwards to it.
+    /// reply. `defer(&request)` captures the request; `.to::<R>()` forwards it.
     #[http::route(Get, "/echo")]
     fn echo(_state: &mut DeferRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        ctx.peer::<EchoPeer>().defer(&EchoAsk { text: "hi".to_string() })
+        ctx.defer(&EchoAsk { text: "hi".to_string() }).to::<EchoPeer>()
     }
 
     /// `GET /blackhole` — forward to the silent peer; it settles without a
     /// reply, so the server's own `502` net answers.
     #[http::route(Get, "/blackhole")]
     fn blackhole(_state: &mut DeferRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        ctx.peer::<SilentPeer>().defer(&EchoAsk { text: "void".to_string() })
+        ctx.defer(&EchoAsk { text: "void".to_string() }).to::<SilentPeer>()
     }
 
     /// Map the peer's `EchoSay` reply into the response answered through

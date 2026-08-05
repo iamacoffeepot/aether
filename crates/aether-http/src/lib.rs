@@ -62,7 +62,7 @@ pub use typed::{Ctx, FromPathSegment, FromRequest, Outcome, Path, Route};
 // macro emits one `::aether_http::…` path a consumer resolves
 // through its existing dependency. Runtime-only — `reply_to` is native.
 #[cfg(feature = "runtime")]
-pub use defer::{Peer, answer_deferred, answer_now};
+pub use defer::{DeferredRequest, answer_deferred, answer_now};
 
 // ADR-0133 reply-based data-phase stream handles. Wasm-safe like `typed`,
 // so a `default-features = false` guest that streams gets them without the

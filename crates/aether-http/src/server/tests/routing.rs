@@ -115,7 +115,7 @@ fn path_template_routes_dispatch_and_capture() {
 }
 
 /// ADR-0154 §2 deferred routes end to end (relay pattern): `GET /echo`
-/// forwards its request to a peer by type via `defer::<EchoPeer>` — an
+/// forwards its request to a peer by type via `defer(&request).to::<EchoPeer>()` — an
 /// inherited `send_with_context` that keeps the request's chain open — and
 /// the reply route answers on the peer's `EchoSay`. `GET /blackhole` forwards
 /// to a peer that settles without replying, so the request's chain settles
