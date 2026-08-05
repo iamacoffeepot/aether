@@ -981,7 +981,7 @@ fn stain_centres(centroids: &[Option<Vec2>; survey::SLOTS], height: usize) -> [O
         let Some(policy) = material.atmosphere.as_ref() else {
             continue;
         };
-        let drift = Vec2::new(image::tuned(policy.drift.0, height), image::tuned(policy.drift.1, height));
+        let drift = policy.carried(height);
         stains[usize::from(material.class)] =
             centroids.get(usize::from(material.class)).copied().flatten().map(|centre| centre + drift);
     }
