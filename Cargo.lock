@@ -828,6 +828,7 @@ name = "aether-puppet"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-component",
  "aether-data",
  "aether-fs",
  "aether-harness-substrate",
@@ -837,35 +838,6 @@ dependencies = [
  "aether-math",
  "aether-render",
  "aether-window",
- "inventory",
- "serde",
- "tracing",
-]
-
-[[package]]
-name = "aether-puppet-idle"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-component",
- "aether-data",
- "aether-kinds",
- "aether-lifecycle",
- "aether-puppet",
- "inventory",
- "serde",
- "tracing",
-]
-
-[[package]]
-name = "aether-puppet-turntable"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-data",
- "aether-kinds",
- "aether-lifecycle",
- "aether-puppet",
  "inventory",
  "serde",
  "tracing",

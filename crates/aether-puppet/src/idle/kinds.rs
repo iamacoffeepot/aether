@@ -51,8 +51,8 @@ pub enum Motion {
     Solo,
 }
 
-/// Init-config for [`Idle`](crate::Idle): which puppet to animate, how
-/// strongly, and — in [`Motion::Solo`] — which single channel to sweep.
+/// Init-config for [`Idle`](crate::Idle): which motion to run, how strongly,
+/// and — in [`Motion::Solo`] — which single channel to sweep.
 ///
 /// # Agent
 /// Encode one of these to the motor's `Config` shape and pass it as the

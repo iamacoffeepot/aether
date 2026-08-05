@@ -14,25 +14,17 @@ license.workspace = true
 # ribbon builder that replaces the SVG emitter.
 #
 # One crate rather than a module in the kit family: the renderer, the
-# charted face, the control surface and the rig are one subsystem, and
-# scattering them across sibling crates would hide that.
+# charted face, the control surface, the rig and its motors are one subsystem,
+# and scattering them across sibling crates would hide that.
 
 [lib]
 crate-type = ["cdylib", "rlib"]
-
-[features]
-# A peer cdylib that links this crate for its kind vocabulary — the
-# turntable, for `Look` — enables this to strip the `export!` entry
-# surface: one `export!` emits the FFI entries per wasm module, so the
-# entry-free rlib face keeps the actor impl without a second
-# `receive_p32` / `init` colliding with the embedder's own `export!` at
-# link. Non-default, so the puppet's own wasm build still emits.
-library = []
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
 # Guest faces only — this is a wasm component and addresses every capability
 # by mail, so each cap comes in marker-only with its runtime feature off.
+aether-component = { path = "../aether-component", default-features = false }
 aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
 aether-render = { path = "../aether-render", default-features = false }
 # ADR-0164: window-originated input is addressed through the neutral window

@@ -6,10 +6,9 @@
 //!
 //! One `aether.puppet.pose` per tick, each of the eight channels on its own
 //! phase, so the subject is never quite still with nothing crossing the wasm
-//! boundary after boot. The sibling of
-//! [`aether-puppet-turntable`](https://docs.rs/aether-puppet-turntable),
-//! which does the same for her eye: subscribe the frame stage, mail the
-//! peer, leave the peer a state machine that only knows the pose it is in.
+//! boundary after boot. The sibling of [`crate::Turntable`], which does the
+//! same for her eye: subscribe the frame stage, mail the peer, leave the
+//! peer a state machine that only knows the pose it is in.
 //!
 //! # Why a component and not a script
 //!
@@ -42,12 +41,12 @@ mod kinds;
 pub use channel::{Authored, Shape, per_tick, shaped};
 pub use kinds::*;
 
+use crate::{Pose, Puppet};
 use aether_actor::{ActorInitError, Addressable, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_component::component::resolve_embedded;
 use aether_data::MailboxId;
 use aether_kinds::Tick;
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
-use aether_puppet::{Pose, Puppet};
 
 /// Channels the rig carries, which is the width of every array here.
 const CHANNELS: usize = 8;
@@ -206,8 +205,6 @@ fn steps(config: &IdleConfig) -> [f32; CHANNELS] {
 
     steps
 }
-
-aether_actor::export!(Idle);
 
 #[cfg(test)]
 mod tests {

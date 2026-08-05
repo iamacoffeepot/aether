@@ -15,8 +15,8 @@
 //! flicks: fast out, slower back, then nothing. That asymmetry is most of
 //! what makes the motion read as an animal, and it costs one branch.
 
-use crate::kinds::Channel;
-use aether_puppet::Pose;
+use super::kinds::Channel;
+use crate::Pose;
 use core::f32::consts::TAU;
 
 /// How a channel's phase becomes a multiplier in `[-1, 1]`.
