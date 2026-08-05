@@ -112,7 +112,7 @@ impl<M: ReplyMode> PeerCtxExt for WasmCtx<'_, M> {
 
 /// Resolve the [`MailboxId`](aether_data::MailboxId) of the embeddable
 /// component loaded under `name`, by folding the instance node
-/// `aether.embedded:<name>` (the [`Embedded`](aether_actor::Embedded)
+/// `aether.embedded:<name>` (the [`Embedded`]
 /// resolver) onto the `aether.component` host cap's carry (ADR-0099 §5/§6,
 /// ADR-0119).
 ///
