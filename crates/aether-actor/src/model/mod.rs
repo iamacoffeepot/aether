@@ -39,10 +39,21 @@ pub trait Resolve {
     /// for a keyed (instanced) target.
     type Args<'a>;
 
-    /// Produce the mailbox for `namespace` as this strategy sees it, given
-    /// the caller's lineage carry and the strategy-specific `args`.
+    /// Produce the raw lineage carry for `namespace` as this strategy sees
+    /// it, given the selected caller scope and the strategy-specific `args`.
+    ///
+    /// The raw carry must remain untagged after a lineage fold. Applying the
+    /// mailbox tag overwrites its high nibble, so a [`MailboxId`] cannot be
+    /// reused as the parent carry for another resolution step.
     #[must_use]
-    fn resolve(caller_carry: u64, namespace: &str, args: Self::Args<'_>) -> MailboxId;
+    fn resolve_carry(caller_carry: u64, namespace: &str, args: Self::Args<'_>) -> u64;
+
+    /// Produce the routable mailbox for `namespace`, applying the mailbox
+    /// tag only after [`Self::resolve_carry`] has completed.
+    #[must_use]
+    fn resolve(caller_carry: u64, namespace: &str, args: Self::Args<'_>) -> MailboxId {
+        MailboxId(with_tag(Tag::Mailbox, Self::resolve_carry(caller_carry, namespace, args)))
+    }
 }
 
 /// Root-pinned keyless resolution (ADR-0119): the depth-1 fixed point
@@ -55,8 +66,8 @@ pub struct One;
 
 impl Resolve for One {
     type Args<'a> = ();
-    fn resolve(_caller_carry: u64, namespace: &str, _args: ()) -> MailboxId {
-        MailboxId(with_tag(Tag::Mailbox, ActorId::singleton(namespace).0))
+    fn resolve_carry(_caller_carry: u64, namespace: &str, _args: ()) -> u64 {
+        ActorId::singleton(namespace).0
     }
 }
 
@@ -67,8 +78,8 @@ pub struct Many;
 
 impl Resolve for Many {
     type Args<'a> = &'a str;
-    fn resolve(caller_carry: u64, namespace: &str, subname: &str) -> MailboxId {
-        MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::instanced(namespace, subname))))
+    fn resolve_carry(caller_carry: u64, namespace: &str, subname: &str) -> u64 {
+        fold_lineage(caller_carry, ActorId::instanced(namespace, subname))
     }
 }
 
@@ -95,8 +106,8 @@ pub struct Embedded;
 
 impl Resolve for Embedded {
     type Args<'a> = ();
-    fn resolve(caller_carry: u64, namespace: &str, _args: ()) -> MailboxId {
-        MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, namespace))))
+    fn resolve_carry(caller_carry: u64, namespace: &str, _args: ()) -> u64 {
+        fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, namespace))
     }
 }
 
@@ -108,9 +119,24 @@ pub struct EmbeddedMany;
 
 impl Resolve for EmbeddedMany {
     type Args<'a> = &'a str;
-    fn resolve(caller_carry: u64, _namespace: &str, subname: &str) -> MailboxId {
-        MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, subname))))
+    fn resolve_carry(caller_carry: u64, _namespace: &str, subname: &str) -> u64 {
+        fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, subname))
     }
+}
+
+/// Which authoritative raw lineage carry a caller-scoped resolver consumes.
+///
+/// Route mailbox ids are deliberately not accepted as a substitute: their
+/// mailbox tag has overwritten part of the fold state. Wasm contexts retain
+/// the available raw values separately and select one through this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallerScope {
+    /// The resolver is root-pinned and does not consume caller lineage.
+    Root,
+    /// The calling actor's own raw lineage carry.
+    Current,
+    /// The calling actor's logical parent's raw lineage carry.
+    Parent,
 }
 
 /// A [`Resolve`] strategy whose fold is correct when it is handed the
@@ -139,11 +165,20 @@ impl Resolve for EmbeddedMany {
     note = "address a loaded component through its host, by the name it was loaded under: \
             `ctx.actor::<ComponentHostCapability>().loaded::<Peer>(name)`"
 )]
-pub trait CallerScoped: Resolve {}
+pub trait CallerScoped: Resolve {
+    /// The authoritative raw caller scope this resolver consumes.
+    const SCOPE: CallerScope;
+}
 
-impl CallerScoped for One {}
-impl CallerScoped for Many {}
-impl CallerScoped for EmbeddedMany {}
+impl CallerScoped for One {
+    const SCOPE: CallerScope = CallerScope::Root;
+}
+impl CallerScoped for Many {
+    const SCOPE: CallerScope = CallerScope::Current;
+}
+impl CallerScoped for EmbeddedMany {
+    const SCOPE: CallerScope = CallerScope::Current;
+}
 
 /// An actor that can be addressed by bare type from a peer's ctx, because its
 /// [`Resolver`](Addressable::Resolver) is [`CallerScoped`] (ADR-0119
@@ -207,6 +242,14 @@ pub trait Addressable: Sized + Send + 'static {
     #[must_use]
     fn resolve(caller_carry: u64, args: <Self::Resolver as Resolve>::Args<'_>) -> MailboxId {
         <Self::Resolver as Resolve>::resolve(caller_carry, Self::NAMESPACE, args)
+    }
+
+    /// This actor's raw lineage carry before the route-only mailbox tag is
+    /// applied. Typed handles retain this value for subsequent child
+    /// resolution at depth two and beyond.
+    #[must_use]
+    fn resolve_carry(caller_carry: u64, args: <Self::Resolver as Resolve>::Args<'_>) -> u64 {
+        <Self::Resolver as Resolve>::resolve_carry(caller_carry, Self::NAMESPACE, args)
     }
 }
 
@@ -567,6 +610,10 @@ mod tests {
         requires_caller_addressable::<RootCap>();
         requires_caller_addressable::<KeyedChild>();
         requires_caller_addressable::<SpawnedSibling>();
+
+        assert_eq!(<One as CallerScoped>::SCOPE, CallerScope::Root);
+        assert_eq!(<Many as CallerScoped>::SCOPE, CallerScope::Current);
+        assert_eq!(<EmbeddedMany as CallerScoped>::SCOPE, CallerScope::Current);
     }
 
     #[test]
@@ -627,6 +674,34 @@ mod tests {
             <PerThing as Addressable>::resolve(carry, "42"),
             <PerThing as Addressable>::resolve(carry, "43"),
             "different subnames resolve to different mailboxes"
+        );
+    }
+
+    /// Resolution exposes the raw lineage fold independently from the
+    /// routable mailbox tag so callers can retain it for later folds.
+    #[test]
+    fn resolve_carry_preserves_the_raw_fold_before_tagging() {
+        struct Child;
+        impl Addressable for Child {
+            const NAMESPACE: &'static str = "test.raw_carry.child";
+            type Resolver = Many;
+        }
+
+        struct Grandchild;
+        impl Addressable for Grandchild {
+            const NAMESPACE: &'static str = "test.raw_carry.grandchild";
+            type Resolver = Many;
+        }
+
+        let root_carry = ActorId::singleton("test.raw_carry.root").0;
+        let child_carry = Child::resolve_carry(root_carry, "one");
+        let child_mailbox = Child::resolve(root_carry, "one");
+        assert_eq!(child_carry, fold_lineage(root_carry, ActorId::instanced("test.raw_carry.child", "one")),);
+        assert_eq!(child_mailbox.0, with_tag(Tag::Mailbox, child_carry));
+
+        assert_eq!(
+            Grandchild::resolve_carry(child_carry, "two"),
+            fold_lineage(child_carry, ActorId::instanced("test.raw_carry.grandchild", "two")),
         );
     }
 }
