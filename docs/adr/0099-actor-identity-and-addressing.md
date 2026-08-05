@@ -67,6 +67,17 @@ MailboxId = with_tag(Tag::Mailbox, state)
 - **The nodes stay recoverable.** The lineage is an array of ActorIds, each reverse-mapping to a name, so a path reads back to what sits at every level — a flat `hash("a/b:7/c")` throws that away.
 - **The fold is incremental.** Extending a lineage is one more `fnv1a_64_fold` step on the running state, so an actor carries its lineage as a single `u64` — the fold state — and a spawn extends it in O(1): `child_state = fnv1a_64_fold(parent_state, child_actor_id.0.to_le_bytes())`. That `u64` is the rolling carry on the actor's runtime binding. "Carry your lineage, pass it forward" is one integer, extended one step per spawn — no growing string, no trait value, no per-spawn rehash of a path.
 
+**The full FNV state and the routing seed are distinct values.** `fnv1a_64_fold` returns the exact 64-bit fold state. `with_tag(Tag::Mailbox, state)` replaces that state's high four bits with the mailbox tag and preserves its low 60 bits; those preserved bits are the **routing seed**. The tagged `MailboxId` is therefore not generally the exact fold state, but it is a routing-equivalent seed for every descendant.
+
+The invariant follows from the FNV-1a byte step. If `h ≡ h' (mod 2^60)`, then for any byte `b`, `h xor b ≡ h' xor b (mod 2^60)` because `b` changes only the low eight bits. Multiplication by the FNV prime and wrapping modulo `2^64` preserve that congruence. Induction over the eight bytes of an ActorId therefore gives:
+
+```text
+with_tag(Mailbox, fold_lineage(h, child))
+    == with_tag(Mailbox, fold_lineage(with_tag(Mailbox, h), child))
+```
+
+The same argument applies at every later generation. Code that needs only descendant routes may use the parent's tagged `MailboxId` as the next routing seed; it does not need a separately retained untagged FNV state. Code that needs the exact 64-bit fold state must retain that value separately, because the natural high nibble cannot be reconstructed from the tag. The `mailbox_ids_are_routing_equivalent_lineage_seeds` regression test enumerates all 16 possible raw high nibbles and checks both a child and a grandchild fold.
+
 **Root caps are the depth-1 fixed point.** A lineage of one node folds to that node verbatim: the loop never runs, so `MailboxId = with_tag(Tag::Mailbox, lineage[0].0)`. Because `with_tag` overwrites the tag nibble, re-tagging an already-`Mailbox`-tagged value is identity, and an ActorId is already `Mailbox`-tagged — so `MailboxId == ActorId == hash(NAMESPACE)`, the id the cap has today. Only actors at depth ≥ 2 — everything loaded, spawned, or nested, each now carrying a real parent — get a new id. The root vocabulary every chassis and component already targets is frozen; the wire break is confined to the hosted layer.
 
 Lineage depth and rendered-path length stay bounded by the existing `MAX_SCOPE_PATH_DEPTH` (8 nodes) and `MAX_SCOPE_PATH_BYTES` (4096) caps (`validate_scope_path`), so a runaway spawn chain is rejected rather than folded into an unbounded key.
