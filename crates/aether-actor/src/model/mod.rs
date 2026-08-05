@@ -403,8 +403,8 @@ pub enum Subname<'a> {
     /// is needed.
     Counter,
     /// Caller-supplied subname. Must pass [`validate_namespace_segment`]
-    /// and be unique within the owning prefix (no `:` separator); names
-    /// retire on drop (ADR-0079).
+    /// and be unique within the owning prefix (no structural `:` or `/`
+    /// separator); names retire on drop (ADR-0079).
     Named(&'a str),
 }
 
@@ -412,7 +412,7 @@ pub enum Subname<'a> {
 /// const on an [`Instanced`] type (the listener prefix) and the
 /// runtime subname passed to `spawn_child`. Same rules apply at both
 /// sites: stay printable-ASCII-ish, don't collide with the structural
-/// `:` separator, and stay under [`NAMESPACE_SEGMENT_MAX_LEN`] bytes.
+/// `:` / `/` separators, and stay under [`NAMESPACE_SEGMENT_MAX_LEN`] bytes.
 ///
 /// `TooLong` carries the limit so error messages can render it
 /// without re-fetching the const, and so future relaxation can vary
@@ -438,7 +438,7 @@ pub const NAMESPACE_SEGMENT_MAX_LEN: usize = 256;
 ///
 /// Rejects:
 /// - empty segments
-/// - segments containing the `:` separator
+/// - segments containing the structural `:` or `/` separators
 /// - segments containing ASCII control bytes or any whitespace (incl. space)
 /// - segments longer than [`NAMESPACE_SEGMENT_MAX_LEN`] bytes
 ///
@@ -453,7 +453,7 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
         return Err(NamespaceError::TooLong { limit: NAMESPACE_SEGMENT_MAX_LEN });
     }
     for c in s.chars() {
-        if c == ':' {
+        if matches!(c, ':' | '/') {
             return Err(NamespaceError::ContainsSeparator);
         }
         if c.is_control() || c.is_whitespace() {
@@ -498,6 +498,13 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
     use super::*;
     use aether_data::{fold_lineage, mailbox_id_from_name};
+
+    #[test]
+    fn namespace_segments_reject_structural_separators() {
+        assert_eq!(validate_namespace_segment("bad:name"), Err(NamespaceError::ContainsSeparator),);
+        assert_eq!(validate_namespace_segment("bad/name"), Err(NamespaceError::ContainsSeparator),);
+        assert_eq!(validate_namespace_segment("aether.kit.camera"), Ok(()));
+    }
 
     /// ADR-0119: cardinality is derived from the resolver. A keyless
     /// [`One`] resolver makes the actor a reachable [`Singleton`] via
