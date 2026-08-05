@@ -136,7 +136,7 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
     // `send_and_await_reply` would hang waiting for a reply that never comes.
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             // Slider drag: press mid-track, drag right, release — the release
             // commits at the dragged value (x=160 → 75% of 0..255 ≈ 191). The
             // press also focuses the slider.
@@ -206,7 +206,7 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
 
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("disable_by_lineage", HarnessOp::send_and_settle(&button, &SetWidgetState { state: unavailable })),
             ("blocked_press", HarnessOp::send_and_settle(&panel, &press(30.0, 190.0))),
             ("blocked_release", HarnessOp::send_and_settle(&panel, &release(30.0, 190.0))),
@@ -378,7 +378,7 @@ fn panel_stacks_declared_children_in_order() {
     harness
         .execute(vec![
             // First tick spawns + lays out the declared stack.
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             // Tab from no focus lands on the first focusable child (index 0);
             // an arrow nudge on the focused slider commits + logs it.
             ("tab_first", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
@@ -423,7 +423,7 @@ fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("focus_read_only", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
             (
                 "blocked_read_only_page",
@@ -475,7 +475,7 @@ fn drive_state_and_keyboard_session(harness: &mut SubstrateHarness) {
     let run = child_address("run");
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             // Forward Tab skips the disabled first slider and focuses the
             // read-only value. Its arrow input must not mutate.
             ("tab_value", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
@@ -586,7 +586,7 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
     let panel = panel_address();
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("focus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
             ("blocked_key", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
             ("blocked_pointer", HarnessOp::send_and_settle(&panel, &press(30.0, 70.0))),
@@ -685,7 +685,7 @@ fn live_state_changes_cancel_button_arm_and_slider_drag() {
     );
 
     let panel = panel_address();
-    harness.execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick))]).expect("spawn widget set");
+    harness.execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))]).expect("spawn widget set");
     drive_button_cancellation_session(&mut harness);
     drive_slider_cancellation_session(&mut harness);
 
@@ -729,7 +729,7 @@ fn read_only_text_field_blocks_activation_until_enabled() {
     let panel = panel_address();
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("focus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
             (
                 "blocked_text",

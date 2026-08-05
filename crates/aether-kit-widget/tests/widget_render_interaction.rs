@@ -135,7 +135,11 @@ fn panel_address() -> String {
 }
 
 fn child_address(subname: &str) -> String {
-    format!("{}/{}:{}", panel_address(), aether_component::WasmTrampoline::NAMESPACE, subname)
+    nested_child_address(&panel_address(), subname)
+}
+
+fn nested_child_address(parent: &str, subname: &str) -> String {
+    format!("{parent}/{}:{subname}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
 /// The kit's `assets/` dir — where `RobotoMono.ttf` ships, resolved relative
@@ -374,8 +378,8 @@ fn warm_panel(harness: &mut SubstrateHarness) {
     let panel = panel_address();
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
-            ("prime", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("prime", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("warm-up");
@@ -385,7 +389,12 @@ fn warm_panel(harness: &mut SubstrateHarness) {
 /// as a capture's `mails` so the panel redraws with its current widget state the
 /// same frame the substrate reads back.
 fn tick_to_panel() -> NamedMail {
-    NamedMail { recipient_name: panel_address(), kind_name: Tick::NAME.to_owned(), payload: Vec::new(), count: 1 }
+    NamedMail {
+        recipient_name: panel_address(),
+        kind_name: Tick::NAME.to_owned(),
+        payload: Tick::default().encode_into_bytes(),
+        count: 1,
+    }
 }
 
 /// A left mouse-button press at `(x, y)`.
@@ -1275,7 +1284,7 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
             ("focus", HarnessOp::send_and_settle(&panel, &press(50.0, text_top + 10.0))),
             ("focus_up", HarnessOp::send_and_settle(&panel, &release(50.0, text_top + 10.0))),
             ("type", HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "hix".to_owned() })),
-            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("focus + type");
@@ -1476,8 +1485,8 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     // the measured interactions.
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
-            ("prime", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("prime", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(4)),
         ])
         .expect("warm-up");
@@ -1496,7 +1505,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
                 "type",
                 HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: typed_text.to_owned() }),
             ),
-            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("focus + type");
@@ -1585,7 +1594,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
                     },
                 ),
             ),
-            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("ime preedit");
@@ -1630,7 +1639,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
                 "commit_text",
                 HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "Z".to_owned() }),
             ),
-            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("commit replacement text");
@@ -1694,8 +1703,8 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
     let panel = panel_address();
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
-            ("prime", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("prime", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(4)),
         ])
         .expect("warm text area and measured font");
@@ -1733,7 +1742,7 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
                 "line4",
                 HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "tail".to_owned() }),
             ),
-            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("rasterize", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle_glyphs", HarnessOp::advance(2)),
         ])
         .expect("type five text-area lines");
@@ -1862,7 +1871,7 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
                     },
                 ),
             ),
-            ("rasterize_preedit", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("rasterize_preedit", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle_preedit", HarnessOp::advance(2)),
         ])
         .expect("multiline IME preedit");
@@ -2358,7 +2367,7 @@ fn nested_scroll_relays_live_font_theme_to_real_label_glyphs() {
                 "relay_theme",
                 HarnessOp::send_and_settle(&panel, &SetTheme { theme: Theme { font_id, ..Theme::DEFAULT } }),
             ),
-            ("prime_relayed_glyph", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("prime_relayed_glyph", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle_relayed_glyph", HarnessOp::advance(2)),
             ("capture_relayed_glyph", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
@@ -2465,9 +2474,9 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
         .expect("nested wheel routing while button capture is held");
 
     let outer_address = child_address("outer");
-    // Inline aliases currently fold flat on the component carry even though
-    // the guest registry records the logical parent for `ctx.parent()`.
-    let inner_address = child_address("inner");
+    // The inner scroll is born from the outer scroll, so its alias extends
+    // that executing actor's lineage rather than restarting at the panel.
+    let inner_address = nested_child_address(&outer_address, "inner");
     let outer_id = mailbox_id_from_path(&outer_address).0;
     let inner_id = mailbox_id_from_path(&inner_address).0;
     let first_log = panel_log_messages(&mut harness);

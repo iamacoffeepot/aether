@@ -24,18 +24,8 @@ pub struct TurntableConfig {
     /// all, so a parked turntable costs the frame nothing beyond an empty
     /// handler call.
     pub running: bool,
-    /// Sweep rate, degrees per second, converted against [`Self::tick_hz`].
-    /// Negative turns the other way.
+    /// Sweep rate in degrees per elapsed second. Negative turns the other way.
     pub degrees_per_second: f32,
-    /// Tick cadence the rate is converted against. `aether.lifecycle.tick`
-    /// carries no elapsed time, so a rate stated in seconds needs the cadence
-    /// stated alongside it; on the headless chassis this is `AETHER_TICK_HZ`.
-    ///
-    /// The desktop chassis ticks per frame rather than on a timer, so there
-    /// the realized sweep rate is the configured one only while the frame
-    /// rate matches this — and the gap between the two is a reading of the
-    /// frame rate, not an error to correct.
-    pub tick_hz: f32,
     /// Azimuth the sweep starts from, degrees. The turntable owns this one
     /// field of the pose and advances it; the three below it holds.
     pub azimuth: f32,
@@ -67,7 +57,6 @@ impl Default for TurntableConfig {
             // it turns, quick enough that a recording of one full turn is
             // shorter than a shot anybody would sit through twice.
             degrees_per_second: 30.0,
-            tick_hz: 60.0,
             // The puppet's own boot framing, so a bare load changes the
             // subject's motion and nothing about how it is composed.
             azimuth: 0.0,

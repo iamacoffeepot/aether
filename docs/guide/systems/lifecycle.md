@@ -49,15 +49,18 @@ subscriber table (`KindId → set of mailboxes`), the fan-out, and the settlemen
 gating. The cap is a bridged singleton, so a wasm guest names it by type:
 `ctx.actor::<LifecycleCapability>()`.
 
-**Stages are empty signals.** Each stage kind is a zero-sized type in
-`aether-kinds`; the broadcast *is* the signal, carrying no payload. Any per-frame
-data a subscriber needs rides its own mail — the camera computes a view-projection
-matrix on `Tick` and publishes it to `aether.render`, rather than threading it
-through a stage. The stage-kind vocabulary:
+**Stages are signals; `Tick` carries elapsed time.** `Tick` has one
+`delta_micros: u32` field supplied by the chassis cadence source. A subscriber
+integrates a rate in units per second with `tick.delta_seconds()`, so slowing or
+speeding the frame cadence does not slow or speed authored motion. Every other
+stage is a zero-sized signal. Application state still rides its own mail — the
+camera computes a view-projection matrix on `Tick` and publishes it to
+`aether.render`, rather than threading it through a stage. The stage-kind
+vocabulary:
 
 | Stage kind | Wire name | Role |
 |---|---|---|
-| `Tick` | `aether.lifecycle.tick` | per-frame step; the kind every component touches |
+| `Tick` | `aether.lifecycle.tick` | per-frame step carrying elapsed microseconds |
 | `Render` | `aether.lifecycle.render` | submit geometry after the whole `Tick` chain settles |
 | `Present` | `aether.lifecycle.present` | post-render ordering point and the graceful-quit drain edge |
 | `Shutdown` | `aether.lifecycle.shutdown` | terminal; graceful cleanup with the mail surface still live |
@@ -67,8 +70,9 @@ through a stage. The stage-kind vocabulary:
 
 Two more kinds are the cadence wire, not stage broadcasts: `LifecycleAdvance`
 (`aether.lifecycle.advance`) is what the chassis main loop sends to ask for the
-next step, and `LifecycleAdvanceComplete` (`aether.lifecycle.advance_complete`) is
-the reply it waits on.
+next step. Its `delta_micros` is copied into `Tick` and ignored for other stages.
+`LifecycleAdvanceComplete` (`aether.lifecycle.advance_complete`) is the reply the
+chassis waits on.
 
 **The graph is a builder over kind types.** A chassis builds its graph with
 `LifecycleGraphData::builder()`, naming each stage by its kind and the edge out of
@@ -91,9 +95,11 @@ unregistered kind, a kind is registered twice, or the graph has no terminal — 
 a malformed lifecycle fails at chassis-build, not at runtime.
 
 **Settlement gates each advance.** The chassis main loop drives cadence by mailing
-`LifecycleAdvance` to the cap once per step. On each advance the cap broadcasts the
-current stage to its subscribers, subscribes settlement on that broadcast's chain
-root, and waits: it advances the state pointer along the resolved edge and replies
+`LifecycleAdvance` to the cap once per step. Desktop measures elapsed wall-clock
+time between frame ticks, headless uses its configured timer period, and the
+substrate harness supplies deterministic synthetic elapsed time. On each advance
+the cap broadcasts the current stage to its subscribers, subscribes settlement on
+that broadcast's chain root, and waits: it advances the state pointer along the resolved edge and replies
 `LifecycleAdvanceComplete` only once that stage's whole chain has
 [settled](tracing-and-settlement.md). Cadence couples to actual work completion —
 `Render` broadcasts only after every actor's `Tick` handler has finished, so a

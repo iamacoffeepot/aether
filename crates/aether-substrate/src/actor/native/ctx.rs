@@ -1046,6 +1046,39 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, M, A> {
             self.reply_target(),
         )
     }
+
+    /// Stage a child under an already-validated logical actor identity that
+    /// shares this ctx's physical binding. This is the wasm trampoline seam:
+    /// an inline actor executes inside the root trampoline but its detached
+    /// child must extend the inline actor's lineage. The component host
+    /// validates `parent` against its active cluster and supplies the
+    /// registry-owned canonical `parent_name`; native actor code should use
+    /// [`Self::spawn_child`] instead.
+    #[doc(hidden)]
+    pub fn spawn_child_scoped<'b, C>(
+        &'b self,
+        parent: MailboxId,
+        parent_name: Arc<str>,
+        subname: super::spawn::Subname<'b>,
+        config: C::Config,
+        params: C::Params,
+    ) -> super::spawn::HandlerSpawnBuilder<'b, C>
+    where
+        C: aether_actor::ChildOf<A> + aether_actor::Instanced + NativeActor,
+    {
+        let spawner = self.binding.spawner().expect("NativeCtx::spawn_child_scoped requires a chassis-built binding");
+        let sender =
+            Source { addr: SourceAddr::Component(self.binding.self_mailbox()), correlation_id: Source::NO_CORRELATION };
+        let parent = super::identity::ActorRuntimeIdentity::new(parent, MailboxId::NONE, parent.0, parent_name);
+        let builder =
+            super::spawn::SpawnBuilder::new_child(Arc::clone(spawner), subname, config, params, sender, parent);
+        super::spawn::HandlerSpawnBuilder::new(
+            builder,
+            Arc::clone(self.binding),
+            self.in_flight_root,
+            self.reply_target(),
+        )
+    }
 }
 
 impl<M: ReplyMode, A> NativeCtx<'_, M, A> {

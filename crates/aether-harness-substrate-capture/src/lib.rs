@@ -2,9 +2,10 @@
 //! ADR-0161): the [`GpuFrameHook`] that owns the pumped `aether.render`
 //! slot and the builder / harness extensions that boot and read it, the
 //! image-compare and `FrameCheck` scoring in [`visual`], and the
-//! failure-only [`ArtifactGuard`]. Split from the core so only visual
-//! consumers carry the aether-render + wgpu edge in their `cargo xtask
-//! affected` closure.
+//! failure-only [`ArtifactGuard`]. [`RenderHarnessExt::program_gpu_timings`]
+//! reads GPU timestamp state without capture readback or PNG encode. Split
+//! from the core so only visual consumers carry the aether-render + wgpu edge
+//! in their `cargo xtask affected` closure.
 //!
 //! A visual test composes render with the builder extension and reads
 //! overlay state with the harness extension:
@@ -23,5 +24,6 @@ mod ext;
 pub mod test_helpers;
 pub mod visual;
 
+pub use aether_render::{PassTimingRow, ProgramTimingsResult};
 pub use artifacts::ArtifactGuard;
 pub use ext::{GpuFrameHook, RenderHarnessBuilderExt, RenderHarnessExt};

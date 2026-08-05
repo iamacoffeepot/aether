@@ -19,7 +19,7 @@ use aether_harness_substrate::{ExecutionError, ExecutionResult, HarnessOp, Subst
 use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe,
-    TagSpawnQuery, TagSpawnReport,
+    SpawnNestedDetached, TagSpawnQuery, TagSpawnReport,
 };
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -160,6 +160,127 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
         CountReport { count: 2 },
         "the inline child's state must survive replace_component via the composite bundle + \
          rehydrate reconstruct; got {post_count:?} (0 means the child was not reconstructed)",
+    );
+}
+
+/// Issue 4490 end-to-end lineage packet. A root wasm actor spawns an inline
+/// `branch`, that actor immediately spawns an inline `leaf`, and later the
+/// branch spawns a detached `worker`. Both grandchildren must live at the
+/// rendered branch lineage rather than restarting from the component root.
+/// The inline leaf accepts delivery, persists across replacement under the
+/// same logical parent, and can still be found and torn down by that parent
+/// after reconstruction; the detached worker remains independently live.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
+    use aether_actor::Addressable;
+
+    const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
+    const FIXTURE_NAME: &str = "inline_nested_lineage";
+
+    let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
+        return;
+    };
+    let root_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
+    let branch_addr = format!("{root_addr}/aether.embedded:branch");
+    let leaf_addr = format!("{branch_addr}/aether.embedded:leaf");
+    let worker_addr = format!("{branch_addr}/aether.embedded:worker");
+
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let loaded = harness
+        .execute(vec![(
+            "load",
+            HarnessOp::send_and_await_reply(
+                "aether.component",
+                &LoadComponent {
+                    wasm,
+                    name: Some(FIXTURE_NAME.to_owned()),
+                    config: Vec::new(),
+                    export: Some("test.inline.nested_parent".to_owned()),
+                },
+            ),
+        )])
+        .expect("load nested lineage fixture");
+    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Err { error } => panic!("nested lineage fixture load failed: {error}"),
+    };
+
+    // Grandchild-depth delivery proves the inline alias extends `branch`.
+    probe_child_alias(&mut harness, &leaf_addr, &CountQuery);
+    let before = harness
+        .execute(vec![
+            ("bump_a", HarnessOp::send_and_settle::<Bump>(leaf_addr.as_str(), &Bump)),
+            ("bump_b", HarnessOp::send_and_settle::<Bump>(leaf_addr.as_str(), &Bump)),
+            ("query", HarnessOp::send_and_await_reply(leaf_addr.as_str(), &CountQuery)),
+        ])
+        .expect("deliver to nested inline leaf");
+    assert_eq!(before.reply::<CountReport>("query").expect("decode nested leaf count"), CountReport { count: 2 },);
+
+    // Spawn a detached wasm actor while dispatching the inline branch. Its
+    // predicted and registered identity must use the same branch seed.
+    harness
+        .execute(vec![(
+            "spawn_worker",
+            HarnessOp::send_and_settle::<SpawnNestedDetached>(branch_addr.as_str(), &SpawnNestedDetached),
+        )])
+        .expect("nested detached spawn settles");
+    let worker = probe_child_alias(&mut harness, &worker_addr, &CountQuery);
+    assert_eq!(
+        worker.reply::<CountReport>("probe").expect("decode nested worker reply"),
+        CountReport { count: 77 },
+        "the detached worker is delivered at the executing inline actor's lineage",
+    );
+
+    let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
+    let swapped = harness
+        .execute(vec![(
+            "swap",
+            HarnessOp::send_and_await_reply(
+                "aether.component",
+                &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+            ),
+        )])
+        .expect("replace nested lineage fixture");
+    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
+        ReplaceResult::Ok { .. } => {}
+        ReplaceResult::Err { error } => panic!("replace nested lineage fixture: {error}"),
+    }
+
+    let after = harness
+        .execute(vec![("query", HarnessOp::send_and_await_reply(leaf_addr.as_str(), &CountQuery))])
+        .expect("query reconstructed nested leaf");
+    assert_eq!(
+        after.reply::<CountReport>("query").expect("decode reconstructed nested leaf count"),
+        CountReport { count: 2 },
+        "rehydration restores the leaf under its persisted branch parent",
+    );
+    let worker_after = harness
+        .execute(vec![("worker", HarnessOp::send_and_await_reply(worker_addr.as_str(), &CountQuery))])
+        .expect("detached worker outlives root replacement");
+    assert_eq!(
+        worker_after.reply::<CountReport>("worker").expect("decode post-replace worker reply"),
+        CountReport { count: 77 },
+    );
+
+    // The reconstructed branch resolves its reconstructed child by logical
+    // parent and retires that exact grandchild alias.
+    harness
+        .execute(vec![(
+            "despawn_leaf",
+            HarnessOp::send_and_settle::<DespawnChild>(branch_addr.as_str(), &DespawnChild),
+        )])
+        .expect("despawn reconstructed nested leaf");
+    let retired =
+        harness.execute(vec![("leaf", HarnessOp::send_and_await_reply(leaf_addr.as_str(), &CountQuery))]).err();
+    assert!(
+        matches!(
+            &retired,
+            Some(ExecutionError::OpFailed { error: SubstrateHarnessError::UnknownMailbox(name), .. })
+                if name == &leaf_addr
+        ),
+        "the reconstructed grandchild route retires at its nested address; got {retired:?}",
     );
 }
 

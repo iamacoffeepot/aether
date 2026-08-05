@@ -133,23 +133,23 @@ impl<C: Kind> LifecycleMailboxForward for NativeActorMailboxWithContext<'_, '_, 
     }
 }
 
-/// Push the current stage's empty signal to each subscriber as an
-/// untyped envelope. Uses the runtime-id `send_envelope_tracked` path
-/// because the broadcast kind is chosen at runtime (the current
-/// state's), not a compile-site `K`; the path preserves the inbound
-/// `(parent, root)` lineage so settlement counts each child against
-/// the root (ADR-0080 §6).
+/// Push the current stage payload to each subscriber as an untyped envelope.
+/// Uses the runtime-id `send_envelope_tracked` path because the broadcast
+/// kind is chosen at runtime (the current state's), not a compile-site `K`;
+/// the path preserves the inbound `(parent, root)` lineage so settlement
+/// counts each child against the root (ADR-0080 §6).
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub fn broadcast_to_subscribers<M: ReplyMode>(
     ctx: &mut NativeCtx<'_, M>,
     subscribers: &BTreeMap<KindId, BTreeSet<MailboxId>>,
     stage: KindId,
+    payload: &[u8],
 ) {
     let Some(set) = subscribers.get(&stage) else {
         return;
     };
     for mailbox in set {
-        let _ = ctx.send_envelope_tracked(SubstrateMailboxId(mailbox.0), stage, &[]);
+        let _ = ctx.send_envelope_tracked(SubstrateMailboxId(mailbox.0), stage, payload);
     }
 }
 

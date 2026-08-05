@@ -14,8 +14,12 @@ use std::sync::Arc;
 
 use aether_actor::Addressable;
 use aether_data::{Kind, MailId};
-use aether_harness_substrate::{FrameHook, RenderHookWiring, SubstrateHarness, SubstrateHarnessBuilder};
-use aether_render::{DrawTexturedQuads, Frame, RenderCapability, RenderParams, RenderTuningConfig};
+use aether_harness_substrate::{
+    ExecutionError, FrameHook, HarnessOp, RenderHookWiring, SubstrateHarness, SubstrateHarnessBuilder,
+};
+use aether_render::{
+    DrawTexturedQuads, Frame, ProgramTimings, ProgramTimingsResult, RenderCapability, RenderParams, RenderTuningConfig,
+};
 use aether_substrate::PumpedSlot;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::{Mail, MailboxId};
@@ -170,6 +174,23 @@ pub trait RenderHarnessExt {
     /// pipeline to snapshot.
     #[must_use]
     fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads>;
+
+    /// Read the asynchronously folded, per-pass GPU timestamp table for
+    /// `program_id` (iamacoffeepot/aether#4422/#4423).
+    ///
+    /// Build the harness with
+    /// [`RenderHarnessBuilderExt::with_render_pass_timings`], drive the
+    /// program through consecutive [`HarnessOp::advance`] frames, then call
+    /// this outside the measured run. The request reads duration state only:
+    /// it performs no frame capture, image readback, or PNG encode, so image
+    /// entropy cannot contaminate the result.
+    ///
+    /// [`ProgramTimingsResult::Absent`] preserves why this adapter cannot
+    /// answer (or why timing was not enabled); it must not be read as a table
+    /// of zero-cost passes. [`ProgramTimingsResult::Err`] reports a bad
+    /// program id or missing render GPU. Capture visual evidence separately,
+    /// after timing.
+    fn program_gpu_timings(&mut self, program_id: u32) -> Result<ProgramTimingsResult, ExecutionError>;
 }
 
 impl RenderHarnessExt for SubstrateHarness {
@@ -178,5 +199,15 @@ impl RenderHarnessExt for SubstrateHarness {
             .and_then(|hook| hook.as_any().downcast_ref::<GpuFrameHook>())
             .expect("committed_overlay_snapshot requires a harness built with .with_render() (issue #3764)")
             .committed_overlay_snapshot()
+    }
+
+    fn program_gpu_timings(&mut self, program_id: u32) -> Result<ProgramTimingsResult, ExecutionError> {
+        const LABEL: &str = "program gpu timings";
+
+        self.execute(vec![(
+            LABEL,
+            HarnessOp::send_and_await_reply(RenderCapability::NAMESPACE, &ProgramTimings { program_id }),
+        )])?
+        .reply(LABEL)
     }
 }

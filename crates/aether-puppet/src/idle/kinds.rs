@@ -66,16 +66,6 @@ pub struct IdleConfig {
     /// loaded and sends nothing at all, so the subject holds whatever pose
     /// it was last given rather than snapping back to rest.
     pub running: bool,
-    /// Tick cadence the periods are converted against. `aether.lifecycle.tick`
-    /// carries no elapsed time, so a period stated in seconds needs the
-    /// cadence stated alongside it; on the headless chassis this is
-    /// `AETHER_TICK_HZ`.
-    ///
-    /// The desktop chassis ticks per frame rather than on a timer, so there
-    /// the realized rate is the configured one only while the frame rate
-    /// matches this — and the gap between the two is a reading of the frame
-    /// rate, not an error to correct.
-    pub tick_hz: f32,
     /// Idle every channel, or solo one of them.
     pub motion: Motion,
     /// Scales every channel's authored amplitude in [`Motion::Idle`].
@@ -111,7 +101,6 @@ impl Default for IdleConfig {
     fn default() -> Self {
         Self {
             running: true,
-            tick_hz: 60.0,
             motion: Motion::Idle,
             liveliness: 1.0,
             channel: Channel::Yaw,

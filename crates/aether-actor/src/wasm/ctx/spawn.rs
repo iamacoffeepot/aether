@@ -122,7 +122,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         let type_tag = ActorTypeTag::of::<C>().0;
         let (is_counter, full_subname) = resolve_subname(subname)?;
         let config_bytes = config.encode_into_bytes();
-        let id = mail::spawn_sibling(type_tag, is_counter, &full_subname, &config_bytes);
+        let id = mail::spawn_sibling_scoped(self.mailbox, type_tag, is_counter, &full_subname, &config_bytes);
         Ok(MailboxId(id))
     }
 
@@ -146,14 +146,10 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// [`SpawnError::SubnameInvalid`]; a synchronous `init` `Err` returns
     /// [`SpawnError::InitFailed`].
     ///
-    /// The alias is folded on the instance carry (flat), so a child's
-    /// subname must be unique within the whole cluster — two children that
-    /// resolve to the same `aether.embedded:<subname>` collide on one alias.
-    /// The spawning actor's real id is recorded as the child's logical
-    /// parent so relative addressing (`ctx.parent()` / `ctx.sibling(name)` /
-    /// `ctx.child(name)`) resolves over the registry. Per-parent subname
-    /// scoping (the nested-alias fold, ADR-0117) is a follow-up needing a
-    /// substrate change.
+    /// The alias extends the executing actor's lineage, so the same subname
+    /// can exist beneath distinct parents in one component cluster. The same
+    /// executing id is recorded as the child's logical parent for relative
+    /// addressing and replacement reconstruction.
     pub fn spawn_inline_child<P, C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<MailboxId, SpawnError>
     where
         P: WasmActor,
@@ -168,7 +164,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     {
         self.validate_spawn_parent::<P>()?;
         let (is_counter, full_subname) = resolve_subname(subname)?;
-        let alias = MailboxId(mail::spawn_inline_child(is_counter, &full_subname));
+        let alias = MailboxId(mail::spawn_inline_child_scoped(self.mailbox, is_counter, &full_subname));
         // Re-decode an owned `C::Config` for the in-guest `init` from the
         // same bytes the detached path would have shipped — symmetric with
         // `spawn_child`'s encode-in-guest / decode-in-host round-trip, and
@@ -182,12 +178,8 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         // tag `init_typed_p32` selects on. This is the id definition for the
         // child type, so the disallowed-method allow mirrors `spawn_child`.
         let type_tag = ActorTypeTag::of::<C>().0;
-        // The spawner's real folded id is recorded as the child's logical
-        // parent so relative addressing (`ctx.parent()` / `ctx.sibling()`)
-        // resolves over the registry. The alias fold itself stays flat on
-        // the instance carry (the substrate's current `spawn_inline_child`),
-        // so subnames are cluster-unique; per-parent subname scoping (the
-        // nested-alias fold) is a follow-up needing a substrate change.
+        // The executing actor is both the scoped host fold seed and the
+        // logical parent recorded for relative addressing and reconstruction.
         install_inline_child::<C>(self.inline, alias, type_tag, full_subname, is_counter, self.mailbox, bytes, owned)
     }
 

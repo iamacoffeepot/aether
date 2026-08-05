@@ -499,12 +499,15 @@ mod tests {
         let inherited_mail = MailId::new(MailboxId(0x4a14), 2);
 
         spawn_inherit::<StubActor, _>(Arc::clone(&binding), inherited_mail, inherited_root, |mut ctx| {
-            <InheritCtx<StubActor> as MailSender>::send::<ParentScopedActor, _>(&mut ctx, &aether_kinds::Tick);
+            <InheritCtx<StubActor> as MailSender>::send::<ParentScopedActor, _>(
+                &mut ctx,
+                &aether_kinds::Tick::default(),
+            );
         })
         .join()
         .expect("inherit worker joins");
         spawn_detached::<StubActor, _>(binding, |mut ctx| {
-            <RootCtx<StubActor> as MailSender>::send::<ParentScopedActor, _>(&mut ctx, &aether_kinds::Tick);
+            <RootCtx<StubActor> as MailSender>::send::<ParentScopedActor, _>(&mut ctx, &aether_kinds::Tick::default());
         })
         .join()
         .expect("root worker joins");
@@ -537,7 +540,7 @@ mod tests {
                 <InheritCtx<StubActor> as MailSender>::send_to_named(
                     &mut inherit,
                     "test.spawn_thread.recipient",
-                    &aether_kinds::Tick,
+                    &aether_kinds::Tick::default(),
                 );
             },
         );
@@ -574,11 +577,14 @@ mod tests {
         let inherited_mail_id = MailId::new(MailboxId(0x5678), 13);
 
         let join = spawn_inherit::<StubActor, _>(binding, inherited_mail_id, inherited_root, move |mut inherit| {
-            <InheritCtx<StubActor> as MailSender>::send_detached::<StubActor, _>(&mut inherit, &aether_kinds::Tick);
+            <InheritCtx<StubActor> as MailSender>::send_detached::<StubActor, _>(
+                &mut inherit,
+                &aether_kinds::Tick::default(),
+            );
             <InheritCtx<StubActor> as MailSender>::send_detached_to_named(
                 &mut inherit,
                 "test.spawn_thread.named_detached",
-                &aether_kinds::Tick,
+                &aether_kinds::Tick::default(),
             );
         });
         join.join().expect("inherit worker thread joins");
@@ -607,7 +613,7 @@ mod tests {
             <RootCtx<StubActor> as MailSender>::send_to_named(
                 &mut root,
                 "test.spawn_thread.recipient",
-                &aether_kinds::Tick,
+                &aether_kinds::Tick::default(),
             );
         });
         join.join().expect("root worker thread joins");
@@ -634,11 +640,14 @@ mod tests {
 
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0xBC)));
         let join = spawn_detached::<StubActor, _>(binding, move |mut root| {
-            <RootCtx<StubActor> as MailSender>::send_detached::<StubActor, _>(&mut root, &aether_kinds::Tick);
+            <RootCtx<StubActor> as MailSender>::send_detached::<StubActor, _>(
+                &mut root,
+                &aether_kinds::Tick::default(),
+            );
             <RootCtx<StubActor> as MailSender>::send_detached_to_named(
                 &mut root,
                 "test.spawn_thread.named_detached",
-                &aether_kinds::Tick,
+                &aether_kinds::Tick::default(),
             );
         });
         join.join().expect("root worker thread joins");
@@ -669,7 +678,7 @@ mod tests {
                 <RootCtx<StubActor> as MailSender>::send_to_named(
                     &mut root,
                     "test.spawn_thread.recipient",
-                    &aether_kinds::Tick,
+                    &aether_kinds::Tick::default(),
                 );
             }
         });
@@ -758,7 +767,7 @@ mod tests {
 
         let recipient = registry.lookup("test.spawn_thread.recipient").expect("recipient registered");
         let kind = <aether_kinds::Tick as Kind>::ID;
-        let payload = aether_data::encode_empty::<aether_kinds::Tick>();
+        let payload = aether_kinds::Tick::default().encode_into_bytes();
         mailer.push(Mail::new(recipient, KindId(kind.0), payload, 1));
 
         let captured = captured.lock().unwrap();

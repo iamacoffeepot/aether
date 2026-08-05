@@ -41,7 +41,7 @@ use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use aether_data::MailboxId;
+use aether_data::{Kind, MailboxId};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::{
     Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
@@ -54,7 +54,7 @@ use aether_harness_substrate_capture::{
 };
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, ClipRect, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, LoadComponent,
-    LoadResult, NamedMail, QuadScale, QuadSpace, SimilarityCheck,
+    LoadResult, NamedMail, QuadScale, QuadSpace, SimilarityCheck, Tick,
 };
 use aether_math::{Rgb, Rgba};
 use aether_render::QuadBlend;
@@ -206,8 +206,8 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
         envelope(&probe_address(), &SetRender { r: 200, g: 32, b: 32, visible: 1 }),
         NamedMail {
             recipient_name: probe_address(),
-            kind_name: "aether.lifecycle.tick".to_owned(),
-            payload: Vec::new(),
+            kind_name: Tick::NAME.to_owned(),
+            payload: Tick::default().encode_into_bytes(),
             count: 1,
         },
     ];

@@ -130,11 +130,12 @@ pub fn reply_correlation() -> u64 {
 /// vs a caller-supplied name; `subname` is the full prefixed subname
 /// for `Named` or the type-namespace prefix for `Counter`; `config`
 /// is the encoded `Config` kind. The returned id is the spawned
-/// sibling's ADR-0099 §3 lineage fold (the trampoline's carry folded
+/// sibling's ADR-0099 §3 lineage fold (the component root folded
 /// with the sibling's node), known synchronously — one fold step on a
 /// carry the host already holds; the spawn itself completes just
 /// after this call (ADR-0097 §4), so a spawn-time failure surfaces
 /// asynchronously rather than here.
+#[allow(dead_code, reason = "legacy guest ABI bridge retained during the scoped-spawn migration")]
 #[must_use]
 pub fn spawn_sibling(tag: u64, is_counter: bool, subname: &str, config: &[u8]) -> u64 {
     let subname_bytes = subname.as_bytes();
@@ -154,10 +155,33 @@ pub fn spawn_sibling(tag: u64, is_counter: bool, subname: &str, config: &[u8]) -
     }
 }
 
+/// Issue 4490: stage a sibling beneath the executing actor rather than the
+/// component root. `parent` is the caller's current mailbox; the host accepts
+/// it only when it belongs to this component cluster. The legacy
+/// [`spawn_sibling`] bridge remains for already-built guest compatibility.
+#[must_use]
+pub fn spawn_sibling_scoped(parent: u64, tag: u64, is_counter: bool, subname: &str, config: &[u8]) -> u64 {
+    let subname_bytes = subname.as_bytes();
+    // SAFETY: both pointer/length pairs are borrowed for this call and the
+    // host copies them before returning; the scalar parent is guest-carried
+    // identity that the host validates before use.
+    unsafe {
+        raw::spawn_sibling_scoped(
+            parent,
+            tag,
+            u32::from(is_counter),
+            subname_bytes.as_ptr().addr() as u32,
+            subname_bytes.len() as u32,
+            config.as_ptr().addr() as u32,
+            config.len() as u32,
+        )
+    }
+}
+
 /// ADR-0114: register an inline child's alias route and return its
 /// `MailboxId`. The inline analogue of `spawn_sibling`: the
-/// host folds the alias id onto the parent's lineage carry and
-/// registers a route to the parent trampoline's own slot, so the
+/// legacy host folds the alias id onto the component root and registers a
+/// route to that trampoline's own slot, so the
 /// co-located child is addressable like any actor with no new
 /// trampoline. `is_counter` selects `Subname::Counter` (the host
 /// appends a monotonic discriminator) vs a caller-supplied name;
@@ -166,6 +190,7 @@ pub fn spawn_sibling(tag: u64, is_counter: bool, subname: &str, config: &[u8]) -
 /// (see [`crate::WasmCtx::spawn_inline_child`]). The returned id is the
 /// ADR-0099 §3 lineage fold, known synchronously; `0` on a host-side
 /// error.
+#[allow(dead_code, reason = "legacy guest ABI bridge retained during the scoped-spawn migration")]
 #[must_use]
 pub fn spawn_inline_child(is_counter: bool, subname: &str) -> u64 {
     let subname_bytes = subname.as_bytes();
@@ -175,6 +200,25 @@ pub fn spawn_inline_child(is_counter: bool, subname: &str) -> u64 {
     // call's duration; the host copies before returning.
     unsafe {
         raw::spawn_inline_child(u32::from(is_counter), subname_bytes.as_ptr().addr() as u32, subname_bytes.len() as u32)
+    }
+}
+
+/// Issue 4490: allocate an inline alias beneath the executing actor. The
+/// host validates `parent` as this component's root or inline alias before
+/// folding or rendering the new address. The unscoped bridge remains only
+/// for staged compatibility with legacy guests.
+#[must_use]
+pub fn spawn_inline_child_scoped(parent: u64, is_counter: bool, subname: &str) -> u64 {
+    let subname_bytes = subname.as_bytes();
+    // SAFETY: the slice remains valid for the call and is copied host-side;
+    // the scalar parent is validated against the active component cluster.
+    unsafe {
+        raw::spawn_inline_child_scoped(
+            parent,
+            u32::from(is_counter),
+            subname_bytes.as_ptr().addr() as u32,
+            subname_bytes.len() as u32,
+        )
     }
 }
 

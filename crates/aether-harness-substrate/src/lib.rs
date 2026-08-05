@@ -40,7 +40,8 @@ pub use chassis::{
     SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS,
 };
 pub use execute::{
-    DEFAULT_POLL_BUDGET, ExecutionError, ExecutionResult, HarnessActor, HarnessOp, HarnessOutput, PollObserver,
+    DEFAULT_POLL_BUDGET, DEFAULT_TICK_DELTA_MICROS, ExecutionError, ExecutionResult, HarnessActor, HarnessOp,
+    HarnessOutput, PollObserver,
 };
 pub use harness::{
     DEFAULT_HEIGHT, DEFAULT_WIDTH, HookFactory, SubstrateHarness, SubstrateHarnessBuilder, SubstrateHarnessError,

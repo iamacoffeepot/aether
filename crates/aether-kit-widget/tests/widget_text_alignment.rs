@@ -151,7 +151,12 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) {
 
 /// One synthesized frame tick addressed straight to the panel's mailbox.
 fn tick_to_panel() -> NamedMail {
-    NamedMail { recipient_name: panel_address(), kind_name: Tick::NAME.to_owned(), payload: Vec::new(), count: 1 }
+    NamedMail {
+        recipient_name: panel_address(),
+        kind_name: Tick::NAME.to_owned(),
+        payload: Tick::default().encode_into_bytes(),
+        count: 1,
+    }
 }
 
 /// A region-scoped `Centroid` check over the inclusive window rect
@@ -257,8 +262,8 @@ fn panel_glyphs_sit_inside_their_row_frames() {
     // frame it reads back.
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick)),
-            ("prime", HarnessOp::send_and_settle(&panel, &Tick)),
+            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
+            ("prime", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("settle", HarnessOp::advance(2)),
         ])
         .expect("warm-up");

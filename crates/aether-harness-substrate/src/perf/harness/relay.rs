@@ -174,8 +174,8 @@ mod cost_cell_liveness {
     use aether_substrate::Subname;
 
     use super::*;
-    use crate::SubstrateHarness;
     use crate::perf::harness::{TickSource, fanout, ticksrc_id};
+    use crate::{DEFAULT_TICK_DELTA_MICROS, SubstrateHarness};
 
     #[test]
     fn sweep_relays_own_live_cost_cells_after_a_run() {
@@ -198,7 +198,7 @@ mod cost_cell_liveness {
             tb.send_bytes_and_await("aether.lifecycle", LifecycleSubscribe::ID, sub_req).expect("subscribe sends");
         assert!(matches!(LifecycleSubscribeResult::decode_from_bytes(&reply), Some(LifecycleSubscribeResult::Ok)));
 
-        let _ = tb.advance(200);
+        let _ = tb.advance(200, DEFAULT_TICK_DELTA_MICROS);
 
         for i in 0..topo.downstreams.len() {
             let name = format!("mlat.relay:{i}");

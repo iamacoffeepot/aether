@@ -4,26 +4,35 @@ use alloc::string::String;
 
 use bytemuck::{Pod, Zeroable};
 
-// ADR-0082 lifecycle stage kinds. Empty payload — the broadcast is the
-// signal. Future revisions may add per-stage fields (frame_no on Tick,
-// vp matrix on Render) once stage payload semantics settle; v1 keeps
-// the wire shape minimal so the application-declared graph can drive
-// stage timing without committing to a fixed payload schema.
+// ADR-0082 lifecycle stage kinds. Most are empty signals. `Tick` carries
+// the elapsed time its subscribers need to state motion in seconds rather
+// than in an assumed frame cadence (issue 4470).
 
-/// Per-frame lifecycle stage (ADR-0082 §11). Empty payload —
-/// elapsed-time is parked until a subscriber actually needs it. The
-/// kind moved from `aether.tick` into the `aether.lifecycle.*` family
-/// in PR 4 so the lifecycle stage vocabulary reads as one namespace.
+/// Per-frame lifecycle stage (ADR-0082 §11). `delta_micros` is the elapsed
+/// wall-clock time represented by this tick, supplied by the chassis cadence
+/// source. Motion subscribers use it so authored seconds remain seconds when
+/// frame rate changes (issue 4470).
 ///
 /// ADR-0033 handler dispatch (`#[actor]` synthesized
 /// `__aether_dispatch`) decodes every typed handler via
 /// `Mail::decode_typed::<K>()`, which requires `K: AnyBitPattern`.
-/// Zero-sized unit kinds like `Tick` trivially satisfy that through
-/// `Pod` + `Zeroable` — no padding, no uninitialized bits.
+/// The single `u32` field has no padding and accepts every bit pattern,
+/// satisfying that contract through `Pod` + `Zeroable`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.tick")]
-pub struct Tick;
+pub struct Tick {
+    pub delta_micros: u32,
+}
+
+impl Tick {
+    /// Elapsed time in seconds for rate/period integration.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub const fn delta_seconds(self) -> f32 {
+        self.delta_micros as f32 / 1_000_000.0
+    }
+}
 
 /// Lifecycle stage broadcast — capability init pass (ADR-0082 §5).
 /// Fires once at chassis boot, after every capability's actor-framework
@@ -90,18 +99,18 @@ pub struct Shutdown;
 #[kind(name = "aether.lifecycle.quit")]
 pub struct Quit;
 
-/// Driver-internal trigger that advances the lifecycle state machine
-/// by one step (ADR-0082 §2). The chassis main loop sends this each
-/// frame; the driver responds by minting the current state's payload
-/// via its factory, broadcasting to subscribers, awaiting settlement,
-/// and advancing the internal state pointer along the resolved edge
-/// (`next` or `quit`). Not exposed via the `aether.lifecycle.*` stage
-/// vocabulary because it carries no semantic meaning to subscribers;
-/// it's the cadence input, not a stage broadcast.
+/// Driver-internal trigger that advances the lifecycle state machine by one
+/// step (ADR-0082 §2). The chassis main loop sends this for every stage in a
+/// frame. `delta_micros` is copied into [`Tick`] when the current stage is
+/// `Tick`; other stages remain empty signals. The driver then broadcasts,
+/// awaits settlement, and advances along the resolved edge (`next` or
+/// `quit`). This is the cadence input, not a stage broadcast.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.advance")]
-pub struct LifecycleAdvance;
+pub struct LifecycleAdvance {
+    pub delta_micros: u32,
+}
 
 /// Reply to [`LifecycleAdvance`] signalling that the stage's broadcast
 /// root has settled (ADR-0082 §6). The chassis main loop wait-replies
@@ -211,4 +220,18 @@ pub struct LifecycleUnsubscribeAll {
 pub enum LifecycleSubscribeResult {
     Ok,
     Err { stage: u64, error: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use aether_data::Kind;
+
+    use super::*;
+
+    #[test]
+    fn tick_elapsed_time_round_trips_on_the_cast_wire() {
+        let tick = Tick { delta_micros: 83_335 };
+        assert_eq!(Tick::decode_from_bytes(&tick.encode_into_bytes()), Some(tick));
+        assert!((tick.delta_seconds() - 0.083_335).abs() < f32::EPSILON);
+    }
 }
