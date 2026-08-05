@@ -7,18 +7,22 @@ use crate::model::ctx::{Emit, Manual, Multi, Single};
 use crate::wasm::inline::RouteDecision;
 use crate::wasm::{RawCallerScopes, WasmActorMailbox};
 use crate::{Addressable, CallerScope, CallerScoped, One, Resolve};
-use aether_data::{ActorId, MailboxId, Source, fold_lineage};
+use aether_data::{ActorId, MailboxId, Source, Tag, with_tag};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem::{align_of, size_of};
 
 struct RelativeKeyless;
 
+fn expose_scope_high_nibble(caller_carry: u64, namespace: &str) -> u64 {
+    ActorId::singleton(namespace).0 ^ (caller_carry >> 60)
+}
+
 impl Resolve for RelativeKeyless {
     type Args<'a> = ();
 
     fn resolve_carry(caller_carry: u64, namespace: &str, (): ()) -> u64 {
-        fold_lineage(caller_carry, ActorId::singleton(namespace))
+        expose_scope_high_nibble(caller_carry, namespace)
     }
 }
 
@@ -39,7 +43,7 @@ impl Resolve for ParentKeyless {
     type Args<'a> = ();
 
     fn resolve_carry(caller_carry: u64, namespace: &str, (): ()) -> u64 {
-        fold_lineage(caller_carry, ActorId::singleton(namespace))
+        expose_scope_high_nibble(caller_carry, namespace)
     }
 }
 
@@ -66,7 +70,7 @@ fn actor_selects_the_resolvers_authoritative_raw_scope() {
     let registry = Registry::new();
     let current = 0xF123_4567_89AB_CDEF;
     let parent = 0xE987_6543_210F_EDCB;
-    let route = 0x1123_4567_89AB_CDEE;
+    let route = with_tag(Tag::Mailbox, current);
     let ctx: WasmCtx<'_, Manual> =
         WasmCtx::__new_scoped(route, RawCallerScopes::available(current, parent), &registry, NO_INBOUND_SOURCE);
 
@@ -75,7 +79,12 @@ fn actor_selects_the_resolvers_authoritative_raw_scope() {
     assert_ne!(
         ctx.actor::<CurrentTarget>().mailbox_id(),
         CurrentTarget::resolve(route, ()),
-        "the tagged route id must not stand in for the raw current carry",
+        "the test resolver exposes whether Current used the canonical high nibble",
+    );
+    assert_ne!(
+        ctx.actor::<ParentTarget>().mailbox_id(),
+        ParentTarget::resolve(current, ()),
+        "Parent must select the logical parent's canonical carry rather than Current",
     );
 }
 

@@ -43,8 +43,11 @@ pub trait Resolve {
     /// it, given the selected caller scope and the strategy-specific `args`.
     ///
     /// The raw carry must remain untagged after a lineage fold. Applying the
-    /// mailbox tag overwrites its high nibble, so a [`MailboxId`] cannot be
-    /// reused as the parent carry for another resolution step.
+    /// mailbox tag overwrites its natural high nibble, so a [`MailboxId`] is
+    /// not the authoritative full-`u64` carry required for exact propagation
+    /// and host validation. The built-in FNV folds can still produce the same
+    /// final low-60-bit route from either value; route equality does not make
+    /// the tagged value canonical lineage state.
     #[must_use]
     fn resolve_carry(caller_carry: u64, namespace: &str, args: Self::Args<'_>) -> u64;
 
@@ -127,8 +130,11 @@ impl Resolve for EmbeddedMany {
 /// Which authoritative raw lineage carry a caller-scoped resolver consumes.
 ///
 /// Route mailbox ids are deliberately not accepted as a substitute: their
-/// mailbox tag has overwritten part of the fold state. Wasm contexts retain
-/// the available raw values separately and select one through this enum.
+/// mailbox tag has overwritten the natural high nibble of the full-`u64`
+/// carry needed for exact propagation and host validation. Wasm contexts
+/// retain the available raw values separately and select one through this
+/// enum, even though the built-in FNV folds can preserve the same eventual
+/// low-60-bit route after tagging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallerScope {
     /// The resolver is root-pinned and does not consume caller lineage.
@@ -139,17 +145,19 @@ pub enum CallerScope {
     Parent,
 }
 
-/// A [`Resolve`] strategy whose fold is correct when it is handed the
-/// **calling** actor's own lineage carry (ADR-0119 amendment, ADR-0099 §5
-/// "reconstructible from constants"). Every ctx send passes its own carry, so
-/// this is the property that makes bare-type addressing sound.
+/// A [`Resolve`] strategy that declares which authoritative raw caller scope
+/// its fold consumes (ADR-0119 amendment, ADR-0099 §5 "reconstructible from
+/// constants"). Every ctx send selects [`Self::SCOPE`] rather than assuming
+/// that all resolvers consume the calling actor's own carry.
 ///
 /// Implemented for the three strategies that hold it:
 ///
-/// - [`One`] ignores the carry — a root cap sits at the root whoever asks.
-/// - [`Many`] folds a keyed child *of the caller*.
-/// - [`EmbeddedMany`] folds a spawned sibling, whose lineage extends the
-///   spawner's (ADR-0099 §Negative "sibling spawn nests").
+/// - [`One`] declares [`CallerScope::Root`] and ignores caller lineage.
+/// - [`Many`] declares [`CallerScope::Current`] for a keyed child of the
+///   caller.
+/// - [`EmbeddedMany`] declares [`CallerScope::Current`] for a spawned sibling
+///   whose lineage extends the spawner's (ADR-0099 §Negative "sibling spawn
+///   nests").
 ///
 /// [`Embedded`] is deliberately absent. An embedded component's node folds the
 /// **component host's** carry, not the caller's, so handing it a caller carry
@@ -158,10 +166,9 @@ pub enum CallerScope {
 /// the host instead; see [`CallerAddressable`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a caller-scoped resolution strategy",
-    label = "cannot be folded onto the sending actor's own lineage carry",
-    note = "`Embedded` folds the component host's carry, not the caller's, so a bare-type send \
-            would name a component embedded under the *sender* — an address nothing registers, \
-            which routes cleanly and drops",
+    label = "does not declare an authoritative caller scope for bare-type resolution",
+    note = "`Embedded` folds the component host's carry, which a generic caller context cannot \
+            select, so a bare-type send would name a component embedded under the wrong parent",
     note = "address a loaded component through its host, by the name it was loaded under: \
             `ctx.actor::<ComponentHostCapability>().loaded::<Peer>(name)`"
 )]
@@ -576,17 +583,17 @@ mod tests {
         requires_instanced::<PerThing>();
     }
 
-    /// ADR-0119 amendment: the three strategies whose fold is meaningful
-    /// against the sender's own carry stay on the bare-type send surface. The
-    /// spawn-sibling resolver is the one at risk — it shares the embed scope
-    /// with [`Embedded`], which the surface refuses, and a sibling's lineage
-    /// really does extend its spawner's (ADR-0099 §Negative), so dropping it
-    /// from [`CallerScoped`] would break sibling addressing rather than
-    /// tighten anything. The refusal side is golden-tested in
+    /// ADR-0119 amendment: each strategy admitted to the bare-type send
+    /// surface declares its authoritative scope. The spawn-sibling resolver
+    /// is the one at risk — it shares the embed scope with [`Embedded`], which
+    /// the surface refuses, and a sibling's lineage really does extend its
+    /// spawner's (ADR-0099 §Negative), so dropping it from [`CallerScoped`]
+    /// would break sibling addressing rather than tighten anything. The
+    /// refusal side is golden-tested in
     /// `aether-actor-derive`'s `rejects_bare_type_address_of_embedded_peer` UI
     /// fixture — a negative bound has no positive witness.
     #[test]
-    fn caller_scoped_admits_every_strategy_that_folds_the_senders_carry() {
+    fn caller_scoped_declares_each_admitted_strategys_scope() {
         fn requires_caller_addressable<T: CallerAddressable>() {}
 
         struct RootCap;
@@ -677,8 +684,10 @@ mod tests {
         );
     }
 
-    /// Resolution exposes the raw lineage fold independently from the
-    /// routable mailbox tag so callers can retain it for later folds.
+    /// Resolution exposes the canonical full-`u64` lineage fold independently
+    /// from the routable mailbox tag. Built-in FNV folding preserves the same
+    /// eventual low 60 route bits when only the parent's high nibble differs,
+    /// so route equality is not evidence that canonical raw carry survived.
     #[test]
     fn resolve_carry_preserves_the_raw_fold_before_tagging() {
         struct Child;
@@ -693,11 +702,24 @@ mod tests {
             type Resolver = Many;
         }
 
-        let root_carry = ActorId::singleton("test.raw_carry.root").0;
+        let root_carry = 0xF123_4567_89AB_CDEF;
+        let tagged_root = with_tag(Tag::Mailbox, root_carry);
+        assert_ne!(root_carry, tagged_root, "mailbox tagging replaces the canonical carry's high nibble");
+
         let child_carry = Child::resolve_carry(root_carry, "one");
+        let child_carry_from_tagged = Child::resolve_carry(tagged_root, "one");
         let child_mailbox = Child::resolve(root_carry, "one");
         assert_eq!(child_carry, fold_lineage(root_carry, ActorId::instanced("test.raw_carry.child", "one")),);
+        assert_ne!(
+            child_carry, child_carry_from_tagged,
+            "the natural high nibble remains part of the canonical raw fold",
+        );
         assert_eq!(child_mailbox.0, with_tag(Tag::Mailbox, child_carry));
+        assert_eq!(
+            child_mailbox,
+            Child::resolve(tagged_root, "one"),
+            "built-in FNV routing can mask a non-canonical parent carry after mailbox tagging",
+        );
 
         assert_eq!(
             Grandchild::resolve_carry(child_carry, "two"),
