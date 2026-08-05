@@ -34,6 +34,24 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 filter = "(package(=aether-kit-widget) & binary(widget_render_interaction)) | (package(=aether-kit-terrain) & binary(world_case_atlas))"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
+# `proposal_scenario` (aether-kit-terrain) drives real wasm through a staged
+# proposal capacity cycle and is the lone outlier in its package: it ran 53.4s
+# and 54.4s on the last two green `main` pushes against the 60s default, while
+# every sibling binary in the crate finishes inside 15s. That is ~90% of budget
+# with no headroom, so it was a tripwire waiting for any contention to trip it —
+# which is exactly what happened when `route_bounds` above began saturating both
+# cores of the GitHub-hosted runner for the whole of its shard. How sensitive it
+# is to that shows in the measurement run above: landing in a shard without
+# `route_bounds`, the same test finished in 22.2s, a 2.4x swing on shard
+# composition alone. So 180s here is headroom for the swing, not for the
+# test. Widen only this
+# binary, matching the sibling-outlier stance the `world_case_atlas` entry above
+# takes; the rest of the package genuinely belongs on the 60s default, so a
+# package-wide `kind(test)` cap here would be a silent loosening.
+[[profile.ci.overrides]]
+filter = "package(=aether-kit-terrain) & binary(proposal_scenario)"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
 # Every binary under `crates/aether-kit-commons/tests/` cold-loads and compiles
 # `aether_kit_commons.wasm` and boots a wgpu `SubstrateHarness`, so they are one
 # slow class rather than a fixed allowlist: #2805 measured the camera scenario
@@ -45,6 +63,50 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 [[profile.ci.overrides]]
 filter = "package(=aether-kit-commons) & kind(test)"
 slow-timeout = { period = "120s", terminate-after = 1 }
+
+# `route_bounds` is a trybuild binary, and trybuild's nested build is the most
+# expensive one in the workspace. It spawns a second `cargo` under its own
+# `CARGO_TARGET_DIR` (`target/tests/trybuild`), so nothing the workspace build
+# already produced is reused, and its generated manifest folds the host crate's
+# *dev*-dependencies into `[dependencies]` — which for `aether-component` means
+# `aether-harness-substrate` (wgpu/naga), `aether-harness-fleet`,
+# `aether-kit-commons`, `aether-substrate`, `wasmtime` and five fixture crates:
+# 264 unique dependency lines against the 43 the derive crates below compile for
+# the same trybuild shape. The pull-request lane measured it at 49.3s, but that
+# lane is an 8-vCPU runner with the S3 sccache wrapper; `main` runs
+# GitHub-hosted with no `RUSTC_WRAPPER` at all, so the same build starts cold on
+# two cores and blew the package-wide 180s cap on every push after
+# iamacoffeepot/aether#4492 landed.
+#
+# A `workflow_dispatch` run takes that same non-pull-request path, which is the
+# only way to measure this binary on the lane that fails it: run 30984727263
+# clocked it at 226.3s. The period below is deliberately well above that rather
+# than fitted to it — the sibling `proposal_scenario` entry swung 22.2s to 54.4s
+# on shard composition alone, so a cap sized to a single observation of a
+# contention-sensitive test is how the 180s cap became a merge-blocker in the
+# first place. This is a wall-clock deadlock guard a healthy run never reaches,
+# not a performance budget: the budget is to stop compiling 264 crates here at
+# all, tracked as iamacoffeepot/aether#4515, which is where this period should be
+# tightened once the nested build is cheap (iamacoffeepot/aether#1275 is the
+# precedent — it took `aether-derive`'s equivalent from 240s to 18s).
+#
+# Ordering: nextest applies the first matching override per setting (verified
+# against cargo-nextest 0.9.133), so this narrow filter must stay above the
+# package-wide `kind(test)` entry below or it never applies.
+[[profile.ci.overrides]]
+filter = "package(=aether-component) & binary(route_bounds)"
+slow-timeout = { period = "600s", terminate-after = 1 }
+
+# The fleetharness replace binary also cold-loads `aether_kit_commons.wasm` and
+# was measured in #2805 around 156.8s against the 180s bundle cap. Keep the
+# package-wide cap intact and widen only this known slow binary. This override
+# used to sit near the end of the file, below the package-wide `kind(test)`
+# entry, where first-match-wins meant it never applied and the binary silently
+# ran on 180s with ~23s of headroom; hoisting it here is what makes its 300s
+# real.
+[[profile.ci.overrides]]
+filter = "package(=aether-component) & binary(fleetharness_replace)"
+slow-timeout = { period = "300s", terminate-after = 1 }
 
 # The `aether-component` integration binaries mix two rehomed slow classes:
 # the scenario tests (iamacoffeepot/aether#3769) cold-load and compile
@@ -172,13 +234,6 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 [[profile.ci.overrides]]
 filter = "package(=aether-fleet) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
-
-# The fleetharness replace binary also cold-loads `aether_kit_commons.wasm` and was
-# measured in #2805 around 156.8s against the 180s bundle cap. Keep the
-# package-wide cap intact and widen only this known slow binary.
-[[profile.ci.overrides]]
-filter = "package(=aether-component) & binary(fleetharness_replace)"
-slow-timeout = { period = "300s", terminate-after = 1 }
 
 # The `aether-text` text scenario binary (rehomed from the bundle's
 # `substrate_harness_scenario` dispatcher, issue #3772) boots a wgpu
