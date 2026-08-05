@@ -1,0 +1,49 @@
+2026-08-05T22:07:03.587279Z INFO aether_substrate::scheduler: keep-local time budget derived from the measured cross-worker handoff cost (iamacoffeepot/aether#1182) handoff_cost_nanos=4320 budget_nanos=25920 realized_multiplier=6.0
+LOAD_OK mailbox_id=mbx-apts-lnr3-gfkk name=aether.component/aether.embedded:resolve-dogfood capabilities=ComponentCapabilities { handlers: [HandlerCapability { id: knd-g3hd-m2to-x6qj, name: "dogfood.resolve.setup", doc: None, reply: One(knd-ir3y-xqkc-odwd) }, HandlerCapability { id: knd-4paw-vo7k-kyqd, name: "dogfood.resolve.spawn_worker", doc: None, reply: One(knd-ir3y-xqkc-odwd) }, HandlerCapability { id: knd-rmq4-nueq-zi2l, name: "dogfood.resolve.probe_worker", doc: None, reply: One(knd-ir3y-xqkc-odwd) }], fallback: None, doc: None, config: None, assets: [] }
+BRANCH_LOGS mailbox=aether.component/aether.embedded:resolve-dogfood/aether.embedded:branch
+Ok {
+    entries: [
+        LogEntry {
+            timestamp_unix_ms: 1785967623977,
+            level: 2,
+            target: "aether_resolve_actor_dogfood",
+            message: "spawned worker alpha and deliberately discarded its mailbox id",
+            sequence: 1,
+            origin: None,
+        },
+        LogEntry {
+            timestamp_unix_ms: 1785967623979,
+            level: 2,
+            target: "aether_resolve_actor_dogfood",
+            message: "resolved worker alpha by typed key and sent request",
+            sequence: 2,
+            origin: None,
+        },
+        LogEntry {
+            timestamp_unix_ms: 1785967623979,
+            level: 2,
+            target: "aether_resolve_actor_dogfood",
+            message: "value=42 observed worker alpha reply",
+            sequence: 3,
+            origin: None,
+        },
+    ],
+    next_since: 3,
+    truncated_before: None,
+}
+WORKER_LOGS mailbox=aether.component/aether.embedded:resolve-dogfood/aether.embedded:branch/aether.embedded:alpha
+Ok {
+    entries: [
+        LogEntry {
+            timestamp_unix_ms: 1785967623979,
+            level: 2,
+            target: "aether_resolve_actor_dogfood",
+            message: "value=41 worker alpha received request",
+            sequence: 1,
+            origin: None,
+        },
+    ],
+    next_since: 1,
+    truncated_before: None,
+}
+DOGFOOD_SUCCESS entry_mailbox=mbx-apts-lnr3-gfkk reply_value=42

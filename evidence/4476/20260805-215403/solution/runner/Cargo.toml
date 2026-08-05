@@ -1,0 +1,11 @@
+[package]
+name = "aether-resolve-actor-dogfood-runner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aether-actor = { path = "/mnt/dev/aether-remote/worktrees/issue-4476-v2/crates/aether-actor" }
+aether-component = { path = "/mnt/dev/aether-remote/worktrees/issue-4476-v2/crates/aether-component" }
+aether-harness-substrate = { path = "/mnt/dev/aether-remote/worktrees/issue-4476-v2/crates/aether-harness-substrate" }
+aether-kinds = { path = "/mnt/dev/aether-remote/worktrees/issue-4476-v2/crates/aether-kinds" }
+aether-resolve-actor-dogfood = { path = "..", features = ["library"] }

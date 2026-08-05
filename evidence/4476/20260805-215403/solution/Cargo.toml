@@ -1,0 +1,16 @@
+[package]
+name = "aether-resolve-actor-dogfood"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+library = []
+
+[dependencies]
+aether-actor = { path = "/mnt/dev/aether-remote/worktrees/issue-4476-v2/crates/aether-actor" }
+aether-data = { path = "/mnt/dev/aether-remote/worktrees/issue-4476-v2/crates/aether-data", features = ["derive"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
+tracing = { version = "0.1", default-features = false }

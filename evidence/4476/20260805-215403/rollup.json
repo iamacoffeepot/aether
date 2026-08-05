@@ -1,0 +1,78 @@
+{
+  "totals": {
+    "findings": 2,
+    "papercut": 2,
+    "missingPrimitive": 0,
+    "docGap": 0,
+    "blocker": 0,
+    "softHolds": 0
+  },
+  "succeeded": true,
+  "buildGreen": true,
+  "summary": "Built the wasm component and public SubstrateHarness runner on Eve with Rust 1.96.0. The settled run loaded the component, spawned a non-root branch, spawned Worker(\"alpha\") while discarding its MailboxId, later recovered it with ctx.resolve_actor::<Worker>(\"alpha\"), sent value 41, and logged the typed reply value 42. Complete transcripts were preserved locally and in the Eve evidence directory.",
+  "artifact": null,
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "public actor placement guidance for wasm components",
+        "what": "The generic placement example made `root` look applicable to a loaded wasm entry, but the compiler rejects `root` for Wasm actors; the host distinction was only clear after correlating later documentation.",
+        "suggested": "Label the `root` placement example as native-only and show the corresponding loaded-wasm entry declaration nearby."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "standalone component Kind/Schema dependency guidance",
+        "what": "Using the `aether_actor::Kind` and `aether_actor::Schema` reexports with only `aether-actor` left the scratch kinds unimplemented; the build succeeded after directly depending on and deriving through `aether-data`.",
+        "suggested": "Make the reexport-only standalone crate path compile as documented, or explicitly include `aether-data` in the component recipe."
+      }
+    ],
+    "missing-primitive": [],
+    "doc-gap": [],
+    "blocker": []
+  },
+  "softHolds": [],
+  "task": {
+    "medium": "author",
+    "prompt": "Author a wasm actor running below a non-root parent that spawns a named instanced child, deliberately discards the returned MailboxId, and in a later handler recovers it with `ctx.resolve_actor::<Worker>(\"alpha\")`, sends a typed request, and observes the child's reply.",
+    "surfaceUnderTest": "WasmCtx::resolve_actor::<R> keyed typed actor addressing",
+    "expectedArtifact": null
+  },
+  "provenance": {
+    "driver": {
+      "model": null,
+      "surface": "codex-main-thread"
+    },
+    "phases": {
+      "author": {
+        "model": null,
+        "effort": null,
+        "surface": "collaboration.spawn_agent",
+        "forkTurns": "none",
+        "taskName": null,
+        "prompt": null
+      },
+      "attempt": {
+        "model": null,
+        "effort": null,
+        "surface": "collaboration.spawn_agent",
+        "forkTurns": "none",
+        "taskName": "dogfood_attempt_20260805_215403",
+        "prompt": "Author a wasm actor running below a non-root parent that spawns a named instanced child, deliberately discards the returned MailboxId, and in a later handler recovers it with `ctx.resolve_actor::<Worker>(\"alpha\")`, sends a typed request, and observes the child's reply. Use only public guide material and exported signatures; build and execute on ssh eve under /mnt/dev; preserve the solution and reply transcript; do not inspect implementation history or mutate the repository or GitHub."
+      },
+      "judge": {
+        "model": null,
+        "effort": null,
+        "surface": "collaboration.spawn_agent",
+        "forkTurns": "none",
+        "taskName": null,
+        "prompt": null
+      }
+    }
+  },
+  "executionErrors": [
+    "The initially supplied stored hub chassis predated the merged scoped-spawn import and rejected the new component with unknown import `aether::spawn_sibling_scoped_p32`; the run-owned engine was terminated.",
+    "The macOS MCP hub could not ingest the Eve-hosted staged path or execute the replacement Linux chassis, so the completed runtime trial used the public SubstrateHarness entirely on Eve."
+  ]
+}
