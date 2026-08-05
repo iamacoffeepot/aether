@@ -40,7 +40,7 @@ pub trait Resolve {
     type Args<'a>;
 
     /// Produce the mailbox for `namespace` as this strategy sees it, given
-    /// the caller's lineage carry and the strategy-specific `args`.
+    /// the selected caller scope and the strategy-specific `args`.
     #[must_use]
     fn resolve(caller_carry: u64, namespace: &str, args: Self::Args<'_>) -> MailboxId;
 }
@@ -113,17 +113,35 @@ impl Resolve for EmbeddedMany {
     }
 }
 
-/// A [`Resolve`] strategy whose fold is correct when it is handed the
-/// **calling** actor's own lineage carry (ADR-0119 amendment, ADR-0099 §5
-/// "reconstructible from constants"). Every ctx send passes its own carry, so
-/// this is the property that makes bare-type addressing sound.
+/// Which caller-relative lineage seed a resolver consumes.
+///
+/// Each scope can use the relevant actor's routable [`MailboxId`]; it does not
+/// require a separately retained untagged FNV state. [`with_tag`] changes only
+/// the high four bits, while each [`fold_lineage`] step's low 60 output bits
+/// depend only on the seed's low 60 bits. A mailbox id therefore preserves
+/// every bit that can affect any later tagged descendant route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallerScope {
+    /// The resolver is root-pinned and does not consume caller lineage.
+    Root,
+    /// The calling actor's own mailbox lineage.
+    Current,
+    /// The calling actor's logical parent's mailbox lineage.
+    Parent,
+}
+
+/// A [`Resolve`] strategy that declares which caller-relative scope its fold
+/// consumes. Every ctx send selects [`Self::SCOPE`] rather than assuming that
+/// all resolvers consume the calling actor's own lineage.
 ///
 /// Implemented for the three strategies that hold it:
 ///
-/// - [`One`] ignores the carry — a root cap sits at the root whoever asks.
-/// - [`Many`] folds a keyed child *of the caller*.
-/// - [`EmbeddedMany`] folds a spawned sibling, whose lineage extends the
-///   spawner's (ADR-0099 §Negative "sibling spawn nests").
+/// - [`One`] declares [`CallerScope::Root`] and ignores caller lineage.
+/// - [`Many`] declares [`CallerScope::Current`] for a keyed child of the
+///   caller.
+/// - [`EmbeddedMany`] declares [`CallerScope::Current`] for a spawned sibling
+///   whose lineage extends the spawner's (ADR-0099 §Negative "sibling spawn
+///   nests").
 ///
 /// [`Embedded`] is deliberately absent. An embedded component's node folds the
 /// **component host's** carry, not the caller's, so handing it a caller carry
@@ -132,18 +150,26 @@ impl Resolve for EmbeddedMany {
 /// the host instead; see [`CallerAddressable`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a caller-scoped resolution strategy",
-    label = "cannot be folded onto the sending actor's own lineage carry",
-    note = "`Embedded` folds the component host's carry, not the caller's, so a bare-type send \
-            would name a component embedded under the *sender* — an address nothing registers, \
-            which routes cleanly and drops",
+    label = "does not declare a caller-relative scope for bare-type resolution",
+    note = "`Embedded` folds the component host's carry, which a generic caller context cannot \
+            select, so a bare-type send would name a component embedded under the wrong parent",
     note = "address a loaded component through its host, by the name it was loaded under: \
             `ctx.actor::<ComponentHostCapability>().loaded::<Peer>(name)`"
 )]
-pub trait CallerScoped: Resolve {}
+pub trait CallerScoped: Resolve {
+    /// The caller-relative scope this resolver consumes.
+    const SCOPE: CallerScope;
+}
 
-impl CallerScoped for One {}
-impl CallerScoped for Many {}
-impl CallerScoped for EmbeddedMany {}
+impl CallerScoped for One {
+    const SCOPE: CallerScope = CallerScope::Root;
+}
+impl CallerScoped for Many {
+    const SCOPE: CallerScope = CallerScope::Current;
+}
+impl CallerScoped for EmbeddedMany {
+    const SCOPE: CallerScope = CallerScope::Current;
+}
 
 /// An actor that can be addressed by bare type from a peer's ctx, because its
 /// [`Resolver`](Addressable::Resolver) is [`CallerScoped`] (ADR-0119
@@ -533,17 +559,17 @@ mod tests {
         requires_instanced::<PerThing>();
     }
 
-    /// ADR-0119 amendment: the three strategies whose fold is meaningful
-    /// against the sender's own carry stay on the bare-type send surface. The
-    /// spawn-sibling resolver is the one at risk — it shares the embed scope
-    /// with [`Embedded`], which the surface refuses, and a sibling's lineage
-    /// really does extend its spawner's (ADR-0099 §Negative), so dropping it
-    /// from [`CallerScoped`] would break sibling addressing rather than
-    /// tighten anything. The refusal side is golden-tested in
+    /// ADR-0119 amendment: each strategy admitted to the bare-type send
+    /// surface declares its caller-relative scope. The spawn-sibling resolver
+    /// is the one at risk — it shares the embed scope with [`Embedded`], which
+    /// the surface refuses, and a sibling's lineage really does extend its
+    /// spawner's (ADR-0099 §Negative), so dropping it from [`CallerScoped`]
+    /// would break sibling addressing rather than tighten anything. The
+    /// refusal side is golden-tested in
     /// `aether-actor-derive`'s `rejects_bare_type_address_of_embedded_peer` UI
     /// fixture — a negative bound has no positive witness.
     #[test]
-    fn caller_scoped_admits_every_strategy_that_folds_the_senders_carry() {
+    fn caller_scoped_declares_each_admitted_strategys_scope() {
         fn requires_caller_addressable<T: CallerAddressable>() {}
 
         struct RootCap;
@@ -567,6 +593,40 @@ mod tests {
         requires_caller_addressable::<RootCap>();
         requires_caller_addressable::<KeyedChild>();
         requires_caller_addressable::<SpawnedSibling>();
+
+        assert_eq!(<One as CallerScoped>::SCOPE, CallerScope::Root);
+        assert_eq!(<Many as CallerScoped>::SCOPE, CallerScope::Current);
+        assert_eq!(<EmbeddedMany as CallerScoped>::SCOPE, CallerScope::Current);
+    }
+
+    /// `with_tag` replaces only the high nibble, while FNV-1a folding modulo
+    /// 2^60 depends only on the seed modulo 2^60. Every possible raw high
+    /// nibble must therefore produce the same child route as the tagged seed,
+    /// and replacing the child's raw fold with its mailbox id must remain safe
+    /// for the grandchild fold too.
+    #[test]
+    fn mailbox_ids_are_routing_equivalent_lineage_seeds() {
+        let body = 0x0123_4567_89ab_cdef;
+        let tagged_parent = with_tag(Tag::Mailbox, body);
+        let child = ActorId::instanced("test.routing_seed.child", "one");
+        let grandchild = ActorId::instanced("test.routing_seed.grandchild", "two");
+
+        for high_nibble in 0_u64..16 {
+            let raw_parent = (high_nibble << 60) | body;
+            let raw_child = fold_lineage(raw_parent, child);
+            let child_mailbox = with_tag(Tag::Mailbox, raw_child);
+
+            assert_eq!(
+                child_mailbox,
+                with_tag(Tag::Mailbox, fold_lineage(tagged_parent, child)),
+                "the parent carry's high nibble cannot affect the child route",
+            );
+            assert_eq!(
+                with_tag(Tag::Mailbox, fold_lineage(raw_child, grandchild)),
+                with_tag(Tag::Mailbox, fold_lineage(child_mailbox, grandchild)),
+                "the tagged child mailbox must remain a valid grandchild seed",
+            );
+        }
     }
 
     #[test]

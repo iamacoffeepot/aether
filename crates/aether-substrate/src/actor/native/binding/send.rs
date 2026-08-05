@@ -220,8 +220,8 @@ mod tests {
     fn mailsender_send_routes_through_resolve_not_flat_hash() {
         use crate::actor::native::ctx::NativeCtx;
         use aether_actor::model::HandlesKind;
-        use aether_actor::{Addressable, CallerScoped, MailSender, Resolve};
-        use aether_data::{ActorId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
+        use aether_actor::{Addressable, CallerScope, CallerScoped, MailSender, Resolve};
+        use aether_data::{ActorId, MailboxId, Tag, fold_lineage, mailbox_id_from_name, with_tag};
         use aether_kinds::Tick;
 
         /// A keyless strategy that folds the actor's own node onto whatever
@@ -238,7 +238,9 @@ mod tests {
                 MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::singleton(namespace))))
             }
         }
-        impl CallerScoped for FoldedChild {}
+        impl CallerScoped for FoldedChild {
+            const SCOPE: CallerScope = CallerScope::Current;
+        }
 
         struct Child;
         impl Addressable for Child {
