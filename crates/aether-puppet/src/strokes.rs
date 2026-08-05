@@ -260,6 +260,24 @@ const GEOMETRY_COUNT: usize = sight::GEOMETRY_COUNT + stroke::GEOMETRY_COUNT;
 const RIBBONS: [usize; stroke::GEOMETRY_COUNT] =
     [sight::GEOMETRY_COUNT + stroke::RESIDENT as usize, sight::GEOMETRY_COUNT + stroke::VOLATILE as usize];
 
+/// The canvas a window of these pixels develops at.
+///
+/// [`wash_canvas`] and nowhere else. The wash resolves its own canvas the
+/// same way, and the two have to land on one because the ink coverage
+/// plane this layer creates is a binding of both their programs
+/// (iamacoffeepot/aether#4451) — and a program binding's size is checked
+/// against the extent the graph was registered at. So two window-to-canvas
+/// maps that agreed at one framing would not be an agreement: at a window
+/// past the wash's long-edge clamp they part, the wash dispatch that binds
+/// the plane is dropped whole in the cap, and the sheet stays the
+/// transparent clear it was created as — no error anywhere, just paint
+/// that never arrives (iamacoffeepot/aether#4465).
+fn windowed_canvas(width: u32, height: u32) -> (u32, u32) {
+    let canvas = wash_canvas(width, height);
+
+    (canvas.width as u32, canvas.height as u32)
+}
+
 impl Strokes {
     /// A canvas change orphans every texture in the set — the field's
     /// capacity and the sheet's size both follow it.
@@ -269,9 +287,16 @@ impl Strokes {
     /// with the camera held all the time, and a canvas that only caught
     /// up at the next solve left the field and the sheet standing at the
     /// old size until something else moved.
+    ///
+    /// Resolved through `windowed_canvas` and not from the window's own
+    /// pixels, because a desktop window announces its size every frame
+    /// and this is therefore the *last* writer of the canvas on every
+    /// frame that did not solve — so a second way of answering "what
+    /// canvas is this window" here is not a near-miss, it is the answer
+    /// (iamacoffeepot/aether#4465).
     pub fn resized(&mut self, width: u32, height: u32) {
         self.window = Some((width, height));
-        self.recanvas((width, height));
+        self.recanvas(windowed_canvas(width, height));
     }
 
     /// Point the layer at a canvas, and note the change if it is one.
@@ -297,8 +322,7 @@ impl Strokes {
     /// without knowing the window in pixels.
     fn resolve_canvas(&self, aspect: f32) -> (u32, u32) {
         if let Some((width, height)) = self.window {
-            let canvas = wash_canvas(width, height);
-            return (canvas.width as u32, canvas.height as u32);
+            return windowed_canvas(width, height);
         }
         let aspect = if aspect.is_finite() && aspect > 0.0 {
             aspect
@@ -870,6 +894,56 @@ mod tests {
         assert_eq!(refilled.len(), 2, "the fresh planes are blank until something fills them");
         assert_eq!(dispatched_field(&refilled[0]), (48, 96), "and the blob carries the new extent");
         assert!(strokes.take_dispatches().is_empty(), "and only once");
+    }
+
+    /// Tripwire: the ink coverage plane must be created at the wash's own
+    /// body extent, at a window big enough for the wash's clamp to bite.
+    ///
+    /// That plane is the one texture the two layers share — this layer
+    /// writes it, the wash program binds and reads it (#4451) — and a
+    /// program binding's size is checked against the extent its graph was
+    /// registered at. So a canvas disagreement is not a slightly wrong
+    /// picture: every wash dispatch is dropped whole in the cap, the sheet
+    /// stays the transparent clear it was created as, and the frame shows
+    /// ink on the raw background with no error raised anywhere.
+    ///
+    /// The frame order is the shipped one, and it is what made this
+    /// survive: a desktop window announces its size *every* frame while a
+    /// solve happens only when the eye moves, so on a still subject the
+    /// announcement is the last writer of the canvas. A layer that
+    /// resolved the window one way in `resized` and another in `solve`
+    /// therefore stood on the `resized` answer forever — and a pose that
+    /// moved re-solved every frame and hid it, which is how a still
+    /// subject came to be the only one that never developed (#4465).
+    #[test]
+    fn a_window_past_the_wash_clamp_still_creates_the_plane_at_the_wash_body_extent() {
+        let mesh = Mesh::from_obj_bytes(TRIANGLE, 0).expect("one triangle parses");
+        let (resident, volatile) = ([curve(1)], [curve(2)]);
+        let drawing = Drawing { resident: &resident, volatile: &volatile };
+        // Past the 1280 long-edge ceiling, where the clamp actually bites;
+        // inside it the two resolutions agree by accident.
+        let window = (1600, 1200);
+
+        let mut strokes = Strokes::default();
+        strokes.resized(window.0, window.1);
+        strokes.subject_changed(&mesh, None);
+        assert!(strokes.solve(drawing, Vec3::new(0.0, 0.0, 3.0), Mat4::IDENTITY, 0.01, 4.0 / 3.0, still()));
+        assert_eq!(strokes.take_registers().len(), PROGRAM_COUNT, "one register per program");
+        for id in 0..PROGRAM_COUNT as u32 {
+            strokes.registered(Ok(id));
+        }
+
+        // The frame after the solve, with the camera held: the window
+        // re-announces the size it has always had.
+        strokes.resized(window.0, window.1);
+        let creates = strokes.take_creates();
+
+        let (width, height) = wash_canvas(window.0, window.1).body();
+        assert_eq!(
+            (creates[INK_PLANE].width, creates[INK_PLANE].height),
+            (width as u32, height as u32),
+            "the wash binds this plane against the extent its graph declares",
+        );
     }
 
     /// A view for [`Strokes::draw`] to place a billboard against. Its

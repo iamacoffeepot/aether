@@ -380,6 +380,34 @@ fn plane_bytes(plane: &[f32]) -> Vec<u8> {
 }
 
 impl Easel {
+    /// Name the gate that just held a develop back, with the state it
+    /// read, at `debug` (iamacoffeepot/aether#4465).
+    ///
+    /// Every mail the develop ships is gated on the replies to the mail
+    /// before it, and a gate that never opens produces no error and no
+    /// warning anywhere — the layer keeps developing and simply never
+    /// dispatches, which is a blank sheet and nothing to read. So each
+    /// early return says which one it was and what it saw. Off at the
+    /// default `info`; ask for it with `AETHER_LOG_FILTER=aether_puppet=debug`,
+    /// or the `[runtime] log_filter` line of a `--config` file, which is
+    /// the route a hub-forked substrate has.
+    fn refused(&self, gate: &str, reason: &str) {
+        tracing::debug!(
+            target: "aether_puppet",
+            gate,
+            reason,
+            programs = ?self.programs,
+            registering = self.registering.len(),
+            textures = self.textures.is_some(),
+            creating = self.creating.is_some(),
+            geometries = ?self.geometries.map(Resident::id),
+            packed = ?self.packed.each_ref().map(Option::is_some),
+            staged = ?self.staged,
+            ink_plane = ?self.ink_plane,
+            "easel gate refused",
+        );
+    }
+
     /// A canvas change orphans every plane pulped for the old one — the
     /// paper's grain is sampled at the canvas' own rate — so it releases
     /// the whole texture set and the seed slice rolled against it. The
@@ -636,9 +664,20 @@ impl Easel {
     /// [`Easel::registered`] in this order.
     pub fn take_registers(&mut self) -> Vec<ProgramRegister> {
         if self.disabled || !self.registering.is_empty() || self.staged.is_none() {
+            self.refused(
+                "registers",
+                if self.disabled {
+                    "disabled"
+                } else if !self.registering.is_empty() {
+                    "registers in flight"
+                } else {
+                    "nothing staged"
+                },
+            );
             return Vec::new();
         }
         let Some(program) = self.program.as_ref() else {
+            self.refused("registers", "no wash graph laid");
             return Vec::new();
         };
 
@@ -684,9 +723,22 @@ impl Easel {
             || self.creating.is_some()
             || self.textures.is_some()
         {
+            self.refused(
+                "creates",
+                if self.disabled {
+                    "disabled"
+                } else if self.programs.iter().any(Option::is_none) {
+                    "programs unregistered"
+                } else if self.creating.is_some() {
+                    "creates in flight"
+                } else {
+                    "textures stand"
+                },
+            );
             return Vec::new();
         }
         let Some(canvas) = self.staged else {
+            self.refused("creates", "nothing staged");
             return Vec::new();
         };
         let (body_width, body_height) = canvas.body();
@@ -736,11 +788,20 @@ impl Easel {
     /// buffer is the GPU's, and nothing owes it an upload.
     pub fn take_geometry_creates(&mut self) -> Vec<CreateGeometry> {
         if self.disabled || self.staged.is_none() {
+            self.refused(
+                "geometry creates",
+                if self.disabled {
+                    "disabled"
+                } else {
+                    "nothing staged"
+                },
+            );
             return Vec::new();
         }
         // One create in flight at a time: the reply carries no slot, so
         // the collector matches it against the one slot that is asking.
         if self.geometries.contains(&Resident::Creating) {
+            self.refused("geometry creates", "a create in flight");
             return Vec::new();
         }
 
@@ -749,6 +810,7 @@ impl Easel {
                 continue;
             }
             let Some(bytes) = self.packed[slot].take() else {
+                self.refused("geometry creates", "an absent slot has nothing packed to ship");
                 continue;
             };
 
@@ -792,6 +854,7 @@ impl Easel {
     /// and in this order — the wash samples what the bake wrote.
     pub fn take_dispatch(&mut self) -> Vec<ProgramDispatch> {
         let (Some(bake_id), Some(wash_id)) = (self.programs[BAKE], self.programs[WASH]) else {
+            self.refused("dispatch", "programs unregistered");
             return Vec::new();
         };
         // The wash reads where the ink stands, and the ink layer owns
@@ -799,22 +862,30 @@ impl Easel {
         // bind, and a dispatch short one binding is dropped whole — so
         // the develop waits rather than being dropped in the cap.
         let Some(ink) = self.ink_plane else {
+            self.refused("dispatch", "no ink coverage plane");
             return Vec::new();
         };
         let Some((bindings, canvas)) = self.textures.as_ref() else {
+            self.refused("dispatch", "no texture set");
             return Vec::new();
         };
         let live: Option<Vec<u32>> = self.geometries.iter().map(|at| at.id()).collect();
         let (Some(ids), Some(staged)) = (live, self.staged.take()) else {
+            self.refused("dispatch", "a geometry slot is not live");
             return Vec::new();
         };
         let Some(uniforms) = self.uniforms.as_ref() else {
+            self.refused("dispatch", "no uniforms derived");
             return Vec::new();
         };
         if staged != *canvas {
+            self.refused("dispatch", "the staged canvas is not the textures'");
             return Vec::new();
         }
 
+        if !self.developed {
+            tracing::debug!(target: "aether_puppet", ?staged, "the easel reached its first dispatch");
+        }
         self.developed = true;
         vec![
             ProgramDispatch {
