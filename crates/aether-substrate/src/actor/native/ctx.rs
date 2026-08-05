@@ -21,7 +21,9 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aether_actor::{Addressable, CallerAddressable, HandlesKind, Manual, Multi, ReplyMode, Single, Singleton};
+use aether_actor::{
+    Addressable, CallerAddressable, CallerScoped, HandlesKind, Manual, Multi, ReplyMode, Single, Singleton,
+};
 use aether_actor::{Emit, MailSender, OutboundReply};
 use core::marker::PhantomData;
 use core::ptr;
@@ -142,7 +144,12 @@ macro_rules! native_sender_methods {
         #[must_use]
         pub fn actor<R: Singleton + CallerAddressable>(&self) -> NativeActorMailbox<'_, R> {
             let (parent, root) = self.outbound_lineage();
-            NativeActorMailbox::__new_in_flight(R::resolve(self.binding.carry(), ()).0, self.binding, parent, root)
+            NativeActorMailbox::__new_in_flight(
+                R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+                self.binding,
+                parent,
+                root,
+            )
         }
 
         /// Multi-instance sender: resolve a typed [`NativeActorMailbox`]
@@ -1322,7 +1329,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
     {
         let bytes = payload.encode_into_bytes();
         self.binding.push_envelope_buffered(
-            R::resolve(self.binding.carry(), ()).0,
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -1343,7 +1350,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
         self.binding.push_envelope_buffered(
-            R::resolve(self.binding.carry(), ()).0,
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
             K::ID.0,
             bytes,
             count,
@@ -1381,7 +1388,14 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
         let bytes = payload.encode_into_bytes();
         // ADR-0080 §7: suppress the in-flight lineage so the recipient
         // starts a fresh causal chain.
-        self.binding.push_envelope_buffered(R::resolve(self.binding.carry(), ()).0, K::ID.0, &bytes, 1, None, None);
+        self.binding.push_envelope_buffered(
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+            K::ID.0,
+            &bytes,
+            1,
+            None,
+            None,
+        );
     }
 
     //noinspection DuplicatedCode

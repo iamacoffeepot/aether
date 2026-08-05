@@ -8,7 +8,7 @@ use aether_data::{Kind, MailboxId, mailbox_id_from_name};
 
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::persistence::Persistence;
-use crate::model::{CallerAddressable, HandlesKind, Singleton};
+use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, HandlesKind, Singleton};
 use crate::wasm::bridge::{mail, persist};
 use alloc::vec::Vec;
 
@@ -43,6 +43,9 @@ pub struct WasmDropCtx<'a> {
     /// `send` resolves the receiver through `R::resolve(self.mailbox)`
     /// like every other ctx (ADR-0099 §5).
     mailbox: u64,
+    /// The actor's logical parent mailbox. Legacy guests and cluster roots
+    /// without parent metadata use [`MailboxId::NONE`].
+    parent: u64,
     /// ADR-0114 §5: when `Some`, `save_state` records into this buffer
     /// instead of the host import, so the dehydrate compose can collect
     /// the parent's and each child's bundle and pack one composite. `None`
@@ -56,8 +59,8 @@ impl<'a> WasmDropCtx<'a> {
     /// Forwards `save_state` to the host import.
     #[doc(hidden)]
     #[must_use]
-    pub fn __new(mailbox: u64) -> Self {
-        Self { mailbox, capture: None, _borrow: PhantomData }
+    pub fn __new(mailbox: u64, parent: u64) -> Self {
+        Self { mailbox, parent, capture: None, _borrow: PhantomData }
     }
 
     /// Not part of the public API; called only by the dehydrate compose
@@ -66,8 +69,12 @@ impl<'a> WasmDropCtx<'a> {
     /// before a single real host `save_state`.
     #[doc(hidden)]
     #[must_use]
-    pub(crate) fn __new_capturing(mailbox: u64, capture: &'a mut CapturedState) -> Self {
-        Self { mailbox, capture: Some(capture), _borrow: PhantomData }
+    pub(crate) fn __new_capturing(mailbox: u64, parent: u64, capture: &'a mut CapturedState) -> Self {
+        Self { mailbox, parent, capture: Some(capture), _borrow: PhantomData }
+    }
+
+    fn scope_mailbox(&self, scope: CallerScope) -> u64 {
+        scope.select(MailboxId(self.mailbox), MailboxId(self.parent)).0
     }
 
     /// Deposit a migration bundle. Mirrors [`Persistence::save_state`].
@@ -106,7 +113,14 @@ impl MailSender for WasmDropCtx<'_> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(R::resolve(self.mailbox, ()).0, K::ID.0, &bytes, 1, false, self.mailbox);
+        mail::send_mail(
+            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
+            K::ID.0,
+            &bytes,
+            1,
+            false,
+            self.mailbox,
+        );
     }
 
     //noinspection DuplicatedCode
@@ -116,7 +130,14 @@ impl MailSender for WasmDropCtx<'_> {
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        mail::send_mail(R::resolve(self.mailbox, ()).0, K::ID.0, bytes, payloads.len() as u32, false, self.mailbox);
+        mail::send_mail(
+            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
+            K::ID.0,
+            bytes,
+            payloads.len() as u32,
+            false,
+            self.mailbox,
+        );
     }
 
     //noinspection DuplicatedCode
@@ -139,7 +160,14 @@ impl MailSender for WasmDropCtx<'_> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(R::resolve(self.mailbox, ()).0, K::ID.0, &bytes, 1, true, self.mailbox);
+        mail::send_mail(
+            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
+            K::ID.0,
+            &bytes,
+            1,
+            true,
+            self.mailbox,
+        );
     }
 
     //noinspection DuplicatedCode
@@ -165,5 +193,19 @@ impl Persistence for WasmDropCtx<'_> {
         // the bundle through `Persistence::save_state_kind`, which calls
         // this trait method, so a capturing ctx must intercept here too.
         WasmDropCtx::save_state(self, version, bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drop_ctx_preserves_parent_scope() {
+        let ctx = WasmDropCtx::__new(0x4d02, 0x4d01);
+
+        assert_eq!(ctx.scope_mailbox(CallerScope::Root), MailboxId::NONE.0);
+        assert_eq!(ctx.scope_mailbox(CallerScope::Current), 0x4d02);
+        assert_eq!(ctx.scope_mailbox(CallerScope::Parent), 0x4d01);
     }
 }

@@ -12,17 +12,22 @@ use aether_data::MailboxId;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActorRuntimeIdentity {
     mailbox: MailboxId,
+    parent: MailboxId,
     carry: u64,
     canonical_name: Arc<str>,
 }
 
 impl ActorRuntimeIdentity {
-    pub fn new(mailbox: MailboxId, carry: u64, canonical_name: Arc<str>) -> Self {
-        Self { mailbox, carry, canonical_name }
+    pub fn new(mailbox: MailboxId, parent: MailboxId, carry: u64, canonical_name: Arc<str>) -> Self {
+        Self { mailbox, parent, carry, canonical_name }
     }
 
     pub fn mailbox(&self) -> MailboxId {
         self.mailbox
+    }
+
+    pub fn parent(&self) -> MailboxId {
+        self.parent
     }
 
     pub fn carry(&self) -> u64 {
@@ -41,9 +46,12 @@ mod tests {
     #[test]
     fn typed_identity_keeps_the_concrete_instance_facts_distinct() {
         let mailbox = MailboxId(0x4058);
-        let identity = ActorRuntimeIdentity::new(mailbox, 0x165, Arc::from("test.parent/test.native.identity:child"));
+        let parent = MailboxId(0x4048);
+        let identity =
+            ActorRuntimeIdentity::new(mailbox, parent, 0x165, Arc::from("test.parent/test.native.identity:child"));
 
         assert_eq!(identity.mailbox(), mailbox);
+        assert_eq!(identity.parent(), parent);
         assert_eq!(identity.carry(), 0x165);
         assert_eq!(&**identity.canonical_name(), "test.parent/test.native.identity:child");
     }

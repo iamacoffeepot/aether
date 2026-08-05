@@ -530,8 +530,8 @@ macro_rules! __export_internal {
 
         /// # Safety
         /// Called exactly once by the substrate before any `receive`.
-        /// Receives the actor's own mailbox id so the SDK can record its
-        /// lineage-aware self identity and pass it to `WasmInitCtx`.
+        /// Receives the actor's own mailbox id and logical parent mailbox so
+        /// runtime ctxs can select Root, Current, or Parent lineage.
         ///
         /// ADR-0090 (issue 1256): the substrate writes `config_len`
         /// bytes at `config_ptr` (`CONFIG_OFFSET` in the substrate's
@@ -545,9 +545,10 @@ macro_rules! __export_internal {
         /// returned `Err(ActorInitError)` or non-empty config bytes failed
         /// to decode.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(export_name = "init_with_config_p32")]
-        pub unsafe extern "C" fn init_with_config(
+        #[unsafe(export_name = "init_with_parent_p32")]
+        pub unsafe extern "C" fn init_with_parent(
             mailbox_id: u64,
+            parent_mailbox_id: u64,
             config_ptr: u32,
             config_len: u32,
         ) -> u32 {
@@ -598,6 +599,7 @@ macro_rules! __export_internal {
             // and `WasmCtx` self read this rather than recomputing
             // `hash(NAMESPACE)`, the ADR-0099 depth-1 fixed point.
             __AETHER_INLINE.set_self_id(mailbox_id);
+            __AETHER_INLINE.set_parent_id(parent_mailbox_id);
             // Issue 2692: install this module's by-tag inline-spawn resolver
             // (the tag-match over its exported set) so guest handler / `wire`
             // code can `ctx.spawn_inline_child_by_tag(...)`. Set once here at
@@ -633,6 +635,15 @@ macro_rules! __export_internal {
                     1
                 }
             }
+        }
+
+        /// # Safety
+        /// Existing config-bearing init ABI. Older substrates do not supply a
+        /// logical parent, so this forwards with mailbox id `0`.
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
+        #[unsafe(export_name = "init_with_config_p32")]
+        pub unsafe extern "C" fn init_with_config(mailbox_id: u64, config_ptr: u32, config_len: u32) -> u32 {
+            unsafe { init_with_parent(mailbox_id, 0, config_ptr, config_len) }
         }
 
         /// # Safety
@@ -856,7 +867,8 @@ macro_rules! __export_internal {
                 $crate::compose_state_envelope(__aether_contexts, __aether_user_state)
             };
             if let Some((version, bytes)) = __aether_state {
-                let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id);
+                let mut ctx: $crate::WasmDropCtx<'_> =
+                    $crate::WasmDropCtx::__new(mailbox_id, __AETHER_INLINE.parent_id_for(mailbox_id));
                 ctx.save_state(version, &bytes);
             }
             0
@@ -1020,16 +1032,14 @@ macro_rules! __export_internal {
 /// One module-level `Slot<Box<dyn ErasedWasmActor>>` holds whichever
 /// exported type the instance became. Two construction entry points:
 ///
-/// - `init_with_config_p32` (the existing 3-arg ABI) constructs the
-///   **default** type when the module opted into one (`@default`). A
-///   defaultless module (`@no_default`, ADR-0138) instead stages a
-///   "module has no default" failure here — the guest-side backstop
-///   for a bare load the host should already have rejected.
-/// - `init_typed_p32` (4-arg, carries an actor-type tag) matches the
-///   tag against each exported type's `mailbox_id_from_name(NAMESPACE)`
-///   and constructs the selected one. This path is unchanged by ADR-0138:
-///   a named load resolves the same way whether or not the module has a
-///   default.
+/// - `init_with_parent_p32` constructs the **default** type and records the
+///   logical parent mailbox. `init_with_config_p32` remains as an additive
+///   compatibility wrapper that supplies parent `0`. A defaultless module
+///   stages the same "module has no default" failure through both exports.
+/// - `init_typed_with_parent_p32` carries both logical parent and actor-type
+///   tag. `init_typed_p32` remains as its parent-`0` compatibility wrapper.
+///   Both match the tag against each exported type's
+///   `mailbox_id_from_name(NAMESPACE)` and construct the selected one.
 ///
 /// `receive` / `wire` / `unwire` / `on_dehydrate` / `on_rehydrate` all
 /// route through the boxed `ErasedWasmActor`, so a multi-actor instance
@@ -1097,8 +1107,8 @@ macro_rules! __export_multi_internal {
         };
     };
     // ADR-0138: multi-actor module WITH a default. Emits the
-    // `aether.namespace` section (naming `$default`) and a 3-arg
-    // `init_with_config_p32` that constructs `$default`, then the shared body.
+    // `aether.namespace` section (naming `$default`) and parent-aware plus
+    // compatibility init exports that construct `$default`, then the shared body.
     (@default $default:ty ; @all $($component:ty),+) => {
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(link_section = "aether.namespace")]
@@ -1114,11 +1124,12 @@ macro_rules! __export_multi_internal {
         };
 
         /// # Safety
-        /// Existing 3-arg init ABI; constructs the default (opted-in) export.
+        /// Parent-aware init ABI; constructs the default (opted-in) export.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(export_name = "init_with_config_p32")]
-        pub unsafe extern "C" fn init_with_config(
+        #[unsafe(export_name = "init_with_parent_p32")]
+        pub unsafe extern "C" fn init_with_parent(
             mailbox_id: u64,
+            parent_mailbox_id: u64,
             config_ptr: u32,
             config_len: u32,
         ) -> u32 {
@@ -1134,6 +1145,7 @@ macro_rules! __export_multi_internal {
             // ADR-0114 addressing amendment: capture the real folded id as the
             // cluster self-identity (correct at any lineage depth).
             __AETHER_INLINE.set_self_id(mailbox_id);
+            __AETHER_INLINE.set_parent_id(parent_mailbox_id);
             // Issue 2692: install the by-tag inline-spawn resolver over the
             // module's full exported set (default + rest), so any exported actor
             // can `ctx.spawn_inline_child_by_tag(...)`.
@@ -1143,12 +1155,21 @@ macro_rules! __export_multi_internal {
             $crate::__export_multi_internal!(@construct $default, mailbox_id, config_bytes)
         }
 
+        /// # Safety
+        /// Existing config-bearing init ABI. Older substrates supply no
+        /// logical parent, so this forwards with mailbox id `0`.
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
+        #[unsafe(export_name = "init_with_config_p32")]
+        pub unsafe extern "C" fn init_with_config(mailbox_id: u64, config_ptr: u32, config_len: u32) -> u32 {
+            unsafe { init_with_parent(mailbox_id, 0, config_ptr, config_len) }
+        }
+
         $crate::__export_multi_internal!(@shared_body $($component),+);
     };
 
     // ADR-0138: multi-actor module WITHOUT a default. Omits the
     // `aether.namespace` section, emits the `aether.no_default` marker
-    // section, and stages a failure from the 3-arg `init_with_config_p32`
+    // section, and stages a failure from both default-init exports
     // (the guest-side backstop — the host rejects a bare, defaultless load
     // before it ever reaches this shim). A named load still resolves
     // through `init_typed_p32` in the shared body.
@@ -1163,13 +1184,14 @@ macro_rules! __export_multi_internal {
         static __AETHER_NO_DEFAULT_SECTION: [u8; 1] = [1u8];
 
         /// # Safety
-        /// 3-arg init ABI on a defaultless module: there is no default to
+        /// Parent-aware init ABI on a defaultless module: there is no default to
         /// construct, so stage a failure and return non-zero. This is a
         /// backstop — the host rejects a bare, defaultless load first.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(export_name = "init_with_config_p32")]
-        pub unsafe extern "C" fn init_with_config(
+        #[unsafe(export_name = "init_with_parent_p32")]
+        pub unsafe extern "C" fn init_with_parent(
             _mailbox_id: u64,
+            _parent_mailbox_id: u64,
             _config_ptr: u32,
             _config_len: u32,
         ) -> u32 {
@@ -1180,12 +1202,21 @@ macro_rules! __export_multi_internal {
             1
         }
 
+        /// # Safety
+        /// Existing config-bearing init ABI. It preserves the same staged
+        /// no-default failure as the parent-aware export.
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
+        #[unsafe(export_name = "init_with_config_p32")]
+        pub unsafe extern "C" fn init_with_config(mailbox_id: u64, config_ptr: u32, config_len: u32) -> u32 {
+            unsafe { init_with_parent(mailbox_id, 0, config_ptr, config_len) }
+        }
+
         $crate::__export_multi_internal!(@shared_body $($component),+);
     };
 
     // ADR-0138: the body shared by `@default` and `@no_default` — everything
     // except the `aether.namespace` / `aether.no_default` sections and the
-    // 3-arg `init_with_config_p32` shim, which the wrapper rules emit.
+    // default-init shims, which the wrapper rules emit.
     (@shared_body $($component:ty),+) => {
         static __AETHER_MULTI: $crate::Slot<
             $crate::__macro_internals::Box<dyn $crate::ErasedWasmActor>
@@ -1305,9 +1336,10 @@ macro_rules! __export_multi_internal {
         /// ADR-0096 typed init: `type_tag` selects which exported type
         /// to construct (its `mailbox_id_from_name(NAMESPACE)`).
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(export_name = "init_typed_p32")]
-        pub unsafe extern "C" fn init_typed(
+        #[unsafe(export_name = "init_typed_with_parent_p32")]
+        pub unsafe extern "C" fn init_typed_with_parent(
             mailbox_id: u64,
+            parent_mailbox_id: u64,
             type_tag: u64,
             config_ptr: u32,
             config_len: u32,
@@ -1324,6 +1356,7 @@ macro_rules! __export_multi_internal {
             // ADR-0114 addressing amendment: capture the real folded id as the
             // cluster self-identity (correct at any lineage depth).
             __AETHER_INLINE.set_self_id(mailbox_id);
+            __AETHER_INLINE.set_parent_id(parent_mailbox_id);
             // Issue 2692: install the by-tag inline-spawn resolver over the
             // module's full exported set — the same set this shim selects the
             // constructed type from — so the constructed actor can
@@ -1345,6 +1378,20 @@ macro_rules! __export_multi_internal {
                 "guest init: unknown actor-type tag for multi-actor module",
             );
             1
+        }
+
+        /// # Safety
+        /// Existing typed-init ABI. Older substrates supply no logical parent,
+        /// so this forwards with mailbox id `0`.
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
+        #[unsafe(export_name = "init_typed_p32")]
+        pub unsafe extern "C" fn init_typed(
+            mailbox_id: u64,
+            type_tag: u64,
+            config_ptr: u32,
+            config_len: u32,
+        ) -> u32 {
+            unsafe { init_typed_with_parent(mailbox_id, 0, type_tag, config_ptr, config_len) }
         }
 
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
@@ -1521,7 +1568,8 @@ macro_rules! __export_multi_internal {
                 $crate::compose_state_envelope(__aether_contexts, __aether_user_state)
             };
             if let Some((version, bytes)) = __aether_state {
-                let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id);
+                let mut ctx: $crate::WasmDropCtx<'_> =
+                    $crate::WasmDropCtx::__new(mailbox_id, __AETHER_INLINE.parent_id_for(mailbox_id));
                 ctx.save_state(version, &bytes);
             }
             0

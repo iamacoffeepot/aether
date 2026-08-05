@@ -130,6 +130,23 @@ pub enum CallerScope {
     Parent,
 }
 
+impl CallerScope {
+    /// Select the routable lineage seed this scope names.
+    ///
+    /// Root-pinned resolvers receive [`MailboxId::NONE`] because they do not
+    /// consume caller lineage. Current and parent scopes receive the logical
+    /// actor mailboxes retained by the runtime; no separate untagged hash
+    /// state is required.
+    #[must_use]
+    pub const fn select(self, current: MailboxId, parent: MailboxId) -> MailboxId {
+        match self {
+            Self::Root => MailboxId::NONE,
+            Self::Current => current,
+            Self::Parent => parent,
+        }
+    }
+}
+
 /// A [`Resolve`] strategy that declares which caller-relative scope its fold
 /// consumes. Every ctx send selects [`Self::SCOPE`] rather than assuming that
 /// all resolvers consume the calling actor's own lineage.
@@ -597,6 +614,16 @@ mod tests {
         assert_eq!(<One as CallerScoped>::SCOPE, CallerScope::Root);
         assert_eq!(<Many as CallerScoped>::SCOPE, CallerScope::Current);
         assert_eq!(<EmbeddedMany as CallerScoped>::SCOPE, CallerScope::Current);
+    }
+
+    #[test]
+    fn caller_scope_selects_root_current_and_parent_mailboxes() {
+        let current = MailboxId(0x4010);
+        let parent = MailboxId(0x4020);
+
+        assert_eq!(CallerScope::Root.select(current, parent), MailboxId::NONE);
+        assert_eq!(CallerScope::Current.select(current, parent), current);
+        assert_eq!(CallerScope::Parent.select(current, parent), parent);
     }
 
     /// `with_tag` replaces only the high nibble, while FNV-1a folding modulo

@@ -47,6 +47,7 @@ use core::cell::{Cell, UnsafeCell};
 use aether_data::MailboxId;
 
 use crate::mail::{Mail, NO_REPLY_HANDLE};
+use crate::model::CallerScope;
 use crate::request_context::RequestContextTable;
 use crate::wasm::ErasedWasmActor;
 use crate::wasm::bridge::mail;
@@ -215,6 +216,10 @@ pub struct Registry {
     /// `wire`, which should not happen). The instance's runtime identity at
     /// any depth, not the ADR-0099 depth-1 fixed point.
     self_id: Cell<u64>,
+    /// The entry actor's logical parent mailbox, supplied by the substrate's
+    /// parent-aware init ABI. Legacy init shims leave this at
+    /// [`MailboxId::NONE`], making their lack of parent metadata explicit.
+    parent_id: Cell<u64>,
     /// The logical actor type actually constructed in the module's entry
     /// slot. Combined with each [`InlineSlot::type_tag`], this lets a ctx
     /// recover the actor identity for its own mailbox at any cluster depth.
@@ -261,6 +266,7 @@ impl Registry {
         Self {
             inner: UnsafeCell::new(BTreeMap::new()),
             self_id: Cell::new(0),
+            parent_id: Cell::new(MailboxId::NONE.0),
             entry_actor_tag: Cell::new(None),
             queue: UnsafeCell::new(VecDeque::new()),
             request_contexts: UnsafeCell::new(RequestContextTable::new()),
@@ -303,12 +309,42 @@ impl Registry {
         self.self_id.set(id);
     }
 
+    /// Record the entry actor's logical parent mailbox. Parent-aware init
+    /// shims set this beside [`Self::set_self_id`]; legacy shims retain
+    /// [`MailboxId::NONE`].
+    pub fn set_parent_id(&self, id: u64) {
+        self.parent_id.set(id);
+    }
+
     /// The instance's real folded [`MailboxId`] raw value, or `0` if no
     /// `init` / `wire` shim has run yet (the receive path falls back to
     /// `hash(NAMESPACE)` only in that should-not-happen window).
     #[must_use]
     pub fn self_id(&self) -> u64 {
         self.self_id.get()
+    }
+
+    /// Select the lineage seed requested by a caller-scoped resolver for a
+    /// cluster member. Inline children read their recorded slot parent; the
+    /// entry actor reads the substrate-supplied parent.
+    #[must_use]
+    pub(crate) fn scope_mailbox(&self, current: MailboxId, scope: CallerScope) -> MailboxId {
+        scope.select(current, self.logical_parent_of(current).unwrap_or(MailboxId::NONE))
+    }
+
+    /// Return a cluster member's logical parent as a raw mailbox id. Macro
+    /// expansions use this when constructing a [`crate::WasmDropCtx`].
+    #[doc(hidden)]
+    #[must_use]
+    pub fn parent_id_for(&self, current: u64) -> u64 {
+        self.logical_parent_of(MailboxId(current)).unwrap_or(MailboxId::NONE).0
+    }
+
+    fn logical_parent_of(&self, id: MailboxId) -> Option<MailboxId> {
+        if id.0 == self.self_id.get() {
+            return Some(MailboxId(self.parent_id.get()));
+        }
+        self.parent_of(id)
     }
 
     /// Record the logical actor type actually constructed in the module's
@@ -712,7 +748,7 @@ mod tests {
     use super::{ChainMode, Registry, RouteDecision, drain_cluster_queue, membrane_dispatch};
     use crate::mail::{Mail, PriorState};
     use crate::wasm::ErasedWasmActor;
-    use crate::{ActorTypeTag, WasmCtx};
+    use crate::{ActorTypeTag, CallerScope, WasmCtx};
     use aether_data::MailboxId;
     use alloc::boxed::Box;
     use alloc::rc::Rc;
@@ -869,6 +905,30 @@ mod tests {
         assert_eq!(meta.full_subname, "widget", "the meta carries the subname");
         assert!(!meta.is_counter, "a Named subname is not a counter");
         assert_eq!(meta.parent, parent, "the meta carries the resident slot's logical parent");
+    }
+
+    #[test]
+    fn scope_selection_distinguishes_entry_and_inline_parents() {
+        let registry = Registry::new();
+        let entry = MailboxId(0x8010);
+        let entry_parent = MailboxId(0x8000);
+        let child = MailboxId(0x8020);
+        registry.set_self_id(entry.0);
+        registry.set_parent_id(entry_parent.0);
+        registry.insert_child(
+            child,
+            0,
+            String::from("child"),
+            false,
+            entry.0,
+            Vec::new(),
+            Box::new(RecordingChild::new().0),
+        );
+
+        assert_eq!(registry.scope_mailbox(entry, CallerScope::Root), MailboxId::NONE);
+        assert_eq!(registry.scope_mailbox(entry, CallerScope::Current), entry);
+        assert_eq!(registry.scope_mailbox(entry, CallerScope::Parent), entry_parent);
+        assert_eq!(registry.scope_mailbox(child, CallerScope::Parent), entry);
     }
 
     #[test]

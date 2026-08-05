@@ -12,7 +12,7 @@ use aether_data::{Kind, MailboxId, RequestId, Source, mailbox_id_from_name};
 
 use crate::mail::ReplyHandle;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
-use crate::model::{Addressable, CallerAddressable, Singleton};
+use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, Singleton};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
 use crate::wasm::mailbox::WasmActorMailbox;
@@ -127,6 +127,10 @@ impl<'a> WasmCtx<'a, Manual> {
 }
 
 impl<M: ReplyMode> WasmCtx<'_, M> {
+    pub(super) fn scope_mailbox(&self, scope: CallerScope) -> u64 {
+        self.inline.scope_mailbox(MailboxId(self.mailbox), scope).0
+    }
+
     /// Not part of the public API; called only by the `#[actor]`
     /// dispatcher. Accepts `None` or `Some(ReplyHandle)` — the dispatcher
     /// passes `mail.reply_handle()` verbatim so component-origin and
@@ -194,7 +198,11 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// the inline registry the send routes through.
     #[must_use]
     pub fn actor<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R> {
-        WasmActorMailbox::__new(R::resolve(self.mailbox, ()).0, self.mailbox, self.inline)
+        WasmActorMailbox::__new(
+            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
+            self.mailbox,
+            self.inline,
+        )
     }
 
     /// Multi-instance sender. Resolve a ctx-bound [`WasmActorMailbox`]
