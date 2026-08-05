@@ -162,16 +162,12 @@ fn mounted_with(dir: &Path, wasm: &Path, pass_timings: bool) -> SubstrateHarness
             fs::copy(rig.join(name), save.join("rig").join(name)).expect("stage the rig");
         }
     }
-    // A fine settle-pump ceiling, because every number below is a frame
-    // time. The default backoff sleeps far longer than a frame, so any
-    // frame with a silent stretch of guest work in it is observed late by
-    // up to the whole of that sleep and reported as work that never
-    // happened (#4453).
+    // Exercise the shipped settle-pump default. The harness keeps this
+    // frame's exact lifecycle chain at the fine floor while outstanding,
+    // so a silent guest handler is no longer measured through the default
+    // coarse ceiling (#4454).
     let (width, height) = canvas();
-    let builder = SubstrateHarness::builder()
-        .size(width, height)
-        .poll_cap(Some(Duration::from_micros(200)))
-        .namespace_roots(test_namespace_roots(save));
+    let builder = SubstrateHarness::builder().size(width, height).namespace_roots(test_namespace_roots(save));
     let builder = if pass_timings {
         builder.with_render_pass_timings()
     } else {
@@ -264,6 +260,11 @@ fn look(azimuth: f32) -> Look {
 ///     cargo test -p aether-puppet --release --test pace_instrument \
 ///     -- --ignored --nocapture
 /// ```
+///
+/// Issue 4454's settle-pump acceptance runs this once with the shipped
+/// default and once with `AETHER_HARNESS_POLL_CAP_MICROS=200`. The default
+/// orbit mean must be within 5% of the fine-cap mean; both static means
+/// must also stay within 5% of their fine-cap rows.
 #[test]
 #[ignore = "instrument; needs the shipped subject in AETHER_CROSSFEED_DIR and a release-profile component wasm"]
 fn the_frame_paces_at_the_pinned_framing() {
@@ -504,8 +505,8 @@ struct Pace {
     /// How much of every span here could be the settle pump sleeping past
     /// the moment the work finished — the harness' own account of its
     /// observation lag (iamacoffeepot/aether#4457). Stated with the
-    /// numbers rather than hoped away: at the default ten-millisecond
-    /// ceiling it is most of a frame.
+    /// numbers rather than hoped away: the tracked frame chain now stays
+    /// at the fine floor, while any post-settlement reply wait may ramp.
     observation: String,
 }
 

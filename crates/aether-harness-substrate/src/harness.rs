@@ -61,6 +61,65 @@ use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use std::error;
 use std::thread;
 
+use crossbeam_channel::{Receiver, TryRecvError};
+
+/// Finest cadence the settle pump uses while an exact causal chain is
+/// known to remain outstanding. Slow untracked waits still ramp toward
+/// their configured ceiling.
+const PUMP_BACKOFF_FLOOR: Duration = Duration::from_micros(50);
+
+/// Adaptive delay for quiet settle-pump iterations.
+///
+/// A tracked chain stays at [`PUMP_BACKOFF_FLOOR`], because sleeping at
+/// the coarse ceiling while its handler is silent makes the observer's
+/// sleep look like handler work. Once that chain settles — or for waits
+/// with no exact chain signal — the geometric ramp keeps slow capability
+/// waits from pinning a core.
+struct PumpBackoff {
+    current: Duration,
+    cap: Duration,
+}
+
+impl PumpBackoff {
+    fn new(cap: Duration) -> Self {
+        Self { current: PUMP_BACKOFF_FLOOR, cap }
+    }
+
+    fn reset(&mut self) {
+        self.current = PUMP_BACKOFF_FLOOR;
+    }
+
+    fn quiet_sleep(&mut self, tracked_chain_outstanding: bool) -> Duration {
+        if tracked_chain_outstanding {
+            self.reset();
+            return PUMP_BACKOFF_FLOOR;
+        }
+
+        let sleep = self.current;
+        self.current = (self.current * 2).min(self.cap);
+        sleep
+    }
+}
+
+/// Consume an exact chain's one-shot settlement signal when it fires.
+///
+/// The signal is a backoff hint only: the correlated reply remains the
+/// functional gate. A disconnected sender is equivalent to no known
+/// outstanding chain, so the pump may resume its ordinary ramp.
+fn tracked_chain_outstanding(settlement: &mut Option<Receiver<()>>) -> bool {
+    let Some(receiver) = settlement.as_ref() else {
+        return false;
+    };
+
+    match receiver.try_recv() {
+        Err(TryRecvError::Empty) => true,
+        Ok(()) | Err(TryRecvError::Disconnected) => {
+            *settlement = None;
+            false
+        }
+    }
+}
+
 /// Boxed [`FrameHook`] constructor the render extension registers on the
 /// builder: runs after the chassis boots, against the live passive (to boot
 /// the pumped render slot via `PassiveChassis::boot_pumped_actor`), the
@@ -399,10 +458,10 @@ impl SubstrateHarnessBuilder {
     /// Issue 4453: override the ceiling the pump clamps its quiet backoff
     /// to. `None` (the default) resolves `AETHER_HARNESS_POLL_CAP_MICROS`
     /// (argv > env > default 10 ms) via `PollConfig`; `Some(d)` pins it.
-    /// A fine value shrinks the observation lag a frame containing a long
-    /// silent handler is measured through, at the cost of CPU spent
-    /// polling — the trade an instrument wants and a normal scenario does
-    /// not. Per-harness, no process env.
+    /// The exact lifecycle chain used by a frame stays at the pump's fine
+    /// floor while outstanding (issue 4454); this ceiling governs
+    /// untracked and post-settlement quiet, where a fine value trades CPU
+    /// for observation resolution. Per-harness, no process env.
     #[must_use]
     pub fn poll_cap(mut self, cap: Option<Duration>) -> Self {
         self.poll_cap = cap;
@@ -1216,7 +1275,23 @@ impl SubstrateHarness {
     where
         R: Kind,
     {
-        let event = self.pump_until_event(cid, expected)?;
+        let event = self.pump_until_event(cid, expected, None)?;
+        Self::decode_reply::<R>(event, expected)
+    }
+
+    /// Pump for a correlated reply while an exact causal chain is known
+    /// to be outstanding. Settlement controls only the quiet-poll cadence;
+    /// the reply remains the ordering gate (issue 999).
+    fn pump_until_reply_while_settling<R>(
+        &mut self,
+        cid: u64,
+        expected: &'static str,
+        settlement: Receiver<()>,
+    ) -> Result<R, SubstrateHarnessError>
+    where
+        R: Kind,
+    {
+        let event = self.pump_until_event(cid, expected, Some(settlement))?;
         Self::decode_reply::<R>(event, expected)
     }
 
@@ -1225,16 +1300,22 @@ impl SubstrateHarness {
     /// [`Self::send_bytes_and_await`] and the `SendAndAwaitReply` op of
     /// [`Self::execute`], where the reply type is decoded on demand.
     fn pump_until_reply_bytes(&mut self, cid: u64, expected: &'static str) -> Result<Vec<u8>, SubstrateHarnessError> {
-        let event = self.pump_until_event(cid, expected)?;
+        let event = self.pump_until_event(cid, expected, None)?;
         Self::reply_payload(event, expected)
     }
 
     /// Pump the event channel and the loopback receiver until a
     /// session-targeted reply with `cid` arrives, returning the raw
     /// [`EgressEvent`]. Shared loop body of [`Self::pump_until_reply`]
-    /// (typed decode) and [`Self::pump_until_reply_bytes`] (raw
-    /// bytes).
-    fn pump_until_event(&mut self, cid: u64, expected: &'static str) -> Result<EgressEvent, SubstrateHarnessError> {
+    /// (typed decode) and [`Self::pump_until_reply_bytes`] (raw bytes).
+    /// When `tracked_settlement` is present, its exact causal chain pins
+    /// quiet polling to the fine floor until settlement fires (issue 4454).
+    fn pump_until_event(
+        &mut self,
+        cid: u64,
+        expected: &'static str,
+        mut tracked_settlement: Option<Receiver<()>>,
+    ) -> Result<EgressEvent, SubstrateHarnessError> {
         // Adaptive backoff between quiet polls. A frame's settlement
         // round-trip (driver → pool → settlement registry → reply)
         // completes in ~1 ms, but a flat coarse sleep makes every tick
@@ -1249,10 +1330,11 @@ impl SubstrateHarness {
         // yields the CPU, so capability dispatcher threads still run
         // (ADR-0070).
         // The cap is settable (issue 4453) so an instrument can trade CPU
-        // for observation resolution: a long silent handler is otherwise
-        // observed up to a whole capped sleep after it actually finished,
-        // and that lag is indistinguishable from work at this seam.
-        const BACKOFF_FLOOR: Duration = Duration::from_micros(50);
+        // for observation resolution during untracked or post-settlement
+        // quiet. An exact outstanding lifecycle chain stays at the floor:
+        // otherwise a silent handler is observed up to a whole capped
+        // sleep after it actually finished, and that lag is
+        // indistinguishable from work at this seam (issue 4454).
         let backoff_cap = self.poll_cap;
         // Wall-clock budget for consecutive quiet (no-progress) time
         // before giving up — a deadlock/livelock backstop, not the gate a
@@ -1272,7 +1354,7 @@ impl SubstrateHarness {
             return Ok(frame);
         }
 
-        let mut backoff = BACKOFF_FLOOR;
+        let mut backoff = PumpBackoff::new(backoff_cap);
         let mut last_progress = Instant::now();
         let mut iterations = 0u32;
         loop {
@@ -1340,15 +1422,15 @@ impl SubstrateHarness {
             }
 
             if progressed {
-                backoff = BACKOFF_FLOOR;
+                backoff.reset();
                 last_progress = Instant::now();
             } else {
                 if last_progress.elapsed() >= stall_deadline {
                     return Err(SubstrateHarnessError::Timeout { expected, pumped_iterations: iterations });
                 }
-                thread::sleep(backoff);
-                self.pump_stats.record_sleep(backoff, backoff >= backoff_cap);
-                backoff = (backoff * 2).min(backoff_cap);
+                let sleep = backoff.quiet_sleep(tracked_chain_outstanding(&mut tracked_settlement));
+                thread::sleep(sleep);
+                self.pump_stats.record_sleep(sleep, sleep >= backoff_cap);
             }
         }
     }
@@ -1478,6 +1560,7 @@ impl SubstrateHarness {
                     self.lifecycle_mailbox,
                     self.kind_lifecycle_advance,
                 );
+                let settlement = self.passive.settlement_registry().subscribe_settlement(advance_root);
                 let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
                 self.queue.push(
                     Mail::new(
@@ -1494,8 +1577,11 @@ impl SubstrateHarness {
                 // settled (a genuine in_flight leak in some downstream cap)
                 // or the driver never replied — same fail-loud disposition
                 // the prior `SettlementTimeout` had.
-                let complete =
-                    self.pump_until_reply::<aether_kinds::LifecycleAdvanceComplete>(cid, "LifecycleAdvanceComplete")?;
+                let complete = self.pump_until_reply_while_settling::<aether_kinds::LifecycleAdvanceComplete>(
+                    cid,
+                    "LifecycleAdvanceComplete",
+                    settlement,
+                )?;
                 if complete.next == <Tick as Kind>::ID.0 || complete.next == 0 {
                     break;
                 }
@@ -1560,6 +1646,45 @@ fn correlation_of(event: &EgressEvent) -> Option<u64> {
 #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
+
+    /// Issue 4454: a silent exact lifecycle chain must never climb toward
+    /// the coarse default ceiling. Once its one-shot settlement signal
+    /// fires, the ordinary geometric ramp resumes from the fine floor.
+    #[test]
+    fn tracked_chain_pins_the_backoff_floor_until_settlement() {
+        let (settled_tx, settled_rx) = crossbeam_channel::bounded(1);
+        let mut settlement = Some(settled_rx);
+        let mut backoff = PumpBackoff::new(Duration::from_millis(10));
+
+        for _ in 0..12 {
+            let outstanding = tracked_chain_outstanding(&mut settlement);
+            assert!(outstanding);
+            assert_eq!(backoff.quiet_sleep(outstanding), PUMP_BACKOFF_FLOOR);
+        }
+
+        settled_tx.send(()).expect("the settlement receiver remains live");
+        let outstanding = tracked_chain_outstanding(&mut settlement);
+        assert!(!outstanding);
+        assert!(settlement.is_none(), "the one-shot signal is discarded after it fires");
+        assert_eq!(backoff.quiet_sleep(outstanding), Duration::from_micros(50));
+        assert_eq!(backoff.quiet_sleep(false), Duration::from_micros(100));
+        assert_eq!(backoff.quiet_sleep(false), Duration::from_micros(200));
+    }
+
+    /// Slow reply-only waits have no exact causal-chain receiver. Preserve
+    /// their prior floor/doubling/cap sequence so the frame fix does not
+    /// turn capability waits into a fine-poll CPU spin.
+    #[test]
+    fn untracked_quiet_keeps_the_existing_geometric_backoff() {
+        let mut settlement = None;
+        let mut backoff = PumpBackoff::new(Duration::from_micros(200));
+
+        for expected in [50, 100, 200, 200, 200] {
+            let outstanding = tracked_chain_outstanding(&mut settlement);
+            assert!(!outstanding);
+            assert_eq!(backoff.quiet_sleep(outstanding), Duration::from_micros(expected));
+        }
+    }
 
     /// The wedge dump renders each pending root with its counts (issue
     /// 2062) — a pure-function check, no chassis boot needed.

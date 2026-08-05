@@ -55,6 +55,15 @@ settle before the next observation. A slow-chain heartbeat can extend patience;
 the cumulative cap identifies a genuine wedge and reports pending roots/hold
 counts.
 
+The frame pump also subscribes to the exact lifecycle root it is waiting on.
+While that chain remains outstanding, quiet polls stay at the 50 µs floor;
+after settlement, or when no exact chain is available, they resume geometric
+backoff toward `AETHER_HARNESS_POLL_CAP_MICROS`. This keeps a silent wasm
+handler's frame measurement from absorbing a coarse observer sleep without
+pinning slow reply-only waits to the fine cadence. Historical frame timings
+collected before issue 4454 with the default 10 ms ceiling should be treated as
+observer-inflated unless they were remeasured or explicitly used a fine cap.
+
 This gate prevents a common flaky pattern:
 
 ```text
