@@ -361,8 +361,17 @@ dependencies = [
  "serde_json",
  "sha2",
  "tracing",
- "trybuild",
  "wasmtime",
+]
+
+[[package]]
+name = "aether-component-ui-tests"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-component",
+ "aether-substrate",
+ "trybuild",
 ]
 
 [[package]]

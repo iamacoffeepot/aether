@@ -45,6 +45,10 @@ members = [
     "crates/aether-tcp",
     "crates/aether-game",
     "crates/aether-component",
+    # Dedicated trybuild host for `aether-component`'s route contracts. Keeping
+    # its dev-dependency graph narrow prevents trybuild's generated project from
+    # inheriting the component crate's integration harnesses and wasm fixtures.
+    "crates/aether-component-ui-tests",
     "crates/aether-http",
     "crates/aether-trace",
     "crates/aether-render",
