@@ -4,12 +4,34 @@
 
 use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child};
 use crate::model::ctx::{Emit, Manual, Multi, Single};
+use crate::model::{Addressable, CallerScope, CallerScoped, Resolve};
 use crate::wasm::WasmActorMailbox;
 use crate::wasm::inline::RouteDecision;
 use aether_data::{MailboxId, Source};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem::{align_of, size_of};
+
+struct ParentScopeResolver;
+
+impl Resolve for ParentScopeResolver {
+    type Args<'a> = ();
+
+    fn resolve(caller_carry: u64, _namespace: &str, (): ()) -> MailboxId {
+        MailboxId(caller_carry)
+    }
+}
+
+impl CallerScoped for ParentScopeResolver {
+    const SCOPE: CallerScope = CallerScope::Parent;
+}
+
+struct ParentScopedActor;
+
+impl Addressable for ParentScopedActor {
+    const NAMESPACE: &'static str = "test.wasm.parent_scoped";
+    type Resolver = ParentScopeResolver;
+}
 
 /// Issue 2001: `source_mailbox()` is a single read of the ctx's
 /// `source` field on the top-level path — the host threads the resolved
@@ -78,6 +100,24 @@ fn ffi_ctx_layout_identical_for_multi_mode() {
 fn ffi_ctx_layout_identical_across_modes() {
     assert_eq!(size_of::<WasmCtx<'static, Single>>(), size_of::<WasmCtx<'static, Manual>>(),);
     assert_eq!(align_of::<WasmCtx<'static, Single>>(), align_of::<WasmCtx<'static, Manual>>(),);
+}
+
+#[test]
+fn actor_resolution_uses_entry_and_inline_logical_parents() {
+    let registry = Registry::new();
+    let entry = MailboxId(0x7010);
+    let entry_parent = MailboxId(0x7000);
+    let child = MailboxId(0x7020);
+    registry.set_self_id(entry.0);
+    registry.set_parent_id(entry_parent.0);
+    install_inline_child::<SucceedingChild>(&registry, child, 0, String::from("child"), false, entry.0, Vec::new(), ())
+        .expect("install inline child");
+
+    let entry_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(entry.0, &registry, NO_INBOUND_SOURCE);
+    let child_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(child.0, &registry, NO_INBOUND_SOURCE);
+
+    assert_eq!(entry_ctx.actor::<ParentScopedActor>().mailbox_id(), entry_parent);
+    assert_eq!(child_ctx.actor::<ParentScopedActor>().mailbox_id(), entry);
 }
 
 /// ADR-0114 addressing amendment: a ctx self-identified as the cluster

@@ -1,3 +1,4 @@
+use aether_data::MailboxId;
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
 
 use super::{ComponentCtx, DELIVERY_ALIGN, MAX_DELIVERABLE_MAIL_BYTES, ReallocFunc, ReceiveFunc, SMALL_REGION_BYTES};
@@ -166,11 +167,11 @@ impl Component {
     ///
     /// ADR-0096: `type_tag` selects which exported actor type a
     /// multi-actor module instantiates. `Some(tag)` calls the guest's
-    /// `init_typed_p32(mailbox_id, tag, ptr, len)` — a missing export is
-    /// a clean boot error (the module isn't multi-actor, or doesn't
-    /// export the selected type). `None` is the entry-type / single-actor
-    /// path: the substrate probes `init_with_config_p32`, then the legacy
-    /// `init` shapes, exactly as before.
+    /// `init_typed_with_parent_p32(mailbox_id, parent, tag, ptr, len)`, then
+    /// falls back to `init_typed_p32` for an older guest. A missing pair is a
+    /// clean boot error. `None` is the entry-type / single-actor path: the
+    /// substrate probes `init_with_parent_p32`, then
+    /// `init_with_config_p32`, then the legacy `init` shapes.
     #[allow(
         clippy::too_many_lines,
         reason = "one cohesive instantiate sequence: build instance, probe the \
@@ -200,12 +201,10 @@ impl Component {
         // so raw-FFI components predating the Phase 2 ABI still load —
         // they just don't get auto-subscribe, which they never did.
         //
-        // ADR-0090 (issue 1256): the substrate probes `init_with_config_p32`
-        // first (the post-#1256 ABI that carries config bytes), then
-        // the `(u64) -> u32` shape (Phase 2), then the legacy `()` shape.
-        // The order is deliberate — a `#[actor]`-built guest exports
-        // both `init_with_config_p32` and the legacy `init(u64)`, so a substrate
-        // that probes `init` first would silently skip the config path.
+        // The substrate probes the parent-aware config ABI first, then the
+        // prior config ABI, `(u64) -> u32`, and finally legacy `()`. The order
+        // is deliberate: macro-built guests export every compatibility shim,
+        // so probing an older shape first would silently discard metadata.
         //
         // Issue 525 Phase 4b / issue 531: a non-zero return value
         // means the guest's `WasmActor::init` returned `Err(ActorInitError)`
@@ -215,6 +214,12 @@ impl Component {
         // path reports it via `LoadResult::Err { error }` — same
         // shape as a wasm trap, just with a more informative message.
         let mailbox_id = store.data().sender.0;
+        // The component store is wired to the hosting trampoline's native
+        // binding before instantiate. That binding owns the logical parent;
+        // raw test/legacy contexts without one make the limitation explicit
+        // as NONE and continue through the compatibility exports below.
+        let parent_mailbox_id =
+            store.data().binding.as_ref().map_or(MailboxId::NONE.0, |binding| binding.parent_mailbox().0);
         // ADR-0095: the guest's generic delivery allocator. Probed before the
         // config write because config delivery routes through it, exactly like
         // `deliver` routes mail. Present on macro-built guests (emitted by
@@ -245,19 +250,9 @@ impl Component {
         let config_len = config_bytes.len() as u32;
         let init_rc = if let Some(type_tag) = type_tag {
             // ADR-0096: a multi-actor module loaded with an export
-            // selector. The module exports `init_typed_p32`
-            // (mailbox_id, type_tag, ptr, len); the tag picks which
-            // exported type to construct. A guest without that export
-            // either isn't a multi-actor module or was built against an
-            // older SDK — a clean boot error, never a silent fall-through
-            // to the entry-only `init_with_config_p32`.
-            let init_typed =
-                instance.get_typed_func::<(u64, u64, u32, u32), u32>(&mut store, "init_typed_p32").map_err(|e| {
-                    wasmtime::Error::msg(format!(
-                        "export selector set but guest exports no `init_typed_p32` \
-                         (not a multi-actor module?): {e}"
-                    ))
-                })?;
+            // selector. Prefer the parent-aware typed export; an older guest
+            // falls back to `init_typed_p32`. Neither path may silently fall
+            // through to the entry-only init exports.
             // ADR-0095: same allocator-backed config write as the
             // entry path below.
             let config_ptr = Self::place_init_config(
@@ -269,7 +264,34 @@ impl Component {
                 &mut large_cap,
                 config_bytes,
             )?;
-            Some(init_typed.call(&mut store, (mailbox_id, type_tag, config_ptr, config_len))?)
+            if let Ok(init_typed) =
+                instance.get_typed_func::<(u64, u64, u64, u32, u32), u32>(&mut store, "init_typed_with_parent_p32")
+            {
+                Some(init_typed.call(&mut store, (mailbox_id, parent_mailbox_id, type_tag, config_ptr, config_len))?)
+            } else {
+                let init_typed = instance
+                    .get_typed_func::<(u64, u64, u32, u32), u32>(&mut store, "init_typed_p32")
+                    .map_err(|e| {
+                        wasmtime::Error::msg(format!(
+                            "export selector set but guest exports neither `init_typed_with_parent_p32` nor \
+                             `init_typed_p32` (not a multi-actor module?): {e}"
+                        ))
+                    })?;
+                Some(init_typed.call(&mut store, (mailbox_id, type_tag, config_ptr, config_len))?)
+            }
+        } else if let Ok(init_with_parent) =
+            instance.get_typed_func::<(u64, u64, u32, u32), u32>(&mut store, "init_with_parent_p32")
+        {
+            let config_ptr = Self::place_init_config(
+                &mut store,
+                &memory,
+                realloc.as_ref(),
+                small_ptr,
+                &mut large_ptr,
+                &mut large_cap,
+                config_bytes,
+            )?;
+            Some(init_with_parent.call(&mut store, (mailbox_id, parent_mailbox_id, config_ptr, config_len))?)
         } else if let Ok(init_with_config) =
             instance.get_typed_func::<(u64, u32, u32), u32>(&mut store, "init_with_config_p32")
         {

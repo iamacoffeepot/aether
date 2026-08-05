@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use aether_actor::{Addressable, HandlesKind};
-use aether_actor::{CallerAddressable, MailSender, Singleton};
+use aether_actor::{CallerAddressable, CallerScoped, MailSender, Singleton};
 use aether_data::{Kind, MailId, MailboxId, mailbox_id_from_name};
 
 use crate::actor::native::binding::NativeBinding;
@@ -124,7 +124,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
     {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.carry(), ()).0,
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -145,7 +145,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
         self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.carry(), ()).0,
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
             K::ID.0,
             bytes,
             count,
@@ -181,7 +181,14 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.binding.send_mail_with_lineage(R::resolve(self.binding.carry(), ()).0, K::ID.0, &bytes, 1, None, None);
+        self.binding.send_mail_with_lineage(
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+            K::ID.0,
+            &bytes,
+            1,
+            None,
+            None,
+        );
     }
 
     //noinspection DuplicatedCode
@@ -229,7 +236,14 @@ impl<A: Addressable> MailSender for RootCtx<A> {
         let bytes = payload.encode_into_bytes();
         // No inherited parent / root — each send mints its own chain
         // rooted at the freshly minted `MailId` (sender = A.mailbox).
-        self.binding.send_mail_with_lineage(R::resolve(self.binding.carry(), ()).0, K::ID.0, &bytes, 1, None, None);
+        self.binding.send_mail_with_lineage(
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+            K::ID.0,
+            &bytes,
+            1,
+            None,
+            None,
+        );
     }
 
     fn send_many<R, K>(&mut self, payloads: &[K])
@@ -242,7 +256,14 @@ impl<A: Addressable> MailSender for RootCtx<A> {
         // realistic mail batches stay well below `u32::MAX`.
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
-        self.binding.send_mail_with_lineage(R::resolve(self.binding.carry(), ()).0, K::ID.0, bytes, count, None, None);
+        self.binding.send_mail_with_lineage(
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+            K::ID.0,
+            bytes,
+            count,
+            None,
+            None,
+        );
     }
 
     // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
@@ -263,7 +284,14 @@ impl<A: Addressable> MailSender for RootCtx<A> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.binding.send_mail_with_lineage(R::resolve(self.binding.carry(), ()).0, K::ID.0, &bytes, 1, None, None);
+        self.binding.send_mail_with_lineage(
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+            K::ID.0,
+            &bytes,
+            1,
+            None,
+            None,
+        );
     }
 
     // Runtime-name detached escape hatch — the `send_to_named` counterpart.
@@ -357,6 +385,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    use aether_actor::{CallerScope, Resolve};
     use aether_data::{KindId, MailboxId};
 
     use crate::mail::registry::{OwnedDispatch, Registry};
@@ -374,6 +403,29 @@ mod tests {
     }
 
     impl HandlesKind<aether_kinds::Tick> for StubActor {}
+
+    struct ParentScopeResolver;
+
+    impl Resolve for ParentScopeResolver {
+        type Args<'a> = ();
+
+        fn resolve(caller_carry: u64, _namespace: &str, (): ()) -> MailboxId {
+            MailboxId(caller_carry)
+        }
+    }
+
+    impl CallerScoped for ParentScopeResolver {
+        const SCOPE: CallerScope = CallerScope::Parent;
+    }
+
+    struct ParentScopedActor;
+
+    impl Addressable for ParentScopedActor {
+        const NAMESPACE: &'static str = "test.spawn_thread.parent_scoped";
+        type Resolver = ParentScopeResolver;
+    }
+
+    impl HandlesKind<aether_kinds::Tick> for ParentScopedActor {}
 
     #[derive(Clone, Debug)]
     struct CapturedDispatch {
@@ -412,6 +464,52 @@ mod tests {
             }),
         );
         captured
+    }
+
+    fn register_capture_at(registry: &Registry, id: MailboxId) -> Arc<Mutex<Vec<CapturedDispatch>>> {
+        let captured: Arc<Mutex<Vec<CapturedDispatch>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_handler = Arc::clone(&captured);
+        registry
+            .try_register_inbox_with_id(
+                &boot_authority(),
+                id,
+                ParentScopedActor::NAMESPACE,
+                Arc::new(move |dispatch: OwnedDispatch| {
+                    dispatch.discharge();
+                    captured_for_handler.lock().unwrap().push(CapturedDispatch {
+                        mail_id: dispatch.mail_id,
+                        root: dispatch.root,
+                        parent_mail: dispatch.parent_mail,
+                        sender: dispatch.sender,
+                    });
+                }),
+            )
+            .expect("register parent-scoped capture");
+        captured
+    }
+
+    #[test]
+    fn offload_contexts_preserve_parent_scoped_resolution() {
+        let (registry, mailer) = fresh_substrate();
+        let parent = MailboxId(0x4a11);
+        let current = MailboxId(0x4a12);
+        let captured = register_capture_at(&registry, parent);
+        let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, parent));
+        let inherited_root = MailId::new(MailboxId(0x4a13), 1);
+        let inherited_mail = MailId::new(MailboxId(0x4a14), 2);
+
+        spawn_inherit::<StubActor, _>(Arc::clone(&binding), inherited_mail, inherited_root, |mut ctx| {
+            <InheritCtx<StubActor> as MailSender>::send::<ParentScopedActor, _>(&mut ctx, &aether_kinds::Tick);
+        })
+        .join()
+        .expect("inherit worker joins");
+        spawn_detached::<StubActor, _>(binding, |mut ctx| {
+            <RootCtx<StubActor> as MailSender>::send::<ParentScopedActor, _>(&mut ctx, &aether_kinds::Tick);
+        })
+        .join()
+        .expect("root worker joins");
+
+        assert_eq!(captured.lock().unwrap().len(), 2, "both offload ctx flavours resolve through the parent");
     }
 
     /// `InheritCtx`-spawned thread's `send_to_named` carries the

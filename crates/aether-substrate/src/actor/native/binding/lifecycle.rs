@@ -15,7 +15,7 @@ use crate::chassis::inbox::{ReplyLineage, SettlingInbox};
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
-use aether_actor::RequestContextTable;
+use aether_actor::{CallerScope, RequestContextTable};
 
 impl NativeBinding {
     /// Build a fresh transport. Pair `self_mailbox` with the id the
@@ -41,9 +41,29 @@ impl NativeBinding {
         aborter: Arc<dyn FatalAborter>,
         spawner: Option<Arc<crate::Spawner>>,
     ) -> Self {
+        Self::new_with_parent::<A>(mailer, self_mailbox, MailboxId::NONE, carry, canonical_name, aborter, spawner)
+    }
+
+    /// Build a typed transport whose actor was logically spawned by
+    /// `parent_mailbox`. Root actors use [`Self::new`], which preserves the
+    /// existing constructor and records [`MailboxId::NONE`].
+    pub fn new_with_parent<A: super::NativeActor>(
+        mailer: Arc<Mailer>,
+        self_mailbox: MailboxId,
+        parent_mailbox: MailboxId,
+        carry: u64,
+        canonical_name: Arc<str>,
+        aborter: Arc<dyn FatalAborter>,
+        spawner: Option<Arc<crate::Spawner>>,
+    ) -> Self {
         Self {
             mailer,
-            identity: BindingIdentity::Typed(ActorRuntimeIdentity::new(self_mailbox, carry, canonical_name)),
+            identity: BindingIdentity::Typed(ActorRuntimeIdentity::new(
+                self_mailbox,
+                parent_mailbox,
+                carry,
+                canonical_name,
+            )),
             inbox: OnceLock::new(),
             correlation: AtomicU64::new(0),
             reply_lineage: ReplyLineage::new(),
@@ -88,11 +108,19 @@ impl NativeBinding {
     /// appropriate for production capabilities, which should go
     /// through [`Self::from_ctx`].
     pub fn new_for_test(mailer: Arc<Mailer>, self_mailbox: MailboxId) -> Self {
+        Self::new_for_test_with_parent(mailer, self_mailbox, MailboxId::NONE)
+    }
+
+    pub(crate) fn new_for_test_with_parent(
+        mailer: Arc<Mailer>,
+        self_mailbox: MailboxId,
+        parent_mailbox: MailboxId,
+    ) -> Self {
         Self {
             mailer,
             // Untyped tests still use relative actor resolution. Preserve the
             // historical depth-1 carry without inventing a logical identity.
-            identity: BindingIdentity::Untyped { mailbox: self_mailbox, carry: self_mailbox.0 },
+            identity: BindingIdentity::Untyped { mailbox: self_mailbox, parent: parent_mailbox, carry: self_mailbox.0 },
             inbox: OnceLock::new(),
             correlation: AtomicU64::new(0),
             reply_lineage: ReplyLineage::new(),
@@ -164,6 +192,17 @@ impl NativeBinding {
     /// carry the spawn machinery folds the new node's `ActorId` onto.
     pub fn carry(&self) -> u64 {
         self.identity.carry()
+    }
+
+    /// The mailbox of this actor's logical parent, or [`MailboxId::NONE`]
+    /// for a chassis root or a legacy/test binding with no parent metadata.
+    pub fn parent_mailbox(&self) -> MailboxId {
+        self.identity.parent()
+    }
+
+    /// Select the lineage seed requested by a caller-scoped resolver.
+    pub fn scope_mailbox(&self, scope: CallerScope) -> MailboxId {
+        scope.select(self.self_mailbox(), self.parent_mailbox())
     }
 
     pub(in crate::actor::native) fn runtime_identity(&self) -> Option<&ActorRuntimeIdentity> {
@@ -293,6 +332,18 @@ mod tests {
         let (_tx2, rx2) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx1);
         transport.install_inbox(rx2);
+    }
+
+    #[test]
+    fn binding_scope_selection_distinguishes_root_current_and_parent() {
+        let (_registry, mailer) = bare_substrate();
+        let current = MailboxId(0x4a01);
+        let parent = MailboxId(0x4a00);
+        let binding = NativeBinding::new_for_test_with_parent(mailer, current, parent);
+
+        assert_eq!(binding.scope_mailbox(CallerScope::Root), MailboxId::NONE);
+        assert_eq!(binding.scope_mailbox(CallerScope::Current), current);
+        assert_eq!(binding.scope_mailbox(CallerScope::Parent), parent);
     }
 
     /// #1716 / step 2: an armed envelope left queued in the dispatcher's

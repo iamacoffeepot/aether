@@ -16,6 +16,7 @@ use wasmtime::{Engine, Linker, Module};
 use std::sync::Mutex;
 
 use super::*;
+use crate::actor::native::NativeBinding;
 use crate::actor::wasm::host_fns;
 use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
@@ -94,6 +95,27 @@ fn try_instantiate_with_config(wat: &str, config_bytes: &[u8]) -> wasmtime::Resu
     Component::instantiate(&engine, &linker, &module, ctx(), config_bytes, None)
 }
 
+fn ctx_with_parent(sender: MailboxId, parent: MailboxId) -> ComponentCtx {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let mut ctx = ComponentCtx::new(sender, registry, Arc::clone(&mailer), HubOutbound::disconnected());
+    ctx.install_binding(Arc::new(NativeBinding::new_for_test_with_parent(mailer, sender, parent)));
+    ctx
+}
+
+fn replacement_ctx_pair(sender: MailboxId, parent: MailboxId) -> (ComponentCtx, ComponentCtx) {
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), sender, parent));
+    let build = || {
+        let mut ctx =
+            ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+        ctx.install_binding(Arc::clone(&binding));
+        ctx
+    };
+    (build(), build())
+}
+
 /// WAT where `on_dehydrate` writes 0x11 to offset 200 — same pattern
 /// as `control.rs` test shape but kept local so component tests
 /// stay standalone. (Issue 584 Phase 3 retired the legacy
@@ -166,6 +188,75 @@ fn wat_records_mail_ptr() -> String {
                 i32.const 0))
     "#
     )
+}
+
+fn wat_init_with_parent() -> String {
+    format!(
+        r#"
+        (module
+            (memory (export "memory") 1)
+            {WAT_REALLOC}
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
+                i32.const 0)
+            (func (export "init_with_parent_p32") (param i64 i64 i32 i32) (result i32)
+                i32.const 200
+                local.get 0
+                i32.wrap_i64
+                i32.store
+                i32.const 204
+                local.get 1
+                i32.wrap_i64
+                i32.store
+                i32.const 0))
+    "#
+    )
+}
+
+fn wat_typed_init(export: &str, parent_aware: bool) -> String {
+    let init = if parent_aware {
+        format!(
+            r#"
+            (func (export "{export}") (param i64 i64 i64 i32 i32) (result i32)
+                i32.const 204
+                local.get 1
+                i32.wrap_i64
+                i32.store
+                i32.const 208
+                local.get 2
+                i32.wrap_i64
+                i32.store
+                i32.const 0)"#
+        )
+    } else {
+        format!(
+            r#"
+            (func (export "{export}") (param i64 i64 i32 i32) (result i32)
+                i32.const 208
+                local.get 1
+                i32.wrap_i64
+                i32.store
+                i32.const 0)"#
+        )
+    };
+    format!(
+        r#"
+        (module
+            (memory (export "memory") 1)
+            {WAT_REALLOC}
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32)
+                i32.const 0)
+            {init})
+    "#
+    )
+}
+
+fn instantiate_typed_with_ctx(wat: &str, ctx: ComponentCtx, type_tag: u64) -> Component {
+    let engine = Engine::default();
+    let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
+    host_fns::register(&mut linker).expect("register host fns");
+    let wasm = wat::parse_str(wat).expect("compile WAT");
+    let module = Module::new(&engine, &wasm).expect("compile module");
+    Component::instantiate(&engine, &linker, &module, ctx, &[], Some(type_tag)).expect("instantiate typed")
 }
 
 /// ADR-0090 / ADR-0095: `init_with_config_p32` shim that stamps the host-
@@ -488,6 +579,58 @@ fn init_with_config_p32_empty_config_passes_zero_length() {
     // No bytes were copied to 212 / 213 (the WAT skips the copy
     // when len == 0), so the slot stays zero.
     assert_eq!(component.read_u32(212), 0);
+}
+
+#[test]
+fn parent_aware_init_receives_parent_on_initial_and_replacement_instantiation() {
+    let sender = MailboxId(0x4c01);
+    let parent = MailboxId(0x4c02);
+    let wat = wat_init_with_parent();
+    let (initial_ctx, replacement_ctx) = replacement_ctx_pair(sender, parent);
+
+    let mut initial = instantiate_with_ctx(&wat, initial_ctx);
+    assert_eq!(initial.read_u32(200), 0x4c01);
+    assert_eq!(initial.read_u32(204), 0x4c02);
+
+    // `replace_component` creates a fresh `ComponentCtx`, reinstalls the same
+    // native binding, and calls this same instantiate path.
+    let mut replacement = instantiate_with_ctx(&wat, replacement_ctx);
+    assert_eq!(replacement.read_u32(204), 0x4c02);
+}
+
+#[test]
+fn legacy_config_init_still_loads_when_the_binding_has_a_parent() {
+    let sender = MailboxId(0x4c11);
+    let parent = MailboxId(0x4c12);
+
+    let mut component = instantiate_with_ctx(&wat_init_with_config(), ctx_with_parent(sender, parent));
+
+    assert_eq!(component.read_u32(200), 0x4c11);
+}
+
+#[test]
+fn typed_parent_aware_init_receives_parent_and_type_tag() {
+    let sender = MailboxId(0x4c21);
+    let parent = MailboxId(0x4c22);
+    let type_tag = 0x4c23;
+    let wat = wat_typed_init("init_typed_with_parent_p32", true);
+
+    let mut component = instantiate_typed_with_ctx(&wat, ctx_with_parent(sender, parent), type_tag);
+
+    assert_eq!(component.read_u32(204), 0x4c22);
+    assert_eq!(component.read_u32(208), 0x4c23);
+}
+
+#[test]
+fn legacy_typed_init_still_loads_when_the_binding_has_a_parent() {
+    let sender = MailboxId(0x4c31);
+    let parent = MailboxId(0x4c32);
+    let type_tag = 0x4c33;
+    let wat = wat_typed_init("init_typed_p32", false);
+
+    let mut component = instantiate_typed_with_ctx(&wat, ctx_with_parent(sender, parent), type_tag);
+
+    assert_eq!(component.read_u32(208), 0x4c33);
 }
 
 /// ADR-0095: a config at/under `SMALL_REGION_BYTES` lands in the cached small

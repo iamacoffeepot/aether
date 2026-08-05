@@ -217,6 +217,7 @@ struct InstancedSlotEntry {
 /// display/reverse-map value; `id` remains the lineage-folded route key.
 pub(super) struct SpawnIdentity {
     id: MailboxId,
+    parent: MailboxId,
     carry: u64,
     canonical_name: Arc<str>,
     subname: String,
@@ -489,16 +490,16 @@ impl Spawner {
         //    depth-1 fixed point: the node is the root of its own
         //    lineage, so it keeps the flat `{NAMESPACE}:{subname}` id.
         let child_actor = ActorId::instanced(A::NAMESPACE, &subname);
-        let (carry, full_name) = parent.map_or_else(
-            || (child_actor.0, Arc::from(format!("{}:{}", A::NAMESPACE, subname))),
+        let (parent_mailbox, carry, full_name) = parent.map_or_else(
+            || (MailboxId::NONE, child_actor.0, Arc::from(format!("{}:{}", A::NAMESPACE, subname))),
             |parent| {
                 let carry = fold_lineage(parent.carry(), child_actor);
                 let name: Arc<str> = Arc::from(format!("{}/{}:{}", parent.canonical_name(), A::NAMESPACE, subname));
-                (carry, name)
+                (parent.mailbox(), carry, name)
             },
         );
         let id = MailboxId(with_tag(Tag::Mailbox, carry));
-        Ok(SpawnIdentity { id, carry, canonical_name: full_name, subname })
+        Ok(SpawnIdentity { id, parent: parent_mailbox, carry, canonical_name: full_name, subname })
     }
 
     /// Legacy eager preflight. Handler staging deliberately uses only
@@ -533,7 +534,7 @@ impl Spawner {
     where
         A: Instanced + NativeActor,
     {
-        let SpawnIdentity { id, carry, canonical_name, subname } = identity;
+        let SpawnIdentity { id, parent, carry, canonical_name, subname } = identity;
 
         // Construct + init on caller's thread. Build the inbox pair
         // up-front so init may publish its self-id (`NativeInitCtx::self_id`
@@ -541,9 +542,10 @@ impl Spawner {
         // the spawn thread doesn't exist yet.
         let (tx, rx) = mpsc::channel::<Envelope>();
 
-        let transport = Arc::new(NativeBinding::new::<A>(
+        let transport = Arc::new(NativeBinding::new_with_parent::<A>(
             Arc::clone(&self.mailer),
             id,
+            parent,
             // The child's lineage carry — its descendants fold onto it.
             carry,
             Arc::clone(&canonical_name),
@@ -590,7 +592,7 @@ impl Spawner {
         };
 
         Ok(StagedActor {
-            identity: SpawnIdentity { id, carry, canonical_name, subname },
+            identity: SpawnIdentity { id, parent, carry, canonical_name, subname },
             sender: tx,
             transport,
             slots,
@@ -1518,6 +1520,28 @@ mod tests {
             RingCapacities::default(),
         ));
         (spawner, registry, mailer, pool)
+    }
+
+    #[test]
+    fn spawned_binding_retains_the_logical_parent_mailbox() {
+        let (spawner, _registry, _mailer, _pool) = activation_fixture();
+        let parent_mailbox = MailboxId(0x4b01);
+        let parent =
+            ActorRuntimeIdentity::new(parent_mailbox, MailboxId::NONE, parent_mailbox.0, Arc::from("test.parent:root"));
+        let root =
+            spawner.prepare_identity::<ActivationProbe>(Subname::Named("root"), None).expect("prepare root identity");
+        assert_eq!(root.parent, MailboxId::NONE);
+
+        let identity = spawner
+            .prepare_identity::<ActivationProbe>(Subname::Named("child"), Some(&parent))
+            .expect("prepare child identity");
+        assert_eq!(identity.parent, parent_mailbox);
+        let (events, _event_rx) = crossbeam_channel::unbounded();
+        let staged = spawner
+            .build::<ActivationProbe>(identity, ActivationConfig::new(events), (), Vec::new())
+            .expect("build child");
+
+        assert_eq!(staged.transport.parent_mailbox(), parent_mailbox);
     }
 
     fn prepared_probe(
