@@ -1081,6 +1081,7 @@ fn wat_scoped_spawns(parent: MailboxId) -> String {
             (import "aether" "spawn_inline_child_scoped_p32"
                 (func $spawn_inline (param i64 i32 i32 i32) (result i64)))
             (memory (export "memory") 1)
+            {WAT_REALLOC}
             (data (i32.const 32) "leaf")
             (data (i32.const 48) "worker")
             (data (i32.const 64) "cfg")
