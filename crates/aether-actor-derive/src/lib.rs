@@ -22,7 +22,7 @@ mod wasm_expand;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Fields, ItemImpl, ItemStruct, ItemTrait, parse_macro_input};
+use syn::{Field, Fields, ItemImpl, ItemStruct, ItemTrait, Token, parse_macro_input, punctuated::Punctuated};
 
 use native_expand::{NativeEmit, expand_native_actor_trait, expand_struct_hosted_actor};
 use opts::{ActorOpts, parse_actor_opts};
@@ -270,15 +270,21 @@ pub fn handler_set(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// Generics are forwarded — `#[local] struct Foo<T>(T);` emits
-/// `impl<T: Default + Send + 'static> Local for Foo<T>`. In
-/// practice Local types are concrete; the generics support is
-/// mostly for completeness.
+/// Generics are forwarded. The generated impl retains the struct's
+/// predicates and requires the instantiated local type to implement
+/// `Default + Send + 'static`, so type, lifetime, and const parameters
+/// remain as general as the authored type allows.
 #[proc_macro_attribute]
 pub fn local(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemStruct);
     let name = &input.ident;
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    let (_, ty_generics, _) = input.generics.split_for_impl();
+    let mut local_generics = input.generics.clone();
+    local_generics
+        .make_where_clause()
+        .predicates
+        .push(syn::parse_quote!(#name #ty_generics: ::core::default::Default + ::core::marker::Send + 'static));
+    let (impl_generics, _, where_clause) = local_generics.split_for_impl();
     quote! {
         #input
         impl #impl_generics ::aether_actor::Local for #name #ty_generics #where_clause {}
@@ -295,23 +301,16 @@ pub fn local(_attr: TokenStream, item: TokenStream) -> TokenStream {
 // directly.
 
 /// `#[capability]` — attribute macro for native chassis capability
-/// structs. Cfg-gates every field with `#[cfg(feature = "runtime")]`
-/// so the cap's runtime fields disappear from non-runtime builds (wasm
-/// guests linking the cap's depable rlib for type/marker visibility
-/// don't pay for `cpal::Stream`, etc.).
-///
-/// Issue 552 stage 0 ships the macro as a thin shim — fields get the
-/// blanket `#[cfg(feature = "runtime")]` gate and the struct itself
-/// passes through unchanged. Stage 1 may extend the macro to gate
-/// trait impls, derive `Default`, or pre-emit the empty
-/// stage-0-required `Singleton` marker; this skeleton lands now so
-/// capability authors can adopt the new shape without waiting on
-/// stage 1 details.
+/// structs. Adds `#[cfg(not(target_family = "wasm"))]` to every named
+/// and tuple field so runtime state disappears from wasm builds while
+/// the capability's marker identity remains available. Existing field
+/// `#[cfg]` conditions stay in place and compose with the native-target
+/// condition.
 ///
 /// ```ignore
 /// #[capability]
 /// pub struct AudioCapability {
-///     // Both fields gain `#[cfg(feature = "runtime")]` automatically.
+///     // Both fields gain `#[cfg(not(target_family = "wasm"))]` automatically.
 ///     audio_sender: Option<AudioEventSender>,
 ///     audio_thread: Option<JoinHandle<()>>,
 /// }
@@ -330,27 +329,19 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     // marker), which is what typed `ctx.actor::<R>().send(...)` needs;
     // host builds see the full struct.
     match &mut item.fields {
-        Fields::Named(fields) => {
-            for field in &mut fields.named {
-                let already_cfg = field.attrs.iter().any(|a| a.path().is_ident("cfg"));
-                if !already_cfg {
-                    field.attrs.push(syn::parse_quote!(#[cfg(not(target_family = "wasm"))]));
-                }
-            }
-        }
-        Fields::Unnamed(fields) => {
-            for field in &mut fields.unnamed {
-                let already_cfg = field.attrs.iter().any(|a| a.path().is_ident("cfg"));
-                if !already_cfg {
-                    field.attrs.push(syn::parse_quote!(#[cfg(not(target_family = "wasm"))]));
-                }
-            }
-        }
+        Fields::Named(fields) => native_only_fields(&mut fields.named),
+        Fields::Unnamed(fields) => native_only_fields(&mut fields.unnamed),
         Fields::Unit => {
             // Marker structs: nothing to gate.
         }
     }
     quote! { #item }.into()
+}
+
+fn native_only_fields(fields: &mut Punctuated<Field, Token![,]>) {
+    for field in fields {
+        field.attrs.push(syn::parse_quote!(#[cfg(not(target_family = "wasm"))]));
+    }
 }
 
 fn expand_handlers(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2> {
@@ -418,5 +409,49 @@ pub fn export_asset(input: TokenStream) -> TokenStream {
     match asset::expand_export_asset(&path_lit) {
         Ok(tokens) => tokens.into(),
         Err(e) => e.to_compile_error().into(),
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    use quote::ToTokens;
+
+    #[test]
+    fn native_only_fields_preserves_named_field_conditions() {
+        let mut item: ItemStruct = syn::parse_quote! {
+            struct Capability {
+                #[cfg(feature = "runtime")]
+                runtime: u8,
+                always: u16,
+            }
+        };
+        let Fields::Named(fields) = &mut item.fields else {
+            panic!("expected named fields")
+        };
+
+        native_only_fields(&mut fields.named);
+
+        assert_eq!(fields.named[0].attrs.iter().filter(|attr| attr.path().is_ident("cfg")).count(), 2);
+        assert_eq!(fields.named[1].attrs.iter().filter(|attr| attr.path().is_ident("cfg")).count(), 1);
+        assert!(fields.named[0].to_token_stream().to_string().contains("feature = \"runtime\""));
+        assert!(fields.named[0].to_token_stream().to_string().contains("target_family = \"wasm\""));
+    }
+
+    #[test]
+    fn native_only_fields_preserves_tuple_field_conditions() {
+        let mut item: ItemStruct = syn::parse_quote! {
+            struct Capability(#[cfg(feature = "runtime")] u8, u16);
+        };
+        let Fields::Unnamed(fields) = &mut item.fields else {
+            panic!("expected tuple fields")
+        };
+
+        native_only_fields(&mut fields.unnamed);
+
+        assert_eq!(fields.unnamed[0].attrs.iter().filter(|attr| attr.path().is_ident("cfg")).count(), 2);
+        assert_eq!(fields.unnamed[1].attrs.iter().filter(|attr| attr.path().is_ident("cfg")).count(), 1);
+        assert!(fields.unnamed[0].to_token_stream().to_string().contains("feature = \"runtime\""));
+        assert!(fields.unnamed[0].to_token_stream().to_string().contains("target_family = \"wasm\""));
     }
 }
