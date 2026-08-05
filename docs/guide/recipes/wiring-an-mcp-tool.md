@@ -115,11 +115,13 @@ pub async fn actor_cost(
         None => None,
     };
 
-    // Build the typed request, address it, and await the reply.
+    // Build the typed request, resolve the recipient the agent named,
+    // address it by id, and await the reply.
     let request = CostTail { kind };
+    let (mailbox_id, _) = self.resolve_engine_address(engine, &args.mailbox_name).await.map_err(internal)?;
     let reply = self
         .session
-        .call_one(engine_envelope(engine, &args.mailbox_name, &request))
+        .call_one(engine_envelope_by_id(engine, mailbox_id, &request))
         .await
         .map_err(internal)?;
 
@@ -146,10 +148,20 @@ The skeleton every tool follows:
 1. **Parse the string ids up front** — `parse_engine_id`, `parse_kind_id`,
    `parse_mailbox_id`. These return `McpError::invalid_params` on a malformed id, so
    a bad id is rejected before any mail moves.
-2. **Build the typed request kind** and address it with `engine_envelope(engine,
-   mailbox_name, &request)` — that hashes the mailbox name to a `MailboxId`, stamps
-   `K::ID`, and encodes the payload. `self.session.call_one(...)` relays it as a
-   wire `Call` and awaits the correlated reply.
+2. **Build the typed request kind, then resolve the recipient before you
+   address it.** A mailbox name the agent typed is often a rendered lineage
+   address — `aether.component/aether.embedded:web`, the form `load_component`
+   hands back — which is a path of nodes rather than one name to hash.
+   `self.resolve_engine_address(engine, name)` takes whichever form arrives: a
+   tagged `mbx-…` parses locally, and anything else goes to the engine's
+   inventory cap, which folds the path and replies with the id plus its
+   canonical rendering. Pass that id to `engine_envelope_by_id(engine,
+   mailbox_id, &request)`, which stamps `K::ID` and encodes the payload;
+   `self.session.call_one(...)` relays it as a wire `Call` and awaits the
+   correlated reply. The by-name `engine_envelope(engine, name, &request)`
+   hashes its name as a single segment, so it is for the fixed chassis-cap
+   constants a tool writes itself (`INVENTORY_CAP`, `RENDER_CAP`,
+   `COMPONENT_CAP`) and never for a name that came in over the tool surface.
 3. **Decode the reply** with `CostTailResult::decode_from_bytes(&reply.payload)`,
    matching the kind's own variants — `Ok` becomes the JSON response, `Err` and an
    undecodable payload become `McpError`s.

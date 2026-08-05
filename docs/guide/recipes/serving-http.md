@@ -170,8 +170,9 @@ Then load it by selector over the MCP harness once the substrate is up:
 ```
 
 `load_component` replies `LoadResult.Ok` with the registered mailbox name
-(`aether.component/aether.embedded:web`). After that, any inbound HTTP request
-on the bound port routes to your handler.
+(`aether.component/aether.embedded:web`) and that mailbox's `mailbox_id`,
+rendered as a tagged `mbx-…` string. After that, any inbound HTTP request on
+the bound port routes to your handler.
 
 ## 5. Send a request
 
@@ -245,8 +246,11 @@ request `KindId`), and `mailbox` (the handler's `MailboxId`). Over the MCP
 wire both tagged ids render as ADR-0064 strings — `knd-…` and `mbx-…` — so
 the values below come from `describe_kinds` (the `kind` for
 `aether.http.server.request`, or a route-specific kind's own id) and from
-`load_component`'s `LoadResult.name` (the `mailbox`, once resolved through
-`describe_component` or the same tagged form it's already returned in):
+`load_component`'s reply, which returns the handler's `mailbox_id` in exactly
+the tagged form this field wants. Reach for the id rather than the
+`LoadResult.name` beside it: the name is a rendered lineage path, and the
+field is an id, so hashing the path yourself lands on a mailbox that was never
+registered:
 
 ```jsonc
 // send_mail → aether.http.server  (kind: aether.http.server.register_route)
@@ -254,7 +258,7 @@ the values below come from `describe_kinds` (the `kind` for
   "prefix": "/api",
   "method": "Get",
   "kind": "knd-…",     // aether.http.server.request's id, from describe_kinds
-  "mailbox": "mbx-…"   // the handler's mailbox, from load_component's LoadResult
+  "mailbox": "mbx-…"   // the handler's mailbox_id, from load_component's reply
 }
 ```
 

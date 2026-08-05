@@ -325,14 +325,36 @@ pub trait Lifecycle<S> {
 ///
 /// Root-scoped singletons — every chassis cap, including catch-alls like
 /// `BroadcastCapability` — have full name `== NAMESPACE`, so a sender
-/// type-addresses them with `ctx.actor::<R>()`. A singleton hosted
-/// inside a parent (a wasm component under its component-host, a
-/// per-session actor under a listener) is reached **scope-relative**,
-/// not through the bare `NAMESPACE`: by its resolved name via
-/// `ctx.resolve_actor::<R>(name)`, or — for a loaded component — the
-/// component-host's `loaded::<R>(name)` helper, which composes the
-/// component-host scope onto the name (`LoadResult.name` is the full
-/// address). Multi-instance loads use the same name-keyed path.
+/// type-addresses them with `ctx.actor::<R>()`. A singleton hosted inside
+/// a parent (a wasm component under its component-host, a per-session
+/// actor under a listener) is reached **through that parent** instead:
+/// its id is the lineage fold, which only the holder of the parent's
+/// carry can compute.
+///
+/// For a loaded component that holder is the component-host, and the
+/// spelling is its by-name facade —
+/// `ctx.actor::<ComponentHostCapability>().loaded::<R>(name)`, where
+/// `name` is the load name alone (`NAME`, the last segment of the
+/// rendered address). It folds the [`Embedded`] node onto the host's own
+/// carry, which is the carry that resolution wants. A multi-instance load
+/// is the same call once per instance name (`base-0`, `base-1`, …), since
+/// each replica registers under its own.
+///
+/// The rendered address itself — `LoadResult.name`, e.g.
+/// `aether.component/aether.embedded:NAME` — is a path of nodes, so it
+/// belongs only to the string surfaces that parse one
+/// (`mailbox_id_from_path`: the registry's name lookup, the MCP
+/// `recipient_name` surface). Handing it to `ctx.resolve_actor::<R>(name)`
+/// or `ctx.send_to_named(name, …)` misses, because those hash their
+/// argument as a single segment (`mailbox_id_from_name`): a `/` trips that
+/// hasher's debug assertion, and a release build resolves an id nothing
+/// registered, so the mail routes cleanly and drops. What those two
+/// spellings do address is the depth-1 fixed point (ADR-0099 §3) — a
+/// mailbox sitting at the root under exactly the name given, which is
+/// every chassis cap and anything else registered flat. The id beside
+/// that name (`LoadResult.mailbox_id`) has no such problem: a caller
+/// already holding one sends to it directly, through the guest's
+/// `ctx.send_to(id, &mail)` or the native `ctx.actor_at::<R>(id)`.
 ///
 /// Mutually exclusive with [`Instanced`] at the type level: an actor is
 /// either one-of-a-kind within a scope (singleton) or N-instances under
