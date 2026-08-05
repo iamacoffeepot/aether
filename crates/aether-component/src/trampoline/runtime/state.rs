@@ -66,7 +66,7 @@ pub struct WasmTrampolineState {
     /// module's), and a sibling spawned from this module inherits it.
     pub param_providers: Arc<ParamProviderRegistry>,
     /// ADR-0170: this instance's load-time facts, replayed into every
-    /// [`LoadContext`](crate::component::LoadContext) this trampoline builds —
+    /// [`LoadContext`] this trampoline builds —
     /// at init, at replace, and for a spawned sibling. Held because they
     /// outlive the load mail that carried them.
     pub instance_name: String,
