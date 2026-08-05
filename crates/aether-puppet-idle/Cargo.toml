@@ -22,6 +22,9 @@ aether-actor = { path = "../aether-actor" }
 # Guest faces only — this is a wasm component and addresses every capability
 # by mail, so each cap comes in marker-only with its runtime feature off.
 aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
+# The component host, for `loaded::<Puppet>` — the peer sits under the same
+# host lineage this motor does, and only the host can compose that address.
+aether-component = { path = "../aether-component", default-features = false }
 # The peer, for its `Pose` kind alone. `library` strips the puppet's own
 # `export!` entry surface so its `receive_p32` / `init` shims do not collide
 # with this crate's at link.

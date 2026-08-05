@@ -62,11 +62,6 @@ pub enum Motion {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.puppet-idle.config")]
 pub struct IdleConfig {
-    /// Mailbox address of the puppet to animate. A loaded component answers
-    /// at its `/`-rendered lineage address (ADR-0099), which is what the
-    /// default spells; a second puppet loaded under another name is
-    /// reachable by swapping the trailing segment.
-    pub target: String,
     /// Whether the motor is engaged. `false` parks it — the motor stays
     /// loaded and sends nothing at all, so the subject holds whatever pose
     /// it was last given rather than snapping back to rest.
@@ -115,7 +110,6 @@ pub struct IdleConfig {
 impl Default for IdleConfig {
     fn default() -> Self {
         Self {
-            target: String::from("aether.component/aether.embedded:aether.puppet"),
             running: true,
             tick_hz: 60.0,
             motion: Motion::Idle,
