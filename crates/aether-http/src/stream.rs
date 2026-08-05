@@ -142,7 +142,7 @@ impl WebSocketStream {
 
 #[cfg(test)]
 mod tests {
-    use aether_actor::{HandlesKind, Singleton};
+    use aether_actor::{CallerAddressable, HandlesKind, Singleton};
     use aether_data::{Kind, KindId};
 
     use super::super::kinds::HttpMethod;
@@ -163,7 +163,7 @@ mod tests {
     impl MailSender for RecordingCtx {
         fn send<R, K>(&mut self, _payload: &K)
         where
-            R: Singleton + HandlesKind<K>,
+            R: Singleton + CallerAddressable + HandlesKind<K>,
             K: Kind,
         {
             unreachable!("stream handles send only via send_detached_to")
@@ -171,7 +171,7 @@ mod tests {
 
         fn send_many<R, K>(&mut self, _payloads: &[K])
         where
-            R: Singleton + HandlesKind<K>,
+            R: Singleton + CallerAddressable + HandlesKind<K>,
             K: Kind + bytemuck::NoUninit,
         {
             unreachable!("stream handles send only via send_detached_to")

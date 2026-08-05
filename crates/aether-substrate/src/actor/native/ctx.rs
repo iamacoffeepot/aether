@@ -21,7 +21,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aether_actor::{Addressable, HandlesKind, Manual, Multi, ReplyMode, Single, Singleton};
+use aether_actor::{Addressable, CallerAddressable, HandlesKind, Manual, Multi, ReplyMode, Single, Singleton};
 use aether_actor::{Emit, MailSender, OutboundReply};
 use core::marker::PhantomData;
 use core::ptr;
@@ -140,7 +140,7 @@ macro_rules! native_sender_methods {
         /// handle captures this ctx's in-flight lineage (ADR-0080 §7) so
         /// a `send` from it inherits the handler's causal chain.
         #[must_use]
-        pub fn actor<R: Singleton>(&self) -> NativeActorMailbox<'_, R> {
+        pub fn actor<R: Singleton + CallerAddressable>(&self) -> NativeActorMailbox<'_, R> {
             let (parent, root) = self.outbound_lineage();
             NativeActorMailbox::__new_in_flight(R::resolve(self.binding.carry(), ()).0, self.binding, parent, root)
         }
@@ -1319,7 +1319,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
-        R: Singleton + HandlesKind<K>,
+        R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
@@ -1336,7 +1336,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
     //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
-        R: Singleton + HandlesKind<K>,
+        R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
@@ -1377,7 +1377,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
     //noinspection DuplicatedCode
     fn send_detached<R, K>(&mut self, payload: &K)
     where
-        R: Singleton + HandlesKind<K>,
+        R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();

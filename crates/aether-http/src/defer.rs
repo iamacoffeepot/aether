@@ -50,16 +50,14 @@ impl Ctx<'_, NativeCtx<'_, Manual>> {
     /// forwards the request and holds the route open until `R`'s reply lands
     /// (ADR-0154 §2). Reads `ctx.peer::<R>().defer(&request)`.
     ///
-    /// This is *not* `ctx.actor::<R>()`: `actor` resolves `R` against the
-    /// caller's own carry, which is correct for a native root singleton but
-    /// resolves an **embedded** component to the wrong mailbox — an embedded
-    /// id folds the *component-host's* carry
-    /// ([`resolve_embedded`](aether_component::resolve_embedded)), not the
-    /// caller's. `peer` resolves against the host carry, so a native root cap
-    /// (whose [`One`](aether_actor::One) resolver ignores the carry) and an
-    /// embedded component (whose [`Embedded`](aether_actor::Embedded) resolver
-    /// folds it to the same id `resolve_embedded(R::NAMESPACE)` gives) are both
-    /// correct and identical at the call site.
+    /// `peer` resolves `R` against the **component host's** carry rather than
+    /// the caller's, so one call site addresses both a native root cap (whose
+    /// [`One`](aether_actor::One) resolver ignores the carry) and an embedded
+    /// component (whose [`Embedded`](aether_actor::Embedded) resolver folds it
+    /// to the id [`resolve_embedded`](aether_component::resolve_embedded)
+    /// gives, under the component's default load name). That is why it is not
+    /// `ctx.actor::<R>()`, which supplies the caller's carry and therefore
+    /// refuses an embedded target outright (ADR-0119 amendment).
     #[must_use = "a peer does nothing until `.defer(&request)` forwards to it"]
     pub fn peer<R: Singleton>(&self) -> Peer<'_, R> {
         let host_carry = <ComponentHostCapability as Addressable>::resolve(0, ()).0;

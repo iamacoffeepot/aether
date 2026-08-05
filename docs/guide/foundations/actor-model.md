@@ -484,10 +484,14 @@ rendered with one `/` per node as
 of the lineage; the `MailboxId` is the fold over the nodes
 (`mailbox_id_from_path` on the string side), never a hash of the joined string.
 You reach a loaded component through its lineage: pass `LoadResult.name` to
-`resolve_actor`, use the `loaded` helper below, or address it by bare type —
-`ctx.actor::<Camera>()` on an embeddable component type resolves by folding the
-component's own name under the embedding-host class, landing on the same hosted
-mailbox.
+`resolve_actor`, or use the `loaded` helper below. What you cannot do is name it
+by bare type. `ctx.actor::<Camera>()` supplies the *calling* actor's lineage
+carry, and a component's node folds the component host's — so the two disagree
+for every caller but the host, and the call is a compile error naming
+`loaded::<Camera>(name)` rather than a mailbox nothing registered. Which
+instance a bare type meant was never answerable anyway: the load name is a
+runtime choice, and `replicas` fans one component out over `camera-0`,
+`camera-1`, and so on.
 
 Because the lineage is the address, two actors collide exactly when they would
 occupy the same position — same parent, same name. The substrate enforces one

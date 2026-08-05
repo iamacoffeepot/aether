@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-18
 - **Accepted:** 2026-06-19 (implementation arc iamacoffeepot/aether#2063 landed)
+- **Last amended:** 2026-08-04
 
 ## Context
 
@@ -102,6 +103,18 @@ The shape rests on four facts that were checked directly rather than assumed:
 - **`type Resolver` with the cardinality constraint on a `where` clause rather than supertrait position.** Rejected: the associated-type equality does not elaborate from a `where`-clause marker to call sites (verified `E0308`), forcing the full bound to be restated at every consumer.
 - **Naming the associated type `Cardinality`.** Rejected: `Embedded` is a resolver, not a cardinality — it shares the singleton cardinality with `Single`, differing only in its fold. Naming the slot for an implication mis-files its contents.
 - **A separate field/flag to mark embedded actors.** Rejected: embedding is already signalled structurally by the `aether.embedded:` segment in the lineage; a field encodes the same fact twice and lets the two drift.
+
+## Amendment (2026-08-04, iamacoffeepot/aether#4467): `Embedded` is not caller-scoped
+
+The decision above gives every strategy the same `resolve(caller_carry, namespace, args)` signature and lets the send surface pass one value into it — the calling actor's own lineage carry. That is right for three of the four strategies and wrong for `Embedded`, and the wrongness is silent: folding `aether.embedded:<peer>` onto the caller's carry names a component embedded *under the sender*, an address nothing registers, so `ctx.actor::<Peer>()` between two co-hosted components resolves cleanly and drops. Deriving cardinality from the resolver put `Embedded` on the keyless surface; nothing then asked whether the carry that surface supplies is the carry the fold needs.
+
+**The carry `Embedded` needs cannot be supplied there.** It is the component host's — `hash("aether.component")` — and three routes to it are each closed. `aether-actor` may not write that namespace: it belongs to `ComponentHostCapability`, which is why this ADR left the carry caller-supplied in the first place, and `aether-actor` cannot depend on `aether-component` to read it from its owner (a cycle — `aether-actor`'s own examples and the derive crate's UI fixtures are wasm actors). The caller cannot recover it from what it holds: the carry is a fold, and `with_tag` overwrites the top nibble, so even FNV's invertible step cannot be run backwards. And threading it in at runtime — an added slot on the guest FFI at init — would make embedded resolution a host-supplied runtime value rather than a compile-time constant, which ADR-0099 §5 rules out ("static in every case: the id is computed from compile-time identities"), while still leaving native callers needing a separately installed global.
+
+**So the spelling is refused rather than repaired.** A marker trait `CallerScoped` sits on the strategy — implemented for `One` (a root cap sits at the root whoever asks), `Many` (a keyed child of the caller), and `EmbeddedMany` (a spawned sibling, whose lineage extends its spawner's, ADR-0099 §Negative) — and its elaborating actor-level companion `CallerAddressable` joins the cardinality marker on every carry-passing surface: `ctx.actor::<R>()` and `MailSender::{send, send_many, send_detached}` on both transports. `Embedded` is absent from `CallerScoped`, so an embedded target is an `E0277` whose `#[diagnostic::on_unimplemented]` names the spelling that supplies the host carry: `ctx.actor::<ComponentHostCapability>().loaded::<Peer>(name)`.
+
+Refusing is not merely the cheaper half of a trade. A component's load name is a runtime fact — `load_component(name = …)`, and `replicas: N` produces `base-0 … base-N` and no default-named instance at all — so a bare type reference could only ever have meant "the instance loaded under its default name," a guess the by-name verb states outright. The surfaces that already supply the host carry (`resolve_embedded`, `ComponentHost{Wasm,Native}Ext::loaded`, `aether-http`'s `Ctx::peer`) are unchanged and remain the way to reach a loaded component.
+
+Nothing about identity moves: no resolver arithmetic changes, no `MailboxId` changes, no wire or FFI ABI change. What changes is which spellings compile. One consequence worth naming: with `Embedded` off the keyless surface, `One` is the only strategy it admits, so `ctx.actor::<R>()` reads no carry today and means exactly "the root-pinned singleton `R`." The parameter stays for the keyless caller-relative strategy ADR-0166 defers ("a true keyless singleton beneath a native parent requires a relative singleton resolver"), which joins by implementing `CallerScoped`.
 
 ## Related
 

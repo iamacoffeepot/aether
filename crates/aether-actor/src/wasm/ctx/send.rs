@@ -11,7 +11,7 @@ use crate::model::ctx::emit::Emit;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode};
-use crate::model::{HandlesKind, Singleton};
+use crate::model::{CallerAddressable, HandlesKind, Singleton};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, RouteDecision};
 
@@ -108,7 +108,7 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
     //noinspection DuplicatedCode
     fn send<R, K>(&mut self, payload: &K)
     where
-        R: Singleton + HandlesKind<K>,
+        R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
@@ -125,7 +125,7 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
     //noinspection DuplicatedCode
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
-        R: Singleton + HandlesKind<K>,
+        R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
@@ -162,7 +162,7 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
     //noinspection DuplicatedCode
     fn send_detached<R, K>(&mut self, payload: &K)
     where
-        R: Singleton + HandlesKind<K>,
+        R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();

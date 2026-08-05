@@ -3,10 +3,13 @@
 //!
 //! A loaded component resolves under the reserved `aether.embedded` scope.
 //! The [`Embedded`] resolver folds the `aether.embedded:<NAMESPACE>` node onto
-//! the caller's carry (ADR-0119 — caller-relative); the by-name verb
-//! [`resolve_embedded`] supplies the `aether.component` host carry, landing on
-//! the mailbox the host registered the component under instead of the bare
-//! `hash(NAMESPACE)` that misses.
+//! whatever carry it is handed, and only the component host's carry is the
+//! right one — which is why `Embedded` is not
+//! [`CallerScoped`](aether_actor::CallerScoped) and the bare-type send
+//! surfaces refuse it (ADR-0119 amendment). The by-name verb
+//! [`resolve_embedded`] supplies that host carry, landing on the mailbox the
+//! host registered the component under instead of the bare `hash(NAMESPACE)`
+//! that misses.
 
 // Asserts the host-class fold differs from the bare-NAMESPACE hash, and stands
 // in the `aether.component` carry by name — the primitive yields the reference
@@ -35,22 +38,24 @@ fn embeddable_resolves_under_the_host_class() {
     // singleton), which is what `resolve_embedded` supplies internally.
     let host_carry = mailbox_id_from_name("aether.component").0;
 
-    // ADR-0119: the `Embedded` resolver is caller-RELATIVE — it folds the
-    // `aether.embedded:<NAMESPACE>` node onto the caller's carry. Given the host
-    // carry it lands on exactly what the by-name verb `resolve_embedded`
-    // computes, so by-type and by-name addressing agree in the host context.
+    // ADR-0119: the `Embedded` resolver folds the `aether.embedded:<NAMESPACE>`
+    // node onto the carry it is handed. Given the host carry it lands on exactly
+    // what the by-name verb `resolve_embedded` computes, so by-type and by-name
+    // addressing agree in the host context.
     assert_eq!(
         <FixtureComponent as Addressable>::resolve(host_carry, ()),
         resolve_embedded(FixtureComponent::NAMESPACE),
         "by-type Embedded resolve (host carry) == resolve_embedded",
     );
 
-    // A different caller carry resolves to a different mailbox — caller-relative
-    // (the opposite of the old hardcoded-host override).
+    // Any other carry lands somewhere else entirely — which is the whole reason
+    // the bare-type send surfaces refuse an `Embedded` target rather than
+    // handing it the sender's own carry (ADR-0119 amendment). Only the host's
+    // carry names the registered mailbox.
     assert_ne!(
-        <FixtureComponent as Addressable>::resolve(0, ()),
         <FixtureComponent as Addressable>::resolve(0xDEAD_BEEF, ()),
-        "Embedded folds onto the caller carry",
+        resolve_embedded(FixtureComponent::NAMESPACE),
+        "a non-host carry folds to an address the host never registered",
     );
 
     // resolve_embedded folds the rendered lineage

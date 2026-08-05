@@ -12,7 +12,7 @@ use aether_data::{Kind, MailboxId, RequestId, Source, mailbox_id_from_name};
 
 use crate::mail::ReplyHandle;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
-use crate::model::{Addressable, Singleton};
+use crate::model::{Addressable, CallerAddressable, Singleton};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
 use crate::wasm::mailbox::WasmActorMailbox;
@@ -193,7 +193,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// actor's own id as the send's `from` (issue 1987) and a borrow of
     /// the inline registry the send routes through.
     #[must_use]
-    pub fn actor<R: Singleton>(&self) -> WasmActorMailbox<'_, R> {
+    pub fn actor<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R> {
         WasmActorMailbox::__new(R::resolve(self.mailbox, ()).0, self.mailbox, self.inline)
     }
 

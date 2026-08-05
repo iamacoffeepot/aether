@@ -64,8 +64,9 @@ pub use local::Local;
 pub use model::ctx::{Emit, MailSender, Manual, Multi, OutboundReply, Persistence, ReplyMode, Single};
 pub use model::slot::Slot;
 pub use model::{
-    Actor, Addressable, ChildOf, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle, Many,
-    NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Resolve, Root, Singleton, Subname, validate_namespace_segment,
+    Actor, Addressable, CallerAddressable, CallerScoped, ChildOf, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind,
+    Instanced, Lifecycle, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Resolve, Root, Singleton, Subname,
+    validate_namespace_segment,
 };
 pub use request_context::{
     REQUEST_CONTEXT_CAPACITY, RequestContextTable, compose_state_envelope, split_state_envelope,
