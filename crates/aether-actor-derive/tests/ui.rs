@@ -127,6 +127,7 @@ fn ui() {
     t.compile_fail("tests/ui/rejects_struct_no_handler.rs");
     t.compile_fail("tests/ui/rejects_struct_no_namespace.rs");
     t.compile_fail("tests/ui/rejects_struct_ambiguous_runtime.rs");
+    t.compile_fail("tests/ui/rejects_struct_handler_set.rs");
     // Issue #2460: sharpen the handler-shape diagnostics. A `&[K]` slice
     // handler is native-only (the wasm dispatcher decodes a single `K`),
     // a non-`Single` class on a `#[handler(task)]` is discarded so it is
@@ -134,6 +135,7 @@ fn ui() {
     // generalized `&self` or `&mut self` diagnostic.
     t.compile_fail("tests/ui/rejects_slice_handler_wasm.rs");
     t.compile_fail("tests/ui/rejects_manual_task_handler_native.rs");
+    t.compile_fail("tests/ui/rejects_duplicate_native_init.rs");
     t.compile_fail("tests/ui/rejects_nonself_handler_wasm.rs");
     // Issue #2607 (ADR-0134): bare `#[handler]` and the classless
     // `#[handler(mail)]` paren form are pointed compile errors naming all
