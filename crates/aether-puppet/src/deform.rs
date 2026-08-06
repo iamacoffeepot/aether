@@ -32,6 +32,9 @@
 use aether_math::Vec3;
 #[cfg(test)]
 use core::iter;
+#[cfg(test)]
+use core::mem::align_of;
+use core::mem::size_of;
 use serde::{Deserialize, Serialize};
 
 use crate::Pose;
@@ -72,13 +75,6 @@ pub const INFLUENCES: usize = 4;
 /// drawing can lay down — and the blend loop is the per-pose cost that
 /// scales with the mesh.
 const MINIMUM_SHARE: f32 = 1.0e-4;
-
-/// Bytes one sparse influence occupies: its `u8` bone slot followed by its
-/// little-endian `f32` share.
-const INFLUENCE_BYTES: usize = 5;
-
-/// Bytes one decoded vertex row occupies in [`RigWeights::data`].
-const SPARSE_ROW_BYTES: usize = INFLUENCES * INFLUENCE_BYTES;
 
 /// An affine map, held as the three images of the basis and the image of
 /// the origin.
@@ -471,12 +467,11 @@ fn descriptor_bone<'a>(
         .ok_or_else(|| format!("rig descriptor line {line} declares {record} for unknown bone '{name}'"))
 }
 
-/// Sparse, validated per-vertex rig weights.
+/// Validated per-vertex rig weights.
 ///
-/// `data` holds `vertices * influences` packed records in vertex-major
-/// order. Each record is one `u8` joint followed by one little-endian `f32`
-/// share. The decoder sorts each row heaviest-first, normalises its live
-/// shares, and pads unused lanes with `(0, 0.0)`.
+/// `data` keeps the dense little-endian `f32` rows from the authored `NumPy`
+/// array behind the declared bytes contract. [`Skin::from_kinds`] decodes the
+/// blob once into aligned floats; the pose loop never reads transport bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.puppet.rig_weights")]
 pub struct RigWeights {
@@ -488,7 +483,7 @@ pub struct RigWeights {
 }
 
 impl RigWeights {
-    /// Decode the dense `.npy` asset into the declared sparse form.
+    /// Decode the dense `.npy` asset into the declared bytes form.
     ///
     /// Only a `NumPy` 1.0 `<f4`, C-order array shaped exactly
     /// `(vertices, descriptor bones)` is accepted. A row with more than
@@ -509,13 +504,9 @@ impl RigWeights {
             ));
         }
 
-        let sparse_bytes = vertices
-            .checked_mul(SPARSE_ROW_BYTES)
-            .ok_or_else(|| "rig weights sparse payload length overflows usize".to_owned())?;
-        let mut data = Vec::with_capacity(sparse_bytes);
         for (vertex, row) in array.payload.chunks_exact(bones * 4).enumerate() {
-            let mut ranked = [(0u8, 0.0f32); BONE_LIMIT];
-            let mut held = 0usize;
+            let mut live = 0usize;
+            let mut total = 0.0f32;
             for (bone, word) in row.chunks_exact(4).enumerate() {
                 let weight = f32::from_le_bytes([word[0], word[1], word[2], word[3]]);
                 if !weight.is_finite() || weight < 0.0 {
@@ -524,43 +515,34 @@ impl RigWeights {
                     ));
                 }
                 if weight > MINIMUM_SHARE {
-                    ranked[held] = (bone as u8, weight);
-                    held += 1;
+                    live += 1;
                 }
+                total += weight;
             }
-            if held == 0 {
+            if live == 0 {
                 return Err(format!("rig weights vertex {vertex} has no share above the minimum {MINIMUM_SHARE}"));
             }
-            if held > INFLUENCES {
+            if live > INFLUENCES {
                 return Err(format!(
-                    "rig weights vertex {vertex} has {held} influences above the minimum {MINIMUM_SHARE}, but the puppet carries at most {INFLUENCES}"
+                    "rig weights vertex {vertex} has {live} influences above the minimum {MINIMUM_SHARE}, but the puppet carries at most {INFLUENCES}"
                 ));
             }
-
-            ranked[..held].sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-            let total: f32 = ranked[..held].iter().map(|&(_, weight)| weight).sum();
-            if !total.is_finite() || total <= 0.0 {
-                return Err(format!("rig weights vertex {vertex} has an invalid influence total {total}"));
-            }
-            for lane in 0..INFLUENCES {
-                let (joint, share) = ranked.get(lane).copied().filter(|_| lane < held).unwrap_or((0, 0.0));
-                data.push(joint);
-                data.extend((share / total).to_le_bytes());
+            if (total - 1.0).abs() > 1.0e-5 {
+                return Err(format!("rig weights vertex {vertex} shares sum to {total}, expected 1"));
             }
         }
 
-        let decoded = Self {
+        Ok(Self {
             vertices: u32::try_from(vertices).map_err(|_| "rig weights vertex count exceeds u32".to_owned())?,
             bones: u32::try_from(bones).map_err(|_| "rig weights bone count exceeds u32".to_owned())?,
             influences: INFLUENCES as u32,
-            data,
-        };
-        decoded.validate(vertices, bones)?;
-
-        Ok(decoded)
+            data: array.payload.to_vec(),
+        })
     }
 
-    fn validate(&self, vertices: usize, bones: usize) -> Result<(), String> {
+    /// Validate the declared header and blob while decoding its bytes once
+    /// into the aligned dense rows the pose loop owns.
+    fn decode_dense(&self, vertices: usize, bones: usize) -> Result<Vec<f32>, String> {
         if self.vertices as usize != vertices {
             return Err(format!(
                 "rig weights declare {} vertices, expected {vertices} for this subject",
@@ -577,67 +559,50 @@ impl RigWeights {
             ));
         }
         let expected = vertices
-            .checked_mul(SPARSE_ROW_BYTES)
-            .ok_or_else(|| "rig weights sparse payload length overflows usize".to_owned())?;
+            .checked_mul(bones)
+            .and_then(|values| values.checked_mul(size_of::<f32>()))
+            .ok_or_else(|| "rig weights dense payload length overflows usize".to_owned())?;
         if self.data.len() != expected {
-            return Err(format!("rig weights sparse payload is {} bytes, expected {expected}", self.data.len()));
+            return Err(format!("rig weights dense payload is {} bytes, expected {expected}", self.data.len()));
         }
 
-        for vertex in 0..vertices {
+        let mut weights = Vec::with_capacity(vertices * bones);
+        for (vertex, packed) in self.data.chunks_exact(bones * size_of::<f32>()).enumerate() {
+            let mut live = 0usize;
             let mut total = 0.0f32;
-            let mut previous = f32::INFINITY;
-            let mut joints = [None; INFLUENCES];
-            let mut padding = false;
-            for lane in 0..INFLUENCES {
-                let (joint, share) = self.influence(vertex, lane);
-                if joint >= bones {
-                    return Err(format!(
-                        "rig weights vertex {vertex} lane {lane} names bone {joint}, but the descriptor has {bones}"
-                    ));
-                }
+            for (bone, word) in packed.chunks_exact(size_of::<f32>()).enumerate() {
+                let share = f32::from_le_bytes([word[0], word[1], word[2], word[3]]);
                 if !share.is_finite() || share < 0.0 {
-                    return Err(format!("rig weights vertex {vertex} lane {lane} has invalid share {share}"));
-                }
-                if share > previous {
-                    return Err(format!("rig weights vertex {vertex} is not sorted heaviest-first"));
-                }
-                if share > 0.0 {
-                    if padding {
-                        return Err(format!("rig weights vertex {vertex} has a live influence after its padding"));
-                    }
-                    if joints[..lane].contains(&Some(joint)) {
-                        return Err(format!("rig weights vertex {vertex} repeats bone {joint}"));
-                    }
-                    joints[lane] = Some(joint);
-                    total += share;
-                    previous = share;
-                } else if joint != 0 {
                     return Err(format!(
-                        "rig weights vertex {vertex} lane {lane} has zero share but nonzero padding joint {joint}"
+                        "rig weights vertex {vertex} bone {bone} has invalid weight {share}; expected a finite non-negative share"
                     ));
-                } else {
-                    padding = true;
                 }
+                if share > MINIMUM_SHARE {
+                    live += 1;
+                }
+                total += share;
+                weights.push(share);
+            }
+            if live == 0 {
+                return Err(format!("rig weights vertex {vertex} has no share above the minimum {MINIMUM_SHARE}"));
+            }
+            if live > INFLUENCES {
+                return Err(format!(
+                    "rig weights vertex {vertex} has {live} influences above the minimum {MINIMUM_SHARE}, but the puppet carries at most {INFLUENCES}"
+                ));
             }
             if (total - 1.0).abs() > 1.0e-5 {
                 return Err(format!("rig weights vertex {vertex} shares sum to {total}, expected 1"));
             }
         }
 
-        Ok(())
-    }
-
-    fn influence(&self, vertex: usize, lane: usize) -> (usize, f32) {
-        let at = vertex * SPARSE_ROW_BYTES + lane * INFLUENCE_BYTES;
-        let word = &self.data[at + 1..at + INFLUENCE_BYTES];
-
-        (usize::from(self.data[at]), f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        Ok(weights)
     }
 }
 
 /// The rig, and the per-vertex weights that bind the sculpt to it.
 pub struct Skin {
-    weights: RigWeights,
+    weights: Vec<f32>,
     descriptor: RigDescriptor,
 }
 
@@ -654,13 +619,9 @@ impl Skin {
     /// cross-kind and subject invariants again at the ownership boundary.
     pub fn from_kinds(weights: RigWeights, descriptor: RigDescriptor, vertices: usize) -> Result<Self, String> {
         descriptor.validate()?;
-        weights.validate(vertices, descriptor.bones.len())?;
+        let weights = weights.decode_dense(vertices, descriptor.bones.len())?;
 
         Ok(Self { weights, descriptor })
-    }
-
-    pub fn weights(&self) -> &RigWeights {
-        &self.weights
     }
 
     pub fn descriptor(&self) -> &RigDescriptor {
@@ -688,11 +649,24 @@ impl Skin {
     /// rather than a sum that drifts off one by a part in 255.
     #[must_use]
     pub fn influences(&self, vertex: usize) -> ([u8; INFLUENCES], [f32; INFLUENCES]) {
+        let row = &self.weights[vertex * self.bones()..(vertex + 1) * self.bones()];
+        let mut ranked = [(0u8, 0.0f32); BONE_LIMIT];
+        let held = row.len().min(BONE_LIMIT);
+        for (bone, &weight) in row.iter().enumerate().take(held) {
+            ranked[bone] = (bone as u8, weight);
+        }
+        ranked[..held].sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+
+        let kept = held.min(INFLUENCES);
+        let total: f32 = ranked[..kept].iter().map(|&(_, weight)| weight).sum();
         let (mut joints, mut shares) = ([0u8; INFLUENCES], [0.0f32; INFLUENCES]);
-        for lane in 0..INFLUENCES {
-            let (joint, share) = self.weights.influence(vertex, lane);
-            joints[lane] = joint as u8;
-            shares[lane] = share;
+        for (lane, &(joint, share)) in ranked[..kept].iter().enumerate() {
+            joints[lane] = joint;
+            shares[lane] = if total > 0.0 {
+                share / total
+            } else {
+                0.0
+            };
         }
 
         (joints, shares)
@@ -777,10 +751,14 @@ impl Skin {
 
     /// The blended map at one vertex.
     fn at_vertex(&self, transforms: &[Rigid], vertex: usize) -> Rigid {
-        (0..INFLUENCES).fold(Rigid::ZERO, |blend, lane| {
-            let (joint, share) = self.weights.influence(vertex, lane);
+        let row = &self.weights[vertex * self.bones()..(vertex + 1) * self.bones()];
 
-            blend.add_scaled(&transforms[joint], share)
+        row.iter().zip(transforms).fold(Rigid::ZERO, |blend, (&weight, transform)| {
+            if weight <= MINIMUM_SHARE {
+                blend
+            } else {
+                blend.add_scaled(transform, weight)
+            }
         })
     }
 
@@ -1069,18 +1047,21 @@ mod tests {
     }
 
     #[test]
-    fn dense_rows_decode_once_to_normalized_sparse_bytes() {
+    fn dense_bytes_decode_once_to_aligned_runtime_floats() {
         let row = [0.2f32, 0.6, 0.0, 0.2];
         let weights = RigWeights::decode_npy(&npy(&row, (1, row.len())), 1, row.len()).expect("a valid dense row");
 
         assert_eq!(RigWeights::NAME, "aether.puppet.rig_weights");
         assert_eq!((weights.vertices, weights.bones, weights.influences), (1, 4, 4));
-        assert_eq!(weights.data.len(), 20, "four (joint byte, f32 share) records");
+        assert_eq!(weights.data.len(), row.len() * size_of::<f32>());
 
         let descriptor = RigDescriptor::decode_text("bones a b c d\n").expect("four declared bones");
         let skin = Skin::from_kinds(weights, descriptor, 1).expect("the kinds agree");
+        assert_eq!(skin.weights, row);
+        assert_eq!((skin.weights.as_ptr() as usize) % align_of::<f32>(), 0);
+
         let (joints, shares) = skin.influences(0);
-        assert_eq!(joints, [1, 0, 3, 0], "heaviest first, then stable bone order, then padding");
+        assert_eq!(joints, [1, 0, 3, 2], "heaviest first, then stable bone order");
         assert!((shares[0] - 0.6).abs() < 1e-6);
         assert!((shares[1] - 0.2).abs() < 1e-6);
         assert!((shares[2] - 0.2).abs() < 1e-6);
@@ -1108,40 +1089,43 @@ mod tests {
         let descriptor = RigDescriptor::decode_text("bones chest head\n").expect("two bones");
         let valid = RigWeights::decode_npy(&npy(&[0.25, 0.75], (1, 2)), 1, 2).expect("valid weights");
 
-        let mut wrong_influences = valid.clone();
-        wrong_influences.influences = 3;
-        assert!(
-            Skin::from_kinds(wrong_influences, descriptor.clone(), 1)
-                .err()
-                .expect("the wrong influence width is refused")
-                .contains("declare 3 influences")
-        );
-
         let mut truncated = valid.clone();
         truncated.data.pop();
         assert!(
             Skin::from_kinds(truncated, descriptor.clone(), 1)
                 .err()
                 .expect("the truncated blob is refused")
-                .contains("19 bytes, expected 20")
+                .contains("7 bytes, expected 8")
         );
 
-        let mut unknown_joint = valid.clone();
-        unknown_joint.data[0] = 2;
+        let mut invalid_share = valid.clone();
+        invalid_share.data[..4].copy_from_slice(&f32::NAN.to_le_bytes());
         assert!(
-            Skin::from_kinds(unknown_joint, descriptor.clone(), 1)
+            Skin::from_kinds(invalid_share, descriptor.clone(), 1)
                 .err()
-                .expect("the unknown joint is refused")
-                .contains("names bone 2")
+                .expect("the invalid share is refused")
+                .contains("invalid weight NaN")
         );
 
         let mut non_normalized = valid;
-        non_normalized.data[1..5].copy_from_slice(&0.5f32.to_le_bytes());
+        non_normalized.data[..4].copy_from_slice(&0.5f32.to_le_bytes());
         assert!(
             Skin::from_kinds(non_normalized, descriptor, 1)
                 .err()
                 .expect("the non-normalized row is refused")
-                .contains("shares sum to 0.75")
+                .contains("shares sum to 1.25")
+        );
+    }
+
+    #[test]
+    fn the_declared_influence_width_is_validated_at_the_skin_boundary() {
+        let descriptor = RigDescriptor::decode_text("bones chest head\n").expect("two bones");
+        let mut weights = RigWeights::decode_npy(&npy(&[0.25, 0.75], (1, 2)), 1, 2).expect("valid weights");
+        weights.influences = 3;
+
+        assert_eq!(
+            Skin::from_kinds(weights, descriptor, 1).err().as_deref(),
+            Some("rig weights declare 3 influences, but the puppet vertex format carries 4"),
         );
     }
 
@@ -1168,16 +1152,19 @@ mod tests {
         let dense = rows.into_iter().flatten().collect::<Vec<_>>();
         let skin =
             Skin::parse(&npy(&dense, (2, 5)), "bones chest neck head jaw ear_left\n", 2).expect("valid legacy rig");
+        assert_eq!(skin.weights, dense, "the declared boundary keeps the exact authored dense rows");
 
         for (vertex, row) in rows.iter().enumerate() {
             let mut ranked =
                 row.iter().copied().enumerate().map(|(bone, weight)| (bone as u8, weight)).collect::<Vec<_>>();
             ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            let kept = ranked.len().min(INFLUENCES);
+            let total: f32 = ranked[..kept].iter().map(|&(_, weight)| weight).sum();
             let mut expected_joints = [0; INFLUENCES];
             let mut expected_shares = [0.0; INFLUENCES];
-            for (lane, &(joint, share)) in ranked.iter().filter(|(_, share)| *share > MINIMUM_SHARE).enumerate() {
+            for (lane, &(joint, share)) in ranked[..kept].iter().enumerate() {
                 expected_joints[lane] = joint;
-                expected_shares[lane] = share;
+                expected_shares[lane] = share / total;
             }
             assert_eq!(skin.influences(vertex), (expected_joints, expected_shares));
         }
@@ -1197,13 +1184,11 @@ mod tests {
     }
 
     #[test]
-    fn non_unit_dense_rows_are_normalized_during_decode() {
-        let skin = Skin::parse(&npy(&[2.0, 1.0], (1, 2)), "bones chest head\n", 1).expect("positive shares normalize");
-        let (_, shares) = skin.influences(0);
-
-        assert!((shares[0] - 2.0 / 3.0).abs() < 1e-6);
-        assert!((shares[1] - 1.0 / 3.0).abs() < 1e-6);
-        assert!((shares.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+    fn non_unit_dense_rows_are_refused() {
+        assert_eq!(
+            Skin::parse(&npy(&[2.0, 1.0], (1, 2)), "bones chest head\n", 1).err().as_deref(),
+            Some("rig weights vertex 0 shares sum to 3, expected 1"),
+        );
     }
 
     /// Tripwire: the sampled affine reproduces the rotation it was read
