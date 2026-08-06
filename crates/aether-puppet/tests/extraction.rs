@@ -13,7 +13,7 @@
 use core::iter;
 
 use aether_math::Vec3;
-use aether_puppet::labels::Labels;
+use aether_puppet::labels::{CLASS_VOCABULARY, Labels, MaterialField};
 use aether_puppet::mesh::Mesh;
 
 /// A unit cube as OBJ text — twelve triangles, consistently wound outward.
@@ -97,10 +97,46 @@ fn a_material_field_that_is_not_a_cube_is_refused() {
     let cube = npy("|u1", false, &[4, 4, 4], &[0; 64]);
     let rectangular = npy("|u1", false, &[4, 4, 5], &[0; 80]);
 
-    assert!(Labels::parse(&cube, lo, hi, 0.12).is_ok(), "a cube is accepted");
+    assert!(Labels::decode(&cube, lo, hi, 0.12).is_ok(), "a cube is accepted");
     assert_eq!(
-        Labels::parse(&rectangular, lo, hi, 0.12).err().as_deref(),
+        Labels::decode(&rectangular, lo, hi, 0.12).err().as_deref(),
         Some("material field shape is [4, 4, 5], expected (n, n, n) with n >= 2"),
+    );
+}
+
+#[test]
+fn material_field_decoder_declares_dimensions_cells_placement_and_vocabulary() {
+    let payload: Vec<u8> = (0_u8..64).map(|cell| cell % 9).collect();
+    let bytes = npy("|u1", false, &[4, 4, 4], &payload);
+    let field = MaterialField::decode(&bytes, Vec3::new(-1.0, 0.0, 1.0), Vec3::new(3.0, 2.0, 3.0), 0.25)
+        .expect("the declared field");
+
+    assert_eq!(field.dimensions, [4, 4, 4]);
+    assert_eq!(field.cells, payload);
+    assert_eq!(field.origin, [-2.0, -2.0, -1.0]);
+    assert_eq!(field.spacing, [2.0, 2.0, 2.0]);
+    assert_eq!(field.classes, CLASS_VOCABULARY.map(str::to_owned));
+}
+
+#[test]
+fn a_field_that_arrives_before_its_mesh_is_replaced_against_the_real_bounds() {
+    let bytes = npy("|u1", false, &[4, 4, 4], &[0; 64]);
+    let mut field = MaterialField::decode(&bytes, Vec3::splat(-1.0), Vec3::splat(1.0), 0.12)
+        .expect("the field placed against stand-in bounds");
+
+    field.place_against(Vec3::new(-1.0, 0.0, 1.0), Vec3::new(3.0, 2.0, 3.0), 0.25);
+
+    assert_eq!(field.origin, [-2.0, -2.0, -1.0]);
+    assert_eq!(field.spacing, [2.0, 2.0, 2.0]);
+}
+
+#[test]
+fn material_field_cells_must_index_the_declared_class_vocabulary() {
+    let bytes = npy("|u1", false, &[2, 2, 2], &[0, 1, 2, 3, 4, 5, 6, 9]);
+
+    assert_eq!(
+        MaterialField::decode(&bytes, Vec3::splat(-1.0), Vec3::splat(1.0), 0.12).err().as_deref(),
+        Some("material field cell 7 names class 9, but the vocabulary has 8 classes"),
     );
 }
 
@@ -113,15 +149,15 @@ fn material_field_metadata_and_truncation_are_diagnostic() {
     truncated.pop();
 
     assert_eq!(
-        Labels::parse(&wrong_dtype, lo, hi, 0.12).err().as_deref(),
+        Labels::decode(&wrong_dtype, lo, hi, 0.12).err().as_deref(),
         Some("material field dtype is '<f4', expected '|u1'"),
     );
     assert_eq!(
-        Labels::parse(&wrong_order, lo, hi, 0.12).err().as_deref(),
+        Labels::decode(&wrong_order, lo, hi, 0.12).err().as_deref(),
         Some("material field is Fortran-order, expected C-order"),
     );
     assert_eq!(
-        Labels::parse(&truncated, lo, hi, 0.12).err().as_deref(),
+        Labels::decode(&truncated, lo, hi, 0.12).err().as_deref(),
         Some("material field refused: NumPy payload is 7 bytes, expected 8 from shape and dtype"),
     );
 }

@@ -105,7 +105,7 @@ const DISTANCE: f32 = 5.4;
 /// same curves the component does.
 const RELAXATION: usize = 2;
 
-/// Padding the material field was baked with — `Puppet::LABEL_PAD`.
+/// Padding declared by the canonical capture asset's `Load` call.
 const LABEL_PAD: f32 = 0.12;
 
 /// Frames each timed condition averages over, and how many lead frames
@@ -207,6 +207,7 @@ fn mounted_with(dir: &Path, wasm: &Path, pass_timings: bool) -> SubstrateHarness
                     namespace: "assets".to_owned(),
                     path: "subject.obj".to_owned(),
                     labels: "labels.npy".to_owned(),
+                    material_field_padding: 0.12,
                     rig: if rig.is_dir() {
                         "rig".to_owned()
                     } else {
@@ -927,7 +928,7 @@ fn the_drawing_divides_by_volatility() {
     let mesh = Mesh::from_obj_bytes(&fs::read(dir.join("subject.obj")).expect("read subject.obj"), RELAXATION)
         .expect("parse the subject");
     let labels =
-        Labels::parse(&fs::read(dir.join("labels.npy")).expect("read labels.npy"), mesh.min, mesh.max, LABEL_PAD)
+        Labels::decode(&fs::read(dir.join("labels.npy")).expect("read labels.npy"), mesh.min, mesh.max, LABEL_PAD)
             .expect("parse the material field");
     let settings = Settings::default();
     let anchors = anchor::Anchors::measure(&mesh, &labels);
@@ -1217,7 +1218,7 @@ impl Subject {
         let mesh = Mesh::from_obj_bytes(&fs::read(dir.join("subject.obj")).expect("read subject.obj"), RELAXATION)
             .expect("parse the subject");
         let labels =
-            Labels::parse(&fs::read(dir.join("labels.npy")).expect("read labels.npy"), mesh.min, mesh.max, LABEL_PAD)
+            Labels::decode(&fs::read(dir.join("labels.npy")).expect("read labels.npy"), mesh.min, mesh.max, LABEL_PAD)
                 .expect("parse the material field");
         let settings = Settings::default();
         let anchors = anchor::Anchors::measure(&mesh, &labels).expect("the subject carries a charted face");

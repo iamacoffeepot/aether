@@ -2,11 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Padding the canonical material field was baked with, as a fraction of
+/// the mesh's longest axis on each side.
+pub const DEFAULT_MATERIAL_FIELD_PADDING: f32 = 0.12;
+
 /// Point the puppet at a mesh in one of the substrate's I/O namespaces
 /// (`save`, `assets`, `config`). The load is asynchronous; the cached
 /// drawing is replaced atomically when the bytes arrive, so a failed load
 /// leaves the previous subject on screen rather than blanking it.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.puppet.load")]
 pub struct Load {
     pub namespace: String,
@@ -21,6 +25,10 @@ pub struct Load {
     /// the field already knows which is which, so the drawing asks it rather
     /// than inventing a geometric proxy. Empty loads the mesh alone.
     pub labels: String,
+    /// Padding the material field was baked with, as a fraction of the mesh's
+    /// longest axis on each side. The default is the canonical asset's `0.12`;
+    /// callers loading a differently baked field must declare its value here.
+    pub material_field_padding: f32,
     /// Optional directory holding the rig that poses this subject:
     /// `weights.npy` (`NumPy` 1.0, `<f4`, C-order, shaped exactly
     /// `(mesh vertices, descriptor bones)`) and `rig.txt` (the bone order,
@@ -31,6 +39,18 @@ pub struct Load {
     /// rather than applied to whatever turned up. Empty leaves the subject
     /// unposable, which is what [`LoadResult::Ok`]'s `bones` then reports.
     pub rig: String,
+}
+
+impl Default for Load {
+    fn default() -> Self {
+        Self {
+            namespace: String::new(),
+            path: String::new(),
+            labels: String::new(),
+            material_field_padding: DEFAULT_MATERIAL_FIELD_PADDING,
+            rig: String::new(),
+        }
+    }
 }
 
 /// What the subject turned out to be. `bones` is `0` when no rig was asked
@@ -132,4 +152,14 @@ pub struct Look {
     pub distance: f32,
     /// Height of the point the camera aims at.
     pub height: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_defaults_to_the_canonical_material_field_padding() {
+        assert_eq!(Load::default().material_field_padding, DEFAULT_MATERIAL_FIELD_PADDING);
+    }
 }

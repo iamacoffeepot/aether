@@ -92,6 +92,7 @@ pub mod weld;
 
 pub use idle::*;
 pub use kinds::*;
+pub use labels::MaterialField;
 pub use turntable::*;
 
 use aether_actor::{ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor};
@@ -121,11 +122,6 @@ const FIELD_OF_VIEW: f32 = 0.454;
 /// it, so a guess that disagrees with the surface stretches the drawing on
 /// one axis and keeps stretching it as the window is resized.
 const ASPECT_UNTIL_MEASURED: f32 = 4.0 / 3.0;
-
-/// Padding the material field was baked with, as a fraction of the mesh's
-/// longest axis. The lattice is reconstructed from the mesh bounds by the
-/// same rule, so no transform rides alongside the volume.
-const LABEL_PAD: f32 = 0.12;
 
 /// Drag sensitivity. A full sweep of a 900-pixel window turns her a bit
 /// more than half a revolution, which is about where a drag stops feeling
@@ -178,6 +174,8 @@ pub struct Puppet {
     /// signal. Solved once when mesh and field are both in.
     class_scores: Option<Vec<[f32; labels::CLASSES]>>,
     awaiting_labels: Option<String>,
+    /// Padding declared by the load that requested `awaiting_labels`.
+    material_field_padding: f32,
     /// Where the charted face goes on this subject, measured off the field
     /// when the subject changes. Neither the mesh nor the field moves, so
     /// neither does the answer, and the eye scan walks every vertex.
@@ -510,6 +508,7 @@ impl WasmActor for Puppet {
             labels: None,
             class_scores: None,
             awaiting_labels: None,
+            material_field_padding: DEFAULT_MATERIAL_FIELD_PADDING,
             anchors: None,
             dragging: false,
             cursor: Vec2::new(0.0, 0.0),
@@ -618,6 +617,7 @@ impl WasmActor for Puppet {
     #[handler::manual]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: Load) {
         self.owed = ctx.reply_target();
+        self.material_field_padding = mail.material_field_padding;
 
         let fetch = |path: String| {
             let context = LoadContext { reply: None, namespace: mail.namespace.clone(), path };
@@ -679,7 +679,7 @@ impl WasmActor for Puppet {
         } else if self.awaiting_labels.as_deref() == Some(path.as_str()) {
             self.awaiting_labels = None;
             let bounds = self.subject.as_ref().map_or((Vec3::splat(-1.0), Vec3::splat(1.0)), |m| (m.min, m.max));
-            match labels::Labels::parse(&bytes, bounds.0, bounds.1, LABEL_PAD) {
+            match MaterialField::decode(&bytes, bounds.0, bounds.1, self.material_field_padding) {
                 Ok(labels) => self.labels = Some(labels),
                 Err(error) => {
                     self.labels = None;
@@ -714,7 +714,7 @@ impl WasmActor for Puppet {
         // a field that settled before its mesh was placed against stand-in
         // bounds — re-place it now that both are in (issue 4401).
         if let Some(labels) = self.labels.as_mut() {
-            labels.place_against(subject.min, subject.max, LABEL_PAD);
+            labels.place_against(subject.min, subject.max, self.material_field_padding);
         }
 
         // Where her features are, measured off the field before anything is

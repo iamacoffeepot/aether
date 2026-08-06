@@ -141,8 +141,7 @@ const ELEVATION: f32 = 3.0;
 const DISTANCE: f32 = 5.4;
 const FIELD_OF_VIEW: f32 = 0.454;
 
-/// Padding the material field was baked with, as `Puppet` reconstructs
-/// the lattice (`LABEL_PAD`).
+/// Padding the canonical cross-feed material field was baked with.
 const LABEL_PAD: f32 = 0.12;
 
 /// Ceiling the packed plane's tone channel clips at, and so the ceiling
@@ -720,7 +719,7 @@ fn split_field(mesh: &Mesh) -> Labels {
     bytes.extend([labels::HAIR; 4]);
     bytes.extend([labels::SKIN; 4]);
 
-    Labels::parse(&bytes, mesh.min, mesh.max, LABEL_PAD).expect("split field")
+    Labels::decode(&bytes, mesh.min, mesh.max, LABEL_PAD).expect("split field")
 }
 
 /// Tripwire: the packed tone channel's ceiling stays above every
@@ -951,7 +950,7 @@ fn crossfeed_the_gpu_bake_against_the_cpu_oracle() {
     let mesh = Mesh::from_obj_bytes(&fs::read(dir.join("subject.obj")).expect("read subject.obj"), 0)
         .expect("parse the subject");
     let labels =
-        Labels::parse(&fs::read(dir.join("labels.npy")).expect("read labels.npy"), mesh.min, mesh.max, LABEL_PAD)
+        Labels::decode(&fs::read(dir.join("labels.npy")).expect("read labels.npy"), mesh.min, mesh.max, LABEL_PAD)
             .expect("parse the material field");
     let scores = labels.vertex_scores(&mesh.positions);
     let (eye, view_proj) = camera(AZIMUTH, CROSSFEED_WIDTH, CROSSFEED_HEIGHT);
