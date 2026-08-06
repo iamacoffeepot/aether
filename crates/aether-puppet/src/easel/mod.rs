@@ -1,31 +1,33 @@
 //! The easel: watercolour laid under the drawing
 //! (iamacoffeepot/aether#4349).
 //!
-//! The wash runs at frame rate. Each render stage develops the whole
-//! painting afresh — a sheet of painted paper standing behind the subject,
-//! re-oriented to face the eye — and costs one textured material rect to
-//! show. The ink is solved live above it and wins the depth test, so the
-//! drawing and the paint under it move together through an orbit rather
-//! than the paint lagging a held view behind (iamacoffeepot/aether#4387).
+//! The wash follows changed frames. A moved render stage develops the
+//! whole painting afresh — a sheet of painted paper standing behind the
+//! subject, re-oriented to face the eye — while a held one keeps presenting
+//! the sheet already standing. The ink is solved live above it and wins the
+//! depth test, so the drawing and the paint under it move together through
+//! an orbit rather than the paint lagging a held view behind
+//! (iamacoffeepot/aether#4387).
 //!
 //! [`field`] turns a region into wet paint on the CPU — the parity
 //! oracle — while [`program`] speaks the same develop as registered
 //! ADR-0170/0171 render programs; [`palette`] owns the pigments;
 //! [`regions`] keeps the CPU bake the oracle rasterizes through.
-//! This module is the orchestrator: what is resident, what is staged per
-//! frame, and where the sheet stands.
+//! This module is the orchestrator: what is resident, what a changed frame
+//! stages, and where the sheet stands.
 //!
 //! # What a frame costs
 //!
-//! Two dispatches and three uniform blobs. Everything that is a pure
+//! A changed frame costs two dispatches and three uniform blobs; a held
+//! frame costs neither. Everything that is a pure
 //! function of the subject is measured once when it loads — the survey's
 //! per-vertex classes and areas ([`survey`]), the bake's vertex buffer —
 //! and everything that is a pure function of the seed and the canvas is
 //! pulped once when the canvas is created: the paper's noise fields
 //! ([`field::paper`], about thirty-two milliseconds at 900x1200, which is
 //! twice a whole frame's budget) and the accident stream the uniform blob
-//! replays ([`wash::SeedUniforms`]). What is left per frame is the two
-//! matrices, the chart's two dozen points per eye, one pass over the
+//! replays ([`wash::SeedUniforms`]). What is left on a changed frame is the
+//! two matrices, the chart's two dozen points per eye, one pass over the
 //! vertices for the centroids, and the aperture geometry the chart moves.
 
 pub mod accent;
@@ -357,6 +359,19 @@ pub struct Easel {
     /// and re-creates its own set on a resize, so the id outlives no
     /// canvas change.
     ink_plane: Option<u32>,
+    /// The version of the inputs the resident sheet ought to contain.
+    ///
+    /// A plain [`DevelopKey`] is not enough here: subject and chart
+    /// invalidations can change the wash while eventually producing the
+    /// same eye, matrix, canvas, bone table, and ink texture id. The ink
+    /// layer also rewrites its coverage plane in place. Those paths clear
+    /// `derived_for`, so committing their next derivation advances this
+    /// revision even when its key compares equal to the one before it.
+    revision: u64,
+    /// The revision whose bake and wash dispatches were both emitted.
+    /// Kept separate from `revision` so a gate that is not ready retries
+    /// on the next frame rather than blessing a sheet it never wrote.
+    dispatched: Option<u64>,
     /// The uniform blobs that key produced.
     uniforms: Option<Uniforms>,
     /// A develop is staged for this canvas, waiting for the mail. Cleared
@@ -530,21 +545,18 @@ impl Easel {
 
     /// Develop the sheet for this view.
     ///
-    /// Every frame, unconditionally: nothing here scales with the canvas
-    /// any more, so there is no rasterize to keep off the frame cadence
-    /// and no reason for the paint to lag the drawing it sits under. What
-    /// this does is measure the subject if it has not been measured, roll
-    /// the accident stream if the visible set has changed, and stage the
-    /// two uniform blobs and the two geometries that move.
+    /// On every changed frame: measure the subject if it has not been
+    /// measured, roll the accident stream if the visible set has changed,
+    /// and stage the two uniform blobs and the two geometries that move.
     ///
     /// A held view is the exception, and it is most of what the frame
     /// used to cost (iamacoffeepot/aether#4447). Every quantity below is
     /// a pure function of the eye, the matrix and the canvas over a
     /// subject that has not changed, so a develop at a view already
-    /// derived for re-stages the uniform blobs the dispatch takes and
-    /// re-derives nothing: no centroid pass over the vertices, no
-    /// re-pack, and — because the packed slots stay taken — no geometry
-    /// mail for buffers already holding those very bytes.
+    /// derived for re-derives nothing: no centroid pass over the vertices,
+    /// no re-pack, no geometry mail for buffers already holding those very
+    /// bytes, and no wash dispatch when that revision already stands in
+    /// the sheet.
     ///
     /// The ink coverage plane is read out of `subject` on every develop,
     /// held view or not: it is an id the ink layer re-issues whenever its
@@ -557,11 +569,17 @@ impl Easel {
         let Some(canvas) = self.canvas() else {
             return;
         };
+        let ink_changed = self.ink_plane != subject.ink;
         self.ink_plane = subject.ink;
 
         let key = DevelopKey::of(subject, view, canvas);
         if self.derived_for == Some(key) && self.uniforms.is_some() {
-            self.staged = Some(canvas);
+            if ink_changed {
+                self.revision += 1;
+                self.staged = Some(canvas);
+            } else if self.dispatched != Some(self.revision) {
+                self.staged = Some(canvas);
+            }
             return;
         }
 
@@ -653,6 +671,7 @@ impl Easel {
         });
         self.seed_slice = Some(slice);
         self.derived_for = Some(key);
+        self.revision += 1;
         self.staged = Some(canvas);
     }
 
@@ -717,6 +736,7 @@ impl Easel {
         let Some((bindings, _)) = self.textures.take() else {
             return Vec::new();
         };
+        self.dispatched = None;
         bindings.owned().into_iter().map(|texture_id| DestroyTexture { texture_id }).collect()
     }
 
@@ -862,6 +882,9 @@ impl Easel {
     /// it. Sent after the geometry updates they read, in the same frame,
     /// and in this order — the wash samples what the bake wrote.
     pub fn take_dispatch(&mut self) -> Vec<ProgramDispatch> {
+        if self.dispatched == Some(self.revision) {
+            return Vec::new();
+        }
         let (Some(bake_id), Some(wash_id)) = (self.programs[BAKE], self.programs[WASH]) else {
             self.refused("dispatch", "programs unregistered");
             return Vec::new();
@@ -896,6 +919,7 @@ impl Easel {
             tracing::debug!(target: "aether_puppet", ?staged, "the easel reached its first dispatch");
         }
         self.developed = true;
+        self.dispatched = Some(self.revision);
         vec![
             ProgramDispatch {
                 program_id: bake_id,
@@ -1166,8 +1190,8 @@ mod tests {
         panic!("the easel never converged, so nothing past the reply protocol can be asked of it");
     }
 
-    /// Tripwire: a held view must ship no geometry mail, and a moved eye
-    /// must ship it again.
+    /// Tripwire: a held view must ship no geometry or program mail, and a
+    /// moved eye must ship both again.
     ///
     /// This is the whole of iamacoffeepot/aether#4447 as a claim about
     /// mail rather than about milliseconds, and both ways of getting it
@@ -1179,7 +1203,7 @@ mod tests {
     /// ink and leaves the paint behind, which reads as the wash being
     /// slightly wrong rather than as a fault.
     #[test]
-    fn a_held_view_ships_no_geometry_and_a_moved_eye_ships_it_again() {
+    fn a_held_view_writes_nothing_and_a_moved_eye_writes_again() {
         let mesh = quad();
         let scores = vec![[1.0; CLASSES]; mesh.positions.len()];
         let settings = Settings::default();
@@ -1200,7 +1224,11 @@ mod tests {
             easel.take_geometry_updates().is_empty(),
             "a develop at the view already derived for owes the GPU nothing"
         );
-        assert_eq!(easel.take_dispatch().len(), 2, "and it still dispatches, so the sheet is redeveloped either way");
+        assert!(
+            easel.take_dispatch().is_empty(),
+            "the resident sheet is byte-identical because a held frame writes none of its planes",
+        );
+        assert!(easel.draw(&view(), 1.0).is_some(), "the held frame keeps presenting the resident sheet");
 
         easel.develop(&subject(), &view_from(Vec3::new(3.0, 1.0, 4.0)));
         assert_eq!(
@@ -1208,6 +1236,36 @@ mod tests {
             1,
             "an eye that moved re-derives the aperture, and it has to travel",
         );
+        assert_eq!(easel.take_dispatch().len(), 2, "the moved view bakes and washes its new answer");
+    }
+
+    /// Subject replacement can leave every bit in `DevelopKey` and the
+    /// ink texture id unchanged. It still replaces the mesh and rewrites
+    /// the coverage plane in place, so it must advance the dispatch
+    /// revision rather than comparing equal to the old sheet.
+    #[test]
+    fn a_subject_invalidation_redevelops_even_when_the_view_key_is_equal() {
+        let mesh = quad();
+        let scores = vec![[1.0; CLASSES]; mesh.positions.len()];
+        let settings = Settings::default();
+        let subject = Subject {
+            mesh: &mesh,
+            posed: None,
+            scores: &scores,
+            settings: &settings,
+            ink: Some(INK),
+            chart: None,
+            skin: None,
+            bones: bone_uniform(&[]),
+        };
+        let mut easel = converged(&mesh, &scores, &settings, &view());
+
+        easel.subject_changed();
+        easel.develop(&subject, &view());
+        assert_eq!(easel.take_geometry_creates().len(), 1, "the replacement subject gets a new resident buffer");
+        easel.geometry_created(Ok(9_001));
+        assert_eq!(easel.take_geometry_updates().len(), 1, "the aperture is re-derived with the subject");
+        assert_eq!(easel.take_dispatch().len(), 2, "the equal view key must not preserve the old subject's wash");
     }
 
     #[test]
@@ -1229,6 +1287,76 @@ mod tests {
             geometry,
             "chart state must not discard resident subject geometry",
         );
+    }
+
+    /// A chart change rewrites both ink coverage and wash inputs while
+    /// keeping the same texture id. Repeating the same invalidation must
+    /// therefore dispatch each time, and a derivation from identical
+    /// inputs must produce identical mail.
+    #[test]
+    fn a_chart_invalidation_redevelops_same_id_coverage_deterministically() {
+        let mesh = quad();
+        let scores = vec![[1.0; CLASSES]; mesh.positions.len()];
+        let settings = Settings::default();
+        let subject = || Subject {
+            mesh: &mesh,
+            posed: None,
+            scores: &scores,
+            settings: &settings,
+            ink: Some(INK),
+            chart: None,
+            skin: None,
+            bones: bone_uniform(&[]),
+        };
+        let mut easel = converged(&mesh, &scores, &settings, &view());
+
+        let dispatches = (0..2)
+            .map(|_| {
+                easel.chart_changed();
+                easel.develop(&subject(), &view());
+                assert_eq!(easel.take_geometry_updates().len(), 1, "the aperture follows the chart invalidation");
+                let dispatches = easel.take_dispatch();
+                assert_eq!(dispatches.len(), 2, "same-id coverage is not mistaken for the coverage already painted");
+                dispatches
+            })
+            .collect::<Vec<_>>();
+
+        for (first, second) in dispatches[0].iter().zip(&dispatches[1]) {
+            assert_eq!(first.program_id, second.program_id);
+            assert_eq!(first.bindings, second.bindings);
+            assert_eq!(first.geometries, second.geometries);
+            assert_eq!(first.uniforms, second.uniforms);
+        }
+    }
+
+    /// The ink layer re-creates its texture set on a resize. Even when
+    /// every derived wash input is unchanged, the wash has to bind and
+    /// read the replacement coverage plane exactly once.
+    #[test]
+    fn a_replaced_ink_plane_redevelops_once_against_the_new_id() {
+        let mesh = quad();
+        let scores = vec![[1.0; CLASSES]; mesh.positions.len()];
+        let settings = Settings::default();
+        let mut easel = converged(&mesh, &scores, &settings, &view());
+        let replacement = INK + 1;
+        let subject = || Subject {
+            mesh: &mesh,
+            posed: None,
+            scores: &scores,
+            settings: &settings,
+            ink: Some(replacement),
+            chart: None,
+            skin: None,
+            bones: bone_uniform(&[]),
+        };
+
+        easel.develop(&subject(), &view());
+        let dispatches = easel.take_dispatch();
+        assert_eq!(dispatches.len(), 2, "the replacement coverage plane invalidates the wash");
+        assert!(dispatches[1].bindings.contains(&replacement), "the wash binds the replacement plane");
+
+        easel.develop(&subject(), &view());
+        assert!(easel.take_dispatch().is_empty(), "the same replacement id does not invalidate a second time");
     }
 
     // Tripwire: a canvas change must release the paper pulped for the old
