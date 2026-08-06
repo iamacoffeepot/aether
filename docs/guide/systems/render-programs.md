@@ -489,6 +489,22 @@ from the immediate-mode draw kinds — the draws must be resent every frame,
 while a dispatched program's result is retained pixels that later frames keep
 sampling.
 
+Device replacement is the one exception to writable-pixel persistence
+([ADR-0173](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0173-render-device-loss-recovery-contract.md)).
+The program keeps its `program_id`, authored WGSL, validated plan, and folded
+timing samples. Replacement rebuilds its pipelines and dispatch cache, drops
+device-bound transient views and timing-query machinery, and leaves its
+writable registry textures cleared under their existing ids. The actor
+redispatches on its next ordinary repaint; the runtime never guesses at or
+replays a dispatch whose submission outcome is unknown.
+
+Programs rebuild independently. If one program's pipelines cannot compile on
+the replacement device, that id is quarantined and later dispatches to it
+warning-drop; sibling programs and the recovered frame continue. Initial
+registration still rejects before assigning an id — quarantine applies only to
+an already registered program during replacement. No generation or quarantine
+signal is sent to the actor, and no program kind or payload changes.
+
 Runtime mismatches **warn-drop the whole dispatch**: the checks run before any
 recording, so a rejected dispatch records nothing and the frame survives —
 other draws still render, and the output texture keeps its prior content. The
