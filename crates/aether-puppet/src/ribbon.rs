@@ -63,6 +63,21 @@ const DEPTH_WEIGHT_CEILING: f32 = 1.22;
 /// where it is negative.
 pub const NOT_DRAWN: f32 = -1.0;
 
+/// Minimum angular arc a curve must span to read as ink.
+///
+/// Authored marks are exempt: the chart intentionally carries details
+/// smaller than the noise floor applied to extracted strokes. Kept as
+/// one function so the CPU oracle and the GPU curve reduction receive
+/// the same policy value.
+#[must_use]
+pub fn minimum_angular_length(curve: &Curve3) -> f32 {
+    if curve.authored {
+        0.0
+    } else {
+        curve.class.min_length() / PAGE_PIXELS_PER_RADIAN
+    }
+}
+
 /// One point's rail pair, solved but not yet widened.
 ///
 /// `offset` reaches from the centre to the right rail at full pressure,
@@ -187,7 +202,7 @@ pub fn reference_depth(curve: &Curve3, eye: Vec3) -> f32 {
             arc += (next.pos - point.pos).length() / depth.max(1e-4);
         }
     }
-    if !curve.authored && arc < curve.class.min_length() / PAGE_PIXELS_PER_RADIAN {
+    if arc < minimum_angular_length(curve) {
         return NOT_DRAWN;
     }
 

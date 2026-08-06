@@ -29,12 +29,12 @@
 //!   whole-or-nothing rule an authored mark passes (`CHART_COVERAGE`)
 //!   becomes a comparison against this plane.
 //! - [`REFERENCE`] — one texel per curve rather than per point:
-//!   [`crate::ribbon::reference_depth`], the stroke's own average
-//!   distance to the eye, with the sign carrying whether the curve is
-//!   drawn at this eye at all. That is everything the eye decides about
-//!   a curve rather than about one of its points, and delivering it
-//!   here is what lets the ink pass solve its rails in the vertex stage
-//!   from a ribbon buffer that never travels
+//!   the stroke's own average distance to the eye, with the sign carrying
+//!   whether the curve is drawn at this eye at all. A sparse draw reduces
+//!   it from the point depths already on the GPU. That is everything the
+//!   eye decides about a curve rather than about one of its points, and
+//!   delivering it here is what lets the ink pass solve its rails in the
+//!   vertex stage from a ribbon buffer that never travels
 //!   (iamacoffeepot/aether#4440).
 //!
 //! # What this module is not
@@ -71,11 +71,10 @@
 //! index, each preceded by one empty texel, and a "row" is a span. The
 //! measured cost is `points + curves + 1` texels — 196k at azimuth 0
 //! against a 1.08M capacity, five times over — and no curve is ever
-//! split or truncated. What is capped is the *scan depth*, not the
-//! curve: [`COVERAGE_STEPS`] doublings reduce a curve of up to
-//! [`MAX_CURVE_POINTS`] points exactly, and [`layout`] refuses a longer
-//! one by name rather than reducing it over a window and calling the
-//! answer a coverage.
+//! split or truncated. What is capped is one reduction's workload: a
+//! sparse per-curve draw reduces up to [`MAX_CURVE_POINTS`] points
+//! exactly, and [`layout`] refuses a longer one by name rather than
+//! silently asking one fragment invocation to run without bound.
 //!
 //! The empty texel is not padding. It reads as hidden and carries zero
 //! arc, so it is the barrier that ends a curve at zero arc from its own
@@ -104,8 +103,8 @@ use crate::math3::hash64;
 use crate::mesh::Mesh;
 use crate::{ribbon, weld};
 
-/// The field's own WGSL: the prepass, the point rasterization, and the
-/// two scan chains.
+/// The field's own WGSL: the prepass, point and curve rasterization, and
+/// the reach scan.
 pub const SIGHT_WGSL: &str = include_str!("sight.wgsl");
 
 /// Dispatch-binding indices, in the order [`program`] declares them.
@@ -121,7 +120,7 @@ pub const REFERENCE: u32 = 4;
 pub const PLANE_COUNT: usize = 5;
 
 /// Geometry slot indices: the subject the prepass rasterizes, then the
-/// drawing's points in two buffers, then one texel per curve.
+/// drawing's points in two buffers, then bounded reduction blocks.
 ///
 /// The points divide by volatility rather than by class
 /// ([`Drawing`]). [`RESIDENT`] carries the
@@ -131,9 +130,9 @@ pub const PLANE_COUNT: usize = 5;
 /// one plane with the second loading what the first laid down
 /// (iamacoffeepot/aether#4435).
 ///
-/// [`CURVES`] is neither: it carries one value per curve rather than
-/// per point, so the whole drawing's worth of it is smaller than either
-/// half's points and dividing it would buy nothing.
+/// [`CURVES`] is neither: it carries one compact record per reduction
+/// block rather than per point. Dividing it would add another dispatch
+/// geometry without changing which drawing updates its spans.
 pub const SUBJECT: u32 = 0;
 pub const RESIDENT: u32 = 1;
 pub const VOLATILE: u32 = 2;
@@ -154,28 +153,36 @@ pub const GEOMETRY_COUNT: usize = 4;
 /// the same, which is what makes saturating honest rather than lossy.
 pub const REACH_STEPS: u32 = 5;
 
-/// Doublings the coverage scan runs. Fifteen reduces a curve of up to
-/// [`MAX_CURVE_POINTS`] points exactly, against a measured longest
-/// curve of 11017 — the azimuth-90 silhouette, the worst of the four
-/// framings the parity scenario walks.
-pub const COVERAGE_STEPS: u32 = 15;
+/// Longest curve one sparse reduction invocation is allowed to walk,
+/// and so the longest [`layout`] admits.
+///
+/// Kept at the former exact-scan limit to preserve the field's accepted
+/// input surface. The measured longest curve is 11017 points, while this
+/// admits 32767 and makes the shader loop's upper bound explicit.
+pub const MAX_CURVE_POINTS: usize = (1 << 15) - 1;
 
-/// Longest curve the coverage scan reduces exactly, and so the longest
-/// [`layout`] admits.
-pub const MAX_CURVE_POINTS: usize = (1 << COVERAGE_STEPS) - 1;
+/// Points one bounded curve-reduction fragment folds.
+///
+/// The second level walks only these block totals. On the shipped
+/// drawing that changes the worst fragment from 11017 texture loads to
+/// 345, while the first level exposes every 32-point block in parallel.
+const CURVE_BLOCK_POINTS: usize = 32;
 
-/// Transient indices, in the order [`program`] declares them. The two
-/// pairs are the scans' ping-pong: a pass may not read the slot it
+/// Transient indices, in the order [`program`] declares them. The pairs
+/// are the reach scan's ping-pong: a pass may not read the slot it
 /// writes, so each doubling reads one and writes the other.
 const DEPTH: u32 = 0;
 const STEP: u32 = 1;
 const HEAD: u32 = 2;
-const TAIL: u32 = 3;
-const ARC: [u32; 2] = [4, 5];
-const HEAD_SPREAD: [u32; 2] = [6, 7];
-const SUM: [u32; 2] = [8, 9];
-const TAIL_SPREAD: [u32; 2] = [10, 11];
-const TRANSIENT_COUNT: usize = 12;
+const POINT_DEPTH: u32 = 3;
+const BLOCK_DEPTH: u32 = 4;
+const BLOCK_ARC: u32 = 5;
+const BLOCK_COVERAGE: u32 = 6;
+const CURVE_COVERAGE: u32 = 7;
+const ARC: [u32; 2] = [8, 9];
+const HEAD_SPREAD: [u32; 2] = [10, 11];
+const TAIL_SPREAD: [u32; 2] = [12, 13];
+const TRANSIENT_COUNT: usize = 14;
 
 /// One plane's slot: full-extent `R32Float`, the format the wash's own
 /// data planes already ride (ADR-0170) and the only one that carries an
@@ -377,9 +384,8 @@ impl SightUniforms {
     /// as an array of `vec4<f32>` must be.
     const BONES: usize = 144;
 
-    /// How many copies the blob carries — one per coverage doubling,
-    /// which is the deeper of the two scans.
-    pub const WINDOWS: u32 = COVERAGE_STEPS;
+    /// How many copies the blob carries — one per reach doubling.
+    pub const WINDOWS: u32 = REACH_STEPS;
 
     /// Byte offset of the window whose `stride` is `2^step`.
     #[must_use]
@@ -493,7 +499,7 @@ pub enum LayoutError {
     /// rather than truncated: a silently dropped tail of the drawing is
     /// a missing outline, not a smaller one.
     OverCapacity { needed: usize, capacity: usize },
-    /// One curve is longer than the coverage scan reduces exactly.
+    /// One curve is longer than one bounded reduction admits.
     /// Named, so the answer is "this curve" rather than "somewhere".
     CurveTooLong { id: CurveId, curve: u32, points: usize },
 }
@@ -847,8 +853,8 @@ pub fn point_indices(spans: &[Span]) -> Vec<u8> {
     (0..count).flat_map(u32::to_le_bytes).collect()
 }
 
-/// The drawing's curves, one texel-sized triangle each, carrying the
-/// one number the eye decides per curve.
+/// The drawing's curve blocks, one texel-sized triangle each, carrying
+/// the eye-independent bounds of the reduction the GPU runs for it.
 ///
 /// `slot` packs the same way a point's does — the flat field index
 /// shifted up two bits with the corner in the low pair — because the
@@ -858,61 +864,90 @@ pub fn curves_slot() -> GeometrySlotSpec {
     GeometrySlotSpec {
         layout: vec![
             VertexAttribute { location: 0, format: VertexFormat::Float32 },
-            VertexAttribute { location: 1, format: VertexFormat::Float32 },
+            VertexAttribute { location: 1, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 2, format: VertexFormat::Float32x2 },
         ],
     }
 }
 
-/// Bytes one curve vertex occupies: the packed slot and the reference.
-pub const CURVE_VERTEX_BYTES: usize = 4 + 4;
+/// Bytes one curve-block vertex occupies: the packed slot, curve start,
+/// block length, block count, curve length and minimum angular length.
+pub const CURVE_VERTEX_BYTES: usize = 4 + 12 + 8;
 
 /// The whole drawing's per-curve buffer, packed for [`curves_slot`]:
-/// [`ribbon::reference_depth`] written at each curve's own first texel.
+/// one triangle per `CURVE_BLOCK_POINTS` points, placed over the
+/// curve's first texels and carrying the curve-wide length policy.
 ///
-/// Not divided by volatility, unlike the points. The value is per curve
-/// and per eye at once — a resident curve's reference depth changes
-/// with the camera exactly as a volatile one's does — so there is no
-/// half of it that stays put, and at one float per curve against a
-/// point's eleven there is nothing to gain by splitting the walk.
+/// Not divided by volatility, unlike the points. One record per at most
+/// `CURVE_BLOCK_POINTS` points is still far smaller than either point
+/// buffer, and the block list changes whenever the volatile drawing
+/// changes.
+/// It does not depend on the eye: the camera reaches the point-depth and
+/// angular-step planes through the uniform blob. Sparse block draws
+/// reduce those in parallel, then the first block folds their totals for
+/// reference depth and coverage without a CPU point walk.
+/// The eye argument remains in this packer's contract because its
+/// callers stage curve metadata at the same per-view boundary as the
+/// volatile drawing; it is deliberately not read.
 ///
 /// A drawing that laid out to nothing still packs one stand-in, for the
 /// reason [`point_vertices`] does, and by the same means: three copies
-/// of one corner, which is a triangle of zero area.
+/// of one corner, which is a triangle of zero area. An empty curve gets
+/// one real zero-length block so its reference still resolves to
+/// [`ribbon::NOT_DRAWN`].
 #[must_use]
-pub fn curve_vertices(drawing: Drawing<'_>, layout: &Layout, eye: Vec3) -> Vec<u8> {
-    let mut curves: Vec<[f32; 2]> = Vec::with_capacity(layout.spans().len());
+pub fn curve_vertices(drawing: Drawing<'_>, layout: &Layout, _eye: Vec3) -> Vec<u8> {
+    let mut blocks: Vec<[f32; 6]> = Vec::new();
     for span in layout.spans() {
         let Some(curve) = drawing.curve(span.curve as usize) else {
             continue;
         };
-        curves.push([span.start as f32, ribbon::reference_depth(curve, eye)]);
+        let block_count = (span.len as usize).div_ceil(CURVE_BLOCK_POINTS).max(1);
+        let length_floor = ribbon::minimum_angular_length(curve);
+        blocks.reserve(block_count);
+        for block in 0..block_count {
+            let consumed = block * CURVE_BLOCK_POINTS;
+            let block_len = (span.len as usize).saturating_sub(consumed).min(CURVE_BLOCK_POINTS);
+            blocks.push([
+                (span.start as usize + block) as f32,
+                span.start as f32,
+                block_len as f32,
+                block_count as f32,
+                span.len as f32,
+                length_floor,
+            ]);
+        }
     }
-    let stand_in = curves.is_empty();
+    let stand_in = blocks.is_empty();
     if stand_in {
-        curves.push([0.0, ribbon::NOT_DRAWN]);
+        blocks.push([0.0; 6]);
     }
 
-    let mut packed: Vec<u8> = Vec::with_capacity(curves.len() * 3 * CURVE_VERTEX_BYTES);
-    for curve in curves {
+    let mut packed: Vec<u8> = Vec::with_capacity(blocks.len() * 3 * CURVE_VERTEX_BYTES);
+    for block in blocks {
         for corner in 0..3u32 {
-            let slot = curve[0] * 4.0
+            let slot = block[0] * 4.0
                 + if stand_in {
                     0.0
                 } else {
                     corner as f32
                 };
-            packed.extend([slot, curve[1]].into_iter().flat_map(f32::to_le_bytes));
+            packed.extend(
+                [slot, block[1], block[2], block[3], block[4], block[5]].into_iter().flat_map(f32::to_le_bytes),
+            );
         }
     }
 
     packed
 }
 
-/// The per-curve index buffer, matching [`curve_vertices`]: sequential
+/// The curve-block index buffer, matching [`curve_vertices`]: sequential
 /// little-endian `u32` triangle-list indices, nothing shared.
 #[must_use]
 pub fn curve_indices(layout: &Layout) -> Vec<u8> {
-    let count = u32::try_from(layout.spans().len().max(1) * 3).unwrap_or(u32::MAX);
+    let blocks =
+        layout.spans().iter().map(|span| (span.len as usize).div_ceil(CURVE_BLOCK_POINTS).max(1)).sum::<usize>();
+    let count = u32::try_from(blocks.max(1) * 3).unwrap_or(u32::MAX);
 
     (0..count).flat_map(u32::to_le_bytes).collect()
 }
@@ -965,12 +1000,13 @@ fn scan(entry_point: &str, step: u32, inputs: Vec<InputSlot>, output: OutputSlot
 
 /// The whole field as one register graph.
 ///
-/// Static by construction: the structure depends on nothing but the two
-/// scan depths, so it is the same graph for every drawing at every
-/// canvas size. Both scans ping-pong between a pair of transients
-/// because a pass may not read the slot it writes, and the reach scan
-/// walks a second pair alongside — the arc a doubling has to pay is
-/// itself a doubling, since arc is not the index.
+/// Static by construction: the structure depends only on the reach scan
+/// depth, so it is the same graph for every drawing at every canvas
+/// size. The reach scan ping-pongs between pairs of transients because a
+/// pass may not read the slot it writes, and walks the arc pair alongside
+/// — the arc a doubling has to pay is itself a doubling, since arc is not
+/// the index. Curve-wide quantities are sparse draw reductions instead
+/// of full-field scan chains.
 #[must_use]
 pub fn program() -> ProgramRegister {
     let transient = |index: u32| OutputSlot::Transient { index };
@@ -983,10 +1019,57 @@ pub fn program() -> ProgramRegister {
     passes.extend(over_points("fs_seen", vec![read(DEPTH)], binding(SEEN)));
     passes.extend(over_points("fs_step", Vec::new(), transient(STEP)));
     passes.extend(over_points("fs_head", Vec::new(), transient(HEAD)));
-    passes.extend(over_points("fs_tail", Vec::new(), transient(TAIL)));
-    // One texel per curve rather than per point, and so one pass rather
-    // than the pair the halves take: the value is per eye either way.
-    passes.push(draw("vs_curve", "fs_reference", CURVES, None, Vec::new(), binding(REFERENCE), PassLoad::Clear));
+    passes.extend(over_points("fs_point_depth", Vec::new(), transient(POINT_DEPTH)));
+    // The block triangles occupy the first texels of each curve's own
+    // span. Their fragments reduce bounded point runs in parallel; then
+    // only the first block triangle survives `vs_curve` to fold the
+    // short list of block totals for the curve.
+    passes.push(draw(
+        "vs_curve_block",
+        "fs_block_depth",
+        CURVES,
+        None,
+        vec![read(POINT_DEPTH)],
+        transient(BLOCK_DEPTH),
+        PassLoad::Clear,
+    ));
+    passes.push(draw(
+        "vs_curve_block",
+        "fs_block_arc",
+        CURVES,
+        None,
+        vec![read(STEP)],
+        transient(BLOCK_ARC),
+        PassLoad::Clear,
+    ));
+    passes.push(draw(
+        "vs_curve",
+        "fs_curve_reference",
+        CURVES,
+        None,
+        vec![read(BLOCK_DEPTH), read(BLOCK_ARC)],
+        binding(REFERENCE),
+        PassLoad::Clear,
+    ));
+    passes.push(draw(
+        "vs_curve_block",
+        "fs_block_coverage",
+        CURVES,
+        None,
+        vec![bound(SEEN)],
+        transient(BLOCK_COVERAGE),
+        PassLoad::Clear,
+    ));
+    passes.push(draw(
+        "vs_curve",
+        "fs_curve_coverage",
+        CURVES,
+        None,
+        vec![read(BLOCK_COVERAGE)],
+        transient(CURVE_COVERAGE),
+        PassLoad::Clear,
+    ));
+    passes.push(scan("fs_cover_gather", 0, vec![read(CURVE_COVERAGE), read(HEAD)], binding(COVERAGE)));
     passes.extend([
         scan("fs_reach_seed", 0, vec![bound(SEEN)], transient(HEAD_SPREAD[0])),
         scan("fs_reach_seed", 0, vec![bound(SEEN)], transient(TAIL_SPREAD[0])),
@@ -1029,18 +1112,6 @@ pub fn program() -> ProgramRegister {
     }
     let (headed, tailed) = (HEAD_SPREAD[head], TAIL_SPREAD[tail]);
 
-    // The coverage scan: a segmented prefix sum along each curve of the
-    // points that survive in a run of at least two, which is the
-    // quantity `visibility::whole_or_nothing` divides.
-    passes.push(scan("fs_cover_seed", 0, vec![bound(SEEN)], transient(SUM[0])));
-    let mut sum = 0usize;
-    for step in 0..COVERAGE_STEPS {
-        passes.push(scan("fs_cover_step", step, vec![read(SUM[sum]), read(HEAD)], transient(SUM[1 - sum])));
-        sum = 1 - sum;
-    }
-    let summed = SUM[sum];
-
-    passes.push(scan("fs_cover_gather", 0, vec![read(summed), read(HEAD), read(TAIL)], binding(COVERAGE)));
     passes.push(scan("fs_total_out", 0, vec![read(headed), read(tailed)], binding(TOTAL)));
     // Last, because a program's final pass writes the binding whose
     // texture is the reference extent every other slot resolves from.
@@ -1149,25 +1220,34 @@ mod tests {
             "bound packed length",
         );
 
-        let eye = Vec3::new(0.0, 0.0, 4.0);
-        assert_eq!(curve_vertices(whole(&curves), &placed, eye).len(), 2 * 3 * CURVE_VERTEX_BYTES, "curve length");
+        assert_eq!(
+            curve_vertices(whole(&curves), &placed, Vec3::ZERO).len(),
+            2 * 3 * CURVE_VERTEX_BYTES,
+            "curve length"
+        );
         assert_eq!(curve_indices(&placed).len(), 2 * 3 * 4, "curve index length");
+
+        let long = [curve(3, 2.0, CURVE_BLOCK_POINTS * 2 + 1)];
+        let blocked = layout(whole(&long), (64, 64)).expect("fits");
+        assert_eq!(
+            curve_vertices(whole(&long), &blocked, Vec3::ZERO).len(),
+            3 * 3 * CURVE_VERTEX_BYTES,
+            "three reduction blocks"
+        );
+        assert_eq!(curve_indices(&blocked).len(), 3 * 3 * 4, "three block triangles");
     }
 
-    /// Tripwire: the length floor reaches the reference plane, as its
-    /// sign.
+    /// Tripwire: the curve reduction receives the exact length-floor
+    /// policy and span length it needs to decide the reference sign.
     ///
     /// The floor used to remove a curve's ribbon vertices outright.
-    /// Now the vertices are packed whatever the eye thinks and the
-    /// curve's reference is negated instead, so the ink pass collapses
-    /// them — which means a floor that stopped reaching this plane puts
-    /// every speck it exists to reject back on the paper at full
-    /// weight, with nothing having errored. The exemption is half the
-    /// rule and is checked with it: an authored mark of the same length
-    /// still draws.
+    /// Now the vertices are packed whatever the eye thinks and the GPU
+    /// reduction negates the reference instead. A missing floor puts
+    /// every speck it exists to reject back on the paper at full weight,
+    /// with nothing having errored. The exemption is half the rule and
+    /// is checked with it: an authored mark carries a zero floor.
     #[test]
-    fn the_length_floor_arrives_as_a_negative_reference() {
-        let eye = Vec3::new(0.0, 0.0, 4.0);
+    fn the_curve_reduction_carries_length_and_floor_policy() {
         let speck = |authored: bool| {
             let mut one = curve(1, 0.0, 3);
             one.points.iter_mut().enumerate().for_each(|(at, point)| {
@@ -1175,15 +1255,26 @@ mod tests {
                 point.probe = point.pos;
             });
             one.authored = authored;
+            let expected = ribbon::minimum_angular_length(&one);
             let drawn = [one];
             let placed = layout(whole(&drawn), (64, 64)).expect("fits");
-            let packed = curve_vertices(whole(&drawn), &placed, eye);
+            let packed = curve_vertices(whole(&drawn), &placed, Vec3::ZERO);
 
-            f32::from_le_bytes(packed[4..8].try_into().expect("the reference lane"))
+            (
+                f32::from_le_bytes(packed[8..12].try_into().expect("the block length lane")),
+                f32::from_le_bytes(packed[12..16].try_into().expect("the block count lane")),
+                f32::from_le_bytes(packed[16..20].try_into().expect("the curve length lane")),
+                f32::from_le_bytes(packed[20..24].try_into().expect("the floor lane")),
+                expected,
+            )
         };
 
-        assert_eq!(speck(false), ribbon::NOT_DRAWN, "an extracted speck under the floor");
-        assert!(speck(true) > 0.0, "an authored mark of the same length");
+        let extracted = speck(false);
+        let authored = speck(true);
+        assert_eq!((extracted.0, extracted.1, extracted.2), (3.0, 1.0, 3.0), "block and curve lengths");
+        assert_eq!(extracted.3, extracted.4, "extracted floor");
+        assert!(extracted.3 > 0.0, "an extracted speck has a floor");
+        assert_eq!(authored, (3.0, 1.0, 3.0, 0.0, 0.0), "an authored mark is exempt");
     }
 
     /// Tripwire: an empty region still packs one point, and that point
@@ -1306,13 +1397,13 @@ mod tests {
         assert!(matches!(layout(whole(&many), (8, 8)), Err(LayoutError::OverCapacity { capacity: 64, .. })));
     }
 
-    /// Tripwire: the uniform blob lays one window down per scan
+    /// Tripwire: the uniform blob lays one window down per reach-scan
     /// doubling, each carrying its own stride.
     ///
     /// The strides are the scans' whole schedule. A blob that carried
     /// one window would compile, dispatch, and quietly run every
     /// doubling at stride one — a reach scan that resolves five points
-    /// instead of thirty-one, and a coverage scan that sums fifteen.
+    /// instead of thirty-one.
     #[test]
     fn every_scan_window_carries_its_own_stride() {
         let blob = SightUniforms {

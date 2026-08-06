@@ -8,9 +8,9 @@
 // the point is hidden when the nearest surface along its pixel is nearer
 // to the eye than the point itself. Everything downstream — the taper
 // that anchors at a run's end, the whole-or-nothing coverage rule an
-// authored mark passes — is derived from that one plane by scans along
-// each stroke's own arc, so the pen's semantics survive as textures
-// rather than as control flow.
+// authored mark passes — is derived from that one plane by reductions
+// along each stroke's own arc, so the pen's semantics survive as
+// textures rather than as CPU control flow.
 //
 // # The field's addressing
 //
@@ -26,16 +26,18 @@
 // sits at zero arc from the last point — which is exactly what "arc
 // distance to the nearest hidden point *or curve end*" means at an end.
 //
-// # Why the scans double
+// # Why the reach scan doubles
 //
-// Both derived fields are min-plus / plus-plus scans over a span, and
-// both run in `log2(reach)` passes rather than one pass per point: pass
-// `k` combines a texel with the texel `2^k` away, so after `K` passes
-// each texel has seen everything within `2^K - 1` of it. The reach scan
-// carries a companion chain of arc weights (`fs_arc_step`) because arc
-// is not the index — a stroke's points are level-set crossings, so the
-// arc between two of them turns with the camera even though their index
-// distance does not.
+// Reach is a min-plus scan over a span and runs in `log2(reach)` passes
+// rather than one pass per point: pass `k` combines a texel with the
+// texel `2^k` away, so after `K` passes each texel has seen everything
+// within `2^K - 1` of it. It carries a companion chain of arc weights
+// (`fs_arc_step`) because arc is not the index — a stroke's points are
+// level-set crossings, so the arc between two of them turns with the
+// camera even though their index distance does not. Curve-wide values
+// use bounded sparse blocks followed by one short fold per curve; their
+// total work is linear in the drawing's points and independent of field
+// size.
 
 // Everything every pass needs of the camera and the field, plus the one
 // number that differs between the scan passes.
@@ -362,6 +364,14 @@ fn fs_step(point: Point) -> @location(0) vec4<f32> {
     return vec4<f32>(point.stroke.x / depth, 0.0, 0.0, 1.0);
 }
 
+// Distance to the eye before the angular-step floor above. The curve
+// reference reduction averages the true distances, while only the arc
+// denominator is floored — exactly `ribbon::reference_depth`'s split.
+@fragment
+fn fs_point_depth(point: Point) -> @location(0) vec4<f32> {
+    return vec4<f32>(length(point.probe - params.eye), 0.0, 0.0, 1.0);
+}
+
 // Points back to the curve's first, and on to its last. Static across a
 // frame — they change only when the drawing is re-extracted — but
 // written per dispatch because a transient holds nothing between them.
@@ -370,34 +380,113 @@ fn fs_head(point: Point) -> @location(0) vec4<f32> {
     return vec4<f32>(point.stroke.y, 0.0, 0.0, 1.0);
 }
 
-@fragment
-fn fs_tail(point: Point) -> @location(0) vec4<f32> {
-    return vec4<f32>(point.stroke.z, 0.0, 0.0, 1.0);
-}
+// Points one bounded reduction invocation folds. The block results sit
+// in the first texels of the curve's own transient span, so the current
+// full-extent slot surface needs no special compact reduction extent.
+const CURVE_BLOCK_POINTS: u32 = 32u;
 
-// One curve, at the texel its first point owns — in this plane and no
-// other, since the reference is the curve's rather than that point's.
+// One reduction block. The block pass rasterizes every triangle; the
+// curve pass rasterizes only a curve's first and collapses the rest.
 struct Curve {
     @builtin(position) clip: vec4<f32>,
-    @location(0) @interpolate(flat) reference: f32,
+    // Curve first texel, block's first point, points in this block and
+    // blocks in the curve.
+    @location(0) @interpolate(flat) span: vec4<f32>,
+    // Points in the curve and minimum angular length.
+    @location(1) @interpolate(flat) rule: vec2<f32>,
 }
 
 @vertex
-fn vs_curve(@location(0) slot: f32, @location(1) reference: f32) -> Curve {
+fn vs_curve_block(
+    @location(0) slot: f32,
+    @location(1) bounds: vec3<f32>,
+    @location(2) rule: vec2<f32>,
+) -> Curve {
+    let flat = u32(slot) >> 2u;
+    let block = flat - u32(bounds.x);
+
     var out: Curve;
     out.clip = texel_clip(slot);
-    out.reference = reference;
+    out.span = vec4<f32>(bounds.x, bounds.x + f32(block * CURVE_BLOCK_POINTS), bounds.y, bounds.z);
+    out.rule = rule;
 
     return out;
 }
 
-// `ribbon::reference_depth`, solved on the CPU and delivered here.
-//
+@vertex
+fn vs_curve(
+    @location(0) slot: f32,
+    @location(1) bounds: vec3<f32>,
+    @location(2) rule: vec2<f32>,
+) -> Curve {
+    let flat = u32(slot) >> 2u;
+    let start = u32(bounds.x);
+    let curve_slot = f32(start * 4u);
+
+    var out: Curve;
+    // Every block after the first becomes three copies of corner zero,
+    // a zero-area triangle. The first retains its three packed corners.
+    out.clip = texel_clip(select(curve_slot, slot, flat == start));
+    out.span = vec4<f32>(bounds.x, bounds.x, bounds.y, bounds.z);
+    out.rule = rule;
+
+    return out;
+}
+
+fn sum_block(tex: texture_2d<f32>, curve: Curve) -> f32 {
+    let start = i32(curve.span.y);
+    let count = u32(curve.span.z);
+    var total = 0.0;
+    for (var offset = 0u; offset < count; offset++) {
+        total += load_flat(tex, start + i32(offset), 0.0);
+    }
+
+    return total;
+}
+
+@fragment
+fn fs_block_depth(curve: Curve) -> @location(0) vec4<f32> {
+    return vec4<f32>(sum_block(source, curve), 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_block_arc(curve: Curve) -> @location(0) vec4<f32> {
+    return vec4<f32>(sum_block(source, curve), 0.0, 0.0, 1.0);
+}
+
+// Count points that survive in runs of at least two. Neighbours are
+// tested against the curve bounds rather than the block bounds, so a
+// visible run crosses a 32-point block boundary without a false break.
+@fragment
+fn fs_block_coverage(curve: Curve) -> @location(0) vec4<f32> {
+    let curve_start = i32(curve.span.x);
+    let curve_end = curve_start + i32(curve.rule.x);
+    let start = i32(curve.span.y);
+    let count = u32(curve.span.z);
+    var total = 0u;
+    for (var offset = 0u; offset < count; offset++) {
+        let flat = start + i32(offset);
+        let here = load_flat(source, flat, 0.0);
+        var joined = 0.0;
+        if flat > curve_start {
+            joined = max(joined, load_flat(source, flat - 1, 0.0));
+        }
+        if flat + 1 < curve_end {
+            joined = max(joined, load_flat(source, flat + 1, 0.0));
+        }
+        if here > 0.5 && joined > 0.5 {
+            total += 1u;
+        }
+    }
+
+    return vec4<f32>(f32(total), 0.0, 0.0, 1.0);
+}
+
 // The one number of the rail solve the eye decides per curve rather
 // than per point, and the reason the ink pass' ribbons can stay put
-// while the camera turns: everything else the rails need is a function
-// of the curve alone and rides the vertex buffer, so a frame's whole
-// view-dependence in the ink is this plane and the uniform blob.
+// while the camera turns. Point depth and angular step are first reduced
+// in bounded parallel blocks; this invocation folds only their compact
+// totals without shipping points back through a CPU walk.
 //
 // Its sign is the verdict. A reference depth is a distance and so never
 // negative, which lets a curve that does not read at this eye — under
@@ -405,8 +494,48 @@ fn vs_curve(@location(0) slot: f32, @location(1) reference: f32) -> Curve {
 // rather than as a second plane, and collapse the ink pass' rails
 // where it lands.
 @fragment
-fn fs_reference(curve: Curve) -> @location(0) vec4<f32> {
-    return vec4<f32>(curve.reference, 0.0, 0.0, 1.0);
+fn fs_curve_reference(curve: Curve) -> @location(0) vec4<f32> {
+    let start = i32(curve.span.x);
+    let blocks = u32(curve.span.w);
+    let count = u32(curve.rule.x);
+    if count < 2u {
+        return vec4<f32>(-1.0, 0.0, 0.0, 1.0);
+    }
+
+    var total = 0.0;
+    var arc = 0.0;
+    for (var offset = 0u; offset < blocks; offset++) {
+        let flat = start + i32(offset);
+        total += load_flat(source, flat, 0.0);
+        arc += load_flat(second, flat, 0.0);
+    }
+    if arc < curve.rule.y {
+        return vec4<f32>(-1.0, 0.0, 0.0, 1.0);
+    }
+
+    return vec4<f32>(total / f32(count), 0.0, 0.0, 1.0);
+}
+
+// Fraction of this curve that survives in runs of at least two points.
+// This is the exact count `visibility::whole_or_nothing` divides. The
+// old full-field prefix sum paid its longest-curve pass count at every
+// canvas texel; the blocks count points in parallel and this invocation
+// walks only their compact totals.
+@fragment
+fn fs_curve_coverage(curve: Curve) -> @location(0) vec4<f32> {
+    let start = i32(curve.span.x);
+    let blocks = u32(curve.span.w);
+    let count = u32(curve.rule.x);
+    if count == 0u {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+
+    var total = 0.0;
+    for (var offset = 0u; offset < blocks; offset++) {
+        total += load_flat(source, start + i32(offset), 0.0);
+    }
+
+    return vec4<f32>(total / f32(count), 0.0, 0.0, 1.0);
 }
 
 // Seed of the reach scan: zero arc at every barrier, far everywhere
@@ -504,59 +633,19 @@ fn fs_total_out(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32
     return vec4<f32>(min(head, REACH_FAR) + min(tail, REACH_FAR), 0.0, 0.0, 1.0);
 }
 
-// The coverage scan's seed: a point counts toward its curve's coverage
-// only where it survives in a run of at least two.
-//
-// That is the quantity `visibility::whole_or_nothing` divides. The rule
-// sums the *runs* a split produced, and the split drops a run of one
-// point — so a raw count of visible points would differ from it by
-// exactly the isolated survivors, which are the crumbs the rule exists
-// to reject. Counting them would blunt the rule it feeds.
-//
-// The empty texel between curves reads as hidden, so it can never join
-// one curve's last point to the next curve's first.
-@fragment
-fn fs_cover_seed(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    let flat = i32(flat_of(vec2<u32>(position.xy)));
-    let here = load_flat(source, flat, 0.0);
-    let joined = max(load_flat(source, flat - 1, 0.0), load_flat(source, flat + 1, 0.0));
-
-    return vec4<f32>(select(0.0, 1.0, here > 0.5 && joined > 0.5), 0.0, 0.0, 1.0);
-}
-
-// One doubling of the coverage scan: a prefix sum of the verdict along
-// each curve, segmented so it never reaches past the curve's first
-// point.
-//
-// The gate is the texel's own distance back to that first point. Where
-// `head >= 2^k` the window `2^k` back is still inside the curve and its
-// partial sum joins this one; where it is not, this texel's sum already
-// covers the whole curve so far and there is nothing left to add.
-@fragment
-fn fs_cover_step(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
-    let flat = i32(flat_of(vec2<u32>(position.xy)));
-    let stride = i32(params.stride);
-    let head = textureLoad(second, vec2<i32>(position.xy), 0).r;
-    let here = load_flat(source, flat, 0.0);
-    let behind = select(0.0, load_flat(source, flat - stride, 0.0), head >= params.stride);
-
-    return vec4<f32>(here + behind, 0.0, 0.0, 1.0);
-}
-
 // The whole-or-nothing input: what fraction of each curve survived,
 // carried to every one of its texels.
 //
-// The scan leaves each curve's total at its last texel, which every
-// texel of the curve can name — it is exactly `tail` texels ahead. An
-// empty texel between curves has no curve, no length worth dividing by
-// and no verdict, so it falls out as zero.
+// The sparse reduction leaves each curve's fraction at its first texel,
+// which every point names through `head`. An empty texel between curves
+// has zero head and a zero reduction value of its own, so it falls out
+// as zero.
 @fragment
 fn fs_cover_gather(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let at = vec2<i32>(position.xy);
     let flat = i32(flat_of(vec2<u32>(position.xy)));
     let head = textureLoad(second, at, 0).r;
-    let tail = textureLoad(third, at, 0).r;
-    let total = load_flat(source, flat + i32(tail), 0.0);
+    let coverage = load_flat(source, flat - i32(head), 0.0);
 
-    return vec4<f32>(total / (head + tail + 1.0), 0.0, 0.0, 1.0);
+    return vec4<f32>(coverage, 0.0, 0.0, 1.0);
 }

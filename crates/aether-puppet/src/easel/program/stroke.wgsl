@@ -100,7 +100,7 @@ struct Ribbon {
 //
 // Three verdicts are read rather than one. A point survives only in a
 // run of at least two — the rule `visibility::runs` applies when it
-// drops a lone survivor, and the same neighbourhood `fs_cover_seed`
+// drops a lone survivor, and the same neighbourhood `fs_block_coverage`
 // counts by — so an isolated visible point between two hidden ones
 // scales to zero here rather than drawing the crumb the split exists to
 // reject.

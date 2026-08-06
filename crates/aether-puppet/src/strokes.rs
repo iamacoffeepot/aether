@@ -128,11 +128,9 @@ type Packed = (Vec<u8>, Vec<u8>);
 struct Solved {
     points: Packed,
     ribbons: Packed,
-    /// One texel per curve, over the whole drawing rather than one
-    /// half: [`ribbon::reference_depth`] is per eye for a resident
-    /// curve exactly as for a volatile one.
-    ///
-    /// [`ribbon::reference_depth`]: crate::ribbon::reference_depth
+    /// Compact curve-reduction blocks over the whole drawing rather
+    /// than one half. Their metadata changes whenever the volatile
+    /// drawing does.
     curves: Packed,
 }
 
@@ -389,18 +387,16 @@ impl Strokes {
     /// right ones. At the shipped framing that is 88% of the drawing's
     /// points and the same share of its ribbons.
     ///
-    /// What the eye still decides is one float per curve —
-    /// [`ribbon::reference_depth`], packed here into a per-curve
-    /// geometry the field rasterizes into its reference plane, at a
-    /// hundred kilobytes against the eighteen megabytes of rails it
-    /// stands in for.
+    /// What the eye still decides is one float per curve — the reference
+    /// depth the field now reduces from point depths on the GPU. This
+    /// packs only each curve's point count and authored length floor;
+    /// no CPU walk over the full drawing remains.
     ///
     /// Returns false when the drawing does not fit the field — the
-    /// layout refuses a curve past the scan's depth or a drawing past
+    /// layout refuses a curve past the reduction cap or a drawing past
     /// the canvas' texel count — which leaves the caller on its CPU
     /// path for that frame rather than showing a wrong picture.
     ///
-    /// [`ribbon::reference_depth`]: crate::ribbon::reference_depth
     pub fn solve(
         &mut self,
         drawing: Drawing<'_>,
