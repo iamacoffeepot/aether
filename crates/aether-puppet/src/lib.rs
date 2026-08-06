@@ -84,6 +84,8 @@ pub mod mesh;
 mod npy;
 pub mod plant;
 pub mod ribbon;
+#[allow(dead_code, reason = "the resident GPU consumer lands after the authored compute surface in issue 4555")]
+mod silhouette;
 pub mod strokes;
 pub mod style;
 pub mod turntable;
