@@ -103,7 +103,13 @@ fn loaded_cube_recovers_without_recreating_the_actor_or_public_ids() {
             "subject",
             HarnessOp::send_and_settle(
                 PUPPET,
-                &Load { namespace: "assets".to_owned(), path, labels: String::new(), rig: String::new() },
+                &Load {
+                    namespace: "assets".to_owned(),
+                    path,
+                    labels: String::new(),
+                    material_field_padding: 0.12,
+                    rig: String::new(),
+                },
             ),
         )])
         .expect("load the committed cube");

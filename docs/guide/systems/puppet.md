@@ -20,13 +20,19 @@ Send `aether.puppet.load` with paths in one of the substrate's file namespaces:
   "namespace": "assets",
   "path": "subject.obj",
   "labels": "labels.npy",
+  "material_field_padding": 0.12,
   "rig": "rig"
 }
 ```
 
 `labels` and `rig` may be empty. The charted face needs the material labels to
 measure its anchors. The optional rig directory contains `weights.npy` and
-`rig.txt`.
+`rig.txt`. `material_field_padding` is the fraction of the mesh's longest axis
+that the material-field baker added on each side; `0.12` is the canonical
+asset's value and remains `Load::default()`'s value. The decoded
+`aether.puppet.material_field` kind declares its dimensions, byte cells,
+world-space origin and spacing, and ordered class vocabulary in memory; the
+on-disk asset remains a NumPy 1.0 `|u1`, C-order cube.
 
 ## Drive the chart
 

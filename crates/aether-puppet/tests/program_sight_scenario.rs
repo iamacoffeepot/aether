@@ -127,8 +127,7 @@ const FIELD_OF_VIEW: f32 = 0.454;
 /// so a bias tuned to one profile cannot carry the gate.
 const AZIMUTHS: [f32; 4] = [0.0, 30.0, 55.0, 90.0];
 
-/// Padding the material field was baked with, as `Puppet` reconstructs
-/// the lattice (`LABEL_PAD`).
+/// Padding the canonical cross-feed material field was baked with.
 const LABEL_PAD: f32 = 0.12;
 
 /// Umbrella passes over the vertex normals, as `Settings::default`
@@ -1292,7 +1291,7 @@ fn crossfeed_the_gpu_field_against_the_cpu_oracle() {
     let mesh = Mesh::from_obj_bytes(&fs::read(dir.join("subject.obj")).expect("read subject.obj"), RELAXATION)
         .expect("parse the subject");
     let labels =
-        Labels::parse(&fs::read(dir.join("labels.npy")).expect("read labels.npy"), mesh.min, mesh.max, LABEL_PAD)
+        Labels::decode(&fs::read(dir.join("labels.npy")).expect("read labels.npy"), mesh.min, mesh.max, LABEL_PAD)
             .expect("parse the material field");
     let settings = Settings::default();
     let bias = mesh.surface_bias();

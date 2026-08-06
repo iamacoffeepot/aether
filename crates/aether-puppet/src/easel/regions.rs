@@ -331,7 +331,7 @@ mod tests {
     fn split_field() -> Labels {
         let bytes = labels_npy(&[[labels::HAIR; 4], [labels::SKIN; 4]].concat());
 
-        Labels::parse(&bytes, Vec3::splat(-1.0), Vec3::splat(1.0), 0.0).expect("fixture field")
+        Labels::decode(&bytes, Vec3::splat(-1.0), Vec3::splat(1.0), 0.0).expect("fixture field")
     }
 
     /// A 2x2x2 field over the unit cube split along depth instead —
@@ -341,7 +341,7 @@ mod tests {
         let cells = [labels::HAIR, labels::SKIN, labels::HAIR, labels::SKIN];
         let bytes = labels_npy(&[cells, cells].concat());
 
-        Labels::parse(&bytes, Vec3::splat(-1.0), Vec3::splat(1.0), 0.0).expect("fixture field")
+        Labels::decode(&bytes, Vec3::splat(-1.0), Vec3::splat(1.0), 0.0).expect("fixture field")
     }
 
     /// Key light straight down the view axis, so a facet square to the eye

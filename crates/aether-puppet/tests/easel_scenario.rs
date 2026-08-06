@@ -105,7 +105,13 @@ fn the_sheet_stands_behind_the_ink() {
                 "subject",
                 HarnessOp::send_and_settle(
                     PUPPET,
-                    &Load { namespace: "assets".to_owned(), path: subject, labels: field, rig: String::new() },
+                    &Load {
+                        namespace: "assets".to_owned(),
+                        path: subject,
+                        labels: field,
+                        material_field_padding: 0.12,
+                        rig: String::new(),
+                    },
                 ),
             ),
         ])
