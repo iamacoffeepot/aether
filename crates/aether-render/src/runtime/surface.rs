@@ -154,27 +154,20 @@ fn opportunistic_features(adapter: &wgpu::Adapter) -> wgpu::Features {
     adapter.features() & wgpu::Features::TIMESTAMP_QUERY
 }
 
-/// Boot a surfaceless wgpu device for the offscreen pumped render runtime
-/// (ADR-0161 slice R4). No surface, no swapchain — the substrate harness
+/// Fallibly acquire a surfaceless wgpu device for an offscreen replacement
+/// transaction (ADR-0173). No surface, no swapchain — the substrate harness
 /// owns no window, so the runtime records into the offscreen targets
 /// [`crate::runtime::RenderGpu::new`] allocates and reads back from them.
-/// `size` is retained by the caller for `RenderGpu::new`; `wireframe` is
-/// the resolved `AETHER_WIREFRAME` value, honored the same way
+/// `wireframe` is the resolved `AETHER_WIREFRAME` value, honored the same way
 /// [`boot_surface`] honors it.
-///
-/// # Panics
-/// Panics if adapter selection or device acquisition fail — fail-fast per
-/// ADR-0063: the harness can't proceed without a usable offscreen pipeline,
-/// and driverless dev boxes are expected to skip the scenario upstream.
-#[must_use]
-pub fn boot_offscreen(wireframe: Option<&str>) -> BootedOffscreen {
+pub fn try_boot_offscreen(wireframe: Option<&str>) -> Result<BootedOffscreen, String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::default(),
         compatible_surface: None,
         force_fallback_adapter: false,
     }))
-    .expect("no compatible wgpu adapter");
+    .map_err(|error| format!("request offscreen adapter: {error}"))?;
     let adapter_info = adapter.get_info();
     let (polygon_mode, build_overlay, required_features) = resolve_wireframe(&adapter, &adapter_info.name, wireframe);
 
@@ -186,16 +179,29 @@ pub fn boot_offscreen(wireframe: Option<&str>) -> BootedOffscreen {
         memory_hints: wgpu::MemoryHints::default(),
         trace: wgpu::Trace::default(),
     }))
-    .expect("request_device");
+    .map_err(|error| format!("request offscreen device: {error}"))?;
     install_uncaptured_error_handler(&device);
 
-    BootedOffscreen {
+    Ok(BootedOffscreen {
         device: Arc::new(device),
         queue: Arc::new(queue),
         format: OFFSCREEN_COLOR_FORMAT,
         polygon_mode,
         build_overlay,
-    }
+    })
+}
+
+/// Boot the first surfaceless device. Initial offscreen boot remains
+/// fail-fast; only an ADR-0173 replacement uses [`try_boot_offscreen`]'s
+/// returned error and enters terminal `Unusable` on failure.
+///
+/// # Panics
+/// Panics if adapter selection or device acquisition fail — fail-fast per
+/// ADR-0063: the harness can't proceed without a usable offscreen pipeline,
+/// and driverless dev boxes are expected to skip the scenario upstream.
+#[must_use]
+pub fn boot_offscreen(wireframe: Option<&str>) -> BootedOffscreen {
+    try_boot_offscreen(wireframe).expect("initial offscreen render device acquisition failed")
 }
 
 #[cfg(feature = "desktop")]

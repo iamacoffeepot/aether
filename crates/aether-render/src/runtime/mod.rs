@@ -70,6 +70,7 @@ use winit::window::Window;
 mod capture;
 mod config;
 pub use config::DEFAULT_CLEAR_COLOR;
+mod device;
 // The ADR-0171 geometry registry: staged vertex/index bytes realized
 // lazily as wgpu buffers at first GPU use (the draw-pass slice records
 // against the realized side).
@@ -103,7 +104,7 @@ pub use self::config::{RenderParams, RenderTuningConfig, RenderTuningConfigLayer
 pub use self::pipeline::RenderGpu;
 
 use self::pipeline::{record_material_batches, record_overlay_batches};
-use self::surface::{boot_offscreen, build_wireframe_overlay_pipeline};
+use self::surface::{boot_offscreen, build_wireframe_overlay_pipeline, try_boot_offscreen};
 #[cfg(feature = "desktop")]
 use self::target::{DesktopGpuContext, FirstWindowGpu, RenderTarget, WindowTargets};
 
@@ -111,6 +112,7 @@ use self::target::{DesktopGpuContext, FirstWindowGpu, RenderTarget, WindowTarget
 // modules, so the re-export up to runtime level keeps that exact visibility.
 use self::capture::PendingCapture;
 pub use self::capture::resolve_reference;
+use self::device::DeviceRecovery;
 pub use self::geometry::{GeometryRegistry, RealizedGeometry, StagedGeometry};
 pub use self::material::MaterialBatch;
 use self::program::ProgramRegistry;
@@ -176,6 +178,10 @@ pub struct RenderCapabilityState {
     /// boots it transactionally with the first window attachment; the
     /// harness boots it lazily from `offscreen_size`.
     gpu: Option<RenderGpu>,
+    /// ADR-0173 generation state and callback bridge for the offscreen
+    /// device. Kept beside `gpu` so replacement is an actor-owned
+    /// transaction rather than a chassis-visible protocol.
+    device_recovery: DeviceRecovery,
     wire_pipeline: Option<wgpu::RenderPipeline>,
     /// Prior frame's submission index, drained at the top of the next
     /// frame to bound the present loop to one frame in flight (issue 1312).
@@ -335,32 +341,152 @@ impl RenderCapabilityState {
     /// Boot the explicit surfaceless harness GPU. Desktop GPUs are booted by
     /// `attach_window`, never by a frame or a shared handle.
     fn ensure_offscreen_gpu_booted(&mut self) {
-        if self.gpu.is_some() {
+        if self.gpu.is_some() || !self.device_recovery.is_unbooted() {
             return;
         }
         let Some((width, height)) = self.offscreen_size else {
             return;
         };
         let booted = boot_offscreen(self.wireframe.as_deref());
-        let gpu = RenderGpu::new(
+        let (gpu, wire_pipeline) = self.build_offscreen_gpu(
             Arc::clone(&booted.device),
             Arc::clone(&booted.queue),
             booted.format,
-            width,
-            height,
+            (width, height),
             booted.polygon_mode,
-            self.vertex_buffer_bytes,
+            booted.build_overlay,
         );
-        self.wire_pipeline = booted
-            .build_overlay
-            .then(|| build_wireframe_overlay_pipeline(&booted.device, gpu.color_format, &gpu.pipeline.pipeline_layout));
+        self.device_recovery.install_initial(&gpu.device);
+        self.wire_pipeline = wire_pipeline;
         self.gpu = Some(gpu);
+    }
+
+    fn build_offscreen_gpu(
+        &self,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        format: wgpu::TextureFormat,
+        size: (u32, u32),
+        polygon_mode: wgpu::PolygonMode,
+        build_overlay: bool,
+    ) -> (RenderGpu, Option<wgpu::RenderPipeline>) {
+        let gpu =
+            RenderGpu::new(Arc::clone(&device), queue, format, size.0, size.1, polygon_mode, self.vertex_buffer_bytes);
+        let wire_pipeline = build_overlay
+            .then(|| build_wireframe_overlay_pipeline(&device, gpu.color_format, &gpu.pipeline.pipeline_layout));
+        (gpu, wire_pipeline)
+    }
+
+    /// Drain loss notices and, when needed, perform the lost generation's
+    /// one offscreen replacement transaction. The replacement GPU and
+    /// overlay are built off to the side; registry realizations are then
+    /// switched as one actor-owned commit. A failed acquisition is terminal.
+    fn recover_offscreen_gpu_if_needed(&mut self) -> Result<(), String> {
+        self.device_recovery.refresh();
+        if let Some(error) = self.device_recovery.unusable_error() {
+            return Err(error);
+        }
+        let Some(ticket) = self.device_recovery.begin_replacement() else {
+            return Ok(());
+        };
+        let Some((width, height)) = self.offscreen_size else {
+            let reason = "device replacement is not available for this non-offscreen render runtime".to_owned();
+            self.finish_failed_replacement(ticket, reason.clone());
+            return Err(reason);
+        };
+
+        let replacement = try_boot_offscreen(self.wireframe.as_deref()).map(|booted| {
+            self.build_offscreen_gpu(
+                Arc::clone(&booted.device),
+                Arc::clone(&booted.queue),
+                booted.format,
+                (width, height),
+                booted.polygon_mode,
+                booted.build_overlay,
+            )
+        });
+        let (gpu, wire_pipeline) = match replacement {
+            Ok(replacement) => replacement,
+            Err(reason) => {
+                self.finish_failed_replacement(ticket, reason.clone());
+                return Err(reason);
+            }
+        };
+
+        self.textures.invalidate_device_resources();
+        self.geometries.invalidate_device_resources();
+        self.programs.rebuild_for_device(&gpu);
+        self.discard_device_replay_caches();
+        self.device_recovery.finish_replacement(ticket, &gpu.device);
+        self.last_submission = None;
+        self.wire_pipeline = wire_pipeline;
+        self.gpu = Some(gpu);
+        Ok(())
+    }
+
+    fn finish_failed_replacement(&mut self, ticket: device::ReplacementTicket, reason: String) {
+        self.last_submission = None;
+        self.wire_pipeline = None;
+        self.gpu = None;
+        self.device_recovery.fail_replacement(ticket, reason.clone());
+        self.fail_pending_capture_for_device(format!("capture_frame failed: {reason}"));
+    }
+
+    /// Reject request/reply GPU work while loss is pending or terminal.
+    /// Replacement belongs to the first frame after a known loss, keeping
+    /// acquisition out of ordinary mail handlers.
+    fn service_device_for_request(&mut self) -> Result<(), String> {
+        self.device_recovery.refresh();
+        self.device_recovery.gpu_work_error().map_or(Ok(()), Err)
+    }
+
+    fn warn_drop_if_unusable(&mut self, operation: &'static str) -> bool {
+        self.device_recovery.refresh();
+        let Some(error) = self.device_recovery.unusable_error() else {
+            return false;
+        };
+        tracing::warn!(
+            target: "aether_render",
+            operation,
+            %error,
+            "dropping fire-and-forget render work because the render capability is unusable",
+        );
+        true
+    }
+
+    fn fail_pending_capture_for_device(&mut self, error: String) {
+        let Some(pending) = self.pending_capture.take() else {
+            return;
+        };
+        for mail in pending.after_mails {
+            self.mailer.push(mail);
+        }
+        pending.reply.reply(&CaptureFrameResult::Err { error });
+    }
+
+    /// Host-only deterministic injection reached through the concrete
+    /// `GpuFrameHook`. No kind, wire shape, or actor callback is exposed.
+    pub fn force_device_loss_for_harness(&self) -> Result<u64, String> {
+        let gpu = self.gpu.as_ref().ok_or_else(|| "the healthy render device has no published GPU".to_owned())?;
+        let generation = self.device_recovery.force_current_loss()?;
+        gpu.device.destroy();
+        Ok(generation)
     }
 
     fn commit_scene(&mut self, replay_cache_when_idle: bool) {
         commit_or_replay(&mut self.frame_vertices, &mut self.last_submitted, replay_cache_when_idle);
         commit_or_replay(&mut self.material_frame, &mut self.material_last_submitted, replay_cache_when_idle);
         commit_or_replay(&mut self.quad_frame, &mut self.quad_last_submitted, replay_cache_when_idle);
+    }
+
+    /// Drop only scene caches that may have been submitted ambiguously on
+    /// the lost generation. Live accumulators and pending program dispatches
+    /// are known not to have recorded yet and survive for the replacement
+    /// frame's ordinary commit.
+    fn discard_device_replay_caches(&mut self) {
+        discard_replay_cache(&mut self.last_submitted);
+        discard_replay_cache(&mut self.material_last_submitted);
+        discard_replay_cache(&mut self.quad_last_submitted);
     }
 
     /// Record the world / material / overlay passes into `encoder` from the
@@ -487,17 +613,28 @@ impl RenderCapabilityState {
             self.mailer.push(mail);
         }
         let gpu = self.gpu.as_ref().expect("capture metadata requires a booted GPU");
-        let outcome: Result<CaptureFrameResult, String> = {
+        let readback = {
             let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
-            map_capture_rgba(&gpu.device, &targets, &meta).and_then(|rgba| {
-                let png = encode_png(&rgba, meta.width, meta.height)?;
-                let (similarity_score, similarity_pass) =
-                    visual::score_similarity(&rgba, meta.width, meta.height, pending.reference.as_ref())?;
-                let verdict = (!pending.checks.is_empty())
-                    .then(|| visual::run_checks(rgba, meta.width, meta.height, &pending.checks));
-                Ok(CaptureFrameResult::Ok { png, verdict, similarity_score, similarity_pass })
-            })
+            map_capture_rgba(&gpu.device, &targets, &meta)
         };
+        if let Err(error) = &readback {
+            self.device_recovery.report_current_loss(format!("capture mapping/readback failed: {error}"));
+        } else {
+            self.device_recovery.refresh();
+        }
+        let outcome: Result<CaptureFrameResult, String> = self.device_recovery.gpu_work_error().map_or_else(
+            || {
+                readback.and_then(|rgba| {
+                    let png = encode_png(&rgba, meta.width, meta.height)?;
+                    let (similarity_score, similarity_pass) =
+                        visual::score_similarity(&rgba, meta.width, meta.height, pending.reference.as_ref())?;
+                    let verdict = (!pending.checks.is_empty())
+                        .then(|| visual::run_checks(rgba, meta.width, meta.height, &pending.checks));
+                    Ok(CaptureFrameResult::Ok { png, verdict, similarity_score, similarity_pass })
+                })
+            },
+            |error| Err(format!("capture_frame failed during device loss: {error}")),
+        );
         match outcome {
             Ok(result) => pending.reply.reply(&result),
             Err(error) => pending.reply.reply(&CaptureFrameResult::Err { error }),
@@ -516,6 +653,10 @@ fn commit_or_replay<T>(live: &mut Vec<T>, last: &mut Vec<T>, replay_cache_when_i
     } else if !replay_cache_when_idle {
         last.clear();
     }
+}
+
+fn discard_replay_cache<T>(last: &mut Vec<T>) {
+    last.clear();
 }
 
 fn deduplicate_windows(windows: Vec<WindowId>) -> BTreeSet<WindowId> {
@@ -562,6 +703,7 @@ impl NativeActor for RenderCapability {
             offscreen_size: params.offscreen_size,
             wireframe: params.wireframe,
             gpu: None,
+            device_recovery: DeviceRecovery::new(),
             wire_pipeline: None,
             last_submission: None,
             overlay_observation: Mutex::new(Vec::new()),
@@ -578,6 +720,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_draw_triangle(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mails: &[DrawTriangle]) {
         state.observe(<DrawTriangle as Kind>::ID);
+        if state.warn_drop_if_unusable("draw_triangle") {
+            return;
+        }
         let bytes: &[u8] = bytemuck::cast_slice(mails);
         let cap_bytes = state.vertex_buffer_bytes;
         let available = cap_bytes.saturating_sub(state.frame_vertices.len());
@@ -602,6 +747,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_camera(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ViewProjection) {
         state.observe(<ViewProjection as Kind>::ID);
+        if state.warn_drop_if_unusable("view_projection") {
+            return;
+        }
         state.camera_state = mail.view_proj;
     }
 
@@ -613,6 +761,9 @@ impl NativeActor for RenderCapability {
         mail: CreateTexture,
     ) -> CreateTextureResult {
         state.observe(<CreateTexture as Kind>::ID);
+        if let Err(error) = state.service_device_for_request() {
+            return CreateTextureResult::Err { error };
+        }
         state.textures.create(mail)
     }
 
@@ -620,6 +771,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_update_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UpdateTexture) {
         state.observe(<UpdateTexture as Kind>::ID);
+        if state.warn_drop_if_unusable("update_texture") {
+            return;
+        }
         state.textures.update(mail);
     }
 
@@ -627,6 +781,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_destroy_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyTexture) {
         state.observe(<DestroyTexture as Kind>::ID);
+        if state.warn_drop_if_unusable("destroy_texture") {
+            return;
+        }
         state.textures.destroy(mail);
     }
 
@@ -640,6 +797,9 @@ impl NativeActor for RenderCapability {
         mail: CreateGeometry,
     ) -> CreateGeometryResult {
         state.observe(<CreateGeometry as Kind>::ID);
+        if let Err(reason) = state.service_device_for_request() {
+            return CreateGeometryResult::Err { reason };
+        }
         state.geometries.create(mail)
     }
 
@@ -647,6 +807,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_update_geometry(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UpdateGeometry) {
         state.observe(<UpdateGeometry as Kind>::ID);
+        if state.warn_drop_if_unusable("update_geometry") {
+            return;
+        }
         state.geometries.update(mail);
     }
 
@@ -655,6 +818,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_destroy_geometry(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyGeometry) {
         state.observe(<DestroyGeometry as Kind>::ID);
+        if state.warn_drop_if_unusable("destroy_geometry") {
+            return;
+        }
         state.geometries.destroy(mail);
     }
 
@@ -673,6 +839,9 @@ impl NativeActor for RenderCapability {
     ) -> ProgramRegisterResult {
         state.observe(<ProgramRegister as Kind>::ID);
         state.ensure_offscreen_gpu_booted();
+        if let Err(reason) = state.service_device_for_request() {
+            return ProgramRegisterResult::Err { reason };
+        }
         let Some(gpu) = state.gpu.as_ref() else {
             return ProgramRegisterResult::Err {
                 reason: "the render GPU is not booted; register programs after the first window attaches".to_owned(),
@@ -688,6 +857,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_program_dispatch(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ProgramDispatch) {
         state.observe(<ProgramDispatch as Kind>::ID);
+        if state.warn_drop_if_unusable("program_dispatch") {
+            return;
+        }
         state.pending_program_dispatches.push(mail);
     }
 
@@ -696,6 +868,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_program_destroy(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ProgramDestroy) {
         state.observe(<ProgramDestroy as Kind>::ID);
+        if state.warn_drop_if_unusable("program_destroy") {
+            return;
+        }
         state.programs.destroy(&mail);
     }
 
@@ -711,6 +886,9 @@ impl NativeActor for RenderCapability {
         mail: ProgramTimings,
     ) -> ProgramTimingsResult {
         state.observe(<ProgramTimings as Kind>::ID);
+        if let Err(reason) = state.service_device_for_request() {
+            return ProgramTimingsResult::Err { reason };
+        }
         state.programs.timings(&mail)
     }
 
@@ -718,6 +896,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_draw_textured_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawTexturedQuads) {
         state.observe(<DrawTexturedQuads as Kind>::ID);
+        if state.warn_drop_if_unusable("draw_textured_quads") {
+            return;
+        }
         state.quad_frame.push(QuadBatch::textured(mail));
     }
 
@@ -726,6 +907,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_draw_solid_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawSolidQuads) {
         state.observe(<DrawSolidQuads as Kind>::ID);
+        if state.warn_drop_if_unusable("draw_solid_quads") {
+            return;
+        }
         let batch = QuadBatch::solid(mail, &mut state.textures);
         state.quad_frame.push(batch);
     }
@@ -734,6 +918,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_draw_material_textured(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialTextured) {
         state.observe(<DrawMaterialTextured as Kind>::ID);
+        if state.warn_drop_if_unusable("draw_material_textured") {
+            return;
+        }
         state.material_frame.push(MaterialBatch::textured(mail));
     }
 
@@ -741,6 +928,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_draw_material_coverage(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialCoverage) {
         state.observe(<DrawMaterialCoverage as Kind>::ID);
+        if state.warn_drop_if_unusable("draw_material_coverage") {
+            return;
+        }
         state.material_frame.push(MaterialBatch::coverage(mail));
     }
 
@@ -798,9 +988,10 @@ impl NativeActor for RenderCapability {
             });
         }
 
-        state.commit_scene(replay_cache_when_idle);
         state.ensure_offscreen_gpu_booted();
-
+        if state.recover_offscreen_gpu_if_needed().is_err() {
+            return;
+        }
         let Some(gpu) = state.gpu.as_ref() else {
             if state.pending_capture.as_ref().is_some_and(PendingCapture::is_ready)
                 && let Some(pending) = state.pending_capture.take()
@@ -818,8 +1009,25 @@ impl NativeActor for RenderCapability {
         if let Some(index) = state.last_submission.take()
             && let Err(error) = device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None })
         {
-            tracing::warn!(target: "aether_substrate::render", ?error, "device.poll for previous frame failed; continuing");
+            if state.offscreen_size.is_some() {
+                state.device_recovery.report_current_loss(format!("waiting for the previous frame failed: {error}"));
+            } else {
+                tracing::warn!(
+                    target: "aether_substrate::render",
+                    ?error,
+                    "device.poll for previous frame failed; continuing",
+                );
+            }
         }
+        // The poll may itself deliver the callback. A pending capture has
+        // not begun recording this frame, so it may survive a successful
+        // transaction and record exactly once below.
+        if state.recover_offscreen_gpu_if_needed().is_err() {
+            return;
+        }
+        state.commit_scene(replay_cache_when_idle);
+        #[cfg(feature = "desktop")]
+        let device = Arc::clone(&state.gpu.as_ref().expect("recovery published a GPU").device);
 
         #[cfg(feature = "desktop")]
         for window in windows.iter().copied() {
@@ -895,6 +1103,11 @@ impl NativeActor for RenderCapability {
         state.observe(<CaptureFrame as Kind>::ID);
         let reply = ctx.take_inbound();
 
+        state.device_recovery.refresh();
+        if let Some(error) = state.device_recovery.unusable_error() {
+            reply.reply(&CaptureFrameResult::Err { error: format!("capture_frame failed: {error}") });
+            return;
+        }
         if let Err(error) = state.validate_capture_target(mail.window) {
             reply.reply(&CaptureFrameResult::Err { error });
             return;
@@ -1070,6 +1283,7 @@ mod tests {
             offscreen_size: None,
             wireframe: None,
             gpu: None,
+            device_recovery: DeviceRecovery::new(),
             wire_pipeline: None,
             last_submission: None,
             overlay_observation: Mutex::new(Vec::new()),
@@ -1169,6 +1383,90 @@ mod tests {
                 .collect::<Vec<_>>(),
             [WindowId(2), WindowId(5), WindowId(8)],
         );
+    }
+
+    #[test]
+    fn replacement_discards_only_old_replay_cache_before_committing_live_work() {
+        let (mailer, _rx) = test_mailer_and_rx();
+        let mut state = headless_state(&mailer);
+        state.last_submitted = vec![1, 2, 3];
+        state.frame_vertices = vec![4, 5, 6];
+        state.pending_program_dispatches.push(ProgramDispatch {
+            program_id: 9,
+            bindings: Vec::new(),
+            geometries: Vec::new(),
+            uniforms: Vec::new(),
+        });
+
+        state.discard_device_replay_caches();
+
+        assert!(state.last_submitted.is_empty(), "ambiguously submitted replay cache is discarded");
+        assert_eq!(state.frame_vertices, [4, 5, 6], "fresh frame mail survives replacement");
+        assert_eq!(state.pending_program_dispatches[0].program_id, 9, "fresh program dispatch survives replacement");
+
+        state.commit_scene(true);
+        assert_eq!(state.last_submitted, [4, 5, 6], "the replacement frame commits fresh work, not the old cache");
+    }
+
+    #[test]
+    fn terminal_device_failure_never_reboots_and_disposes_each_mail_shape() {
+        let (mailer, rx) = test_mailer_and_rx();
+        let mut state = headless_state(&mailer);
+        state.offscreen_size = Some((64, 48));
+        state.device_recovery.force_unusable_for_test("replacement acquisition failed");
+        state.textures.entries.insert(3, test_staged_texture(vec![7; 16]));
+        let binding = ctx_binding(&mailer);
+
+        {
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            RenderCapability::on_frame(
+                &mut state,
+                &mut ctx,
+                Frame { replay_cache_when_idle: true, windows: Vec::new() },
+            );
+            let registered = RenderCapability::on_program_register(
+                &mut state,
+                &mut ctx,
+                ProgramRegister {
+                    wgsl: String::new(),
+                    bindings: Vec::new(),
+                    transients: Vec::new(),
+                    geometries: Vec::new(),
+                    depth_transients: Vec::new(),
+                    passes: Vec::new(),
+                },
+            );
+            assert!(
+                matches!(registered, ProgramRegisterResult::Err { reason } if reason.contains("unusable")),
+                "request/reply GPU work returns the terminal structured error",
+            );
+
+            RenderCapability::on_update_texture(
+                &mut state,
+                &mut ctx,
+                UpdateTexture { texture_id: 3, x: 0, y: 0, width: 1, height: 1, pixels: vec![9, 9, 9, 9] },
+            );
+            RenderCapability::on_draw_triangle(&mut state, &mut ctx, &[DrawTriangle::default()]);
+        }
+
+        assert!(state.gpu.is_none(), "terminal state never retries initial device boot");
+        assert_eq!(state.textures.entries[&3].pixels, vec![7; 16], "fire-and-forget updates are dropped");
+        assert!(state.frame_vertices.is_empty(), "fire-and-forget draws are dropped");
+
+        let mut ctx = manual_dispatch_ctx(&binding, session_sender(), MailboxId(0));
+        RenderCapability::on_capture_frame(
+            &mut state,
+            &mut ctx,
+            CaptureFrame {
+                window: None,
+                mails: Vec::new(),
+                after_mails: Vec::new(),
+                checks: Vec::new(),
+                similarity: None,
+            },
+        );
+        assert!(capture_err(&rx).contains("unusable"), "capture replies with the terminal structured error");
+        assert!(state.gpu.is_none(), "terminal capture does not retry device acquisition");
     }
 
     /// A second `capture_frame` while one is pending replies `Err`

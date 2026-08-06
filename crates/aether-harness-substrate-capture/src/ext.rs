@@ -51,6 +51,19 @@ impl GpuFrameHook {
     pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
         self.slot.read_state(|state| state.committed_overlay_snapshot()).unwrap_or_default()
     }
+
+    /// Deterministically lose the concrete offscreen device. This is a
+    /// host-only scenario seam: it reaches the actor state directly through
+    /// the owned pumped slot and introduces no render kind or guest callback.
+    // The pumped state type is `pub` inside a private module of aether-render,
+    // so it is unnameable here — the closure form is required (the suggested
+    // method reference would not compile).
+    #[allow(clippy::redundant_closure_for_method_calls)]
+    pub fn force_device_loss(&self) -> Result<u64, String> {
+        self.slot
+            .read_state(|state| state.force_device_loss_for_harness())
+            .unwrap_or_else(|| Err("the pumped render slot is closed".to_owned()))
+    }
 }
 
 impl FrameHook for GpuFrameHook {
@@ -175,6 +188,12 @@ pub trait RenderHarnessExt {
     #[must_use]
     fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads>;
 
+    /// Force loss of the currently installed offscreen device and return its
+    /// generation. The next request/frame services the normal ADR-0173
+    /// replacement transaction. Available only on a harness built with
+    /// [`RenderHarnessBuilderExt::with_render`].
+    fn force_render_device_loss(&self) -> Result<u64, String>;
+
     /// Read the asynchronously folded, per-pass GPU timestamp table for
     /// `program_id` (iamacoffeepot/aether#4422/#4423).
     ///
@@ -199,6 +218,13 @@ impl RenderHarnessExt for SubstrateHarness {
             .and_then(|hook| hook.as_any().downcast_ref::<GpuFrameHook>())
             .expect("committed_overlay_snapshot requires a harness built with .with_render() (issue #3764)")
             .committed_overlay_snapshot()
+    }
+
+    fn force_render_device_loss(&self) -> Result<u64, String> {
+        self.frame_hook()
+            .and_then(|hook| hook.as_any().downcast_ref::<GpuFrameHook>())
+            .ok_or_else(|| "force_render_device_loss requires a harness built with .with_render()".to_owned())?
+            .force_device_loss()
     }
 
     fn program_gpu_timings(&mut self, program_id: u32) -> Result<ProgramTimingsResult, ExecutionError> {
