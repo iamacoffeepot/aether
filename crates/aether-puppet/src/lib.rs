@@ -81,6 +81,7 @@ mod kinds;
 pub mod labels;
 pub mod math3;
 pub mod mesh;
+mod npy;
 pub mod plant;
 pub mod ribbon;
 pub mod strokes;
@@ -292,8 +293,13 @@ impl Rig {
         self.awaiting_weights.is_some() || self.awaiting_descriptor.is_some()
     }
 
-    fn build(&self, vertices: usize) -> Option<deform::Skin> {
-        deform::Skin::parse(self.weights.as_ref()?, self.descriptor.as_ref()?, vertices)
+    fn build(&self, vertices: usize) -> Result<Option<deform::Skin>, String> {
+        match (&self.weights, &self.descriptor) {
+            (None, None) => Ok(None),
+            (Some(weights), Some(descriptor)) => deform::Skin::parse(weights, descriptor, vertices).map(Some),
+            (Some(_), None) => Err("rig descriptor is missing or is not valid UTF-8".to_owned()),
+            (None, Some(_)) => Err("rig weights are missing".to_owned()),
+        }
     }
 }
 
@@ -659,9 +665,17 @@ impl WasmActor for Puppet {
         } else if self.awaiting_labels.as_deref() == Some(path.as_str()) {
             self.awaiting_labels = None;
             let bounds = self.subject.as_ref().map_or((Vec3::splat(-1.0), Vec3::splat(1.0)), |m| (m.min, m.max));
-            self.labels = labels::Labels::parse(&bytes, bounds.0, bounds.1, LABEL_PAD);
-            if self.labels.is_none() {
-                tracing::warn!(target: "aether_puppet", "material field is not a cube; creases stay unmasked");
+            match labels::Labels::parse(&bytes, bounds.0, bounds.1, LABEL_PAD) {
+                Ok(labels) => self.labels = Some(labels),
+                Err(error) => {
+                    self.labels = None;
+                    tracing::warn!(
+                        target: "aether_puppet",
+                        path = %path,
+                        error = %error,
+                        "material field refused; creases stay unmasked",
+                    );
+                }
             }
         } else {
             let Some(subject) = Mesh::from_obj_bytes(&bytes, self.settings.relaxation) else {
@@ -701,9 +715,16 @@ impl WasmActor for Puppet {
         // The rig, checked against the mesh it claims to bind. A refused
         // one leaves her unposable rather than posing her wrongly, and the
         // reply says so.
-        self.skin = self.rig.build(subject.positions.len());
-        if self.rig.weights.is_some() && self.skin.is_none() {
-            tracing::warn!(target: "aether_puppet", "the rig does not bind this subject; she stays in the rest pose");
+        match self.rig.build(subject.positions.len()) {
+            Ok(skin) => self.skin = skin,
+            Err(error) => {
+                self.skin = None;
+                tracing::warn!(
+                    target: "aether_puppet",
+                    error = %error,
+                    "the rig was refused; she stays in the rest pose",
+                );
+            }
         }
 
         // Ungated when a rig is in: the gate reads each point's normal and

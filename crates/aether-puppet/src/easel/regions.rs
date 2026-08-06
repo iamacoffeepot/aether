@@ -280,7 +280,7 @@ pub fn ink(triangles: &[DrawTriangle], view_proj: &Mat4, width: usize, height: u
 
 #[cfg(test)]
 mod tests {
-    use core::fmt::Write as _;
+    use core::{fmt::Write as _, iter};
 
     use super::{RegionPlanes, ink, rasterize};
     use crate::extract::Settings;
@@ -295,6 +295,21 @@ mod tests {
     const SIDE: usize = 16;
 
     const EYE: Vec3 = Vec3::new(0.0, 0.0, 5.0);
+
+    fn labels_npy(cells: &[u8]) -> Vec<u8> {
+        assert_eq!(cells.len(), 8, "the fixture is a 2x2x2 field");
+        let dictionary = "{'descr': '|u1', 'fortran_order': False, 'shape': (2, 2, 2), }";
+        let padding = (16 - ((10 + dictionary.len() + 1) % 16)) % 16;
+        let mut header = dictionary.to_owned();
+        header.extend(iter::repeat_n(' ', padding));
+        header.push('\n');
+
+        let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+        bytes.extend(u16::try_from(header.len()).expect("a short fixture header").to_le_bytes());
+        bytes.extend(header.as_bytes());
+        bytes.extend(cells);
+        bytes
+    }
 
     /// A mesh from bare vertices and triangles. `Mesh` derives its normals,
     /// bounds and bvh at construction and OBJ bytes are the only door in,
@@ -314,11 +329,7 @@ mod tests {
     /// A 2x2x2 field over the unit cube, `HAIR` where `x < 0` and `SKIN`
     /// where `x > 0`, so a sample's x alone decides its class.
     fn split_field() -> Labels {
-        // Ten bytes of `.npy` preamble, of which only the little-endian
-        // header length at [8..10] is read; zero puts the cells first.
-        let mut bytes = vec![0u8; 10];
-        bytes.extend([labels::HAIR; 4]);
-        bytes.extend([labels::SKIN; 4]);
+        let bytes = labels_npy(&[[labels::HAIR; 4], [labels::SKIN; 4]].concat());
 
         Labels::parse(&bytes, Vec3::splat(-1.0), Vec3::splat(1.0), 0.0).expect("fixture field")
     }
@@ -327,9 +338,8 @@ mod tests {
     /// `HAIR` where `z < 0` and `SKIN` where `z > 0` (z is the
     /// fastest-varying cell axis, so the classes alternate).
     fn depth_split_field() -> Labels {
-        let mut bytes = vec![0u8; 10];
-        bytes.extend([labels::HAIR, labels::SKIN, labels::HAIR, labels::SKIN]);
-        bytes.extend([labels::HAIR, labels::SKIN, labels::HAIR, labels::SKIN]);
+        let cells = [labels::HAIR, labels::SKIN, labels::HAIR, labels::SKIN];
+        let bytes = labels_npy(&[cells, cells].concat());
 
         Labels::parse(&bytes, Vec3::splat(-1.0), Vec3::splat(1.0), 0.0).expect("fixture field")
     }

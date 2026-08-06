@@ -99,7 +99,7 @@
     clippy::suboptimal_flops
 )]
 
-use core::fmt::Write as _;
+use core::{fmt::Write as _, iter};
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -708,9 +708,15 @@ fn synthetic_subject() -> Mesh {
 /// whose x half decides the class, so a face straddling `x = 0` carries
 /// a boundary the indicators have to place per pixel.
 fn split_field(mesh: &Mesh) -> Labels {
-    // Ten bytes of `.npy` preamble, of which only the little-endian
-    // header length at [8..10] is read; zero puts the cells first.
-    let mut bytes = vec![0u8; 10];
+    let dictionary = "{'descr': '|u1', 'fortran_order': False, 'shape': (2, 2, 2), }";
+    let padding = (16 - ((10 + dictionary.len() + 1) % 16)) % 16;
+    let mut header = dictionary.to_owned();
+    header.extend(iter::repeat_n(' ', padding));
+    header.push('\n');
+
+    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+    bytes.extend(u16::try_from(header.len()).expect("a short fixture header").to_le_bytes());
+    bytes.extend(header.as_bytes());
     bytes.extend([labels::HAIR; 4]);
     bytes.extend([labels::SKIN; 4]);
 
@@ -829,10 +835,15 @@ fn a_re_uploaded_subject_re_bakes_from_its_new_vertices() {
     assert_parity("posed", &oracle, &after, CANVAS_WIDTH, CANVAS_HEIGHT);
 }
 
-/// A little-endian 1.0 `.npy` around `values` — the payload shape
-/// `Skin::parse` reads; the header dict is bytes it skips over.
-fn weights_npy(values: &[f32]) -> Vec<u8> {
-    let header = "{'descr': '<f4', 'fortran_order': False, 'shape': (0,), }\n";
+/// A little-endian, C-order `NumPy` 1.0 weight matrix.
+fn weights_npy(values: &[f32], shape: (usize, usize)) -> Vec<u8> {
+    assert_eq!(shape.0.checked_mul(shape.1), Some(values.len()), "fixture shape must match its values");
+    let dictionary = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({}, {}), }}", shape.0, shape.1);
+    let padding = (16 - ((10 + dictionary.len() + 1) % 16)) % 16;
+    let mut header = dictionary;
+    header.extend(iter::repeat_n(' ', padding));
+    header.push('\n');
+
     let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
     bytes.extend(u16::try_from(header.len()).expect("a short header").to_le_bytes());
     bytes.extend(header.as_bytes());
@@ -873,7 +884,7 @@ fn a_bone_posed_subject_bakes_where_the_posed_oracle_says() {
         row[usize::from(vertex < 6)] = 1.0;
     }
     let descriptor = "bones chest head\npivot head 0 0 0";
-    let skin = deform::Skin::parse(&weights_npy(&weights), descriptor, vertices).expect("the rig binds");
+    let skin = deform::Skin::parse(&weights_npy(&weights, (vertices, 2)), descriptor, vertices).expect("the rig binds");
 
     let mut harness = SubstrateHarness::builder()
         .size(CANVAS_WIDTH as u32, CANVAS_HEIGHT as u32)

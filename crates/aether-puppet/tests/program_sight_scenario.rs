@@ -83,6 +83,7 @@
 
 use core::f32::consts::{PI, TAU};
 use core::fmt::Write as _;
+use core::iter;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -1129,10 +1130,15 @@ fn a_re_uploaded_subject_re_occludes_from_its_new_vertices() {
     assert_derived("posed", eye, drawing, &layout, &after);
 }
 
-/// A little-endian 1.0 `.npy` around `values` — the payload shape
-/// `Skin::parse` reads; the header dict is bytes it skips over.
-fn weights_npy(values: &[f32]) -> Vec<u8> {
-    let header = "{'descr': '<f4', 'fortran_order': False, 'shape': (0,), }\n";
+/// A little-endian, C-order `NumPy` 1.0 weight matrix.
+fn weights_npy(values: &[f32], shape: (usize, usize)) -> Vec<u8> {
+    assert_eq!(shape.0.checked_mul(shape.1), Some(values.len()), "fixture shape must match its values");
+    let dictionary = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({}, {}), }}", shape.0, shape.1);
+    let padding = (16 - ((10 + dictionary.len() + 1) % 16)) % 16;
+    let mut header = dictionary;
+    header.extend(iter::repeat_n(' ', padding));
+    header.push('\n');
+
     let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
     bytes.extend(u16::try_from(header.len()).expect("a short header").to_le_bytes());
     bytes.extend(header.as_bytes());
@@ -1193,7 +1199,7 @@ fn a_bone_posed_occluder_occludes_where_the_posed_oracle_says() {
         row[usize::from(vertex >= vertices - 4)] = 1.0;
     }
     let descriptor = "bones chest head\npivot head -0.95 0.0 1.2";
-    let skin = deform::Skin::parse(&weights_npy(&weights), descriptor, vertices).expect("the rig binds");
+    let skin = deform::Skin::parse(&weights_npy(&weights, (vertices, 2)), descriptor, vertices).expect("the rig binds");
 
     let mut harness = SubstrateHarness::builder()
         .size(CANVAS_WIDTH as u32, CANVAS_HEIGHT as u32)

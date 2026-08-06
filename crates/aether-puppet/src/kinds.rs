@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 pub struct Load {
     pub namespace: String,
     pub path: String,
-    /// Optional path to the material field, a `uint8` cubic `.npy` baked
-    /// over the same sculpt.
+    /// Optional path to the material field, a `NumPy` 1.0 `|u1`, C-order
+    /// array shaped exactly `(n, n, n)` with `n >= 2`, baked over the same
+    /// sculpt.
     ///
     /// Without it every crease is inked, and the sculpt carves a hair-strand
     /// seam exactly as deeply as it carves an eyelid — there are five times
@@ -21,8 +22,9 @@ pub struct Load {
     /// than inventing a geometric proxy. Empty loads the mesh alone.
     pub labels: String,
     /// Optional directory holding the rig that poses this subject:
-    /// `weights.npy` (per-vertex, per-bone, `<f4`) and `rig.txt` (the bone
-    /// order, pivots and long axes).
+    /// `weights.npy` (`NumPy` 1.0, `<f4`, C-order, shaped exactly
+    /// `(mesh vertices, descriptor bones)`) and `rig.txt` (the bone order,
+    /// pivots and long axes).
     ///
     /// Weights are per vertex of one sculpt and carry no identity of their
     /// own, so a rig whose vertex count disagrees with the mesh is refused
