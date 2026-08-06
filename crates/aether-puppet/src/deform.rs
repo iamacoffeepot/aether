@@ -672,6 +672,24 @@ impl Skin {
         (joints, shares)
     }
 
+    /// One vertex's authored weights in bone-table order, padded to the
+    /// whole table the pose uniform carries.
+    ///
+    /// The sparse vertex-stage binding above deliberately reorders and
+    /// quantises the live shares. Silhouette classification cannot use that
+    /// spelling: a last-bit normal change can move a zero crossing to the
+    /// other side of an edge. The resident compute input therefore keeps
+    /// the same dense, bone-order floats [`Self::at_vertex`] reads on the
+    /// CPU, including sub-threshold values that the pose loop itself decides
+    /// whether to skip.
+    pub(super) fn dense_weights(&self, vertex: usize) -> [f32; BONE_LIMIT] {
+        let mut dense = [0.0; BONE_LIMIT];
+        let row = &self.weights[vertex * self.bones()..(vertex + 1) * self.bones()];
+        dense[..row.len()].copy_from_slice(row);
+
+        dense
+    }
+
     fn pivot(&self, name: &str) -> Vec3 {
         self.descriptor
             .bones

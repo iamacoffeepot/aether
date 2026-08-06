@@ -76,6 +76,7 @@ pub mod deform;
 pub mod easel;
 pub mod extract;
 pub mod feature;
+mod gpu_silhouette;
 pub mod idle;
 mod kinds;
 pub mod labels;
@@ -84,6 +85,8 @@ pub mod mesh;
 mod npy;
 pub mod plant;
 pub mod ribbon;
+#[allow(dead_code, reason = "the CPU half is the committed byte-and-order oracle for the live GPU consumer")]
+mod silhouette;
 pub mod strokes;
 pub mod style;
 pub mod turntable;
@@ -160,6 +163,19 @@ pub struct DumpPlanes {
     namespace: String,
     /// Directory prefix the four plane files are written under.
     prefix: String,
+}
+
+/// Diagnostic selector for the resident GPU silhouette candidate.
+///
+/// The default (`enabled: false`) is the current CPU silhouette. The
+/// exceptional overlay draws only curves that touched a non-manifold
+/// junction, in a high-contrast inspection colour; it is evidence, not a
+/// shipping style.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "aether.puppet.gpu_silhouette_mode")]
+pub struct GpuSilhouetteMode {
+    pub enabled: bool,
+    pub exceptional_overlay: bool,
 }
 
 pub struct Puppet {
@@ -243,6 +259,9 @@ pub struct Puppet {
     /// The ink layer over it (ADR-0172): the visibility field and the
     /// stroke program, re-solved whenever the eye moves.
     strokes: strokes::Strokes,
+    /// The instrument-only resident silhouette candidate. The CPU path
+    /// remains the default and oracle until its captures are approved.
+    gpu_silhouette: gpu_silhouette::GpuSilhouette,
     /// Which layer each in-flight reply belongs to. The easel and the
     /// ink both register programs and create textures and geometry, and
     /// the replies carry no sender — so the answer is position: the
@@ -311,6 +330,7 @@ impl Rig {
 #[derive(Clone, Copy)]
 enum Awaiting {
     Easel,
+    GpuSilhouette,
     Strokes,
 }
 
@@ -460,9 +480,18 @@ impl Puppet {
         self.volatile = face
             .into_iter()
             .chain(extract::suggestive(surface, subject, self.labels.as_ref(), frame.eye, &self.settings))
-            .chain(extract::silhouettes(surface, frame.eye))
+            .chain(
+                (!self.gpu_silhouette.selected())
+                    .then(|| extract::silhouettes(surface, frame.eye))
+                    .into_iter()
+                    .flatten(),
+            )
             .collect();
         self.drawn_from = Some(frame);
+
+        if self.gpu_silhouette.selected() {
+            self.gpu_silhouette.solve(view_proj, frame.eye, &self.bones);
+        }
 
         // A pose no longer costs the drawing its residency. Every surface
         // curve is packed against the anchorage it was extracted at and
@@ -527,6 +556,7 @@ impl WasmActor for Puppet {
             settings: extract::Settings::default(),
             easel: easel::Easel::default(),
             strokes: strokes::Strokes::default(),
+            gpu_silhouette: gpu_silhouette::GpuSilhouette::default(),
             awaiting: Awaiting3::default(),
             // Facing her, slightly above, far enough back that her whole
             // height fits the frame at this field of view.
@@ -571,6 +601,7 @@ impl WasmActor for Puppet {
             let aspect = size.width as f32 / size.height as f32;
             self.easel.resized(size.width, size.height);
             self.strokes.resized(size.width, size.height);
+            self.gpu_silhouette.resized(size.width, size.height);
             if self.aspect != aspect {
                 self.aspect = aspect;
                 self.drawn_from = None;
@@ -760,6 +791,11 @@ impl WasmActor for Puppet {
         self.drawn_from = None;
         self.easel.subject_changed();
         self.strokes.subject_changed(subject, self.skin.as_ref());
+        if self.gpu_silhouette.selected()
+            && let Err(error) = self.gpu_silhouette.subject_changed(subject, self.skin.as_ref())
+        {
+            tracing::warn!(target: "aether_puppet", error = %error, "GPU silhouette candidate refused this subject");
+        }
         tracing::info!(
             target: "aether_puppet",
             faces = subject.faces.len(),
@@ -783,6 +819,23 @@ impl WasmActor for Puppet {
     #[handler::single]
     fn on_pose(&mut self, _ctx: &mut WasmCtx<'_>, pose: Pose) {
         self.pose = pose;
+    }
+
+    /// Switch between the shipping CPU oracle and the instrument-only GPU
+    /// candidate. Selection invalidates the view solve so the two paths can
+    /// never share geometry from different frames.
+    #[handler::single]
+    fn on_gpu_silhouette_mode(&mut self, _ctx: &mut WasmCtx<'_>, mode: GpuSilhouetteMode) {
+        let mounting = mode.enabled && !self.gpu_silhouette.selected();
+        if self.gpu_silhouette.select(mode.enabled, mode.exceptional_overlay) {
+            self.drawn_from = None;
+        }
+        if mounting
+            && let Some(subject) = self.subject.as_ref()
+            && let Err(error) = self.gpu_silhouette.subject_changed(subject, self.skin.as_ref())
+        {
+            tracing::warn!(target: "aether_puppet", error = %error, "GPU silhouette candidate refused this subject");
+        }
     }
 
     /// Choose a named face while preserving the direction she is looking.
@@ -897,6 +950,7 @@ impl WasmActor for Puppet {
     /// One frame: publish the camera, add the view-dependent lines to the
     /// cached ones, split them against the surface, and emit ribbons over
     /// the easel's sheet.
+    #[allow(clippy::too_many_lines, reason = "one ordered render mailbox transaction across the three layers")]
     #[handler::single]
     fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _stage: Render) {
         let render = ctx.actor::<RenderCapability>();
@@ -1006,6 +1060,36 @@ impl WasmActor for Puppet {
             render.send(&dispatch);
         }
 
+        // The candidate owns a separate transparent sheet and is mounted
+        // only by its diagnostic selector. Its resident compute/draw graph
+        // follows the ordinary ink so the CPU face and suggestive curves
+        // keep their established order, with the replacement silhouette
+        // composited last.
+        for destroy in self.gpu_silhouette.take_program_destroys() {
+            render.send(&destroy);
+        }
+        for register in self.gpu_silhouette.take_registers() {
+            self.awaiting.registers.push_back(Awaiting::GpuSilhouette);
+            render.send(&register);
+        }
+        for destroy in self.gpu_silhouette.take_destroys() {
+            render.send(&destroy);
+        }
+        for create in self.gpu_silhouette.take_creates() {
+            self.awaiting.textures.push_back(Awaiting::GpuSilhouette);
+            render.send(&create);
+        }
+        for create in self.gpu_silhouette.take_geometry_creates() {
+            self.awaiting.geometries.push_back(Awaiting::GpuSilhouette);
+            render.send(&create);
+        }
+        for update in self.gpu_silhouette.take_geometry_updates() {
+            render.send(&update);
+        }
+        for dispatch in self.gpu_silhouette.take_dispatches() {
+            render.send(&dispatch);
+        }
+
         // The easel's, in the same dependency order: the programs a
         // re-laid graph has finished with, the program registers (both at
         // the first develop, the wash's again after a re-lay), the
@@ -1039,16 +1123,18 @@ impl WasmActor for Puppet {
             render.send(&dispatch);
         }
 
-        // The two billboards, sheet first. The material pass writes no
-        // depth, so they compose in send order — which is what places the
-        // ink in front of the paint, rather than anything about the order
-        // their programs were dispatched in above.
+        // The ordinary two billboards, sheet first, then the opt-in GPU
+        // silhouette candidate. The material pass writes no depth, so they
+        // compose in send order.
         let subject_radius = (subject.max - subject.min).length() * 0.5;
         if let Some(sheet) = self.easel.draw(&view, subject_radius) {
             render.send(&sheet);
         }
         if let Some(ink) = self.strokes.draw(&view, subject_radius) {
             render.send(&ink);
+        }
+        if let Some(silhouette) = self.gpu_silhouette.draw(&view, subject_radius) {
+            render.send(&silhouette);
         }
     }
 
@@ -1067,6 +1153,7 @@ impl WasmActor for Puppet {
         };
         match self.awaiting.registers.pop_front() {
             Some(Awaiting::Easel) => self.easel.registered(result),
+            Some(Awaiting::GpuSilhouette) => self.gpu_silhouette.registered(result),
             Some(Awaiting::Strokes) => self.strokes.registered(result),
             None => {}
         }
@@ -1086,6 +1173,7 @@ impl WasmActor for Puppet {
         };
         match self.awaiting.textures.pop_front() {
             Some(Awaiting::Easel) => self.easel.created(result),
+            Some(Awaiting::GpuSilhouette) => self.gpu_silhouette.created(result),
             Some(Awaiting::Strokes) => self.strokes.created(result),
             None => {}
         }
@@ -1106,6 +1194,7 @@ impl WasmActor for Puppet {
         };
         match self.awaiting.geometries.pop_front() {
             Some(Awaiting::Easel) => self.easel.geometry_created(result),
+            Some(Awaiting::GpuSilhouette) => self.gpu_silhouette.geometry_created(result),
             Some(Awaiting::Strokes) => self.strokes.geometry_created(result),
             None => {}
         }
