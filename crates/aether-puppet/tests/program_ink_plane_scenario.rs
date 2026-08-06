@@ -40,9 +40,9 @@ use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter,
 use aether_harness_substrate_capture::visual::decode_png;
 use aether_kinds::QuadSpace;
 use aether_math::{Mat4, Rgb, Rgba, Vec3};
-use aether_puppet::deform;
 use aether_puppet::easel::program::{self, stroke};
 use aether_puppet::easel::regions;
+use aether_puppet::{deform, ribbon};
 use aether_render::QuadBlend;
 use aether_render::{
     CreateTexture, CreateTextureResult, DrawTexturedQuads, DrawTriangle, InputSlot, OutputSlot, PassStage,
@@ -149,6 +149,25 @@ fn fs_probe(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 }
 ";
 
+/// Test-only observation of the production WGSL `rail` solve. With the
+/// fixture's eye five units from the origin and `shape.x` at one fifth,
+/// the offset length is exactly the selected depth weight. Halving it
+/// keeps both ends representable in an `Rgba8` target.
+const DEPTH_PROBE_WGSL: &str = r"
+@fragment
+fn fs_depth_probe(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let reference = select(0.01, 100.0, position.x >= 1.0);
+    let solved = rail(
+        vec3<f32>(0.0, 0.0, 0.0),
+        vec3<f32>(1.0, 0.0, 0.0),
+        vec2<f32>(0.2, 0.0),
+        reference,
+    );
+
+    return vec4<f32>(length(solved.offset) * 0.5, 0.0, 0.0, 1.0);
+}
+";
+
 /// Binding indices this scenario declares: the staged raster, then the
 /// readable output whose texture states the reference extent.
 const RASTER: u32 = 0;
@@ -182,6 +201,27 @@ fn probed_program() -> ProgramRegister {
             off("fs_ink_plane", InputSlot::Binding { index: RASTER }, OutputSlot::Transient { index: 0 }),
             off("fs_probe", InputSlot::Transient { index: 0 }, OutputSlot::Binding { index: OUTPUT }),
         ],
+    }
+}
+
+/// The shipped stroke module with only a test entry point added: no
+/// substitute clamp or rail arithmetic enters the GPU side of the test.
+fn depth_probe_program() -> ProgramRegister {
+    ProgramRegister {
+        wgsl: format!("{}\n{}\n{DEPTH_PROBE_WGSL}", stroke::STROKE_WGSL, program::SKIN_WGSL),
+        bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
+        transients: Vec::new(),
+        geometries: Vec::new(),
+        depth_transients: Vec::new(),
+        passes: vec![ProgramPass {
+            stage: PassStage::Fragment,
+            entry_point: "fs_depth_probe".to_owned(),
+            inputs: Vec::new(),
+            output: OutputSlot::Binding { index: 0 },
+            uniform_offset: 0,
+            uniform_length: stroke::StrokeUniforms::BYTES,
+            repeat: None,
+        }],
     }
 }
 
@@ -273,6 +313,73 @@ fn develop(harness: &mut SubstrateHarness, raster: &[f32]) -> Vec<f32> {
     plane
 }
 
+/// The two clamped weights the production WGSL solves, decoded back to
+/// linear after the writable-target and capture round trips.
+fn depth_weights(harness: &mut SubstrateHarness) -> [f32; 2] {
+    let output = create_texture(
+        harness,
+        "create_depth_output",
+        &CreateTexture {
+            width: 2,
+            height: 1,
+            format: TextureFormat::Rgba8,
+            sampling: TextureSampling::Nearest,
+            usage: TextureUsage::Writable,
+            pixels: Vec::new(),
+        },
+    );
+    let program_id = match harness
+        .execute(vec![(
+            "register_depth_probe",
+            HarnessOp::send_and_await_reply("aether.render", &depth_probe_program()),
+        )])
+        .expect("register depth probe sequence")
+        .reply::<ProgramRegisterResult>("register_depth_probe")
+        .expect("decode depth probe ProgramRegisterResult")
+    {
+        ProgramRegisterResult::Ok { program_id } => program_id,
+        ProgramRegisterResult::Err { reason } => panic!("register depth probe failed: {reason}"),
+    };
+    let eye = Vec3::new(0.0, 0.0, 5.0);
+    let uniforms =
+        stroke::StrokeUniforms { view_proj: camera(), eye, bias: 0.0, field: (1, 1), bones: deform::bone_uniform(&[]) }
+            .encode();
+    let dispatch = ProgramDispatch { program_id, bindings: vec![output], geometries: Vec::new(), uniforms };
+    let overlay = DrawTexturedQuads {
+        texture_id: output,
+        blend: QuadBlend::Straight,
+        space: QuadSpace::Screen,
+        clip: None,
+        quads: vec![TexturedQuad {
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 1.0,
+            u0: 0.0,
+            v0: 0.0,
+            u1: 1.0,
+            v1: 1.0,
+            tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
+        }],
+    };
+    let pre = vec![envelope("aether.render", &dispatch), envelope("aether.render", &overlay)];
+    let captured =
+        harness.execute(vec![("snap_depth", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture depth probe");
+    let image = decode_png(captured.captured("snap_depth").expect("depth probe ran")).expect("decode depth probe png");
+
+    [0, 1].map(|x| srgb_byte_to_linear(rgba_at(&image, x, 0)[0]) / 0.5)
+}
+
+/// Invert the offscreen target's sRGB transfer, byte to linear.
+fn srgb_byte_to_linear(byte: u8) -> f32 {
+    let encoded = f32::from(byte) / 255.0;
+    if encoded <= 0.04045 {
+        encoded / 12.92
+    } else {
+        ((encoded + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 /// A plane rendered as text, so a failure shows the shape of the
 /// disagreement rather than one coordinate.
 fn sketch(plane: &[f32]) -> String {
@@ -353,4 +460,32 @@ fn a_stroke_thinner_than_a_plane_texel_reduces_to_a_continuous_line() {
         sketch(&developed),
     );
     assert!(last - first > 20, "test setup: the sliver should span a useful run, spanned {}", last - first);
+}
+
+#[test]
+fn the_depth_clamp_saturates_like_the_rust_rail_on_both_sides() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let eye = Vec3::new(0.0, 0.0, 5.0);
+    let anchor = ribbon::Anchor { pos: Vec3::ZERO, along: Vec3::new(1.0, 0.0, 0.0), half: 0.2, drift: 0.0 };
+    let references = [0.01, 100.0];
+    let expected = references.map(|reference| ribbon::rail(&anchor, reference, eye).1.length());
+
+    // Prove the fixture reaches the saturated branches rather than
+    // merely comparing two points inside the clamp.
+    let raw = references.map(|reference| reference / eye.length());
+    assert!(expected[0] > raw[0], "test setup: the near-side ratio did not reach the floor");
+    assert!(expected[1] < raw[1], "test setup: the far-side ratio did not reach the ceiling");
+
+    let got = depth_weights(&mut harness());
+    // One half-step from the Rgba8 write and one sRGB byte round trip,
+    // doubled because the probe encoded each weight at half scale.
+    let tolerance = 2.0 / 255.0 / 0.5;
+    for (side, (got, expected)) in ["floor", "ceiling"].into_iter().zip(got.into_iter().zip(expected)) {
+        assert!(
+            (got - expected).abs() <= tolerance,
+            "the shipped WGSL {side} disagrees with ribbon::rail: got {got}, expected {expected}, tolerance {tolerance}",
+        );
+    }
 }
