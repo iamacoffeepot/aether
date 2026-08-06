@@ -135,6 +135,12 @@ const ORBIT_DEGREES_PER_PIXEL: f32 = 0.25;
 /// Fraction of the current distance one wheel notch covers.
 const DOLLY_PER_NOTCH: f32 = 0.08;
 
+/// Interactive dolly bounds. The far bound also sizes the sight field's
+/// reach scan: its point window must still cover the angular pressure ramp
+/// when the subject is smallest on screen.
+const MIN_DOLLY_DISTANCE: f32 = 0.6;
+const MAX_DOLLY_DISTANCE: f32 = 40.0;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.puppet.load_context")]
 struct LoadContext {
@@ -603,7 +609,8 @@ impl WasmActor for Puppet {
     /// the same close up as far out.
     #[handler::single]
     fn on_mouse_wheel(&mut self, _ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
-        self.look.distance = (self.look.distance * (1.0 - wheel.delta_y * DOLLY_PER_NOTCH)).clamp(0.6, 40.0);
+        self.look.distance = (self.look.distance * (1.0 - wheel.delta_y * DOLLY_PER_NOTCH))
+            .clamp(MIN_DOLLY_DISTANCE, MAX_DOLLY_DISTANCE);
     }
 
     /// Point her at a subject. Asynchronous — the reply target is carried
