@@ -45,8 +45,8 @@ use aether_math::{Rgba, Vec2};
 use aether_puppet::easel::image;
 use aether_puppet::easel::palette::{self, Coat};
 use aether_puppet::easel::program::sheet::{
-    CoatParams, LostEdgeParams, SHEET_PARAMS_BYTES, SHEET_WGSL, care_mix_pass, coat_absorb_pass, light_prime_pass,
-    lost_edge_pass, paper_composite_pass, plane_slot, sheet_slot,
+    CoatParams, LostEdgeParams, SHEET_PARAMS_BYTES, SHEET_WGSL, care_mix_pass, coat_absorb_pass,
+    first_coat_absorb_pass, lost_edge_pass, paper_composite_pass, plane_slot, sheet_slot,
 };
 use aether_render::QuadBlend;
 use aether_render::{
@@ -392,7 +392,7 @@ fn lost_edge_gives_way_where_the_cpu_does() {
     assert_rect_parity(&img, 4, 44, side as u32, 4, "lost edge");
 }
 
-/// The palette composite (`fs_light_prime` / `fs_coat_absorb` /
+/// The palette composite (`fs_first_coat_absorb` / `fs_coat_absorb` /
 /// `fs_paper_composite` against [`palette::composite`] itself — the
 /// real function is the oracle): three coats with distinct pigments and
 /// caps over a non-unit paper shade, two densities deliberately
@@ -458,27 +458,21 @@ fn palette_composite_matches_the_cpu_sheet() {
             geometries: Vec::new(),
             depth_transients: Vec::new(),
             passes: vec![
-                light_prime_pass(OutputSlot::Transient { index: 0 }),
+                first_coat_absorb_pass(InputSlot::Binding { index: 0 }, OutputSlot::Transient { index: 0 }, 0),
                 coat_absorb_pass(
                     InputSlot::PassOutput { pass: 0 },
-                    InputSlot::Binding { index: 0 },
-                    OutputSlot::Transient { index: 1 },
-                    0,
-                ),
-                coat_absorb_pass(
-                    InputSlot::PassOutput { pass: 1 },
                     InputSlot::Binding { index: 1 },
-                    OutputSlot::Transient { index: 0 },
+                    OutputSlot::Transient { index: 1 },
                     SHEET_PARAMS_BYTES,
                 ),
                 coat_absorb_pass(
-                    InputSlot::PassOutput { pass: 2 },
+                    InputSlot::PassOutput { pass: 1 },
                     InputSlot::Binding { index: 2 },
-                    OutputSlot::Transient { index: 1 },
+                    OutputSlot::Transient { index: 0 },
                     2 * SHEET_PARAMS_BYTES,
                 ),
                 paper_composite_pass(
-                    InputSlot::PassOutput { pass: 3 },
+                    InputSlot::PassOutput { pass: 2 },
                     InputSlot::Binding { index: 3 },
                     OutputSlot::Binding { index: 4 },
                 ),

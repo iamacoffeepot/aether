@@ -45,6 +45,17 @@ fn load_reflected(plane: texture_2d<f32>, at: vec2<i32>) -> f32 {
     return textureLoad(plane, clamp(over, zero, extent - vec2<i32>(1, 1)), 0).r;
 }
 
+// The same mirrored read over the first two channels of a paired soft
+// plane. Each lane is one scalar plane carried through identical blur
+// arithmetic; the other two channels are padding only.
+fn load_reflected_pair(plane: texture_2d<f32>, at: vec2<i32>) -> vec2<f32> {
+    let extent = vec2<i32>(textureDimensions(plane));
+    let zero = vec2<i32>(0, 0);
+    let under = select(at, -vec2<i32>(1, 1) - at, at < zero);
+    let over = select(under, 2 * extent - vec2<i32>(1, 1) - under, under >= extent);
+    return textureLoad(plane, clamp(over, zero, extent - vec2<i32>(1, 1)), 0).rg;
+}
+
 // The CPU `sample_bilinear` corner read: everything off the plane is zero.
 fn load_or_zero(plane: texture_2d<f32>, at: vec2<i32>) -> f32 {
     let extent = vec2<i32>(textureDimensions(plane));
@@ -119,6 +130,61 @@ fn fs_box_blur(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32>
     return plane_out(sum / (2.0 * half_width));
 }
 
+@group(1) @binding(2) var box_blur_source_b: texture_2d<f32>;
+
+// The first sweep of a paired chain. The two scalar sources have the
+// same extent and kernel, so one fragment carries their independent
+// answers in R and G without changing either lane's arithmetic.
+@fragment
+fn fs_box_blur_pair(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let at = vec2<i32>(position.xy);
+    let axis = vec2<i32>(box_blur.axis_x, box_blur.axis_y);
+    let half_width = box_blur.half_width_texels;
+    let reach = i32(ceil(half_width - 0.5));
+    let straddle = half_width - f32(reach) + 0.5;
+
+    var sum = vec2<f32>(0.0, 0.0);
+    for (var tap = 1 - reach; tap < reach; tap++) {
+        let sample_at = at + axis * tap;
+        sum += vec2<f32>(load_reflected(box_blur_source, sample_at), load_reflected(box_blur_source_b, sample_at));
+    }
+    if reach == 0 {
+        sum = vec2<f32>(load_reflected(box_blur_source, at), load_reflected(box_blur_source_b, at));
+    } else {
+        let near = at - axis * reach;
+        let far = at + axis * reach;
+        sum += straddle
+            * vec2<f32>(
+                load_reflected(box_blur_source, near) + load_reflected(box_blur_source, far),
+                load_reflected(box_blur_source_b, near) + load_reflected(box_blur_source_b, far),
+            );
+    }
+    return vec4<f32>(sum / (2.0 * half_width), 0.0, 1.0);
+}
+
+// Every later sweep reads the paired plane written by the first.
+@fragment
+fn fs_box_blur_paired(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let at = vec2<i32>(position.xy);
+    let axis = vec2<i32>(box_blur.axis_x, box_blur.axis_y);
+    let half_width = box_blur.half_width_texels;
+    let reach = i32(ceil(half_width - 0.5));
+    let straddle = half_width - f32(reach) + 0.5;
+
+    var sum = vec2<f32>(0.0, 0.0);
+    for (var tap = 1 - reach; tap < reach; tap++) {
+        sum += load_reflected_pair(box_blur_source, at + axis * tap);
+    }
+    if reach == 0 {
+        sum = load_reflected_pair(box_blur_source, at);
+    } else {
+        sum += straddle
+            * (load_reflected_pair(box_blur_source, at - axis * reach)
+                + load_reflected_pair(box_blur_source, at + axis * reach));
+    }
+    return vec4<f32>(sum / (2.0 * half_width), 0.0, 1.0);
+}
+
 // The whole chain's softening as one kernel (iamacoffeepot/aether#4441).
 // Convolution is associative, so the three box sweeps one axis carries are
 // a single piecewise-quadratic kernel, and the axes commute — six sweeps
@@ -176,6 +242,13 @@ fn sample_reflected(at: vec2<f32>, extent: vec2<f32>) -> f32 {
     return textureSampleLevel(fused_blur_source, fused_blur_sampler, (folded + 0.5) / extent, 0.0).r;
 }
 
+fn sample_reflected_pair(at: vec2<f32>, extent: vec2<f32>) -> vec2<f32> {
+    let under = select(at, -1.0 - at, at < vec2<f32>(-0.5, -0.5));
+    let folded = select(under, 2.0 * extent - 1.0 - under, under > extent - vec2<f32>(0.5, 0.5));
+
+    return textureSampleLevel(fused_blur_source, fused_blur_sampler, (folded + 0.5) / extent, 0.0).rg;
+}
+
 fn fused_sweep(at: vec2<f32>, axis: vec2<f32>) -> vec4<f32> {
     let extent = vec2<f32>(textureDimensions(fused_blur_source));
 
@@ -197,6 +270,60 @@ fn fs_fused_blur_x(@builtin(position) position: vec4<f32>) -> @location(0) vec4<
 @fragment
 fn fs_fused_blur_y(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     return fused_sweep(position.xy - 0.5, vec2<f32>(0.0, 1.0));
+}
+
+@group(1) @binding(2) var fused_blur_source_b: texture_2d<f32>;
+@group(1) @binding(3) var fused_blur_sampler_b: sampler;
+
+fn sample_reflected_split(at: vec2<f32>, extent: vec2<f32>) -> vec2<f32> {
+    let under = select(at, -1.0 - at, at < vec2<f32>(-0.5, -0.5));
+    let folded = select(under, 2.0 * extent - 1.0 - under, under > extent - vec2<f32>(0.5, 0.5));
+    let uv = (folded + 0.5) / extent;
+
+    return vec2<f32>(
+        textureSampleLevel(fused_blur_source, fused_blur_sampler, uv, 0.0).r,
+        textureSampleLevel(fused_blur_source_b, fused_blur_sampler_b, uv, 0.0).r,
+    );
+}
+
+fn fused_split_sweep(at: vec2<f32>, axis: vec2<f32>) -> vec4<f32> {
+    let extent = vec2<f32>(textureDimensions(fused_blur_source));
+    var sum = fused_blur.centre * sample_reflected_split(at, extent);
+    for (var read = 0; read < fused_blur.reads; read++) {
+        let packed = fused_blur.reads_at[read / 2];
+        let tap = select(packed.xy, packed.zw, (read & 1) == 1);
+        let reach = axis * tap.x;
+        sum += tap.y
+            * (sample_reflected_split(at - reach, extent) + sample_reflected_split(at + reach, extent));
+    }
+    return vec4<f32>(sum, 0.0, 1.0);
+}
+
+fn fused_paired_sweep(at: vec2<f32>, axis: vec2<f32>) -> vec4<f32> {
+    let extent = vec2<f32>(textureDimensions(fused_blur_source));
+    var sum = fused_blur.centre * sample_reflected_pair(at, extent);
+    for (var read = 0; read < fused_blur.reads; read++) {
+        let packed = fused_blur.reads_at[read / 2];
+        let tap = select(packed.xy, packed.zw, (read & 1) == 1);
+        let reach = axis * tap.x;
+        sum += tap.y * (sample_reflected_pair(at - reach, extent) + sample_reflected_pair(at + reach, extent));
+    }
+    return vec4<f32>(sum, 0.0, 1.0);
+}
+
+@fragment
+fn fs_fused_blur_pair_x(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return fused_split_sweep(position.xy - 0.5, vec2<f32>(1.0, 0.0));
+}
+
+@fragment
+fn fs_fused_blur_paired_x(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return fused_paired_sweep(position.xy - 0.5, vec2<f32>(1.0, 0.0));
+}
+
+@fragment
+fn fs_fused_blur_paired_y(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return fused_paired_sweep(position.xy - 0.5, vec2<f32>(0.0, 1.0));
 }
 
 @group(1) @binding(0) var soft_carry_source: texture_2d<f32>;
@@ -244,6 +371,22 @@ fn fs_box_downsample(@builtin(position) position: vec4<f32>) -> @location(0) vec
     return plane_out(sum / f32(box_scale.divisor * box_scale.divisor));
 }
 
+@group(1) @binding(2) var box_scale_source_b: texture_2d<f32>;
+
+@fragment
+fn fs_box_downsample_pair(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let base = vec2<i32>(position.xy) * box_scale.divisor;
+
+    var sum = vec2<f32>(0.0, 0.0);
+    for (var down = 0; down < box_scale.divisor; down++) {
+        for (var across = 0; across < box_scale.divisor; across++) {
+            let at = base + vec2<i32>(across, down);
+            sum += vec2<f32>(load_reflected(box_scale_source, at), load_reflected(box_scale_source_b, at));
+        }
+    }
+    return vec4<f32>(sum / f32(box_scale.divisor * box_scale.divisor), 0.0, 1.0);
+}
+
 @fragment
 fn fs_box_upsample(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     // Texel centres, not corners: the reduced texel covering full-extent
@@ -267,6 +410,28 @@ fn fs_box_upsample(@builtin(position) position: vec4<f32>) -> @location(0) vec4<
         fraction.x,
     );
     return plane_out(mix(upper, lower, fraction.y));
+}
+
+@fragment
+fn fs_box_upsample_paired(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let at = vec2<f32>(vec2<i32>(position.xy));
+    let source = (at + vec2<f32>(0.5, 0.5)) / f32(box_scale.divisor) - vec2<f32>(0.5, 0.5);
+
+    let corner = floor(source);
+    let fraction = source - corner;
+    let x0 = i32(corner.x);
+    let y0 = i32(corner.y);
+    let upper = mix(
+        load_reflected_pair(box_scale_source, vec2<i32>(x0, y0)),
+        load_reflected_pair(box_scale_source, vec2<i32>(x0 + 1, y0)),
+        fraction.x,
+    );
+    let lower = mix(
+        load_reflected_pair(box_scale_source, vec2<i32>(x0, y0 + 1)),
+        load_reflected_pair(box_scale_source, vec2<i32>(x0 + 1, y0 + 1)),
+        fraction.x,
+    );
+    return vec4<f32>(mix(upper, lower, fraction.y), 0.0, 1.0);
 }
 
 // field.rs `shrink`: resample the region smaller about the wash's centroid

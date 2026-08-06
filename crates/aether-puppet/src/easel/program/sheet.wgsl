@@ -95,14 +95,6 @@ fn fs_lost_edge(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32
     return vec4<f32>(hard * (1.0 - lostness) + stain * LOST_STAIN * lostness, 0.0, 0.0, 1.0);
 }
 
-// The unpainted sheet (palette.rs composite's starting light): full
-// transmission into the light accumulator — the empty product the
-// absorption passes multiply down, coat by coat.
-@fragment
-fn fs_light_prime() -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 1.0, 1.0, 1.0);
-}
-
 // One coat's absorption (palette.rs composite's per-coat step): a = the
 // light accumulated so far, b = the coat's density plane. The deposit
 // is capped before the pigment power — the sheet holds only so much —
@@ -120,6 +112,22 @@ fn fs_coat_absorb(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f
         deposit > MINIMUM_DEPOSIT,
     );
     return vec4<f32>(light * absorbed, 1.0);
+}
+
+// The first coat against unpainted paper: a = the coat's density plane.
+// Full transmission is the multiplicative identity, so this is exactly
+// `fs_light_prime` followed by `fs_coat_absorb` without materializing the
+// neutral accumulator in its own pass.
+@fragment
+fn fs_first_coat_absorb(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let at = vec2<i32>(position.xy);
+    let deposit = min(textureLoad(plane_a, at, 0).r, sheet_params.cap);
+    let absorbed = select(
+        vec3<f32>(1.0, 1.0, 1.0),
+        pow(sheet_params.transmission.rgb, vec3<f32>(deposit, deposit, deposit)),
+        deposit > MINIMUM_DEPOSIT,
+    );
+    return vec4<f32>(absorbed, 1.0);
 }
 
 // The resolve against paper white (palette.rs composite's final loop):

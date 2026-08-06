@@ -109,6 +109,7 @@ pub(super) fn wgpu_texture_format(format: TextureFormat) -> wgpu::TextureFormat 
         TextureFormat::R8 => wgpu::TextureFormat::R8Unorm,
         TextureFormat::R32Float => wgpu::TextureFormat::R32Float,
         TextureFormat::R16Float => wgpu::TextureFormat::R16Float,
+        TextureFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
     }
 }
 
@@ -314,9 +315,29 @@ mod tests {
         assert_eq!(expected_pixel_bytes(2, 3, TextureFormat::Rgba8), Some(24));
         assert_eq!(expected_pixel_bytes(2, 3, TextureFormat::R8), Some(6));
         assert_eq!(expected_pixel_bytes(2, 3, TextureFormat::R32Float), Some(24));
+        assert_eq!(expected_pixel_bytes(2, 3, TextureFormat::R16Float), Some(12));
+        assert_eq!(expected_pixel_bytes(2, 3, TextureFormat::Rgba16Float), Some(48));
         assert_eq!(expected_pixel_bytes(0, 4, TextureFormat::Rgba8), None);
         assert_eq!(expected_pixel_bytes(4, 0, TextureFormat::R8), None);
         assert_eq!(expected_pixel_bytes(u32::MAX, u32::MAX, TextureFormat::Rgba8), None);
+    }
+
+    #[test]
+    fn rgba16float_maps_to_a_filterable_eight_byte_texture() {
+        assert_eq!(wgpu_texture_format(TextureFormat::Rgba16Float), wgpu::TextureFormat::Rgba16Float);
+        assert_eq!(TextureFormat::Rgba16Float.bytes_per_pixel(), 8);
+        assert!(TextureFormat::Rgba16Float.filterable());
+
+        let mut registry = TextureRegistry::new();
+        let created = registry.create(CreateTexture {
+            width: 2,
+            height: 1,
+            format: TextureFormat::Rgba16Float,
+            sampling: TextureSampling::Linear,
+            usage: TextureUsage::Sampled,
+            pixels: vec![0u8; 16],
+        });
+        assert!(matches!(created, CreateTextureResult::Ok { .. }), "linear-sampled Rgba16Float must be accepted");
     }
 
     /// `apply_subrect` writes an in-bounds rect into the staged pixels

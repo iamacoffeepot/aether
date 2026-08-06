@@ -75,8 +75,8 @@ use crate::easel::survey;
 use crate::labels::{HAIR, SKIN};
 
 use super::sheet::{
-    CoatParams, LostEdgeParams, SHEET_PARAMS_BYTES, care_mix_pass, coat_absorb_pass, light_prime_pass, lost_edge_pass,
-    paper_composite_pass, sheet_slot,
+    CoatParams, LostEdgeParams, SHEET_PARAMS_BYTES, care_mix_pass, coat_absorb_pass, first_coat_absorb_pass,
+    lost_edge_pass, paper_composite_pass, sheet_slot,
 };
 use super::{care, face, flow, pigment, puddle};
 
@@ -405,9 +405,8 @@ struct PourPlan {
 /// pigment settle.
 struct ChainPlan {
     /// `None` for a wash that carries pigment uniformly (no value plane,
-    /// so no support blurs at all).
-    support_value_blur: Option<BlurPlan>,
-    support_reference_blur: Option<BlurPlan>,
+    /// so no paired value/reference support blur at all).
+    support_blur: Option<BlurPlan>,
     pours: Vec<PourPlan>,
     granulate: u32,
     /// `None` for a wash that never spatters.
@@ -440,8 +439,8 @@ struct AtmospherePlan {
 /// One material's slice of the program: every window its passes read, in
 /// the order [`program`] laid them.
 struct MaterialPlan {
-    /// `None` for a meta-material, whose mask arrives from the face
-    /// passes rather than from the class channel.
+    /// `None` for a meta-material or the skin, whose mask arrives from
+    /// the face passes rather than from another class-channel pass.
     mask: Option<u32>,
     shade: u32,
     tight: ChainPlan,
@@ -535,6 +534,12 @@ const fn soft_slot(extent: SlotExtent) -> SlotSpec {
     SlotSpec { format: puddle::SOFT_PLANE_FORMAT, extent }
 }
 
+/// Two independent soft quantities sharing one filterable target. R and
+/// G each carry the same `f16` value their former scalar planes did.
+const fn paired_soft_slot(extent: SlotExtent) -> SlotSpec {
+    SlotSpec { format: TextureFormat::Rgba16Float, extent }
+}
+
 /// The 32-bit data plane: what a binding staged from the CPU or written
 /// by another program stands at, and what the care flood's seeds need. A
 /// seed is a linear texel index, an integer past a million on this
@@ -574,6 +579,11 @@ impl Graph {
 
     fn plane(&mut self, extent: SlotExtent) -> u32 {
         self.transients.push(soft_slot(extent));
+        (self.transients.len() - 1) as u32
+    }
+
+    fn paired_plane(&mut self, extent: SlotExtent) -> u32 {
+        self.transients.push(paired_soft_slot(extent));
         (self.transients.len() - 1) as u32
     }
 
@@ -654,6 +664,42 @@ impl Graph {
         (transient(out), plan)
     }
 
+    /// Two same-radius scalar blur chains carried as independent R/G
+    /// lanes. Both sources are already graph-owned soft planes, so the
+    /// first sweep can read them directly before every later sweep reads
+    /// the paired target.
+    fn paired_blur(
+        &mut self,
+        sources: [InputSlot; 2],
+        radius_pixels: f32,
+        extent: SlotExtent,
+    ) -> (InputSlot, BlurPlan) {
+        let tuned = image::tuned(radius_pixels, self.extent_height(extent));
+        let divisor = puddle::blur_divisor(tuned);
+        let plan = BlurPlan {
+            window: self.window(puddle::BoxBlurUniforms::BYTES),
+            half_width_texels: puddle::box_half_width(tuned, divisor),
+            divisor,
+        };
+
+        let swept = compounded(extent, divisor);
+        let chain = puddle::BoxBlurChain {
+            scratch: self.paired_plane(swept),
+            carry: self.paired_plane(swept),
+            divisor,
+            half_width_texels: plan.half_width_texels,
+        };
+        let out = self.paired_plane(extent);
+        self.passes.extend(puddle::paired_box_blur_passes(
+            sources,
+            &chain,
+            OutputSlot::Transient { index: out },
+            plan.window,
+        ));
+
+        (transient(out), plan)
+    }
+
     fn glue(
         &mut self,
         entry_point: &str,
@@ -709,8 +755,9 @@ impl Graph {
     /// The face paint, laid as passes: the aperture fill and what the two
     /// halves of it become. Returns the iris coverage and the lid weight
     /// at the sheet's own pixels, and the finished cheek flush at the
-    /// body's.
-    fn face_chain(&mut self) -> (FacePlan, [InputSlot; 3]) {
+    /// body's. The skin mask is returned too: its material wash and the
+    /// blush gate need the same exact class selection.
+    fn face_chain(&mut self) -> (FacePlan, [InputSlot; 4]) {
         let clip_fill = self.plane(FINE);
         self.passes.push(face::aperture_pass(APERTURE_GEOMETRY, OutputSlot::Transient { index: clip_fill }));
         let (clip, clip_blur) = self.blur(transient(clip_fill), accent::CLIP_BLUR, FINE);
@@ -751,7 +798,7 @@ impl Graph {
 
         (
             FacePlan { fine_eyes, body_eyes, clip_blur, skin_mask, skin_blur, flush_blur },
-            [transient(iris), transient(weight), blush],
+            [transient(iris), transient(weight), blush, skin],
         )
     }
 
@@ -767,11 +814,8 @@ impl Graph {
     ) -> (InputSlot, ChainPlan) {
         let extent = grain.extent;
         let margin = params.water + field::SUPPORT_MARGIN;
-        let support = value.map(|plane| self.blur(plane, margin, extent));
-        let reference = value.map(|_| self.blur(mask, margin, extent));
-        let (support_value, support_value_blur) = support.map_or((mask, None), |(plane, plan)| (plane, Some(plan)));
-        let (support_reference, support_reference_blur) =
-            reference.map_or((mask, None), |(plane, plan)| (plane, Some(plan)));
+        let support = value.map(|plane| self.paired_blur([plane, mask], margin, extent));
+        let (support, support_blur) = support.map_or((mask, None), |(plane, plan)| (plane, Some(plan)));
 
         let mut density: Option<InputSlot> = None;
         let mut pours = Vec::with_capacity(params.pours.len());
@@ -834,8 +878,16 @@ impl Graph {
 
             let accumulate = self.window(AccumulateUniforms::BYTES);
             density = Some(self.glue(
-                "fs_pour_accumulate",
-                vec![density.unwrap_or(mask), alpha, rim_plane, support_value, support_reference],
+                if support_blur.is_some() {
+                    "fs_pour_accumulate_paired"
+                } else {
+                    "fs_pour_accumulate"
+                },
+                if support_blur.is_some() {
+                    vec![density.unwrap_or(mask), alpha, rim_plane, support]
+                } else {
+                    vec![density.unwrap_or(mask), alpha, rim_plane, mask, mask]
+                },
                 accumulate,
                 AccumulateUniforms::BYTES,
                 extent,
@@ -863,15 +915,18 @@ impl Graph {
             window
         });
 
-        (settled, ChainPlan { support_value_blur, support_reference_blur, pours, granulate, spatter })
+        (settled, ChainPlan { support_blur, pours, granulate, spatter })
     }
 
     /// One coat absorbed into the light accumulator; returns the next
     /// accumulator hop and the coat's window.
-    fn absorb(&mut self, light: InputSlot, density: InputSlot, extent: SlotExtent) -> (InputSlot, u32) {
+    fn absorb(&mut self, light: Option<InputSlot>, density: InputSlot, extent: SlotExtent) -> (InputSlot, u32) {
         let window = self.window(SHEET_PARAMS_BYTES);
         let out = self.light_hop(extent);
-        self.passes.push(coat_absorb_pass(light, density, OutputSlot::Transient { index: out }, window));
+        self.passes.push(light.map_or_else(
+            || first_coat_absorb_pass(density, OutputSlot::Transient { index: out }, window),
+            |light| coat_absorb_pass(light, density, OutputSlot::Transient { index: out }, window),
+        ));
         (transient(out), window)
     }
 
@@ -886,7 +941,7 @@ impl Graph {
         &mut self,
         material: &palette::Material,
         fields: &Fields,
-        light: &mut InputSlot,
+        light: &mut Option<InputSlot>,
         fine_coats: &mut Vec<(InputSlot, u32)>,
     ) -> MaterialPlan {
         let fine = material.class >= palette::META;
@@ -899,6 +954,8 @@ impl Graph {
 
         let (mask, mask_window) = if fine {
             (fields.iris, None)
+        } else if material.class == SKIN {
+            (fields.skin, None)
         } else {
             let window = self.window(MaskUniforms::BYTES);
             (self.glue("fs_mask", vec![binding(PACKED)], window, MaskUniforms::BYTES, extent), Some(window))
@@ -943,14 +1000,14 @@ impl Graph {
             window
         } else {
             let (absorbed, window) = self.absorb(*light, density, extent);
-            *light = absorbed;
+            *light = Some(absorbed);
             window
         };
 
         let glaze = (material.class == HAIR).then(|| {
             let (glaze_density, plan) = self.wash_chain(mask, None, &field::glaze_wash_params(), grain);
             let (absorbed, coat) = self.absorb(*light, glaze_density, extent);
-            *light = absorbed;
+            *light = Some(absorbed);
             (plan, coat)
         });
 
@@ -965,7 +1022,7 @@ impl Graph {
 
             let (stain, chain) = self.wash_chain(spill, None, &field::atmosphere_wash_params(), grain);
             let (absorbed, coat) = self.absorb(*light, stain, extent);
-            *light = absorbed;
+            *light = Some(absorbed);
             AtmospherePlan { figure: figure_window, halo_blur, standing_blur, spill: spill_window, chain, coat }
         });
 
@@ -975,12 +1032,13 @@ impl Graph {
 
 /// The fields laid before the material loop that every entry's chains
 /// read: how closely the hand is held, which way the drawing runs, and
-/// the two planes the chart contributes to the iris.
+/// the planes the chart contributes to the iris and skin.
 struct Fields {
     care: InputSlot,
     flow: [InputSlot; 3],
     iris: InputSlot,
     lid_weight: InputSlot,
+    skin: InputSlot,
 }
 
 /// Lay the whole develop as one register graph, for a canvas
@@ -1035,13 +1093,11 @@ pub fn program_at(canvas_height: usize, divisor: u32) -> WashProgram {
     ));
     let care = transient(care_out);
 
-    let (face_plan, [iris_mask, lid_weight, blush]) = graph.face_chain();
+    let (face_plan, [iris_mask, lid_weight, blush, skin]) = graph.face_chain();
 
-    let mut light = {
-        let out = graph.light_hop(body);
-        graph.passes.push(light_prime_pass(OutputSlot::Transient { index: out }));
-        transient(out)
-    };
+    // White is the multiplicative identity, so the first body coat writes
+    // its absorbed light directly instead of priming a separate target.
+    let mut light = None;
 
     // The one coat that develops at the sheet's own pixels, held back
     // until the accumulator has been lifted across the seam. Absorption
@@ -1050,7 +1106,7 @@ pub fn program_at(canvas_height: usize, divisor: u32) -> WashProgram {
     // the sequence in two.
     let mut fine_coats: Vec<(InputSlot, u32)> = Vec::new();
 
-    let fields = Fields { care, flow: [flow_x, flow_y, coherence], iris: iris_mask, lid_weight };
+    let fields = Fields { care, flow: [flow_x, flow_y, coherence], iris: iris_mask, lid_weight, skin };
     let materials = palette::MATERIALS
         .iter()
         .map(|material| graph.material(material, &fields, &mut light, &mut fine_coats))
@@ -1440,7 +1496,7 @@ fn place(blob: &mut [u8], chain: &ChainPlan, centre: Vec2) {
 /// laid — so nothing here re-derives them.
 fn encode_chain(blob: &mut Blob, plan: &ChainPlan, data: &ChainData<'_>, rng: &mut Rng, width: usize, height: usize) {
     let params = data.params;
-    for blur in [plan.support_value_blur.as_ref(), plan.support_reference_blur.as_ref()].into_iter().flatten() {
+    if let Some(blur) = plan.support_blur.as_ref() {
         blob.window(blur.window, &blur.encode());
     }
 
@@ -1498,6 +1554,8 @@ fn encode_chain(blob: &mut Blob, plan: &ChainPlan, data: &ChainData<'_>, rng: &m
 
 #[cfg(test)]
 mod tests {
+    use std::iter;
+
     use super::*;
 
     /// Tripwire: the notch must spare the accents.
@@ -1527,6 +1585,44 @@ mod tests {
             program.register.transients.iter().any(|slot| slot.extent == FINE),
             "and the accents at the sheet's own",
         );
+    }
+
+    /// The first wash batch removes one whole support chain per valued
+    /// wash, the duplicate skin mask, and the neutral light prime. Keep
+    /// those structural savings explicit: a visually plausible graph
+    /// can otherwise silently drift back to doing the old work.
+    #[test]
+    fn the_first_wash_batch_pairs_support_and_removes_neutral_passes() {
+        let program = program(960);
+        let valued_chains = program
+            .materials
+            .iter()
+            .flat_map(|material| iter::once(&material.tight).chain(material.loose.iter()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(valued_chains.len(), 10);
+        assert!(valued_chains.iter().all(|chain| chain.support_blur.is_some()));
+        assert_eq!(program.register.passes.len(), 309);
+        assert_eq!(
+            program
+                .register
+                .passes
+                .iter()
+                .filter(|pass| {
+                    matches!(
+                        pass.entry_point.as_str(),
+                        puddle::FUSED_BLUR_PAIR_X_ENTRY
+                            | puddle::BOX_BLUR_PAIR_ENTRY
+                            | puddle::BOX_DOWNSAMPLE_PAIR_ENTRY
+                    )
+                })
+                .count(),
+            10,
+            "every valued wash must enter one paired blur chain",
+        );
+        assert_eq!(program.register.passes.iter().filter(|pass| pass.entry_point == "fs_mask").count(), 7);
+        assert_eq!(program.register.passes.iter().filter(|pass| pass.entry_point == "fs_first_coat_absorb").count(), 1,);
+        assert!(program.register.passes.iter().all(|pass| pass.entry_point != "fs_light_prime"));
     }
 
     /// Tripwire: every uniform window the graph handed out must fit inside

@@ -19,9 +19,9 @@
 //! against the WGSL `SheetParams` block layout.
 //!
 //! Compositing runs as the CPU runs it: a light accumulator primed to
-//! full transmission ([`light_prime_pass`]), one absorption per coat
-//! ping-ponged between two [`sheet_slot`] transients
-//! ([`coat_absorb_pass`]), then one resolve against paper white
+//! full transmission folded into the first coat
+//! ([`first_coat_absorb_pass`]), later absorptions ping-ponged between two
+//! [`sheet_slot`] transients ([`coat_absorb_pass`]), then one resolve against paper white
 //! ([`paper_composite_pass`]) into the sheet binding. Between coats the
 //! accumulator lives in RGBA8, so a develop drifts from the CPU's `f32`
 //! accumulator by up to one quantization step per coat — thresholded
@@ -123,11 +123,11 @@ pub fn lost_edge_pass(hard: InputSlot, soft: InputSlot, output: OutputSlot, unif
     pass("fs_lost_edge", vec![hard, soft], output, uniform_offset, SHEET_PARAMS_BYTES)
 }
 
-/// The unpainted sheet (`fs_light_prime`): full transmission written
-/// into a [`sheet_slot`] light accumulator, the empty product the
-/// absorption chain multiplies down. No inputs, no uniforms.
-pub fn light_prime_pass(output: OutputSlot) -> ProgramPass {
-    pass("fs_light_prime", Vec::new(), output, 0, 0)
+/// The first coat absorbed against unpainted paper
+/// (`fs_first_coat_absorb`): full transmission is the multiplicative
+/// identity, so no neutral light plane is materialized first.
+pub fn first_coat_absorb_pass(density: InputSlot, output: OutputSlot, uniform_offset: u32) -> ProgramPass {
+    pass("fs_first_coat_absorb", vec![density], output, uniform_offset, SHEET_PARAMS_BYTES)
 }
 
 /// One coat's absorption (`fs_coat_absorb`): `light` is the accumulator

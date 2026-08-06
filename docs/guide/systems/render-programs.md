@@ -202,8 +202,8 @@ graph with no draw pass in it:
   passes clear and test against. These carry an extent alone, since their
   format is fixed.
 
-A `SlotSpec` is a `format` (`Rgba8`, `R8`, `R32Float`, or `R16Float`) plus an
-`extent`. The two float formats are both data planes — texels carrying
+A `SlotSpec` is a `format` (`Rgba8`, `R8`, `R32Float`, `R16Float`, or
+`Rgba16Float`) plus an `extent`. The float formats are data planes — texels carrying
 quantities rather than colours — and choosing between them is a question about
 what the texel holds and who reads it. `R32Float` keeps a full 24-bit mantissa
 and cannot be linear-filtered in core WebGPU, so it is what a label, an index,
@@ -211,7 +211,9 @@ or anything a pass reads point by point stands at. `R16Float` keeps about
 eleven bits and *is* filterable, so a pass may take a fractional coordinate
 through one and be handed the interpolation instead of computing it from four
 point fetches — which is what a separable blur wants, since pairing its taps
-into filtered reads halves its texture fetches.
+into filtered reads halves its texture fetches. `Rgba16Float` gives the same
+filterability and per-lane precision to four quantities in one target, so
+same-kernel scalar operations can travel independently through its channels.
 
 - `SlotExtent::Full` — the reference size.
 - `SlotExtent::Divided { divisor }` — the reference size floor-divided by
@@ -419,7 +421,7 @@ Repeats compose with the declaration directly: under `Clear` the first
 iteration clears and every later iteration loads, so a repeated draw pass
 accumulates through its blend; under `Load` no iteration clears.
 The blend is fixed by the output format, as it is for fragment passes —
-`Rgba8` and `R8` alpha-blend, `R32Float` replaces.
+`Rgba8` and `R8` alpha-blend; every float data-plane format replaces.
 
 ### Channel-packed outputs
 
@@ -432,9 +434,11 @@ takes its own `R32Float` output from its own pass, whose single channel carries
 it exactly.
 
 Packing into `Rgba8` quantizes each channel to 256 levels, which suits labels
-and low-frequency terms and does not suit an accumulator. Choose per plane:
-labels and tone pack together, quantities that later math amplifies get a float
-target.
+and low-frequency terms and does not suit an accumulator. `Rgba16Float` is the
+packed alternative when independent quantities need float precision or
+filtering: a pass can carry them through separate channels without quantizing
+them to eight bits. Choose per plane: labels and tone can pack into `Rgba8`;
+quantities that later math amplifies get a float target.
 
 ## Register-time validation
 
