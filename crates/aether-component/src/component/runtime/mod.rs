@@ -29,7 +29,7 @@ pub use self::config::ComponentHostParams;
 
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, DropResult, ListComponents, ListComponentsResult,
-    LoadComponent, ReplaceComponent, ReplaceResult,
+    LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult,
 };
 
 pub use aether_actor::Manual;
@@ -240,6 +240,15 @@ impl NativeActor for ComponentHostCapability {
     #[handler::manual]
     fn on_load_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, payload: LoadComponent) {
         state.begin_load(ctx, payload);
+    }
+
+    /// Load a component beneath a caller-selected live logical parent for a
+    /// `SubstrateHarness` composition scenario. Ordinary `LoadComponent`
+    /// continues to place the requested trampoline beneath this component
+    /// host; this handler is the explicit test-harness seam for nested peers.
+    #[handler::manual]
+    fn on_load_component_under(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, payload: LoadComponentUnder) {
+        state.begin_load_under(ctx, payload);
     }
 
     #[handler(task)]

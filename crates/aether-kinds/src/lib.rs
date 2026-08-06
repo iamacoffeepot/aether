@@ -614,6 +614,23 @@ mod control_plane {
         pub export: Option<String>,
     }
 
+    /// `aether.component.load_under` — test-harness composition request for
+    /// loading a component beneath an already-live logical parent. The
+    /// component host resolves `parent` to its registry-canonical address,
+    /// then runs its `load` through the ordinary component loader and replies
+    /// with [`LoadResult`].
+    ///
+    /// This is additive harness infrastructure rather than a replacement for
+    /// [`LoadComponent`]: production load callers keep the established
+    /// `aether.component.load` root placement, while `SubstrateHarness`
+    /// scenarios use this request to construct nested component topologies.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.component.load_under")]
+    pub struct LoadComponentUnder {
+        pub parent: String,
+        pub load: LoadComponent,
+    }
+
     /// Reply to `LoadComponent`. `Ok` carries the assigned mailbox id,
     /// the resolved name (so callers that omitted `name` learn the
     /// substrate-defaulted one), and the component's advertised

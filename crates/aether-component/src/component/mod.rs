@@ -73,7 +73,7 @@ pub use runtime::ComponentHostParams;
 use aether_kinds::LoadResult;
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, ListComponents, ListComponentsResult, LoadComponent,
-    ReplaceComponent, ReplaceResult,
+    LoadComponentUnder, ReplaceComponent, ReplaceResult,
 };
 
 // The `#[actor]` attribute sits on the capability struct (the struct-hosted
