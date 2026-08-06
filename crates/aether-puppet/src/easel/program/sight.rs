@@ -149,7 +149,7 @@ pub const GEOMETRY_COUNT: usize = 4;
 /// world-space edge of 0.0074, and [`style::RAMP`] is angular, so dollying
 /// away shrinks the arc each point contributes. The derived window is the
 /// first `2^steps - 1` points whose mean arc still spans the whole ramp at
-/// [`crate::MAX_DOLLY_DISTANCE`]. Past that window the taper is flat, which
+/// the maximum interactive dolly distance. Past that window the taper is flat, which
 /// is what makes saturating honest rather than lossy.
 pub const REACH_STEPS: u32 = reach_steps_for_distance(crate::MAX_DOLLY_DISTANCE);
 
