@@ -1239,6 +1239,33 @@ mod tests {
         assert_eq!(easel.take_dispatch().len(), 2, "the moved view bakes and washes its new answer");
     }
 
+    /// A pose reaches both the bake and the in-place ink coverage through
+    /// the bone table. It is therefore a wash input even when the camera
+    /// itself is held.
+    #[test]
+    fn a_changed_bone_table_redevelops_at_a_held_view() {
+        let mesh = quad();
+        let scores = vec![[1.0; CLASSES]; mesh.positions.len()];
+        let settings = Settings::default();
+        let mut bones = bone_uniform(&[]);
+        bones[3] = 0.25;
+        let subject = Subject {
+            mesh: &mesh,
+            posed: None,
+            scores: &scores,
+            settings: &settings,
+            ink: Some(INK),
+            chart: None,
+            skin: None,
+            bones,
+        };
+        let mut easel = converged(&mesh, &scores, &settings, &view());
+
+        easel.develop(&subject, &view());
+        assert_eq!(easel.take_geometry_updates().len(), 1, "the pose re-derives the projected aperture");
+        assert_eq!(easel.take_dispatch().len(), 2, "the held camera does not hide a changed pose");
+    }
+
     /// Subject replacement can leave every bit in `DevelopKey` and the
     /// ink texture id unchanged. It still replaces the mesh and rewrites
     /// the coverage plane in place, so it must advance the dispatch
@@ -1376,6 +1403,31 @@ mod tests {
 
         easel.resized(3024, 1670);
         assert!(easel.seed_slice.is_none(), "a canvas change must, so the next develop re-rolls at the new size");
+    }
+
+    #[test]
+    fn a_resize_invalidates_the_dispatched_sheet_and_releases_its_textures() {
+        let mesh = quad();
+        let scores = vec![[1.0; CLASSES]; mesh.positions.len()];
+        let settings = Settings::default();
+        let subject = Subject {
+            mesh: &mesh,
+            posed: None,
+            scores: &scores,
+            settings: &settings,
+            ink: Some(INK),
+            chart: None,
+            skin: None,
+            bones: bone_uniform(&[]),
+        };
+        let mut easel = converged(&mesh, &scores, &settings, &view());
+        let standing = easel.revision;
+
+        easel.resized(320, 400);
+        easel.develop(&subject, &view());
+        assert_ne!(easel.revision, standing, "the new canvas advances the wash revision");
+        assert_eq!(easel.take_destroys().len(), 7, "the old canvas' whole texture set is released");
+        assert!(easel.dispatched.is_none(), "fresh textures must be refilled before the revision can stand");
     }
 
     // A register answered after the canvas outgrew the graph it was sent
