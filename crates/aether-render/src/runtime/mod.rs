@@ -178,9 +178,9 @@ pub struct RenderCapabilityState {
     /// boots it transactionally with the first window attachment; the
     /// harness boots it lazily from `offscreen_size`.
     gpu: Option<RenderGpu>,
-    /// ADR-0173 generation state and callback bridge for the offscreen
-    /// device. Kept beside `gpu` so replacement is an actor-owned
-    /// transaction rather than a chassis-visible protocol.
+    /// ADR-0173 generation state and callback bridge for the shared render
+    /// device. Kept beside `gpu` so replacement is an actor-owned transaction
+    /// rather than a chassis-visible protocol.
     device_recovery: DeviceRecovery,
     wire_pipeline: Option<wgpu::RenderPipeline>,
     /// Prior frame's submission index, drained at the top of the next
@@ -201,6 +201,30 @@ pub struct RenderCapabilityState {
     mailer: Arc<Mailer>,
     assets_dir: Option<PathBuf>,
     observed_kinds: Option<Arc<Mutex<Vec<KindId>>>>,
+}
+
+struct BuiltReplacement {
+    gpu: RenderGpu,
+    wire_pipeline: Option<wgpu::RenderPipeline>,
+    #[cfg(feature = "desktop")]
+    desktop: Option<(WindowTargets<RenderTarget>, DesktopGpuContext)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveryTarget {
+    Desktop,
+    Offscreen((u32, u32)),
+    Unavailable,
+}
+
+fn select_recovery_target(has_desktop_targets: bool, offscreen_size: Option<(u32, u32)>) -> RecoveryTarget {
+    if has_desktop_targets {
+        RecoveryTarget::Desktop
+    } else if let Some(size) = offscreen_size {
+        RecoveryTarget::Offscreen(size)
+    } else {
+        RecoveryTarget::Unavailable
+    }
 }
 
 impl RenderCapabilityState {
@@ -292,6 +316,7 @@ impl RenderCapabilityState {
         };
 
         if let Some(FirstWindowGpu { context, gpu, wire_pipeline }) = install {
+            self.device_recovery.install_initial(&gpu.device);
             self.desktop_gpu = Some(context);
             self.gpu = Some(gpu);
             self.wire_pipeline = wire_pipeline;
@@ -377,11 +402,56 @@ impl RenderCapabilityState {
         (gpu, wire_pipeline)
     }
 
+    fn build_replacement_gpu(&self) -> Result<BuiltReplacement, String> {
+        #[cfg(feature = "desktop")]
+        let has_desktop_targets = !self.targets.is_empty();
+        #[cfg(not(feature = "desktop"))]
+        let has_desktop_targets = false;
+
+        match select_recovery_target(has_desktop_targets, self.offscreen_size) {
+            RecoveryTarget::Desktop => {
+                #[cfg(feature = "desktop")]
+                {
+                    let (targets, FirstWindowGpu { context, gpu, wire_pipeline }) =
+                        RenderTarget::build_replacement_targets(
+                            &self.targets,
+                            self.wireframe.as_deref(),
+                            self.vertex_buffer_bytes,
+                        )?;
+                    Ok(BuiltReplacement { gpu, wire_pipeline, desktop: Some((targets, context)) })
+                }
+                #[cfg(not(feature = "desktop"))]
+                unreachable!("desktop recovery requires the desktop feature")
+            }
+            RecoveryTarget::Offscreen((width, height)) => {
+                let booted = try_boot_offscreen(self.wireframe.as_deref())?;
+                let (gpu, wire_pipeline) = self.build_offscreen_gpu(
+                    Arc::clone(&booted.device),
+                    Arc::clone(&booted.queue),
+                    booted.format,
+                    (width, height),
+                    booted.polygon_mode,
+                    booted.build_overlay,
+                );
+                Ok(BuiltReplacement {
+                    gpu,
+                    wire_pipeline,
+                    #[cfg(feature = "desktop")]
+                    desktop: None,
+                })
+            }
+            RecoveryTarget::Unavailable => {
+                Err("device replacement requires an offscreen target or retained desktop windows".to_owned())
+            }
+        }
+    }
+
     /// Drain loss notices and, when needed, perform the lost generation's
-    /// one offscreen replacement transaction. The replacement GPU and
-    /// overlay are built off to the side; registry realizations are then
-    /// switched as one actor-owned commit. A failed acquisition is terminal.
-    fn recover_offscreen_gpu_if_needed(&mut self) -> Result<(), String> {
+    /// one replacement transaction. Offscreen targets or the complete
+    /// canonical desktop target map are built off to the side; registry
+    /// realizations are then switched in the same actor-owned commit. A
+    /// failed device or surface acquisition is terminal.
+    fn recover_gpu_if_needed(&mut self) -> Result<(), String> {
         self.device_recovery.refresh();
         if let Some(error) = self.device_recovery.unusable_error() {
             return Err(error);
@@ -389,23 +459,13 @@ impl RenderCapabilityState {
         let Some(ticket) = self.device_recovery.begin_replacement() else {
             return Ok(());
         };
-        let Some((width, height)) = self.offscreen_size else {
-            let reason = "device replacement is not available for this non-offscreen render runtime".to_owned();
-            self.finish_failed_replacement(ticket, reason.clone());
-            return Err(reason);
-        };
 
-        let replacement = try_boot_offscreen(self.wireframe.as_deref()).map(|booted| {
-            self.build_offscreen_gpu(
-                Arc::clone(&booted.device),
-                Arc::clone(&booted.queue),
-                booted.format,
-                (width, height),
-                booted.polygon_mode,
-                booted.build_overlay,
-            )
-        });
-        let (gpu, wire_pipeline) = match replacement {
+        let BuiltReplacement {
+            gpu,
+            wire_pipeline,
+            #[cfg(feature = "desktop")]
+            desktop,
+        } = match self.build_replacement_gpu() {
             Ok(replacement) => replacement,
             Err(reason) => {
                 self.finish_failed_replacement(ticket, reason.clone());
@@ -419,6 +479,11 @@ impl RenderCapabilityState {
         self.discard_device_replay_caches();
         self.device_recovery.finish_replacement(ticket, &gpu.device);
         self.last_submission = None;
+        #[cfg(feature = "desktop")]
+        if let Some((targets, context)) = desktop {
+            self.targets = targets;
+            self.desktop_gpu = Some(context);
+        }
         self.wire_pipeline = wire_pipeline;
         self.gpu = Some(gpu);
         Ok(())
@@ -989,7 +1054,7 @@ impl NativeActor for RenderCapability {
         }
 
         state.ensure_offscreen_gpu_booted();
-        if state.recover_offscreen_gpu_if_needed().is_err() {
+        if state.recover_gpu_if_needed().is_err() {
             return;
         }
         let Some(gpu) = state.gpu.as_ref() else {
@@ -1009,20 +1074,12 @@ impl NativeActor for RenderCapability {
         if let Some(index) = state.last_submission.take()
             && let Err(error) = device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None })
         {
-            if state.offscreen_size.is_some() {
-                state.device_recovery.report_current_loss(format!("waiting for the previous frame failed: {error}"));
-            } else {
-                tracing::warn!(
-                    target: "aether_substrate::render",
-                    ?error,
-                    "device.poll for previous frame failed; continuing",
-                );
-            }
+            state.device_recovery.report_current_loss(format!("waiting for the previous frame failed: {error}"));
         }
         // The poll may itself deliver the callback. A pending capture has
         // not begun recording this frame, so it may survive a successful
         // transaction and record exactly once below.
-        if state.recover_offscreen_gpu_if_needed().is_err() {
+        if state.recover_gpu_if_needed().is_err() {
             return;
         }
         state.commit_scene(replay_cache_when_idle);
@@ -1383,6 +1440,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             [WindowId(2), WindowId(5), WindowId(8)],
         );
+    }
+
+    #[test]
+    fn recovery_target_prefers_retained_desktop_state_then_offscreen() {
+        assert_eq!(
+            select_recovery_target(true, Some((64, 48))),
+            RecoveryTarget::Desktop,
+            "retained windows own the replacement adapter selection",
+        );
+        assert_eq!(select_recovery_target(false, Some((64, 48))), RecoveryTarget::Offscreen((64, 48)));
+        assert_eq!(select_recovery_target(false, None), RecoveryTarget::Unavailable);
     }
 
     #[test]

@@ -172,16 +172,24 @@ records with nothing freshly emitted (a capture that didn't advance a tick), the
 renderer replays the last submitted geometry, so a still frame shows what the
 last live frame drew.
 
-**Offscreen device loss is generation-aware and bounded.** The surfaceless
-runtime used by `SubstrateHarness` tags every installed wgpu device with an
-internal generation. The first frame after that generation reports loss makes
-one replacement attempt; callbacks arriving late from an older device are
-ignored. A complete replacement is published at once — fresh built-in
+**Device loss is generation-aware and bounded.** Every installed wgpu device
+has an internal generation. The first frame after that generation reports loss
+makes one replacement attempt; callbacks arriving late from an older device
+are ignored. A complete replacement is published at once — fresh built-in
 pipelines and targets plus rebuilt registry state — rather than exposing a
 partly reconstructed GPU. Failure emits one structured error and makes render
 terminally unusable for the session: request/reply GPU operations and captures
 return `Err`, while fire-and-forget draw, update, dispatch, and destroy mail is
 warning-dropped. It does not retry or spin.
+
+The surfaceless `SubstrateHarness` replaces its fixed offscreen target. A
+desktop runtime instead walks every retained window in ascending `WindowId`
+order. The first canonical window selects the replacement adapter, device, and
+surface format; every later window must attach to that same context and format.
+Only after all surfaces succeed does the runtime replace the full target map,
+preserving each `WindowId` and occlusion flag together with the shared GPU and
+wireframe overlay. If any later surface fails, none of the staged surfaces or
+device state becomes live and the whole render capability becomes unusable.
 
 Public ids do not change across a successful replacement. Sampled textures
 upload again from their retained CPU pixels and registered geometry realizes
@@ -192,8 +200,7 @@ had not begun may cross the successful transaction and record once. Loss with
 an ambiguous submission, poll, map, or readback instead returns that capture's
 `Err`; its frame is not replayed and its `after_mails` are not released twice.
 All of this is host policy — there is no recovery kind, generation callback, or
-guest-visible wire change. Desktop surface replacement is a separate slice of
-ADR-0173; this contract currently describes the offscreen runtime only.
+guest-visible wire change.
 
 **The production headless chassis absorbs draw and camera mail.** It composes
 `HeadlessRenderCapability` on the same `aether.render` mailbox:

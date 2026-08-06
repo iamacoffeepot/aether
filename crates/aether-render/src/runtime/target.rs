@@ -59,6 +59,35 @@ impl<T> WindowTargets<T> {
         self.entries.remove(&id)
     }
 
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Build a complete replacement map without mutating the live targets.
+    /// The lowest [`WindowId`] is always passed to `build_first`; every later
+    /// target sees the caller-chosen context that first build returned. A
+    /// failure at any point drops only the staged values.
+    fn stage_replacement_with<U, C>(
+        &self,
+        build_first: impl FnOnce(WindowId, &T) -> Result<(U, C), String>,
+        mut build_later: impl FnMut(WindowId, &T, &C) -> Result<U, String>,
+    ) -> Result<(WindowTargets<U>, C), String> {
+        let mut live = self.entries.iter();
+        let Some((&first_id, first_target)) = live.next() else {
+            return Err("desktop device replacement requires at least one retained window target".to_owned());
+        };
+        let (first_target, context) = build_first(first_id, first_target)?;
+        let mut staged = BTreeMap::new();
+        staged.insert(first_id, first_target);
+
+        for (&id, target) in live {
+            staged.insert(id, build_later(id, target, &context)?);
+        }
+
+        Ok((WindowTargets { entries: staged }, context))
+    }
+
     /// The attached target for `id`, if there is one. `None` is the ordinary
     /// case for a window in a fan-out list that has since detached, so callers
     /// skip it rather than treating it as an error.
@@ -124,6 +153,43 @@ pub struct DesktopGpuContext {
 }
 
 impl RenderTarget {
+    /// Rebuild every retained surface against one replacement device. The
+    /// canonical first window selects the adapter, device, and format; later
+    /// windows must attach to that exact context. The live map remains intact
+    /// unless the caller publishes the returned map.
+    pub fn build_replacement_targets(
+        targets: &WindowTargets<Self>,
+        wireframe: Option<&str>,
+        vertex_buffer_bytes: usize,
+    ) -> Result<(WindowTargets<Self>, FirstWindowGpu), String> {
+        targets.stage_replacement_with(
+            |_id, live| {
+                let size = live.window.inner_size();
+                let (mut target, first_gpu) = Self::boot_first(
+                    Arc::clone(&live.window),
+                    (size.width, size.height),
+                    wireframe,
+                    vertex_buffer_bytes,
+                )?;
+                target.occluded = live.occluded;
+                Ok((target, first_gpu.expect("boot_first always returns the selected desktop GPU")))
+            },
+            |_id, live, first_gpu| {
+                let size = live.window.inner_size();
+                let (mut target, install) = Self::attach_to_booted_gpu(
+                    &first_gpu.context,
+                    &first_gpu.gpu.device,
+                    Arc::clone(&live.window),
+                    (size.width, size.height),
+                    first_gpu.gpu.color_format,
+                )?;
+                debug_assert!(install.is_none(), "later windows never replace the shared desktop GPU");
+                target.occluded = live.occluded;
+                Ok(target)
+            },
+        )
+    }
+
     /// Attach a window to the device an earlier attachment already selected.
     /// Fails if the window's surface cannot offer `format`, which is what
     /// keeps every target copy-compatible with the shared color texture.
@@ -193,7 +259,14 @@ impl RenderTarget {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct TestTarget {
+        occluded: bool,
+    }
 
     /// Target bookkeeping is transactional: failed and duplicate attachments
     /// do not replace entries; occlusion and removal stay local to one id.
@@ -224,5 +297,57 @@ mod tests {
 
         assert_eq!(targets.detach(WindowId(1)), Some(true));
         assert!(targets.entries.contains_key(&WindowId(2)), "detaching one target leaves the other live");
+    }
+
+    #[test]
+    fn staged_replacement_uses_canonical_first_id_and_preserves_target_state() {
+        let mut targets = WindowTargets::default();
+        for (id, occluded) in [(8, true), (2, false), (5, true)] {
+            targets.attach_with(WindowId(id), || Ok((TestTarget { occluded }, ()))).expect("test target attaches");
+        }
+        let build_order = RefCell::new(Vec::new());
+        let (staged, first_id) = targets
+            .stage_replacement_with(
+                |id, live| {
+                    build_order.borrow_mut().push(id);
+                    Ok((live.clone(), id))
+                },
+                |id, live, selected| {
+                    assert_eq!(*selected, WindowId(2), "later targets share the canonical first context");
+                    build_order.borrow_mut().push(id);
+                    Ok(live.clone())
+                },
+            )
+            .expect("complete replacement stages");
+
+        assert_eq!(first_id, WindowId(2));
+        assert_eq!(build_order.into_inner(), [WindowId(2), WindowId(5), WindowId(8)]);
+        assert_eq!(staged.entries, targets.entries, "keys and occlusion flags survive replacement");
+    }
+
+    #[test]
+    fn later_staging_failure_leaves_live_target_map_unchanged() {
+        let mut targets = WindowTargets::default();
+        for (id, occluded) in [(2, false), (5, true), (8, false)] {
+            targets.attach_with(WindowId(id), || Ok((TestTarget { occluded }, ()))).expect("test target attaches");
+        }
+        let before = targets.entries.clone();
+
+        let result = targets.stage_replacement_with(
+            |_id, live| Ok((live.clone(), ())),
+            |id, live, _context| {
+                if id == WindowId(8) {
+                    Err("later surface failed".to_owned())
+                } else {
+                    Ok(live.clone())
+                }
+            },
+        );
+
+        let Err(error) = result else {
+            panic!("later failure must reject the staged map");
+        };
+        assert_eq!(error, "later surface failed");
+        assert_eq!(targets.entries, before, "the live map is not mutated during staging");
     }
 }
