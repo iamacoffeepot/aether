@@ -26,7 +26,11 @@ Send `aether.puppet.load` with paths in one of the substrate's file namespaces:
 
 `labels` and `rig` may be empty. The charted face needs the material labels to
 measure its anchors. The optional rig directory contains `weights.npy` and
-`rig.txt`.
+`rig.txt`. Those disk formats stay compatible with the external bake pipeline;
+the puppet decodes them once into the declared `aether.puppet.rig_weights` and
+`aether.puppet.rig_descriptor` kinds. A descriptor with malformed or unknown
+records, or a weight row that cannot fit the declared four-influence vertex
+format, is refused instead of being defaulted or truncated.
 
 ## Drive the chart
 
