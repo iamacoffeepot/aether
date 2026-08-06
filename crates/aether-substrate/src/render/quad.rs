@@ -469,6 +469,8 @@ pub fn upload_texture_full(queue: &wgpu::Queue, realized: &RealizedTexture, pixe
 fn texture_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
     match format {
         wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::R32Float => 4,
+        wgpu::TextureFormat::R16Float => 2,
+        wgpu::TextureFormat::Rgba16Float => 8,
         wgpu::TextureFormat::R8Unorm => 1,
         _ => panic!("unsupported render texture format: {format:?}"),
     }

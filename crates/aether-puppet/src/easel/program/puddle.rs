@@ -44,6 +44,14 @@ pub const BOX_BLUR_ENTRY: &str = "fs_box_blur";
 /// as a single kernel ([`composite_taps`]).
 pub const FUSED_BLUR_X_ENTRY: &str = "fs_fused_blur_x";
 pub const FUSED_BLUR_Y_ENTRY: &str = "fs_fused_blur_y";
+/// Entry points for two same-kernel scalar planes carried in the R/G
+/// channels of one filterable target. `PAIR_X` reads the two separate
+/// sources; the `PAIRED` entries read the packed intermediate.
+pub const FUSED_BLUR_PAIR_X_ENTRY: &str = "fs_fused_blur_pair_x";
+pub const FUSED_BLUR_PAIRED_X_ENTRY: &str = "fs_fused_blur_paired_x";
+pub const FUSED_BLUR_PAIRED_Y_ENTRY: &str = "fs_fused_blur_paired_y";
+pub const BOX_BLUR_PAIR_ENTRY: &str = "fs_box_blur_pair";
+pub const BOX_BLUR_PAIRED_ENTRY: &str = "fs_box_blur_paired";
 
 /// Entry point of the carry onto the soft plane ([`soft_carry_pass`]).
 pub const SOFT_CARRY_ENTRY: &str = "fs_soft_carry";
@@ -52,6 +60,8 @@ pub const SOFT_CARRY_ENTRY: &str = "fs_soft_carry";
 /// into the reduced plane and the bilinear carry back out of it.
 pub const BOX_DOWNSAMPLE_ENTRY: &str = "fs_box_downsample";
 pub const BOX_UPSAMPLE_ENTRY: &str = "fs_box_upsample";
+pub const BOX_DOWNSAMPLE_PAIR_ENTRY: &str = "fs_box_downsample_pair";
+pub const BOX_UPSAMPLE_PAIRED_ENTRY: &str = "fs_box_upsample_paired";
 
 /// Entry point of the scale-about-centroid resample ([`shrink_pass`]).
 pub const SHRINK_ENTRY: &str = "fs_shrink";
@@ -442,6 +452,106 @@ pub fn box_blur_passes(
     if reduced {
         passes.push(pass(
             BOX_UPSAMPLE_ENTRY,
+            vec![InputSlot::Transient { index: chain.carry }],
+            output,
+            scale_offset,
+            BOX_SCALE_WINDOW_BYTES,
+        ));
+    }
+
+    passes
+}
+
+/// Two scalar blur chains with one radius and extent, carried through R/G
+/// of one `Rgba16Float` plane. The first pass reads `sources` separately;
+/// every later pass reads the paired intermediate. Each lane executes the
+/// scalar chain's arithmetic and lands in an `f16` channel, so pairing
+/// removes one chain without changing either plane's precision.
+pub fn paired_box_blur_passes(
+    sources: [InputSlot; 2],
+    chain: &BoxBlurChain,
+    output: OutputSlot,
+    uniform_offset: u32,
+) -> Vec<ProgramPass> {
+    let reduced = chain.divisor > 1;
+    let sweep_offset = uniform_offset + FUSED_BLUR_WINDOW_BYTES;
+    let scale_offset = sweep_offset + 2 * BOX_BLUR_WINDOW_BYTES;
+    let mut passes = Vec::with_capacity(2 * BLUR_PASSES as usize + 2);
+
+    if reduced {
+        passes.push(pass(
+            BOX_DOWNSAMPLE_PAIR_ENTRY,
+            sources.to_vec(),
+            OutputSlot::Transient { index: chain.carry },
+            scale_offset,
+            BOX_SCALE_WINDOW_BYTES,
+        ));
+    }
+    let softened = if reduced {
+        OutputSlot::Transient { index: chain.carry }
+    } else {
+        output
+    };
+
+    if fuses(chain.half_width_texels) {
+        passes.push(pass(
+            if reduced {
+                FUSED_BLUR_PAIRED_X_ENTRY
+            } else {
+                FUSED_BLUR_PAIR_X_ENTRY
+            },
+            if reduced {
+                vec![InputSlot::Transient { index: chain.carry }]
+            } else {
+                sources.to_vec()
+            },
+            OutputSlot::Transient { index: chain.scratch },
+            uniform_offset,
+            FUSED_BLUR_WINDOW_BYTES,
+        ));
+        passes.push(pass(
+            FUSED_BLUR_PAIRED_Y_ENTRY,
+            vec![InputSlot::Transient { index: chain.scratch }],
+            softened,
+            uniform_offset,
+            FUSED_BLUR_WINDOW_BYTES,
+        ));
+    } else {
+        for iteration in 0..BLUR_PASSES {
+            let first = iteration == 0 && !reduced;
+            passes.push(pass(
+                if first {
+                    BOX_BLUR_PAIR_ENTRY
+                } else {
+                    BOX_BLUR_PAIRED_ENTRY
+                },
+                if first {
+                    sources.to_vec()
+                } else {
+                    vec![InputSlot::Transient { index: chain.carry }]
+                },
+                OutputSlot::Transient { index: chain.scratch },
+                sweep_offset,
+                BOX_BLUR_WINDOW_BYTES,
+            ));
+            let last = iteration + 1 == BLUR_PASSES;
+            passes.push(pass(
+                BOX_BLUR_PAIRED_ENTRY,
+                vec![InputSlot::Transient { index: chain.scratch }],
+                if last {
+                    softened
+                } else {
+                    OutputSlot::Transient { index: chain.carry }
+                },
+                sweep_offset + BOX_BLUR_WINDOW_BYTES,
+                BOX_BLUR_WINDOW_BYTES,
+            ));
+        }
+    }
+
+    if reduced {
+        passes.push(pass(
+            BOX_UPSAMPLE_PAIRED_ENTRY,
             vec![InputSlot::Transient { index: chain.carry }],
             output,
             scale_offset,

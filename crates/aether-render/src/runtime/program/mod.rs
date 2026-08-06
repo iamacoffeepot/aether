@@ -378,7 +378,7 @@ fn build_program_passes(
 fn blend_for(format: TextureFormat) -> Option<wgpu::BlendState> {
     match format {
         TextureFormat::Rgba8 | TextureFormat::R8 => Some(wgpu::BlendState::ALPHA_BLENDING),
-        TextureFormat::R32Float | TextureFormat::R16Float => None,
+        TextureFormat::R32Float | TextureFormat::R16Float | TextureFormat::Rgba16Float => None,
     }
 }
 

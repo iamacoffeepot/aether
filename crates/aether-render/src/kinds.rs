@@ -140,6 +140,13 @@ pub enum TextureFormat {
     /// into. A label or a texel index does not belong in it — that is
     /// what the 32-bit plane is for.
     R16Float,
+    /// Eight bytes per pixel, four little-endian `f16` channels — the
+    /// filterable data-plane format for several quantities that travel
+    /// through the same authored-program operation. Each channel keeps
+    /// the precision and filtering semantics of [`Self::R16Float`]; the
+    /// wider texel lets one pass carry independent planes without
+    /// quantizing them into color.
+    Rgba16Float,
 }
 
 impl TextureFormat {
@@ -148,6 +155,7 @@ impl TextureFormat {
         match self {
             Self::Rgba8 | Self::R32Float => 4,
             Self::R16Float => 2,
+            Self::Rgba16Float => 8,
             Self::R8 => 1,
         }
     }
@@ -158,7 +166,7 @@ impl TextureFormat {
     #[must_use]
     pub const fn filterable(self) -> bool {
         match self {
-            Self::Rgba8 | Self::R8 | Self::R16Float => true,
+            Self::Rgba8 | Self::R8 | Self::R16Float | Self::Rgba16Float => true,
             Self::R32Float => false,
         }
     }

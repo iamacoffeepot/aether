@@ -50,7 +50,7 @@ the `RenderCapability` actor. It handles these payload kinds:
 |---|---|---|
 | `aether.draw_triangle` | `{ verts: [Vertex; 3] }`, cast-shaped | per-tick geometry; accumulates into the frame |
 | `aether.view_projection` | `{ view_proj: [f32; 16] }`, cast-shaped | the world→clip matrix; latest value wins |
-| `aether.render.create_texture` | `{ width, height, format, sampling, usage, pixels }` → `create_texture_result` | register an `Rgba8`, `R8`, `R32Float`, or `R16Float` texture; reply carries the `texture_id` |
+| `aether.render.create_texture` | `{ width, height, format, sampling, usage, pixels }` → `create_texture_result` | register an `Rgba8`, `R8`, `R32Float`, `R16Float`, or `Rgba16Float` texture; reply carries the `texture_id` |
 | `aether.render.update_texture` | `{ texture_id, x, y, width, height, pixels }` | overwrite a sub-rect of a texture (atlas growth) |
 | `aether.render.destroy_texture` | `{ texture_id }` | release a registered texture; fire-and-forget |
 | `aether.render.draw_textured_quads` | `{ texture_id, space, clip, blend, quads }` | per-tick textured alpha-blended quads; accumulates into the frame |
@@ -98,10 +98,11 @@ render programs draw into; `update_texture` against a writable texture
 warn-drops, since it has no CPU staging. Two formats store data planes rather than
 colour. `R32Float` keeps one `f32` per texel; core WebGPU cannot linear-filter
 it, so it requires `Nearest` sampling and binds through a non-filtering layout.
-`R16Float` keeps an `f16` — about eleven bits of mantissa — and is filterable,
-which is what a pass reading between texels needs. Both are read by the
-authored-program passes; the color material and overlay passes warn-drop
-batches over `R32Float`.
+`R16Float` keeps one `f16` — about eleven bits of mantissa — and is filterable,
+which is what a pass reading between texels needs. `Rgba16Float` carries four
+such filterable lanes when several independent quantities share one pass.
+All three are read by authored-program passes; the color material and overlay
+paths are not data-plane consumers.
 
 **Authored render programs** ([ADR-0170](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0170-authored-render-programs.md))
 put actor-owned per-pixel work on the GPU without a substrate change.

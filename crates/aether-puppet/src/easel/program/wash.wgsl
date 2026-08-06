@@ -128,6 +128,22 @@ fn fs_pour_accumulate(@builtin(position) position: vec4<f32>) -> @location(0) ve
     return vec4<f32>(kept + poured, 0.0, 0.0, 1.0);
 }
 
+// The same accumulation when the value and reference support blurs rode
+// one paired Rgba16Float chain. R is the softened value and G the
+// softened mask; each channel was filtered and quantized exactly as its
+// former scalar R16Float plane was.
+@fragment
+fn fs_pour_accumulate_paired(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let at = vec2<i32>(position.xy);
+    let support = textureLoad(accumulate_value, at, 0).rg;
+    let carried = min(support.r / max(support.g, SUPPORT_FLOOR), 1.0);
+
+    let poured = textureLoad(accumulate_alpha, at, 0).r * accumulate_params.body_load * carried
+        + textureLoad(accumulate_rim, at, 0).r;
+    let kept = textureLoad(accumulate_prev, at, 0).r * accumulate_params.keep;
+    return vec4<f32>(kept + poured, 0.0, 0.0, 1.0);
+}
+
 struct LiftParams {
     // 1 applies the lift plane, 0 leaves the density untouched (a subject
     // that charted no face uploads no lift worth reading).
