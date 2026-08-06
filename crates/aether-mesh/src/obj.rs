@@ -1,17 +1,112 @@
-//! Wavefront OBJ writer for the spike's mesher output.
+//! Minimal Wavefront OBJ import and export.
 //!
-//! OBJ is the simplest text format every 3D viewer can open (Preview.app on
-//! macOS, Blender, `MeshLab`, …). For spike measurability this beats stdout
-//! triangle dumps — you can actually look at the mesh.
+//! The importer is deliberately an indexed triangle boundary rather than a
+//! renderer boundary. It reads bytes directly so a large wasm-hosted asset
+//! need not first become another whole-file string, retains only positions
+//! and faces, and leaves normals, acceleration structures, and render types
+//! to its consumers. Faces are fan-triangulated; texture, normal, material,
+//! group, and smoothing directives are ignored.
 //!
-//! Per-face color is not standard OBJ; we emit one OBJ group per palette
-//! index so a viewer that supports groups can recolor manually.
+//! The exporter remains the inspection path for the DSL mesher. Per-face
+//! color is not standard OBJ, so it emits one group per palette index for a
+//! viewer that supports manual recoloring.
 
+use core::str;
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use crate::mesh::Triangle;
 use aether_math::Vec3;
-use std::collections::BTreeMap;
+
+use crate::mesh::Triangle;
+
+/// Indexed geometry retained by the Wavefront importer.
+#[derive(Debug, PartialEq)]
+pub struct IndexedMesh {
+    pub positions: Vec<Vec3>,
+    pub faces: Vec<[u32; 3]>,
+}
+
+/// Why a recognized Wavefront position or face record could not be read.
+#[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
+pub enum ObjImportError {
+    #[error("line {line}: vertex coordinate {coordinate} is missing or malformed")]
+    MalformedVertex { line: usize, coordinate: char },
+    #[error("line {line}: face corner {corner} has a malformed position index")]
+    MalformedFaceIndex { line: usize, corner: usize },
+    #[error("line {line}: position index {index} is out of range for {defined} defined positions")]
+    PositionIndexOutOfRange { line: usize, index: i64, defined: usize },
+    #[error("line {line}: face has {vertices} vertices; at least 3 are required")]
+    DegenerateFace { line: usize, vertices: usize },
+}
+
+/// Parse the indexed position/face subset shared by Aether's OBJ consumers.
+///
+/// Recognized records are `v X Y Z` and `f V1 V2 V3 [V4 ...]`. Face
+/// references may be bare or carry slash-separated texture and normal
+/// indices; only the leading position index is retained. Positive indices
+/// are one-based and negative indices count backward from the positions
+/// defined before that face.
+pub fn parse_obj(bytes: &[u8]) -> Result<IndexedMesh, ObjImportError> {
+    let mut positions = Vec::new();
+    let mut faces = Vec::new();
+    let mut corners = Vec::with_capacity(4);
+
+    for (line_index, line) in bytes.split(|&byte| byte == b'\n').enumerate() {
+        let line_number = line_index + 1;
+        let mut fields = line.split(u8::is_ascii_whitespace).filter(|field| !field.is_empty());
+        let Some(head) = fields.next() else {
+            continue;
+        };
+
+        match head {
+            b"v" => {
+                let mut coordinate = |name| {
+                    fields
+                        .next()
+                        .and_then(|token| str::from_utf8(token).ok())
+                        .and_then(|token| token.parse::<f32>().ok())
+                        .ok_or(ObjImportError::MalformedVertex { line: line_number, coordinate: name })
+                };
+                positions.push(Vec3::new(coordinate('x')?, coordinate('y')?, coordinate('z')?));
+            }
+            b"f" => {
+                corners.clear();
+                for token in fields.take_while(|token| !token.starts_with(b"#")) {
+                    let corner = corners.len() + 1;
+                    let position = token.split(|&byte| byte == b'/').next().unwrap_or_default();
+                    let raw = str::from_utf8(position)
+                        .ok()
+                        .and_then(|position| position.parse::<i64>().ok())
+                        .ok_or(ObjImportError::MalformedFaceIndex { line: line_number, corner })?;
+                    corners.push(resolve_index(raw, positions.len(), line_number)?);
+                }
+                if corners.len() < 3 {
+                    return Err(ObjImportError::DegenerateFace { line: line_number, vertices: corners.len() });
+                }
+                for corner in 1..corners.len() - 1 {
+                    faces.push([corners[0], corners[corner], corners[corner + 1]]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(IndexedMesh { positions, faces })
+}
+
+fn resolve_index(raw: i64, defined: usize, line: usize) -> Result<u32, ObjImportError> {
+    let index = if raw < 0 {
+        defined as i128 + i128::from(raw)
+    } else {
+        i128::from(raw) - 1
+    };
+
+    if index < 0 || index >= defined as i128 {
+        return Err(ObjImportError::PositionIndexOutOfRange { line, index: raw, defined });
+    }
+
+    u32::try_from(index).map_err(|_| ObjImportError::PositionIndexOutOfRange { line, index: raw, defined })
+}
 
 #[must_use]
 pub fn to_obj(triangles: &[Triangle]) -> String {
@@ -60,4 +155,65 @@ fn approx_eq(a: Vec3, b: Vec3) -> bool {
     const EPS: f32 = 1e-6;
     //noinspection DuplicatedCode
     (a.x - b.x).abs() < EPS && (a.y - b.y).abs() < EPS && (a.z - b.z).abs() < EPS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn imports_slash_faces_and_fan_triangulates() {
+        let mesh = parse_obj(
+            b"# a quad\n\
+              v 0 0 0\n\
+              v 1 0 0\n\
+              v 1 1 0\n\
+              v 0 1 0\n\
+              vt 0 0\n\
+              vn 0 0 1\n\
+              f 1/1/1 2/2/1 3/3/1 4/4/1\n",
+        )
+        .expect("the indexed Wavefront subset parses");
+
+        assert_eq!(mesh.positions.len(), 4);
+        assert_eq!(mesh.faces, vec![[0, 1, 2], [0, 2, 3]]);
+    }
+
+    #[test]
+    fn imports_negative_indices_relative_to_the_face() {
+        let mesh =
+            parse_obj(b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf -3 -2 -1\n").expect("negative indices are Wavefront indices");
+
+        assert_eq!(mesh.faces, vec![[0, 1, 2]]);
+    }
+
+    #[test]
+    fn reports_the_malformed_vertex_coordinate() {
+        assert_eq!(parse_obj(b"v 1 nope 3\n"), Err(ObjImportError::MalformedVertex { line: 1, coordinate: 'y' }),);
+    }
+
+    #[test]
+    fn reports_the_malformed_face_corner() {
+        assert_eq!(
+            parse_obj(b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 /2/1 3\n"),
+            Err(ObjImportError::MalformedFaceIndex { line: 4, corner: 2 }),
+        );
+    }
+
+    #[test]
+    fn reports_positive_and_negative_indices_outside_the_defined_positions() {
+        let bytes = b"v 0 0 0\nv 1 0 0\nf 1 2 99\n";
+        assert_eq!(parse_obj(bytes), Err(ObjImportError::PositionIndexOutOfRange { line: 3, index: 99, defined: 2 }),);
+
+        let bytes = b"v 0 0 0\nv 1 0 0\nf -3 1 2\n";
+        assert_eq!(parse_obj(bytes), Err(ObjImportError::PositionIndexOutOfRange { line: 3, index: -3, defined: 2 }),);
+    }
+
+    #[test]
+    fn reports_faces_with_fewer_than_three_vertices() {
+        assert_eq!(
+            parse_obj(b"v 0 0 0\nv 1 0 0\nf 1 2\n"),
+            Err(ObjImportError::DegenerateFace { line: 3, vertices: 2 }),
+        );
+    }
 }

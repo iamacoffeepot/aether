@@ -138,24 +138,27 @@ older kind comment calls it fire-and-forget, the current handler preserves an
 available reply target and returns `MeshLoadResult` after fs read and parse
 settle. Await the reply when automation needs a definitive outcome.
 
-Extension matching is case-insensitive. Both inputs must be UTF-8:
+Extension matching is case-insensitive. DSL input must be UTF-8; OBJ is read
+directly from bytes and validates the recognized numeric tokens:
 
 - `.dsl` uses `parse` → `mesh_polygons` → `tessellate_polygon`. Filled faces
   use `color % 8` in the viewer palette; every outer and hole edge also emits a
   narrow lifted slate outline.
-- `.obj` accepts positive, one-based `v` positions and `f` faces, including
-  slash-form references. Faces are fan-triangulated. Normals, UVs, groups,
-  materials, smoothing, and other directives are ignored; every face is soft
-  blue and receives no outline. Negative OBJ indices are not supported, and a
-  missing/unparseable vertex component currently defaults to zero.
+- `.obj` accepts positive one-based and relative negative `v` position indices
+  in `f` faces, including slash-form references. Faces are fan-triangulated.
+  Normals, UVs, groups, materials, smoothing, and other directives are ignored;
+  every face is soft blue and receives no outline. Malformed coordinates or
+  face indices and references outside the positions defined so far are errors.
 
-Any read, UTF-8, extension, parse, mesh, or OBJ-index failure leaves the prior
-triangle cache untouched and returns `ok: false`. The current loader does not
-produce non-fatal warnings, though the reply reserves that vector. The actor
-and parser are in
-[`aether-kit-commons/src/mesh/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-commons/src/mesh/mod.rs) and
-[`mesh/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-commons/src/mesh/kinds.rs); the shared
-reply type is in
+Any read, DSL UTF-8, extension, parse, mesh, or OBJ-index failure leaves the
+prior triangle cache untouched and returns `ok: false`. The current loader does
+not produce non-fatal warnings, though the reply reserves that vector. The
+actor and request kind are in
+[`aether-kit-commons/src/mesh/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-commons/src/mesh/mod.rs),
+[`mesh/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-commons/src/mesh/kinds.rs).
+The shared importer is in
+[`aether-mesh/src/obj.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-mesh/src/obj.rs);
+the shared reply type is in
 [`aether-kinds/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kinds/src/lib.rs).
 
 ## Geometry invariants and failure modes

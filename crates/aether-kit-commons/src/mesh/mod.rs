@@ -9,10 +9,10 @@
 //!   Filled triangles use the DSL's `:color N` palette indices; the
 //!   polygon-edge outlines (slate) come along for free since the n-gon
 //!   source is in hand at load time.
-//! - `.obj` → minimal Wavefront parser (fan-style triangulation). OBJ
-//!   doesn't carry per-face color, so triangles default to soft blue;
-//!   no wireframe is emitted because the n-gon source is already
-//!   tessellated by the time it arrives.
+//! - `.obj` → `aether-mesh`'s indexed Wavefront importer (fan-style
+//!   triangulation). OBJ doesn't carry per-face color, so triangles default
+//!   to soft blue; no wireframe is emitted because the n-gon source is
+//!   already tessellated by the time it arrives.
 //!
 //! This runtime supersedes the old `aether-mesh-editor-component`
 //! (its inline `set_text` path is gone — write the DSL to a file via
@@ -154,9 +154,9 @@ impl WasmActor for MeshViewer {
 
     /// Consumes the substrate's I/O reply. Dispatches on the request
     /// context path's extension and replaces the cached triangle list on
-    /// success. Any failure (read error, non-utf8, parse error,
-    /// unknown extension) leaves the previous cache intact, with a
-    /// warn log explaining the failure. Issue 964: after computing the
+    /// success. Any failure (read error, invalid DSL UTF-8, malformed mesh,
+    /// unknown extension) leaves the previous cache intact, with a warn log
+    /// explaining the failure. Issue 964: after computing the
     /// outcome, replies `aether.mesh.load_result` to the originator of
     /// the `aether.kit.mesh.load` request (carried in the request context),
     /// echoing the request's `namespace` + `path` and carrying the structured
@@ -216,18 +216,20 @@ impl MeshViewer {
     /// structured outcome for the `MeshLoadResult` reply.
     fn load_bytes(&mut self, path: &str, bytes: &[u8]) -> LoadOutcome {
         let lower = path.rsplit('.').next().map(str::to_ascii_lowercase);
-        let Ok(text) = str::from_utf8(bytes) else {
-            tracing::warn!(
-                target: "aether_kit_commons",
-                path = %path,
-                "mesh file is not valid UTF-8; keeping prior mesh",
-            );
-            return LoadOutcome::failed("mesh file is not valid UTF-8".to_string());
-        };
         if lower.as_deref() == Some("dsl") {
-            self.try_replace_dsl(text)
+            str::from_utf8(bytes).map_or_else(
+                |_| {
+                    tracing::warn!(
+                        target: "aether_kit_commons",
+                        path = %path,
+                        "mesh file is not valid UTF-8; keeping prior mesh",
+                    );
+                    LoadOutcome::failed("mesh file is not valid UTF-8".to_string())
+                },
+                |text| self.try_replace_dsl(text),
+            )
         } else if lower.as_deref() == Some("obj") {
-            self.try_replace_obj(text)
+            self.try_replace_obj(bytes)
         } else {
             tracing::warn!(
                 target: "aether_kit_commons",
@@ -299,8 +301,8 @@ impl MeshViewer {
         LoadOutcome::ok()
     }
 
-    fn try_replace_obj(&mut self, obj: &str) -> LoadOutcome {
-        match parse_obj(obj) {
+    fn try_replace_obj(&mut self, obj: &[u8]) -> LoadOutcome {
+        match draw_obj(obj) {
             Ok(tris) => {
                 tracing::info!(
                     target: "aether_kit_commons",
@@ -313,10 +315,10 @@ impl MeshViewer {
             Err(error) => {
                 tracing::warn!(
                     target: "aether_kit_commons",
-                    error = ?error,
+                    error = %error,
                     "OBJ parse failed; keeping prior mesh",
                 );
-                LoadOutcome::failed(format!("OBJ parse failed: {error:?}"))
+                LoadOutcome::failed(format!("OBJ parse failed: {error}"))
             }
         }
     }
@@ -370,72 +372,14 @@ fn to_draw_triangle_rgb(tri: [Vec3; 3], color: Rgb) -> DrawTriangle {
     }
 }
 
-#[derive(Debug)]
-pub enum ObjParseError {
-    VertexIndexOutOfRange { index: usize, defined: usize },
-    DegenerateFace,
-}
+/// Convert the renderer-independent indexed import at the upload boundary.
+fn draw_obj(bytes: &[u8]) -> Result<Vec<DrawTriangle>, aether_mesh::ObjImportError> {
+    let aether_mesh::IndexedMesh { positions, faces } = aether_mesh::parse_obj(bytes)?;
 
-/// Minimal OBJ parser. Supports `v X Y Z` and `f V1 V2 V3 [V4 ...]`
-/// (n-gons triangulated fan-style). Ignores normals (`vn`), texcoords
-/// (`vt`), groups (`g`), materials (`mtllib`/`usemtl`), smoothing
-/// (`s`), and comments (`#`). Face refs may be `v`, `v/vt`, `v//vn`,
-/// or `v/vt/vn` — only the position index is used.
-pub fn parse_obj(text: &str) -> Result<Vec<DrawTriangle>, ObjParseError> {
-    let mut vertices: Vec<[f32; 3]> = Vec::new();
-    let mut triangles: Vec<DrawTriangle> = Vec::new();
-    let default_color = OBJ_DEFAULT_COLOR;
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let mut parts = trimmed.split_whitespace();
-        let Some(head) = parts.next() else {
-            continue;
-        };
-        match head {
-            "v" => {
-                let x: f32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                let y: f32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                let z: f32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                vertices.push([x, y, z]);
-            }
-            "f" => {
-                let indices: Vec<usize> =
-                    parts.filter_map(|tok| tok.split('/').next()).filter_map(|n| n.parse::<usize>().ok()).collect();
-                if indices.len() < 3 {
-                    return Err(ObjParseError::DegenerateFace);
-                }
-                for i in 1..indices.len() - 1 {
-                    let a = obj_idx(indices[0], vertices.len())?;
-                    let b = obj_idx(indices[i], vertices.len())?;
-                    let c = obj_idx(indices[i + 1], vertices.len())?;
-                    let va = vertices[a];
-                    let vb = vertices[b];
-                    let vc = vertices[c];
-                    triangles.push(DrawTriangle {
-                        verts: [
-                            Vertex { x: va[0], y: va[1], z: va[2], color: default_color },
-                            Vertex { x: vb[0], y: vb[1], z: vb[2], color: default_color },
-                            Vertex { x: vc[0], y: vc[1], z: vc[2], color: default_color },
-                        ],
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(triangles)
-}
-
-fn obj_idx(one_based: usize, count: usize) -> Result<usize, ObjParseError> {
-    if one_based == 0 || one_based > count {
-        Err(ObjParseError::VertexIndexOutOfRange { index: one_based, defined: count })
-    } else {
-        Ok(one_based - 1)
-    }
+    Ok(faces
+        .into_iter()
+        .map(|face| to_draw_triangle_rgb(face.map(|index| positions[index as usize]), OBJ_DEFAULT_COLOR))
+        .collect())
 }
 
 #[cfg(test)]
@@ -451,7 +395,7 @@ mod tests {
             v 0 1 0\n\
             f 1 2 3\n\
             f 1 3 4\n";
-        let tris = parse_obj(obj).expect("test setup: well-formed OBJ parses");
+        let tris = draw_obj(obj.as_bytes()).expect("test setup: well-formed OBJ parses");
         assert_eq!(tris.len(), 2);
     }
 
@@ -463,7 +407,7 @@ mod tests {
             v 1 1 0\n\
             v 0 1 0\n\
             f 1 2 3 4\n";
-        let tris = parse_obj(obj).expect("test setup: quad OBJ parses");
+        let tris = draw_obj(obj.as_bytes()).expect("test setup: quad OBJ parses");
         assert_eq!(tris.len(), 2, "quad should triangulate to 2 triangles");
     }
 
@@ -480,7 +424,7 @@ mod tests {
             s off\n\
             g group_name\n\
             f 1 2 3\n";
-        let tris = parse_obj(obj).expect("test setup: OBJ with unknown directives still parses faces");
+        let tris = draw_obj(obj.as_bytes()).expect("test setup: OBJ with unknown directives still parses faces");
         assert_eq!(tris.len(), 1);
     }
 
@@ -491,7 +435,7 @@ mod tests {
             v 1 0 0\n\
             v 1 1 0\n\
             f 1/1/1 2/2/1 3/3/1\n";
-        let tris = parse_obj(obj).expect("test setup: OBJ with v/vt/vn refs parses");
+        let tris = draw_obj(obj.as_bytes()).expect("test setup: OBJ with v/vt/vn refs parses");
         assert_eq!(tris.len(), 1);
     }
 
@@ -501,6 +445,6 @@ mod tests {
             v 0 0 0\n\
             v 1 0 0\n\
             f 1 2 99\n";
-        assert!(parse_obj(obj).is_err());
+        assert!(draw_obj(obj.as_bytes()).is_err());
     }
 }

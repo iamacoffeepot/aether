@@ -1,10 +1,11 @@
-//! Mesh DSL parser, typed AST, mesher, and OBJ exporter for the
+//! Mesh DSL parser, typed AST, mesher, and minimal OBJ import/export for the
 //! primitive-composition format defined by ADR-0026 and ADR-0051.
 //!
 //! Library-only (per ADR-0053): produces triangles, doesn't render. The
 //! `aether-mesh-viewer` runtime consumes this crate to mesh DSL text
 //! loaded from disk; the `dsl_to_obj` example converts a `.dsl` file to
-//! Wavefront OBJ for inspection in any external viewer.
+//! Wavefront OBJ for inspection in any external viewer. The indexed OBJ
+//! importer is also shared by the engine's triangle consumers.
 //!
 //! Boolean composition (`union` / `intersection` / `difference`) was
 //! retired from the v1 DSL by ADR-0062. The full prior implementation
@@ -31,7 +32,7 @@ pub(crate) mod test_helpers;
 
 pub use ast::{Axis, Node};
 pub use mesh::{MeshError, Triangle, mesh};
-pub use obj::to_obj;
+pub use obj::{IndexedMesh, ObjImportError, parse_obj, to_obj};
 pub use parse::{ParseError, parse};
 pub use point::Point3;
 pub use polygon::{Polygon, mesh_polygons, tessellate_polygon};

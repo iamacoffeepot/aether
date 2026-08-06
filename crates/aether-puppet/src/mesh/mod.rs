@@ -15,7 +15,6 @@
 //! answered by the BVH.
 
 pub mod bvh;
-pub mod obj;
 
 use aether_math::Vec3;
 
@@ -80,7 +79,7 @@ impl Mesh {
     /// Build from OBJ bytes. No path: a wasm guest has no filesystem, so
     /// the bytes arrive by mail from `aether.fs` and the caller owns them.
     pub fn from_obj_bytes(bytes: &[u8], normal_relaxation: usize) -> Option<Self> {
-        let raw = obj::parse(bytes);
+        let raw = aether_mesh::parse_obj(bytes).ok()?;
 
         (!raw.faces.is_empty()).then(|| Self::build(raw.positions, raw.faces, normal_relaxation))
     }
@@ -131,13 +130,12 @@ impl Mesh {
     }
 
     fn build(positions: Vec<Vec3>, faces: Vec<[u32; 3]>, normal_relaxation: usize) -> Self {
-        let raw = obj::Raw { positions, faces };
-        let mut normals = vertex_normals(&raw.positions, &raw.faces);
+        let mut normals = vertex_normals(&positions, &faces);
         for _ in 0..normal_relaxation {
-            normals = relax(&normals, &raw.faces);
+            normals = relax(&normals, &faces);
         }
 
-        let (min, max) = bounds_of(&raw.positions);
+        let (min, max) = bounds_of(&positions);
 
         // Orientation check: for a closed surface the outward normal
         // agrees with the direction from the centroid. Near +1 is outward,
@@ -145,13 +143,13 @@ impl Mesh {
         // every view-dependent feature will dissolve.
         let centre = (min + max) * 0.5;
         let agreement: f32 =
-            raw.positions.iter().zip(&normals).map(|(&p, &n)| (p - centre).normalize_or(n).dot(n)).sum::<f32>()
-                / raw.positions.len() as f32;
+            positions.iter().zip(&normals).map(|(&p, &n)| (p - centre).normalize_or(n).dot(n)).sum::<f32>()
+                / positions.len() as f32;
         tracing::debug!(target: "aether_puppet", agreement, "normal orientation");
 
-        let bvh = Some(Bvh::build(&raw.positions, &raw.faces));
-        let mean_edge = mean_edge_length(&raw.positions, &raw.faces);
-        Self { positions: raw.positions, faces: raw.faces, normals, min, max, bvh, mean_edge }
+        let bvh = Some(Bvh::build(&positions, &faces));
+        let mean_edge = mean_edge_length(&positions, &faces);
+        Self { positions, faces, normals, min, max, bvh, mean_edge }
     }
 
     pub fn centre(&self) -> Vec3 {
