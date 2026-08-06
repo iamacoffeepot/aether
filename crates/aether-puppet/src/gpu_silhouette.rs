@@ -5,16 +5,16 @@
 //! it poses and classifies resident vertices, marches faces, pairs canonical
 //! edge endpoints, compacts the result in the oracle's order, and consumes
 //! the resulting vertex/index/control buffers through indexed-indirect draw.
-//! A posed-subject depth prepass shares its private depth slot with that draw,
-//! so the candidate obeys the same foreground occlusion as the established
-//! stroke visibility program instead of surviving on a color-only overlay.
+//! A posed-subject depth prepass feeds centreline visibility classification
+//! during compaction, so hidden segments leave before the depth-free ribbon
+//! draw and visible segments keep both rails of the established pen.
 
 use std::mem::{self, size_of};
 
 use aether_math::{Mat4, Rgba, Vec3};
 use aether_render::{
     ComputeBufferBinding, ComputePass, CreateGeometry, CreateTexture, DestroyTexture, DrawMaterialTextured, DrawPass,
-    GeometryBuffer, GeometrySlotSpec, MaterialRect, MaterialTexturedRect, OutputSlot, PassLoad, PassStage,
+    GeometryBuffer, GeometrySlotSpec, InputSlot, MaterialRect, MaterialTexturedRect, OutputSlot, PassLoad, PassStage,
     ProgramDestroy, ProgramDispatch, ProgramPass, ProgramRegister, QuadBlend, SlotExtent, SlotSpec, StorageAccess,
     TextureFormat, TextureSampling, TextureUsage, UpdateGeometry, VertexAttribute, VertexFormat,
 };
@@ -88,6 +88,7 @@ pub struct GpuSilhouette {
     canvas: Option<(u32, u32)>,
     sized: Option<(u32, u32)>,
     counts: Option<[u32; 3]>,
+    surface_bias: f32,
     registering_counts: Option<[u32; 3]>,
     registered_counts: Option<[u32; 3]>,
     program: Resident,
@@ -148,6 +149,7 @@ impl GpuSilhouette {
         }
 
         self.counts = Some(counts);
+        self.surface_bias = mesh.surface_bias();
         self.staged = Some(geometries(mesh, skin, &topology, capacity)?);
         self.revision = self.revision.wrapping_add(1);
         self.dispatched = None;
@@ -294,7 +296,7 @@ impl GpuSilhouette {
             program_id,
             bindings: vec![texture_id],
             geometries: self.geometries.ids.clone(),
-            uniforms: uniforms(standing, counts, self.exceptional_overlay),
+            uniforms: uniforms(standing, counts, self.surface_bias, self.exceptional_overlay),
         }]
     }
 
@@ -380,6 +382,18 @@ fn binding(geometry: u32, buffer: GeometryBuffer) -> ComputeBufferBinding {
 
 fn program(counts: [u32; 3]) -> ProgramRegister {
     let groups = |count: u32| count.saturating_add(63) / 64;
+    let mut compact = compute(
+        "cs_compact",
+        vec![
+            binding(2, GeometryBuffer::Vertices),
+            binding(3, GeometryBuffer::Vertices),
+            binding(3, GeometryBuffer::Indices),
+            binding(3, GeometryBuffer::DrawIndexedIndirect),
+        ],
+        1,
+    );
+    compact.inputs = vec![InputSlot::Transient { index: 0 }];
+
     ProgramRegister {
         wgsl: MODULE.to_owned(),
         bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
@@ -420,21 +434,12 @@ fn program(counts: [u32; 3]) -> ProgramRegister {
                 vec![binding(1, GeometryBuffer::Vertices), binding(2, GeometryBuffer::Vertices)],
                 groups(counts[2]),
             ),
-            compute(
-                "cs_compact",
-                vec![
-                    binding(2, GeometryBuffer::Vertices),
-                    binding(3, GeometryBuffer::Vertices),
-                    binding(3, GeometryBuffer::Indices),
-                    binding(3, GeometryBuffer::DrawIndexedIndirect),
-                ],
-                1,
-            ),
+            compact,
             ProgramPass {
                 stage: PassStage::DrawIndexedIndirect(DrawPass {
                     vertex_entry_point: "vs_silhouette".to_owned(),
                     geometry: 3,
-                    depth: Some(0),
+                    depth: None,
                     load: PassLoad::Clear,
                 }),
                 entry_point: "fs_silhouette".to_owned(),
@@ -498,8 +503,8 @@ fn geometries(
 
     let scratch_words = u64::from(8u32)
         + u64::from(capacity.vertices) * 8
-        + u64::from(capacity.faces) * 16
-        + u64::from(capacity.max_points) * 4;
+        + u64::from(capacity.faces) * 24
+        + u64::from(capacity.max_points) * 8;
     let scratch_bytes = usize::try_from(scratch_words.checked_mul(4).ok_or("scratch byte count overflow")?)
         .map_err(|_| "scratch byte count exceeds usize")?;
     let output_vertices = usize::try_from(u64::from(capacity.max_points.max(1)) * 2 * 16)
@@ -520,7 +525,7 @@ fn geometries(
     ])
 }
 
-fn uniforms(standing: &Standing, counts: [u32; 3], exceptional_overlay: bool) -> Vec<u8> {
+fn uniforms(standing: &Standing, counts: [u32; 3], surface_bias: f32, exceptional_overlay: bool) -> Vec<u8> {
     let mut bytes = vec![0u8; 480];
     for (lane, value) in bytes[..64].chunks_exact_mut(4).zip(standing.view_proj.to_cols_array()) {
         lane.copy_from_slice(&value.to_le_bytes());
@@ -529,9 +534,10 @@ fn uniforms(standing: &Standing, counts: [u32; 3], exceptional_overlay: bool) ->
         lane.copy_from_slice(&value.to_le_bytes());
     }
     bytes[76..80].copy_from_slice(&u32::from(exceptional_overlay).to_le_bytes());
-    for (lane, value) in bytes[80..96].chunks_exact_mut(4).zip([counts[0], counts[1], counts[2], 0]) {
+    for (lane, value) in bytes[80..92].chunks_exact_mut(4).zip(counts) {
         lane.copy_from_slice(&value.to_le_bytes());
     }
+    bytes[92..96].copy_from_slice(&surface_bias.to_le_bytes());
     for (lane, value) in bytes[96..].chunks_exact_mut(4).zip(standing.bones) {
         lane.copy_from_slice(&value.to_le_bytes());
     }
@@ -542,9 +548,12 @@ fn uniforms(standing: &Standing, counts: [u32; 3], exceptional_overlay: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::{PI, TAU};
+    use std::fmt::Write as _;
+
     use aether_harness_substrate::{HarnessOp, SubstrateHarness};
     use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter};
-    use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png};
+    use aether_harness_substrate_capture::visual::{Image, background_top_left, coverage, decode_png};
     use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
     use aether_kinds::QuadSpace;
     use aether_render::{
@@ -555,7 +564,7 @@ mod tests {
     use crate::deform::bone_uniform;
 
     const TRIANGLE: &[u8] = b"v -1 -1 0\nv 1 -1 0\nv 0 1 0\nf 1 2 3\n";
-    const OCCLUDED_CUBE: &[u8] = br"
+    const REAR_CUBE: &str = r"
 v -1 -1 -1
 v 1 -1 -1
 v 1 1 -1
@@ -564,10 +573,6 @@ v -1 -1 1
 v 1 -1 1
 v 1 1 1
 v -1 1 1
-v -1.25 -1.25 2
-v 1.25 -1.25 2
-v 1.25 1.25 2
-v -1.25 1.25 2
 f 1 3 2
 f 1 4 3
 f 5 6 7
@@ -580,9 +585,75 @@ f 3 4 8
 f 3 8 7
 f 4 1 5
 f 4 5 8
-f 9 10 11
-f 9 11 12
 ";
+
+    fn occluded_cube() -> Vec<u8> {
+        const GRID: u32 = 16;
+        const HALF_EXTENT: f32 = 2.0;
+
+        let mut obj = REAR_CUBE.to_owned();
+        for y in 0..=GRID {
+            for x in 0..=GRID {
+                let px = -HALF_EXTENT + 2.0 * HALF_EXTENT * x as f32 / GRID as f32;
+                let py = -HALF_EXTENT + 2.0 * HALF_EXTENT * y as f32 / GRID as f32;
+                writeln!(obj, "v {px} {py} 2").expect("write front-occluder vertex");
+            }
+        }
+        for y in 0..GRID {
+            for x in 0..GRID {
+                let a = 9 + y * (GRID + 1) + x;
+                let b = a + 1;
+                let d = a + GRID + 1;
+                let c = d + 1;
+                writeln!(obj, "f {a} {b} {c}\nf {a} {c} {d}").expect("write front-occluder faces");
+            }
+        }
+
+        obj.into_bytes()
+    }
+
+    fn visible_sphere() -> Vec<u8> {
+        const RINGS: u32 = 24;
+        const SEGMENTS: u32 = 64;
+
+        let mut obj = String::from("v 0 0 1\n");
+        for ring in 1..RINGS {
+            let latitude = PI * ring as f32 / RINGS as f32;
+            let radius = latitude.sin();
+            let z = latitude.cos();
+            for segment in 0..SEGMENTS {
+                let longitude = TAU * segment as f32 / SEGMENTS as f32;
+                writeln!(obj, "v {} {} {z}", radius * longitude.cos(), radius * longitude.sin())
+                    .expect("write sphere ring vertex");
+            }
+        }
+        writeln!(obj, "v 0 0 -1").expect("write sphere bottom vertex");
+
+        for segment in 0..SEGMENTS {
+            let next = (segment + 1) % SEGMENTS;
+            writeln!(obj, "f 1 {} {}", 2 + segment, 2 + next).expect("write sphere top faces");
+        }
+        for ring in 0..RINGS - 2 {
+            let upper = 2 + ring * SEGMENTS;
+            let lower = upper + SEGMENTS;
+            for segment in 0..SEGMENTS {
+                let next = (segment + 1) % SEGMENTS;
+                let a = upper + segment;
+                let b = upper + next;
+                let c = lower + segment;
+                let d = lower + next;
+                writeln!(obj, "f {a} {c} {d}\nf {a} {d} {b}").expect("write sphere band faces");
+            }
+        }
+        let bottom = 2 + (RINGS - 1) * SEGMENTS;
+        let last = bottom - SEGMENTS;
+        for segment in 0..SEGMENTS {
+            let next = (segment + 1) % SEGMENTS;
+            writeln!(obj, "f {bottom} {} {}", last + next, last + segment).expect("write sphere bottom faces");
+        }
+
+        obj.into_bytes()
+    }
 
     fn mesh() -> Mesh {
         Mesh::from_obj_bytes(TRIANGLE, 0).expect("triangle parses")
@@ -605,8 +676,9 @@ f 9 11 12
         assert!(matches!(register.passes[0].stage, PassStage::Draw(DrawPass { geometry: 0, depth: Some(0), .. })));
         assert!(matches!(
             register.passes[5].stage,
-            PassStage::DrawIndexedIndirect(DrawPass { geometry: 3, depth: Some(0), .. })
+            PassStage::DrawIndexedIndirect(DrawPass { geometry: 3, depth: None, .. })
         ));
+        assert_eq!(register.passes[4].inputs, vec![InputSlot::Transient { index: 0 }]);
         assert_eq!(register.depth_transients, vec![SlotExtent::Full]);
     }
 
@@ -619,16 +691,17 @@ f 9 11 12
         assert_eq!(staged[0].vertices.len(), mesh.positions.len() * 64);
         assert_eq!(
             staged[2].vertices.len(),
-            (8 + capacity.vertices * 8 + capacity.faces * 16 + capacity.max_points * 4) as usize * 4
+            (8 + capacity.vertices * 8 + capacity.faces * 24 + capacity.max_points * 8) as usize * 4
         );
         assert_eq!(staged[3].vertices.len(), capacity.max_points as usize * 2 * 16);
         assert_eq!(staged[3].indices.len(), capacity.faces as usize * 6 * 4);
 
         let standing = Standing { view_proj: Mat4::IDENTITY, eye: Vec3::new(1.0, 2.0, 3.0), bones: bone_uniform(&[]) };
-        let encoded = uniforms(&standing, [3, 1, 3], true);
+        let encoded = uniforms(&standing, [3, 1, 3], 0.125, true);
         assert_eq!(encoded.len(), 480);
         assert_eq!(u32::from_le_bytes(encoded[76..80].try_into().expect("mode word")), 1);
         assert_eq!(u32::from_le_bytes(encoded[80..84].try_into().expect("vertex count")), 3);
+        assert_eq!(f32::from_le_bytes(encoded[92..96].try_into().expect("surface bias")), 0.125);
     }
 
     #[test]
@@ -705,6 +778,11 @@ f 9 11 12
         }
     }
 
+    fn pixel_differs(image: &Image, background: [u8; 3], x: u32, y: u32, tolerance: u8) -> bool {
+        let at = ((y * image.width + x) * 4) as usize;
+        image.rgba[at..at + 3].iter().zip(background).any(|(&value, background)| value.abs_diff(background) > tolerance)
+    }
+
     #[test]
     fn resident_candidate_is_deterministic_bounded_occluded_timed_and_recovers_with_the_device() {
         if !has_wgpu_adapter() {
@@ -739,7 +817,7 @@ f 9 11 12
             program_id,
             bindings: vec![output],
             geometries,
-            uniforms: uniforms(&standing, counts, false),
+            uniforms: uniforms(&standing, counts, mesh.surface_bias(), false),
         };
         let capture = |harness: &mut SubstrateHarness, label, mail: ProgramDispatch| {
             decode_png(
@@ -807,11 +885,85 @@ f 9 11 12
             }
         }
 
+        assert_visible_silhouette_full_width(&mut harness);
         assert_rear_silhouette_occluded(&mut harness);
     }
 
+    fn assert_visible_silhouette_full_width(harness: &mut SubstrateHarness) {
+        let mesh = Mesh::from_obj_bytes(&visible_sphere(), 0).expect("visible sphere parses");
+        let topology = CanonicalTopology::of(&mesh).expect("visible sphere topology");
+        let capacity = DerivationCapacity::of(&mesh, &topology).expect("visible sphere capacity");
+        let staged = geometries(&mesh, None, &topology, capacity).expect("stage visible sphere");
+        let counts = [capacity.vertices, capacity.faces, capacity.edges];
+        let eye = Vec3::new(0.0, 0.0, 100.0);
+        let standing = Standing {
+            view_proj: Mat4::orthographic_rh(-1.25, 1.25, -1.25, 1.25, 1.0, 200.0)
+                * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y),
+            eye,
+            bones: bone_uniform(&[]),
+        };
+        let geometry_ids = staged
+            .iter()
+            .enumerate()
+            .map(|(at, geometry)| {
+                create_geometry(
+                    harness,
+                    ["sphere_source", "sphere_topology", "sphere_scratch", "sphere_output"][at],
+                    geometry,
+                )
+            })
+            .collect::<Vec<_>>();
+        let output = create_texture(harness);
+        let program_id = register(harness, counts);
+        let dispatch = ProgramDispatch {
+            program_id,
+            bindings: vec![output],
+            geometries: geometry_ids,
+            uniforms: uniforms(&standing, counts, mesh.surface_bias(), false),
+        };
+        let capture = decode_png(
+            harness
+                .execute(vec![(
+                    "full_width",
+                    HarnessOp::capture_with_mails(
+                        vec![envelope("aether.render", &dispatch), envelope("aether.render", &overlay(output))],
+                        Vec::new(),
+                    ),
+                )])
+                .expect("capture full-width silhouette")
+                .captured("full_width")
+                .expect("full-width capture ran"),
+        )
+        .expect("decode full-width silhouette");
+        let background = background_top_left(&capture);
+        let centreline_radius = capture.width as f32 * 0.4;
+        let mut inner_rail_pixels = 0;
+        let mut outer_rail_pixels = 0;
+        for y in 0..capture.height {
+            for x in 0..capture.width {
+                if pixel_differs(&capture, background, x, y, 5) {
+                    let dx = x as f32 + 0.5 - capture.width as f32 * 0.5;
+                    let dy = y as f32 + 0.5 - capture.height as f32 * 0.5;
+                    let radius = dx.hypot(dy);
+                    inner_rail_pixels += usize::from(radius < centreline_radius - 0.6);
+                    outer_rail_pixels += usize::from(radius > centreline_radius + 0.6);
+                }
+            }
+        }
+
+        // The unit sphere's centreline projects to radius 25.6. Shared
+        // fragment depth erases every pixel more than 0.6 px inward while
+        // retaining the outward half. Requiring substantial coverage on
+        // both sides therefore proves the final depth-free draw retains the
+        // full symmetric ribbon rather than a clipped single rail.
+        assert!(
+            inner_rail_pixels >= 100 && outer_rail_pixels >= 100,
+            "visible silhouette must cover both rails, got {inner_rail_pixels} inner and {outer_rail_pixels} outer pixels",
+        );
+    }
+
     fn assert_rear_silhouette_occluded(harness: &mut SubstrateHarness) {
-        let mesh = Mesh::from_obj_bytes(OCCLUDED_CUBE, 0).expect("occluded cube parses");
+        let mesh = Mesh::from_obj_bytes(&occluded_cube(), 0).expect("occluded cube parses");
         let topology = CanonicalTopology::of(&mesh).expect("occluded cube topology");
         let capacity = DerivationCapacity::of(&mesh, &topology).expect("occluded cube capacity");
         let staged = geometries(&mesh, None, &topology, capacity).expect("stage occluded cube");
@@ -835,7 +987,7 @@ f 9 11 12
             program_id,
             bindings: vec![output],
             geometries: geometry_ids,
-            uniforms: uniforms(&standing, counts, false),
+            uniforms: uniforms(&standing, counts, mesh.surface_bias(), false),
         };
         let capture = decode_png(
             harness
@@ -852,9 +1004,10 @@ f 9 11 12
         )
         .expect("decode occluded candidate");
 
+        let rear_coverage = coverage(&capture, background_top_left(&capture), 5);
         assert!(
-            coverage(&capture, background_top_left(&capture), 5) < 0.0001,
-            "the front surface must hide the disconnected rear silhouette",
+            rear_coverage < 0.0001,
+            "the front surface must hide the disconnected rear silhouette, got {rear_coverage}",
         );
     }
 }

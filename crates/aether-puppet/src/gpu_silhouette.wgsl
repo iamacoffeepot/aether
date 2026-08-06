@@ -2,11 +2,13 @@ struct SilhouetteParams {
     view_proj: mat4x4<f32>,
     eye: vec3<f32>,
     mode: u32,
-    counts: vec4<u32>,
+    counts: vec3<u32>,
+    bias: f32,
     bones: array<vec4<f32>, 24>,
 }
 
 @group(0) @binding(0) var<uniform> params: SilhouetteParams;
+@group(1) @binding(0) var surface_depth: texture_2d<f32>;
 
 // Every compute entry point uses a prefix of the same raw-storage spelling.
 // The pass graph maps that prefix to the resident resource each stage needs.
@@ -17,8 +19,8 @@ struct SilhouetteParams {
 
 const VERTEX_WORDS: u32 = 16u;
 const POSED_WORDS: u32 = 8u;
-const SEGMENT_WORDS: u32 = 16u;
-const POINT_WORDS: u32 = 4u;
+const SEGMENT_WORDS: u32 = 24u;
+const POINT_WORDS: u32 = 8u;
 const SCRATCH_HEADER_WORDS: u32 = 8u;
 const TOPOLOGY_HEADER_WORDS: u32 = 8u;
 const EDGE_WORDS: u32 = 4u;
@@ -30,6 +32,7 @@ const MINIMUM_ANGULAR_LENGTH: f32 = 1.5 / REFERENCE_PIXELS_PER_RADIAN;
 const ANGULAR_HALF_WIDTH: f32 = 0.0007;
 const ANGULAR_WOBBLE: f32 = 0.8 / REFERENCE_PIXELS_PER_RADIAN;
 const PRESSURE_RAMP: f32 = 0.0064;
+const RAY_MIN: f32 = 1.0e-4;
 
 fn load0(at: u32) -> f32 {
     return bitcast<f32>(storage0[at]);
@@ -99,8 +102,8 @@ fn bone_direction(bone: u32, v: vec3<f32>) -> vec3<f32> {
 // rasterized once into a private depth slot. Dense weights stay in bone-table
 // order, so this accumulation is deliberately the same one
 // `cs_pose_classify` performs below. The color transient records distance like
-// the established stroke-visibility prepass, while the shared depth slot is
-// what the final indirect draw consumes.
+// the established stroke-visibility prepass, and compaction samples that
+// distance at each centreline before the depth-free final draw.
 struct SubjectVertex {
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
@@ -191,6 +194,11 @@ fn posed_position(vertex: u32) -> vec3<f32> {
     return vec3<f32>(load2(at), load2(at + 1u), load2(at + 2u));
 }
 
+fn posed_normal(vertex: u32) -> vec3<f32> {
+    let at = posed_offset(vertex);
+    return vec3<f32>(load2(at + 4u), load2(at + 5u), load2(at + 6u));
+}
+
 fn facing(vertex: u32) -> f32 {
     return load2(posed_offset(vertex) + 7u);
 }
@@ -207,7 +215,12 @@ fn local_edge(a: u32, b: u32) -> u32 {
     return 2u;
 }
 
-fn crossing(corners: vec3<u32>, i: u32, j: u32) -> vec3<f32> {
+struct Crossing {
+    position: vec3<f32>,
+    normal: vec3<f32>,
+}
+
+fn crossing(corners: vec3<u32>, i: u32, j: u32) -> Crossing {
     var low_corner = i;
     var high_corner = j;
     if corners[i] > corners[j] {
@@ -222,15 +235,25 @@ fn crossing(corners: vec3<u32>, i: u32, j: u32) -> vec3<f32> {
     if abs(span) >= 1.0e-20 {
         t = -low_value / span;
     }
-    return mix(posed_position(low), posed_position(high), t);
+    let blended_normal = mix(posed_normal(low), posed_normal(high), t);
+    var normal = posed_normal(low);
+    if length(blended_normal) >= 1.0e-12 {
+        normal = normalize(blended_normal);
+    }
+
+    return Crossing(mix(posed_position(low), posed_position(high), t), normal);
 }
 
-fn write_endpoint(base: u32, endpoint: u32, edge: u32, position: vec3<f32>) {
+fn write_endpoint(base: u32, endpoint: u32, edge: u32, crossing: Crossing) {
     storage2[base + 1u + endpoint] = edge;
-    let at = base + 4u + endpoint * 4u;
-    store2(at, position.x);
-    store2(at + 1u, position.y);
-    store2(at + 2u, position.z);
+    let position_at = base + 4u + endpoint * 4u;
+    store2(position_at, crossing.position.x);
+    store2(position_at + 1u, crossing.position.y);
+    store2(position_at + 2u, crossing.position.z);
+    let normal_at = base + 16u + endpoint * 4u;
+    store2(normal_at, crossing.normal.x);
+    store2(normal_at + 1u, crossing.normal.y);
+    store2(normal_at + 2u, crossing.normal.z);
 }
 
 @compute @workgroup_size(64)
@@ -335,11 +358,19 @@ fn endpoint_position(face: u32, endpoint: u32) -> vec3<f32> {
     return vec3<f32>(load0(at), load0(at + 1u), load0(at + 2u));
 }
 
-fn write_point(point: u32, position: vec3<f32>) {
+fn endpoint_normal(face: u32, endpoint: u32) -> vec3<f32> {
+    let at = segment_offset(face) + 16u + endpoint * 4u;
+    return vec3<f32>(load0(at), load0(at + 1u), load0(at + 2u));
+}
+
+fn write_point(point: u32, position: vec3<f32>, normal: vec3<f32>) {
     let at = point_offset(point);
     store0(at, position.x);
     store0(at + 1u, position.y);
     store0(at + 2u, position.z);
+    store0(at + 4u, normal.x);
+    store0(at + 5u, normal.y);
+    store0(at + 6u, normal.z);
 }
 
 fn point_position(point: u32) -> vec3<f32> {
@@ -347,10 +378,48 @@ fn point_position(point: u32) -> vec3<f32> {
     return vec3<f32>(load0(at), load0(at + 1u), load0(at + 2u));
 }
 
+fn point_normal(point: u32) -> vec3<f32> {
+    let at = point_offset(point);
+    return vec3<f32>(load0(at + 4u), load0(at + 5u), load0(at + 6u));
+}
+
+fn set_point_visible(point: u32, visible: bool) {
+    storage0[point_offset(point) + 3u] = select(0u, 1u, visible);
+}
+
+fn point_visible(point: u32) -> bool {
+    return storage0[point_offset(point) + 3u] != 0u;
+}
+
 fn swap_points(a: u32, b: u32) {
-    let held = point_position(a);
-    write_point(a, point_position(b));
-    write_point(b, held);
+    let held_position = point_position(a);
+    let held_normal = point_normal(a);
+    write_point(a, point_position(b), point_normal(b));
+    write_point(b, held_position, held_normal);
+}
+
+// The same nearest-surface comparison `sight.wgsl` uses, asked once per
+// derived centreline point rather than once per ribbon fragment. Hidden
+// points therefore remove whole segments while a visible point's two rails
+// remain a single indivisible pen mark.
+fn centreline_visible(position: vec3<f32>, normal: vec3<f32>) -> bool {
+    let lifted = position + normal * params.bias;
+    let clip = params.view_proj * vec4<f32>(lifted, 1.0);
+    if clip.w <= 0.0 {
+        return true;
+    }
+
+    let ndc = clip.xyz / clip.w;
+    if abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 {
+        return true;
+    }
+
+    let size = vec2<f32>(textureDimensions(surface_depth));
+    let page = (vec2<f32>(ndc.x, -ndc.y) * 0.5 + vec2<f32>(0.5, 0.5)) * size;
+    let at = vec2<i32>(clamp(page, vec2<f32>(0.0), size - vec2<f32>(1.0)));
+    let front = textureLoad(surface_depth, at, 0).r;
+
+    return !(front > 0.0 && front <= length(lifted - params.eye) - RAY_MIN);
 }
 
 fn wander(at: vec3<f32>) -> f32 {
@@ -396,9 +465,9 @@ fn cs_compact() {
         storage0[start_segment + 14u] = 1u;
         let first_point = points;
         var exceptional = false;
-        write_point(points, endpoint_position(start, 0u));
+        write_point(points, endpoint_position(start, 0u), endpoint_normal(start, 0u));
         points += 1u;
-        write_point(points, endpoint_position(start, 1u));
+        write_point(points, endpoint_position(start, 1u), endpoint_normal(start, 1u));
         points += 1u;
 
         var tail_face = start;
@@ -419,7 +488,7 @@ fn cs_compact() {
             }
             storage0[next_segment + 14u] = 1u;
             let far = next_endpoint ^ 1u;
-            write_point(points, endpoint_position(next_face, far));
+            write_point(points, endpoint_position(next_face, far), endpoint_normal(next_face, far));
             points += 1u;
             tail_face = next_face;
             tail_endpoint = far;
@@ -451,7 +520,7 @@ fn cs_compact() {
             }
             storage0[next_segment + 14u] = 1u;
             let far = next_endpoint ^ 1u;
-            write_point(points, endpoint_position(next_face, far));
+            write_point(points, endpoint_position(next_face, far), endpoint_normal(next_face, far));
             points += 1u;
             tail_face = next_face;
             tail_endpoint = far;
@@ -474,43 +543,79 @@ fn cs_compact() {
         }
         reference /= f32(curve_points);
 
-        var travelled = 0.0;
         for (var at = 0u; at < curve_points; at += 1u) {
             let point = first_point + at;
-            let position = point_position(point);
-            let before = point_position(first_point + select(0u, at - 1u, at > 0u));
-            let after = point_position(first_point + min(at + 1u, curve_points - 1u));
-            let to_eye = params.eye - position;
-            let depth = max(length(to_eye), 1.0e-4);
-            var across = cross(after - before, to_eye);
-            if length(across) < 1.0e-9 {
-                across = vec3<f32>(0.0);
-            } else {
-                across = normalize(across);
-            }
-            let centre = position + across * (wander(position) * ANGULAR_WOBBLE * depth);
-            let depth_weight = clamp(reference / depth, 0.82, 1.22);
-            let ramp = min(PRESSURE_RAMP, angular * 0.45);
-            var pressure = 1.0;
-            if ramp > 1.0e-6 {
-                let ends = clamp(min(travelled / ramp, (angular - travelled) / ramp), 0.0, 1.0);
-                pressure = 0.42 + 0.58 * sqrt(ends);
-            }
-            let offset = across * (ANGULAR_HALF_WIDTH * depth * depth_weight * pressure);
-            output_vertex(point * 2u, centre - offset, exceptional);
-            output_vertex(point * 2u + 1u, centre + offset, exceptional);
+            set_point_visible(point, centreline_visible(point_position(point), point_normal(point)));
+        }
 
-            if at + 1u < curve_points {
-                let next_left = point * 2u + 2u;
-                let next_right = point * 2u + 3u;
-                storage2[indices] = point * 2u;
-                storage2[indices + 1u] = next_left;
-                storage2[indices + 2u] = next_right;
-                storage2[indices + 3u] = point * 2u;
-                storage2[indices + 4u] = next_right;
-                storage2[indices + 5u] = point * 2u + 1u;
-                indices += 6u;
-                travelled += length(point_position(point + 1u) - position) / depth;
+        // Fold each contiguous visible run independently. Hidden points never
+        // contribute indices, so the final depth-free draw cannot leave one
+        // clipped rail behind; run-local pressure still tapers where the
+        // established visibility field would have ended the pen stroke.
+        var cursor = 0u;
+        while cursor < curve_points {
+            while cursor < curve_points && !point_visible(first_point + cursor) {
+                cursor += 1u;
+            }
+            if cursor >= curve_points {
+                break;
+            }
+            let run_first = cursor;
+            while cursor < curve_points && point_visible(first_point + cursor) {
+                cursor += 1u;
+            }
+            let run_end = cursor;
+            let run_points = run_end - run_first;
+            if run_points < 2u {
+                continue;
+            }
+
+            var run_angular = 0.0;
+            for (var at = run_first; at + 1u < run_end; at += 1u) {
+                let point = first_point + at;
+                let position = point_position(point);
+                let depth = max(length(position - params.eye), 1.0e-4);
+                run_angular += length(point_position(point + 1u) - position) / depth;
+            }
+
+            var travelled = 0.0;
+            for (var at = run_first; at < run_end; at += 1u) {
+                let point = first_point + at;
+                let position = point_position(point);
+                let before = point_position(first_point + select(run_first, at - 1u, at > run_first));
+                let after = point_position(first_point + min(at + 1u, run_end - 1u));
+                let to_eye = params.eye - position;
+                let depth = max(length(to_eye), 1.0e-4);
+                var across = cross(after - before, to_eye);
+                if length(across) < 1.0e-9 {
+                    across = vec3<f32>(0.0);
+                } else {
+                    across = normalize(across);
+                }
+                let centre = position + across * (wander(position) * ANGULAR_WOBBLE * depth);
+                let depth_weight = clamp(reference / depth, 0.82, 1.22);
+                let ramp = min(PRESSURE_RAMP, run_angular * 0.45);
+                var pressure = 1.0;
+                if ramp > 1.0e-6 {
+                    let ends = clamp(min(travelled / ramp, (run_angular - travelled) / ramp), 0.0, 1.0);
+                    pressure = 0.42 + 0.58 * sqrt(ends);
+                }
+                let offset = across * (ANGULAR_HALF_WIDTH * depth * depth_weight * pressure);
+                output_vertex(point * 2u, centre - offset, exceptional);
+                output_vertex(point * 2u + 1u, centre + offset, exceptional);
+
+                if at + 1u < run_end {
+                    let next_left = point * 2u + 2u;
+                    let next_right = point * 2u + 3u;
+                    storage2[indices] = point * 2u;
+                    storage2[indices + 1u] = next_left;
+                    storage2[indices + 2u] = next_right;
+                    storage2[indices + 3u] = point * 2u;
+                    storage2[indices + 4u] = next_right;
+                    storage2[indices + 5u] = point * 2u + 1u;
+                    indices += 6u;
+                    travelled += length(point_position(point + 1u) - position) / depth;
+                }
             }
         }
     }
