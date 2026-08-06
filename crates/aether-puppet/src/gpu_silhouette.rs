@@ -788,7 +788,7 @@ f 4 5 8
         if !has_wgpu_adapter() {
             return;
         }
-        let mesh = Mesh::from_obj_bytes(include_bytes!("../tests/fixtures/cube.obj"), 0).expect("cube parses");
+        let mesh = Mesh::from_obj_bytes(REAR_CUBE.as_bytes(), 0).expect("cube parses");
         let topology = CanonicalTopology::of(&mesh).expect("cube topology");
         let capacity = DerivationCapacity::of(&mesh, &topology).expect("cube capacity");
         let staged = geometries(&mesh, None, &topology, capacity).expect("stage cube");
