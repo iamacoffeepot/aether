@@ -101,7 +101,7 @@ use crate::extract::Settings;
 use crate::feature::{Curve3, Drawing, FeatureClass};
 use crate::math3::hash64;
 use crate::mesh::Mesh;
-use crate::{ribbon, weld};
+use crate::{ribbon, style, weld};
 
 /// The field's own WGSL: the prepass, point and curve rasterization, and
 /// the reach scan.
@@ -144,14 +144,30 @@ pub const GEOMETRY_COUNT: usize = 4;
 /// Doublings the reach scan runs, so it resolves any barrier within
 /// `2^REACH_STEPS - 1` points and saturates past it.
 ///
-/// Thirty-one points. The taper it feeds ramps over
-/// `style::pressure`'s `RAMP` of 0.0064 radians and is flat beyond, and
-/// a point of the shipped drawing is about 0.0014 radians of arc from
-/// the next (a 0.0074 mean edge at the framing's 5.4 distance) — so the
-/// ramp is under five points long and the window clears it six times
-/// over. Past the window every arc is far enough that the taper reads
-/// the same, which is what makes saturating honest rather than lossy.
-pub const REACH_STEPS: u32 = 5;
+/// Sized at the farthest interactive dolly rather than the initial framing.
+/// A point of the shipped drawing is separated from the next by a mean
+/// world-space edge of 0.0074, and [`style::RAMP`] is angular, so dollying
+/// away shrinks the arc each point contributes. The derived window is the
+/// first `2^steps - 1` points whose mean arc still spans the whole ramp at
+/// [`crate::MAX_DOLLY_DISTANCE`]. Past that window the taper is flat, which
+/// is what makes saturating honest rather than lossy.
+pub const REACH_STEPS: u32 = reach_steps_for_distance(crate::MAX_DOLLY_DISTANCE);
+
+/// Mean distance between neighbouring points in the shipped drawing.
+const MEAN_POINT_EDGE: f32 = 0.0074;
+
+/// Smallest doubling schedule whose point window covers the pressure ramp
+/// at `distance`.
+const fn reach_steps_for_distance(distance: f32) -> u32 {
+    let required_points = distance * style::RAMP / MEAN_POINT_EDGE;
+    let mut steps = 0;
+    loop {
+        if ((1u32 << steps) - 1) as f32 >= required_points {
+            return steps;
+        }
+        steps += 1;
+    }
+}
 
 /// Longest curve one sparse reduction invocation is allowed to walk,
 /// and so the longest [`layout`] admits.
@@ -1402,8 +1418,8 @@ mod tests {
     ///
     /// The strides are the scans' whole schedule. A blob that carried
     /// one window would compile, dispatch, and quietly run every
-    /// doubling at stride one — a reach scan that resolves five points
-    /// instead of thirty-one.
+    /// doubling at stride one — a reach scan that resolves six points
+    /// instead of sixty-three.
     #[test]
     fn every_scan_window_carries_its_own_stride() {
         let blob = SightUniforms {
@@ -1422,5 +1438,18 @@ mod tests {
             let stride = f32::from_le_bytes(blob[at..at + 4].try_into().expect("four bytes"));
             assert_eq!(stride, (1u32 << step) as f32, "window {step}");
         }
+    }
+
+    /// The scan window must cover every barrier whose angular distance can
+    /// still affect pressure, including at the farthest wheel dolly.
+    #[test]
+    fn the_reach_window_covers_the_ramp_at_the_far_dolly() {
+        let span = |steps| ((1u32 << steps) - 1) as f32 * MEAN_POINT_EDGE / crate::MAX_DOLLY_DISTANCE;
+
+        assert_eq!(reach_steps_for_distance(35.8), 5, "just inside the five-step boundary");
+        assert_eq!(reach_steps_for_distance(35.9), 6, "just outside the five-step boundary");
+        assert_eq!(REACH_STEPS, 6, "farthest dolly schedule");
+        assert!(span(REACH_STEPS - 1) < style::RAMP, "the old window falls short");
+        assert!(span(REACH_STEPS) >= style::RAMP, "the derived window covers the ramp");
     }
 }
