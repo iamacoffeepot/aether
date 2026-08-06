@@ -492,7 +492,7 @@ impl RigWeights {
     ///
     /// Only a `NumPy` 1.0 `<f4`, C-order array shaped exactly
     /// `(vertices, descriptor bones)` is accepted. A row with more than
-    /// [`INFLUENCES`] shares above [`MINIMUM_SHARE`] is refused rather than
+    /// [`INFLUENCES`] shares above `MINIMUM_SHARE` is refused rather than
     /// truncated.
     pub fn decode_npy(bytes: &[u8], vertices: usize, bones: usize) -> Result<Self, String> {
         let array = npy::parse(bytes).map_err(|error| format!("rig weights refused: {error}"))?;
