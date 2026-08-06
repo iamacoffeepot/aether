@@ -261,6 +261,7 @@ fn look(azimuth: f32) -> Look {
 ///
 /// ```text
 /// AETHER_CROSSFEED_DIR=/path/to/dir AETHER_PUPPET_GATE_PNG=/path/pinned.png \
+///     AETHER_PUPPET_HELD_PNG=/path/held.png \
 ///     AETHER_PUPPET_TURNED_PNG=/path/turned.png \
 ///     cargo test -p aether-puppet --release --test pace_instrument \
 ///     -- --ignored --nocapture
@@ -753,6 +754,11 @@ fn assert_the_develop_repeats(harness: &mut SubstrateHarness) {
         sheets[1].len(),
     );
     eprintln!("pace: two develops of the held view are byte-identical ({} bytes)", sheets[0].len());
+
+    if let Ok(path) = env::var("AETHER_PUPPET_HELD_PNG") {
+        fs::write(&path, &sheets[1]).expect("write the repeated held frame");
+        eprintln!("pace: wrote the repeated held frame to {path} ({} bytes)", sheets[1].len());
+    }
 }
 
 /// Write one frame out under the path `variable` names, or do nothing

@@ -98,10 +98,10 @@ use aether_kinds::QuadSpace;
 use aether_math::{Mat4, Rgba, Vec3};
 use aether_puppet::easel::program::sight::{self, Layout, SightUniforms, ToneUniforms};
 use aether_puppet::extract::{self, Settings};
-use aether_puppet::feature::{Curve3, Drawing, FeatureClass, SurfacePoint};
+use aether_puppet::feature::{Curve3, Drawing, FeatureClass, Pen, SurfacePoint};
 use aether_puppet::labels::Labels;
 use aether_puppet::mesh::Mesh;
-use aether_puppet::{Pose, anchor, chart, deform, ribbon, visibility};
+use aether_puppet::{Pose, anchor, chart, deform, ribbon, style, visibility};
 use aether_render::QuadBlend;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot, OutputSlot,
@@ -714,6 +714,39 @@ fn derive(curve: &Curve3, eye: Vec3, seen: &[bool]) -> Derived {
         (0..points).filter(|&at| seen[at] && (at > 0 && seen[at - 1] || at + 1 < points && seen[at + 1])).count();
 
     Derived { reach, coverage: kept as f32 / points as f32 }
+}
+
+/// A hidden point one texel beyond the old 31-point reach window is still
+/// inside the angular pressure ramp at the far dolly. Missing it saturates
+/// reach to the full-width value; the longer schedule must resolve it.
+#[test]
+fn the_far_dolly_scan_reaches_every_barrier_inside_the_pressure_ramp() {
+    const POINTS: usize = 129;
+    const TARGET: usize = 64;
+    const BARRIER: usize = 32;
+    const MEAN_POINT_EDGE: f32 = 0.0074;
+    const FAR_DOLLY_DISTANCE: f32 = 40.0;
+
+    let curve = Curve3 {
+        points: (0..POINTS)
+            .map(|at| {
+                let x = (at as isize - TARGET as isize) as f32 * MEAN_POINT_EDGE;
+                SurfacePoint::on_surface(Vec3::new(x, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+            })
+            .collect(),
+        class: FeatureClass::Silhouette,
+        pen: Pen::Ink,
+        seed: 0,
+        authored: false,
+    };
+    let mut seen = vec![true; POINTS];
+    seen[BARRIER] = false;
+
+    let reach = derive(&curve, Vec3::new(0.0, 0.0, FAR_DOLLY_DISTANCE), &seen).reach[TARGET];
+
+    assert_eq!(TARGET - BARRIER, (1 << 5), "the barrier sits just beyond the old window");
+    assert!(reach > 0.0, "the barrier has nonzero arc from the target");
+    assert!(reach < style::RAMP, "{reach:.6} rad should remain inside the pressure ramp");
 }
 
 /// The GPU's verdict for one curve, gathered out of the field.

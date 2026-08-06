@@ -32,6 +32,10 @@
 use aether_math::Vec3;
 #[cfg(test)]
 use core::iter;
+#[cfg(test)]
+use core::mem::align_of;
+use core::mem::size_of;
+use serde::{Deserialize, Serialize};
 
 use crate::Pose;
 use crate::extract::{Settings, tone_gate};
@@ -57,11 +61,9 @@ pub const BONE_LIMIT: usize = 8;
 /// of the `Uint8x4` / `Unorm8x4` attribute pair the closed vertex format
 /// set names for skinning.
 ///
-/// Four is not a truncation of this rig. The solved weight matrix has at
-/// most four non-zero entries in every one of its 434,165 rows, seams
-/// included, so the sparse attribute carries the dense row exactly and
-/// the fifth influence a wider format would hold does not exist. See
-/// [`Skin::influences`].
+/// Four is a checked property of every loaded rig. The decoder refuses a
+/// row with a fifth meaningful influence instead of silently truncating and
+/// renormalising it to fit this format. See [`RigWeights::decode_npy`].
 pub const INFLUENCES: usize = 4;
 
 /// Below this share of a vertex a bone is not blended in.
@@ -271,93 +273,363 @@ impl Bound<'_> {
     }
 }
 
-/// One bone: what it is called, what it turns about, and its long axis
-/// where one is meaningful.
-struct Bone {
-    name: String,
-    pivot: Option<Vec3>,
-    axis: Option<Vec3>,
+/// One declared bone in a rig descriptor.
+///
+/// `segment` is bake metadata rather than a runtime motor today, but it is
+/// still part of `rig.txt`: accepting it without declaring and validating it
+/// would preserve the old parser's unknown-data hole.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, aether_data::Schema)]
+pub struct RigBone {
+    pub name: String,
+    pub pivot: Option<[f32; 3]>,
+    pub axis: Option<[f32; 3]>,
+    pub segment: Option<[[f32; 3]; 2]>,
 }
 
-/// The rig, and the per-vertex weights that bind the sculpt to it.
-pub struct Skin {
-    /// Row-major `[vertex][bone]`, as the solver normalised them.
-    weights: Vec<f32>,
-    bones: Vec<Bone>,
+/// The validated in-memory form of `rig.txt`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "aether.puppet.rig_descriptor")]
+pub struct RigDescriptor {
+    pub bones: Vec<RigBone>,
     /// How much of the head's rotation the neck takes, so a turn reads as
     /// a neck carrying a head rather than a head swivelling on a post.
-    neck_share: f32,
+    pub neck_share: f32,
 }
 
-impl Skin {
-    /// Read a rig from its weight array and its descriptor.
+impl RigDescriptor {
+    /// Decode and validate the authored `rig.txt` format.
     ///
-    /// Only a `NumPy` 1.0 `<f4`, C-order array shaped exactly
-    /// `(vertices, descriptor bones)` is accepted. The diagnostic names a
-    /// framing, metadata, descriptor, or subject mismatch.
-    pub fn parse(weights: &[u8], descriptor: &str, vertices: usize) -> Result<Self, String> {
-        let mut bones: Vec<Bone> = Vec::new();
-        let mut neck_share = 0.35;
-        let read = |value: &str| value.parse::<f32>().unwrap_or(0.0);
-        let find = |bones: &[Bone], name: &str| bones.iter().position(|bone| bone.name == name);
+    /// Empty lines are harmless. Every non-empty line must be one of the
+    /// format's declared records, name a declared bone where applicable,
+    /// and contain finite numeric data. Missing `neck_share` retains the
+    /// historical authored default of `0.35`; a malformed value never does.
+    pub fn decode_text(text: &str) -> Result<Self, String> {
+        let mut bones: Option<Vec<RigBone>> = None;
+        let mut neck_share = None;
 
-        for line in descriptor.lines() {
-            match line.split_whitespace().collect::<Vec<&str>>().as_slice() {
-                ["bones", names @ ..] => {
-                    bones =
-                        names.iter().map(|name| Bone { name: (*name).to_owned(), pivot: None, axis: None }).collect();
+        for (line_index, line) in text.lines().enumerate() {
+            let line_number = line_index + 1;
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.is_empty() {
+                continue;
+            }
+
+            match fields.as_slice() {
+                ["bones", names @ ..] if !names.is_empty() => {
+                    if bones.is_some() {
+                        return Err(format!("rig descriptor line {line_number} repeats the bones table"));
+                    }
+                    if names.len() > BONE_LIMIT {
+                        return Err(format!(
+                            "rig descriptor names {} bones, but the puppet carries at most {BONE_LIMIT}",
+                            names.len()
+                        ));
+                    }
+                    let mut declared = Vec::with_capacity(names.len());
+                    for &name in names {
+                        if declared.iter().any(|bone: &RigBone| bone.name == name) {
+                            return Err(format!("rig descriptor line {line_number} repeats bone '{name}'"));
+                        }
+                        declared.push(RigBone { name: name.to_owned(), pivot: None, axis: None, segment: None });
+                    }
+                    bones = Some(declared);
                 }
-                ["neck_share", value] => neck_share = read(value),
-                ["pivot", name, x, y, z] => {
-                    if let Some(at) = find(&bones, name) {
-                        bones[at].pivot = Some(Vec3::new(read(x), read(y), read(z)));
+                ["neck_share", value] => {
+                    if neck_share.is_some() {
+                        return Err(format!("rig descriptor line {line_number} repeats neck_share"));
+                    }
+                    let value = descriptor_float(value, line_number, "neck_share")?;
+                    if !(0.0..=1.0).contains(&value) {
+                        return Err(format!(
+                            "rig descriptor line {line_number} neck_share is {value}, expected a share from 0 to 1"
+                        ));
+                    }
+                    neck_share = Some(value);
+                }
+                [record @ ("pivot" | "axis"), name, x, y, z] => {
+                    let values = [
+                        descriptor_float(x, line_number, record)?,
+                        descriptor_float(y, line_number, record)?,
+                        descriptor_float(z, line_number, record)?,
+                    ];
+                    let bone = descriptor_bone(&mut bones, name, line_number, record)?;
+                    let slot = if *record == "pivot" {
+                        &mut bone.pivot
+                    } else {
+                        &mut bone.axis
+                    };
+                    if slot.is_some() {
+                        return Err(format!("rig descriptor line {line_number} repeats {record} for bone '{name}'"));
+                    }
+                    if *record == "axis" && values.iter().map(|value| value * value).sum::<f32>() <= f32::EPSILON {
+                        return Err(format!("rig descriptor line {line_number} gives bone '{name}' a zero axis"));
+                    }
+                    *slot = Some(values);
+                }
+                ["seg", name, ax, ay, az, bx, by, bz] => {
+                    let segment = [
+                        [
+                            descriptor_float(ax, line_number, "seg")?,
+                            descriptor_float(ay, line_number, "seg")?,
+                            descriptor_float(az, line_number, "seg")?,
+                        ],
+                        [
+                            descriptor_float(bx, line_number, "seg")?,
+                            descriptor_float(by, line_number, "seg")?,
+                            descriptor_float(bz, line_number, "seg")?,
+                        ],
+                    ];
+                    let bone = descriptor_bone(&mut bones, name, line_number, "seg")?;
+                    if bone.segment.replace(segment).is_some() {
+                        return Err(format!("rig descriptor line {line_number} repeats seg for bone '{name}'"));
                     }
                 }
-                ["axis", name, x, y, z] => {
-                    if let Some(at) = find(&bones, name) {
-                        bones[at].axis = Some(Vec3::new(read(x), read(y), read(z)));
-                    }
+                [record, ..] if matches!(*record, "bones" | "neck_share" | "pivot" | "axis" | "seg") => {
+                    return Err(format!("rig descriptor line {line_number} has malformed {record} data"));
                 }
-                _ => {}
+                [record, ..] => {
+                    return Err(format!("rig descriptor line {line_number} has unknown record '{record}'"));
+                }
+                [] => unreachable!("empty descriptor lines were skipped"),
             }
         }
 
-        if bones.is_empty() {
+        let descriptor = Self {
+            bones: bones.ok_or_else(|| "rig descriptor names no bones".to_owned())?,
+            neck_share: neck_share.unwrap_or(0.35),
+        };
+        descriptor.validate()?;
+
+        Ok(descriptor)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.bones.is_empty() {
             return Err("rig descriptor names no bones".to_owned());
         }
-        if bones.len() > BONE_LIMIT {
+        if self.bones.len() > BONE_LIMIT {
             return Err(format!(
                 "rig descriptor names {} bones, but the puppet carries at most {BONE_LIMIT}",
-                bones.len()
+                self.bones.len()
+            ));
+        }
+        if !self.neck_share.is_finite() || !(0.0..=1.0).contains(&self.neck_share) {
+            return Err(format!(
+                "rig descriptor neck_share is {}, expected a finite share from 0 to 1",
+                self.neck_share
             ));
         }
 
-        let array = npy::parse(weights).map_err(|error| format!("rig weights refused: {error}"))?;
+        for (index, bone) in self.bones.iter().enumerate() {
+            if bone.name.is_empty() {
+                return Err(format!("rig descriptor bone {index} has an empty name"));
+            }
+            if self.bones[..index].iter().any(|earlier| earlier.name == bone.name) {
+                return Err(format!("rig descriptor repeats bone '{}'", bone.name));
+            }
+            if bone.pivot.is_some_and(|values| values.iter().any(|value| !value.is_finite())) {
+                return Err(format!("rig descriptor bone '{}' has a non-finite pivot", bone.name));
+            }
+            if bone.axis.is_some_and(|values| values.iter().any(|value| !value.is_finite())) {
+                return Err(format!("rig descriptor bone '{}' has a non-finite axis", bone.name));
+            }
+            if bone.segment.is_some_and(|segment| segment.iter().flatten().any(|value| !value.is_finite())) {
+                return Err(format!("rig descriptor bone '{}' has a non-finite segment", bone.name));
+            }
+            if bone.axis.is_some_and(|axis| axis.iter().map(|value| value * value).sum::<f32>() <= f32::EPSILON) {
+                return Err(format!("rig descriptor bone '{}' has a zero axis", bone.name));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn descriptor_float(value: &str, line: usize, record: &str) -> Result<f32, String> {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| format!("rig descriptor line {line} has non-finite or malformed {record} number '{value}'"))
+}
+
+fn descriptor_bone<'a>(
+    bones: &'a mut Option<Vec<RigBone>>,
+    name: &str,
+    line: usize,
+    record: &str,
+) -> Result<&'a mut RigBone, String> {
+    bones
+        .as_mut()
+        .ok_or_else(|| format!("rig descriptor line {line} declares {record} before its bones table"))?
+        .iter_mut()
+        .find(|bone| bone.name == name)
+        .ok_or_else(|| format!("rig descriptor line {line} declares {record} for unknown bone '{name}'"))
+}
+
+/// Validated per-vertex rig weights.
+///
+/// `data` keeps the dense little-endian `f32` rows from the authored `NumPy`
+/// array behind the declared bytes contract. [`Skin::from_kinds`] decodes the
+/// blob once into aligned floats; the pose loop never reads transport bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "aether.puppet.rig_weights")]
+pub struct RigWeights {
+    pub vertices: u32,
+    pub bones: u32,
+    pub influences: u32,
+    #[serde(with = "aether_data::bytes")]
+    pub data: Vec<u8>,
+}
+
+impl RigWeights {
+    /// Decode the dense `.npy` asset into the declared bytes form.
+    ///
+    /// Only a `NumPy` 1.0 `<f4`, C-order array shaped exactly
+    /// `(vertices, descriptor bones)` is accepted. A row with more than
+    /// [`INFLUENCES`] shares above `MINIMUM_SHARE` is refused rather than
+    /// truncated.
+    pub fn decode_npy(bytes: &[u8], vertices: usize, bones: usize) -> Result<Self, String> {
+        let array = npy::parse(bytes).map_err(|error| format!("rig weights refused: {error}"))?;
         if array.descr != "<f4" {
             return Err(format!("rig weights dtype is '{}', expected '<f4'", array.descr));
         }
         if array.fortran_order {
             return Err("rig weights are Fortran-order, expected C-order".to_owned());
         }
-        if array.shape.as_slice() != [vertices, bones.len()] {
+        if array.shape.as_slice() != [vertices, bones] {
             return Err(format!(
-                "rig weights shape is {:?}, expected ({vertices}, {}) for this subject and descriptor",
-                array.shape,
-                bones.len(),
+                "rig weights shape is {:?}, expected ({vertices}, {bones}) for this subject and descriptor",
+                array.shape
             ));
         }
 
-        let weights = array
-            .payload
-            .chunks_exact(4)
-            .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
-            .collect();
+        for (vertex, row) in array.payload.chunks_exact(bones * 4).enumerate() {
+            let mut live = 0usize;
+            let mut total = 0.0f32;
+            for (bone, word) in row.chunks_exact(4).enumerate() {
+                let weight = f32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+                if !weight.is_finite() || weight < 0.0 {
+                    return Err(format!(
+                        "rig weights vertex {vertex} bone {bone} has invalid weight {weight}; expected a finite non-negative share"
+                    ));
+                }
+                if weight > MINIMUM_SHARE {
+                    live += 1;
+                }
+                total += weight;
+            }
+            if live == 0 {
+                return Err(format!("rig weights vertex {vertex} has no share above the minimum {MINIMUM_SHARE}"));
+            }
+            if live > INFLUENCES {
+                return Err(format!(
+                    "rig weights vertex {vertex} has {live} influences above the minimum {MINIMUM_SHARE}, but the puppet carries at most {INFLUENCES}"
+                ));
+            }
+            if (total - 1.0).abs() > 1.0e-5 {
+                return Err(format!("rig weights vertex {vertex} shares sum to {total}, expected 1"));
+            }
+        }
 
-        Ok(Self { weights, bones, neck_share })
+        Ok(Self {
+            vertices: u32::try_from(vertices).map_err(|_| "rig weights vertex count exceeds u32".to_owned())?,
+            bones: u32::try_from(bones).map_err(|_| "rig weights bone count exceeds u32".to_owned())?,
+            influences: INFLUENCES as u32,
+            data: array.payload.to_vec(),
+        })
+    }
+
+    /// Validate the declared header and blob while decoding its bytes once
+    /// into the aligned dense rows the pose loop owns.
+    fn decode_dense(&self, vertices: usize, bones: usize) -> Result<Vec<f32>, String> {
+        if self.vertices as usize != vertices {
+            return Err(format!(
+                "rig weights declare {} vertices, expected {vertices} for this subject",
+                self.vertices
+            ));
+        }
+        if self.bones as usize != bones {
+            return Err(format!("rig weights declare {} bones, expected {bones} from the descriptor", self.bones));
+        }
+        if self.influences as usize != INFLUENCES {
+            return Err(format!(
+                "rig weights declare {} influences, but the puppet vertex format carries {INFLUENCES}",
+                self.influences
+            ));
+        }
+        let expected = vertices
+            .checked_mul(bones)
+            .and_then(|values| values.checked_mul(size_of::<f32>()))
+            .ok_or_else(|| "rig weights dense payload length overflows usize".to_owned())?;
+        if self.data.len() != expected {
+            return Err(format!("rig weights dense payload is {} bytes, expected {expected}", self.data.len()));
+        }
+
+        let mut weights = Vec::with_capacity(vertices * bones);
+        for (vertex, packed) in self.data.chunks_exact(bones * size_of::<f32>()).enumerate() {
+            let mut live = 0usize;
+            let mut total = 0.0f32;
+            for (bone, word) in packed.chunks_exact(size_of::<f32>()).enumerate() {
+                let share = f32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+                if !share.is_finite() || share < 0.0 {
+                    return Err(format!(
+                        "rig weights vertex {vertex} bone {bone} has invalid weight {share}; expected a finite non-negative share"
+                    ));
+                }
+                if share > MINIMUM_SHARE {
+                    live += 1;
+                }
+                total += share;
+                weights.push(share);
+            }
+            if live == 0 {
+                return Err(format!("rig weights vertex {vertex} has no share above the minimum {MINIMUM_SHARE}"));
+            }
+            if live > INFLUENCES {
+                return Err(format!(
+                    "rig weights vertex {vertex} has {live} influences above the minimum {MINIMUM_SHARE}, but the puppet carries at most {INFLUENCES}"
+                ));
+            }
+            if (total - 1.0).abs() > 1.0e-5 {
+                return Err(format!("rig weights vertex {vertex} shares sum to {total}, expected 1"));
+            }
+        }
+
+        Ok(weights)
+    }
+}
+
+/// The rig, and the per-vertex weights that bind the sculpt to it.
+pub struct Skin {
+    weights: Vec<f32>,
+    descriptor: RigDescriptor,
+}
+
+impl Skin {
+    /// Read the two legacy disk assets into their declared in-memory kinds.
+    pub fn parse(weights: &[u8], descriptor: &str, vertices: usize) -> Result<Self, String> {
+        let descriptor = RigDescriptor::decode_text(descriptor)?;
+        let weights = RigWeights::decode_npy(weights, vertices, descriptor.bones.len())?;
+
+        Self::from_kinds(weights, descriptor, vertices)
+    }
+
+    /// Build a skin from already-decoded declared kinds, checking their
+    /// cross-kind and subject invariants again at the ownership boundary.
+    pub fn from_kinds(weights: RigWeights, descriptor: RigDescriptor, vertices: usize) -> Result<Self, String> {
+        descriptor.validate()?;
+        let weights = weights.decode_dense(vertices, descriptor.bones.len())?;
+
+        Ok(Self { weights, descriptor })
+    }
+
+    pub fn descriptor(&self) -> &RigDescriptor {
+        &self.descriptor
     }
 
     pub fn bones(&self) -> usize {
-        self.bones.len()
+        self.descriptor.bones.len()
     }
 
     /// One vertex's bone binding as the vertex stage takes it: the
@@ -377,36 +649,36 @@ impl Skin {
     /// rather than a sum that drifts off one by a part in 255.
     #[must_use]
     pub fn influences(&self, vertex: usize) -> ([u8; INFLUENCES], [f32; INFLUENCES]) {
-        let row = &self.weights[vertex * self.bones.len()..(vertex + 1) * self.bones.len()];
-
-        // Selection over a fixed array rather than a sorted `Vec`. This
-        // runs once per vertex of the subject and twice per curve point,
-        // so an allocation here is half a million allocations at load.
+        let row = &self.weights[vertex * self.bones()..(vertex + 1) * self.bones()];
         let mut ranked = [(0u8, 0.0f32); BONE_LIMIT];
-        let mut held = 0usize;
-        for (bone, &weight) in row.iter().enumerate().take(BONE_LIMIT) {
-            ranked[held] = (bone as u8, weight);
-            held += 1;
+        let held = row.len().min(BONE_LIMIT);
+        for (bone, &weight) in row.iter().enumerate().take(held) {
+            ranked[bone] = (bone as u8, weight);
         }
         ranked[..held].sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
 
         let kept = held.min(INFLUENCES);
         let total: f32 = ranked[..kept].iter().map(|&(_, weight)| weight).sum();
-        let (mut joints, mut weights) = ([0u8; INFLUENCES], [0.0f32; INFLUENCES]);
-        for (lane, &(bone, weight)) in ranked[..kept].iter().enumerate() {
-            joints[lane] = bone;
-            weights[lane] = if total > 0.0 {
-                weight / total
+        let (mut joints, mut shares) = ([0u8; INFLUENCES], [0.0f32; INFLUENCES]);
+        for (lane, &(joint, share)) in ranked[..kept].iter().enumerate() {
+            joints[lane] = joint;
+            shares[lane] = if total > 0.0 {
+                share / total
             } else {
                 0.0
             };
         }
 
-        (joints, weights)
+        (joints, shares)
     }
 
     fn pivot(&self, name: &str) -> Vec3 {
-        self.bones.iter().find(|bone| bone.name == name).and_then(|bone| bone.pivot).unwrap_or(Vec3::ZERO)
+        self.descriptor
+            .bones
+            .iter()
+            .find(|bone| bone.name == name)
+            .and_then(|bone| bone.pivot)
+            .map_or(Vec3::ZERO, Vec3::from_array)
     }
 
     /// Where the head bone sends a point at this pose.
@@ -430,12 +702,13 @@ impl Skin {
         let head_pivot = self.pivot("head");
         let head = |p: Vec3, share: f32| turn(p, head_pivot, pose, share);
 
-        self.bones
+        self.descriptor
+            .bones
             .iter()
             .map(|bone| {
-                let pivot = bone.pivot.unwrap_or(Vec3::ZERO);
+                let pivot = bone.pivot.map_or(Vec3::ZERO, Vec3::from_array);
                 match bone.name.as_str() {
-                    "neck" => Rigid::sample(|p| head(p, self.neck_share)),
+                    "neck" => Rigid::sample(|p| head(p, self.descriptor.neck_share)),
                     "head" => Rigid::sample(|p| head(p, 1.0)),
                     "jaw" => Rigid::sample(|p| head(rotate(p, pivot, Vec3::X, pose.jaw), 1.0)),
                     "ear_left" | "ear_right" => {
@@ -458,7 +731,7 @@ impl Skin {
                                 -1.0
                             },
                         );
-                        let axis = bone.axis.unwrap_or(Vec3::Y);
+                        let axis = bone.axis.map_or(Vec3::Y, Vec3::from_array);
 
                         // Aim first, about the blade's own axis, so the cup
                         // sweeps. Then flick, which swings the whole blade
@@ -478,7 +751,7 @@ impl Skin {
 
     /// The blended map at one vertex.
     fn at_vertex(&self, transforms: &[Rigid], vertex: usize) -> Rigid {
-        let row = &self.weights[vertex * self.bones.len()..(vertex + 1) * self.bones.len()];
+        let row = &self.weights[vertex * self.bones()..(vertex + 1) * self.bones()];
 
         row.iter().zip(transforms).fold(Rigid::ZERO, |blend, (&weight, transform)| {
             if weight <= MINIMUM_SHARE {
@@ -634,6 +907,8 @@ pub(crate) fn npy(values: &[f32], shape: (usize, usize)) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    use aether_data::{Kind, Schema, SchemaType};
+
     use crate::feature::{FeatureClass, Pen, SurfacePoint};
     use crate::weld;
 
@@ -726,6 +1001,193 @@ mod tests {
         assert_eq!(
             Skin::parse(&truncated, descriptor(), 2).err().as_deref(),
             Some("rig weights refused: NumPy payload is 15 bytes, expected 16 from shape and dtype"),
+        );
+    }
+
+    #[test]
+    fn the_disk_descriptor_decodes_to_a_declared_kind() {
+        let text = "bones chest head ear_left\n\
+                    neck_share 0.4\n\
+                    pivot head 0.0 0.3 -0.1\n\
+                    seg head 0.0 0.2 0.0 0.0 0.8 0.0\n\
+                    axis ear_left 0.0 1.0 0.0\n";
+        let descriptor = RigDescriptor::decode_text(text).expect("the authored descriptor decodes");
+
+        assert_eq!(RigDescriptor::NAME, "aether.puppet.rig_descriptor");
+        assert_eq!(descriptor.neck_share, 0.4);
+        assert_eq!(
+            descriptor.bones.iter().map(|bone| bone.name.as_str()).collect::<Vec<_>>(),
+            ["chest", "head", "ear_left"]
+        );
+        assert_eq!(descriptor.bones[1].pivot, Some([0.0, 0.3, -0.1]));
+        assert_eq!(descriptor.bones[1].segment, Some([[0.0, 0.2, 0.0], [0.0, 0.8, 0.0]]));
+        assert_eq!(descriptor.bones[2].axis, Some([0.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn the_descriptor_refuses_unknown_malformed_or_ambiguous_data() {
+        let cases = [
+            ("bones chest head\npivto head 0 0 0\n", "unknown record 'pivto'"),
+            ("bones chest head\npivot head nope 0 0\n", "malformed pivot number 'nope'"),
+            ("bones chest head\npivot missing 0 0 0\n", "pivot for unknown bone 'missing'"),
+            ("pivot head 0 0 0\nbones chest head\n", "pivot before its bones table"),
+            ("bones chest head\nbones chest head\n", "repeats the bones table"),
+            ("bones chest chest\n", "repeats bone 'chest'"),
+            ("bones chest head\npivot head 0 0 0\npivot head 0 0 0\n", "repeats pivot for bone 'head'"),
+            ("bones chest ear_left\naxis ear_left 0 0 0\n", "gives bone 'ear_left' a zero axis"),
+            ("bones chest head\nneck_share 1.1\n", "expected a share from 0 to 1"),
+            ("bones chest head\nneck_share NaN\n", "non-finite or malformed neck_share number 'NaN'"),
+            ("bones chest head\nseg head 0 0 0 1 1\n", "malformed seg data"),
+        ];
+
+        for (text, wanted) in cases {
+            let error = RigDescriptor::decode_text(text).expect_err(text);
+            assert!(error.contains(wanted), "{text:?} produced {error:?}, expected it to contain {wanted:?}");
+        }
+    }
+
+    #[test]
+    fn dense_bytes_decode_once_to_aligned_runtime_floats() {
+        let row = [0.2f32, 0.6, 0.0, 0.2];
+        let weights = RigWeights::decode_npy(&npy(&row, (1, row.len())), 1, row.len()).expect("a valid dense row");
+
+        assert_eq!(RigWeights::NAME, "aether.puppet.rig_weights");
+        assert_eq!((weights.vertices, weights.bones, weights.influences), (1, 4, 4));
+        assert_eq!(weights.data.len(), row.len() * size_of::<f32>());
+
+        let descriptor = RigDescriptor::decode_text("bones a b c d\n").expect("four declared bones");
+        let skin = Skin::from_kinds(weights, descriptor, 1).expect("the kinds agree");
+        assert_eq!(skin.weights, row);
+        assert_eq!((skin.weights.as_ptr() as usize) % align_of::<f32>(), 0);
+
+        let (joints, shares) = skin.influences(0);
+        assert_eq!(joints, [1, 0, 3, 2], "heaviest first, then stable bone order");
+        assert!((shares[0] - 0.6).abs() < 1e-6);
+        assert!((shares[1] - 0.2).abs() < 1e-6);
+        assert!((shares[2] - 0.2).abs() < 1e-6);
+        assert_eq!(shares[3], 0.0);
+    }
+
+    #[test]
+    fn weight_decode_refuses_invalid_or_overwide_rows() {
+        let cases: [(&[f32], &str); 5] = [
+            (&[0.0, 0.0], "has no share above the minimum"),
+            (&[1.0, -0.1], "invalid weight -0.1"),
+            (&[1.0, f32::NAN], "invalid weight NaN"),
+            (&[1.0, f32::INFINITY], "invalid weight inf"),
+            (&[0.3, 0.25, 0.2, 0.15, 0.1], "has 5 influences"),
+        ];
+
+        for (row, wanted) in cases {
+            let error = RigWeights::decode_npy(&npy(row, (1, row.len())), 1, row.len()).expect_err(wanted);
+            assert!(error.contains(wanted), "{row:?} produced {error:?}, expected it to contain {wanted:?}");
+        }
+    }
+
+    #[test]
+    fn typed_weight_headers_and_payloads_are_revalidated_at_the_skin_boundary() {
+        let descriptor = RigDescriptor::decode_text("bones chest head\n").expect("two bones");
+        let valid = RigWeights::decode_npy(&npy(&[0.25, 0.75], (1, 2)), 1, 2).expect("valid weights");
+
+        let mut truncated = valid.clone();
+        truncated.data.pop();
+        assert!(
+            Skin::from_kinds(truncated, descriptor.clone(), 1)
+                .err()
+                .expect("the truncated blob is refused")
+                .contains("7 bytes, expected 8")
+        );
+
+        let mut invalid_share = valid.clone();
+        invalid_share.data[..4].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(
+            Skin::from_kinds(invalid_share, descriptor.clone(), 1)
+                .err()
+                .expect("the invalid share is refused")
+                .contains("invalid weight NaN")
+        );
+
+        let mut non_normalized = valid;
+        non_normalized.data[..4].copy_from_slice(&0.5f32.to_le_bytes());
+        assert!(
+            Skin::from_kinds(non_normalized, descriptor, 1)
+                .err()
+                .expect("the non-normalized row is refused")
+                .contains("shares sum to 1.25")
+        );
+    }
+
+    #[test]
+    fn the_declared_influence_width_is_validated_at_the_skin_boundary() {
+        let descriptor = RigDescriptor::decode_text("bones chest head\n").expect("two bones");
+        let mut weights = RigWeights::decode_npy(&npy(&[0.25, 0.75], (1, 2)), 1, 2).expect("valid weights");
+        weights.influences = 3;
+
+        assert_eq!(
+            Skin::from_kinds(weights, descriptor, 1).err().as_deref(),
+            Some("rig weights declare 3 influences, but the puppet vertex format carries 4"),
+        );
+    }
+
+    #[test]
+    fn rig_kind_schemas_expose_the_header_blob_and_bone_table() {
+        let SchemaType::Struct { fields, .. } = RigWeights::SCHEMA else {
+            panic!("rig weights must be a structured kind");
+        };
+        assert_eq!(
+            fields.iter().map(|field| field.name.as_ref()).collect::<Vec<_>>(),
+            ["vertices", "bones", "influences", "data"]
+        );
+        assert!(matches!(fields[3].ty, SchemaType::Bytes));
+
+        let SchemaType::Struct { fields, .. } = RigDescriptor::SCHEMA else {
+            panic!("rig descriptor must be a structured kind");
+        };
+        assert_eq!(fields.iter().map(|field| field.name.as_ref()).collect::<Vec<_>>(), ["bones", "neck_share"]);
+    }
+
+    #[test]
+    fn legacy_valid_rows_keep_their_bindings_and_pose() {
+        let rows = [[0.5f32, 0.3, 0.0, 0.2, 0.0], [0.0, 0.1, 0.2, 0.3, 0.4]];
+        let dense = rows.into_iter().flatten().collect::<Vec<_>>();
+        let skin =
+            Skin::parse(&npy(&dense, (2, 5)), "bones chest neck head jaw ear_left\n", 2).expect("valid legacy rig");
+        assert_eq!(skin.weights, dense, "the declared boundary keeps the exact authored dense rows");
+
+        for (vertex, row) in rows.iter().enumerate() {
+            let mut ranked =
+                row.iter().copied().enumerate().map(|(bone, weight)| (bone as u8, weight)).collect::<Vec<_>>();
+            ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            let kept = ranked.len().min(INFLUENCES);
+            let total: f32 = ranked[..kept].iter().map(|&(_, weight)| weight).sum();
+            let mut expected_joints = [0; INFLUENCES];
+            let mut expected_shares = [0.0; INFLUENCES];
+            for (lane, &(joint, share)) in ranked[..kept].iter().enumerate() {
+                expected_joints[lane] = joint;
+                expected_shares[lane] = share / total;
+            }
+            assert_eq!(skin.influences(vertex), (expected_joints, expected_shares));
+        }
+
+        let transforms = skin.transforms(&quarter_turn());
+        let point = Vec3::new(0.2, 0.7, 1.1);
+        for (vertex, row) in rows.iter().enumerate() {
+            let legacy = row.iter().zip(&transforms).fold(Rigid::ZERO, |blend, (&share, transform)| {
+                if share <= MINIMUM_SHARE {
+                    blend
+                } else {
+                    blend.add_scaled(transform, share)
+                }
+            });
+            assert!((skin.at_vertex(&transforms, vertex).point(point) - legacy.point(point)).length() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn non_unit_dense_rows_are_refused() {
+        assert_eq!(
+            Skin::parse(&npy(&[2.0, 1.0], (1, 2)), "bones chest head\n", 1).err().as_deref(),
+            Some("rig weights vertex 0 shares sum to 3, expected 1"),
         );
     }
 
@@ -937,10 +1399,9 @@ mod tests {
         let wide = format!("bones {names}\n");
         let fits = format!("bones {}\n", names.rsplit_once(' ').expect("more than one bone").0);
 
-        assert!(
-            Skin::parse(&npy(&[0.0; BONE_LIMIT], (1, BONE_LIMIT)), &fits, 1).is_ok(),
-            "a rig the blob has slots for",
-        );
+        let mut fitting_row = [0.0; BONE_LIMIT];
+        fitting_row[0] = 1.0;
+        assert!(Skin::parse(&npy(&fitting_row, (1, BONE_LIMIT)), &fits, 1).is_ok(), "a rig the blob has slots for");
         assert_eq!(
             Skin::parse(&npy(&[0.0; BONE_LIMIT + 1], (1, BONE_LIMIT + 1)), &wide, 1).err().as_deref(),
             Some("rig descriptor names 9 bones, but the puppet carries at most 8"),
@@ -955,7 +1416,7 @@ mod tests {
     /// a claim about the *rig* rather than about the code — so it is
     /// checked against a row that fills all four and one that would
     /// overflow them. The dropped mass is what a silent truncation would
-    /// cost, and it is reported rather than assumed.
+    /// cost, and the latter is refused rather than assumed.
     #[test]
     fn the_sparse_influences_carry_the_whole_row_when_it_fits() {
         let names = ["a", "b", "c", "d", "e"];
@@ -970,9 +1431,9 @@ mod tests {
         }
 
         let spread = [0.3f32, 0.25, 0.2, 0.15, 0.1];
-        let wider = Skin::parse(&npy(&spread, (1, spread.len())), &descriptor, 1).expect("a one-vertex rig");
-        let (_, renormalised) = wider.influences(0);
-        let sum: f32 = renormalised.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-6, "a row past four influences is renormalised, and summed to {sum}");
+        assert_eq!(
+            Skin::parse(&npy(&spread, (1, spread.len())), &descriptor, 1).err().as_deref(),
+            Some("rig weights vertex 0 has 5 influences above the minimum 0.0001, but the puppet carries at most 4"),
+        );
     }
 }

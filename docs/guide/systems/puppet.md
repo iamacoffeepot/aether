@@ -27,9 +27,15 @@ Send `aether.puppet.load` with paths in one of the substrate's file namespaces:
 
 `labels` and `rig` may be empty. The charted face needs the material labels to
 measure its anchors. The optional rig directory contains `weights.npy` and
-`rig.txt`. `material_field_padding` is the fraction of the mesh's longest axis
-that the material-field baker added on each side; `0.12` is the canonical
-asset's value and remains `Load::default()`'s value. The decoded
+`rig.txt`. Those disk formats stay compatible with the external bake pipeline;
+the puppet decodes them once into the declared `aether.puppet.rig_weights` and
+`aether.puppet.rig_descriptor` kinds. A descriptor with malformed or unknown
+records, or a weight row that cannot fit the declared four-influence vertex
+format, is refused instead of being defaulted or truncated.
+
+`material_field_padding` is the fraction of the mesh's longest axis that the
+material-field baker added on each side; `0.12` is the canonical asset's value
+and remains `Load::default()`'s value. The decoded
 `aether.puppet.material_field` kind declares its dimensions, byte cells,
 world-space origin and spacing, and ordered class vocabulary in memory; the
 on-disk asset remains a NumPy 1.0 `|u1`, C-order cube.
