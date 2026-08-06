@@ -234,6 +234,7 @@ impl DerivationCapacity {
             + u64::from(self.faces) * size_of::<[u32; 3]>() as u64
     }
 
+    #[allow(dead_code, reason = "reserved for the visibility-field integration after the resident prototype")]
     pub fn field_use(self, width: u32, height: u32) -> Result<FieldUse, CapacityError> {
         field_use(self.max_points, self.max_curves, width, height)
     }

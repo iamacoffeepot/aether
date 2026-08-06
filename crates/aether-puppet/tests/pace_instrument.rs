@@ -58,8 +58,8 @@ use aether_puppet::feature::{Curve3, Drawing, Half};
 use aether_puppet::labels::{CLASSES, Labels};
 use aether_puppet::mesh::Mesh;
 use aether_puppet::{
-    Channel, Expression, EyeArchetype, Gaze, IdleConfig, Load, LoadResult as PuppetLoadResult, Look, Motion, Pose,
-    Viseme, anchor, chart, deform,
+    Channel, Expression, EyeArchetype, Gaze, GpuSilhouetteMode, IdleConfig, Load, LoadResult as PuppetLoadResult, Look,
+    Motion, Pose, Viseme, anchor, chart, deform,
 };
 use aether_render::{PassTimingRow, ProgramTimings, ProgramTimingsResult};
 
@@ -151,6 +151,10 @@ fn mounted(dir: &Path, wasm: &Path) -> SubstrateHarness {
 /// whole-frame millisecond measured with them on is not the frame this
 /// branch ships.
 fn mounted_with(dir: &Path, wasm: &Path, pass_timings: bool) -> SubstrateHarness {
+    mounted_at(dir, wasm, pass_timings, canvas())
+}
+
+fn mounted_at(dir: &Path, wasm: &Path, pass_timings: bool, dimensions: (u32, u32)) -> SubstrateHarness {
     let save = init_save_sandbox("puppet-pace");
     for name in ["subject.obj", "labels.npy"] {
         fs::copy(dir.join(name), save.join(name)).expect("stage the subject");
@@ -170,7 +174,7 @@ fn mounted_with(dir: &Path, wasm: &Path, pass_timings: bool) -> SubstrateHarness
     // frame's exact lifecycle chain at the fine floor while outstanding,
     // so a silent guest handler is no longer measured through the default
     // coarse ceiling (#4454).
-    let (width, height) = canvas();
+    let (width, height) = dimensions;
     let builder = SubstrateHarness::builder().size(width, height).namespace_roots(test_namespace_roots(save));
     let builder = if pass_timings {
         builder.with_render_pass_timings()
@@ -441,6 +445,102 @@ fn chart_controls_capture() {
     );
 
     eprintln!("pace: wrote unjudged chart-control evidence to {}", output.display());
+}
+
+/// Raw owner-inspection evidence for the resident silhouette candidate.
+///
+/// Every view writes the untouched CPU baseline, the opt-in candidate, an
+/// unamplified per-channel absolute difference, and the candidate's
+/// exceptional-junction overlay. The instrument deliberately makes no
+/// visual assertion; disposition belongs to the owner.
+///
+/// ```text
+/// AETHER_CROSSFEED_DIR=/path/to/dir \
+/// AETHER_GPU_SILHOUETTE_DIR=/path/to/output \
+/// cargo test -p aether-puppet --release --test pace_instrument \
+///     -- --ignored --nocapture gpu_silhouette_capture
+/// ```
+#[test]
+#[ignore = "visual hold; needs the shipped subject and a release-profile component wasm"]
+fn gpu_silhouette_capture() {
+    let (Some(wasm), Some(dir)) = (require_runtime("aether_puppet"), subject_dir()) else {
+        return;
+    };
+    let output = required_output_dir("AETHER_GPU_SILHOUETTE_DIR");
+    for (resolution, dimensions) in [("pinned", PINNED), ("acceptance", ACCEPTANCE)] {
+        let resolution_output = output.join(resolution);
+        fs::create_dir_all(&resolution_output).expect("create silhouette resolution directory");
+        let mut harness = mounted_at(&dir, &wasm, false, dimensions);
+        for (view, pose, look) in silhouette_views() {
+            capture_silhouette_view(&mut harness, &resolution_output, view, &pose, &look);
+        }
+    }
+    eprintln!("pace: wrote unjudged GPU silhouette evidence to {}", output.display());
+}
+
+fn silhouette_views() -> [(&'static str, Pose, Look); 3] {
+    [
+        ("rest", Pose::default(), look(AZIMUTH)),
+        (
+            "pose",
+            Pose { yaw: 22.0, pitch: -6.0, jaw: 7.0, ear_twist_left: 18.0, ear_twist_right: -18.0, ..Pose::default() },
+            look(AZIMUTH),
+        ),
+        (
+            "articulation",
+            Pose { yaw: -12.0, pitch: 5.0, jaw: 16.0, ear_twist_left: -22.5, ear_twist_right: 22.5, ..Pose::default() },
+            look(32.0),
+        ),
+    ]
+}
+
+fn capture_silhouette_view(harness: &mut SubstrateHarness, output: &Path, view: &str, pose: &Pose, look: &Look) {
+    let baseline =
+        capture_silhouette_mode(harness, pose, look, &GpuSilhouetteMode { enabled: false, exceptional_overlay: false });
+    let candidate =
+        capture_silhouette_mode(harness, pose, look, &GpuSilhouetteMode { enabled: true, exceptional_overlay: false });
+    let exceptional =
+        capture_silhouette_mode(harness, pose, look, &GpuSilhouetteMode { enabled: true, exceptional_overlay: true });
+    for (suffix, png) in [("baseline", &baseline), ("candidate", &candidate), ("exceptional", &exceptional)] {
+        fs::write(output.join(format!("{view}-{suffix}.png")), png).expect("write raw silhouette capture");
+    }
+    fs::write(output.join(format!("{view}-absolute-diff.png")), absolute_diff(&baseline, &candidate))
+        .expect("write silhouette absolute difference");
+}
+
+fn capture_silhouette_mode(
+    harness: &mut SubstrateHarness,
+    pose: &Pose,
+    look: &Look,
+    mode: &GpuSilhouetteMode,
+) -> Vec<u8> {
+    harness
+        .execute(vec![
+            ("mode", HarnessOp::send_and_settle(PUPPET, mode)),
+            ("pose", HarnessOp::send_and_settle(PUPPET, pose)),
+            ("look", HarnessOp::send_and_settle(PUPPET, look)),
+            ("settle", HarnessOp::advance(24)),
+            ("capture", HarnessOp::capture()),
+        ])
+        .expect("settle and capture silhouette mode")
+        .captured("capture")
+        .expect("silhouette capture ran")
+        .to_vec()
+}
+
+fn absolute_diff(baseline: &[u8], candidate: &[u8]) -> Vec<u8> {
+    let baseline = decode_png(baseline).expect("decode silhouette baseline");
+    let candidate = decode_png(candidate).expect("decode silhouette candidate");
+    assert_eq!((baseline.width, baseline.height), (candidate.width, candidate.height));
+    let mut rgba = baseline.rgba;
+    for (difference, current) in rgba.chunks_exact_mut(4).zip(candidate.rgba.chunks_exact(4)) {
+        for channel in 0..3 {
+            difference[channel] = difference[channel].abs_diff(current[channel]);
+        }
+        difference[3] = 255;
+    }
+
+    encode_png(&rgba, baseline.width, baseline.height).expect("encode silhouette absolute difference")
 }
 
 fn required_output_dir(variable: &str) -> PathBuf {
