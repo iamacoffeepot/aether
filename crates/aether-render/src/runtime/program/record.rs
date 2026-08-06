@@ -15,18 +15,20 @@
 use std::collections::HashMap;
 
 use aether_substrate::render::{
-    PROGRAM_DEPTH_FORMAT, ProgramDepthAttachment, ProgramDrawPass, ProgramPassDraw, create_program_depth_transient,
-    create_program_transient, record_program_draw_pass, record_program_pass,
+    PROGRAM_DEPTH_FORMAT, ProgramComputePass, ProgramDepthAttachment, ProgramDrawCommand, ProgramDrawPass,
+    ProgramPassDraw, create_program_depth_transient, create_program_transient, record_program_compute_pass,
+    record_program_draw_pass, record_program_pass,
 };
 
-use super::super::geometry::GeometryRegistry;
+use super::super::geometry::{GeometryRegistry, INDIRECT_CONTROL_BYTES};
 use super::super::pipeline::RenderGpu;
+use super::super::surface::render_limits;
 use super::super::texture::TextureRegistry;
-use super::cache::{BoundInput, CacheParts};
+use super::cache::{BoundInput, BoundStorage, CacheParts};
 use super::timing::FrameQueries;
-use super::validate::{PassPlan, ProgramPlan, ResolvedSlot, resolve_extent};
-use super::{PassGpu, ProgramDeviceState, RegisteredProgram, TransientKey};
-use crate::{PassLoad, ProgramDispatch, TextureSampling, TextureUsage};
+use super::validate::{PassPlan, PassPlanStage, ProgramPlan, ResolvedSlot, resolve_extent};
+use super::{PassGpu, PassPipeline, ProgramDeviceState, RegisteredProgram, TransientKey};
+use crate::{GeometryBuffer, PassLoad, ProgramDispatch, TextureSampling, TextureUsage};
 
 /// Execute one dispatch into `encoder`, or warn-drop it whole: the
 /// checks run first, so a rejected dispatch records nothing and the
@@ -78,10 +80,17 @@ pub(super) fn record_dispatch(
         }
     }
     for pass_plan in &plan.passes {
-        if let Some(draw) = &pass_plan.draw
+        if let Some(draw) = pass_plan.stage.draw()
             && let Some(entry) = geometries.entries.get_mut(&dispatch.geometries[draw.geometry as usize])
         {
             entry.ensure_realized(&gpu.device, &gpu.queue);
+        }
+        if let Some(compute) = pass_plan.stage.compute() {
+            for binding in &compute.buffers {
+                if let Some(entry) = geometries.entries.get_mut(&dispatch.geometries[binding.geometry as usize]) {
+                    entry.ensure_realized(&gpu.device, &gpu.queue);
+                }
+            }
         }
     }
 
@@ -183,7 +192,7 @@ fn report_pass_gpu_errors(errors: GpuErrors, dispatch: &ProgramDispatch, pass: u
             entry_point = %pass_plan.entry_point,
             input_slots = ?pass_plan.inputs,
             output_slot = ?pass_plan.output,
-            draw = ?pass_plan.draw,
+            stage = ?pass_plan.stage,
             bindings = ?dispatch.bindings,
             geometries = ?dispatch.geometries,
             error_class,
@@ -291,8 +300,17 @@ fn check_dispatch(
     }
 
     for (pass, pass_plan) in plan.passes.iter().enumerate() {
-        if let Some(draw) = &pass_plan.draw {
-            let binding = draw.geometry as usize;
+        let mut geometry_bindings = Vec::new();
+        if let Some(draw) = pass_plan.stage.draw() {
+            geometry_bindings.push(draw.geometry);
+        }
+        if let Some(compute) = pass_plan.stage.compute() {
+            geometry_bindings.extend(compute.buffers.iter().map(|binding| binding.geometry));
+        }
+        geometry_bindings.sort_unstable();
+        geometry_bindings.dedup();
+        for binding in geometry_bindings {
+            let binding = binding as usize;
             let geometry_id = dispatch.geometries[binding];
             let Some(entry) = geometries.entries.get(&geometry_id) else {
                 tracing::warn!(
@@ -319,6 +337,45 @@ fn check_dispatch(
                 return None;
             }
         }
+
+        if let Some(compute) = pass_plan.stage.compute() {
+            let max_bytes = render_limits().max_storage_buffer_binding_size;
+            for (storage_binding, declared) in compute.buffers.iter().enumerate() {
+                let geometry_id = dispatch.geometries[declared.geometry as usize];
+                let entry = &geometries.entries[&geometry_id];
+                let bytes = match declared.buffer {
+                    GeometryBuffer::Vertices => entry.vertices.len() as u64,
+                    GeometryBuffer::Indices => entry.indices.len() as u64,
+                    GeometryBuffer::DrawIndexedIndirect => INDIRECT_CONTROL_BYTES as u64,
+                };
+                if bytes == 0 {
+                    tracing::warn!(
+                        target: "aether_render",
+                        program_id,
+                        pass,
+                        storage_binding,
+                        geometry_id,
+                        buffer = ?declared.buffer,
+                        "program dispatch compute binding names an empty geometry buffer; dropping the dispatch",
+                    );
+                    return None;
+                }
+                if bytes > max_bytes {
+                    tracing::warn!(
+                        target: "aether_render",
+                        program_id,
+                        pass,
+                        storage_binding,
+                        geometry_id,
+                        buffer = ?declared.buffer,
+                        bytes,
+                        max_bytes,
+                        "program dispatch compute binding exceeds the storage binding size limit; dropping the dispatch",
+                    );
+                    return None;
+                }
+            }
+        }
         if pass_plan.uniform_length > 0 {
             let end = u64::from(pass_plan.uniform_offset)
                 + u64::from(pass_plan.repeat_count - 1) * u64::from(pass_plan.uniform_stride)
@@ -335,7 +392,7 @@ fn check_dispatch(
                 return None;
             }
         }
-        if let ResolvedSlot::Binding(output) = pass_plan.output {
+        if let Some(ResolvedSlot::Binding(output)) = pass_plan.output {
             let output_id = dispatch.bindings[output as usize];
             for input in &pass_plan.inputs {
                 if let ResolvedSlot::Binding(input_binding) = input
@@ -407,6 +464,8 @@ fn encode_passes(
     // survive the `&mut` that stores a rebuilt bind group.
     let mut input_key: Vec<BoundInput> = Vec::new();
     let mut input_entries: Vec<wgpu::BindGroupEntry<'_>> = Vec::new();
+    let mut storage_key: Vec<BoundStorage> = Vec::new();
+    let mut storage_entries: Vec<wgpu::BindGroupEntry<'_>> = Vec::new();
     for (pass, ((pass_plan, pass_gpu), offsets)) in
         plan.passes.iter().zip(passes_gpu).zip(&layout.iteration_offsets).enumerate()
     {
@@ -447,12 +506,41 @@ fn encode_passes(
             cache.store_inputs(pass, &input_key, group);
         }
 
+        if let Some(compute) = pass_plan.stage.compute() {
+            storage_key.clear();
+            storage_entries.clear();
+            for (binding, declared) in compute.buffers.iter().enumerate() {
+                let geometry_id = dispatch.geometries[declared.geometry as usize];
+                let entry = &geometries.entries[&geometry_id];
+                let realized = entry.realized.as_ref().expect("realized before encode");
+                let buffer = match declared.buffer {
+                    GeometryBuffer::Vertices => &realized.vertex_buffer,
+                    GeometryBuffer::Indices => &realized.index_buffer,
+                    GeometryBuffer::DrawIndexedIndirect => &realized.indirect_buffer,
+                };
+                storage_key.push(BoundStorage {
+                    geometry_id,
+                    revision: entry.revision,
+                    buffer: declared.buffer,
+                    access: declared.access,
+                });
+                storage_entries.push(wgpu::BindGroupEntry {
+                    binding: u32::try_from(binding).expect("program storage binding index fits u32"),
+                    resource: buffer.as_entire_binding(),
+                });
+            }
+            if cache.storage_stale(pass, &storage_key) {
+                let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("aether program storage bind group"),
+                    layout: pass_gpu.storage_layout.as_ref().expect("compute pass has a storage layout"),
+                    entries: &storage_entries,
+                });
+                cache.store_storage(pass, &storage_key, group);
+            }
+        }
+
         let uniform_bind_group = cache.uniform_group(pass);
         let inputs_bind_group = cache.inputs_group(pass);
-        let target_view = match pass_plan.output {
-            ResolvedSlot::Binding(binding) => cache.binding_view(binding),
-            ResolvedSlot::Transient(transient) => transient_view(transient),
-        };
         // The pass's timestamp pair, claimed once for the whole repeat:
         // its first iteration opens the span and its last closes it, so
         // one bracket attributes every iteration to the pass entry.
@@ -464,53 +552,78 @@ fn encode_passes(
             let timestamps = bracket.and_then(|query| {
                 queries.as_ref().and_then(|queries| queries.timestamps(query, iteration, iterations))
             });
-            // The dispatch's first write to a slot clears it and every
-            // later one loads it, so a chain accumulates; a repeat's
-            // later iterations load for the same reason.
-            let first_write = layout.clears_output[pass] && iteration == 0;
-            if let Some(draw) = &pass_plan.draw {
-                // A draw pass's declared load is authoritative on its color
-                // output; its later repeat iterations load so a repeat
-                // accumulates rather than each iteration wiping the last.
-                // Depth follows the shared-slot rule: the dispatch's first
-                // reference to a slot clears it, later ones load it.
-                let depth = draw.depth.map(|slot| ProgramDepthAttachment {
-                    view: depth_view(slot),
-                    clear: layout.clears_depth[pass] && iteration == 0,
-                });
-                let realized = geometries.entries[&dispatch.geometries[draw.geometry as usize]]
-                    .realized
-                    .as_ref()
-                    .expect("realized before encode");
-                record_program_draw_pass(
-                    encoder,
-                    &ProgramDrawPass {
-                        pipeline: &pass_gpu.pipeline,
-                        target_view,
-                        clear_color: draw.load == PassLoad::Clear && iteration == 0,
-                        depth,
-                        uniform_bind_group,
-                        uniform_offset,
-                        inputs_bind_group,
-                        vertex_buffer: &realized.vertex_buffer,
-                        index_buffer: &realized.index_buffer,
-                        index_count: realized.index_count,
-                        timestamps,
-                    },
-                );
-            } else {
-                record_program_pass(
-                    encoder,
-                    &ProgramPassDraw {
-                        pipeline: &pass_gpu.pipeline,
-                        target_view,
-                        clear: first_write,
-                        uniform_bind_group,
-                        uniform_offset,
-                        inputs_bind_group,
-                        timestamps,
-                    },
-                );
+            match (&pass_plan.stage, &pass_gpu.pipeline) {
+                (PassPlanStage::Fragment, PassPipeline::Render(pipeline)) => {
+                    let target_view = match pass_plan.output.expect("fragment pass has an output") {
+                        ResolvedSlot::Binding(binding) => cache.binding_view(binding),
+                        ResolvedSlot::Transient(transient) => transient_view(transient),
+                    };
+                    record_program_pass(
+                        encoder,
+                        &ProgramPassDraw {
+                            pipeline,
+                            target_view,
+                            clear: layout.clears_output[pass] && iteration == 0,
+                            uniform_bind_group,
+                            uniform_offset,
+                            inputs_bind_group,
+                            timestamps,
+                        },
+                    );
+                }
+                (
+                    PassPlanStage::Draw(draw) | PassPlanStage::DrawIndexedIndirect(draw),
+                    PassPipeline::Render(pipeline),
+                ) => {
+                    let target_view = match pass_plan.output.expect("draw pass has an output") {
+                        ResolvedSlot::Binding(binding) => cache.binding_view(binding),
+                        ResolvedSlot::Transient(transient) => transient_view(transient),
+                    };
+                    let depth = draw.depth.map(|slot| ProgramDepthAttachment {
+                        view: depth_view(slot),
+                        clear: layout.clears_depth[pass] && iteration == 0,
+                    });
+                    let realized = geometries.entries[&dispatch.geometries[draw.geometry as usize]]
+                        .realized
+                        .as_ref()
+                        .expect("realized before encode");
+                    let command = if matches!(&pass_plan.stage, PassPlanStage::DrawIndexedIndirect(_)) {
+                        ProgramDrawCommand::Indirect { buffer: &realized.indirect_buffer }
+                    } else {
+                        ProgramDrawCommand::Direct { index_count: realized.index_count }
+                    };
+                    record_program_draw_pass(
+                        encoder,
+                        &ProgramDrawPass {
+                            pipeline,
+                            target_view,
+                            clear_color: draw.load == PassLoad::Clear && iteration == 0,
+                            depth,
+                            uniform_bind_group,
+                            uniform_offset,
+                            inputs_bind_group,
+                            vertex_buffer: &realized.vertex_buffer,
+                            index_buffer: &realized.index_buffer,
+                            command,
+                            timestamps,
+                        },
+                    );
+                }
+                (PassPlanStage::Compute(compute), PassPipeline::Compute(pipeline)) => {
+                    record_program_compute_pass(
+                        encoder,
+                        &ProgramComputePass {
+                            pipeline,
+                            uniform_bind_group,
+                            uniform_offset,
+                            inputs_bind_group,
+                            storage_bind_group: cache.storage_group(pass),
+                            workgroups: compute.workgroups,
+                            timestamps,
+                        },
+                    );
+                }
+                _ => unreachable!("validated pass stage and built pipeline stay paired"),
             }
         }
         if report_pass_gpu_errors(pass_scopes.pop(), dispatch, pass, pass_plan) {

@@ -10,8 +10,9 @@
 use std::collections::HashMap;
 
 use aether_substrate::render::{
-    ProgramDrawPipelineSpec, build_fullscreen_vertex_module, build_program_draw_pipeline, build_program_pipeline,
-    program_inputs_layout, program_uniform_layout,
+    ProgramComputePipelineSpec, ProgramDrawPipelineSpec, build_fullscreen_vertex_module,
+    build_program_compute_pipeline, build_program_draw_pipeline, build_program_pipeline, program_inputs_layout,
+    program_storage_layout, program_uniform_layout,
 };
 
 use super::geometry::{GeometryRegistry, wgpu_vertex_attributes};
@@ -30,7 +31,7 @@ mod validate;
 
 use cache::DispatchCache;
 use timing::{Availability, PassCosts, PassTimingInstrument};
-use validate::ProgramPlan;
+use validate::{PassPlanStage, ProgramPlan};
 
 /// Minimum bytes a pass binds for its uniform window: a zero-length
 /// window (a uniform-less pass) still binds a 4-byte zeroed dummy so
@@ -66,10 +67,16 @@ enum ProgramDeviceState {
 /// Per-pass GPU resources: the compiled pipeline and the layouts the
 /// dispatch path builds its per-dispatch bind groups against.
 struct PassGpu {
-    pipeline: wgpu::RenderPipeline,
+    pipeline: PassPipeline,
     uniform_layout: wgpu::BindGroupLayout,
     inputs_layout: wgpu::BindGroupLayout,
+    storage_layout: Option<wgpu::BindGroupLayout>,
     bound_uniform_bytes: u64,
+}
+
+enum PassPipeline {
+    Render(wgpu::RenderPipeline),
+    Compute(wgpu::ComputePipeline),
 }
 
 /// Pool key: resolved size plus realized format. Pooling on the
@@ -296,28 +303,34 @@ fn build_program_passes(
         .iter()
         .map(|pass| {
             let bound_uniform_bytes = u64::from(pass.uniform_length).max(MIN_BOUND_UNIFORM_BYTES);
-            let uniform_layout = program_uniform_layout(device, bound_uniform_bytes);
+            let visibility = match &pass.stage {
+                PassPlanStage::Fragment => wgpu::ShaderStages::FRAGMENT,
+                PassPlanStage::Draw(_) | PassPlanStage::DrawIndexedIndirect(_) => wgpu::ShaderStages::VERTEX_FRAGMENT,
+                PassPlanStage::Compute(_) => wgpu::ShaderStages::COMPUTE,
+            };
+            let uniform_layout = program_uniform_layout(device, bound_uniform_bytes, visibility);
             let filterable: Vec<bool> = pass.inputs.iter().map(|slot| plan.slot_format(*slot).filterable()).collect();
-            let inputs_layout = program_inputs_layout(device, &filterable);
-            let output_format = plan.slot_format(pass.output);
-            let color_format = super::texture::wgpu_texture_format(output_format);
-            let pipeline = pass.draw.as_ref().map_or_else(
-                || {
-                    build_program_pipeline(
+            let inputs_layout = program_inputs_layout(device, &filterable, visibility);
+            let mut storage_layout = None;
+            let pipeline = match &pass.stage {
+                PassPlanStage::Fragment => {
+                    let output_format = plan.slot_format(pass.output.expect("fragment pass has an output"));
+                    PassPipeline::Render(build_program_pipeline(
                         device,
                         fullscreen,
                         &module,
                         &pass.entry_point,
-                        color_format,
+                        super::texture::wgpu_texture_format(output_format),
                         blend_for(output_format),
                         &uniform_layout,
                         &inputs_layout,
-                    )
-                },
-                |draw| {
+                    ))
+                }
+                PassPlanStage::Draw(draw) | PassPlanStage::DrawIndexedIndirect(draw) => {
+                    let output_format = plan.slot_format(pass.output.expect("draw pass has an output"));
                     let layout = &plan.geometries[draw.geometry as usize].layout;
                     let attributes = wgpu_vertex_attributes(layout);
-                    build_program_draw_pipeline(
+                    PassPipeline::Render(build_program_draw_pipeline(
                         device,
                         &ProgramDrawPipelineSpec {
                             module: &module,
@@ -326,16 +339,33 @@ fn build_program_passes(
                             vertex_stride_bytes: u64::try_from(vertex_stride_bytes(layout))
                                 .expect("vertex stride fits u64"),
                             vertex_attributes: &attributes,
-                            color_format,
+                            color_format: super::texture::wgpu_texture_format(output_format),
                             blend: blend_for(output_format),
                             depth: draw.depth.is_some(),
                             uniform_layout: &uniform_layout,
                             inputs_layout: &inputs_layout,
                         },
-                    )
-                },
-            );
-            PassGpu { pipeline, uniform_layout, inputs_layout, bound_uniform_bytes }
+                    ))
+                }
+                PassPlanStage::Compute(compute) => {
+                    let read_only: Vec<bool> =
+                        compute.buffers.iter().map(|binding| binding.access == crate::StorageAccess::Read).collect();
+                    let layout = program_storage_layout(device, &read_only);
+                    let pipeline = build_program_compute_pipeline(
+                        device,
+                        &ProgramComputePipelineSpec {
+                            module: &module,
+                            entry_point: &pass.entry_point,
+                            uniform_layout: &uniform_layout,
+                            inputs_layout: &inputs_layout,
+                            storage_layout: &layout,
+                        },
+                    );
+                    storage_layout = Some(layout);
+                    PassPipeline::Compute(pipeline)
+                }
+            };
+            PassGpu { pipeline, uniform_layout, inputs_layout, storage_layout, bound_uniform_bytes }
         })
         .collect();
     pollster::block_on(scope.pop())

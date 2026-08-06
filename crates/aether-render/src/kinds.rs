@@ -643,6 +643,11 @@ pub enum OutputSlot {
     /// The transient intermediate at `index` into
     /// `ProgramRegister.transients`.
     Transient { index: u32 },
+    /// No texture output. Valid only for a compute pass, whose writes
+    /// land in the resident geometry buffers declared by its stage.
+    /// A later pass cannot name this pass through `PassOutput`, and the
+    /// final pass of a program must still write a dispatch binding.
+    None,
 }
 
 /// One geometry slot a program declares (ADR-0171) — an entry in
@@ -700,10 +705,61 @@ pub struct DrawPass {
     pub load: PassLoad,
 }
 
-/// Which GPU stage a program pass runs (ADR-0170, ADR-0171). A `Compute`
-/// arm arrives as an addition when a consumer needs shared-memory tiles,
-/// reductions, or scatter writes — the slot / extent / uniform-window
-/// vocabulary is stage-agnostic.
+/// Which resident buffer of a declared geometry slot a compute pass
+/// binds at group 2. Vertex and index buffers preserve the created
+/// geometry's capacity; the indirect buffer is the substrate-owned
+/// 32-byte control block consumed by `DrawIndexedIndirect`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum GeometryBuffer {
+    /// Packed interleaved vertex bytes, storage-visible as raw u32
+    /// words. The authored shader decodes the declared vertex layout;
+    /// natural WGSL struct alignment is not the wire stride.
+    Vertices,
+    /// The geometry's u32 index capacity.
+    Indices,
+    /// Eight u32 words. Words 0 through 4 are WebGPU's indexed-indirect
+    /// arguments (`index_count`, `instance_count`, `first_index`,
+    /// signed `base_vertex` bits, `first_instance`); words 5 and 6 are
+    /// vertex and index capacities, and word 7 is an authored overflow
+    /// flag. Reconstruction seeds a zero index count, one instance,
+    /// zero offsets, the CPU-staged capacities, and zero overflow.
+    /// `first_instance` must remain zero because the render device does
+    /// not request WebGPU's optional indirect-first-instance feature.
+    DrawIndexedIndirect,
+}
+
+/// Access a compute entry point declares for one group-2 resident
+/// geometry buffer binding.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum StorageAccess {
+    Read,
+    ReadWrite,
+}
+
+/// One group-2 storage-buffer binding of an authored compute pass.
+/// Bindings are assigned in list order: entry `n` is
+/// `@group(2) @binding(n)` in WGSL.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct ComputeBufferBinding {
+    /// Index into `ProgramRegister.geometries`.
+    pub geometry: u32,
+    pub buffer: GeometryBuffer,
+    pub access: StorageAccess,
+}
+
+/// The `PassStage::Compute` declaration: resident geometry buffers and
+/// the fixed workgroup grid dispatched for each pass iteration. Fixed
+/// dimensions keep structure at register time; per-run values continue
+/// to ride the uniform window.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ComputePass {
+    pub buffers: Vec<ComputeBufferBinding>,
+    pub workgroups: [u32; 3],
+}
+
+/// Which GPU stage a program pass runs (ADR-0170, ADR-0171). Compute
+/// adds shared-memory, reductions, and scatter writes over resident
+/// geometry; indexed-indirect draw consumes its derived control block.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum PassStage {
     /// A fullscreen-triangle fragment pipeline over a render attachment.
@@ -711,6 +767,14 @@ pub enum PassStage {
     /// An indexed triangle-list draw of a bound geometry through an
     /// authored vertex stage, optionally depth-tested (ADR-0171).
     Draw(DrawPass),
+    /// An indexed triangle-list draw whose arguments come from the
+    /// bound geometry's resident indirect/control buffer. A preceding
+    /// compute pass in the same graph must write that buffer.
+    DrawIndexedIndirect(DrawPass),
+    /// A compute dispatch over resident geometry buffers. Compute has
+    /// no texture render attachment, so its `ProgramPass.output` must
+    /// be `OutputSlot::None`.
+    Compute(ComputePass),
 }
 
 /// Repetition of one program pass (ADR-0170): the pass records `count`
@@ -731,12 +795,11 @@ pub struct PassRepeat {
 /// One pass in a program's declared graph (ADR-0170). The graph is a
 /// sequence: a pass may read only slots already written, which makes
 /// the DAG check a single index comparison at register time.
-/// `entry_point` names a fragment entry in the program's WGSL module —
-/// paired with the substrate's fullscreen vertex stage for a
-/// `PassStage::Fragment` pass, or with the authored vertex stage the
-/// `PassStage::Draw` declaration names (ADR-0171). `inputs` bind in
-/// order as the pass's group-1 texture / sampler
-/// pairs; `output` is the render attachment. `uniform_offset` /
+/// `entry_point` names a fragment entry for fragment and draw stages,
+/// or a compute entry for `PassStage::Compute`. `inputs` bind in order
+/// as the pass's group-1 texture / sampler pairs; render stages attach
+/// `output`, while compute declares `OutputSlot::None` and writes its
+/// group-2 resident buffers. `uniform_offset` /
 /// `uniform_length` window the dispatch's uniform blob in bytes — the
 /// window binds at `@group(0) @binding(0)` and must cover the uniform
 /// block the entry point declares (checked at register from naga's
@@ -759,8 +822,8 @@ pub struct ProgramPass {
 /// paints. Validation happens here, once, each failure class with a
 /// distinguishable `Err` reason: the WGSL through naga (`invalid
 /// wgsl`), then the graph — every declared extent divisor is nonzero,
-/// every pass's entry point exists as a fragment entry, every slot is
-/// written before it is read (the sequence-index check), no pass reads
+/// every pass's entry point exists in its declared stage, every texture
+/// slot is written before it is read (the sequence-index check), no pass reads
 /// its own output, every uniform window covers the uniform block its
 /// entry point declares, the graph's per-dispatch cost stays inside the
 /// executor's budget (the render passes it encodes and the uniform bytes
@@ -797,6 +860,10 @@ pub struct ProgramPass {
 /// passes clear and test against — declared as extents alone, since
 /// their format is fixed. Both lists are empty for a fragment-only
 /// program, which registers exactly as it did before this arm existed.
+/// A `PassStage::Compute` pass instead binds its uniform at group 0,
+/// sampled inputs at group 1, and the declared resident geometry
+/// buffers at group 2 in list order. It writes no texture attachment;
+/// a later indexed-indirect draw consumes the derived buffers.
 ///
 /// Reply: `ProgramRegisterResult`; `program_id` is session-scoped,
 /// assigned like texture and instrument ids. Desktop-only — the
@@ -884,13 +951,14 @@ pub struct ProgramDestroy {
 }
 
 /// Which pipeline shape a timed pass ran, flattened from
-/// [`PassStage`] — the `Draw` declaration itself is register-time
+/// [`PassStage`] — draw and compute declarations are register-time
 /// authoring detail a timing reader has no use for, and carrying it
 /// would make the reply grow with the graph's vertex layouts.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PassStageKind {
     Fragment,
     Draw,
+    Compute,
 }
 
 /// One pass's measured GPU duration, in the shape `actor_cost` reports a
@@ -915,7 +983,8 @@ pub enum PassStageKind {
 /// that is what a pass-merging or extent decision keys on: `pass` is the
 /// index into the registered graph's pass list, `label` its WGSL entry
 /// point, `width` / `height` the extent its output slot resolved to on
-/// the most recent dispatch, and `divisor` the declared
+/// the most recent dispatch (`0 / 0` for outputless compute), and
+/// `divisor` the declared
 /// [`SlotExtent`] that extent came from (`1` for `Full`). `iterations`
 /// is the pass's repeat count — one row covers all of a repeated pass's
 /// iterations, so a large mean over a large `iterations` is a chain, not

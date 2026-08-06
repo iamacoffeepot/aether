@@ -34,6 +34,7 @@ use aether_substrate::render::PROGRAM_DEPTH_FORMAT;
 use super::super::texture::{TextureRegistry, wgpu_texture_format};
 use super::validate::{ProgramPlan, ResolvedSlot, resolve_extent};
 use super::{PassGpu, TransientKey};
+use crate::{GeometryBuffer, StorageAccess};
 
 /// One transient's physical allocation for a dispatch: which pool class
 /// it draws from and which slot within that class it occupies.
@@ -82,11 +83,13 @@ impl PlanLayout {
             .passes
             .iter()
             .map(|pass| {
-                let first = !written.contains(&pass.output);
-                if first {
-                    written.push(pass.output);
-                }
-                first
+                pass.output.is_some_and(|output| {
+                    let first = !written.contains(&output);
+                    if first {
+                        written.push(output);
+                    }
+                    first
+                })
             })
             .collect();
 
@@ -95,7 +98,7 @@ impl PlanLayout {
             .passes
             .iter()
             .map(|pass| {
-                pass.draw.as_ref().and_then(|draw| draw.depth).is_some_and(|slot| {
+                pass.stage.draw().and_then(|draw| draw.depth).is_some_and(|slot| {
                     let first = !depth_seen.contains(&slot);
                     if first {
                         depth_seen.push(slot);
@@ -139,10 +142,27 @@ pub(super) enum BoundInput {
     Transient(TransientKey, usize),
 }
 
+/// Identity of one resident geometry buffer at the granularity that
+/// invalidates a cached group-2 bind group. A geometry update keeps its
+/// public id but advances `revision` before it realizes replacement
+/// buffers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct BoundStorage {
+    pub geometry_id: u32,
+    pub revision: u64,
+    pub buffer: GeometryBuffer,
+    pub access: StorageAccess,
+}
+
 /// One pass's cached input bind group, with the resolved identities it
 /// was built from.
 struct PassInputs {
     key: Vec<BoundInput>,
+    group: wgpu::BindGroup,
+}
+
+struct PassStorage {
+    key: Vec<BoundStorage>,
     group: wgpu::BindGroup,
 }
 
@@ -168,6 +188,7 @@ pub(super) struct DispatchCache {
     /// stops naming are released when that slot is next rebound.
     binding_views: Vec<Option<(u32, wgpu::TextureView)>>,
     pass_inputs: Vec<Option<PassInputs>>,
+    pass_storage: Vec<Option<PassStorage>>,
     uniforms: Option<UniformCache>,
     /// Reused staging bytes, refilled from each dispatch's blob.
     staging: Vec<u8>,
@@ -180,6 +201,7 @@ impl DispatchCache {
             extent: None,
             binding_views: (0..plan.bindings.len()).map(|_| None).collect(),
             pass_inputs: (0..plan.passes.len()).map(|_| None).collect(),
+            pass_storage: (0..plan.passes.len()).map(|_| None).collect(),
             uniforms: None,
             staging: Vec::new(),
         }
@@ -226,6 +248,7 @@ impl DispatchCache {
             extent: self.extent.as_ref().expect("extent layout built before the encode"),
             binding_views: &self.binding_views,
             pass_inputs: &mut self.pass_inputs,
+            pass_storage: &mut self.pass_storage,
             uniforms: &mut self.uniforms,
             staging: &mut self.staging,
         }
@@ -240,6 +263,7 @@ pub(super) struct CacheParts<'a> {
     pub extent: &'a ExtentLayout,
     binding_views: &'a [Option<(u32, wgpu::TextureView)>],
     pass_inputs: &'a mut [Option<PassInputs>],
+    pass_storage: &'a mut [Option<PassStorage>],
     uniforms: &'a mut Option<UniformCache>,
     staging: &'a mut Vec<u8>,
 }
@@ -325,6 +349,14 @@ impl<'a> CacheParts<'a> {
         self.pass_inputs[pass] = Some(PassInputs { key: key.to_vec(), group });
     }
 
+    pub fn storage_stale(&self, pass: usize, key: &[BoundStorage]) -> bool {
+        self.pass_storage[pass].as_ref().is_none_or(|held| held.key != key)
+    }
+
+    pub fn store_storage(&mut self, pass: usize, key: &[BoundStorage], group: wgpu::BindGroup) {
+        self.pass_storage[pass] = Some(PassStorage { key: key.to_vec(), group });
+    }
+
     /// The uniform bind group for a pass, valid once
     /// [`Self::upload_uniforms`] has run for this dispatch.
     pub fn uniform_group(&self, pass: usize) -> &wgpu::BindGroup {
@@ -335,6 +367,10 @@ impl<'a> CacheParts<'a> {
     /// stored through [`Self::store_inputs`].
     pub fn inputs_group(&self, pass: usize) -> &wgpu::BindGroup {
         &self.pass_inputs[pass].as_ref().expect("a stale inputs group is rebuilt before the encode").group
+    }
+
+    pub fn storage_group(&self, pass: usize) -> &wgpu::BindGroup {
+        &self.pass_storage[pass].as_ref().expect("a stale storage group is rebuilt before the encode").group
     }
 }
 
@@ -392,7 +428,7 @@ fn assign_depth_transients(plan: &ProgramPlan, reference: (u32, u32)) -> Vec<Opt
         .enumerate()
         .map(|(slot, extent)| {
             let slot = u32::try_from(slot).expect("depth slot index fits u32");
-            let named = plan.passes.iter().any(|pass| pass.draw.as_ref().is_some_and(|draw| draw.depth == Some(slot)));
+            let named = plan.passes.iter().any(|pass| pass.stage.draw().is_some_and(|draw| draw.depth == Some(slot)));
             named.then(|| {
                 let (width, height) = resolve_extent(*extent, reference);
                 let key = (width, height, PROGRAM_DEPTH_FORMAT);

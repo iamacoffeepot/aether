@@ -7,13 +7,15 @@
 use naga::front::wgsl;
 use naga::valid::{Capabilities, ModuleInfo, ValidationFlags, Validator};
 use naga::{
-    AddressSpace, Binding, BuiltIn, Handle, Module, Scalar, ScalarKind, ShaderStage, Type, TypeInner, VectorSize,
+    AddressSpace, Binding, BuiltIn, Handle, Module, Scalar, ScalarKind, ShaderStage,
+    StorageAccess as NagaStorageAccess, Type, TypeInner, VectorSize,
 };
 
 use super::super::surface::render_limits;
 use crate::{
-    DrawPass, GeometrySlotSpec, InputSlot, OutputSlot, PassLoad, PassStage, ProgramPass, ProgramRegister, SlotExtent,
-    SlotSpec, TextureFormat, VertexAttribute, VertexFormat,
+    ComputeBufferBinding, ComputePass, DrawPass, GeometryBuffer, GeometrySlotSpec, InputSlot, OutputSlot, PassLoad,
+    PassStage, ProgramPass, ProgramRegister, SlotExtent, SlotSpec, StorageAccess, TextureFormat, VertexAttribute,
+    VertexFormat,
 };
 
 /// Ceiling on one pass's repeat count: a register-time bound so a typo
@@ -49,20 +51,43 @@ pub enum ResolvedSlot {
     Transient(u32),
 }
 
-/// One validated pass: entry point, resolved slots, uniform window, and
-/// the flattened repeat (`repeat_count` is 1 for an unrepeated pass).
-/// `draw` is `Some` for a `PassStage::Draw` pass and `None` for a
-/// fullscreen fragment pass.
+/// One validated pass: explicit stage, entry point, resolved texture
+/// slots, uniform window, and flattened repeat (`repeat_count` is 1 for
+/// an unrepeated pass). Compute carries no texture output.
 #[derive(Debug)]
 pub struct PassPlan {
     pub entry_point: String,
-    pub draw: Option<DrawPlan>,
+    pub stage: PassPlanStage,
     pub inputs: Vec<ResolvedSlot>,
-    pub output: ResolvedSlot,
+    pub output: Option<ResolvedSlot>,
     pub uniform_offset: u32,
     pub uniform_length: u32,
     pub repeat_count: u32,
     pub uniform_stride: u32,
+}
+
+#[derive(Debug)]
+pub enum PassPlanStage {
+    Fragment,
+    Draw(DrawPlan),
+    DrawIndexedIndirect(DrawPlan),
+    Compute(ComputePlan),
+}
+
+impl PassPlanStage {
+    pub fn draw(&self) -> Option<&DrawPlan> {
+        match self {
+            Self::Draw(draw) | Self::DrawIndexedIndirect(draw) => Some(draw),
+            Self::Fragment | Self::Compute(_) => None,
+        }
+    }
+
+    pub fn compute(&self) -> Option<&ComputePlan> {
+        match self {
+            Self::Compute(compute) => Some(compute),
+            Self::Fragment | Self::Draw(_) | Self::DrawIndexedIndirect(_) => None,
+        }
+    }
 }
 
 /// One validated draw pass (ADR-0171): the authored vertex entry, the
@@ -75,6 +100,14 @@ pub struct DrawPlan {
     pub geometry: u32,
     pub depth: Option<u32>,
     pub load: PassLoad,
+}
+
+/// One validated compute pass: the resident buffers bound at group 2
+/// and the fixed dispatch grid.
+#[derive(Debug)]
+pub struct ComputePlan {
+    pub buffers: Vec<ComputeBufferBinding>,
+    pub workgroups: [u32; 3],
 }
 
 /// One transient's declaration plus its live range over the pass
@@ -167,7 +200,7 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
     for (index, pass) in mail.passes.iter().enumerate() {
         let plan = validate_pass(mail, &module, &info, &passes, &transients, index, pass)?;
         let sequence = u32::try_from(index).expect("pass sequence index fits u32");
-        if let ResolvedSlot::Transient(transient) = plan.output {
+        if let Some(ResolvedSlot::Transient(transient)) = plan.output {
             let live = &mut transients[transient as usize];
             live.first_write.get_or_insert(sequence);
             live.last_use = Some(sequence);
@@ -177,7 +210,7 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
                 transients[*transient as usize].last_use = Some(sequence);
             }
         }
-        if let ResolvedSlot::Binding(binding) = plan.output
+        if let Some(ResolvedSlot::Binding(binding)) = plan.output
             && !written_bindings.contains(&binding)
         {
             written_bindings.push(binding);
@@ -188,7 +221,7 @@ pub fn validate(mail: &ProgramRegister) -> Result<ProgramPlan, String> {
     check_encode_budget(&passes)?;
 
     let final_output = passes.last().expect("passes checked non-empty").output;
-    let ResolvedSlot::Binding(output_binding) = final_output else {
+    let Some(ResolvedSlot::Binding(output_binding)) = final_output else {
         return Err("the final pass must write a dispatch binding (the program's result texture)".to_owned());
     };
     if mail.bindings[output_binding as usize].extent != SlotExtent::Full {
@@ -266,7 +299,7 @@ fn check_geometry_slot(index: usize, slot: &GeometrySlotSpec) -> Result<(), Stri
 // One linear walk per pass — entry point, inputs, output, window,
 // repeat — reads better in sequence than split into per-check helpers
 // that would each re-thread the same five context arguments.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn validate_pass(
     mail: &ProgramRegister,
     module: &Module,
@@ -276,18 +309,23 @@ fn validate_pass(
     index: usize,
     pass: &ProgramPass,
 ) -> Result<PassPlan, String> {
-    // Matched rather than destructured so a future `Compute` arm fails
-    // to compile here rather than silently building a fragment pipeline.
-    let declared_draw = match &pass.stage {
-        PassStage::Fragment => None,
-        PassStage::Draw(draw) => Some(draw),
+    let entry_stage = if matches!(&pass.stage, PassStage::Compute(_)) {
+        ShaderStage::Compute
+    } else {
+        ShaderStage::Fragment
     };
-
+    let entry_stage_name = if entry_stage == ShaderStage::Compute {
+        "compute"
+    } else {
+        "fragment"
+    };
     let entry_index = module
         .entry_points
         .iter()
-        .position(|entry| entry.stage == ShaderStage::Fragment && entry.name == pass.entry_point)
-        .ok_or_else(|| format!("pass {index}: no fragment entry point named `{}` in the module", pass.entry_point))?;
+        .position(|entry| entry.stage == entry_stage && entry.name == pass.entry_point)
+        .ok_or_else(|| {
+            format!("pass {index}: no {entry_stage_name} entry point named `{}` in the module", pass.entry_point)
+        })?;
 
     let mut inputs = Vec::with_capacity(pass.inputs.len());
     for (input_index, input) in pass.inputs.iter().enumerate() {
@@ -296,29 +334,57 @@ fn validate_pass(
     let output = match pass.output {
         OutputSlot::Binding { index: binding } => {
             check_binding_index(mail, index, binding)?;
-            ResolvedSlot::Binding(binding)
+            Some(ResolvedSlot::Binding(binding))
         }
         OutputSlot::Transient { index: transient } => {
             check_transient_index(mail, index, transient)?;
-            ResolvedSlot::Transient(transient)
+            Some(ResolvedSlot::Transient(transient))
         }
+        OutputSlot::None => None,
     };
-    if inputs.contains(&output) {
+    if output.is_some_and(|output| inputs.contains(&output)) {
         return Err(format!("pass {index} reads its own output slot"));
     }
 
-    let output_extent = match output {
-        ResolvedSlot::Binding(binding) => mail.bindings[binding as usize].extent,
-        ResolvedSlot::Transient(transient) => mail.transients[transient as usize].extent,
+    let (stage, vertex_entry_index) = match &pass.stage {
+        PassStage::Fragment => {
+            if output.is_none() {
+                return Err(format!("pass {index}: a fragment pass must declare a texture output"));
+            }
+            (PassPlanStage::Fragment, None)
+        }
+        PassStage::Draw(draw) | PassStage::DrawIndexedIndirect(draw) => {
+            let Some(output) = output else {
+                return Err(format!("pass {index}: a draw pass must declare a texture output"));
+            };
+            let output_extent = match output {
+                ResolvedSlot::Binding(binding) => mail.bindings[binding as usize].extent,
+                ResolvedSlot::Transient(transient) => mail.transients[transient as usize].extent,
+            };
+            let validated = validate_draw(mail, module, index, draw, (entry_index, &pass.entry_point), output_extent)?;
+            if matches!(&pass.stage, PassStage::DrawIndexedIndirect(_)) {
+                check_indirect_writer(earlier, index, draw.geometry)?;
+            }
+            let vertex_entry_index = validated.vertex_entry_index;
+            let stage = if matches!(&pass.stage, PassStage::DrawIndexedIndirect(_)) {
+                PassPlanStage::DrawIndexedIndirect(validated.plan)
+            } else {
+                PassPlanStage::Draw(validated.plan)
+            };
+            (stage, Some(vertex_entry_index))
+        }
+        PassStage::Compute(compute) => {
+            if output.is_some() {
+                return Err(format!("pass {index}: a compute pass must declare OutputSlot::None"));
+            }
+            (PassPlanStage::Compute(validate_compute(mail, module, info, index, entry_index, compute)?), None)
+        }
     };
-    let draw = declared_draw
-        .map(|declared| validate_draw(mail, module, index, declared, (entry_index, &pass.entry_point), output_extent))
-        .transpose()?;
 
     // The window must cover whichever stages read the block: a draw
     // pass's vertex stage binds the same group-0 window its fragment
     // stage does.
-    let block_bytes = [Some(entry_index), draw.as_ref().map(|resolved| resolved.vertex_entry_index)]
+    let block_bytes = [Some(entry_index), vertex_entry_index]
         .into_iter()
         .flatten()
         .filter_map(|entry| uniform_block_bytes(module, info, entry))
@@ -348,7 +414,7 @@ fn validate_pass(
 
     Ok(PassPlan {
         entry_point: pass.entry_point.clone(),
-        draw: draw.map(|validated| validated.plan),
+        stage,
         inputs,
         output,
         uniform_offset: pass.uniform_offset,
@@ -363,6 +429,127 @@ fn validate_pass(
 struct ValidatedDraw {
     plan: DrawPlan,
     vertex_entry_index: usize,
+}
+
+/// Validate the compute-only declaration and its group-2 shader
+/// interface. Every declared buffer maps exactly to the same numbered
+/// storage binding used by this entry point; leaving the comparison to
+/// pipeline creation would collapse access and binding mistakes into an
+/// opaque compiler error.
+fn validate_compute(
+    mail: &ProgramRegister,
+    module: &Module,
+    info: &ModuleInfo,
+    index: usize,
+    entry_index: usize,
+    compute: &ComputePass,
+) -> Result<ComputePlan, String> {
+    let limits = render_limits();
+    if compute.buffers.len() > limits.max_storage_buffers_per_shader_stage as usize {
+        return Err(format!(
+            "pass {index}: compute declares {} storage buffers, over the supported maximum {}",
+            compute.buffers.len(),
+            limits.max_storage_buffers_per_shader_stage,
+        ));
+    }
+    for (dimension, &workgroups) in compute.workgroups.iter().enumerate() {
+        if workgroups == 0 {
+            return Err(format!("pass {index}: compute workgroup dimension {dimension} must be at least 1"));
+        }
+        if workgroups > limits.max_compute_workgroups_per_dimension {
+            return Err(format!(
+                "pass {index}: compute workgroup dimension {dimension} is {workgroups}, over the supported maximum {}",
+                limits.max_compute_workgroups_per_dimension,
+            ));
+        }
+    }
+
+    for (binding, declared) in compute.buffers.iter().enumerate() {
+        if declared.geometry as usize >= mail.geometries.len() {
+            return Err(format!(
+                "pass {index}: compute buffer binding {binding} names geometry slot {}, which is out of range ({} declared)",
+                declared.geometry,
+                mail.geometries.len(),
+            ));
+        }
+        if compute.buffers[..binding]
+            .iter()
+            .any(|earlier| earlier.geometry == declared.geometry && earlier.buffer == declared.buffer)
+        {
+            return Err(format!(
+                "pass {index}: compute binds geometry slot {} {:?} more than once",
+                declared.geometry, declared.buffer,
+            ));
+        }
+    }
+
+    let entry_info = info.get_entry_point(entry_index);
+    let mut reflected = Vec::new();
+    for (handle, global) in module.global_variables.iter() {
+        let Some(binding) = &global.binding else {
+            continue;
+        };
+        if binding.group != 2 || entry_info[handle].is_empty() {
+            continue;
+        }
+        let AddressSpace::Storage { access } = global.space else {
+            return Err(format!(
+                "pass {index}: compute @group(2) @binding({}) is not a storage buffer",
+                binding.binding,
+            ));
+        };
+        reflected.push((binding.binding, access));
+    }
+
+    for (binding, declared) in compute.buffers.iter().enumerate() {
+        let binding = u32::try_from(binding).expect("compute binding index fits u32");
+        let Some((_, access)) = reflected.iter().find(|(reflected, _)| *reflected == binding) else {
+            return Err(format!(
+                "pass {index}: compute buffer binding {binding} has no used @group(2) @binding({binding}) storage variable",
+            ));
+        };
+        let expected = match declared.access {
+            StorageAccess::Read => NagaStorageAccess::LOAD,
+            StorageAccess::ReadWrite => NagaStorageAccess::LOAD | NagaStorageAccess::STORE,
+        };
+        if *access != expected {
+            return Err(format!(
+                "pass {index}: compute @group(2) @binding({binding}) access disagrees with declared {:?}",
+                declared.access,
+            ));
+        }
+    }
+    if let Some((binding, _)) = reflected.iter().find(|(binding, _)| *binding as usize >= compute.buffers.len()) {
+        return Err(format!(
+            "pass {index}: compute shader uses @group(2) @binding({binding}), but only {} buffers are declared",
+            compute.buffers.len(),
+        ));
+    }
+
+    Ok(ComputePlan { buffers: compute.buffers.clone(), workgroups: compute.workgroups })
+}
+
+/// An indirect draw may only consume a control buffer a preceding
+/// compute pass in this graph declared writable. The control block is
+/// seeded with a zero draw count, but rejecting the missing dependency
+/// at register makes the intended ordering explicit and testable.
+fn check_indirect_writer(earlier: &[PassPlan], index: usize, geometry: u32) -> Result<(), String> {
+    let written = earlier.iter().any(|pass| {
+        pass.stage.compute().is_some_and(|compute| {
+            compute.buffers.iter().any(|binding| {
+                binding.geometry == geometry
+                    && binding.buffer == GeometryBuffer::DrawIndexedIndirect
+                    && binding.access == StorageAccess::ReadWrite
+            })
+        })
+    });
+    if written {
+        Ok(())
+    } else {
+        Err(format!(
+            "pass {index}: indexed-indirect draw of geometry slot {geometry} has no preceding compute pass that writes its indirect buffer",
+        ))
+    }
 }
 
 /// The `PassStage::Draw` half of pass validation (ADR-0171), in check
@@ -577,8 +764,13 @@ fn resolve_input(
         }
         InputSlot::PassOutput { pass } => earlier
             .get(pass as usize)
-            .map(|prior| prior.output)
-            .ok_or_else(|| format!("pass {index} reads the output of pass {pass}, which does not run before it")),
+            .ok_or_else(|| format!("pass {index} reads the output of pass {pass}, which does not run before it"))?
+            .output
+            .ok_or_else(|| {
+                format!(
+                    "pass {index} reads pass {pass} through PassOutput, but that compute pass has no texture output"
+                )
+            }),
         InputSlot::Transient { index: transient } => {
             check_transient_index(mail, index, transient)?;
             if transients[transient as usize].first_write.is_none() {
@@ -890,7 +1082,7 @@ fn fs_depth_writer() -> DepthOut {
         };
 
         let plan = validate(&base()).expect("the baseline draw program validates");
-        let drawn = plan.passes[0].draw.as_ref().expect("the draw pass carries a draw plan");
+        let drawn = plan.passes[0].stage.draw().expect("the draw pass carries a draw plan");
         assert_eq!(drawn.vertex_entry_point, "vs_flat");
         assert_eq!(drawn.depth, Some(0));
 
@@ -985,5 +1177,169 @@ fn fs_depth_writer() -> DepthOut {
         };
         let short = rejection(&mail);
         assert!(short.contains("uniform window"), "window class over the vertex stage: {short}");
+    }
+
+    const COMPUTE_MODULE: &str = r"
+@group(2) @binding(0) var<storage, read> source_vertices: array<u32>;
+@group(2) @binding(1) var<storage, read_write> output_vertices: array<u32>;
+@group(2) @binding(2) var<storage, read_write> output_indices: array<u32>;
+@group(2) @binding(3) var<storage, read_write> indirect: array<u32>;
+
+@compute @workgroup_size(1)
+fn cs_derive() {
+    output_vertices[0] = source_vertices[0];
+    output_indices[0] = 0u;
+    indirect[0] = 3u;
+}
+
+@vertex
+fn vs_flat(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(position, 1.0);
+}
+
+@fragment
+fn fs_red() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+}
+";
+
+    fn compute_stage() -> PassStage {
+        PassStage::Compute(ComputePass {
+            buffers: vec![
+                ComputeBufferBinding { geometry: 0, buffer: GeometryBuffer::Vertices, access: StorageAccess::Read },
+                ComputeBufferBinding {
+                    geometry: 1,
+                    buffer: GeometryBuffer::Vertices,
+                    access: StorageAccess::ReadWrite,
+                },
+                ComputeBufferBinding { geometry: 1, buffer: GeometryBuffer::Indices, access: StorageAccess::ReadWrite },
+                ComputeBufferBinding {
+                    geometry: 1,
+                    buffer: GeometryBuffer::DrawIndexedIndirect,
+                    access: StorageAccess::ReadWrite,
+                },
+            ],
+            workgroups: [1, 1, 1],
+        })
+    }
+
+    fn compute_pass() -> ProgramPass {
+        ProgramPass {
+            stage: compute_stage(),
+            entry_point: "cs_derive".to_owned(),
+            inputs: Vec::new(),
+            output: OutputSlot::None,
+            uniform_offset: 0,
+            uniform_length: 0,
+            repeat: None,
+        }
+    }
+
+    fn indirect_pass() -> ProgramPass {
+        ProgramPass {
+            stage: PassStage::DrawIndexedIndirect(DrawPass {
+                vertex_entry_point: "vs_flat".to_owned(),
+                geometry: 1,
+                depth: None,
+                load: PassLoad::Clear,
+            }),
+            entry_point: "fs_red".to_owned(),
+            inputs: Vec::new(),
+            output: OutputSlot::Binding { index: 0 },
+            uniform_offset: 0,
+            uniform_length: 0,
+            repeat: None,
+        }
+    }
+
+    fn compute_program() -> ProgramRegister {
+        ProgramRegister {
+            wgsl: COMPUTE_MODULE.to_owned(),
+            bindings: vec![full(TextureFormat::Rgba8)],
+            transients: Vec::new(),
+            geometries: vec![position_slot(), position_slot()],
+            depth_transients: Vec::new(),
+            passes: vec![compute_pass(), indirect_pass()],
+        }
+    }
+
+    #[test]
+    fn compute_and_indirect_plan_validates_exact_storage_contract() {
+        let plan = validate(&compute_program()).expect("compute-to-indirect graph validates");
+        let compute = plan.passes[0].stage.compute().expect("first pass is compute");
+        assert_eq!(compute.workgroups, [1, 1, 1]);
+        assert_eq!(compute.buffers.len(), 4);
+        assert!(matches!(plan.passes[1].stage, PassPlanStage::DrawIndexedIndirect(_)));
+        assert_eq!(plan.passes[0].output, None);
+        assert_eq!(plan.output_binding, 0);
+    }
+
+    #[test]
+    fn compute_validation_classes_are_distinguishable() {
+        let mut nonempty_output = compute_program();
+        nonempty_output.passes[0].output = OutputSlot::Binding { index: 0 };
+        let reason = rejection(&nonempty_output);
+        assert!(reason.contains("OutputSlot::None"), "compute-output class: {reason}");
+
+        let mut missing_entry = compute_program();
+        missing_entry.passes[0].entry_point = "cs_missing".to_owned();
+        let reason = rejection(&missing_entry);
+        assert!(reason.contains("no compute entry point"), "compute-entry class: {reason}");
+
+        let mut zero_workgroups = compute_program();
+        let PassStage::Compute(compute) = &mut zero_workgroups.passes[0].stage else {
+            panic!("fixture starts compute");
+        };
+        compute.workgroups[1] = 0;
+        let reason = rejection(&zero_workgroups);
+        assert!(reason.contains("dimension 1 must be at least 1"), "workgroup class: {reason}");
+
+        let mut bad_geometry = compute_program();
+        let PassStage::Compute(compute) = &mut bad_geometry.passes[0].stage else {
+            panic!("fixture starts compute");
+        };
+        compute.buffers[0].geometry = 8;
+        let reason = rejection(&bad_geometry);
+        assert!(reason.contains("geometry slot 8") && reason.contains("out of range"), "geometry class: {reason}");
+
+        let mut duplicate = compute_program();
+        let PassStage::Compute(compute) = &mut duplicate.passes[0].stage else {
+            panic!("fixture starts compute");
+        };
+        compute.buffers[1] = compute.buffers[0];
+        let reason = rejection(&duplicate);
+        assert!(reason.contains("more than once"), "storage-alias class: {reason}");
+
+        let mut wrong_access = compute_program();
+        let PassStage::Compute(compute) = &mut wrong_access.passes[0].stage else {
+            panic!("fixture starts compute");
+        };
+        compute.buffers[1].access = StorageAccess::Read;
+        let reason = rejection(&wrong_access);
+        assert!(reason.contains("access disagrees"), "storage-access class: {reason}");
+
+        let mut no_writer = compute_program();
+        no_writer.passes.remove(0);
+        let reason = rejection(&no_writer);
+        assert!(reason.contains("no preceding compute pass"), "indirect-dependency class: {reason}");
+    }
+
+    #[test]
+    fn pass_output_cannot_name_outputless_compute() {
+        let mut mail = compute_program();
+        mail.passes.insert(
+            1,
+            ProgramPass {
+                stage: PassStage::Fragment,
+                entry_point: "fs_red".to_owned(),
+                inputs: vec![InputSlot::PassOutput { pass: 0 }],
+                output: OutputSlot::Binding { index: 0 },
+                uniform_offset: 0,
+                uniform_length: 0,
+                repeat: None,
+            },
+        );
+        let reason = rejection(&mail);
+        assert!(reason.contains("compute pass has no texture output"), "outputless alias class: {reason}");
     }
 }

@@ -25,7 +25,7 @@ use aether_substrate::mail::CostCell;
 use aether_substrate::render::PassTimestamps;
 
 use super::RegisteredProgram;
-use super::validate::{ProgramPlan, resolve_extent};
+use super::validate::{PassPlanStage, ProgramPlan, resolve_extent};
 use crate::{PassStageKind, PassTimingRow, SlotExtent};
 
 /// Queries per set. wgpu caps a single set at
@@ -144,22 +144,26 @@ impl PassCosts {
             .zip(&self.cells)
             .enumerate()
             .map(|(index, (pass, cell))| {
-                let extent = plan.slot_spec(pass.output).extent;
-                let (width, height) = self.reference.map_or((0, 0), |reference| resolve_extent(extent, reference));
+                let (width, height, divisor) = pass.output.map_or((0, 0, 1), |output| {
+                    let extent = plan.slot_spec(output).extent;
+                    let (width, height) = self.reference.map_or((0, 0), |reference| resolve_extent(extent, reference));
+                    let divisor = match extent {
+                        SlotExtent::Full => 1,
+                        SlotExtent::Divided { divisor } => divisor,
+                    };
+                    (width, height, divisor)
+                });
                 PassTimingRow {
                     pass: u32::try_from(index).expect("pass index fits u32"),
                     label: pass.entry_point.clone(),
-                    stage: if pass.draw.is_some() {
-                        PassStageKind::Draw
-                    } else {
-                        PassStageKind::Fragment
+                    stage: match &pass.stage {
+                        PassPlanStage::Fragment => PassStageKind::Fragment,
+                        PassPlanStage::Draw(_) | PassPlanStage::DrawIndexedIndirect(_) => PassStageKind::Draw,
+                        PassPlanStage::Compute(_) => PassStageKind::Compute,
                     },
                     width,
                     height,
-                    divisor: match extent {
-                        SlotExtent::Full => 1,
-                        SlotExtent::Divided { divisor } => divisor,
-                    },
+                    divisor,
                     iterations: pass.repeat_count,
                     mean_nanos: cell.mean_nanos(),
                     mad_nanos: cell.mad_nanos(),
@@ -470,4 +474,43 @@ fn fold_readback(slot: &Readback, period_nanos: f32, programs: &mut HashMap<u32,
 #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 fn nanos_of(ticks: u64, period_nanos: f32) -> u64 {
     (ticks as f64 * f64::from(period_nanos)).round().max(0.0) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{SlotSpec, TextureFormat};
+
+    #[test]
+    fn compute_timing_row_has_stage_and_no_texture_extent() {
+        let plan = ProgramPlan {
+            bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
+            transients: Vec::new(),
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
+            passes: vec![super::super::validate::PassPlan {
+                entry_point: "cs_derive".to_owned(),
+                stage: PassPlanStage::Compute(super::super::validate::ComputePlan {
+                    buffers: Vec::new(),
+                    workgroups: [4, 2, 1],
+                }),
+                inputs: Vec::new(),
+                output: None,
+                uniform_offset: 0,
+                uniform_length: 0,
+                repeat_count: 1,
+                uniform_stride: 0,
+            }],
+            output_binding: 0,
+            written_bindings: Vec::new(),
+        };
+        let mut costs = PassCosts::new(&plan);
+        costs.observe_reference((128, 96));
+
+        let row = &costs.rows(&plan)[0];
+        assert_eq!(row.stage, PassStageKind::Compute);
+        assert_eq!((row.width, row.height, row.divisor), (0, 0, 1));
+        assert_eq!(row.iterations, 1);
+        assert_eq!(row.samples, 0);
+    }
 }

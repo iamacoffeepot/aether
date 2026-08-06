@@ -13,6 +13,8 @@ use crate::kinds::{
     CreateGeometry, CreateGeometryResult, DestroyGeometry, UpdateGeometry, VertexAttribute, vertex_stride_bytes,
 };
 
+pub(super) const INDIRECT_CONTROL_BYTES: usize = 32;
+
 /// Realized form of one declared attribute format. Variant names match
 /// their `wgpu::VertexFormat` counterparts, so the mapping is a
 /// rename.
@@ -48,11 +50,14 @@ pub(super) fn wgpu_vertex_attributes(layout: &[VertexAttribute]) -> Vec<wgpu::Ve
 }
 
 /// The wgpu buffers a staged geometry realizes into at first GPU use:
-/// the packed vertex buffer, the 32-bit index buffer, and the index
-/// count the draw pass issues.
+/// the packed vertex buffer, the 32-bit index buffer, the resident
+/// indexed-indirect/control block, and the index count a direct draw
+/// issues. The three buffers are storage-visible so an authored compute
+/// pass can derive geometry without a CPU readback.
 pub struct RealizedGeometry {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
+    pub indirect_buffer: wgpu::Buffer,
     pub index_count: u32,
 }
 
@@ -68,6 +73,10 @@ pub struct StagedGeometry {
     pub indices: Vec<u8>,
     pub realized: Option<RealizedGeometry>,
     pub dirty: bool,
+    /// Changes whenever realization must produce new buffers. Cached
+    /// compute bind groups key on it so an in-place geometry update
+    /// cannot keep binding the superseded buffers.
+    pub revision: u64,
 }
 
 impl StagedGeometry {
@@ -91,19 +100,43 @@ impl StagedGeometry {
                 queue,
                 "aether geometry vertices",
                 &self.vertices,
-                wgpu::BufferUsages::VERTEX,
+                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
             ),
             index_buffer: staged_buffer(
                 device,
                 queue,
                 "aether geometry indices",
                 &self.indices,
-                wgpu::BufferUsages::INDEX,
+                wgpu::BufferUsages::INDEX | wgpu::BufferUsages::STORAGE,
+            ),
+            indirect_buffer: staged_buffer(
+                device,
+                queue,
+                "aether geometry indexed indirect control",
+                &indirect_control_bytes(&self.vertices, &self.indices, &self.layout),
+                wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::STORAGE,
             ),
             index_count: u32::try_from(self.indices.len() / size_of::<u32>()).expect("index count fits u32"),
         });
         self.dirty = false;
     }
+}
+
+/// Seed the 32-byte control block every realization reconstructs. The
+/// first 20 bytes are WebGPU's `DrawIndexedIndirectArgs`; `index_count`
+/// starts at zero so an indirect stage cannot draw capacity bytes before
+/// its required compute writer runs. The tail tells authored compute
+/// code the vertex/index capacities and gives it one overflow flag.
+fn indirect_control_bytes(vertices: &[u8], indices: &[u8], layout: &[VertexAttribute]) -> [u8; INDIRECT_CONTROL_BYTES] {
+    let vertex_capacity =
+        u32::try_from(vertices.len() / vertex_stride_bytes(layout)).expect("vertex capacity fits u32");
+    let index_capacity = u32::try_from(indices.len() / size_of::<u32>()).expect("index capacity fits u32");
+    let words = [0u32, 1, 0, 0, 0, vertex_capacity, index_capacity, 0];
+    let mut bytes = [0u8; INDIRECT_CONTROL_BYTES];
+    for (word, chunk) in words.into_iter().zip(bytes.chunks_exact_mut(size_of::<u32>())) {
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+    bytes
 }
 
 /// Create one GPU buffer holding `bytes`. Validation guarantees the
@@ -159,6 +192,7 @@ impl GeometryRegistry {
         for entry in self.entries.values_mut() {
             entry.realized = None;
             entry.dirty = true;
+            entry.revision = entry.revision.wrapping_add(1);
         }
     }
 
@@ -179,6 +213,7 @@ impl GeometryRegistry {
                 indices: mail.indices,
                 realized: None,
                 dirty: false,
+                revision: 0,
             },
         );
         CreateGeometryResult::Ok { geometry_id }
@@ -210,6 +245,7 @@ impl GeometryRegistry {
         entry.vertices = mail.vertices;
         entry.indices = mail.indices;
         entry.dirty = true;
+        entry.revision = entry.revision.wrapping_add(1);
     }
 
     /// Release a registered geometry. Same fire-and-forget disposition
@@ -349,6 +385,7 @@ mod tests {
         assert_eq!(entry.vertices, grown_vertices, "a valid update replaces the vertex bytes wholesale");
         assert_eq!(entry.indices, grown_indices, "a valid update replaces the index bytes wholesale");
         assert!(entry.dirty, "a valid update must dirty the entry so realization re-creates the buffers");
+        assert_eq!(entry.revision, 1, "a valid update advances the compute bind-group cache key");
 
         registry.entries.get_mut(&geometry_id).expect("entry present").dirty = false;
         registry.update(UpdateGeometry { geometry_id, vertices: vec![0u8; 20], indices: indices_bytes(&[5]) });
@@ -356,6 +393,7 @@ mod tests {
         assert_eq!(entry.vertices, grown_vertices, "a rejected update must leave the previous vertices staged");
         assert_eq!(entry.indices, grown_indices, "a rejected update must leave the previous indices staged");
         assert!(!entry.dirty, "a rejected update must not dirty the entry");
+        assert_eq!(entry.revision, 1, "a rejected update must not invalidate resident bindings");
     }
 
     /// Unknown-id update and destroy warn-drop without touching the
@@ -393,7 +431,20 @@ mod tests {
             panic!("geometry create accepted");
         };
         registry.entries.get_mut(&geometry_id).expect("created entry").ensure_realized(&booted.device, &booted.queue);
-        assert!(registry.entries[&geometry_id].realized.is_some(), "precondition: geometry is realized");
+        let realized = registry.entries[&geometry_id].realized.as_ref().expect("precondition: geometry is realized");
+        assert!(
+            realized.vertex_buffer.usage().contains(wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE),
+            "resident vertices serve both authored compute and draw",
+        );
+        assert!(
+            realized.index_buffer.usage().contains(wgpu::BufferUsages::INDEX | wgpu::BufferUsages::STORAGE),
+            "resident indices serve both authored compute and draw",
+        );
+        assert!(
+            realized.indirect_buffer.usage().contains(wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::STORAGE),
+            "the control block is writable by compute and consumable by indirect draw",
+        );
+        assert_eq!(realized.indirect_buffer.size(), INDIRECT_CONTROL_BYTES as u64);
 
         registry.invalidate_device_resources();
 
@@ -405,5 +456,6 @@ mod tests {
         assert_eq!(entry.indices, indices);
         assert!(entry.realized.is_none(), "old-device buffers must be released");
         assert!(entry.dirty, "preserved bytes must be upload-ready for the replacement device");
+        assert_eq!(entry.revision, 1, "replacement invalidates cached resident-buffer bind groups");
     }
 }
