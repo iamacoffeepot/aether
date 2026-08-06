@@ -58,7 +58,8 @@ use aether_puppet::feature::{Curve3, Drawing, Half};
 use aether_puppet::labels::{CLASSES, Labels};
 use aether_puppet::mesh::Mesh;
 use aether_puppet::{
-    Channel, IdleConfig, Load, LoadResult as PuppetLoadResult, Look, Motion, Pose, anchor, chart, deform,
+    Channel, Expression, EyeArchetype, Gaze, IdleConfig, Load, LoadResult as PuppetLoadResult, Look, Motion, Pose,
+    Viseme, anchor, chart, deform,
 };
 use aether_render::{PassTimingRow, ProgramTimings, ProgramTimingsResult};
 
@@ -356,6 +357,219 @@ fn equal_elapsed_motion_frames() {
         full_path.display(),
         contact_path.display(),
     );
+}
+
+/// Produce issue 4338's visual handoff without interpreting it. Every state
+/// is preserved as a full-resolution raw PNG, and each control family gets a
+/// labeled half-resolution contact sheet for the owner's inspection.
+///
+/// ```text
+/// AETHER_CROSSFEED_DIR=/path/to/dir \
+/// AETHER_PUPPET_CONTROL_DIR=/path/to/output \
+/// cargo test -p aether-puppet --release --test pace_instrument \
+///     -- --ignored --nocapture chart_controls_capture
+/// ```
+#[test]
+#[ignore = "visual hold; needs the shipped subject and a release-profile component wasm"]
+fn chart_controls_capture() {
+    let (Some(wasm), Some(dir)) = (require_runtime("aether_puppet"), subject_dir()) else {
+        return;
+    };
+    let output = required_output_dir("AETHER_PUPPET_CONTROL_DIR");
+    let mut harness = mounted(&dir, &wasm);
+    harness.execute(vec![("prime", HarnessOp::advance(24))]).expect("prime the chart before capturing its controls");
+
+    capture_control_family(
+        &mut harness,
+        &output,
+        "expression",
+        &[
+            ("rest", Expression { name: "rest".to_owned() }),
+            ("happy", Expression { name: "happy".to_owned() }),
+            ("grin", Expression { name: "grin".to_owned() }),
+            ("angry", Expression { name: "angry".to_owned() }),
+            ("surprised", Expression { name: "surprised".to_owned() }),
+            ("smug", Expression { name: "smug".to_owned() }),
+            ("sad", Expression { name: "sad".to_owned() }),
+            ("speaking", Expression { name: "speaking".to_owned() }),
+        ],
+    );
+
+    capture_control_family(
+        &mut harness,
+        &output,
+        "gaze",
+        &[
+            ("center", Gaze { x: 0.0, y: 0.0 }),
+            ("left", Gaze { x: 1.0, y: 0.0 }),
+            ("right", Gaze { x: -1.0, y: 0.0 }),
+            ("up", Gaze { x: 0.0, y: 1.0 }),
+            ("down", Gaze { x: 0.0, y: -1.0 }),
+        ],
+    );
+
+    capture_control_family(
+        &mut harness,
+        &output,
+        "viseme",
+        &[
+            ("closed-start", Viseme { name: "closed".to_owned() }),
+            ("A", Viseme { name: "A".to_owned() }),
+            ("I", Viseme { name: "I".to_owned() }),
+            ("U", Viseme { name: "U".to_owned() }),
+            ("E", Viseme { name: "E".to_owned() }),
+            ("O", Viseme { name: "O".to_owned() }),
+            ("closed-end", Viseme { name: "closed".to_owned() }),
+        ],
+    );
+
+    capture_control_family(
+        &mut harness,
+        &output,
+        "archetype",
+        &[
+            ("kitsune", EyeArchetype { name: "kitsune".to_owned() }),
+            ("vulpine", EyeArchetype { name: "vulpine".to_owned() }),
+            ("sketch", EyeArchetype { name: "sketch".to_owned() }),
+            ("cool", EyeArchetype { name: "cool".to_owned() }),
+            ("soft", EyeArchetype { name: "soft".to_owned() }),
+            ("wide", EyeArchetype { name: "wide".to_owned() }),
+            ("mask", EyeArchetype { name: "mask".to_owned() }),
+        ],
+    );
+
+    eprintln!("pace: wrote unjudged chart-control evidence to {}", output.display());
+}
+
+fn required_output_dir(variable: &str) -> PathBuf {
+    let output =
+        PathBuf::from(env::var(variable).unwrap_or_else(|_| panic!("{variable} must name an output directory")));
+    fs::create_dir_all(&output).unwrap_or_else(|error| panic!("create {}: {error}", output.display()));
+
+    output
+}
+
+fn capture_control_family<K: Kind>(harness: &mut SubstrateHarness, output: &Path, family: &str, states: &[(&str, K)]) {
+    let mut frames = Vec::with_capacity(states.len());
+    for (label, mail) in states {
+        let captured = harness
+            .execute(vec![
+                ("control", HarnessOp::send_and_settle(PUPPET, mail)),
+                ("settle", HarnessOp::advance(4)),
+                ("capture", HarnessOp::capture()),
+            ])
+            .unwrap_or_else(|error| panic!("settle and capture {family}/{label}: {error}"));
+        let png = captured.captured("capture").expect("the control capture step ran").to_vec();
+        let path = output.join(format!("{family}-{label}.png"));
+        fs::write(&path, &png).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+        eprintln!("pace: wrote raw {family}/{label} to {} ({} bytes)", path.display(), png.len());
+        frames.push((*label, png));
+    }
+
+    let sheet = output.join(format!("{family}-sheet.png"));
+    fs::write(&sheet, labeled_control_sheet(&frames))
+        .unwrap_or_else(|error| panic!("write {}: {error}", sheet.display()));
+    eprintln!("pace: wrote labeled {family} sheet to {}", sheet.display());
+}
+
+/// Arrange half-resolution thumbnails in reading order. Labels are a tiny
+/// embedded bitmap alphabet so the evidence instrument adds no font or image
+/// dependency to the crate.
+fn labeled_control_sheet(frames: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    const COLUMNS: usize = 4;
+    const LABEL_HEIGHT: u32 = 36;
+
+    let decoded: Vec<_> = frames
+        .iter()
+        .map(|(label, png)| (*label, decode_png(png).unwrap_or_else(|error| panic!("decode {label}: {error}"))))
+        .collect();
+    let first = &decoded[0].1;
+    assert!(
+        decoded.iter().all(|(_, image)| (image.width, image.height) == (first.width, first.height)),
+        "all control frames must share one framing",
+    );
+    let (thumb_width, thumb_height) = ((first.width / 2).max(1), (first.height / 2).max(1));
+    let columns = COLUMNS.min(decoded.len());
+    let rows = decoded.len().div_ceil(columns);
+    let (width, height) = (thumb_width * columns as u32, (thumb_height + LABEL_HEIGHT) * rows as u32);
+    let mut rgba = vec![0u8; width as usize * height as usize * 4];
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[0xf4, 0xef, 0xe4, 0xff]);
+    }
+
+    for (index, (label, image)) in decoded.iter().enumerate() {
+        let cell_x = (index % columns) as u32 * thumb_width;
+        let cell_y = (index / columns) as u32 * (thumb_height + LABEL_HEIGHT);
+        draw_label(&mut rgba, width, cell_x + 10, cell_y + 7, label);
+        for y in 0..thumb_height {
+            for x in 0..thumb_width {
+                let source_x = x * image.width / thumb_width;
+                let source_y = y * image.height / thumb_height;
+                let source = (source_y * image.width + source_x) as usize * 4;
+                let target = ((cell_y + LABEL_HEIGHT + y) * width + cell_x + x) as usize * 4;
+                rgba[target..target + 4].copy_from_slice(&image.rgba[source..source + 4]);
+            }
+        }
+    }
+
+    encode_png(&rgba, width, height).expect("encode the labeled control sheet")
+}
+
+fn draw_label(rgba: &mut [u8], width: u32, x: u32, y: u32, label: &str) {
+    const SCALE: u32 = 3;
+
+    for (letter, glyph) in label.to_ascii_uppercase().chars().map(glyph).enumerate() {
+        for (row, bits) in glyph.into_iter().enumerate() {
+            for column in 0..5 {
+                if bits & (1 << (4 - column)) == 0 {
+                    continue;
+                }
+                for py in 0..SCALE {
+                    for px in 0..SCALE {
+                        let at_x = x + letter as u32 * 6 * SCALE + column * SCALE + px;
+                        let at_y = y + row as u32 * SCALE + py;
+                        let at = (at_y * width + at_x) as usize * 4;
+                        if at + 4 <= rgba.len() {
+                            rgba[at..at + 4].copy_from_slice(&[0x25, 0x22, 0x1f, 0xff]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn glyph(letter: char) -> [u8; 7] {
+    match letter {
+        'A' => [14, 17, 17, 31, 17, 17, 17],
+        'B' => [30, 17, 17, 30, 17, 17, 30],
+        'C' => [14, 17, 16, 16, 16, 17, 14],
+        'D' => [30, 17, 17, 17, 17, 17, 30],
+        'E' => [31, 16, 16, 30, 16, 16, 31],
+        'F' => [31, 16, 16, 30, 16, 16, 16],
+        'G' => [14, 17, 16, 23, 17, 17, 14],
+        'H' => [17, 17, 17, 31, 17, 17, 17],
+        'I' => [31, 4, 4, 4, 4, 4, 31],
+        'J' => [7, 2, 2, 2, 18, 18, 12],
+        'K' => [17, 18, 20, 24, 20, 18, 17],
+        'L' => [16, 16, 16, 16, 16, 16, 31],
+        'M' => [17, 27, 21, 21, 17, 17, 17],
+        'N' => [17, 25, 21, 19, 17, 17, 17],
+        'O' => [14, 17, 17, 17, 17, 17, 14],
+        'P' => [30, 17, 17, 30, 16, 16, 16],
+        'Q' => [14, 17, 17, 17, 21, 18, 13],
+        'R' => [30, 17, 17, 30, 20, 18, 17],
+        'S' => [15, 16, 16, 14, 1, 1, 30],
+        'T' => [31, 4, 4, 4, 4, 4, 4],
+        'U' => [17, 17, 17, 17, 17, 17, 14],
+        'V' => [17, 17, 17, 17, 17, 10, 4],
+        'W' => [17, 17, 17, 21, 21, 21, 10],
+        'X' => [17, 17, 10, 4, 10, 17, 17],
+        'Y' => [17, 17, 10, 4, 4, 4, 4],
+        'Z' => [31, 1, 2, 4, 8, 16, 31],
+        '-' => [0, 0, 0, 31, 0, 0, 0],
+        _ => [0; 7],
+    }
 }
 
 fn motion_frame(dir: &Path, wasm: &Path, ticks: u32, delta: Duration) -> Vec<u8> {

@@ -331,6 +331,13 @@ impl Puppet {
         Vec3::new(0.0, self.look.height, 0.0)
     }
 
+    /// Invalidate only what chart state contributes to. Surface extraction,
+    /// the material survey, and resident GPU geometry remain valid.
+    fn chart_changed(&mut self) {
+        self.drawn_from = None;
+        self.easel.chart_changed();
+    }
+
     fn view_matrix(&self) -> Mat4 {
         let view = Mat4::look_at_rh(self.eye(), self.target(), Vec3::new(0.0, 1.0, 0.0));
         let projection = Mat4::perspective_rh(FIELD_OF_VIEW, self.aspect, 0.05, 40.0);
@@ -771,6 +778,63 @@ impl WasmActor for Puppet {
         self.pose = pose;
     }
 
+    /// Choose a named face while preserving the direction she is looking.
+    ///
+    /// # Agent
+    /// Send one of `rest`, `happy`, `grin`, `angry`, `surprised`, `smug`,
+    /// `sad`, or `speaking`. Unknown names leave the current face unchanged.
+    #[handler::single]
+    fn on_expression(&mut self, _ctx: &mut WasmCtx<'_>, expression: Expression) {
+        if set_expression(&mut self.settings, &expression.name) {
+            self.chart_changed();
+        } else if chart::face(&expression.name).is_none() {
+            tracing::warn!(target: "aether_puppet", name = %expression.name, "unknown expression");
+        }
+    }
+
+    /// Move both irises together, with the lids following vertically.
+    ///
+    /// # Agent
+    /// `x` and `y` are normalized axes clamped to `[-1, 1]`; positive `x`
+    /// is toward her left and positive `y` is up. Non-finite values are ignored.
+    #[handler::single]
+    fn on_gaze(&mut self, _ctx: &mut WasmCtx<'_>, gaze: Gaze) {
+        if set_gaze(&mut self.settings, gaze) {
+            self.chart_changed();
+        } else if !gaze.x.is_finite() || !gaze.y.is_finite() {
+            tracing::warn!(target: "aether_puppet", x = gaze.x, y = gaze.y, "non-finite gaze ignored");
+        }
+    }
+
+    /// Replace only the mouth shape, leaving expression, gaze, and eye design.
+    ///
+    /// # Agent
+    /// Speech shapes are `closed`, `A`, `I`, `U`, `E`, and `O`. The chart's
+    /// expression shapes `rest`, `smile`, `grin`, `frown`, `smirk`, and `pout`
+    /// are accepted too. Unknown names leave the current mouth unchanged.
+    #[handler::single]
+    fn on_viseme(&mut self, _ctx: &mut WasmCtx<'_>, viseme: Viseme) {
+        if set_viseme(&mut self.settings, &viseme.name) {
+            self.chart_changed();
+        } else if chart::mouth::shape(&viseme.name).is_none() {
+            tracing::warn!(target: "aether_puppet", name = %viseme.name, "unknown viseme");
+        }
+    }
+
+    /// Choose the eye design without changing expression, gaze, or speech.
+    ///
+    /// # Agent
+    /// Send one of `kitsune`, `vulpine`, `sketch`, `cool`, `soft`, `wide`, or
+    /// `mask`. Unknown names leave the current eye design unchanged.
+    #[handler::single]
+    fn on_eye_archetype(&mut self, _ctx: &mut WasmCtx<'_>, archetype: EyeArchetype) {
+        if set_eye_archetype(&mut self.settings, &archetype.name) {
+            self.chart_changed();
+        } else {
+            tracing::warn!(target: "aether_puppet", name = %archetype.name, "unknown eye archetype");
+        }
+    }
+
     #[handler::single]
     fn on_look(&mut self, _ctx: &mut WasmCtx<'_>, mail: Look) {
         self.look = mail;
@@ -1038,6 +1102,106 @@ impl WasmActor for Puppet {
             Some(Awaiting::Strokes) => self.strokes.geometry_created(result),
             None => {}
         }
+    }
+}
+
+fn set_expression(settings: &mut extract::Settings, name: &str) -> bool {
+    let Some(mut expression) = chart::face(name) else {
+        return false;
+    };
+    expression.gaze = settings.face.map_or(Vec2::ZERO, |face| face.gaze);
+    if settings.face == Some(expression) {
+        return false;
+    }
+    settings.face = Some(expression);
+
+    true
+}
+
+fn set_gaze(settings: &mut extract::Settings, gaze: Gaze) -> bool {
+    if !gaze.x.is_finite() || !gaze.y.is_finite() {
+        return false;
+    }
+    let Some(face) = settings.face.as_mut() else {
+        return false;
+    };
+    let gaze = Vec2::new(gaze.x.clamp(-1.0, 1.0), gaze.y.clamp(-1.0, 1.0));
+    if face.gaze == gaze {
+        return false;
+    }
+    face.gaze = gaze;
+
+    true
+}
+
+fn set_viseme(settings: &mut extract::Settings, name: &str) -> bool {
+    let (Some(mouth), Some(face)) = (chart::mouth::shape(name), settings.face.as_mut()) else {
+        return false;
+    };
+    if face.mouth == mouth {
+        return false;
+    }
+    face.mouth = mouth;
+
+    true
+}
+
+fn set_eye_archetype(settings: &mut extract::Settings, name: &str) -> bool {
+    let Some(style) = chart::eye::style(name) else {
+        return false;
+    };
+    settings.eye_style = style;
+
+    true
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    #[test]
+    fn expression_gaze_and_viseme_compose_without_resetting_each_other() {
+        let mut settings = extract::Settings::default();
+
+        assert!(set_gaze(&mut settings, Gaze { x: 1.8, y: -1.4 }));
+        assert!(set_expression(&mut settings, "angry"));
+        let angry = settings.face.expect("the expression keeps the chart enabled");
+        assert_eq!(angry.gaze, Vec2::new(1.0, -1.0), "an expression must preserve the shared gaze");
+
+        assert!(set_viseme(&mut settings, "A"));
+        let speaking = settings.face.expect("the viseme keeps the chart enabled");
+        assert_eq!(speaking.mouth, chart::mouth::shape("A").expect("the chart has the A viseme"));
+        assert_eq!(speaking.brow, angry.brow, "a viseme must not replace the expression's brows");
+        assert_eq!(speaking.eye, angry.eye, "a viseme must not replace the expression's aperture");
+        assert_eq!(speaking.gaze, angry.gaze, "a viseme must not replace gaze");
+    }
+
+    #[test]
+    fn invalid_controls_leave_the_current_chart_state_intact() {
+        let mut settings = extract::Settings::default();
+        assert!(set_expression(&mut settings, "happy"));
+        assert!(set_gaze(&mut settings, Gaze { x: -0.4, y: 0.7 }));
+        let before = settings.face;
+        let eye_scale = settings.eye_style.scale;
+
+        assert!(!set_expression(&mut settings, "missing"));
+        assert!(!set_viseme(&mut settings, "missing"));
+        assert!(!set_gaze(&mut settings, Gaze { x: f32::NAN, y: 0.0 }));
+        assert!(!set_eye_archetype(&mut settings, "missing"));
+        assert_eq!(settings.face, before);
+        assert_eq!(settings.eye_style.scale, eye_scale);
+    }
+
+    #[test]
+    fn eye_archetype_changes_only_the_style() {
+        let mut settings = extract::Settings::default();
+        assert!(set_expression(&mut settings, "smug"));
+        assert!(set_gaze(&mut settings, Gaze { x: 0.5, y: -0.25 }));
+        let face = settings.face;
+
+        assert!(set_eye_archetype(&mut settings, "wide"));
+        assert_eq!(settings.face, face);
+        assert_eq!(settings.eye_style.scale, chart::eye::style("wide").expect("the wide style exists").scale);
     }
 }
 
