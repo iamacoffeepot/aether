@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use aether_actor::{Manual, OutboundReply, ReplyMode, Single};
 use aether_data::{Kind, KindDescriptor};
-use aether_kinds::{ComponentCapabilities, DropComponent, LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_kinds::{
+    ComponentCapabilities, DropComponent, LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult,
+};
 use wasmtime::Module;
 
 use aether_substrate::actor::native::{
@@ -41,6 +43,13 @@ pub(super) struct PreparedLoad {
     wasm_bytes: Arc<[u8]>,
     config: Vec<u8>,
     name: String,
+    placement: LoadPlacement,
+}
+
+#[derive(Clone)]
+enum LoadPlacement {
+    ComponentHost,
+    Under { parent: MailboxId, canonical_name: Arc<str> },
 }
 
 impl PreparedLoad {
@@ -151,7 +160,28 @@ pub(super) enum SpawnContext {
 
 impl ComponentHostCapabilityState {
     pub fn begin_load(&mut self, ctx: &mut NativeCtx<'_, Manual>, payload: LoadComponent) {
-        let (descriptors, load) = match self.prepare_load(payload) {
+        self.begin_load_at(ctx, payload, LoadPlacement::ComponentHost);
+    }
+
+    pub fn begin_load_under(&mut self, ctx: &mut NativeCtx<'_, Manual>, payload: LoadComponentUnder) {
+        let parent = match self.registry.resolve_address(&payload.parent) {
+            Ok(parent) => parent,
+            Err(error) => {
+                ctx.reply(&LoadResult::Err {
+                    error: format!("component parent {:?} did not resolve: {error}", payload.parent),
+                });
+                return;
+            }
+        };
+        self.begin_load_at(
+            ctx,
+            payload.load,
+            LoadPlacement::Under { parent: parent.mailbox_id, canonical_name: Arc::from(parent.canonical_path) },
+        );
+    }
+
+    fn begin_load_at(&mut self, ctx: &mut NativeCtx<'_, Manual>, payload: LoadComponent, placement: LoadPlacement) {
+        let (descriptors, load) = match self.prepare_load(payload, placement) {
             Ok(prepared) => prepared,
             Err(result) => {
                 ctx.reply(&result);
@@ -166,7 +196,11 @@ impl ComponentHostCapabilityState {
         clippy::result_large_err,
         reason = "cold synchronous preparation returns the exact public LoadResult error shape"
     )]
-    fn prepare_load(&mut self, payload: LoadComponent) -> Result<(Vec<KindDescriptor>, Arc<PreparedLoad>), LoadResult> {
+    fn prepare_load(
+        &mut self,
+        payload: LoadComponent,
+        placement: LoadPlacement,
+    ) -> Result<(Vec<KindDescriptor>, Arc<PreparedLoad>), LoadResult> {
         let descriptors = kind_manifest::read_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
         let actors =
             kind_manifest::read_actor_inputs_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
@@ -242,6 +276,7 @@ impl ComponentHostCapabilityState {
                 wasm_bytes,
                 config: payload.config,
                 name,
+                placement,
             }),
         ))
     }
@@ -312,10 +347,17 @@ impl ComponentHostCapabilityState {
         boot_hash: Option<String>,
     ) {
         let config = load.requested_config(self);
-        match ctx
-            .spawn_child::<WasmTrampoline>(Subname::Named(&load.name), config, ())
-            .continue_from(owed, SpawnContext::RequestedActor { load: Arc::clone(&load), boot_hash: boot_hash.clone() })
-        {
+        let context = SpawnContext::RequestedActor { load: Arc::clone(&load), boot_hash: boot_hash.clone() };
+        let placement = load.placement.clone();
+        let staged = match placement {
+            LoadPlacement::ComponentHost => {
+                ctx.spawn_child::<WasmTrampoline>(Subname::Named(&load.name), config, ()).continue_from(owed, context)
+            }
+            LoadPlacement::Under { parent, canonical_name } => ctx
+                .spawn_child_scoped::<WasmTrampoline>(parent, canonical_name, Subname::Named(&load.name), config, ())
+                .continue_from(owed, context),
+        };
+        match staged {
             Ok(_) => {
                 if let Some(hash) = &boot_hash {
                     let entry =

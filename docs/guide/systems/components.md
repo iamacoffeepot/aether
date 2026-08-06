@@ -173,6 +173,37 @@ what lets a wasm crate be a *library* of actors: a UI root spawns its panels, a 
 manager spawns a per-entity actor for each thing in range — all from one resident
 module, its compiled code shared across the instances while each keeps its own state.
 
+### Explicit logical parents in `SubstrateHarness`
+
+Component-composition tests can load a different binary beneath an already-live
+logical actor with `HarnessOp::load_component_under`:
+
+```rust,ignore
+let nested_load = HarnessOp::load_component_under(
+    parent_name,
+    LoadComponent {
+        wasm,
+        name: Some("worker".to_owned()),
+        config: Vec::new(),
+        export: Some("example.worker".to_owned()),
+    },
+);
+```
+
+The component host resolves `parent_name` through the live registry before it
+stages the ordinary component-loader path. The existing `LoadResult` is the
+reply: `Ok.name` carries the canonical nested address
+`PARENT/aether.embedded:worker`, while a missing or non-live parent returns
+`LoadResult::Err`. Loading another component beneath that returned name builds
+another lineage generation. Because `PeerCtxExt::peer` and `peer_named` seed
+resolution from the caller's runtime parent, identical component types can then
+route to the peers in their own explicit or nested scope.
+
+This constructor is test-harness composition infrastructure. Ordinary
+`aether.component.load` retains its established placement beneath
+`aether.component`; the hub and MCP load surfaces do not expose an explicit
+parent mode.
+
 ## Hot reload
 
 Every component can already be replaced in place — its wasm swapped behind a stable

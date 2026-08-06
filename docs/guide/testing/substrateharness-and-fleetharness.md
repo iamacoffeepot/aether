@@ -140,6 +140,32 @@ The three that wait are covered above under [Choosing a wait](#choosing-a-wait).
 the retired YAML scenario runner: the compiler checks kind construction, while
 the harness owns ordering.
 
+Component-composition tests can place a loaded actor beneath any already-live
+logical parent with `HarnessOp::load_component_under`:
+
+```rust,ignore
+let operation = HarnessOp::load_component_under(
+    parent_name,
+    LoadComponent {
+        wasm,
+        name: Some("worker".to_owned()),
+        config: Vec::new(),
+        export: Some("example.worker".to_owned()),
+    },
+);
+let result = harness.execute(vec![("load-worker", operation)])?;
+let loaded = result.reply::<LoadResult>("load-worker")?;
+```
+
+The component host resolves `parent_name` through the live registry, uses its
+canonical path as the new actor's lineage, and returns the ordinary
+`LoadResult`. On success, `LoadResult::Ok.name` is the canonical child address,
+for example `PARENT/aether.embedded:worker`; an unknown parent produces
+`LoadResult::Err`. This makes parent-relative `PeerCtxExt::peer` and
+`peer_named` routes testable across explicit and nested component scopes.
+Ordinary `LoadComponent` mail still loads beneath `aether.component`, and this
+harness constructor does not add an MCP or production-hub load mode.
+
 Use `CaptureWithMails` when geometry must land in the same frame as readback;
 separate send/capture steps describe a different temporal contract.
 

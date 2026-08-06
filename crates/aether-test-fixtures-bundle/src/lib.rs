@@ -22,6 +22,7 @@ mod inline_child;
 mod mat4_source;
 mod matrix_sweep;
 mod multi_actor;
+mod peer_routing;
 mod probe;
 mod source_observer;
 mod stateful_replace;
@@ -42,6 +43,7 @@ pub use inline_child::{
 pub use mat4_source::MatSource;
 pub use matrix_sweep::{MatrixChild, MatrixParent};
 pub use multi_actor::{Panel, RootManager};
+pub use peer_routing::{ParentPeerCaller, ParentPeerTarget};
 pub use probe::{Probe, ProbeWithConfig};
 pub use source_observer::SourceObserver;
 pub use stateful_replace::{Counter, Sidecar};
@@ -57,6 +59,8 @@ aether_actor::export!(
     ProbeWithConfig,
     RootManager,
     Panel,
+    ParentPeerCaller,
+    ParentPeerTarget,
     Cube,
     EditorRegionProbe,
     FsDemux,

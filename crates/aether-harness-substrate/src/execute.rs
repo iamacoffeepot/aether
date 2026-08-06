@@ -27,8 +27,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::{Addressable, HandlesKind, One};
+use aether_component::ComponentHostCapability;
 use aether_data::{Kind, KindId};
-use aether_kinds::NamedMail;
+use aether_kinds::{LoadComponent, LoadComponentUnder, NamedMail};
 use aether_window::{InjectWindowEvent, SyntheticWindowCapability, WindowId};
 
 use super::harness::{SubstrateHarness, SubstrateHarnessError};
@@ -250,6 +251,26 @@ impl HarnessOp {
     pub fn window_event<K: Kind>(window: WindowId, event: &K) -> Self {
         let injection = InjectWindowEvent { window, kind: K::ID, payload: event.encode_into_bytes() };
         Self::actor::<SyntheticWindowCapability>().send(&injection)
+    }
+
+    /// Load `component` beneath the live logical actor addressed by `parent`.
+    ///
+    /// This is the public harness composition seam for explicit-parent and
+    /// nested-component scenarios. The component host canonicalizes `parent`
+    /// through the live registry before staging the same loader path used by
+    /// [`LoadComponent`]. Decode the stored reply as a `LoadResult` with
+    /// [`ExecutionResult::reply`]; its `Ok.name` is the child's canonical
+    /// lineage address.
+    ///
+    /// Ordinary [`HarnessOp::send_and_await_reply`] with `LoadComponent`
+    /// retains root component-host placement. This constructor does not add a
+    /// production hub or MCP load mode.
+    #[must_use]
+    pub fn load_component_under(parent: impl Into<String>, component: LoadComponent) -> Self {
+        Self::send_and_await_reply(
+            ComponentHostCapability::NAMESPACE,
+            &LoadComponentUnder { parent: parent.into(), load: component },
+        )
     }
 
     /// Send a typed mail and wait for its whole causal chain to settle:
