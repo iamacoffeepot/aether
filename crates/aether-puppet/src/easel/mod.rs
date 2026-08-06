@@ -431,6 +431,15 @@ impl Easel {
         self.derived_for = None;
     }
 
+    /// The chart changed while the subject and its resident geometry did not.
+    ///
+    /// Expression, gaze, viseme, and eye-style mail move only authored face
+    /// marks. The next develop must re-project the eye frames and aperture,
+    /// but the survey and subject buffers remain valid.
+    pub fn chart_changed(&mut self) {
+        self.derived_for = None;
+    }
+
     /// The reply to one requested register. Ids arrive in send order, so
     /// each answers the front of the in-flight queue. `Err` disables the
     /// easel for the session, exactly as a refused create does; an id
@@ -1198,6 +1207,27 @@ mod tests {
             easel.take_geometry_updates().len(),
             1,
             "an eye that moved re-derives the aperture, and it has to travel",
+        );
+    }
+
+    #[test]
+    fn a_chart_change_invalidates_only_the_chart_derivation() {
+        let mesh = quad();
+        let scores = vec![[1.0; CLASSES]; mesh.positions.len()];
+        let settings = Settings::default();
+        let mut easel = converged(&mesh, &scores, &settings, &view());
+        let geometry = easel.geometries[SUBJECT_GEOMETRY].id();
+
+        assert!(easel.derived_for.is_some());
+        assert!(easel.survey.is_some());
+        easel.chart_changed();
+
+        assert!(easel.derived_for.is_none(), "the next develop must re-project the chart");
+        assert!(easel.survey.is_some(), "chart state does not invalidate the material survey");
+        assert_eq!(
+            easel.geometries[SUBJECT_GEOMETRY].id(),
+            geometry,
+            "chart state must not discard resident subject geometry",
         );
     }
 

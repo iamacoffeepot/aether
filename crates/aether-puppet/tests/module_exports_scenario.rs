@@ -11,7 +11,7 @@ use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_puppet::{Idle, IdleConfig, Puppet, Turntable, TurntableConfig};
+use aether_puppet::{Expression, EyeArchetype, Gaze, Idle, IdleConfig, Puppet, Turntable, TurntableConfig, Viseme};
 
 const PUPPET_EXPORT: &str = <Puppet as Addressable>::NAMESPACE;
 const IDLE_EXPORT: &str = <Idle as Addressable>::NAMESPACE;
@@ -66,6 +66,20 @@ fn one_artifact_serves_all_three_explicit_exports() {
             LoadResult::Ok { name, capabilities, .. } => {
                 assert!(name.ends_with(&format!(":{export}")), "selector {export} registered as {name}");
                 assert!(!capabilities.handlers.is_empty(), "selector {export} exposed no handlers");
+                if export == PUPPET_EXPORT {
+                    for (kind, id) in [
+                        (Expression::NAME, Expression::ID),
+                        (Gaze::NAME, Gaze::ID),
+                        (Viseme::NAME, Viseme::ID),
+                        (EyeArchetype::NAME, EyeArchetype::ID),
+                    ] {
+                        assert!(
+                            capabilities.handlers.iter().any(|handler| handler.id == id),
+                            "selector {export} did not expose {kind}; handlers: {:?}",
+                            capabilities.handlers,
+                        );
+                    }
+                }
                 assert_eq!(
                     capabilities.config.as_ref().map(|declared| declared.name.as_str()),
                     config,

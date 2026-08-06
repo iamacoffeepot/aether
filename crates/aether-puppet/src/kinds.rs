@@ -43,6 +43,43 @@ pub enum LoadResult {
     Err { reason: String },
 }
 
+/// Select one of the chart's named faces.
+///
+/// The expression supplies the mouth, brows, and eye aperture. It leaves
+/// [`Gaze`] alone, so looking somewhere and feeling something compose.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "aether.puppet.expression")]
+pub struct Expression {
+    pub name: String,
+}
+
+/// Move both irises together in the puppet's own frame.
+///
+/// Both axes are normalized and clamped to `[-1, 1]`. Positive `x` is
+/// toward her left and positive `y` is up. The lids follow the vertical
+/// axis with the chart's authored upper/lower weights.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "aether.puppet.gaze")]
+pub struct Gaze {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Select one of the chart's named mouth shapes without changing the
+/// expression's brows or eyes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "aether.puppet.viseme")]
+pub struct Viseme {
+    pub name: String,
+}
+
+/// Select the eye design the chart draws without changing expression or gaze.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "aether.puppet.eye_archetype")]
+pub struct EyeArchetype {
+    pub name: String,
+}
+
 /// What the rig is doing, in degrees per channel.
 ///
 /// Channel names follow the rigging reference: `ARKit` where `ARKit` has
