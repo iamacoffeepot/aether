@@ -33,12 +33,16 @@ pub fn build_fullscreen_vertex_module(device: &wgpu::Device) -> wgpu::ShaderModu
 /// vertex stage reads the same window its fragment stage does
 /// (ADR-0171), and visibility a stage does not use costs nothing.
 #[must_use]
-pub fn program_uniform_layout(device: &wgpu::Device, bound_bytes: u64) -> wgpu::BindGroupLayout {
+pub fn program_uniform_layout(
+    device: &wgpu::Device,
+    bound_bytes: u64,
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("aether program uniform bind group layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            visibility,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: true,
@@ -65,13 +69,17 @@ pub fn program_uniform_layout(device: &wgpu::Device, bound_bytes: u64) -> wgpu::
 /// grants a vertex stage `textureLoad` / `textureSampleLevel` and
 /// nothing more, and visibility a stage does not use costs nothing.
 #[must_use]
-pub fn program_inputs_layout(device: &wgpu::Device, filterable: &[bool]) -> wgpu::BindGroupLayout {
+pub fn program_inputs_layout(
+    device: &wgpu::Device,
+    filterable: &[bool],
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayout {
     let mut entries = Vec::with_capacity(filterable.len() * 2);
     let mut base = 0u32;
     for &filterable in filterable {
         entries.push(wgpu::BindGroupLayoutEntry {
             binding: base,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            visibility,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable },
                 view_dimension: wgpu::TextureViewDimension::D2,
@@ -81,7 +89,7 @@ pub fn program_inputs_layout(device: &wgpu::Device, filterable: &[bool]) -> wgpu
         });
         entries.push(wgpu::BindGroupLayoutEntry {
             binding: base + 1,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            visibility,
             ty: wgpu::BindingType::Sampler(if filterable {
                 wgpu::SamplerBindingType::Filtering
             } else {
@@ -93,6 +101,35 @@ pub fn program_inputs_layout(device: &wgpu::Device, filterable: &[bool]) -> wgpu
     }
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("aether program inputs bind group layout"),
+        entries: &entries,
+    })
+}
+
+/// Group-2 layout for a compute pass's resident geometry buffers. One
+/// bool per binding states whether WGSL declared it read-only; every
+/// binding is a whole storage buffer and is visible only to compute.
+///
+/// # Panics
+/// Panics if the binding count exceeds `u32`, unreachable behind
+/// WebGPU's per-stage storage-buffer limit.
+#[must_use]
+pub fn program_storage_layout(device: &wgpu::Device, read_only: &[bool]) -> wgpu::BindGroupLayout {
+    let entries: Vec<_> = read_only
+        .iter()
+        .enumerate()
+        .map(|(binding, &read_only)| wgpu::BindGroupLayoutEntry {
+            binding: u32::try_from(binding).expect("program storage binding index fits u32"),
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        })
+        .collect();
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("aether program storage bind group layout"),
         entries: &entries,
     })
 }
@@ -239,6 +276,37 @@ pub fn build_program_draw_pipeline(device: &wgpu::Device, spec: &ProgramDrawPipe
     })
 }
 
+/// One authored compute pipeline: the authored entry point over the
+/// same uniform and sampled-input groups render stages use, plus the
+/// resident geometry storage buffers at group 2.
+pub struct ProgramComputePipelineSpec<'a> {
+    pub module: &'a wgpu::ShaderModule,
+    pub entry_point: &'a str,
+    pub uniform_layout: &'a wgpu::BindGroupLayout,
+    pub inputs_layout: &'a wgpu::BindGroupLayout,
+    pub storage_layout: &'a wgpu::BindGroupLayout,
+}
+
+#[must_use]
+pub fn build_program_compute_pipeline(
+    device: &wgpu::Device,
+    spec: &ProgramComputePipelineSpec<'_>,
+) -> wgpu::ComputePipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("aether program compute pipeline layout"),
+        bind_group_layouts: &[Some(spec.uniform_layout), Some(spec.inputs_layout), Some(spec.storage_layout)],
+        immediate_size: 0,
+    });
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("aether program compute pipeline"),
+        layout: Some(&pipeline_layout),
+        module: spec.module,
+        entry_point: Some(spec.entry_point),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    })
+}
+
 /// Create one depth transient for the program transient pool
 /// (ADR-0171): a `Depth32Float` attachment draw passes clear and test
 /// against. Render-attachment only — nothing samples it, and the pass
@@ -305,6 +373,16 @@ impl<'a> PassTimestamps<'a> {
     #[must_use]
     pub fn writes(self) -> wgpu::RenderPassTimestampWrites<'a> {
         wgpu::RenderPassTimestampWrites {
+            query_set: self.query_set,
+            beginning_of_pass_write_index: self.beginning,
+            end_of_pass_write_index: self.end,
+        }
+    }
+
+    /// Lower into a compute-pass descriptor's timestamp field.
+    #[must_use]
+    pub fn compute_writes(self) -> wgpu::ComputePassTimestampWrites<'a> {
+        wgpu::ComputePassTimestampWrites {
             query_set: self.query_set,
             beginning_of_pass_write_index: self.beginning,
             end_of_pass_write_index: self.end,
@@ -380,10 +458,16 @@ pub struct ProgramDrawPass<'a> {
     pub inputs_bind_group: &'a wgpu::BindGroup,
     pub vertex_buffer: &'a wgpu::Buffer,
     pub index_buffer: &'a wgpu::Buffer,
-    pub index_count: u32,
+    pub command: ProgramDrawCommand<'a>,
     /// GPU timestamps to bracket this iteration with, or `None` when the
     /// per-pass timing instrument is not running.
     pub timestamps: Option<PassTimestamps<'a>>,
+}
+
+/// How a recorded authored draw obtains its indexed draw arguments.
+pub enum ProgramDrawCommand<'a> {
+    Direct { index_count: u32 },
+    Indirect { buffer: &'a wgpu::Buffer },
 }
 
 /// Record one draw pass iteration into `encoder`: an indexed
@@ -422,7 +506,7 @@ pub fn record_program_draw_pass(encoder: &mut wgpu::CommandEncoder, draw: &Progr
         occlusion_query_set: None,
         multiview_mask: None,
     });
-    if draw.index_count == 0 {
+    if matches!(draw.command, ProgramDrawCommand::Direct { index_count: 0 }) {
         return;
     }
     pass.set_pipeline(draw.pipeline);
@@ -430,5 +514,35 @@ pub fn record_program_draw_pass(encoder: &mut wgpu::CommandEncoder, draw: &Progr
     pass.set_bind_group(1, draw.inputs_bind_group, &[]);
     pass.set_vertex_buffer(0, draw.vertex_buffer.slice(..));
     pass.set_index_buffer(draw.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-    pass.draw_indexed(0..draw.index_count, 0, 0..1);
+    match draw.command {
+        ProgramDrawCommand::Direct { index_count } => pass.draw_indexed(0..index_count, 0, 0..1),
+        ProgramDrawCommand::Indirect { buffer } => pass.draw_indexed_indirect(buffer, 0),
+    }
+}
+
+/// One authored compute-pass iteration over the shared group-0 uniform
+/// window, group-1 sampled inputs, and group-2 resident buffers.
+pub struct ProgramComputePass<'a> {
+    pub pipeline: &'a wgpu::ComputePipeline,
+    pub uniform_bind_group: &'a wgpu::BindGroup,
+    pub uniform_offset: u32,
+    pub inputs_bind_group: &'a wgpu::BindGroup,
+    pub storage_bind_group: &'a wgpu::BindGroup,
+    pub workgroups: [u32; 3],
+    pub timestamps: Option<PassTimestamps<'a>>,
+}
+
+/// Record one authored compute-pass iteration. Ending this pass before a
+/// later render pass gives wgpu the storage-to-vertex/index/indirect
+/// ordering transition inside the same command encoder.
+pub fn record_program_compute_pass(encoder: &mut wgpu::CommandEncoder, dispatch: &ProgramComputePass<'_>) {
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("aether program compute pass"),
+        timestamp_writes: dispatch.timestamps.map(PassTimestamps::compute_writes),
+    });
+    pass.set_pipeline(dispatch.pipeline);
+    pass.set_bind_group(0, dispatch.uniform_bind_group, &[dispatch.uniform_offset]);
+    pass.set_bind_group(1, dispatch.inputs_bind_group, &[]);
+    pass.set_bind_group(2, dispatch.storage_bind_group, &[]);
+    pass.dispatch_workgroups(dispatch.workgroups[0], dispatch.workgroups[1], dispatch.workgroups[2]);
 }
