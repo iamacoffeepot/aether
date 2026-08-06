@@ -95,6 +95,57 @@ fn bone_direction(bone: u32, v: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(dot(params.bones[row], h), dot(params.bones[row + 1u], h), dot(params.bones[row + 2u], h));
 }
 
+// The same resident source that compute poses for silhouette derivation is
+// rasterized once into a private depth slot. Dense weights stay in bone-table
+// order, so this accumulation is deliberately the same one
+// `cs_pose_classify` performs below. The color transient records distance like
+// the established stroke-visibility prepass, while the shared depth slot is
+// what the final indirect draw consumes.
+struct SubjectVertex {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) world: vec3<f32>,
+}
+
+@vertex
+fn vs_subject(
+    @location(0) rest_position: vec3<f32>,
+    @location(1) _position_pad: f32,
+    @location(2) _rest_normal: vec3<f32>,
+    @location(3) _normal_pad: f32,
+    @location(4) weight0: f32,
+    @location(5) weight1: f32,
+    @location(6) weight2: f32,
+    @location(7) weight3: f32,
+    @location(8) weight4: f32,
+    @location(9) weight5: f32,
+    @location(10) weight6: f32,
+    @location(11) weight7: f32,
+) -> SubjectVertex {
+    let weights = array<f32, 8>(weight0, weight1, weight2, weight3, weight4, weight5, weight6, weight7);
+    var world = vec3<f32>(0.0);
+    var total = 0.0;
+    for (var bone = 0u; bone < 8u; bone += 1u) {
+        let weight = weights[bone];
+        if weight > 1.0e-4 {
+            world += bone_point(bone, rest_position) * weight;
+            total += weight;
+        }
+    }
+    if total <= 0.0 {
+        world = rest_position;
+    }
+
+    var out: SubjectVertex;
+    out.clip = params.view_proj * vec4<f32>(world, 1.0);
+    out.world = world;
+    return out;
+}
+
+@fragment
+fn fs_subject_depth(subject: SubjectVertex) -> @location(0) vec4<f32> {
+    return vec4<f32>(length(subject.world - params.eye), 0.0, 0.0, 1.0);
+}
+
 @compute @workgroup_size(64)
 fn cs_pose_classify(@builtin(global_invocation_id) invocation: vec3<u32>) {
     let vertex = invocation.x;

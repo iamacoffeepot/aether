@@ -5,6 +5,9 @@
 //! it poses and classifies resident vertices, marches faces, pairs canonical
 //! edge endpoints, compacts the result in the oracle's order, and consumes
 //! the resulting vertex/index/control buffers through indexed-indirect draw.
+//! A posed-subject depth prepass shares its private depth slot with that draw,
+//! so the candidate obeys the same foreground occlusion as the established
+//! stroke visibility program instead of surviving on a color-only overlay.
 
 use std::mem::{self, size_of};
 
@@ -380,10 +383,24 @@ fn program(counts: [u32; 3]) -> ProgramRegister {
     ProgramRegister {
         wgsl: MODULE.to_owned(),
         bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
-        transients: Vec::new(),
+        transients: vec![SlotSpec { format: TextureFormat::R32Float, extent: SlotExtent::Full }],
         geometries: vec![source_slot(), raw_slot(), raw_slot(), output_slot()],
-        depth_transients: Vec::new(),
+        depth_transients: vec![SlotExtent::Full],
         passes: vec![
+            ProgramPass {
+                stage: PassStage::Draw(DrawPass {
+                    vertex_entry_point: "vs_subject".to_owned(),
+                    geometry: 0,
+                    depth: Some(0),
+                    load: PassLoad::Clear,
+                }),
+                entry_point: "fs_subject_depth".to_owned(),
+                inputs: Vec::new(),
+                output: OutputSlot::Transient { index: 0 },
+                uniform_offset: 0,
+                uniform_length: 480,
+                repeat: None,
+            },
             compute(
                 "cs_pose_classify",
                 vec![binding(0, GeometryBuffer::Vertices), binding(2, GeometryBuffer::Vertices)],
@@ -417,7 +434,7 @@ fn program(counts: [u32; 3]) -> ProgramRegister {
                 stage: PassStage::DrawIndexedIndirect(DrawPass {
                     vertex_entry_point: "vs_silhouette".to_owned(),
                     geometry: 3,
-                    depth: None,
+                    depth: Some(0),
                     load: PassLoad::Clear,
                 }),
                 entry_point: "fs_silhouette".to_owned(),
@@ -538,17 +555,46 @@ mod tests {
     use crate::deform::bone_uniform;
 
     const TRIANGLE: &[u8] = b"v -1 -1 0\nv 1 -1 0\nv 0 1 0\nf 1 2 3\n";
+    const OCCLUDED_CUBE: &[u8] = br"
+v -1 -1 -1
+v 1 -1 -1
+v 1 1 -1
+v -1 1 -1
+v -1 -1 1
+v 1 -1 1
+v 1 1 1
+v -1 1 1
+v -1.25 -1.25 2
+v 1.25 -1.25 2
+v 1.25 1.25 2
+v -1.25 1.25 2
+f 1 3 2
+f 1 4 3
+f 5 6 7
+f 5 7 8
+f 1 2 6
+f 1 6 5
+f 2 3 7
+f 2 7 6
+f 3 4 8
+f 3 8 7
+f 4 1 5
+f 4 5 8
+f 9 10 11
+f 9 11 12
+";
 
     fn mesh() -> Mesh {
         Mesh::from_obj_bytes(TRIANGLE, 0).expect("triangle parses")
     }
 
     #[test]
-    fn graph_is_four_bounded_derivations_followed_by_resident_indirect_draw() {
+    fn graph_is_posed_occlusion_four_bounded_derivations_and_resident_indirect_draw() {
         let register = program([65, 129, 257]);
         let groups = register
             .passes
             .iter()
+            .skip(1)
             .take(4)
             .map(|pass| match &pass.stage {
                 PassStage::Compute(pass) => pass.workgroups,
@@ -556,7 +602,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(groups, [[2, 1, 1], [3, 1, 1], [5, 1, 1], [1, 1, 1]]);
-        assert!(matches!(register.passes[4].stage, PassStage::DrawIndexedIndirect(_)));
+        assert!(matches!(register.passes[0].stage, PassStage::Draw(DrawPass { geometry: 0, depth: Some(0), .. })));
+        assert!(matches!(
+            register.passes[5].stage,
+            PassStage::DrawIndexedIndirect(DrawPass { geometry: 3, depth: Some(0), .. })
+        ));
+        assert_eq!(register.depth_transients, vec![SlotExtent::Full]);
     }
 
     #[test]
@@ -655,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn resident_candidate_is_deterministic_bounded_timed_and_recovers_with_the_device() {
+    fn resident_candidate_is_deterministic_bounded_occluded_timed_and_recovers_with_the_device() {
         if !has_wgpu_adapter() {
             return;
         }
@@ -747,11 +798,63 @@ mod tests {
             }
             ProgramTimingsResult::Err { reason } => panic!("candidate timings failed: {reason}"),
             ProgramTimingsResult::Ok { rows, .. } => {
-                assert_eq!(rows.len(), 5, "four derivations and one resident draw");
-                assert!(rows[..4].iter().all(|row| row.stage == PassStageKind::Compute && row.samples > 0));
-                assert_eq!(rows[4].stage, PassStageKind::Draw);
-                assert!(rows[4].samples > 0);
+                assert_eq!(rows.len(), 6, "one depth prepass, four derivations, and one resident draw");
+                assert_eq!(rows[0].stage, PassStageKind::Draw);
+                assert!(rows[0].samples > 0);
+                assert!(rows[1..5].iter().all(|row| row.stage == PassStageKind::Compute && row.samples > 0));
+                assert_eq!(rows[5].stage, PassStageKind::Draw);
+                assert!(rows[5].samples > 0);
             }
         }
+
+        assert_rear_silhouette_occluded(&mut harness);
+    }
+
+    fn assert_rear_silhouette_occluded(harness: &mut SubstrateHarness) {
+        let mesh = Mesh::from_obj_bytes(OCCLUDED_CUBE, 0).expect("occluded cube parses");
+        let topology = CanonicalTopology::of(&mesh).expect("occluded cube topology");
+        let capacity = DerivationCapacity::of(&mesh, &topology).expect("occluded cube capacity");
+        let staged = geometries(&mesh, None, &topology, capacity).expect("stage occluded cube");
+        let counts = [capacity.vertices, capacity.faces, capacity.edges];
+        let eye = Vec3::new(0.0, 0.0, 100.0);
+        let standing = Standing {
+            view_proj: Mat4::orthographic_rh(-1.5, 1.5, -1.5, 1.5, 1.0, 200.0)
+                * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y),
+            eye,
+            bones: bone_uniform(&[]),
+        };
+
+        let geometry_ids = staged
+            .iter()
+            .enumerate()
+            .map(|(at, geometry)| create_geometry(harness, ["source", "topology", "scratch", "output"][at], geometry))
+            .collect::<Vec<_>>();
+        let output = create_texture(harness);
+        let program_id = register(harness, counts);
+        let dispatch = ProgramDispatch {
+            program_id,
+            bindings: vec![output],
+            geometries: geometry_ids,
+            uniforms: uniforms(&standing, counts, false),
+        };
+        let capture = decode_png(
+            harness
+                .execute(vec![(
+                    "occluded",
+                    HarnessOp::capture_with_mails(
+                        vec![envelope("aether.render", &dispatch), envelope("aether.render", &overlay(output))],
+                        Vec::new(),
+                    ),
+                )])
+                .expect("capture occluded candidate")
+                .captured("occluded")
+                .expect("occluded capture ran"),
+        )
+        .expect("decode occluded candidate");
+
+        assert!(
+            coverage(&capture, background_top_left(&capture), 5) < 0.0001,
+            "the front surface must hide the disconnected rear silhouette",
+        );
     }
 }
