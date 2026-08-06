@@ -341,7 +341,7 @@ impl RenderCapabilityState {
     /// Boot the explicit surfaceless harness GPU. Desktop GPUs are booted by
     /// `attach_window`, never by a frame or a shared handle.
     fn ensure_offscreen_gpu_booted(&mut self) {
-        if self.gpu.is_some() {
+        if self.gpu.is_some() || !self.device_recovery.is_unbooted() {
             return;
         }
         let Some((width, height)) = self.offscreen_size else {
@@ -416,6 +416,7 @@ impl RenderCapabilityState {
         self.textures.invalidate_device_resources();
         self.geometries.invalidate_device_resources();
         self.programs.rebuild_for_device(&gpu);
+        self.discard_device_replay_caches();
         self.device_recovery.finish_replacement(ticket, &gpu.device);
         self.last_submission = None;
         self.wire_pipeline = wire_pipeline;
@@ -476,6 +477,16 @@ impl RenderCapabilityState {
         commit_or_replay(&mut self.frame_vertices, &mut self.last_submitted, replay_cache_when_idle);
         commit_or_replay(&mut self.material_frame, &mut self.material_last_submitted, replay_cache_when_idle);
         commit_or_replay(&mut self.quad_frame, &mut self.quad_last_submitted, replay_cache_when_idle);
+    }
+
+    /// Drop only scene caches that may have been submitted ambiguously on
+    /// the lost generation. Live accumulators and pending program dispatches
+    /// are known not to have recorded yet and survive for the replacement
+    /// frame's ordinary commit.
+    fn discard_device_replay_caches(&mut self) {
+        discard_replay_cache(&mut self.last_submitted);
+        discard_replay_cache(&mut self.material_last_submitted);
+        discard_replay_cache(&mut self.quad_last_submitted);
     }
 
     /// Record the world / material / overlay passes into `encoder` from the
@@ -642,6 +653,10 @@ fn commit_or_replay<T>(live: &mut Vec<T>, last: &mut Vec<T>, replay_cache_when_i
     } else if !replay_cache_when_idle {
         last.clear();
     }
+}
+
+fn discard_replay_cache<T>(last: &mut Vec<T>) {
+    last.clear();
 }
 
 fn deduplicate_windows(windows: Vec<WindowId>) -> BTreeSet<WindowId> {
@@ -977,8 +992,6 @@ impl NativeActor for RenderCapability {
         if state.recover_offscreen_gpu_if_needed().is_err() {
             return;
         }
-        state.commit_scene(replay_cache_when_idle);
-
         let Some(gpu) = state.gpu.as_ref() else {
             if state.pending_capture.as_ref().is_some_and(PendingCapture::is_ready)
                 && let Some(pending) = state.pending_capture.take()
@@ -996,7 +1009,15 @@ impl NativeActor for RenderCapability {
         if let Some(index) = state.last_submission.take()
             && let Err(error) = device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None })
         {
-            state.device_recovery.report_current_loss(format!("waiting for the previous frame failed: {error}"));
+            if state.offscreen_size.is_some() {
+                state.device_recovery.report_current_loss(format!("waiting for the previous frame failed: {error}"));
+            } else {
+                tracing::warn!(
+                    target: "aether_substrate::render",
+                    ?error,
+                    "device.poll for previous frame failed; continuing",
+                );
+            }
         }
         // The poll may itself deliver the callback. A pending capture has
         // not begun recording this frame, so it may survive a successful
@@ -1004,6 +1025,7 @@ impl NativeActor for RenderCapability {
         if state.recover_offscreen_gpu_if_needed().is_err() {
             return;
         }
+        state.commit_scene(replay_cache_when_idle);
         #[cfg(feature = "desktop")]
         let device = Arc::clone(&state.gpu.as_ref().expect("recovery published a GPU").device);
 
@@ -1361,6 +1383,90 @@ mod tests {
                 .collect::<Vec<_>>(),
             [WindowId(2), WindowId(5), WindowId(8)],
         );
+    }
+
+    #[test]
+    fn replacement_discards_only_old_replay_cache_before_committing_live_work() {
+        let (mailer, _rx) = test_mailer_and_rx();
+        let mut state = headless_state(&mailer);
+        state.last_submitted = vec![1, 2, 3];
+        state.frame_vertices = vec![4, 5, 6];
+        state.pending_program_dispatches.push(ProgramDispatch {
+            program_id: 9,
+            bindings: Vec::new(),
+            geometries: Vec::new(),
+            uniforms: Vec::new(),
+        });
+
+        state.discard_device_replay_caches();
+
+        assert!(state.last_submitted.is_empty(), "ambiguously submitted replay cache is discarded");
+        assert_eq!(state.frame_vertices, [4, 5, 6], "fresh frame mail survives replacement");
+        assert_eq!(state.pending_program_dispatches[0].program_id, 9, "fresh program dispatch survives replacement");
+
+        state.commit_scene(true);
+        assert_eq!(state.last_submitted, [4, 5, 6], "the replacement frame commits fresh work, not the old cache");
+    }
+
+    #[test]
+    fn terminal_device_failure_never_reboots_and_disposes_each_mail_shape() {
+        let (mailer, rx) = test_mailer_and_rx();
+        let mut state = headless_state(&mailer);
+        state.offscreen_size = Some((64, 48));
+        state.device_recovery.force_unusable_for_test("replacement acquisition failed");
+        state.textures.entries.insert(3, test_staged_texture(vec![7; 16]));
+        let binding = ctx_binding(&mailer);
+
+        {
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            RenderCapability::on_frame(
+                &mut state,
+                &mut ctx,
+                Frame { replay_cache_when_idle: true, windows: Vec::new() },
+            );
+            let registered = RenderCapability::on_program_register(
+                &mut state,
+                &mut ctx,
+                ProgramRegister {
+                    wgsl: String::new(),
+                    bindings: Vec::new(),
+                    transients: Vec::new(),
+                    geometries: Vec::new(),
+                    depth_transients: Vec::new(),
+                    passes: Vec::new(),
+                },
+            );
+            assert!(
+                matches!(registered, ProgramRegisterResult::Err { reason } if reason.contains("unusable")),
+                "request/reply GPU work returns the terminal structured error",
+            );
+
+            RenderCapability::on_update_texture(
+                &mut state,
+                &mut ctx,
+                UpdateTexture { texture_id: 3, x: 0, y: 0, width: 1, height: 1, pixels: vec![9, 9, 9, 9] },
+            );
+            RenderCapability::on_draw_triangle(&mut state, &mut ctx, &[DrawTriangle::default()]);
+        }
+
+        assert!(state.gpu.is_none(), "terminal state never retries initial device boot");
+        assert_eq!(state.textures.entries[&3].pixels, vec![7; 16], "fire-and-forget updates are dropped");
+        assert!(state.frame_vertices.is_empty(), "fire-and-forget draws are dropped");
+
+        let mut ctx = manual_dispatch_ctx(&binding, session_sender(), MailboxId(0));
+        RenderCapability::on_capture_frame(
+            &mut state,
+            &mut ctx,
+            CaptureFrame {
+                window: None,
+                mails: Vec::new(),
+                after_mails: Vec::new(),
+                checks: Vec::new(),
+                similarity: None,
+            },
+        );
+        assert!(capture_err(&rx).contains("unusable"), "capture replies with the terminal structured error");
+        assert!(state.gpu.is_none(), "terminal capture does not retry device acquisition");
     }
 
     /// A second `capture_frame` while one is pending replies `Err`

@@ -64,6 +64,14 @@ impl DeviceRecovery {
         Self { status: DeviceStatus::Unbooted, notice: Arc::new(LossNotice::default()) }
     }
 
+    /// Whether the offscreen runtime may perform its one initial, fail-fast
+    /// device boot. Every later state, including terminal `Unusable`, must
+    /// remain on the recovery path and may never re-enter initial boot.
+    #[must_use]
+    pub fn is_unbooted(&self) -> bool {
+        self.status == DeviceStatus::Unbooted
+    }
+
     /// Install the lazily booted first device. Initial acquisition remains
     /// fail-fast in `surface`; only replacement acquisition is fallible.
     pub fn install_initial(&mut self, device: &wgpu::Device) {
@@ -225,6 +233,11 @@ impl DeviceRecovery {
     fn report_generation_for_test(&self, generation: u64, reason: &str) {
         self.notice.report(generation, reason.to_owned());
     }
+
+    #[cfg(test)]
+    pub fn force_unusable_for_test(&mut self, reason: &str) {
+        self.status = DeviceStatus::Unusable { lost_generation: 0, reason: reason.to_owned() };
+    }
 }
 
 #[cfg(test)]
@@ -273,6 +286,7 @@ mod tests {
         recovery.refresh();
 
         assert!(recovery.begin_replacement().is_none());
+        assert!(!recovery.is_unbooted(), "terminal state must never re-enter initial device boot");
         assert_eq!(
             recovery.unusable_error().as_deref(),
             Some("render capability is unusable for this session: no replacement adapter"),
