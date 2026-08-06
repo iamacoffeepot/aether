@@ -16,6 +16,7 @@
 //! to the puppet directly because the harness has no window to announce
 //! one; on desktop the same kind arrives from the window capability.
 
+use core::iter;
 use std::fs;
 use std::path::Path;
 
@@ -38,10 +39,17 @@ const PUPPET_EXPORT: &str = "aether.puppet";
 
 /// A 2x2x2 material field over the cube, hair on one side of `x = 0` and
 /// skin on the other, so both a pigmented wash and a mostly-reserved one
-/// develop. The `.npy` preamble is ten bytes of which only the header
-/// length at bytes 8..10 is read; zero puts the cells first.
+/// develop.
 fn labels_field() -> Vec<u8> {
-    let mut bytes = vec![0u8; 10];
+    let dictionary = "{'descr': '|u1', 'fortran_order': False, 'shape': (2, 2, 2), }";
+    let padding = (16 - ((10 + dictionary.len() + 1) % 16)) % 16;
+    let mut header = dictionary.to_owned();
+    header.extend(iter::repeat_n(' ', padding));
+    header.push('\n');
+
+    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+    bytes.extend(u16::try_from(header.len()).expect("a short fixture header").to_le_bytes());
+    bytes.extend(header.as_bytes());
     bytes.extend([labels::HAIR; 4]);
     bytes.extend([labels::SKIN; 4]);
     bytes

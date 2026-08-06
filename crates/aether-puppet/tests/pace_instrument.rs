@@ -1007,7 +1007,7 @@ impl Subject {
         let skin = fs::read(dir.join("rig/weights.npy"))
             .ok()
             .zip(fs::read_to_string(dir.join("rig/rig.txt")).ok())
-            .and_then(|(weights, descriptor)| deform::Skin::parse(&weights, &descriptor, mesh.positions.len()));
+            .and_then(|(weights, descriptor)| deform::Skin::parse(&weights, &descriptor, mesh.positions.len()).ok());
 
         Self { mesh, labels, settings, anchors, scores, resident, ungated, skin }
     }

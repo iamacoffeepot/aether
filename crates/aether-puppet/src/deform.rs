@@ -30,11 +30,14 @@
 //! the posed surface.
 
 use aether_math::Vec3;
+#[cfg(test)]
+use core::iter;
 
 use crate::Pose;
 use crate::extract::{Settings, tone_gate};
 use crate::feature::Curve3;
 use crate::mesh::{Anchorage, Mesh};
+use crate::npy;
 
 /// Half the arc an ear can actually turn through, in degrees. A fox aims
 /// an ear by rotating it about its own long axis; past this the blade is
@@ -286,25 +289,13 @@ pub struct Skin {
     neck_share: f32,
 }
 
-/// The `f32` payload of a little-endian `.npy`, however its header is
-/// sized. Same shape as the material field's reader: a guest has no
-/// filesystem, so the array arrives by mail and the caller owns the bytes.
-fn npy_f32(bytes: &[u8]) -> Option<Vec<f32>> {
-    let header = usize::from(u16::from_le_bytes([*bytes.get(8)?, *bytes.get(9)?]));
-
-    Some(bytes.get(10 + header..)?.chunks_exact(4).map(|w| f32::from_le_bytes([w[0], w[1], w[2], w[3]])).collect())
-}
-
 impl Skin {
     /// Read a rig from its weight array and its descriptor.
     ///
-    /// `None` when the weights do not describe this subject. That check is
-    /// the whole of the rig's identity — weights are per vertex of one
-    /// sculpt, and a rig silently applied to a different one poses nothing
-    /// recognisable while reporting success.
-    pub fn parse(weights: &[u8], descriptor: &str, vertices: usize) -> Option<Self> {
-        let weights = npy_f32(weights)?;
-
+    /// Only a `NumPy` 1.0 `<f4`, C-order array shaped exactly
+    /// `(vertices, descriptor bones)` is accepted. The diagnostic names a
+    /// framing, metadata, descriptor, or subject mismatch.
+    pub fn parse(weights: &[u8], descriptor: &str, vertices: usize) -> Result<Self, String> {
         let mut bones: Vec<Bone> = Vec::new();
         let mut neck_share = 0.35;
         let read = |value: &str| value.parse::<f32>().unwrap_or(0.0);
@@ -331,9 +322,38 @@ impl Skin {
             }
         }
 
-        let binds = !bones.is_empty() && bones.len() <= BONE_LIMIT && weights.len() == vertices * bones.len();
+        if bones.is_empty() {
+            return Err("rig descriptor names no bones".to_owned());
+        }
+        if bones.len() > BONE_LIMIT {
+            return Err(format!(
+                "rig descriptor names {} bones, but the puppet carries at most {BONE_LIMIT}",
+                bones.len()
+            ));
+        }
 
-        binds.then_some(Self { weights, bones, neck_share })
+        let array = npy::parse(weights).map_err(|error| format!("rig weights refused: {error}"))?;
+        if array.descr != "<f4" {
+            return Err(format!("rig weights dtype is '{}', expected '<f4'", array.descr));
+        }
+        if array.fortran_order {
+            return Err("rig weights are Fortran-order, expected C-order".to_owned());
+        }
+        if array.shape.as_slice() != [vertices, bones.len()] {
+            return Err(format!(
+                "rig weights shape is {:?}, expected ({vertices}, {}) for this subject and descriptor",
+                array.shape,
+                bones.len(),
+            ));
+        }
+
+        let weights = array
+            .payload
+            .chunks_exact(4)
+            .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect();
+
+        Ok(Self { weights, bones, neck_share })
     }
 
     pub fn bones(&self) -> usize {
@@ -594,11 +614,17 @@ pub fn posed_surface(
 /// because the packers' own tests need a rig too and a second
 /// transcription of this framing is a second thing to get wrong.
 #[cfg(test)]
-pub(crate) fn npy(values: &[f32]) -> Vec<u8> {
-    let header = b"{'descr': '<f4', 'fortran_order': False, }    \n";
+pub(crate) fn npy(values: &[f32], shape: (usize, usize)) -> Vec<u8> {
+    assert_eq!(shape.0.checked_mul(shape.1), Some(values.len()), "fixture shape must match its values");
+    let dictionary = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({}, {}), }}", shape.0, shape.1);
+    let padding = (16 - ((10 + dictionary.len() + 1) % 16)) % 16;
+    let mut header = dictionary;
+    header.extend(iter::repeat_n(' ', padding));
+    header.push('\n');
+
     let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
-    bytes.extend((header.len() as u16).to_le_bytes());
-    bytes.extend(header);
+    bytes.extend(u16::try_from(header.len()).expect("a short fixture header").to_le_bytes());
+    bytes.extend(header.as_bytes());
     bytes.extend(values.iter().flat_map(|value| value.to_le_bytes()));
 
     bytes
@@ -617,6 +643,30 @@ mod tests {
         "bones chest head\nneck_share 0.35\npivot head 0.0 0.0 0.0\n"
     }
 
+    fn weight_array(descr: &str, fortran_order: bool, shape: (usize, usize), values: &[f32]) -> Vec<u8> {
+        assert_eq!(shape.0.checked_mul(shape.1), Some(values.len()), "fixture shape must match its values");
+        let dictionary = format!(
+            "{{'descr': '{descr}', 'fortran_order': {}, 'shape': ({}, {}), }}",
+            if fortran_order {
+                "True"
+            } else {
+                "False"
+            },
+            shape.0,
+            shape.1,
+        );
+        let padding = (16 - ((10 + dictionary.len() + 1) % 16)) % 16;
+        let mut header = dictionary;
+        header.extend(iter::repeat_n(' ', padding));
+        header.push('\n');
+
+        let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+        bytes.extend(u16::try_from(header.len()).expect("a short fixture header").to_le_bytes());
+        bytes.extend(header.as_bytes());
+        bytes.extend(values.iter().flat_map(|value| value.to_le_bytes()));
+        bytes
+    }
+
     fn quarter_turn() -> Pose {
         Pose { yaw: 90.0, ..Pose::default() }
     }
@@ -628,7 +678,7 @@ mod tests {
     fn strip() -> (Mesh, Skin) {
         const OBJ: &[u8] = b"v -1 0 0\nv 1 0 0\nv -1 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n";
         let mesh = Mesh::from_obj_bytes(OBJ, 0).expect("a strip is a mesh");
-        let weights = npy(&[1.0, 0.0, 0.7, 0.3, 0.4, 0.6, 0.0, 1.0]);
+        let weights = npy(&[1.0, 0.0, 0.7, 0.3, 0.4, 0.6, 0.0, 1.0], (4, 2));
 
         (mesh, Skin::parse(&weights, descriptor(), 4).expect("a four-vertex rig"))
     }
@@ -643,10 +693,40 @@ mod tests {
     /// with nothing in the log.
     #[test]
     fn a_rig_for_another_subject_is_refused() {
-        let weights = npy(&[1.0, 0.0, 0.5, 0.5]);
+        let weights = npy(&[1.0, 0.0, 0.5, 0.5], (2, 2));
 
-        assert!(Skin::parse(&weights, descriptor(), 2).is_some(), "two vertices by two bones is this subject");
-        assert!(Skin::parse(&weights, descriptor(), 3).is_none(), "the same array cannot describe three vertices");
+        assert!(Skin::parse(&weights, descriptor(), 2).is_ok(), "two vertices by two bones is this subject");
+        assert_eq!(
+            Skin::parse(&weights, descriptor(), 3).err().as_deref(),
+            Some("rig weights shape is [2, 2], expected (3, 2) for this subject and descriptor"),
+        );
+    }
+
+    #[test]
+    fn rig_weight_metadata_and_truncation_are_diagnostic() {
+        let values = [1.0, 0.0, 0.5, 0.5];
+        let wrong_dtype = weight_array(">f4", false, (2, 2), &values);
+        let wrong_order = weight_array("<f4", true, (2, 2), &values);
+        let wrong_shape = weight_array("<f4", false, (1, 4), &values);
+        let mut truncated = npy(&values, (2, 2));
+        truncated.pop();
+
+        assert_eq!(
+            Skin::parse(&wrong_dtype, descriptor(), 2).err().as_deref(),
+            Some("rig weights dtype is '>f4', expected '<f4'"),
+        );
+        assert_eq!(
+            Skin::parse(&wrong_order, descriptor(), 2).err().as_deref(),
+            Some("rig weights are Fortran-order, expected C-order"),
+        );
+        assert_eq!(
+            Skin::parse(&wrong_shape, descriptor(), 2).err().as_deref(),
+            Some("rig weights shape is [1, 4], expected (2, 2) for this subject and descriptor"),
+        );
+        assert_eq!(
+            Skin::parse(&truncated, descriptor(), 2).err().as_deref(),
+            Some("rig weights refused: NumPy payload is 15 bytes, expected 16 from shape and dtype"),
+        );
     }
 
     /// Tripwire: the sampled affine reproduces the rotation it was read
@@ -682,7 +762,7 @@ mod tests {
     #[test]
     fn the_inverse_carries_a_point_back_through_the_pose() {
         let pose = quarter_turn();
-        let skin = Skin::parse(&npy(&[1.0, 0.0, 0.5, 0.5]), descriptor(), 2).expect("a two-vertex rig");
+        let skin = Skin::parse(&npy(&[1.0, 0.0, 0.5, 0.5], (2, 2)), descriptor(), 2).expect("a two-vertex rig");
         let head = skin.head(&pose);
 
         let at = Vec3::new(0.3, 1.4, 2.0);
@@ -701,7 +781,7 @@ mod tests {
     /// and off the arc between them.
     #[test]
     fn a_shared_vertex_travels_its_own_share_of_the_way() {
-        let skin = Skin::parse(&npy(&[0.0, 1.0, 0.5, 0.5]), descriptor(), 2).expect("a two-vertex rig");
+        let skin = Skin::parse(&npy(&[0.0, 1.0, 0.5, 0.5], (2, 2)), descriptor(), 2).expect("a two-vertex rig");
         let transforms = skin.transforms(&quarter_turn());
 
         let at = Vec3::new(0.0, 1.0, 1.0);
@@ -857,8 +937,14 @@ mod tests {
         let wide = format!("bones {names}\n");
         let fits = format!("bones {}\n", names.rsplit_once(' ').expect("more than one bone").0);
 
-        assert!(Skin::parse(&npy(&[0.0; BONE_LIMIT]), &fits, 1).is_some(), "a rig the blob has slots for");
-        assert!(Skin::parse(&npy(&[0.0; BONE_LIMIT + 1]), &wide, 1).is_none(), "one bone past the blob's table");
+        assert!(
+            Skin::parse(&npy(&[0.0; BONE_LIMIT], (1, BONE_LIMIT)), &fits, 1).is_ok(),
+            "a rig the blob has slots for",
+        );
+        assert_eq!(
+            Skin::parse(&npy(&[0.0; BONE_LIMIT + 1], (1, BONE_LIMIT + 1)), &wide, 1).err().as_deref(),
+            Some("rig descriptor names 9 bones, but the puppet carries at most 8"),
+        );
     }
 
     /// Tripwire: every influence the solver produced survives the sparse
@@ -875,7 +961,7 @@ mod tests {
         let names = ["a", "b", "c", "d", "e"];
         let descriptor = format!("bones {}\n", names.join(" "));
         let row = [0.4f32, 0.3, 0.2, 0.1, 0.0];
-        let skin = Skin::parse(&npy(&row), &descriptor, 1).expect("a one-vertex rig");
+        let skin = Skin::parse(&npy(&row, (1, row.len())), &descriptor, 1).expect("a one-vertex rig");
 
         let (joints, shares) = skin.influences(0);
         assert_eq!(joints, [0, 1, 2, 3], "the four heaviest bones, heaviest first");
@@ -884,7 +970,7 @@ mod tests {
         }
 
         let spread = [0.3f32, 0.25, 0.2, 0.15, 0.1];
-        let wider = Skin::parse(&npy(&spread), &descriptor, 1).expect("a one-vertex rig");
+        let wider = Skin::parse(&npy(&spread, (1, spread.len())), &descriptor, 1).expect("a one-vertex rig");
         let (_, renormalised) = wider.influences(0);
         let sum: f32 = renormalised.iter().sum();
         assert!((sum - 1.0).abs() < 1e-6, "a row past four influences is renormalised, and summed to {sum}");

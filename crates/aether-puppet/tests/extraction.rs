@@ -37,6 +37,32 @@ fn cube() -> String {
     corners.iter().map(|c| format!("v {c}\n")).chain(faces.iter().map(|(a, b, c)| format!("f {a} {b} {c}\n"))).collect()
 }
 
+fn npy(descr: &str, fortran_order: bool, shape: &[usize], payload: &[u8]) -> Vec<u8> {
+    let shape = if shape.len() == 1 {
+        format!("({},)", shape[0])
+    } else {
+        format!("({})", shape.iter().map(usize::to_string).collect::<Vec<_>>().join(", "))
+    };
+    let dictionary = format!(
+        "{{'descr': '{descr}', 'fortran_order': {}, 'shape': {shape}, }}",
+        if fortran_order {
+            "True"
+        } else {
+            "False"
+        },
+    );
+    let padding = (16 - ((10 + dictionary.len() + 1) % 16)) % 16;
+    let mut header = dictionary;
+    header.extend(iter::repeat_n(' ', padding));
+    header.push('\n');
+
+    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+    bytes.extend(u16::try_from(header.len()).expect("a short test header").to_le_bytes());
+    bytes.extend(header.as_bytes());
+    bytes.extend(payload);
+    bytes
+}
+
 /// Tripwire: the OBJ reader keeps winding, so vertex normals come out
 /// pointing away from the body.
 ///
@@ -67,15 +93,35 @@ fn obj_winding_survives_the_reader() {
 /// reads as "ink this crease". A wrong field is worse than no field.
 #[test]
 fn a_material_field_that_is_not_a_cube_is_refused() {
-    // `\x93NUMPY`, version, then a two-byte header length.
-    let header = |cells: usize| {
-        let mut bytes = b"\x93NUMPY\x01\x00\x00\x00".to_vec();
-        bytes.extend(iter::repeat_n(0u8, cells));
-        bytes
-    };
     let (lo, hi) = (Vec3::splat(-1.0), Vec3::splat(1.0));
+    let cube = npy("|u1", false, &[4, 4, 4], &[0; 64]);
+    let rectangular = npy("|u1", false, &[4, 4, 5], &[0; 80]);
 
-    assert!(Labels::parse(&header(4 * 4 * 4), lo, hi, 0.12).is_some(), "a cube is accepted");
-    assert!(Labels::parse(&header(4 * 4 * 4 + 1), lo, hi, 0.12).is_none(), "a non-cube is refused");
-    assert!(Labels::parse(b"\x93NU", lo, hi, 0.12).is_none(), "a truncated buffer is refused, not indexed");
+    assert!(Labels::parse(&cube, lo, hi, 0.12).is_ok(), "a cube is accepted");
+    assert_eq!(
+        Labels::parse(&rectangular, lo, hi, 0.12).err().as_deref(),
+        Some("material field shape is [4, 4, 5], expected (n, n, n) with n >= 2"),
+    );
+}
+
+#[test]
+fn material_field_metadata_and_truncation_are_diagnostic() {
+    let (lo, hi) = (Vec3::splat(-1.0), Vec3::splat(1.0));
+    let wrong_dtype = npy("<f4", false, &[2, 2, 2], &[0; 32]);
+    let wrong_order = npy("|u1", true, &[2, 2, 2], &[0; 8]);
+    let mut truncated = npy("|u1", false, &[2, 2, 2], &[0; 8]);
+    truncated.pop();
+
+    assert_eq!(
+        Labels::parse(&wrong_dtype, lo, hi, 0.12).err().as_deref(),
+        Some("material field dtype is '<f4', expected '|u1'"),
+    );
+    assert_eq!(
+        Labels::parse(&wrong_order, lo, hi, 0.12).err().as_deref(),
+        Some("material field is Fortran-order, expected C-order"),
+    );
+    assert_eq!(
+        Labels::parse(&truncated, lo, hi, 0.12).err().as_deref(),
+        Some("material field refused: NumPy payload is 7 bytes, expected 8 from shape and dtype"),
+    );
 }

@@ -14,6 +14,8 @@
 
 use aether_math::Vec3;
 
+use crate::npy;
+
 /// Class indices as the source spike writes them: `0` unlabelled, then
 /// `index + 1` into its material list.
 pub const SKIN: u8 = 1;
@@ -70,24 +72,28 @@ impl Labels {
     /// the bounds of the mesh it was baked from.
     ///
     /// Bytes rather than a path: a guest has no filesystem, so the field
-    /// arrives by mail from `aether.fs` like the mesh does. `None` when the
-    /// buffer is too short to carry a header or holds something that is not
-    /// a cube — the lattice is reconstructed from the cell count, so a
-    /// non-cube would silently place every sample in the wrong place.
-    pub fn parse(bytes: &[u8], min: Vec3, max: Vec3, pad: f32) -> Option<Self> {
-        // `\x93NUMPY`, major, minor, then a little-endian header length.
-        let header_len = usize::from(u16::from_le_bytes([*bytes.get(8)?, *bytes.get(9)?]));
-        let cells = bytes.get(10 + header_len..)?.to_vec();
-
-        let n = (cells.len() as f64).cbrt().round() as usize;
-        if n < 2 || n * n * n != cells.len() {
-            return None;
+    /// arrives by mail from `aether.fs` like the mesh does. Only `NumPy` 1.0
+    /// `|u1`, C-order arrays shaped exactly `(n, n, n)` with `n >= 2` are
+    /// accepted; the diagnostic names any framing or metadata mismatch.
+    pub fn parse(bytes: &[u8], min: Vec3, max: Vec3, pad: f32) -> Result<Self, String> {
+        let array = npy::parse(bytes).map_err(|error| format!("material field refused: {error}"))?;
+        if array.descr != "|u1" {
+            return Err(format!("material field dtype is '{}', expected '|u1'", array.descr));
+        }
+        if array.fortran_order {
+            return Err("material field is Fortran-order, expected C-order".to_owned());
+        }
+        let [nx, ny, nz] = array.shape.as_slice() else {
+            return Err(format!("material field shape is {:?}, expected a cubic 3-D shape", array.shape));
+        };
+        if nx != ny || ny != nz || *nx < 2 {
+            return Err(format!("material field shape is {:?}, expected (n, n, n) with n >= 2", array.shape));
         }
 
-        let mut labels = Self { cells, n, origin: Vec3::splat(0.0), spacing: 1.0 };
+        let mut labels = Self { cells: array.payload.to_vec(), n: *nx, origin: Vec3::splat(0.0), spacing: 1.0 };
         labels.place_against(min, max, pad);
 
-        Some(labels)
+        Ok(labels)
     }
 
     /// Re-place the lattice against a mesh's bounds.

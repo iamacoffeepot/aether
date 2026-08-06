@@ -1089,7 +1089,7 @@ mod tests {
     fn bound_fixture() -> (Mesh, Skin) {
         const OBJ: &[u8] = b"v -1 0 0\nv 1 0 0\nv -1 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n";
         let mesh = Mesh::from_obj_bytes(OBJ, 0).expect("a strip is a mesh");
-        let weights = npy(&[1.0, 0.0, 0.7, 0.3, 0.4, 0.6, 0.0, 1.0]);
+        let weights = npy(&[1.0, 0.0, 0.7, 0.3, 0.4, 0.6, 0.0, 1.0], (4, 2));
         let skin = Skin::parse(&weights, "bones chest head\npivot head 0.0 0.0 0.0\n", 4).expect("a four-vertex rig");
 
         (mesh, skin)
