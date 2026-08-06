@@ -1,6 +1,6 @@
 # ADR-0173: Render device-loss recovery contract
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-05
 
 ## Context
