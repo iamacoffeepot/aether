@@ -34,6 +34,7 @@ aether-fs = { path = "../aether-fs", default-features = false }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
 aether-math = { path = "../aether-math" }
+aether-mesh = { path = "../aether-mesh" }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 tracing = { workspace = true, default-features = false }
 

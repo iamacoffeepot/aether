@@ -845,6 +845,7 @@ dependencies = [
  "aether-kinds",
  "aether-lifecycle",
  "aether-math",
+ "aether-mesh",
  "aether-render",
  "aether-window",
  "inventory",

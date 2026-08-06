@@ -148,10 +148,9 @@ fn dsl_box_loads_and_renders() {
     differs_from_background(&img, 5).expect("captured frame should diverge from clear color");
 }
 
-/// `.obj` parser smoke. The OBJ path doesn't go through `aether-mesh`'s
-/// parser — it's a built-in fan-triangulation parser inside the
-/// component — so this test guards against the OBJ branch silently
-/// regressing while the DSL branch keeps working.
+/// `.obj` importer smoke. The shared `aether-mesh` importer supplies indexed
+/// triangles and this actor still owns their `DrawTriangle` conversion, so
+/// this guards the whole OBJ branch while the DSL branch keeps working.
 #[test]
 fn obj_quad_loads_and_renders() {
     let Some(wasm_path) = require_runtime("aether_kit_commons") else {
