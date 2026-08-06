@@ -875,11 +875,11 @@ pub fn curves_slot() -> GeometrySlotSpec {
 pub const CURVE_VERTEX_BYTES: usize = 4 + 12 + 8;
 
 /// The whole drawing's per-curve buffer, packed for [`curves_slot`]:
-/// one triangle per [`CURVE_BLOCK_POINTS`] points, placed over the
+/// one triangle per `CURVE_BLOCK_POINTS` points, placed over the
 /// curve's first texels and carrying the curve-wide length policy.
 ///
 /// Not divided by volatility, unlike the points. One record per at most
-/// [`CURVE_BLOCK_POINTS`] points is still far smaller than either point
+/// `CURVE_BLOCK_POINTS` points is still far smaller than either point
 /// buffer, and the block list changes whenever the volatile drawing
 /// changes.
 /// It does not depend on the eye: the camera reaches the point-depth and
