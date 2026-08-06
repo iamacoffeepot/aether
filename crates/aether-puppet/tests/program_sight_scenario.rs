@@ -6,22 +6,23 @@
 //!
 //! # What is being compared, and in what space
 //!
-//! The field writes three `R32Float` planes and nothing reads float
-//! pixels back to the CPU — the only pixel exit in the engine is the
-//! frame capture. So the planes are observed the way every parity
-//! scenario here observes one: a test-only probe pass packs the three
-//! into an `Rgba8` writable binding, the overlay draws that texture
+//! The probe observes three derived `R32Float` planes and the reference
+//! plane's sign, and nothing reads float pixels back to the CPU — the
+//! only pixel exit in the engine is the frame capture. So the planes are
+//! observed the way every parity scenario here observes one: a
+//! test-only probe pass packs them into an `Rgba8` writable binding, the
+//! overlay draws that texture
 //! texel-for-pixel, and the capture's bytes are decoded back through
 //! the inverse sRGB transfer. The field is the canvas's own extent, so
 //! one texel is one pixel and the mapping is exact rather than
 //! resampled.
 //!
-//! The instrument's own floor, stated: `seen` is zero or one, which an
-//! `Rgba8Unorm` store carries exactly and the sRGB round trip returns
-//! to the same integer with the whole range to spare, so the verdict is
-//! compared *exactly*. `reach` rides as a fraction of [`REACH_WINDOW`]
-//! and `coverage` as itself, both quantizing once at the store and once
-//! at the encode — about one part in 255 of their encoded range each.
+//! The instrument's own floor, stated: `seen` and the reference sign are
+//! two booleans packed into red's exact `0, 85, 170, 255` byte codes; the
+//! sRGB round trip returns the same code, so both verdicts are compared
+//! *exactly*. `reach` rides as a fraction of [`REACH_WINDOW`] and
+//! `coverage` as itself, both quantizing once at the store and once at
+//! the encode — about one part in 255 of their encoded range each.
 //!
 //! # The two gates, and why they are separate
 //!
@@ -100,7 +101,7 @@ use aether_puppet::extract::{self, Settings};
 use aether_puppet::feature::{Curve3, Drawing, FeatureClass, SurfacePoint};
 use aether_puppet::labels::Labels;
 use aether_puppet::mesh::Mesh;
-use aether_puppet::{Pose, anchor, chart, deform, visibility};
+use aether_puppet::{Pose, anchor, chart, deform, ribbon, visibility};
 use aether_render::QuadBlend;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot, OutputSlot,
@@ -223,6 +224,7 @@ const PROBE_WGSL: &str = r"
 @group(1) @binding(0) var field_seen: texture_2d<f32>;
 @group(1) @binding(2) var field_reach: texture_2d<f32>;
 @group(1) @binding(4) var field_coverage: texture_2d<f32>;
+@group(1) @binding(6) var field_reference: texture_2d<f32>;
 
 @fragment
 fn fs_probe(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
@@ -230,10 +232,15 @@ fn fs_probe(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let seen = textureLoad(field_seen, at, 0).r;
     let reach = textureLoad(field_reach, at, 0).r;
     let coverage = textureLoad(field_coverage, at, 0).r;
+    let reference = textureLoad(field_reference, at, 0).r;
+    let reference_drawn = select(0.0, 1.0, reference >= 0.0);
+    let verdicts = (seen + reference_drawn * 2.0) / 3.0;
 
-    return vec4<f32>(seen, min(reach / 0.02, 1.0), coverage, 1.0);
+    return vec4<f32>(verdicts, min(reach / 0.02, 1.0), coverage, 1.0);
 }
 ";
+
+const FIELD_PROBE: u32 = sight::PLANE_COUNT as u32;
 
 /// The field's own graph plus the probe: one more binding for the
 /// `Rgba8` the probe writes, and one more pass reading the three planes
@@ -249,8 +256,9 @@ fn probed_program() -> ProgramRegister {
             InputSlot::Binding { index: sight::SEEN },
             InputSlot::Binding { index: sight::REACH },
             InputSlot::Binding { index: sight::COVERAGE },
+            InputSlot::Binding { index: sight::REFERENCE },
         ],
-        output: OutputSlot::Binding { index: sight::PLANE_COUNT as u32 },
+        output: OutputSlot::Binding { index: FIELD_PROBE },
         uniform_offset: 0,
         uniform_length: 0,
         repeat: None,
@@ -306,7 +314,6 @@ fn create_targets(harness: &mut SubstrateHarness, width: usize, height: usize) -
             pixels: Vec::new(),
         },
     ));
-
     targets
 }
 
@@ -379,12 +386,14 @@ fn camera(azimuth: f32, width: usize, height: usize) -> (Vec3, Mat4) {
     (eye, projection * view)
 }
 
-/// The three planes as the GPU wrote them, decoded out of one capture
-/// and addressed by flat texel index the way the field is.
+/// The derived planes and reference verdict as the GPU wrote them,
+/// decoded out of one capture and addressed by flat texel index the way
+/// the field is.
 struct Field {
     seen: Vec<bool>,
     reach: Vec<f32>,
     coverage: Vec<f32>,
+    reference_drawn: Vec<bool>,
     /// Canvas height in texels — the scale one pixel of resampling is
     /// measured against when a disagreement is judged.
     height: usize,
@@ -400,9 +409,9 @@ struct Rig {
     /// The two point buffers the field is rasterized from, in slot
     /// order: the resident half and the volatile one.
     points: [u32; 2],
-    /// The per-curve buffer the reference plane is rasterized from —
-    /// one texel a curve, re-pointed with the volatile half because
-    /// its value is the eye's (iamacoffeepot/aether#4440).
+    /// The curve-block buffer the reference and coverage reductions are
+    /// rasterized from, re-pointed with the volatile half because its
+    /// spans change with that drawing.
     curves: u32,
     width: usize,
     height: usize,
@@ -508,29 +517,31 @@ impl Rig {
         bias: f32,
         bones: &[f32; deform::BONE_LIMIT * 12],
     ) -> Field {
-        let probe = *self.bindings.last().expect("the probe binding is last");
+        let probe = self.bindings[FIELD_PROBE as usize];
         let pre = vec![
             envelope("aether.render", &self.dispatch(eye, view_proj, bias, bones)),
             envelope("aether.render", &overlay(probe, self.width, self.height)),
         ];
-
         let captured =
-            harness.execute(vec![("snap", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture the field");
-        let image = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode capture png");
+            harness.execute(vec![("field", HarnessOp::capture_with_mails(pre, vec![]))]).expect("capture the field");
+        let image = decode_png(captured.captured("field").expect("field capture ran")).expect("decode field png");
 
         let texels = self.width * self.height;
         let mut field = Field {
             seen: Vec::with_capacity(texels),
             reach: Vec::with_capacity(texels),
             coverage: Vec::with_capacity(texels),
+            reference_drawn: Vec::with_capacity(texels),
             height: self.height,
         };
         for y in 0..self.height {
             for x in 0..self.width {
                 let texel = rgba_at(&image, x as u32, y as u32);
-                field.seen.push(srgb_byte_to_linear(texel[0]) > 0.5);
+                let verdicts = (srgb_byte_to_linear(texel[0]) * 3.0).round() as u8;
+                field.seen.push(verdicts & 1 == 1);
                 field.reach.push(srgb_byte_to_linear(texel[1]) * REACH_WINDOW);
                 field.coverage.push(srgb_byte_to_linear(texel[2]));
+                field.reference_drawn.push(verdicts >= 2);
             }
         }
 
@@ -849,6 +860,12 @@ fn assert_derived(context: &str, eye: Vec3, drawing: Drawing<'_>, layout: &Layou
     for span in layout.spans() {
         let curve = drawing.curve(span.curve as usize).expect("a span names a curve of the drawing");
         let expected = derive(curve, eye, &gathered(field, span));
+        assert_eq!(
+            field.reference_drawn[span.start as usize],
+            ribbon::reference_depth(curve, eye) >= 0.0,
+            "{context}: curve {:?} carries the wrong reference-depth verdict",
+            span.id,
+        );
 
         for (at, &want) in expected.reach.iter().enumerate() {
             // Only inside the probe's encoded range: past it the store
@@ -1350,7 +1367,12 @@ fn crossfeed_the_gpu_field_against_the_cpu_oracle() {
 /// same geometry — which is nothing to do with the dispatch and swamps
 /// it (iamacoffeepot/aether#4422).
 fn report_cost(harness: &mut SubstrateHarness, rig: &Rig, eye: Vec3, view_proj: Mat4, bias: f32) {
-    let dispatch = rig.dispatch(eye, view_proj, bias, &deform::bone_uniform(&[]));
+    // Time the production graph, not the readback probe appended by this
+    // scenario. The probe is a full-field pass of its own and adding a
+    // fourth observed plane would otherwise look like a field regression.
+    let mut dispatch = rig.dispatch(eye, view_proj, bias, &deform::bone_uniform(&[]));
+    dispatch.program_id = register(harness, &sight::program());
+    dispatch.bindings.truncate(sight::PLANE_COUNT);
 
     let mut run = |dispatched: bool| {
         let mut millis = 0.0;
