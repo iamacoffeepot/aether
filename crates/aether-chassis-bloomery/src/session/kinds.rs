@@ -150,6 +150,10 @@ pub struct Release {
 pub enum ReleaseResult {
     /// The session was deposited into the pool, unleased.
     Ok,
+    /// The presented lease is not the one the pooled row holds, so nothing was
+    /// deposited — a stale holder returning after its lease expired and was
+    /// re-acquired (#3665). Distinct from `Err`: the store worked.
+    NotLeaseHolder,
     /// The release failed.
     Err {
         /// A human-readable failure reason.

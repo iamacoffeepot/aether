@@ -12,7 +12,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::kinds::{SessionKey, SessionManifest};
-use super::runtime::{SessionBackend, SqliteSessionStore};
+use super::runtime::{ReleaseOutcome, SessionBackend, SqliteSessionStore};
 
 const HOUR_SECS: u64 = 3600;
 const LEASE_SECS: u64 = 900;
@@ -43,7 +43,7 @@ fn manifest(head_hash: &str, context_tokens: u64, deposited_at: u64) -> SessionM
 #[test]
 fn eligible_session_acquires_and_leases() {
     let mut store = store();
-    store.release(&key(), "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
+    store.release(&key(), None, "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
 
     let leased = store.acquire(&key(), "head-A", 1000).unwrap().expect("an eligible session leases");
     assert_eq!(leased.session_bytes, "digest-1");
@@ -56,7 +56,7 @@ fn second_acquire_while_leased_misses() {
     // The exclusive-lease guarantee: while a session is leased (until now +
     // LEASE_SECS), a concurrent acquire of the same key finds nothing.
     let mut store = store();
-    store.release(&key(), "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
+    store.release(&key(), None, "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
 
     assert!(store.acquire(&key(), "head-A", 1000).unwrap().is_some());
     assert!(store.acquire(&key(), "head-A", 1000).unwrap().is_none(), "a leased session is exclusive");
@@ -67,7 +67,7 @@ fn lease_past_ttl_is_reacquirable() {
     // Lazy expiry: a lease older than LEASE_SECS is treated as free, so a crashed
     // holder never wedges the key. Tripwire: an expired lease must re-acquire.
     let mut store = store();
-    store.release(&key(), "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
+    store.release(&key(), None, "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
 
     // Lease at t=1000 → held until t=1900.
     assert!(store.acquire(&key(), "head-A", 1000).unwrap().is_some());
@@ -82,7 +82,7 @@ fn past_cutoff_is_ineligible() {
     // The age bound (#3264): a session deposited longer ago than the cutoff is
     // retired even though its head still matches. Tripwire: an aged session misses.
     let mut store = store();
-    store.release(&key(), "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
+    store.release(&key(), None, "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
 
     // now - deposited_at == 3600 == cutoff → ineligible (the boundary is exclusive).
     assert!(store.acquire(&key(), "head-A", 1000 + HOUR_SECS).unwrap().is_none(), "a past-cutoff session misses");
@@ -96,7 +96,7 @@ fn head_hash_drift_misses() {
     // reuses without re-deriving. A head that moved since deposit is a real cache
     // miss. Tripwire: a drifted head must not acquire.
     let mut store = store();
-    store.release(&key(), "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
+    store.release(&key(), None, "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
 
     assert!(store.acquire(&key(), "head-MOVED", 1000).unwrap().is_none(), "a drifted head misses");
     // The same head still acquires (proving only the drift, not the key, moved).
@@ -108,7 +108,7 @@ fn over_context_cap_is_ineligible() {
     // A session whose terminal context exceeds the cap is retired (lowering the
     // cap must retire an existing entry). Tripwire: an over-cap session misses.
     let mut store = store();
-    store.release(&key(), "digest-1", &manifest("head-A", CAP + 1, 1000)).unwrap();
+    store.release(&key(), None, "digest-1", &manifest("head-A", CAP + 1, 1000)).unwrap();
 
     assert!(store.acquire(&key(), "head-A", 1000).unwrap().is_none(), "an over-cap session misses");
 }
@@ -117,7 +117,7 @@ fn over_context_cap_is_ineligible() {
 fn at_context_cap_is_eligible() {
     // The cap boundary is inclusive — a session exactly at the cap still acquires.
     let mut store = store();
-    store.release(&key(), "digest-1", &manifest("head-A", CAP, 1000)).unwrap();
+    store.release(&key(), None, "digest-1", &manifest("head-A", CAP, 1000)).unwrap();
 
     assert!(store.acquire(&key(), "head-A", 1000).unwrap().is_some());
 }
@@ -127,7 +127,7 @@ fn key_mismatch_misses() {
     // The pool identity is the full `{model, effort, task}` key — an effort flip
     // (which breaks the prompt cache, #3264) is a different pool entry.
     let mut store = store();
-    store.release(&key(), "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
+    store.release(&key(), None, "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
 
     let other_effort = SessionKey { effort: "low".to_owned(), ..key() };
     assert!(store.acquire(&other_effort, "head-A", 1000).unwrap().is_none(), "a mismatched effort misses");
@@ -149,11 +149,69 @@ fn tree_hash_change_still_acquires() {
     let mut store = store();
     let mut deposited = manifest("head-A", 1000, 1000);
     deposited.workspace_tree_hash = "tree-CHANGED-since-last-attempt".to_owned();
-    store.release(&key(), "digest-1", &deposited).unwrap();
+    store.release(&key(), None, "digest-1", &deposited).unwrap();
 
     assert!(
         store.acquire(&key(), "head-A", 1000).unwrap().is_some(),
         "a changed workpiece tree must not retire a pooled session (#3341)"
+    );
+}
+
+#[test]
+fn a_stale_holder_cannot_overwrite_the_live_holders_session() {
+    // Tripwire: `release` proves ownership against the row's stored lease
+    // (#3665). The scenario, in order: X leases, X stalls past the TTL, Y
+    // lazily re-acquires the expired row and starts resuming, then X returns.
+    // If X's stale release deposits, it overwrites Y's session bytes with an
+    // older transcript *and* clears Y's lease — so a third holder could acquire
+    // a transcript Y is still resuming. Two concurrent resumes from one session
+    // is exactly what the lease exists to prevent.
+    let mut store = store();
+    store.release(&key(), None, "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
+
+    let stale = store.acquire(&key(), "head-A", 1000).unwrap().expect("X leases the pooled session");
+    let live = store
+        .acquire(&key(), "head-A", 1000 + LEASE_SECS)
+        .unwrap()
+        .expect("Y re-acquires once X's lease lazily expires");
+    assert_ne!(stale.lease, live.lease, "two acquires of one key mint distinct tokens");
+
+    assert_eq!(
+        store.release(&key(), Some(&stale.lease), "digest-STALE", &manifest("head-A", 1000, 1002)).unwrap(),
+        ReleaseOutcome::NotLeaseHolder,
+        "X no longer holds the lease, so its deposit is refused",
+    );
+    // Refused means nothing was written: Y still holds the lease, so the row is
+    // not acquirable by a third holder.
+    assert!(
+        store.acquire(&key(), "head-A", 1000 + LEASE_SECS).unwrap().is_none(),
+        "the refused release must not have cleared the live holder's lease",
+    );
+
+    // Y's own release is the one that lands.
+    assert_eq!(
+        store.release(&key(), Some(&live.lease), "digest-2", &manifest("head-A", 1000, 1003)).unwrap(),
+        ReleaseOutcome::Deposited,
+    );
+}
+
+#[test]
+fn a_cold_release_cannot_jump_a_held_lease() {
+    // The same rule with no token at all: presenting nothing must not be a way
+    // to win the race that presenting a stale token loses. A cold deposit is
+    // legitimate only against a row nobody holds.
+    let mut store = store();
+    store.release(&key(), None, "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
+    let live = store.acquire(&key(), "head-A", 1000).unwrap().expect("a holder leases it");
+
+    assert_eq!(
+        store.release(&key(), None, "digest-COLD", &manifest("head-A", 1000, 1002)).unwrap(),
+        ReleaseOutcome::NotLeaseHolder,
+    );
+    assert_eq!(
+        store.release(&key(), Some(&live.lease), "digest-2", &manifest("head-A", 1000, 1003)).unwrap(),
+        ReleaseOutcome::Deposited,
+        "the holder still releases normally",
     );
 }
 
@@ -174,7 +232,7 @@ fn release_chains_parent_receipt() {
     let mut cold = manifest("head-A", 1000, 1000);
     cold.receipt = "R1".to_owned();
     cold.parent_receipt = None;
-    store.release(&key(), "digest-1", &cold).unwrap();
+    store.release(&key(), None, "digest-1", &cold).unwrap();
 
     // Resume: acquire hands back R1 as the resumed attempt's parent.
     let leased = store.acquire(&key(), "head-A", 1000).unwrap().unwrap();
@@ -184,7 +242,7 @@ fn release_chains_parent_receipt() {
     let mut resumed = manifest("head-A", 1200, 1001);
     resumed.receipt = "R2".to_owned();
     resumed.parent_receipt = Some("R1".to_owned());
-    store.release(&key(), "digest-2", &resumed).unwrap();
+    store.release(&key(), Some(&leased.lease), "digest-2", &resumed).unwrap();
 
     // The next resume now inherits R2 as its parent (the chain advanced).
     let next = store.acquire(&key(), "head-A", 1002).unwrap().unwrap();

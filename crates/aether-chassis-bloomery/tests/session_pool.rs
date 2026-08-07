@@ -159,13 +159,11 @@ fn acquire_release_resume_over_rpc() {
     // Acquire with the matching head → leased back with the transcript digest and
     // the acquired session's own receipt as the resume's parent.
     let leased: AcquireResult = call(&mut stream, 2, &Acquire { key: key(), current_head_hash: "HEAD-A".to_owned() });
-    match leased {
-        AcquireResult::Leased { session_bytes, parent_receipt, .. } => {
-            assert_eq!(session_bytes, "digest-1");
-            assert_eq!(parent_receipt, "R1");
-        }
-        other => panic!("expected a leased session, got {other:?}"),
-    }
+    let AcquireResult::Leased { session_bytes, parent_receipt, lease, .. } = leased else {
+        panic!("expected a leased session, got {leased:?}");
+    };
+    assert_eq!(session_bytes, "digest-1");
+    assert_eq!(parent_receipt, "R1");
 
     // A drifted static-prefix head is a real cache miss (#3422) → None.
     let drifted: AcquireResult =
@@ -175,9 +173,11 @@ fn acquire_release_resume_over_rpc() {
     // Resumed release: deposit the next attempt's session, naming R1 as parent
     // and carrying a CHANGED workpiece tree — the construct/verify/refine loop's
     // normal state, which must not retire the pooled session (#3341 non-gate).
+    // The resume presents the lease it acquired — a warm release proves it still
+    // holds the row before depositing over it (#3665).
     let resumed = Release {
         key: key(),
-        lease: None,
+        lease: Some(lease),
         session_bytes: "digest-2".to_owned(),
         manifest: SessionManifest {
             parent_receipt: Some("R1".to_owned()),
