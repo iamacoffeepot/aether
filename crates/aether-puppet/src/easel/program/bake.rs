@@ -156,7 +156,7 @@ struct BakeLayout {
 impl BakeLayout {
     fn of<const CLASS_COUNT: usize>() -> Self {
         assert!(CLASS_COUNT > 0, "the bake needs at least one class score");
-        assert!(CLASS_COUNT <= usize::from(u8::MAX), "the packed class channel carries at most 255 classes");
+        assert!(u8::try_from(CLASS_COUNT).is_ok(), "the packed class channel carries at most 255 classes");
 
         let score_lanes: Vec<_> = (0..CLASS_COUNT.div_ceil(3))
             .map(|index| ScoreLane { index, score_start: index * 3, width: (CLASS_COUNT - index * 3).min(3) })
@@ -444,7 +444,10 @@ pub fn program<const CLASS_COUNT: usize>() -> ProgramRegister {
 
 #[cfg(test)]
 mod tests {
+    use core::array::from_fn;
+
     use super::*;
+    use crate::labels::CLASSES;
     use aether_render::vertex_stride_bytes;
 
     fn assert_layout<const CLASS_COUNT: usize>(score_formats: &[VertexFormat], joints: u32, shares: u32) {
@@ -482,19 +485,18 @@ mod tests {
     #[test]
     fn the_packed_vertex_matches_the_declared_stride() {
         let mesh = Mesh::from_obj_bytes(b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", 0).expect("fixture mesh");
-        let scores = vec![[0.0; crate::labels::CLASSES]; mesh.positions.len()];
+        let scores = vec![[0.0; CLASSES]; mesh.positions.len()];
 
         assert_eq!(
             vertices(&mesh, &scores, &Settings::default(), None).len(),
-            mesh.positions.len() * vertex_bytes::<{ crate::labels::CLASSES }>(),
+            mesh.positions.len() * vertex_bytes::<CLASSES>(),
             "packed length",
         );
     }
 
     fn assert_score_packing<const CLASS_COUNT: usize>() {
         let mesh = Mesh::from_obj_bytes(b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", 0).expect("fixture mesh");
-        let scores: Vec<[f32; CLASS_COUNT]> =
-            vec![core::array::from_fn(|index| index as f32 + 0.25); mesh.positions.len()];
+        let scores: Vec<[f32; CLASS_COUNT]> = vec![from_fn(|index| index as f32 + 0.25); mesh.positions.len()];
         let packed = vertices::<CLASS_COUNT>(&mesh, &scores, &Settings::default(), None);
         let first = &packed[..vertex_bytes::<CLASS_COUNT>()];
         let decoded: Vec<_> = first[FIXED_VERTEX_BYTES..FIXED_VERTEX_BYTES + CLASS_COUNT * size_of::<f32>()]
