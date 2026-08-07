@@ -30,7 +30,7 @@ runtime = ["dep:aether-substrate"]
 # `DesktopWindowCapability` that drives a real winit window. Pulls the
 # substrate runtime (via `runtime`) plus winit; default features stay
 # `runtime`-only, so headless / harness / wasm consumers never build winit.
-desktop = ["runtime", "dep:winit"]
+desktop = ["runtime", "dep:winit", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
 # Deterministic in-memory window manager and raw event injection surface for
 # real-substrate harness tests. Production chassis do not enable this feature.
 synthetic = ["runtime"]
@@ -52,6 +52,13 @@ winit = { version = "0.30", optional = true }
 # `inventory` reachable; wasm guests don't (the gate skips emission).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 inventory = { workspace = true }
+
+# App activation is only needed by the desktop runtime on macOS. Keep these
+# bindings out of every other target, including wasm marker-only consumers.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", features = ["NSApplication"], optional = true }
+objc2-foundation = { version = "0.3", features = ["NSProcessInfo"], optional = true }
 
 [dev-dependencies]
 # The selector/unsubscribe/drop integration scenarios boot the in-process

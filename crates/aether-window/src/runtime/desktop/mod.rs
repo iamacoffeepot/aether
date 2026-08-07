@@ -24,6 +24,12 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Spa
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::runtime::effect_chain::OrderingDevice;
 use aether_substrate::{InboundMail, MonitorHandle as ActorMonitorHandle, Subname};
+#[cfg(target_os = "macos")]
+use objc2::MainThreadMarker;
+#[cfg(target_os = "macos")]
+use objc2_app_kit::NSApplication;
+#[cfg(target_os = "macos")]
+use objc2_foundation::NSProcessInfo;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, Ime, WindowEvent};
 use winit::keyboard::PhysicalKey;
@@ -40,6 +46,28 @@ use crate::{
 };
 
 pub use application::{DesktopWindowApplication, DesktopWindowIntegration, DesktopWindowUserEvent};
+
+#[cfg(target_os = "macos")]
+fn activate_application() {
+    let Some(marker) = MainThreadMarker::new() else {
+        return;
+    };
+    let application = NSApplication::sharedApplication(marker);
+    if NSProcessInfo::processInfo().operatingSystemVersion().majorVersion >= 14 {
+        application.activate();
+    } else {
+        activate_legacy_application(&application);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn activate_legacy_application(application: &NSApplication) {
+    application.activateIgnoringOtherApps(true);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn activate_application() {}
 
 /// Construction input for the application-scoped desktop window manager.
 ///
@@ -754,6 +782,7 @@ impl NativeActor for DesktopWindowCapability {
                 window.set_minimized(false);
                 window.set_visible(true);
                 window.focus_window();
+                activate_application();
                 ApplyWindowCommandResult::Focus(FocusWindowResult::Ok)
             }
             WindowCommand::RequestRedraw => {
