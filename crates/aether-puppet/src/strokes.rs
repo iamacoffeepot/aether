@@ -260,6 +260,10 @@ impl Strokes {
     /// Orchestration resolves this extent once and gives the same value
     /// to the easel. That shared decision is load-bearing: the coverage
     /// texture created here is bound by both programs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either resolved canvas dimension cannot fit in a `u32`.
     pub fn resized(&mut self, canvas: Canvas) {
         self.recanvas((
             u32::try_from(canvas.width).expect("canvas width fits u32"),
@@ -692,6 +696,7 @@ impl Strokes {
 mod tests {
     use super::*;
     use crate::deform::bone_uniform;
+    use crate::easel::resolve_canvas;
     use crate::extract::Settings;
     use crate::feature::{Curve3, FeatureClass, Pen, SurfacePoint};
 
@@ -830,7 +835,7 @@ mod tests {
         let mesh = Mesh::from_obj_bytes(TRIANGLE, 0).expect("one triangle parses");
         let (resident, volatile) = ([curve(1)], [curve(2)]);
         let drawing = Drawing { resident: &resident, volatile: &volatile };
-        let canvas = crate::easel::resolve_canvas(512, 512, 660 * 660).expect("the promoted drawing fits");
+        let canvas = resolve_canvas(512, 512, 660 * 660).expect("the promoted drawing fits");
 
         let mut strokes = Strokes::default();
         strokes.resized(canvas);
@@ -875,9 +880,8 @@ mod tests {
         let window = (1600, 1200);
 
         let mut strokes = Strokes::default();
-        let canvas =
-            crate::easel::resolve_canvas(window.0, window.1, sight::required_texels(drawing).expect("bounded"))
-                .expect("the drawing fits");
+        let canvas = resolve_canvas(window.0, window.1, sight::required_texels(drawing).expect("bounded"))
+            .expect("the drawing fits");
         strokes.resized(canvas);
         strokes.subject_changed(&mesh, None);
         assert!(strokes.solve(drawing, Vec3::new(0.0, 0.0, 3.0), Mat4::IDENTITY, 0.01, still()));

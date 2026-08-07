@@ -141,7 +141,9 @@ pub fn resolve_canvas(width: u32, height: u32, required_texels: usize) -> Result
 /// The window-only answer used by the independent silhouette instrument.
 #[must_use]
 pub fn wash_canvas(width: u32, height: u32) -> Canvas {
-    resolve_canvas(width, height, 0).expect("an empty drawing fits every canvas")
+    let (width, height) = ((width as usize).max(1), (height as usize).max(1));
+
+    canvas_at_long_edge(width, height, width.max(height).min(CANVAS_LONG_EDGE))
 }
 
 /// The studio's one seed — `Sumire` in ASCII — so the same view develops
