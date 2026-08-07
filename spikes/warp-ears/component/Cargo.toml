@@ -1,0 +1,76 @@
+[package]
+name = "warp-ears"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+build = "build.rs"
+
+# Spike crate: one wasm actor that renders the SAME kitsune-ear voxel dataset
+# twice, side by side — the left instance posed by linear-blend skinning, the
+# right by a displacement field carrying a det-J fold guard. Both are driven
+# from identical bone transforms and identical volumetrized weights, so the two
+# paths agree by construction wherever the pose is benign and diverge exactly
+# where the representations differ.
+#
+# Its own workspace root (the empty `[workspace]` table below) so `main` never
+# carries a `spikes/` member and the spike's feature resolution stays isolated
+# from the engine workspace — a shared feature unification is what strips
+# `export!` off a component and produces a dead ~54 KB wasm. The sibling
+# `spikes/warp-ears/tools/` is likewise its own workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `export!` gates its emitted FFI entry surface on the invoking crate's
+# `library` feature. Nothing embeds this spike, so the feature is never
+# enabled — it is declared only so `unexpected_cfgs` recognizes the value the
+# macro expands to.
+library = []
+
+[dependencies]
+aether-actor = { path = "../../../crates/aether-actor" }
+aether-kinds = { path = "../../../crates/aether-kinds" }
+# Marker-only guest faces: the spike addresses these caps by mail, it does not
+# host their runtimes.
+aether-lifecycle = { path = "../../../crates/aether-lifecycle", default-features = false }
+aether-render = { path = "../../../crates/aether-render", default-features = false }
+aether-math = { path = "../../../crates/aether-math" }
+# The two driver kinds (`set_phase` / `set_auto`) derive `Kind` + `Schema`.
+aether-data = { path = "../../../crates/aether-data", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+
+# Every crate that derives `Kind` needs `inventory` reachable on native builds
+# so the `aether.kinds` descriptor list picks up its types; the wasm guest skips
+# the submission via the derive's own cfg gate. Tests here are native.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = "0.3"
+
+# Host-side only: the build script parses `assets/ear-voxels.json` into a
+# generated static table, so the wasm carries the voxels but no JSON parser and
+# has no runtime filesystem dependency.
+[build-dependencies]
+serde_json = "1"
+
+[lints.rust]
+unused_qualifications = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+self_named_module_files = "deny"
+uninlined_format_args = "deny"
+unreadable_literal = "deny"
+
+# Mirrors the engine workspace's opt-outs: the `WasmActor` dispatch ABI fixes
+# `&mut self` / `&mut ctx` on handlers whether or not a given body mutates
+# through them, and the rest are idiom-fight / doc-burden picks the workspace
+# already settled.
+float_cmp = "allow"
+missing_const_for_fn = "allow"
+missing_errors_doc = "allow"
+needless_pass_by_ref_mut = "allow"
+too_long_first_doc_paragraph = "allow"

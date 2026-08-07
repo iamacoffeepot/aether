@@ -1,0 +1,12 @@
+[workspace]
+
+[package]
+name = "warp-ears-extract"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "warp-ears-extract"
+path = "src/main.rs"
+
+[dependencies]
