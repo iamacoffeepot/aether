@@ -119,5 +119,5 @@ and the defect rate over the scored samples, followed by a per-defect list namin
 the issue and its defect class. A defect rate that climbs after a routing / effort
 / model change — especially on `size:l`, where the probe arc found the model
 choice matters most — is the signal that the change degraded correctness in a way
-no other check would surface. A single week is noisy at five samples; the value is
-the trend across weeks on the rolling issue.
+no other check would surface. A single five-sample run is noisy; repeat runs using
+the same sampling method over time before treating movement as a trend.
