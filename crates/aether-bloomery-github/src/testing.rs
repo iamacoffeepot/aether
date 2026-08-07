@@ -27,7 +27,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::client::{
     ActionsApi, Artifact, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, Issue, NewComment, NewIssue,
-    RunConclusion, RunStatus, WorkflowRun,
+    NewPullRequest, PullRequest, PullRequestApi, PullRequestState, RunConclusion, RunStatus, WorkflowRun,
 };
 use crate::correspondence::{Correspondence, CorrespondenceError, GitObjectId};
 use crate::executor::INPUT_NONCE;
@@ -72,6 +72,30 @@ struct StoredCommit {
     message: String,
 }
 
+#[derive(Clone)]
+struct StoredPullRequest {
+    number: u64,
+    head: String,
+    head_sha: String,
+    base: String,
+    state: PullRequestState,
+    merged: bool,
+    merge_commit_sha: Option<String>,
+}
+
+impl StoredPullRequest {
+    fn project(&self) -> PullRequest {
+        PullRequest {
+            number: self.number,
+            head_sha: self.head_sha.clone(),
+            base: self.base.clone(),
+            state: self.state,
+            merged: self.merged,
+            merge_commit_sha: self.merge_commit_sha.clone(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     next_issue: u64,
@@ -90,6 +114,10 @@ struct State {
     next_run: u64,
     dispatches: Vec<StoredDispatch>,
     runs: Vec<StoredRun>,
+    // The pull-request surface the land path drives: opened proposals, keyed
+    // for lookup by head branch the way the real list endpoint filters.
+    next_pull_request: u64,
+    pull_requests: Vec<StoredPullRequest>,
     // The git-object↔bloom-digest correspondence the source/executor ports
     // resolve real git shas through (ADR-0150), keyed forward by the 32-byte
     // digest; the reverse direction scans for the matching object (a test store
@@ -150,6 +178,33 @@ impl FakeGithub {
         let mut state = self.lock();
         state.issues.retain(|issue| issue.number != number);
         state.comments.retain(|comment| comment.issue_number != number);
+    }
+
+    /// Merge pull request `number` at `merge_commit_sha` — the fake's stand-in
+    /// for the person who merges a landing proposal. Bloomery never merges (the
+    /// client has no verb for it), so a land-watch test cannot reach this state
+    /// through the port and drives it from here instead.
+    ///
+    /// The sha is the caller's to choose precisely because a squash merge — what
+    /// this repository requires — produces a mainline commit that is *not* the
+    /// head Bloomery proposed. A test that passes the proposed head back would
+    /// quietly assert away the one distinction the land watch has to get right.
+    pub fn merge_pull_request(&self, number: u64, merge_commit_sha: &str) {
+        let mut state = self.lock();
+        if let Some(pull) = state.pull_requests.iter_mut().find(|pull| pull.number == number) {
+            pull.state = PullRequestState::Closed;
+            pull.merged = true;
+            pull.merge_commit_sha = Some(merge_commit_sha.to_owned());
+        }
+    }
+
+    /// Close pull request `number` without merging — the operator declining a
+    /// landing proposal, the other terminal a land watch must recognize.
+    pub fn close_pull_request(&self, number: u64) {
+        let mut state = self.lock();
+        if let Some(pull) = state.pull_requests.iter_mut().find(|pull| pull.number == number) {
+            pull.state = PullRequestState::Closed;
+        }
     }
 
     /// Seed a commit object carrying `tree_sha` (no parents) and return its
@@ -497,6 +552,50 @@ impl StoredRun {
             status: self.status,
             conclusion: self.conclusion,
         }
+    }
+}
+
+impl PullRequestApi for FakeGithub {
+    fn create_pull_request(&self, new: &NewPullRequest) -> Result<PullRequest, GithubError> {
+        let mut state = self.lock();
+        // GitHub refuses a second open pull request for the same head with a
+        // 422. Modelling it is what lets a test prove the land path adopts the
+        // existing proposal rather than relying on the refusal never happening.
+        if state.pull_requests.iter().any(|pull| pull.head == new.head && pull.state == PullRequestState::Open) {
+            return Err(GithubError::Status {
+                status: 422,
+                body: format!("a pull request already exists for {}", new.head),
+            });
+        }
+        // The head sha comes from the ref the branch names, as it does on the
+        // real surface: opening a pull request proposes whatever that ref
+        // currently points at, not a sha the caller asserts.
+        let head_sha = state.refs.get(&format!("heads/{}", new.head)).cloned().unwrap_or_default();
+        state.next_pull_request += 1;
+        let stored = StoredPullRequest {
+            number: state.next_pull_request,
+            head: new.head.clone(),
+            head_sha,
+            base: new.base.clone(),
+            state: PullRequestState::Open,
+            merged: false,
+            merge_commit_sha: None,
+        };
+        state.pull_requests.push(stored.clone());
+        Ok(stored.project())
+    }
+
+    fn get_pull_request(&self, number: u64) -> Result<Option<PullRequest>, GithubError> {
+        let state = self.lock();
+        Ok(state.pull_requests.iter().find(|pull| pull.number == number).map(StoredPullRequest::project))
+    }
+
+    fn find_pull_request_for_head(&self, head: &str) -> Result<Option<PullRequest>, GithubError> {
+        // Any state, newest first — the real list endpoint's `state=all` +
+        // `direction=desc`. A merged proposal stays findable, which is what lets
+        // a land watch observe the landing instead of proposing again.
+        let state = self.lock();
+        Ok(state.pull_requests.iter().rev().find(|pull| pull.head == head).map(StoredPullRequest::project))
     }
 }
 

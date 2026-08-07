@@ -57,7 +57,8 @@ pub mod testing;
 pub use client::{
     ActionsApi, Artifact, CheckConclusion, CheckRun, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError,
     HttpRequest, HttpResponse, HttpTransport, InstallationToken, Issue, Method, NewCheckRun, NewComment, NewIssue,
-    ReqwestGithub, ReqwestTransport, RunConclusion, RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
+    NewPullRequest, PullRequest, PullRequestApi, PullRequestState, ReqwestGithub, ReqwestTransport, RunConclusion,
+    RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
 };
 pub use config::GithubConfig;
 pub use correspondence::{Correspondence, CorrespondenceError, GitObjectFormat, GitObjectId};
