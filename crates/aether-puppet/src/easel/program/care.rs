@@ -48,6 +48,22 @@ pub fn plane_slot() -> SlotSpec {
     SlotSpec { format: TextureFormat::R32Float, extent: SlotExtent::Full }
 }
 
+/// Uniform window for the seed — the WGSL `CareSeedParams` block.
+pub struct SeedUniforms {
+    /// The drawn features as a class bit set
+    /// ([`Palette::face_classes`](crate::easel::palette::Palette::face_classes)
+    /// through [`class_set`](crate::easel::palette::class_set)).
+    pub features: u32,
+}
+
+impl SeedUniforms {
+    pub const BYTES: u32 = 4;
+
+    pub fn encode(&self) -> [u8; Self::BYTES as usize] {
+        self.features.to_le_bytes()
+    }
+}
+
 /// Uniform window for one hop — the WGSL `CareJumpParams` block.
 pub struct JumpUniforms {
     /// How far this hop reaches, in texels.
@@ -86,9 +102,12 @@ impl RampUniforms {
     }
 }
 
-/// Total uniform bytes one [`passes`] chain windows: one hop window each,
-/// then the ramp's.
-pub const UNIFORM_BYTES: u32 = HOPS.len() as u32 * JumpUniforms::BYTES + RampUniforms::BYTES;
+/// Total uniform bytes one [`passes`] chain windows: the seed's, one hop
+/// window each, then the ramp's.
+pub const UNIFORM_BYTES: u32 = SeedUniforms::BYTES + HOPS.len() as u32 * JumpUniforms::BYTES + RampUniforms::BYTES;
+
+/// Where the hop windows begin, past the seed's.
+const HOPS_AT: u32 = SeedUniforms::BYTES;
 
 /// The whole transform as passes: the seed, [`HOPS`] flood hops
 /// ping-ponging between two planes, and the ramp into `output`.
@@ -100,7 +119,7 @@ pub const UNIFORM_BYTES: u32 = HOPS.len() as u32 * JumpUniforms::BYTES + RampUni
 /// through [`encode`].
 pub fn passes(classes: InputSlot, carry: u32, relay: u32, output: OutputSlot, uniform_offset: u32) -> Vec<ProgramPass> {
     let mut passes = Vec::with_capacity(HOPS.len() + 2);
-    passes.push(pass(SEED_ENTRY, classes, OutputSlot::Transient { index: carry }, uniform_offset, 0));
+    passes.push(pass(SEED_ENTRY, classes, OutputSlot::Transient { index: carry }, uniform_offset, SeedUniforms::BYTES));
 
     let (mut read, mut write) = (carry, relay);
     for hop in 0..HOPS.len() as u32 {
@@ -108,7 +127,7 @@ pub fn passes(classes: InputSlot, carry: u32, relay: u32, output: OutputSlot, un
             JUMP_ENTRY,
             InputSlot::Transient { index: read },
             OutputSlot::Transient { index: write },
-            uniform_offset + hop * JumpUniforms::BYTES,
+            uniform_offset + HOPS_AT + hop * JumpUniforms::BYTES,
             JumpUniforms::BYTES,
         ));
         (read, write) = (write, read);
@@ -118,26 +137,30 @@ pub fn passes(classes: InputSlot, carry: u32, relay: u32, output: OutputSlot, un
         RAMP_ENTRY,
         InputSlot::Transient { index: read },
         output,
-        uniform_offset + HOPS.len() as u32 * JumpUniforms::BYTES,
+        uniform_offset + HOPS_AT + HOPS.len() as u32 * JumpUniforms::BYTES,
         RampUniforms::BYTES,
     ));
 
     passes
 }
 
-/// Write the chain's windows: the hop schedule and the canvas' own ramp.
+/// Write the chain's windows: the subject's drawn features, the hop
+/// schedule and the canvas' own ramp.
 ///
-/// Every value here is fixed by the schedule and the canvas height, so
-/// this belongs to the develop's static uniform slice — nothing in it
-/// turns with the view.
-pub fn encode(blob: &mut [u8], uniform_offset: u32, height: usize) {
+/// Every value here is fixed by the subject's box, the schedule and the
+/// canvas height, so this belongs to the develop's static uniform slice —
+/// nothing in it turns with the view.
+pub fn encode(blob: &mut [u8], uniform_offset: u32, height: usize, features: u32) {
     let at = uniform_offset as usize;
+    blob[at..at + SeedUniforms::BYTES as usize].copy_from_slice(&SeedUniforms { features }.encode());
+
+    let hops_at = at + HOPS_AT as usize;
     for (hop, &step) in HOPS.iter().enumerate() {
-        let window = at + hop * JumpUniforms::BYTES as usize;
+        let window = hops_at + hop * JumpUniforms::BYTES as usize;
         blob[window..window + JumpUniforms::BYTES as usize].copy_from_slice(&JumpUniforms { step }.encode());
     }
 
-    let ramp = at + HOPS.len() * JumpUniforms::BYTES as usize;
+    let ramp = hops_at + HOPS.len() * JumpUniforms::BYTES as usize;
     blob[ramp..ramp + RampUniforms::BYTES as usize].copy_from_slice(&RampUniforms::for_canvas(height).encode());
 }
 

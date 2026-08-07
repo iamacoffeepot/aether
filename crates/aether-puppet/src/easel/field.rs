@@ -35,8 +35,7 @@ use aether_math::Vec2;
 
 use super::accent::Accents;
 use super::image::{self, Flow, Rng};
-use super::palette::{self, Atmosphere, Coat, Material};
-use crate::labels::{BROW, DRESS, EYE, HAIR, LIPS, SKIN};
+use super::palette::{self, Atmosphere, Coat, DRESS_CLASS, HAIR_CLASS, Material, Palette, SKIN_CLASS};
 
 /// The baked planes a sheet is painted from, all at `width * height` and
 /// row major.
@@ -390,6 +389,9 @@ pub(crate) const ATMOSPHERE_SEED: u64 = 0xa7_a7;
 /// together. The care field is derived once for the same reason.
 pub struct Sheet<'a> {
     planes: Planes<'a>,
+    /// The box this sheet is painted out of, and the vocabulary its class
+    /// plane is written in.
+    palette: &'a Palette,
     seed: u64,
     noise: NoisePlanes,
     /// The sheet's own colour variation, as a multiplier about one.
@@ -471,12 +473,12 @@ pub fn paper(seed: u64, width: usize, height: usize) -> Paper {
 }
 
 impl<'a> Sheet<'a> {
-    pub fn new(planes: Planes<'a>, seed: u64) -> Self {
+    pub fn new(planes: Planes<'a>, palette: &'a Palette, seed: u64) -> Self {
         let (width, height) = (planes.width, planes.height);
         let Paper { noise, shade } = paper(seed, width, height);
-        let care = care_field(planes.classes, width, height);
+        let care = care_field(planes.classes, &palette.face_classes(), width, height);
 
-        Self { planes, seed, noise, shade, care }
+        Self { planes, palette, seed, noise, shade, care }
     }
 
     /// The paper's own colour variation, for [`palette::composite`].
@@ -506,15 +508,16 @@ impl<'a> Sheet<'a> {
     pub fn coats(&self, flow: Option<&Flow>, accents: Option<&Accents>) -> Vec<Coat> {
         let mut rng = Rng::new(self.seed);
         let mut coats = Vec::new();
+        let hair = self.palette.class_named(HAIR_CLASS);
 
-        for material in palette::MATERIALS {
+        for material in self.palette.materials() {
             let Some(mask) = self.coverage(material, accents) else {
                 continue;
             };
             let value = palette::shade_of(material, self.planes.tone);
             let mut density = self.material_wash(material, &mask, &value, &mut rng);
 
-            if material.class == HAIR
+            if Some(material.class) == hair
                 && let Some(flow) = flow
             {
                 let reach = image::tuned(SMEAR_REACH, self.planes.height).round() as i32;
@@ -535,9 +538,9 @@ impl<'a> Sheet<'a> {
 
             coats.push(Coat { class: material.class, pigment: material.pigment, cap: palette::DENSITY_CAP, density });
 
-            if material.class == HAIR {
-                let glaze = self.wash(&mask, None, &glaze_wash_params(), &mut rng);
-                coats.push(Coat { class: HAIR, pigment: GLAZE_PIGMENT, cap: GLAZE_CAP, density: glaze });
+            if Some(material.class) == hair {
+                let glaze = self.wash(&mask, None, &glaze_wash_params(self.palette), &mut rng);
+                coats.push(Coat { class: material.class, pigment: GLAZE_PIGMENT, cap: GLAZE_CAP, density: glaze });
             }
 
             if let Some(policy) = material.atmosphere.as_ref() {
@@ -554,9 +557,11 @@ impl<'a> Sheet<'a> {
         // The flush belongs to the skin the way the glaze belongs to the
         // hair: a second pigment over a region already washed, and one
         // that arrives soft and edgeless rather than as a wash of its own.
-        if let Some(accents) = accents {
+        // A box with no skin has no cheek to flush, and the accents a
+        // chartless subject carries are empty anyway.
+        if let (Some(accents), Some(skin)) = (accents, self.palette.class_named(SKIN_CLASS)) {
             coats.push(Coat {
-                class: SKIN,
+                class: skin,
                 pigment: palette::BLUSH_PIGMENT,
                 cap: palette::BLUSH_CAP,
                 density: accents.blush.clone(),
@@ -631,7 +636,7 @@ impl<'a> Sheet<'a> {
     /// never carried its id.
     fn coverage(&self, material: &Material, accents: Option<&Accents>) -> Option<Vec<f32>> {
         if material.class < palette::META {
-            return Some(palette::mask_of(self.planes.classes, material.class));
+            return Some(self.palette.mask_of(self.planes.classes, material.class));
         }
 
         accents.and_then(|accents| accents.mask(material.class)).map(<[f32]>::to_vec)
@@ -645,7 +650,7 @@ impl<'a> Sheet<'a> {
     /// which of the two the eye is looking at.
     fn material_wash(&self, material: &Material, mask: &[f32], value: &[f32], rng: &mut Rng) -> Vec<f32> {
         let tight = self.wash(mask, Some(value), &held_params(material), rng);
-        let Some(freed) = freed_params(material) else {
+        let Some(freed) = freed_params(self.palette, material) else {
             return tight;
         };
         let loose = self.wash(mask, Some(value), &freed, rng);
@@ -889,8 +894,8 @@ fn sagged(soft: &[f32], width: usize, height: usize) -> Vec<f32> {
 }
 
 /// Which way a material gives up its far edge, in radians.
-fn lost_angle(class: u8) -> f32 {
-    LOST_RISE.atan2(if class == DRESS {
+fn lost_angle(palette: &Palette, class: u8) -> f32 {
+    LOST_RISE.atan2(if palette.class_named(DRESS_CLASS) == Some(class) {
         LOST_RUN.0
     } else {
         LOST_RUN.1
@@ -915,24 +920,26 @@ pub(crate) fn held_params(material: &Material) -> WashParams {
 
 /// The loose wash a material relaxes into past the care ramp, or `None`
 /// for a feature the hand never loosens over.
-pub(crate) fn freed_params(material: &Material) -> Option<WashParams> {
+pub(crate) fn freed_params(palette: &Palette, material: &Material) -> Option<WashParams> {
     if material.small {
         return None;
     }
 
-    let drops = if material.class == HAIR {
+    let drops = if palette.class_named(HAIR_CLASS) == Some(material.class) {
         HAIR_SPATTER
     } else {
         0
     };
-    let freed =
-        WashParams::loose().charged(material.gran, material.load).losing(lost_angle(material.class)).spattering(drops);
+    let freed = WashParams::loose()
+        .charged(material.gran, material.load)
+        .losing(lost_angle(palette, material.class))
+        .spattering(drops);
 
     // The dress wears less water than the hair: at the board's framing
     // the full flood overshot her silhouette into a slab past the arm.
     // A garment's edge is a cut line, not a fall of hair — the lost
     // side stays, the water that carried it a hand-width out does not.
-    Some(if material.class == DRESS {
+    Some(if palette.class_named(DRESS_CLASS) == Some(material.class) {
         freed.wetted(DRESS_WATER)
     } else {
         freed
@@ -941,8 +948,8 @@ pub(crate) fn freed_params(material: &Material) -> Option<WashParams> {
 
 /// The glaze dropped into the wet hair, losing its edge the way the hair
 /// does.
-pub(crate) fn glaze_wash_params() -> WashParams {
-    WashParams::glaze().losing(lost_angle(HAIR))
+pub(crate) fn glaze_wash_params(palette: &Palette) -> WashParams {
+    WashParams::glaze().losing(lost_angle(palette, palette.class_named(HAIR_CLASS).unwrap_or_default()))
 }
 
 /// The wash an atmosphere stain is painted as, against the loose one it
@@ -961,8 +968,12 @@ pub(crate) fn atmosphere_wash_params() -> WashParams {
 /// Distance from the drawn features, by chamfer transform: near the face
 /// the painter cuts like gongbi, and past the fall of the hair the hand
 /// relaxes into xieyi. The transition is the painting.
-pub fn care_field(classes: &[u8], width: usize, height: usize) -> Vec<f32> {
-    let features: Vec<bool> = classes.iter().map(|&at| matches!(at, LIPS | BROW | EYE)).collect();
+/// `features` is the palette's own answer to which classes are drawn
+/// features ([`Palette::face_classes`]) — a class id means only what the
+/// active vocabulary says it means, so the seed set is asked for rather
+/// than assumed.
+pub fn care_field(classes: &[u8], features: &[u8], width: usize, height: usize) -> Vec<f32> {
+    let features: Vec<bool> = classes.iter().map(|at| features.contains(at)).collect();
     let distance = image::chamfer_distance(&features, width, height);
     let (far, near) = (image::tuned(CARE_FAR, height), image::tuned(CARE_NEAR, height));
 
@@ -972,7 +983,7 @@ pub fn care_field(classes: &[u8], width: usize, height: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::labels::SKIN;
+    use crate::labels::{DRESS, EYE, HAIR, LIPS, SKIN};
 
     /// A small figure with a face, a fall of hair and a dress, which is
     /// enough of a subject for every branch of the wash to run.
@@ -1013,7 +1024,8 @@ mod tests {
     fn painted(width: usize, height: usize, seed: u64) -> Vec<u8> {
         let (classes, tone, facing) = subject(width, height);
         let planes = Planes { classes: &classes, tone: &tone, facing: &facing, width, height };
-        let sheet = Sheet::new(planes, seed);
+        let palette = Palette::canonical();
+        let sheet = Sheet::new(planes, &palette, seed);
 
         palette::composite(&sheet.coats(None, None), sheet.paper_shade())
     }
@@ -1048,7 +1060,7 @@ mod tests {
         let (classes, tone, facing) = subject(width, height);
         let planes = Planes { classes: &classes, tone: &tone, facing: &facing, width, height };
 
-        for coat in Sheet::new(planes, 0x5e_ed).coats(None, None) {
+        for coat in Sheet::new(planes, &Palette::canonical(), 0x5e_ed).coats(None, None) {
             assert!(coat.density.iter().all(|at| at.is_finite()), "class {} laid down a NaN", coat.class);
         }
     }
@@ -1107,7 +1119,8 @@ mod tests {
             width,
             height,
         };
-        let sheet = Sheet::new(planes, 1);
+        let palette = Palette::canonical();
+        let sheet = Sheet::new(planes, &palette, 1);
 
         let density = sheet.wash(&vec![0.0; width * height], None, &WashParams::loose(), &mut Rng::new(1));
         assert!(density.iter().all(|&at| at == 0.0), "an uncovered region must lay down no pigment");
@@ -1147,9 +1160,12 @@ mod tests {
         }
 
         let tone = vec![0.5; width * height];
-        let sheet = Sheet::new(Planes { classes: &classes, tone: &tone, facing: &tone, width, height }, 0x5e_ed);
-        let mask = palette::mask_of(&classes, HAIR);
-        let policy = palette::MATERIALS
+        let palette = Palette::canonical();
+        let planes = Planes { classes: &classes, tone: &tone, facing: &tone, width, height };
+        let sheet = Sheet::new(planes, &palette, 0x5e_ed);
+        let mask = palette.mask_of(&classes, HAIR);
+        let policy = palette
+            .materials()
             .iter()
             .find(|material| material.class == HAIR)
             .and_then(|material| material.atmosphere.as_ref())
@@ -1161,5 +1177,53 @@ mod tests {
         let (from, to) = (centroid(&mask, width).expect("the fixture region"), mass_centre(&stain, width));
         assert!(to.x < from.x, "the hair's stain drifts left across the sheet: {from:?} to {to:?}");
         assert!(to.y > from.y, "and down it: {from:?} to {to:?}");
+    }
+
+    /// Tripwire: a subject painted out of its own box takes that box's
+    /// pigments and none of hers, and takes none of the marks her named
+    /// materials earn.
+    ///
+    /// The failure this guards is the whole reason the box became data,
+    /// and it is invisible in every other test because every other test
+    /// uses her vocabulary. A class id is a position, so a hillside's
+    /// third class sits exactly where her hair does — and the smear, the
+    /// spatter and the violet glaze are all hung off "the hair". Keyed by
+    /// number rather than by name they fire on the grass: the sheet
+    /// develops a plausible landscape with a violet glaze bleeding
+    /// through the meadow and drops thrown off it, and nothing anywhere
+    /// errors.
+    ///
+    /// So the fixture puts a real region at class 3 and counts the coats.
+    /// One per material is the whole box; a fourth is her hair's glaze
+    /// landing on someone else's grass.
+    #[test]
+    fn a_subject_paints_out_of_its_own_box_and_takes_no_marks_it_never_earned() {
+        let hillside = Palette::decode_text(
+            "classes rock soil grass\n\
+             material rock 0x7a6f63 0.4 0.6 0.35\n\
+             material soil 0x6b5334 0.35 0.5 0.4\n\
+             material grass 0x5c7a4a 0.3 0.4 0.2\n",
+        )
+        .expect("the hillside box is well formed");
+
+        let (width, height) = (120, 90);
+        let mut classes = vec![0u8; width * height];
+        for (index, at) in classes.iter_mut().enumerate() {
+            *at = (index / (width * 30) + 1) as u8;
+        }
+        let tone = vec![0.5; width * height];
+
+        let planes = Planes { classes: &classes, tone: &tone, facing: &tone, width, height };
+        let coats = Sheet::new(planes, &hillside, 0x5e_ed).coats(None, None);
+
+        let laid: Vec<u32> = coats.iter().map(|coat| coat.pigment).collect();
+        assert_eq!(laid, [0x7a_6f_63, 0x6b_53_34, 0x5c_7a_4a], "the hillside paints its own three and nothing else");
+
+        let hers: Vec<u32> = Palette::canonical().materials().iter().map(|material| material.pigment).collect();
+        assert!(
+            laid.iter().all(|pigment| !hers.contains(pigment)),
+            "no pigment of hers may reach a subject that is not her: {laid:x?}",
+        );
+        assert!(!laid.contains(&GLAZE_PIGMENT), "the glaze belongs to her hair, not to whatever class 3 happens to be");
     }
 }

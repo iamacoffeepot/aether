@@ -96,6 +96,7 @@ use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter,
 use aether_harness_substrate_capture::visual::decode_png;
 use aether_kinds::QuadSpace;
 use aether_math::{Mat4, Rgba, Vec3};
+use aether_puppet::easel::palette;
 use aether_puppet::easel::program::sight::{self, Layout, SightUniforms, ToneUniforms};
 use aether_puppet::extract::{self, Settings};
 use aether_puppet::feature::{Curve3, Drawing, FeatureClass, Pen, SurfacePoint};
@@ -1323,9 +1324,14 @@ fn crossfeed_the_gpu_field_against_the_cpu_oracle() {
 
     let mesh = Mesh::from_obj_bytes(&fs::read(dir.join("subject.obj")).expect("read subject.obj"), RELAXATION)
         .expect("parse the subject");
-    let labels =
-        Labels::decode(&fs::read(dir.join("labels.npy")).expect("read labels.npy"), mesh.min, mesh.max, LABEL_PAD)
-            .expect("parse the material field");
+    let labels = Labels::decode(
+        &fs::read(dir.join("labels.npy")).expect("read labels.npy"),
+        palette::Palette::canonical().classes(),
+        mesh.min,
+        mesh.max,
+        LABEL_PAD,
+    )
+    .expect("parse the material field");
     let settings = Settings::default();
     let bias = mesh.surface_bias();
     eprintln!("crossfeed: {} faces, {} vertices, surface bias {bias:.5}", mesh.faces.len(), mesh.positions.len());

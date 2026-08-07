@@ -30,6 +30,7 @@ use std::fs;
 use std::path::Path;
 
 use super::field::{Planes, Sheet};
+use super::palette::Palette;
 
 /// Seed for the diagnostic sheet. Arbitrary but fixed, so two runs over
 /// the same planes differ only in the planes.
@@ -69,9 +70,12 @@ fn crossfeed_the_wash_with_external_planes() {
     let facing = read_f32_plane(&dir.join("facing.bin"), count);
     let flat = vec![1.0; count];
 
+    // The reference board is her own, so its planes are read out of the
+    // box she was tuned on.
+    let palette = Palette::canonical();
     for (run, facing) in [("real", &facing), ("flat", &flat)] {
         let planes = Planes { classes: &classes, tone: &tone, facing, width, height };
-        let sheet = Sheet::new(planes, SEED);
+        let sheet = Sheet::new(planes, &palette, SEED);
         let coats = sheet.coats(None, None);
         for (index, coat) in coats.iter().enumerate() {
             write_f32_plane(&dir.join(format!("density-{run}-{index}-{}.bin", coat.class)), &coat.density);

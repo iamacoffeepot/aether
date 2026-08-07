@@ -21,11 +21,12 @@ Send `aether.puppet.load` with paths in one of the substrate's file namespaces:
   "path": "subject.obj",
   "labels": "labels.npy",
   "material_field_padding": 0.12,
-  "rig": "rig"
+  "rig": "rig",
+  "palette": "palette.txt"
 }
 ```
 
-`labels` and `rig` may be empty. The charted face needs the material labels to
+`labels`, `rig` and `palette` may be empty. The charted face needs the material labels to
 measure its anchors. The optional rig directory contains `weights.npy` and
 `rig.txt`. Those disk formats stay compatible with the external bake pipeline;
 the puppet decodes them once into the declared `aether.puppet.rig_weights` and
@@ -39,6 +40,54 @@ and remains `Load::default()`'s value. The decoded
 `aether.puppet.material_field` kind declares its dimensions, byte cells,
 world-space origin and spacing, and ordered class vocabulary in memory; the
 on-disk asset remains a NumPy 1.0 `|u1`, C-order cube.
+
+## The painter's box
+
+`palette` points at the box a subject is painted out of. Empty gets the
+canonical box — the pigments the crate was tuned on — so the mascot loads
+exactly as before.
+
+The box matters because pigments are per subject. A field cell names its class
+by *position*, so the same byte means hair under one vocabulary and grass under
+another, and a scene's rock and timber are not her indigo and rose. The field is
+therefore validated against whichever box is going to paint it: a cell running
+past that box's vocabulary is refused with the cell and the class named, rather
+than developing as a hole in the sheet.
+
+The format is line-oriented records, comments after `#`:
+
+```text
+classes  <name>...                                       the vocabulary, class id = index + 1
+material <class> <pigment> <load> <gran> <floor>         one entry, in mixing order
+lit      <class> <tone>                                  the entry names its own fully-lit tone
+small    <class>                                         a region too small to loosen
+air      <class> <halo> <across> <down> <pigment> <cap>  what it leaves in the air past its edge
+remap    <child> <parent>                                the child takes the parent's wash
+reserve  <class>                                         paper, left bare
+```
+
+Every class the vocabulary declares must be painted, remapped or reserved
+exactly once — a class an author simply forgot is refused rather than silently
+left unpainted. A vocabulary carries at most eight classes, which is what the
+bake's per-class indicator lanes hold. `material iris` names the one
+meta-material: the chart supplies its coverage rather than the field, so it sits
+outside the vocabulary.
+
+Mixing order is authored and load-bearing. Compositing commutes, so it carries
+no meaning for the colour — but each wash's accidents are rolled from one shared
+stream material by material, so two boxes naming the same entries in different
+orders are two different paintings.
+
+A few marks belong to a *named* material rather than to any material, and are
+resolved by name against the active vocabulary: only `hair` throws drops, takes
+the violet glaze and is brushed down its own locks; only `dress` wears less
+water and gives up its far edge on the shorter run; only `skin` flushes. A box
+carrying no such class simply never earns those marks. The same rule governs the
+face: the chart, the iris and the blush activate only when `lips`, `brow` and
+`eye` are all in the vocabulary, so a subject without a face plants nothing.
+
+`aether-puppet`'s own `Palette::canonical` box, written in this format, is the
+crate's `CANONICAL_TEXT` constant — the worked example to copy from.
 
 ## Drive the chart
 

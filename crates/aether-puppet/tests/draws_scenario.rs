@@ -144,6 +144,7 @@ fn a_loaded_mesh_draws_from_two_angles() {
                     labels: String::new(),
                     material_field_padding: 0.12,
                     rig: String::new(),
+                    palette: String::new(),
                 },
             ),
         )])

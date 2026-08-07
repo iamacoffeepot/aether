@@ -28,12 +28,6 @@
 // canvas this engine paints at and so survives an f32 round trip
 // unrounded. `CARE_UNSEEDED` is negative, which no index is.
 
-// Class ids the hand is held tight around (labels.rs LIPS / BROW / EYE),
-// as the integers the packed plane's class channel carries.
-const CARE_LIPS: f32 = 6.0;
-const CARE_BROW: f32 = 7.0;
-const CARE_EYE: f32 = 8.0;
-
 // No seed here. Negative so it can never be mistaken for a texel index,
 // and tested for rather than arithmetic'd around.
 const CARE_UNSEEDED: f32 = -1.0;
@@ -67,6 +61,16 @@ fn care_seed_distance(seed: f32, here: vec2<f32>, width: f32) -> f32 {
     return dot(offset, offset);
 }
 
+struct CareSeedParams {
+    // Which classes the hand is held tight around, as a class bit set
+    // (`palette::Palette::face_classes` through `class_set`). Authored
+    // rather than constant: a subject with no eye in its vocabulary seeds
+    // nothing here, and the empty set says so exactly.
+    features: u32,
+}
+
+@group(0) @binding(0) var<uniform> care_seed_params: CareSeedParams;
+
 // The flood's first plane: every feature texel seeds itself, everything
 // else is unseeded. `field::care_field`'s `features` predicate, verbatim.
 @fragment
@@ -74,7 +78,7 @@ fn fs_care_seed(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32
     let at = vec2<i32>(position.xy);
     let size = textureDimensions(care_source);
     let labelled = round(textureLoad(care_source, at, 0).r * 255.0);
-    let feature = labelled == CARE_LIPS || labelled == CARE_BROW || labelled == CARE_EYE;
+    let feature = in_class_set(care_seed_params.features, labelled) > 0.0;
 
     let index = f32(at.y) * f32(size.x) + f32(at.x);
     return vec4<f32>(select(CARE_UNSEEDED, index, feature), 0.0, 0.0, 1.0);

@@ -111,6 +111,7 @@ use core::mem;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
+use easel::palette::Palette;
 use feature::{Curve3, Drawing};
 use mesh::Mesh;
 
@@ -190,6 +191,17 @@ pub struct Puppet {
     /// signal. Solved once when mesh and field are both in.
     class_scores: Option<Vec<[f32; labels::CLASSES]>>,
     awaiting_labels: Option<String>,
+    /// The field's bytes, held until the box that has to paint them is in.
+    ///
+    /// A cell names its class by position in a vocabulary, and the
+    /// vocabulary belongs to the palette — so a field cannot be decoded
+    /// until the box has settled, and the two reads settle in either
+    /// order. Held rather than parsed, the way the rig's weights are.
+    staged_labels: Option<Vec<u8>>,
+    /// The painter's box this subject is painted out of, and the path
+    /// still owed for it. The canonical box until a load names its own.
+    palette: Palette,
+    awaiting_palette: Option<String>,
     /// Padding declared by the load that requested `awaiting_labels`.
     material_field_padding: f32,
     /// Where the charted face goes on this subject, measured off the field
@@ -537,6 +549,9 @@ impl WasmActor for Puppet {
             labels: None,
             class_scores: None,
             awaiting_labels: None,
+            staged_labels: None,
+            palette: Palette::canonical(),
+            awaiting_palette: None,
             material_field_padding: DEFAULT_MATERIAL_FIELD_PADDING,
             anchors: None,
             dragging: false,
@@ -655,6 +670,15 @@ impl WasmActor for Puppet {
             ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
         };
 
+        // The box first, because the field is read against it: a load
+        // that names no palette paints out of the canonical box, and one
+        // that names a box it cannot read falls back to the same rather
+        // than painting out of the last subject's.
+        self.palette = Palette::canonical();
+        if !mail.palette.is_empty() {
+            self.awaiting_palette = Some(mail.palette.clone());
+            fetch(mail.palette.clone());
+        }
         if !mail.labels.is_empty() {
             self.awaiting_labels = Some(mail.labels.clone());
             fetch(mail.labels.clone());
@@ -684,6 +708,50 @@ impl WasmActor for Puppet {
         }
     }
 
+    /// File one settled read against the asset that owed it, decided by
+    /// the path the reply echoes rather than by arrival order — the reads
+    /// settle independently of each other.
+    ///
+    /// `Err` is the one refusal that ends a load: without a mesh there is
+    /// nothing to draw. A box or a field that will not decode degrades
+    /// instead and says so in the log, because a subject painted out of
+    /// the canonical box is still a subject.
+    fn accept(&mut self, path: &str, bytes: Vec<u8>) -> Result<(), String> {
+        if self.rig.claims(path) {
+            // Held rather than parsed: the weights are only meaningful
+            // against a vertex count, and the mesh may not be in yet.
+            self.rig.accept(path, bytes);
+        } else if self.awaiting_palette.as_deref() == Some(path) {
+            self.awaiting_palette = None;
+            match String::from_utf8(bytes)
+                .map_err(|_| "palette is not valid UTF-8".to_owned())
+                .and_then(|text| Palette::decode_text(&text))
+            {
+                Ok(palette) => self.palette = palette,
+                Err(error) => tracing::warn!(
+                    target: "aether_puppet",
+                    path = %path,
+                    error = %error,
+                    "palette refused; painting out of the canonical box",
+                ),
+            }
+        } else if self.awaiting_labels.as_deref() == Some(path) {
+            // Held rather than decoded: the cells name classes by position
+            // in the box's vocabulary, and neither the box nor the mesh
+            // the lattice is placed against need have settled yet.
+            self.awaiting_labels = None;
+            self.staged_labels = Some(bytes);
+        } else {
+            let Some(subject) = Mesh::from_obj_bytes(&bytes, self.settings.relaxation) else {
+                tracing::warn!(target: "aether_puppet", "parse failed; keeping the previous subject");
+                return Err(format!("{path} is not a mesh this reader accepts"));
+            };
+            self.subject = Some(subject);
+        }
+
+        Ok(())
+    }
+
     /// The bytes arrived. Parse, run the view-independent passes, and swap
     /// the cache in one go.
     #[handler::manual]
@@ -701,34 +769,9 @@ impl WasmActor for Puppet {
             return;
         };
 
-        // Which asset this is, decided by the path the reply echoes rather
-        // than by arrival order — the reads settle independently.
-        if self.rig.claims(&path) {
-            // Held rather than parsed: the weights are only meaningful
-            // against a vertex count, and the mesh may not be in yet.
-            self.rig.accept(&path, bytes);
-        } else if self.awaiting_labels.as_deref() == Some(path.as_str()) {
-            self.awaiting_labels = None;
-            let bounds = self.subject.as_ref().map_or((Vec3::splat(-1.0), Vec3::splat(1.0)), |m| (m.min, m.max));
-            match MaterialField::decode(&bytes, bounds.0, bounds.1, self.material_field_padding) {
-                Ok(labels) => self.labels = Some(labels),
-                Err(error) => {
-                    self.labels = None;
-                    tracing::warn!(
-                        target: "aether_puppet",
-                        path = %path,
-                        error = %error,
-                        "material field refused; creases stay unmasked",
-                    );
-                }
-            }
-        } else {
-            let Some(subject) = Mesh::from_obj_bytes(&bytes, self.settings.relaxation) else {
-                tracing::warn!(target: "aether_puppet", "parse failed; keeping the previous subject");
-                self.settle(ctx, &LoadResult::Err { reason: format!("{path} is not a mesh this reader accepts") });
-                return;
-            };
-            self.subject = Some(subject);
+        if let Err(reason) = self.accept(&path, bytes) {
+            self.settle(ctx, &LoadResult::Err { reason });
+            return;
         }
 
         // Extraction needs the mesh, and the field if one was asked for —
@@ -737,15 +780,33 @@ impl WasmActor for Puppet {
         let Some(subject) = self.subject.as_ref() else {
             return;
         };
-        if self.awaiting_labels.is_some() || self.rig.outstanding() {
+        if self.awaiting_labels.is_some() || self.awaiting_palette.is_some() || self.rig.outstanding() {
             return;
         }
 
-        // The field's lattice is placed against the mesh's own bounds, and
-        // a field that settled before its mesh was placed against stand-in
-        // bounds — re-place it now that both are in (issue 4401).
+        // Everything is in, so the field can finally be read: against the
+        // box's vocabulary, which says what its cells name, and against
+        // the mesh's own bounds, which say where its lattice sits.
+        let (min, max) = (subject.min, subject.max);
+        if let Some(bytes) = self.staged_labels.take() {
+            match MaterialField::decode(&bytes, self.palette.classes(), min, max, self.material_field_padding) {
+                Ok(labels) => self.labels = Some(labels),
+                Err(error) => {
+                    self.labels = None;
+                    tracing::warn!(
+                        target: "aether_puppet",
+                        error = %error,
+                        "material field refused; creases stay unmasked",
+                    );
+                }
+            }
+        }
+
+        // A field kept from an earlier load has a lattice placed against
+        // that subject's bounds, and those scale the whole thing — so it
+        // is re-placed against this one (issue 4401).
         if let Some(labels) = self.labels.as_mut() {
-            labels.place_against(subject.min, subject.max, self.material_field_padding);
+            labels.place_against(min, max, self.material_field_padding);
         }
 
         // Where her features are, measured off the field before anything is
@@ -920,6 +981,7 @@ impl WasmActor for Puppet {
             mesh: subject,
             posed: self.posed.as_ref().filter(|_| !self.pose.is_rest()),
             scores,
+            palette: &self.palette,
             settings: &self.settings,
             ink: self.strokes.ink_plane(),
             chart: None,
@@ -1020,6 +1082,7 @@ impl WasmActor for Puppet {
                 mesh: painted_mesh,
                 posed: self.posed.as_ref().filter(|_| !self.pose.is_rest()),
                 scores,
+                palette: &self.palette,
                 settings: &self.settings,
                 ink,
                 chart,
