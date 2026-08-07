@@ -57,8 +57,8 @@ inventory = { workspace = true }
 # bindings out of every other target, including wasm marker-only consumers.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", optional = true }
-objc2-app-kit = { version = "0.3", features = ["NSApplication"], optional = true }
-objc2-foundation = { version = "0.3", features = ["NSProcessInfo"], optional = true }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder"], optional = true }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSProcessInfo"], optional = true }
 
 [dev-dependencies]
 # The selector/unsubscribe/drop integration scenarios boot the in-process
