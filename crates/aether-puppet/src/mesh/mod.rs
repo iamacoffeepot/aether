@@ -21,6 +21,28 @@ use aether_math::Vec3;
 use crate::deform::{Rigid, Skin};
 use bvh::{Bvh, SilhouetteBvh};
 
+const FACING_BLOCK_SIZE: usize = 8192;
+const FACING_RANGE_LIMIT: usize = 16384;
+
+#[derive(Clone, Copy)]
+struct FacingRange {
+    start: usize,
+    end: usize,
+}
+
+fn facing_ranges(faces: &[[u32; 3]]) -> Vec<FacingRange> {
+    faces
+        .chunks(FACING_BLOCK_SIZE)
+        .map(|faces| {
+            let mut vertices = faces.iter().flatten().copied();
+            let first = vertices.next().expect("a face block is occupied");
+            let (start, end) = vertices.fold((first, first), |(min, max), vertex| (min.min(vertex), max.max(vertex)));
+
+            FacingRange { start: start as usize, end: end as usize + 1 }
+        })
+        .collect()
+}
+
 pub struct Mesh {
     pub positions: Vec<Vec3>,
     pub faces: Vec<[u32; 3]>,
@@ -39,6 +61,7 @@ pub struct Mesh {
     silhouette: Option<SilhouetteBvh>,
     /// The exact bone maps used to write this posed copy.
     silhouette_transforms: Vec<Rigid>,
+    facing_ranges: Vec<FacingRange>,
     /// Cached, because the occlusion bias reads it once per ray sample and
     /// the honest computation walks every face.
     mean_edge: f32,
@@ -115,6 +138,7 @@ impl Mesh {
             bvh: None,
             silhouette: self.bvh.as_ref().map(|bvh| bvh.silhouette(skin, &self.faces)),
             silhouette_transforms: Vec::new(),
+            facing_ranges: self.facing_ranges.clone(),
             mean_edge: self.mean_edge,
         }
     }
@@ -156,6 +180,7 @@ impl Mesh {
         tracing::debug!(target: "aether_puppet", agreement, "normal orientation");
 
         let bvh = Some(Bvh::build(&positions, &normals, &faces));
+        let facing_ranges = facing_ranges(&faces);
         let mean_edge = mean_edge_length(&positions, &faces);
         Self {
             positions,
@@ -166,6 +191,7 @@ impl Mesh {
             bvh,
             silhouette: None,
             silhouette_transforms: Vec::new(),
+            facing_ranges,
             mean_edge,
         }
     }
@@ -209,15 +235,7 @@ impl Mesh {
     /// `i` and `j` name the edge's two corners *within* `face`, so the
     /// crossing can report where inside the face it landed as well as
     /// where in the world — the [`Anchorage`] a pose carries it by.
-    fn crossing_with(
-        &self,
-        face: usize,
-        i: usize,
-        j: usize,
-        value: &impl Fn(usize) -> f32,
-        aux: &[f32],
-        iso: f32,
-    ) -> Crossing {
+    fn crossing_with(&self, face: usize, i: usize, j: usize, values: &[f32; 3], aux: &[f32], iso: f32) -> Crossing {
         let corners = self.faces[face];
         let (lo_corner, hi_corner) = if corners[i] < corners[j] {
             (i, j)
@@ -226,11 +244,11 @@ impl Mesh {
         };
         let (lo, hi) = (corners[lo_corner] as usize, corners[hi_corner] as usize);
 
-        let span = value(hi) - value(lo);
+        let span = values[hi_corner] - values[lo_corner];
         let t = if span.abs() < 1e-20 {
             0.5
         } else {
-            (iso - value(lo)) / span
+            (iso - values[lo_corner]) / span
         };
 
         let mut shares = [0.0f32; 3];
@@ -251,7 +269,12 @@ impl Mesh {
     /// The segment, if any, where `iso` crosses one triangle.
     fn march_with(&self, face: usize, value: &impl Fn(usize) -> f32, aux: &[f32], iso: f32) -> Option<[Crossing; 2]> {
         let corners = self.faces[face];
-        let above = corners.map(|c| value(c as usize) >= iso);
+        let values = corners.map(|c| value(c as usize));
+        self.march_values(face, values, aux, iso)
+    }
+
+    fn march_values(&self, face: usize, values: [f32; 3], aux: &[f32], iso: f32) -> Option<[Crossing; 2]> {
+        let above = values.map(|value| value >= iso);
         if above[0] == above[1] && above[1] == above[2] {
             return None;
         }
@@ -265,7 +288,7 @@ impl Mesh {
         };
         let (a, b) = ((odd + 1) % 3, (odd + 2) % 3);
 
-        Some([self.crossing_with(face, odd, a, value, aux, iso), self.crossing_with(face, odd, b, value, aux, iso)])
+        Some([self.crossing_with(face, odd, a, &values, aux, iso), self.crossing_with(face, odd, b, &values, aux, iso)])
     }
 
     fn march(&self, face: usize, values: &[f32], aux: &[f32], iso: f32) -> Option<[Crossing; 2]> {
@@ -282,17 +305,52 @@ impl Mesh {
     /// linear oracle; sorting candidates restores original face order
     /// before welding observes them.
     pub(crate) fn silhouette_level_set(&self, eye: Vec3) -> Vec<[Crossing; 2]> {
-        let faces = self.silhouette.as_ref().map_or_else(
-            || self.bvh.as_ref().map_or_else(|| (0..self.faces.len()).collect(), |bvh| bvh.silhouette_faces(eye)),
-            |silhouette| silhouette.faces(eye, &self.silhouette_transforms),
-        );
+        if let Some(silhouette) = &self.silhouette {
+            let pruned = silhouette.faces(eye, &self.silhouette_transforms);
+            return self.silhouette_level_set_faces((0..self.faces.len()).filter(|&face| !pruned.contains(face)), eye);
+        }
+        let faces = self.bvh.as_ref().map_or_else(|| (0..self.faces.len()).collect(), |bvh| bvh.silhouette_faces(eye));
 
-        faces
-            .into_iter()
-            .filter_map(|face| {
-                self.march_with(face, &|vertex| (self.positions[vertex] - eye).dot(self.normals[vertex]), &[], 0.0)
-            })
-            .collect()
+        self.silhouette_level_set_faces(faces, eye)
+    }
+
+    fn silhouette_level_set_faces(&self, faces: impl IntoIterator<Item = usize>, eye: Vec3) -> Vec<[Crossing; 2]> {
+        let mut segments = Vec::new();
+        let mut values = Vec::new();
+        let mut faces = faces.into_iter().peekable();
+        while let Some(&face) = faces.peek() {
+            let block_index = face / FACING_BLOCK_SIZE;
+            let range = self.facing_ranges[block_index];
+            let range_start = range.start;
+            let range_end = range.end;
+            if range_end - range_start <= FACING_RANGE_LIMIT {
+                values.clear();
+                values.extend(
+                    self.positions[range_start..range_end]
+                        .iter()
+                        .zip(&self.normals[range_start..range_end])
+                        .map(|(&position, &normal)| (position - eye).dot(normal)),
+                );
+                while faces.peek().is_some_and(|face| *face / FACING_BLOCK_SIZE == block_index) {
+                    let face = faces.next().expect("the block still has a face");
+                    let facing = self.faces[face].map(|vertex| values[vertex as usize - range_start]);
+                    if let Some(segment) = self.march_values(face, facing, &[], 0.0) {
+                        segments.push(segment);
+                    }
+                }
+            } else {
+                while faces.peek().is_some_and(|face| *face / FACING_BLOCK_SIZE == block_index) {
+                    let face = faces.next().expect("the block still has a face");
+                    let facing = self.faces[face]
+                        .map(|vertex| (self.positions[vertex as usize] - eye).dot(self.normals[vertex as usize]));
+                    if let Some(segment) = self.march_values(face, facing, &[], 0.0) {
+                        segments.push(segment);
+                    }
+                }
+            }
+        }
+
+        segments
     }
 
     /// Every level set of `values` at integer multiples of `spacing`,
@@ -767,6 +825,11 @@ mod tests {
                     let eye = Vec3::new(x as f32 * 0.8, y as f32 * 0.7, z);
                     let expected = posed.level_set(&posed.facing(eye), &[], 0.0);
                     let actual = posed.silhouette_level_set(eye);
+                    assert_eq!(
+                        actual.iter().map(|segment| segment[0].at.face).collect::<Vec<_>>(),
+                        expected.iter().map(|segment| segment[0].at.face).collect::<Vec<_>>(),
+                        "candidate faces differ at eye {eye:?}",
+                    );
                     assert_crossings_identical(&actual, &expected);
                     assert_curves_identical(&extract::silhouettes(&posed, eye), &oracle_curves(&posed, eye));
                 }

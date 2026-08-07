@@ -54,9 +54,10 @@ use aether_puppet::easel::program::{bake, face, sight, stroke, wash};
 use aether_puppet::easel::survey::{self, Survey};
 use aether_puppet::easel::{View, accent};
 use aether_puppet::extract::{self, Settings};
-use aether_puppet::feature::{Curve3, Drawing, Half};
+use aether_puppet::feature::{Curve3, Drawing, FeatureClass, Half, Pen, SurfacePoint};
 use aether_puppet::labels::{CLASSES, Labels};
 use aether_puppet::mesh::Mesh;
+use aether_puppet::weld;
 use aether_puppet::{
     Channel, Expression, EyeArchetype, Gaze, GpuSilhouetteMode, IdleConfig, Load, LoadResult as PuppetLoadResult, Look,
     Motion, Pose, Viseme, anchor, chart, deform,
@@ -1183,9 +1184,7 @@ fn time_the_pose_moved_half(at: &Subject, skin: &deform::Skin, view: &View) {
     });
     posed.rebound(&transforms);
     phase("pose — silhouette, accelerated", PHASE_REPEATS, || extract::silhouettes(&posed, view.eye));
-    phase("pose — silhouette, retained linear oracle", PHASE_REPEATS, || {
-        posed.level_set(&posed.facing(view.eye), &[], 0.0)
-    });
+    phase("pose — silhouette, retained linear oracle", PHASE_REPEATS, || linear_silhouettes(&posed, view.eye));
 
     // What a posed frame packs now: the volatile half alone, against the
     // resident half that stays on the GPU. The same pack
@@ -1206,6 +1205,18 @@ fn time_the_pose_moved_half(at: &Subject, skin: &deform::Skin, view: &View) {
     let moved = Drawing { resident: &[], volatile: &whole };
     phase("retired — strokes pack, the WHOLE drawing volatile", PHASE_REPEATS, || pack(moved, view.eye));
     eprintln!("phase: posed, the drawing is {} curves — {} of which stay resident now", whole.len(), at.resident.len());
+}
+
+fn linear_silhouettes(mesh: &Mesh, eye: Vec3) -> Vec<Curve3> {
+    let segments = mesh
+        .level_set(&mesh.facing(eye), &[], 0.0)
+        .into_iter()
+        .map(|crossings| crossings.map(|crossing| SurfacePoint::anchored(&crossing)))
+        .collect();
+    let template =
+        Curve3 { points: Vec::new(), class: FeatureClass::Silhouette, pen: Pen::Ink, seed: 0, authored: false };
+
+    weld::curves(segments, &template)
 }
 
 /// The field's and the ink's volatile buffers for one drawing: what a

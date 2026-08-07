@@ -36,6 +36,7 @@ use core::iter;
 use core::mem::align_of;
 use core::mem::size_of;
 use serde::{Deserialize, Serialize};
+use std::f32::consts::PI;
 
 use crate::Pose;
 use crate::extract::{Settings, tone_gate};
@@ -91,6 +92,31 @@ pub struct Rigid {
     translation: Vec3,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct RigidBounds {
+    pub stretch: f32,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RigidDelta {
+    pub displacement: f32,
+    pub translation: f32,
+    pub rotation: f32,
+}
+
+fn operator_bound(columns: &[Vec3; 3]) -> f32 {
+    let gram = [0, 1, 2].map(|row| [0, 1, 2].map(|column| columns[row].dot(columns[column])));
+
+    [0, 1, 2]
+        .map(|row| {
+            gram[row][row] + (0..3).filter(|&column| column != row).map(|column| gram[row][column].abs()).sum::<f32>()
+        })
+        .into_iter()
+        .fold(0.0f32, f32::max)
+        .sqrt()
+        * (1.0 + 8.0 * f32::EPSILON)
+}
+
 impl Rigid {
     pub const IDENTITY: Self = Self { columns: [Vec3::X, Vec3::Y, Vec3::Z], translation: Vec3::ZERO };
 
@@ -113,29 +139,36 @@ impl Rigid {
         self.columns[0] * v.x + self.columns[1] * v.y + self.columns[2] * v.z
     }
 
-    /// A conservative image of a sphere under this affine map.
-    ///
-    /// Live bones are rotations, but the operator bound deliberately does
-    /// not rely on exact orthonormal float columns: it encloses any small
-    /// sampling drift as well as the exact rotated sphere.
-    pub(crate) fn bound_sphere(&self, centre: Vec3, radius: f32) -> Option<(Vec3, f32)> {
-        let gram = [0, 1, 2].map(|row| [0, 1, 2].map(|column| self.columns[row].dot(self.columns[column])));
-        // Gershgorin bounds the largest eigenvalue of A^T A; its square
-        // root bounds the largest stretch of A and stays at one for an
-        // exact rotation.
-        let stretch_squared = [0, 1, 2]
-            .map(|row| {
-                gram[row][row]
-                    + (0..3).filter(|&column| column != row).map(|column| gram[row][column].abs()).sum::<f32>()
-            })
-            .into_iter()
-            .fold(0.0f32, f32::max);
-        let stretch = stretch_squared.sqrt();
-        let centre = self.point(centre);
-        let radius = radius * stretch * (1.0 + 8.0 * f32::EPSILON);
+    /// Pose-wide scalar bounds used by every silhouette node this bone
+    /// influences. Computing them once avoids transforming a sphere and
+    /// cone separately at every node visited by the query.
+    pub(crate) fn silhouette_bounds(&self) -> Option<RigidBounds> {
+        let stretch = operator_bound(&self.columns);
 
-        (centre.x.is_finite() && centre.y.is_finite() && centre.z.is_finite() && radius.is_finite() && radius >= 0.0)
-            .then_some((centre, radius))
+        (stretch.is_finite() && stretch >= 0.0).then_some(RigidBounds { stretch })
+    }
+
+    /// Conservative linear, translational, and angular distances between
+    /// two affine bone maps.
+    pub(crate) fn relative_bounds(&self, other: &Self) -> Option<RigidDelta> {
+        let difference = [
+            self.columns[0] - other.columns[0],
+            self.columns[1] - other.columns[1],
+            self.columns[2] - other.columns[2],
+        ];
+        // For rotations, `||A - B|| = 2 sin(theta / 2)`. Gershgorin's
+        // operator upper bound keeps the recovered relative angle wide.
+        let displacement = operator_bound(&difference);
+        let translation = (self.translation - other.translation).length() * (1.0 + 8.0 * f32::EPSILON);
+        let rotation = (2.0 * (displacement * 0.5).min(1.0).asin() + 32.0 * f32::EPSILON).min(PI);
+
+        (displacement.is_finite()
+            && translation.is_finite()
+            && rotation.is_finite()
+            && displacement >= 0.0
+            && translation >= 0.0
+            && rotation >= 0.0)
+            .then_some(RigidDelta { displacement, translation, rotation })
     }
 
     /// The inverse, given the linear part is a rotation: its transpose,
