@@ -44,7 +44,37 @@ if [[ -z "$session_key" ]]; then
     session_key=$(json_value '.session_id // .muse_session_id // .tbh_session_id')
 fi
 if [[ -z "$session_key" ]]; then
-    exit 0
+    case "$(uname -s)" in
+        Darwin)
+            if command -v uuidgen >/dev/null 2>&1; then
+                session_key=$(uuidgen 2>/dev/null | tr 'A-Z' 'a-z')
+            fi
+            ;;
+        Linux)
+            if [[ -r /proc/sys/kernel/random/uuid ]]; then
+                session_key=$(tr 'A-Z' 'a-z' < /proc/sys/kernel/random/uuid 2>/dev/null)
+            elif command -v uuidgen >/dev/null 2>&1; then
+                session_key=$(uuidgen 2>/dev/null | tr 'A-Z' 'a-z')
+            fi
+            ;;
+    esac
+    if [[ -z "$session_key" ]]; then
+        if command -v openssl >/dev/null 2>&1; then
+            hex=$(openssl rand -hex 16 2>/dev/null)
+            if [[ -n "$hex" ]]; then
+                session_key=$(printf '%s' "$hex" | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')
+            fi
+        fi
+        if [[ -z "$session_key" ]]; then
+            hex=$(od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n' | tr 'A-Z' 'a-z')
+            if [[ -n "$hex" ]]; then
+                session_key=$(printf '%s' "$hex" | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')
+            fi
+        fi
+    fi
+    if [[ -z "$session_key" ]]; then
+        exit 0
+    fi
 fi
 
 safe_key=$(printf '%s' "$session_key" | tr -cs 'A-Za-z0-9._-' '-' | sed 's/^-//; s/-$//' | cut -c 1-80)
