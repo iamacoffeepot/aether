@@ -74,15 +74,12 @@ struct BakeParams {
 }
 @group(0) @binding(0) var<uniform> params: BakeParams;
 
-// The interpolated surface, per pixel: the eight class indicators the
-// argmax runs over, then the two scalars the other two channels carry
-// out whole.
+// The interpolated surface, per pixel: the class indicators the argmax
+// runs over, then the two scalars the other two channels carry out whole.
 struct Baked {
     @builtin(position) clip: vec4<f32>,
-    @location(0) @interpolate(linear) scores_low: vec3<f32>,
-    @location(1) @interpolate(linear) scores_mid: vec3<f32>,
-    @location(2) @interpolate(linear) scores_high: vec2<f32>,
-    @location(3) @interpolate(linear) surface: vec2<f32>,
+{{BAKED_SCORE_FIELDS}}
+    @location({{SURFACE_LOCATION}}) @interpolate(linear) surface: vec2<f32>,
 }
 
 // Project, and answer facing where the eye is still known.
@@ -99,11 +96,9 @@ fn vs_bake(
     @location(0) rest_position: vec3<f32>,
     @location(1) rest_normal: vec3<f32>,
     @location(2) tone: f32,
-    @location(3) scores_low: vec3<f32>,
-    @location(4) scores_mid: vec3<f32>,
-    @location(5) scores_high: vec2<f32>,
-    @location(6) joints: vec4<u32>,
-    @location(7) shares: vec4<f32>,
+{{VERTEX_SCORE_PARAMETERS}}
+    @location({{JOINTS_LOCATION}}) joints: vec4<u32>,
+    @location({{SHARES_LOCATION}}) shares: vec4<f32>,
 ) -> Baked {
     // The subject posed here rather than re-uploaded. The easel bakes
     // its subject plane once per subject and had no update path, so
@@ -120,9 +115,7 @@ fn vs_bake(
 
     var baked: Baked;
     baked.clip = params.view_proj * vec4<f32>(position, 1.0);
-    baked.scores_low = scores_low;
-    baked.scores_mid = scores_mid;
-    baked.scores_high = scores_high;
+{{SCORE_ASSIGNMENTS}}
 
     // `normalize_or` keeps the normal when the eye has collapsed onto
     // the point and there is no direction to take.
@@ -151,20 +144,13 @@ fn vs_bake(
 // to the lower class.
 @fragment
 fn fs_packed(baked: Baked) -> @location(0) vec4<f32> {
-    var scores = array<f32, 8>(
-        baked.scores_low.x,
-        baked.scores_low.y,
-        baked.scores_low.z,
-        baked.scores_mid.x,
-        baked.scores_mid.y,
-        baked.scores_mid.z,
-        baked.scores_high.x,
-        baked.scores_high.y,
+    var scores = array<f32, {{CLASS_COUNT}}>(
+{{FLATTENED_SCORES}}
     );
 
     var winner = 0.0;
     var best = 0.0;
-    for (var index = 0; index < 8; index++) {
+    for (var index = 0; index < {{CLASS_COUNT}}; index++) {
         if scores[index] > best {
             best = scores[index];
             winner = f32(index + 1);

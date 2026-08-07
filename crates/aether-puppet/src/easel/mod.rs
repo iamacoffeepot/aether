@@ -216,7 +216,7 @@ const GEOMETRIES: usize = 2;
 /// Each slot beside the vertex layout its pass binds, in create order —
 /// which is the order the ids answer in.
 const GEOMETRY_SLOTS: [(usize, fn() -> GeometrySlotSpec); GEOMETRIES] =
-    [(SUBJECT_GEOMETRY, bake::geometry_slot), (APERTURE_GEOMETRY, face::geometry_slot)];
+    [(SUBJECT_GEOMETRY, bake::geometry_slot::<{ labels::CLASSES }>), (APERTURE_GEOMETRY, face::geometry_slot)];
 
 /// The sampled plane textures one canvas carries, before the writable
 /// sheet that completes the set.
@@ -618,7 +618,7 @@ impl Easel {
         let survey = self.survey.get_or_insert_with(|| Survey::measure(mesh, scores, subject.palette));
         if self.packed[SUBJECT_GEOMETRY].is_none() && self.geometries[SUBJECT_GEOMETRY] == Resident::Absent {
             self.packed[SUBJECT_GEOMETRY] = Some(GeometryBytes {
-                vertices: bake::vertices(mesh, scores, settings, *skin),
+                vertices: bake::vertices::<{ labels::CLASSES }>(mesh, scores, settings, *skin),
                 indices: bake::indices(mesh),
             });
         }
@@ -742,7 +742,7 @@ impl Easel {
         let mut registers = Vec::with_capacity(PROGRAMS);
         if self.programs[BAKE].is_none() {
             self.registering.push_back(Registering::Bake);
-            registers.push(bake::program());
+            registers.push(bake::program::<{ labels::CLASSES }>());
         }
         if self.programs[WASH].is_none() {
             self.registering.push_back(Registering::Wash);

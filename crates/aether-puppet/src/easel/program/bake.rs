@@ -37,7 +37,7 @@
 //! argmax only at the end — never a label lookup at the pixel's own
 //! point, which on a thin shell paints an ear's outer sheet with the
 //! concha's class (issue 4399). Interpolate-then-argmax *is* the
-//! rasterizer's interpolator followed by eight comparisons in the
+//! rasterizer's interpolator followed by one comparison per class in the
 //! fragment stage, so the GPU form is the definition, not an
 //! approximation of it.
 //!
@@ -74,27 +74,190 @@ use super::{SKIN_WGSL, TONE_WGSL};
 use crate::deform::{BONE_LIMIT, INFLUENCES, Skin};
 use crate::extract::Settings;
 use crate::feature::SurfacePoint;
-use crate::labels::CLASSES;
 use crate::mesh::Mesh;
 
-/// The bake's WGSL: one vertex entry feeding one fragment entry.
+/// The bake's WGSL template: one vertex entry feeding one fragment entry.
+///
+/// [`program`] fills its score-lane markers from the same bake layout
+/// that declares the geometry slot.
 pub const BAKE_WGSL: &str = include_str!("bake.wgsl");
 
 /// The dispatch binding [`program`] declares — the one packed plane a
 /// dispatch supplies and the pass fills.
 pub const PACKED: u32 = 0;
 
-/// The vertex layout splits the eight class scores three-three-two
-/// because `VertexFormat` has no four-lane float (ADR-0171's closed
-/// set). A ninth class would want its own attribute rather than a
-/// silent repack, so the split is pinned to the class count here.
-const _: () = assert!(CLASSES == 8, "the vertex layout packs exactly eight class indicators as 3 + 3 + 2 lanes");
+const SCORE_LOCATION: u32 = 3;
+const FIXED_VERTEX_BYTES: usize = 12 + 12 + 4;
+const SKIN_VERTEX_BYTES: usize = 4 + 4;
 
-/// Bytes one vertex occupies: position, normal, tone, the eight
+/// One class-score vertex attribute and fragment interpolant.
+///
+/// Every complete lane carries three scores. The final lane carries the
+/// one or two left over, so no class count silently pads a shader input
+/// or changes the order the strict argmax visits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScoreLane {
+    index: usize,
+    score_start: usize,
+    width: usize,
+}
+
+impl ScoreLane {
+    fn name(self) -> String {
+        let index = self.index;
+        format!("scores_{index}")
+    }
+
+    fn format(self) -> VertexFormat {
+        match self.width {
+            1 => VertexFormat::Float32,
+            2 => VertexFormat::Float32x2,
+            3 => VertexFormat::Float32x3,
+            _ => unreachable!("score lanes are one to three floats wide"),
+        }
+    }
+
+    fn wgsl_type(self) -> &'static str {
+        match self.width {
+            1 => "f32",
+            2 => "vec2<f32>",
+            3 => "vec3<f32>",
+            _ => unreachable!("score lanes are one to three floats wide"),
+        }
+    }
+
+    fn bytes(self) -> usize {
+        self.format().bytes()
+    }
+
+    fn component(self, offset: usize) -> String {
+        if self.width == 1 {
+            self.name()
+        } else {
+            let name = self.name();
+            let component = ["x", "y", "z"][offset];
+            format!("{name}.{component}")
+        }
+    }
+}
+
+/// The complete class-dependent part of one bake specialization.
+///
+/// This is deliberately the sole derivation of score lanes and their
+/// following locations. Both sides of the geometry/WGSL contract render
+/// from it, so growing the class vocabulary cannot shift skinning on one
+/// side while leaving it fixed on the other.
+struct BakeLayout {
+    score_lanes: Vec<ScoreLane>,
+    joints_location: u32,
+    shares_location: u32,
+}
+
+impl BakeLayout {
+    fn of<const CLASS_COUNT: usize>() -> Self {
+        assert!(CLASS_COUNT > 0, "the bake needs at least one class score");
+        assert!(u8::try_from(CLASS_COUNT).is_ok(), "the packed class channel carries at most 255 classes");
+
+        let score_lanes: Vec<_> = (0..CLASS_COUNT.div_ceil(3))
+            .map(|index| ScoreLane { index, score_start: index * 3, width: (CLASS_COUNT - index * 3).min(3) })
+            .collect();
+        let joints_location = SCORE_LOCATION + u32::try_from(score_lanes.len()).expect("score lane count fits u32");
+
+        Self { score_lanes, joints_location, shares_location: joints_location + 1 }
+    }
+
+    fn class_count(&self) -> usize {
+        self.score_lanes.iter().map(|lane| lane.width).sum()
+    }
+
+    fn vertex_bytes(&self) -> usize {
+        FIXED_VERTEX_BYTES + self.score_lanes.iter().copied().map(ScoreLane::bytes).sum::<usize>() + SKIN_VERTEX_BYTES
+    }
+
+    fn geometry_slot(&self) -> GeometrySlotSpec {
+        let mut layout = vec![
+            VertexAttribute { location: 0, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 1, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 2, format: VertexFormat::Float32 },
+        ];
+        layout.extend(self.score_lanes.iter().enumerate().map(|(index, lane)| VertexAttribute {
+            location: SCORE_LOCATION + u32::try_from(index).expect("score lane index fits u32"),
+            format: lane.format(),
+        }));
+        layout.extend([
+            VertexAttribute { location: self.joints_location, format: VertexFormat::Uint8x4 },
+            VertexAttribute { location: self.shares_location, format: VertexFormat::Unorm8x4 },
+        ]);
+
+        GeometrySlotSpec { layout }
+    }
+
+    fn wgsl(&self) -> String {
+        let baked_score_fields = self
+            .score_lanes
+            .iter()
+            .enumerate()
+            .map(|(location, lane)| {
+                let name = lane.name();
+                let wgsl_type = lane.wgsl_type();
+                format!("    @location({location}) @interpolate(linear) {name}: {wgsl_type},")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let vertex_score_parameters = self
+            .score_lanes
+            .iter()
+            .enumerate()
+            .map(|(index, lane)| {
+                let location = SCORE_LOCATION + u32::try_from(index).expect("score lane index fits u32");
+                let name = lane.name();
+                let wgsl_type = lane.wgsl_type();
+                format!("    @location({location}) {name}: {wgsl_type},")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let score_assignments = self
+            .score_lanes
+            .iter()
+            .map(|lane| {
+                let name = lane.name();
+                format!("    baked.{name} = {name};")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let flattened_scores = self
+            .score_lanes
+            .iter()
+            .flat_map(|lane| {
+                let lane = *lane;
+                (0..lane.width).map(move |offset| {
+                    let component = lane.component(offset);
+                    format!("        baked.{component},")
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        BAKE_WGSL
+            .replace("{{BAKED_SCORE_FIELDS}}", &baked_score_fields)
+            .replace("{{SURFACE_LOCATION}}", &self.score_lanes.len().to_string())
+            .replace("{{VERTEX_SCORE_PARAMETERS}}", &vertex_score_parameters)
+            .replace("{{JOINTS_LOCATION}}", &self.joints_location.to_string())
+            .replace("{{SHARES_LOCATION}}", &self.shares_location.to_string())
+            .replace("{{SCORE_ASSIGNMENTS}}", &score_assignments)
+            .replace("{{CLASS_COUNT}}", &self.class_count().to_string())
+            .replace("{{FLATTENED_SCORES}}", &flattened_scores)
+    }
+}
+
+/// Bytes one vertex occupies: position, normal, tone, the class
 /// indicators, then the bone binding. Attributes pack in declaration
-/// order with no padding (ADR-0171), so this is the sum of the formats'
-/// widths and [`vertices`] writes them in exactly this order.
-pub const VERTEX_BYTES: usize = 12 + 12 + 4 + 12 + 12 + 8 + 4 + 4;
+/// order with no padding (ADR-0171), so this is the sum of the generated
+/// formats' widths and [`vertices`] writes them in exactly this order.
+#[must_use]
+pub fn vertex_bytes<const CLASS_COUNT: usize>() -> usize {
+    BakeLayout::of::<CLASS_COUNT>().vertex_bytes()
+}
 
 /// The geometry slot the draw pass binds: the subject, carrying
 /// everything the three channels blend.
@@ -105,19 +268,8 @@ pub const VERTEX_BYTES: usize = 12 + 12 + 4 + 12 + 12 + 8 + 4 + 4;
 /// carrying the same scalar makes the tone plane parity by
 /// construction, and spares the shader a second transcription of the
 /// face lift's falloff.
-pub fn geometry_slot() -> GeometrySlotSpec {
-    GeometrySlotSpec {
-        layout: vec![
-            VertexAttribute { location: 0, format: VertexFormat::Float32x3 },
-            VertexAttribute { location: 1, format: VertexFormat::Float32x3 },
-            VertexAttribute { location: 2, format: VertexFormat::Float32 },
-            VertexAttribute { location: 3, format: VertexFormat::Float32x3 },
-            VertexAttribute { location: 4, format: VertexFormat::Float32x3 },
-            VertexAttribute { location: 5, format: VertexFormat::Float32x2 },
-            VertexAttribute { location: 6, format: VertexFormat::Uint8x4 },
-            VertexAttribute { location: 7, format: VertexFormat::Unorm8x4 },
-        ],
-    }
+pub fn geometry_slot<const CLASS_COUNT: usize>() -> GeometrySlotSpec {
+    BakeLayout::of::<CLASS_COUNT>().geometry_slot()
 }
 
 /// The baked plane's slot: full-extent `Rgba8`, carrying class, tone and
@@ -217,14 +369,25 @@ impl BakeUniforms {
 /// paints from, and what `program_bake_scenario` holds the tone channel
 /// against; a rigged subject's shader derives its own from the normal it
 /// posed, since the rest pose's shading slides under a moving body.
-pub fn vertices(mesh: &Mesh, scores: &[[f32; CLASSES]], settings: &Settings, skin: Option<&Skin>) -> Vec<u8> {
-    let mut packed = Vec::with_capacity(mesh.positions.len() * VERTEX_BYTES);
+pub fn vertices<const CLASS_COUNT: usize>(
+    mesh: &Mesh,
+    scores: &[[f32; CLASS_COUNT]],
+    settings: &Settings,
+    skin: Option<&Skin>,
+) -> Vec<u8> {
+    let layout = BakeLayout::of::<CLASS_COUNT>();
+    let mut packed = Vec::with_capacity(mesh.positions.len() * layout.vertex_bytes());
     for (index, (&position, &normal)) in mesh.positions.iter().zip(&mesh.normals).enumerate() {
         let tone = settings.tone(&SurfacePoint::on_surface(position, normal));
-        let indicators = scores.get(index).copied().unwrap_or([0.0; CLASSES]);
+        let indicators = scores.get(index).copied().unwrap_or([0.0; CLASS_COUNT]);
 
-        for value in position.to_array().into_iter().chain(normal.to_array()).chain([tone]).chain(indicators) {
+        for value in position.to_array().into_iter().chain(normal.to_array()).chain([tone]) {
             packed.extend_from_slice(&value.to_le_bytes());
+        }
+        for lane in &layout.score_lanes {
+            for value in &indicators[lane.score_start..lane.score_start + lane.width] {
+                packed.extend_from_slice(&value.to_le_bytes());
+            }
         }
         let (joints, shares) = skin.map_or(([0; INFLUENCES], [0.0; INFLUENCES]), |skin| skin.influences(index));
         packed.extend(joints);
@@ -246,15 +409,18 @@ pub fn indices(mesh: &Mesh) -> Vec<u8> {
 /// Static by construction, like the wash's own graph — the structure
 /// depends on nothing but the plane vocabulary, so it is the same graph
 /// for every subject at every canvas size.
-pub fn program() -> ProgramRegister {
+pub fn program<const CLASS_COUNT: usize>() -> ProgramRegister {
+    let layout = BakeLayout::of::<CLASS_COUNT>();
+    let bake_wgsl = layout.wgsl();
+
     ProgramRegister {
         // The two preludes after this module's own source: the vertex
         // stage poses the subject from the bone table, and answers
         // `Settings::tone` against the normal that posing turned.
-        wgsl: format!("{BAKE_WGSL}\n{SKIN_WGSL}\n{TONE_WGSL}"),
+        wgsl: format!("{bake_wgsl}\n{SKIN_WGSL}\n{TONE_WGSL}"),
         bindings: vec![packed_slot()],
         transients: Vec::new(),
-        geometries: vec![geometry_slot()],
+        geometries: vec![layout.geometry_slot()],
         // The depth slot resolves which surface each pixel's answers come
         // from. One pass needs it no less than three did: the subject is
         // a closed shell, so most pixels are covered front and back.
@@ -278,8 +444,37 @@ pub fn program() -> ProgramRegister {
 
 #[cfg(test)]
 mod tests {
+    use core::array::from_fn;
+
     use super::*;
+    use crate::labels::CLASSES;
     use aether_render::vertex_stride_bytes;
+
+    fn assert_layout<const CLASS_COUNT: usize>(score_formats: &[VertexFormat], joints: u32, shares: u32) {
+        let slot = geometry_slot::<CLASS_COUNT>();
+        let actual_score_formats: Vec<_> =
+            slot.layout[3..slot.layout.len() - 2].iter().map(|attribute| attribute.format).collect();
+        let actual_score_locations: Vec<_> =
+            slot.layout[3..slot.layout.len() - 2].iter().map(|attribute| attribute.location).collect();
+
+        assert_eq!(actual_score_formats, score_formats, "score formats");
+        assert_eq!(actual_score_locations, (SCORE_LOCATION..joints).collect::<Vec<_>>(), "score locations");
+        assert_eq!(slot.layout[slot.layout.len() - 2].location, joints, "joints location");
+        assert_eq!(slot.layout[slot.layout.len() - 1].location, shares, "shares location");
+        assert_eq!(vertex_stride_bytes(&slot.layout), vertex_bytes::<CLASS_COUNT>(), "declared stride");
+    }
+
+    #[test]
+    fn class_counts_derive_score_lanes_and_shift_skinning() {
+        assert_layout::<1>(&[VertexFormat::Float32], 4, 5);
+        assert_layout::<4>(&[VertexFormat::Float32x3, VertexFormat::Float32], 5, 6);
+        assert_layout::<8>(&[VertexFormat::Float32x3, VertexFormat::Float32x3, VertexFormat::Float32x2], 6, 7);
+        assert_layout::<11>(
+            &[VertexFormat::Float32x3, VertexFormat::Float32x3, VertexFormat::Float32x3, VertexFormat::Float32x2],
+            7,
+            8,
+        );
+    }
 
     /// Tripwire: the packer and the declared layout must agree on the
     /// stride. They are two independent statements of one byte
@@ -289,15 +484,57 @@ mod tests {
     /// mesh, every attribute sliding one lane per vertex.
     #[test]
     fn the_packed_vertex_matches_the_declared_stride() {
-        assert_eq!(vertex_stride_bytes(&geometry_slot().layout), VERTEX_BYTES, "declared stride");
-
         let mesh = Mesh::from_obj_bytes(b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", 0).expect("fixture mesh");
         let scores = vec![[0.0; CLASSES]; mesh.positions.len()];
 
         assert_eq!(
             vertices(&mesh, &scores, &Settings::default(), None).len(),
-            mesh.positions.len() * VERTEX_BYTES,
+            mesh.positions.len() * vertex_bytes::<CLASSES>(),
             "packed length",
         );
+    }
+
+    fn assert_score_packing<const CLASS_COUNT: usize>() {
+        let mesh = Mesh::from_obj_bytes(b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", 0).expect("fixture mesh");
+        let scores: Vec<[f32; CLASS_COUNT]> = vec![from_fn(|index| index as f32 + 0.25); mesh.positions.len()];
+        let packed = vertices::<CLASS_COUNT>(&mesh, &scores, &Settings::default(), None);
+        let first = &packed[..vertex_bytes::<CLASS_COUNT>()];
+        let decoded: Vec<_> = first[FIXED_VERTEX_BYTES..FIXED_VERTEX_BYTES + CLASS_COUNT * size_of::<f32>()]
+            .chunks_exact(size_of::<f32>())
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("one f32")))
+            .collect();
+
+        assert_eq!(decoded.as_slice(), scores[0].as_slice(), "score order");
+        assert_eq!(
+            &first[FIXED_VERTEX_BYTES + CLASS_COUNT * size_of::<f32>()..],
+            &[0; SKIN_VERTEX_BYTES],
+            "skinning follows scores",
+        );
+    }
+
+    #[test]
+    fn score_packing_follows_scalar_and_wide_remainders() {
+        assert_score_packing::<4>();
+        assert_score_packing::<11>();
+    }
+
+    #[test]
+    fn generated_wgsl_follows_the_same_lanes() {
+        let scalar = BakeLayout::of::<4>().wgsl();
+        assert!(scalar.contains("@location(1) @interpolate(linear) scores_1: f32,"));
+        assert!(scalar.contains("@location(4) scores_1: f32,"));
+        assert!(scalar.contains("@location(5) joints: vec4<u32>"));
+        assert!(scalar.contains("array<f32, 4>"));
+        assert!(scalar.contains("baked.scores_1,"));
+        assert!(scalar.contains("index < 4"));
+
+        let wide = BakeLayout::of::<11>().wgsl();
+        assert!(wide.contains("@location(3) @interpolate(linear) scores_3: vec2<f32>,"));
+        assert!(wide.contains("@location(6) scores_3: vec2<f32>,"));
+        assert!(wide.contains("@location(7) joints: vec4<u32>"));
+        assert!(wide.contains("array<f32, 11>"));
+        assert!(wide.contains("baked.scores_3.y,"));
+        assert!(wide.contains("index < 11"));
+        assert!(!wide.contains("{{"), "every WGSL marker must be specialized");
     }
 }

@@ -246,8 +246,8 @@ const PROBE: u32 = bake::PACKED + 1;
 
 /// The bake's own graph plus the opacity probe: one more `Rgba8` binding
 /// and one fragment pass reading the plane the draw pass just filled.
-fn probed_program() -> ProgramRegister {
-    let mut register = bake::program();
+fn probed_program<const CLASS_COUNT: usize>() -> ProgramRegister {
+    let mut register = bake::program::<CLASS_COUNT>();
     register.wgsl = format!("{}\n{PROBE_WGSL}", register.wgsl);
     register.bindings.push(bake::packed_slot());
     register.passes.push(ProgramPass {
@@ -301,15 +301,15 @@ fn create_targets(harness: &mut SubstrateHarness, width: usize, height: usize) -
         .collect()
 }
 
-fn create_geometry(
+fn create_geometry<const CLASS_COUNT: usize>(
     harness: &mut SubstrateHarness,
     mesh: &Mesh,
-    scores: &[[f32; labels::CLASSES]],
+    scores: &[[f32; CLASS_COUNT]],
     skin: Option<&deform::Skin>,
 ) -> u32 {
     let mail = CreateGeometry {
-        layout: bake::geometry_slot().layout,
-        vertices: bake::vertices(mesh, scores, &settings(), skin),
+        layout: bake::geometry_slot::<CLASS_COUNT>().layout,
+        vertices: bake::vertices::<CLASS_COUNT>(mesh, scores, &settings(), skin),
         indices: bake::indices(mesh),
     };
     let created = harness
@@ -407,18 +407,18 @@ struct Rig {
 }
 
 impl Rig {
-    fn mount(
+    fn mount<const CLASS_COUNT: usize>(
         harness: &mut SubstrateHarness,
         mesh: &Mesh,
-        scores: &[[f32; labels::CLASSES]],
+        scores: &[[f32; CLASS_COUNT]],
         width: usize,
         height: usize,
         skin: Option<&deform::Skin>,
     ) -> Self {
         Self {
-            program_id: register(harness, &probed_program()),
+            program_id: register(harness, &probed_program::<CLASS_COUNT>()),
             bindings: create_targets(harness, width, height),
-            geometry: create_geometry(harness, mesh, scores, skin),
+            geometry: create_geometry::<CLASS_COUNT>(harness, mesh, scores, skin),
             width,
             height,
         }
@@ -779,6 +779,48 @@ fn the_gpu_bake_places_the_same_boundaries_as_the_cpu_oracle() {
     assert_parity("synthetic", &oracle, &baked, CANVAS_WIDTH, CANVAS_HEIGHT);
 }
 
+fn assert_generic_class_count_bakes<const CLASS_COUNT: usize>(winning_index: usize) {
+    let mesh = synthetic_subject();
+    let mut scores = vec![[0.0; CLASS_COUNT]; mesh.positions.len()];
+    for vertex_scores in &mut scores {
+        vertex_scores[winning_index] = 1.0;
+    }
+    let (eye, view_proj) = camera(AZIMUTH, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+    let mut harness = SubstrateHarness::builder()
+        .size(CANVAS_WIDTH as u32, CANVAS_HEIGHT as u32)
+        .with_render()
+        .build()
+        .expect("harness");
+    let rig = Rig::mount::<CLASS_COUNT>(&mut harness, &mesh, &scores, CANVAS_WIDTH, CANVAS_HEIGHT, None);
+    let baked = rig.read_planes(&mut harness, eye, view_proj, &deform::bone_uniform(&[]), false);
+    let winning_class = u8::try_from(winning_index + 1).expect("fixture class fits the packed channel");
+
+    assert!(baked.class.contains(&winning_class), "the winning class must cover the subject");
+    assert!(
+        baked.class.iter().all(|&class| class == 0 || class == winning_class),
+        "only the background and winning class may be baked",
+    );
+}
+
+#[test]
+fn a_smaller_scalar_remainder_class_count_bakes() {
+    if !require_wgpu_only() {
+        return;
+    }
+
+    assert_generic_class_count_bakes::<4>(3);
+}
+
+#[test]
+fn a_greater_than_eight_class_count_bakes() {
+    if !require_wgpu_only() {
+        return;
+    }
+
+    assert_generic_class_count_bakes::<11>(10);
+}
+
 /// Tripwire: the bake follows vertices that move, through the re-upload
 /// path and nothing else.
 ///
@@ -821,7 +863,7 @@ fn a_re_uploaded_subject_re_bakes_from_its_new_vertices() {
                 "aether.render",
                 &UpdateGeometry {
                     geometry_id: rig.geometry,
-                    vertices: bake::vertices(&posed, &scores, &settings(), None),
+                    vertices: bake::vertices::<{ labels::CLASSES }>(&posed, &scores, &settings(), None),
                     indices: bake::indices(&posed),
                 },
             ),
