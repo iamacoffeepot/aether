@@ -40,9 +40,12 @@ Because Codex trust-records hook definitions, new or changed hooks may need
 review through `/hooks` before they run.
 
 The SessionStart hook can prepare a per-session worktree under
-`.agents/worktrees/` when Codex exposes a stable session or thread id, but a
-hook subprocess cannot change Codex's cwd. Planned issue work still follows the
-implement skill and edits `.agents/worktrees/issue-<N>`.
+`.agents/worktrees/` when the harness exposes a stable session or thread id, but a
+hook subprocess cannot change the agent's cwd. When a SessionStart reports
+`prepared git worktree at: <path>`, the agent should treat `<path>` as its repo
+root for the session and `cd` there for edits (other platforms auto-enter this way).
+Planned issue work still follows the implement skill and edits
+`.agents/worktrees/issue-<N>`.
 
 Codex hooks are guardrails, not a new local preflight or CI surface. Do not add
 hook tests or CI hook jobs unless a scoped issue explicitly asks for them.
