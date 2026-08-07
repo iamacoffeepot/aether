@@ -148,8 +148,8 @@ pub enum IntegrateResult {
     },
 }
 
-/// Compare-and-swap mainline from `expected_base` to `new_head` for `bloom`
-/// (all `aether_data::wire`-encoded).
+/// Propose landing `bloom`'s `new_head` onto mainline, guarded by
+/// `expected_base` (all `aether_data::wire`-encoded).
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.source.land")]
 pub struct Land {
@@ -168,13 +168,13 @@ pub struct Land {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.source.land_result")]
 pub enum LandResult {
-    /// The swap succeeded; mainline moved and a receipt was issued.
-    Landed {
-        /// The `aether_data::wire`-encoded [`aether_bloomery::LandingReceipt`].
-        #[serde(with = "aether_data::bytes")]
-        receipt: Vec<u8>,
+    /// The resolved head was proposed; mainline has not moved yet. Watch the
+    /// proposal with [`PollLand`] to see where it ends up.
+    Proposed {
+        /// The proposal's number on the backend.
+        number: u64,
     },
-    /// The swap was refused: mainline had moved off the expected base.
+    /// The land was refused: mainline had moved off the expected base.
     BaseMoved {
         /// The `aether_data::wire`-encoded base the caller expected.
         #[serde(with = "aether_data::bytes")]
@@ -184,6 +184,42 @@ pub enum LandResult {
         actual: Vec<u8>,
     },
     /// The land failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
+/// Read where the land proposal `number`, previously issued for `bloom` against
+/// `expected_base`, has got to (digests `aether_data::wire`-encoded).
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.source.poll_land")]
+pub struct PollLand {
+    /// The `aether_data::wire`-encoded [`aether_bloomery::BloomId`].
+    #[serde(with = "aether_data::bytes")]
+    pub bloom: Vec<u8>,
+    /// The `aether_data::wire`-encoded expected base [`aether_bloomery::Digest`].
+    #[serde(with = "aether_data::bytes")]
+    pub expected_base: Vec<u8>,
+    /// The proposal number [`LandResult::Proposed`] handed back.
+    pub number: u64,
+}
+
+/// Reply to [`PollLand`], mirroring [`aether_bloomery::LandProposal`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.source.poll_land_result")]
+pub enum PollLandResult {
+    /// Still open. Mainline has not moved; keep watching.
+    Open,
+    /// Accepted — mainline moved, and the receipt says where to.
+    Landed {
+        /// The `aether_data::wire`-encoded [`aether_bloomery::LandingReceipt`].
+        #[serde(with = "aether_data::bytes")]
+        receipt: Vec<u8>,
+    },
+    /// Terminated without landing — the proposal was declined.
+    Declined,
+    /// The poll failed.
     Err {
         /// A human-readable failure reason.
         error: String,

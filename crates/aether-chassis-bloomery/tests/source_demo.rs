@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{BloomId, Digest, IntegrateOutcome, LandOutcome};
+use aether_bloomery::{BloomId, Digest, IntegrateOutcome, LandOutcome, LandProposal};
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitSource, SourceError};
 use aether_chassis_bloomery::bloomery::SourceShell;
@@ -86,30 +86,40 @@ fn a_synthetic_bloom_snapshots_integrates_and_observes_gated_land() {
 }
 
 #[test]
-fn land_performs_the_compare_and_swap_when_enabled() {
+fn land_proposes_the_new_head_and_observes_the_acceptance_when_enabled() {
     let (_gated, fake, bloom, base) = demo();
 
-    // A second shell over the same fake with the gate enabled: the CAS advances
-    // mainline from the expected base and issues a receipt. The new head's
-    // git-object correspondence is seeded so the CAS resolves its target.
+    // A second shell over the same fake with the gate enabled: the guard passes
+    // against the expected base and a landing proposal is opened. The new head's
+    // git-object correspondence is seeded so the landing branch resolves.
     let enabled = SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake.clone()), true)));
     let new_head = digest(90);
     fake.seed_git_object(&new_head);
-    match enabled.land(&bloom, &base, &new_head).unwrap() {
-        LandOutcome::Landed(receipt) => {
-            assert_eq!(receipt.previous_base, base);
-            assert_eq!(receipt.new_head, new_head);
-        }
-        LandOutcome::BaseMoved { .. } => panic!("expected Landed, got BaseMoved"),
-    }
-    assert_eq!(fake.ref_digest("heads/main"), Some(new_head), "mainline advanced to the new head");
+    let number = match enabled.land(&bloom, &base, &new_head).unwrap() {
+        LandOutcome::Proposed { number } => number,
+        other @ LandOutcome::BaseMoved { .. } => panic!("expected Proposed, got {other:?}"),
+    };
+    assert_eq!(fake.ref_digest("heads/main"), Some(base), "mainline is protected — proposing never writes it");
+    assert_eq!(enabled.poll_land(&bloom, &base, number).unwrap(), LandProposal::Open, "the proposal stands open");
 
-    // A stale expected base is the clean BaseMoved refusal, not an error.
+    // Accepting it is what lands the bloom, and the receipt attests the commit
+    // mainline actually became rather than the head that was proposed.
+    fake.merge_pull_request(number, &"5c".repeat(20));
+    let landed = enabled.poll_land(&bloom, &base, number).unwrap();
+    let LandProposal::Landed(receipt) = landed else {
+        panic!("expected Landed, got {landed:?}")
+    };
+    assert_eq!(receipt.previous_base, base);
+    assert_ne!(receipt.new_head, new_head, "the landed head is the merge commit");
+
+    // A stale expected base is the clean BaseMoved refusal, not an error — and
+    // it proposes nothing.
+    fake.seed_ref_at("heads/main", &new_head);
     match enabled.land(&bloom, &base, &digest(91)).unwrap() {
         LandOutcome::BaseMoved { expected, actual } => {
             assert_eq!(expected, base);
             assert_eq!(actual, new_head);
         }
-        LandOutcome::Landed(_) => panic!("expected BaseMoved, got Landed"),
+        other @ LandOutcome::Proposed { .. } => panic!("expected BaseMoved, got {other:?}"),
     }
 }

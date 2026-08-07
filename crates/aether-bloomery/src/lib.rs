@@ -77,7 +77,7 @@ pub use manifest::{
 };
 pub use port::{
     BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, Conclusion, EvidenceRef,
-    ExecutionStatus, ExecutorBackend, IntegrateOutcome, IntegrationPosition, LandOutcome, MemberView,
+    ExecutionStatus, ExecutorBackend, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal, MemberView,
     PendingDecisionView, ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument, WorkHandle, WorkOrder,
 };
 pub use reduce::{
