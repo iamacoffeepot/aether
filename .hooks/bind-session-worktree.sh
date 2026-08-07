@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Unified SessionStart hook — works for both Claude (Muse) and Codex.
-# Creates a detached worktree under .agents/worktrees/<key> so both agents
+# Unified SessionStart hook — works for Claude (Muse), Muse, and Codex.
+# Creates a detached worktree under .agents/worktrees/<key> so all agents
 # share one worktree root (AGENTS.md: issue work in .agents/worktrees/issue-<N>).
-# Claude session_id and Codex thread_id/session_id are both accepted.
+# Muse (tbh), Claude session_id and Codex thread_id/session_id are all accepted.
 
 set -u
 
 input=$(cat)
 
-# Project root
-project_dir="${CLAUDE_PROJECT_DIR:-}"
+# Project root — try Claude, Muse, and generic envs
+project_dir="${CLAUDE_PROJECT_DIR:-${MUSE_PROJECT_DIR:-${TBH_PROJECT_DIR:-}}}"
 if [[ -z "$project_dir" ]]; then
     script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
     project_dir=$(cd "$script_dir/.." && pwd)
 fi
-# Fallback for Codex: git common dir
-if [[ ! -e "$project_dir/.git" && ! -e "$project_dir/.claude" ]]; then
+# Fallback for Codex/Muse: git common dir
+if [[ ! -e "$project_dir/.git" && ! -e "$project_dir/.claude" && ! -e "$project_dir/.codex" ]]; then
     current_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
     git_common_dir=$(git -C "$current_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
     if [[ -n "$git_common_dir" ]]; then
@@ -32,14 +32,16 @@ json_value() {
     fi
 }
 
-# Try Claude field first, then Codex variants, then env
-session_key=$(json_value '.session_id // .sessionId // .thread_id // .threadId // .conversation_id // .conversationId // .id // .thread.id // .conversation.id')
+# Try Claude/Muse/Codex fields first, then env
+session_key=$(json_value '.session_id // .sessionId // .muse_session_id // .tbh_session_id // .thread_id // .threadId // .conversation_id // .conversationId // .id // .thread.id // .conversation.id // .session.id')
 if [[ -z "$session_key" ]]; then
-    session_key="${CODEX_SESSION_ID:-${CODEX_THREAD_ID:-${CODEX_CONVERSATION_ID:-}}}"
+    session_key="${MUSE_SESSION_ID:-${TBH_SESSION_ID:-${CODEX_SESSION_ID:-${CODEX_THREAD_ID:-${CODEX_CONVERSATION_ID:-}}}}}"
 fi
 if [[ -z "$session_key" ]]; then
-    # Claude also exports via env in some harnesses
-    session_key=$(json_value '.session_id')
+    session_key="${CLAUDE_SESSION_ID:-}"
+fi
+if [[ -z "$session_key" ]]; then
+    session_key=$(json_value '.session_id // .muse_session_id // .tbh_session_id')
 fi
 if [[ -z "$session_key" ]]; then
     exit 0
@@ -77,7 +79,7 @@ This session has a prepared git worktree at:
 
     $worktree_dir
 
-A hook cannot change the parent process cwd. Use that worktree for repo edits, or use the issue-specific worktree required by the Aether implement skill (.agents/worktrees/issue-<N>).
+A hook cannot change the parent process cwd. To work isolated like other platforms, cd into that worktree for repo edits (e.g. cd "$worktree_dir"), or use the issue-specific worktree required by the Aether implement skill (.agents/worktrees/issue-<N>). Future sessions will auto-enter when the agent respects this context.
 EOF
 )
     jq -n --arg ctx "$context" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}'
