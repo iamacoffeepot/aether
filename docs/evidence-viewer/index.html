@@ -113,7 +113,7 @@
     padding: 0.4rem 0;
     border-bottom: 1px solid var(--border);
   }
-  video, img.frame {
+  img.frame {
     max-width: 100%;
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -164,10 +164,9 @@
 (function () {
   "use strict";
 
-  // Storage-repoint knobs: change these two constants to retroactively fix every
-  // previously posted evidence link (bucket rename, CloudFront/OAC swap, etc).
+  // Storage-repoint knob: change this constant to retroactively fix every
+  // previously posted evidence link after an evidence-branch move.
   var BRANCH_BASE = "https://raw.githubusercontent.com/iamacoffeepot/aether/dogfood/evidence/evidence/";
-  var BUCKET_BASE = "https://aether-evidence.s3.amazonaws.com/evidence/";
 
   var REPO = "iamacoffeepot/aether";
   var EVIDENCE_BRANCH = "dogfood/evidence";
@@ -207,10 +206,12 @@
     return { issue: issue, run: run, joined: issue + "/" + run };
   }
 
-  // Run ids are "<github run id>-<attempt>"; both halves are numeric and the
-  // run id is assigned monotonically, so a numeric compare doubles as time
-  // order. Falls back to a string compare for anything unexpected.
-  function compareRunsDesc(a, b) {
+  // Historical run ids are "<github run id>-<attempt>". Current ids are
+  // timestamp-shaped. Neither identifier shape is comparable with the other,
+  // so evidence commit dates are the authoritative chronology. Dated evidence
+  // sorts ahead of archived runs whose dates fell out of branch history; those
+  // undated runs retain the old numeric/string ordering as a deterministic fallback.
+  function compareRunIdsDesc(a, b) {
     var pa = a.split("-");
     var pb = b.split("-");
     var byRun = (Number(pb[0]) || 0) - (Number(pa[0]) || 0);
@@ -218,6 +219,24 @@
     var byAttempt = (Number(pb[1]) || 0) - (Number(pa[1]) || 0);
     if (byAttempt) return byAttempt;
     return a < b ? 1 : a > b ? -1 : 0;
+  }
+
+  function evidenceMillis(dates, issue, run) {
+    var value = dates && dates[issue + "/" + run];
+    if (!value) return null;
+    var millis = Date.parse(value);
+    return isNaN(millis) ? null : millis;
+  }
+
+  function compareRunsDesc(issueA, runA, issueB, runB, dates) {
+    var millisA = evidenceMillis(dates, issueA, runA);
+    var millisB = evidenceMillis(dates, issueB, runB);
+    if (millisA !== null && millisB !== null) {
+      return millisB - millisA || compareRunIdsDesc(runA, runB);
+    }
+    if (millisA !== null) return -1;
+    if (millisB !== null) return 1;
+    return compareRunIdsDesc(runA, runB);
   }
 
   function fetchJson(url) {
@@ -294,11 +313,13 @@
 
     var issues = Object.keys(byIssue);
     issues.forEach(function (issue) {
-      byIssue[issue].sort(compareRunsDesc);
+      byIssue[issue].sort(function (a, b) {
+        return compareRunsDesc(issue, a, issue, b, dates);
+      });
     });
     // Newest issue first, where an issue's age is its most recent run.
     issues.sort(function (a, b) {
-      return compareRunsDesc(byIssue[a][0], byIssue[b][0]);
+      return compareRunsDesc(a, byIssue[a][0], b, byIssue[b][0], dates);
     });
 
     clear(app);
@@ -486,7 +507,7 @@
     var table = el("table");
     var thead = el("thead");
     var headRow = el("tr");
-    ["phase", "model", "effort", "agent type"].forEach(function (heading) {
+    ["phase", "model", "effort", "surface", "task name"].forEach(function (heading) {
       headRow.appendChild(el("th", { text: heading }));
     });
     thead.appendChild(headRow);
@@ -497,6 +518,7 @@
     driverRow.appendChild(el("td", { text: "driver (harness session)" }));
     driverRow.appendChild(el("td", { text: fieldText(provenance.driver && provenance.driver.model) || "—" }));
     driverRow.appendChild(el("td", { text: "—" }));
+    driverRow.appendChild(el("td", { text: fieldText(provenance.driver && provenance.driver.surface) || "—" }));
     driverRow.appendChild(el("td", { text: "—" }));
     tbody.appendChild(driverRow);
 
@@ -509,7 +531,10 @@
       tr.appendChild(el("td", { text: phase.prompt ? name : name + " (did not run)" }));
       tr.appendChild(el("td", { text: fieldText(phase.model) || "—" }));
       tr.appendChild(el("td", { text: fieldText(phase.effort) || "—" }));
-      tr.appendChild(el("td", { text: fieldText(phase.agentType) || "—" }));
+      var surface = fieldText(phase.surface);
+      if (!surface && phase.agentType) surface = fieldText(phase.agentType) + " (legacy agent type)";
+      tr.appendChild(el("td", { text: surface || "—" }));
+      tr.appendChild(el("td", { text: fieldText(phase.taskName) || "—" }));
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
@@ -524,6 +549,32 @@
       wrap.appendChild(details);
     });
 
+    return wrap;
+  }
+
+  function renderExecutionErrors(executionErrors) {
+    var wrap = document.createDocumentFragment();
+    if (executionErrors === null || executionErrors === undefined) {
+      wrap.appendChild(el("p", {
+        className: "muted",
+        text: "Execution errors were not recorded for this archived run.",
+      }));
+      return wrap;
+    }
+    if (!Array.isArray(executionErrors)) {
+      wrap.appendChild(el("p", { className: "muted", text: "Execution errors are present in an unrecognized format." }));
+      return wrap;
+    }
+    if (executionErrors.length === 0) {
+      wrap.appendChild(el("p", { className: "muted", text: "No execution errors." }));
+      return wrap;
+    }
+
+    var ul = el("ul", { className: "plain" });
+    executionErrors.forEach(function (error) {
+      ul.appendChild(el("li", { text: fieldText(error) || "(empty error record)" }));
+    });
+    wrap.appendChild(ul);
     return wrap;
   }
 
@@ -625,6 +676,11 @@
   function renderMedia(run) {
     var wrap = document.createDocumentFragment();
 
+    wrap.appendChild(el("p", {
+      className: "muted",
+      text: "Durable evidence retains the judged frame when one was captured and the solution directory for heavy trials. Archived runs may provide only a legacy frame.",
+    }));
+
     // judged-frame.png is the frame the JUDGE graded. Runs archived before the judge
     // saved its own capture only have frame.png — a LATER re-capture by the CI driver,
     // which is not necessarily the picture the verdict was formed against. Prefer the
@@ -636,24 +692,16 @@
     img.src = BRANCH_BASE + run.joined + "/judged-frame.png";
     img.onerror = function () {
       img.onerror = function () { img.style.display = "none"; };
+      img.alt = "legacy run frame (not necessarily the frame the judge graded), run " + run.joined;
       img.src = BRANCH_BASE + run.joined + "/frame.png";
     };
     wrap.appendChild(img);
 
-    var video = el("video", { attrs: { controls: "", preload: "metadata" } });
-    video.src = BUCKET_BASE + run.joined + "/trial.mp4";
-    video.onerror = function () {
-      video.style.display = "none";
-    };
-    wrap.appendChild(video);
-
     var links = el("div", { className: "links" });
-    var transcript = el("a", { text: "transcript.jsonl", href: BUCKET_BASE + run.joined + "/transcript.jsonl" });
     var solution = el("a", {
-      text: "solution/",
+      text: "solution/ (heavy trials)",
       href: "https://github.com/iamacoffeepot/aether/tree/dogfood/evidence/evidence/" + run.joined + "/solution",
     });
-    links.appendChild(transcript);
     links.appendChild(solution);
     wrap.appendChild(links);
 
@@ -681,13 +729,16 @@
     app.appendChild(el("h2", { text: "Soft-holds" }));
     app.appendChild(renderSoftHolds(rollup.softHolds));
 
+    app.appendChild(el("h2", { text: "Execution errors" }));
+    app.appendChild(renderExecutionErrors(rollup.executionErrors));
+
     var tokenTable = renderTokenTable(rollup.tokensPerTool);
     if (tokenTable) {
       app.appendChild(el("h2", { text: "MCP tool tokens" }));
       app.appendChild(tokenTable);
     }
 
-    app.appendChild(el("h2", { text: "Media & artifacts" }));
+    app.appendChild(el("h2", { text: "Durable evidence artifacts" }));
     app.appendChild(renderMedia(run));
 
     app.appendChild(el("h2", { text: "Provenance" }));

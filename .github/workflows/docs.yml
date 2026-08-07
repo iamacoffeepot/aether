@@ -47,6 +47,10 @@ jobs:
         run: cp -r docs/evidence-viewer docs/book/evidence
       - name: Copy the pipeline deck
         run: cp -r docs/pipeline-deck docs/book/pipeline
+      - name: Verify standalone pages
+        run: |
+          test -s docs/book/evidence/index.html
+          test -s docs/book/pipeline/index.html
       - name: Archive the guide as a Pages artifact
         if: github.ref == 'refs/heads/main'
         run: |

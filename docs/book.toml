@@ -5,7 +5,9 @@ authors = ["aether"]
 language = "en"
 # The guide source lives under docs/guide/ so it sits next to the ADRs
 # (docs/adr/) without entangling with them. The rendered site builds to
-# docs/book/ (gitignored); CI rebuilds it fresh and deploys to Pages.
+# docs/book/ (gitignored); CI rebuilds it fresh and deploys to Pages. The
+# standalone docs/evidence-viewer/ and docs/pipeline-deck/ pages live outside
+# this mdBook source and docs.yml copies them into the Pages tree after build.
 src = "guide"
 
 [output.html]
