@@ -451,6 +451,74 @@ fn chart_controls_capture() {
     eprintln!("pace: wrote unjudged chart-control evidence to {}", output.display());
 }
 
+/// Raw before/after evidence for issue 4568's small-canvas capacity fix.
+///
+/// Exactly four physical window sizes are captured from release-profile
+/// baseline and candidate components under the same shipped subject and
+/// pinned camera. The files are left full-resolution and unmodified. A CSV
+/// beside them counts pixels that differ from the render cap's configured
+/// default clear color; the count is evidence for inspection, never a visual
+/// verdict.
+///
+/// ```text
+/// AETHER_CROSSFEED_DIR=/path/to/dir \
+/// AETHER_PUPPET_SMALL_CANVAS_BASELINE_WASM=/path/to/baseline/aether_puppet.wasm \
+/// AETHER_PUPPET_SMALL_CANVAS_DIR=/path/to/output \
+/// cargo test -p aether-puppet --release --test pace_instrument \
+///     -- --ignored --nocapture small_canvas_capacity_capture
+/// ```
+#[test]
+#[ignore = "visual hold; needs baseline and candidate release components plus the shipped subject"]
+fn small_canvas_capacity_capture() {
+    let (Some(candidate), Some(dir)) = (require_runtime("aether_puppet"), subject_dir()) else {
+        return;
+    };
+    let baseline = PathBuf::from(
+        env::var("AETHER_PUPPET_SMALL_CANVAS_BASELINE_WASM")
+            .expect("AETHER_PUPPET_SMALL_CANVAS_BASELINE_WASM must name the baseline release component"),
+    );
+    assert!(baseline.is_file(), "the baseline release component does not exist");
+    let output = required_output_dir("AETHER_PUPPET_SMALL_CANVAS_DIR");
+    let mut census = vec![
+        "variant,width,height,non_clear_pixels,total_pixels,clear_rgba,subject,seed,camera,wasm_profile".to_owned(),
+    ];
+
+    for dimensions in [(512, 512), (656, 656), (664, 664), PINNED] {
+        for (variant, wasm) in [("baseline", baseline.as_path()), ("candidate", candidate.as_path())] {
+            let png = capture_small_canvas(&dir, wasm, dimensions);
+            let name = format!("{}x{}-{variant}.png", dimensions.0, dimensions.1);
+            fs::write(output.join(name), &png).expect("write raw small-canvas capture");
+            let decoded = decode_png(&png).expect("decode small-canvas capture for its pixel census");
+            assert_eq!((decoded.width, decoded.height), dimensions, "the raw capture keeps the requested extent");
+            let non_clear = decoded.rgba.chunks_exact(4).filter(|pixel| *pixel != [0x0d, 0x12, 0x20, 0xff]).count();
+            census.push(format!(
+                "{variant},{},{},{non_clear},{},0d1220ff,shipped,53756d697265,azimuth=0;elevation=3;distance=5.4;height=0,release",
+                dimensions.0,
+                dimensions.1,
+                decoded.rgba.len() / 4,
+            ));
+        }
+    }
+
+    fs::write(output.join("non-clear-census.csv"), format!("{}\n", census.join("\n")))
+        .expect("write the machine-readable non-clear pixel census");
+    eprintln!("pace: wrote unjudged small-canvas raw pairs and census to {}", output.display());
+}
+
+fn capture_small_canvas(dir: &Path, wasm: &Path, dimensions: (u32, u32)) -> Vec<u8> {
+    let mut harness = mounted_at(dir, wasm, false, dimensions);
+    harness
+        .execute(vec![
+            ("look", HarnessOp::send_and_settle(PUPPET, &look(AZIMUTH))),
+            ("settle", HarnessOp::advance(24)),
+            ("capture", HarnessOp::capture()),
+        ])
+        .expect("settle and capture the small canvas")
+        .captured("capture")
+        .expect("the small-canvas capture ran")
+        .to_vec()
+}
+
 /// Raw owner-inspection evidence for the resident silhouette candidate.
 ///
 /// The pinned, mid-orbit, and held cases each write the untouched

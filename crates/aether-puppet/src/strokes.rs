@@ -42,10 +42,10 @@ use aether_render::{
 };
 
 use crate::deform::{BONE_LIMIT, Bound, Skin};
+use crate::easel::View;
 use crate::easel::program::sight::ToneUniforms;
-use crate::easel::program::wash::BODY_DIVISOR;
+use crate::easel::program::wash::{BODY_DIVISOR, Canvas};
 use crate::easel::program::{sight, stroke};
-use crate::easel::{View, wash_canvas};
 use crate::feature::{Drawing, Half};
 use crate::mesh::Mesh;
 
@@ -176,10 +176,8 @@ struct Staged {
 /// The ink layer's state machine.
 #[derive(Default)]
 pub struct Strokes {
-    window: Option<(u32, u32)>,
     /// The canvas the field and the sheet are sized to — the window
-    /// when one has been announced, and otherwise a frustum-shaped
-    /// stand-in. Resolved at solve time and held for the creates.
+    /// resolved once by orchestration and shared with the easel.
     canvas: Option<(u32, u32)>,
     programs: Ordered,
     textures: Ordered,
@@ -232,9 +230,6 @@ pub struct Strokes {
     disabled: bool,
 }
 
-/// Long edge of the stand-in canvas used before a window is announced.
-const CANVAS_EDGE: u32 = 1200;
-
 /// How far in front of the subject's near side the ink stands.
 const INK_STANDOFF: f32 = 0.05;
 
@@ -258,43 +253,18 @@ const GEOMETRY_COUNT: usize = sight::GEOMETRY_COUNT + stroke::GEOMETRY_COUNT;
 const RIBBONS: [usize; stroke::GEOMETRY_COUNT] =
     [sight::GEOMETRY_COUNT + stroke::RESIDENT as usize, sight::GEOMETRY_COUNT + stroke::VOLATILE as usize];
 
-/// The canvas a window of these pixels develops at.
-///
-/// [`wash_canvas`] and nowhere else. The wash resolves its own canvas the
-/// same way, and the two have to land on one because the ink coverage
-/// plane this layer creates is a binding of both their programs
-/// (iamacoffeepot/aether#4451) — and a program binding's size is checked
-/// against the extent the graph was registered at. So two window-to-canvas
-/// maps that agreed at one framing would not be an agreement: at a window
-/// past the wash's long-edge clamp they part, the wash dispatch that binds
-/// the plane is dropped whole in the cap, and the sheet stays the
-/// transparent clear it was created as — no error anywhere, just paint
-/// that never arrives (iamacoffeepot/aether#4465).
-fn windowed_canvas(width: u32, height: u32) -> (u32, u32) {
-    let canvas = wash_canvas(width, height);
-
-    (canvas.width as u32, canvas.height as u32)
-}
-
 impl Strokes {
     /// A canvas change orphans every texture in the set — the field's
     /// capacity and the sheet's size both follow it.
     ///
-    /// The canvas is resolved here rather than waiting for the next
-    /// solve. A solve happens when the eye moves; a window is resized
-    /// with the camera held all the time, and a canvas that only caught
-    /// up at the next solve left the field and the sheet standing at the
-    /// old size until something else moved.
-    ///
-    /// Resolved through `windowed_canvas` and not from the window's own
-    /// pixels, because a desktop window announces its size every frame
-    /// and this is therefore the *last* writer of the canvas on every
-    /// frame that did not solve — so a second way of answering "what
-    /// canvas is this window" here is not a near-miss, it is the answer
-    /// (iamacoffeepot/aether#4465).
-    pub fn resized(&mut self, width: u32, height: u32) {
-        self.window = Some((width, height));
-        self.recanvas(windowed_canvas(width, height));
+    /// Orchestration resolves this extent once and gives the same value
+    /// to the easel. That shared decision is load-bearing: the coverage
+    /// texture created here is bound by both programs.
+    pub fn resized(&mut self, canvas: Canvas) {
+        self.recanvas((
+            u32::try_from(canvas.width).expect("canvas width fits u32"),
+            u32::try_from(canvas.height).expect("canvas height fits u32"),
+        ));
     }
 
     /// Point the layer at a canvas, and note the change if it is one.
@@ -302,35 +272,6 @@ impl Strokes {
         if self.canvas != Some(canvas) {
             self.canvas = Some(canvas);
             self.revision += 1;
-        }
-    }
-
-    /// The canvas to solve at.
-    ///
-    /// The window when one has been announced, resolved through
-    /// [`wash_canvas`] — the wash resolves its own the same way, and the
-    /// two have to land on one canvas because the coverage plane this
-    /// layer writes is a binding of both their programs
-    /// (iamacoffeepot/aether#4451). Otherwise a stand-in of
-    /// the same shape as the frustum, which is all the ink needs: it
-    /// composites as a world-space billboard spanning the frustum's own
-    /// cross-section, so the sheet's *resolution* is a quality choice
-    /// and only its *aspect* has to agree with the view. That is the
-    /// difference from a screen-space quad, which cannot be placed
-    /// without knowing the window in pixels.
-    fn resolve_canvas(&self, aspect: f32) -> (u32, u32) {
-        if let Some((width, height)) = self.window {
-            return windowed_canvas(width, height);
-        }
-        let aspect = if aspect.is_finite() && aspect > 0.0 {
-            aspect
-        } else {
-            1.0
-        };
-        if aspect >= 1.0 {
-            (CANVAS_EDGE, ((CANVAS_EDGE as f32 / aspect).round() as u32).max(1))
-        } else {
-            (((CANVAS_EDGE as f32 * aspect).round() as u32).max(1), CANVAS_EDGE)
         }
     }
 
@@ -397,20 +338,13 @@ impl Strokes {
     /// the canvas' texel count — which leaves the caller on its CPU
     /// path for that frame rather than showing a wrong picture.
     ///
-    pub fn solve(
-        &mut self,
-        drawing: Drawing<'_>,
-        eye: Vec3,
-        view_proj: Mat4,
-        bias: f32,
-        aspect: f32,
-        posing: Posing<'_>,
-    ) -> bool {
+    pub fn solve(&mut self, drawing: Drawing<'_>, eye: Vec3, view_proj: Mat4, bias: f32, posing: Posing<'_>) -> bool {
         if self.disabled {
             return false;
         }
-        let field = self.resolve_canvas(aspect);
-        self.recanvas(field);
+        let Some(field) = self.canvas else {
+            return false;
+        };
         let Ok(layout) = sight::layout(drawing, field) else {
             return false;
         };
@@ -792,12 +726,9 @@ mod tests {
     /// The ids are the ask order, which is what the layer treats them
     /// as, so an id here is its own slot.
     fn mounted(strokes: &mut Strokes, mesh: &Mesh, drawing: Drawing<'_>, canvas: (u32, u32)) {
-        strokes.resized(canvas.0, canvas.1);
+        strokes.resized(Canvas { width: canvas.0 as usize, height: canvas.1 as usize });
         strokes.subject_changed(mesh, None);
-        assert!(
-            strokes.solve(drawing, Vec3::new(0.0, 0.0, 3.0), Mat4::IDENTITY, 0.01, 1.0, still()),
-            "the first solve"
-        );
+        assert!(strokes.solve(drawing, Vec3::new(0.0, 0.0, 3.0), Mat4::IDENTITY, 0.01, still()), "the first solve");
 
         assert_eq!(strokes.take_registers().len(), PROGRAM_COUNT, "one register per program");
         for id in 0..PROGRAM_COUNT as u32 {
@@ -849,7 +780,7 @@ mod tests {
         assert!(strokes.draw(&held_view(), 1.0).is_some(), "the sheet still holds the ink it was dispatched");
 
         assert!(
-            strokes.solve(drawing, Vec3::new(3.0, 1.0, -2.0), Mat4::IDENTITY, 0.01, 1.0, still()),
+            strokes.solve(drawing, Vec3::new(3.0, 1.0, -2.0), Mat4::IDENTITY, 0.01, still()),
             "the solve after a turn"
         );
         assert_eq!(strokes.take_dispatches().len(), 2, "a turn re-derives both");
@@ -877,7 +808,7 @@ mod tests {
         let first = strokes.take_dispatches();
         assert_eq!(dispatched_field(&first[0]), (64, 64), "the field the first dispatch was sized to");
 
-        strokes.resized(48, 96);
+        strokes.resized(Canvas { width: 48, height: 96 });
         assert_eq!(strokes.take_destroys().len(), TEXTURE_COUNT, "every texture in the set follows the canvas");
         let creates = strokes.take_creates();
         assert_eq!((creates[0].width, creates[0].height), (48, 96), "the planes are re-created at the new canvas");
@@ -890,6 +821,29 @@ mod tests {
         assert_eq!(refilled.len(), 2, "the fresh planes are blank until something fills them");
         assert_eq!(dispatched_field(&refilled[0]), (48, 96), "and the blob carries the new extent");
         assert!(strokes.take_dispatches().is_empty(), "and only once");
+    }
+
+    /// A promoted field and the coverage texture consumed by the wash are
+    /// derived from one resolved canvas, not independently from the window.
+    #[test]
+    fn a_promoted_canvas_sizes_the_field_and_the_wash_binding_from_one_extent() {
+        let mesh = Mesh::from_obj_bytes(TRIANGLE, 0).expect("one triangle parses");
+        let (resident, volatile) = ([curve(1)], [curve(2)]);
+        let drawing = Drawing { resident: &resident, volatile: &volatile };
+        let canvas = crate::easel::resolve_canvas(512, 512, 660 * 660).expect("the promoted drawing fits");
+
+        let mut strokes = Strokes::default();
+        strokes.resized(canvas);
+        strokes.subject_changed(&mesh, None);
+        assert!(strokes.solve(drawing, Vec3::new(0.0, 0.0, 3.0), Mat4::IDENTITY, 0.01, still()));
+        assert_eq!(strokes.take_registers().len(), PROGRAM_COUNT);
+        for id in 0..PROGRAM_COUNT as u32 {
+            strokes.registered(Ok(id));
+        }
+
+        let creates = strokes.take_creates();
+        assert_eq!((creates[0].width, creates[0].height), (660, 660), "the visibility field extent");
+        assert_eq!((creates[INK_PLANE].width, creates[INK_PLANE].height), (330, 330), "the wash binding extent");
     }
 
     /// Tripwire: the ink coverage plane must be created at the wash's own
@@ -921,9 +875,12 @@ mod tests {
         let window = (1600, 1200);
 
         let mut strokes = Strokes::default();
-        strokes.resized(window.0, window.1);
+        let canvas =
+            crate::easel::resolve_canvas(window.0, window.1, sight::required_texels(drawing).expect("bounded"))
+                .expect("the drawing fits");
+        strokes.resized(canvas);
         strokes.subject_changed(&mesh, None);
-        assert!(strokes.solve(drawing, Vec3::new(0.0, 0.0, 3.0), Mat4::IDENTITY, 0.01, 4.0 / 3.0, still()));
+        assert!(strokes.solve(drawing, Vec3::new(0.0, 0.0, 3.0), Mat4::IDENTITY, 0.01, still()));
         assert_eq!(strokes.take_registers().len(), PROGRAM_COUNT, "one register per program");
         for id in 0..PROGRAM_COUNT as u32 {
             strokes.registered(Ok(id));
@@ -931,10 +888,10 @@ mod tests {
 
         // The frame after the solve, with the camera held: the window
         // re-announces the size it has always had.
-        strokes.resized(window.0, window.1);
+        strokes.resized(canvas);
         let creates = strokes.take_creates();
 
-        let (width, height) = wash_canvas(window.0, window.1).body();
+        let (width, height) = canvas.body();
         assert_eq!(
             (creates[INK_PLANE].width, creates[INK_PLANE].height),
             (width as u32, height as u32),
@@ -969,10 +926,10 @@ mod tests {
         let mesh = Mesh::from_obj_bytes(TRIANGLE, 0).expect("one triangle parses");
         let (resident, volatile) = ([curve(1)], [curve(2)]);
         let drawing = Drawing { resident: &resident, volatile: &volatile };
-        let solve = |strokes: &mut Strokes, eye| strokes.solve(drawing, eye, Mat4::IDENTITY, 0.01, 1.0, still());
+        let solve = |strokes: &mut Strokes, eye| strokes.solve(drawing, eye, Mat4::IDENTITY, 0.01, still());
 
         let mut strokes = Strokes::default();
-        strokes.resized(64, 64);
+        strokes.resized(Canvas { width: 64, height: 64 });
         strokes.subject_changed(&mesh, None);
         assert!(solve(&mut strokes, Vec3::new(0.0, 0.0, 3.0)), "the first solve");
         assert_eq!(strokes.take_geometry_creates().len(), GEOMETRY_COUNT, "one create per declared slot");

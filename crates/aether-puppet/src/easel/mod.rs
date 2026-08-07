@@ -72,11 +72,36 @@ use crate::mesh::Mesh;
 /// they are exactly the content the sheet's own pixels exist for.
 pub(crate) const CANVAS_LONG_EDGE: usize = 1280;
 
-/// The canvas a window develops at — the window's own pixels, clamped to
-/// a long-edge ceiling of 1280, which is the resolution every distance in
-/// the engine was tuned at.
+/// Why the active drawing cannot be served without crossing the canvas
+/// ceiling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanvasCapacityError {
+    pub needed: usize,
+    pub capacity: usize,
+}
+
+/// A canvas at `long_edge`, preserving the requested aspect ratio with the
+/// same floor rounding as the established long-edge clamp.
+fn canvas_at_long_edge(width: usize, height: usize, long_edge: usize) -> Canvas {
+    if width >= height {
+        let short = height as u64 * long_edge as u64 / width as u64;
+        Canvas { width: long_edge, height: usize::try_from(short.max(1)).expect("a canvas short edge fits usize") }
+    } else {
+        let short = width as u64 * long_edge as u64 / height as u64;
+        Canvas { width: usize::try_from(short.max(1)).expect("a canvas short edge fits usize"), height: long_edge }
+    }
+}
+
+/// Resolve the one canvas both ink and wash use.
 ///
-/// Both layers resolve their canvas here and nowhere else. The wash reads
+/// The requested pixels stand unchanged while they fit under the long-edge
+/// ceiling and already carry `required_texels`. Otherwise the long edge is
+/// promoted to the smallest integer size whose aspect-preserving extent can
+/// carry the drawing. A drawing that still does not fit at the ceiling is
+/// refused with its exact requirement and the largest capacity this aspect
+/// can provide.
+///
+/// Orchestration resolves this once and hands the result to both layers. The wash reads
 /// its ink coverage plane out of a texture the ink layer's own program
 /// writes (iamacoffeepot/aether#4451), and a program binding's size is
 /// checked against the extent it was declared at, so the two agree on that
@@ -84,17 +109,39 @@ pub(crate) const CANVAS_LONG_EDGE: usize = 1280;
 /// Two clamps that happened to match at the shipped framing would not be
 /// an agreement; the dispatch that disagreed would warn-drop whole, and
 /// the frame would lose its paint or its ink rather than show a wrong one.
+pub fn resolve_canvas(width: u32, height: u32, required_texels: usize) -> Result<Canvas, CanvasCapacityError> {
+    let (width, height) = ((width as usize).max(1), (height as usize).max(1));
+    let requested_long = width.max(height);
+    let base_long = requested_long.min(CANVAS_LONG_EDGE);
+    let base = canvas_at_long_edge(width, height, base_long);
+    if base.width * base.height >= required_texels {
+        return Ok(base);
+    }
+    let ceiling = canvas_at_long_edge(width, height, CANVAS_LONG_EDGE);
+    let capacity = ceiling.width * ceiling.height;
+    if capacity < required_texels {
+        return Err(CanvasCapacityError { needed: required_texels, capacity });
+    }
+
+    let mut low = base_long + 1;
+    let mut high = CANVAS_LONG_EDGE;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let candidate = canvas_at_long_edge(width, height, middle);
+        if candidate.width * candidate.height >= required_texels {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+
+    Ok(canvas_at_long_edge(width, height, low))
+}
+
+/// The window-only answer used by the independent silhouette instrument.
 #[must_use]
 pub fn wash_canvas(width: u32, height: u32) -> Canvas {
-    let (width, height) = ((width as usize).max(1), (height as usize).max(1));
-
-    let long = width.max(height);
-    if long <= CANVAS_LONG_EDGE {
-        return Canvas { width, height };
-    }
-    let scale = CANVAS_LONG_EDGE as f32 / long as f32;
-
-    Canvas { width: ((width as f32 * scale) as usize).max(1), height: ((height as f32 * scale) as usize).max(1) }
+    resolve_canvas(width, height, 0).expect("an empty drawing fits every canvas")
 }
 
 /// The studio's one seed — `Sumire` in ASCII — so the same view develops
@@ -327,7 +374,7 @@ struct Creating {
 /// geometry and textures, and this frame's staged develop.
 #[derive(Default)]
 pub struct Easel {
-    window: Option<(u32, u32)>,
+    canvas: Option<Canvas>,
     /// The wash program's graph and window layout, laid at the first
     /// develop and re-laid only when the canvas changes height — the one
     /// thing its blur extents are chosen against.
@@ -435,11 +482,11 @@ impl Easel {
     /// the whole texture set and the seed slice rolled against it. The
     /// programs and the resident geometry survive: neither knows the
     /// canvas size.
-    pub fn resized(&mut self, width: u32, height: u32) {
-        if self.window == Some((width, height)) {
+    pub fn resized(&mut self, canvas: Canvas) {
+        if self.canvas == Some(canvas) {
             return;
         }
-        self.window = Some((width, height));
+        self.canvas = Some(canvas);
         self.seed_slice = None;
         self.derived_for = None;
     }
@@ -544,9 +591,7 @@ impl Easel {
 
     /// The window's own pixels, clamped to the long-edge ceiling.
     fn canvas(&self) -> Option<Canvas> {
-        let (width, height) = self.window?;
-
-        Some(wash_canvas(width, height))
+        self.canvas
     }
 
     /// The exact planes a develop at the current view would paint from,
@@ -1097,6 +1142,22 @@ mod tests {
     /// hand out serves.
     const INK: u32 = 9_000;
 
+    #[test]
+    fn the_canvas_keeps_requested_pixels_until_the_drawing_needs_promotion() {
+        assert_eq!(resolve_canvas(512, 512, 512 * 512), Ok(Canvas { width: 512, height: 512 }));
+        assert_eq!(resolve_canvas(512, 512, 660 * 660), Ok(Canvas { width: 660, height: 660 }));
+        assert_eq!(resolve_canvas(664, 664, 660 * 660), Ok(Canvas { width: 664, height: 664 }));
+    }
+
+    #[test]
+    fn promotion_preserves_aspect_and_reports_the_ceiling_capacity_exactly() {
+        assert_eq!(resolve_canvas(320, 240, 640 * 480), Ok(Canvas { width: 640, height: 480 }));
+        assert_eq!(
+            resolve_canvas(320, 240, 1280 * 960 + 1),
+            Err(CanvasCapacityError { needed: 1280 * 960 + 1, capacity: 1280 * 960 }),
+        );
+    }
+
     /// A quad standing well inside the frame, every vertex skin.
     fn quad() -> Mesh {
         Mesh::from_obj_bytes(b"v -0.5 -0.5 0\nv 0.5 -0.5 0\nv 0.5 0.5 0\nv -0.5 0.5 0\nf 1 2 3\nf 1 3 4\n", 0)
@@ -1140,7 +1201,7 @@ mod tests {
         let settings = Settings::default();
 
         let mut easel = Easel::default();
-        easel.resized(160, 200);
+        easel.resized(wash_canvas(160, 200));
 
         let mut next_id = 0u32;
         let mut ids = || {
@@ -1196,7 +1257,7 @@ mod tests {
     /// test past the reply protocol can ask what a steady frame does.
     fn converged(mesh: &Mesh, scores: &[[f32; CLASSES]], settings: &Settings, at: &View) -> Easel {
         let mut easel = Easel::default();
-        easel.resized(160, 200);
+        easel.resized(wash_canvas(160, 200));
 
         let mut next_id = 0u32;
         let mut ids = || {
@@ -1444,15 +1505,15 @@ mod tests {
     #[test]
     fn a_resize_orphans_the_seed_slice_and_a_same_size_announcement_keeps_it() {
         let mut easel = Easel::default();
-        easel.resized(800, 1000);
+        easel.resized(wash_canvas(800, 1000));
         let canvas = easel.canvas().expect("a resized easel has a canvas");
         easel.seed_slice =
             Some(wash::program(canvas.height, &PALETTE).seed_uniforms(SHEET_SEED, canvas, Presence::default()));
 
-        easel.resized(800, 1000);
+        easel.resized(wash_canvas(800, 1000));
         assert!(easel.seed_slice.is_some(), "a same-size announcement must not orphan the accident stream");
 
-        easel.resized(3024, 1670);
+        easel.resized(wash_canvas(3024, 1670));
         assert!(easel.seed_slice.is_none(), "a canvas change must, so the next develop re-rolls at the new size");
     }
 
@@ -1475,7 +1536,7 @@ mod tests {
         let mut easel = converged(&mesh, &scores, &settings, &view());
         let standing = easel.revision;
 
-        easel.resized(320, 400);
+        easel.resized(wash_canvas(320, 400));
         easel.develop(&subject, &view());
         assert_ne!(easel.revision, standing, "the new canvas advances the wash revision");
         assert_eq!(easel.take_destroys().len(), 7, "the old canvas' whole texture set is released");
