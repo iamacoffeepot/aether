@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/bind-session-worktree.sh\"",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.hooks/bind-session-worktree.sh\"",
             "timeout": 30,
             "statusMessage": "Preparing session worktree"
           }
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/check-pr-body.sh\"",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.hooks/check-pr-body.sh\"",
             "timeout": 30,
             "statusMessage": "Checking PR and issue text"
           }
@@ -32,13 +32,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/check-main-worktree-clean.sh\"",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.hooks/check-worktree-clean.sh\"",
             "timeout": 30,
             "statusMessage": "Checking main checkout"
           },
           {
             "type": "command",
-            "command": "bash \"$(git rev-parse --show-toplevel)/.codex/hooks/check-source-guardrails.sh\"",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.hooks/check-source-guardrails.sh\"",
             "timeout": 30,
             "statusMessage": "Checking source guardrails"
           }
