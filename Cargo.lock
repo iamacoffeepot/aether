@@ -1089,6 +1089,9 @@ dependencies = [
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-kinds",
  "inventory",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "serde",
  "winit",
 ]
