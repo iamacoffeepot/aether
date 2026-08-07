@@ -124,6 +124,60 @@ pub struct NewCheckRun {
     pub conclusion: CheckConclusion,
 }
 
+/// A pull request as the land path reads it (ADR-0149 §The bloom). Bloomery
+/// proposes a resolved bloom by opening one and admits its landing when it
+/// observes the merge, so the fields here are the ones that decision turns on
+/// — not a faithful mirror of the API object.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PullRequest {
+    /// The pull request number — the handle the land watch re-reads it by.
+    pub number: u64,
+    /// The sha at the head of the proposing branch.
+    pub head_sha: String,
+    /// The branch being merged into (`main` for a landing).
+    pub base: String,
+    /// Whether it is still open.
+    pub state: PullRequestState,
+    /// Whether it merged. Distinct from a `Closed` `state`: a closed pull
+    /// request that never merged is a rejection, and the two terminal states
+    /// land a bloom in different places.
+    pub merged: bool,
+    /// The commit mainline actually became, present only once
+    /// [`merged`](Self::merged) is true.
+    ///
+    /// GitHub also populates the underlying field on an **open** pull request,
+    /// where it names a throwaway *test-merge* commit that is not on any
+    /// branch. Reading that as a landing would record a mainline head that
+    /// exists nowhere, so the decode blanks it unless the pull request merged
+    /// and this stays `None` until then.
+    pub merge_commit_sha: Option<String>,
+}
+
+/// Whether a pull request is still open. GitHub's `state` is exactly these two
+/// values; "merged" is a separate boolean, not a third state, which is why
+/// [`PullRequest::merged`] is its own field.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PullRequestState {
+    /// Still open — the land watch keeps waiting.
+    Open,
+    /// Closed, merged or not.
+    Closed,
+}
+
+/// The fields to open a pull request with.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct NewPullRequest {
+    /// The title.
+    pub title: String,
+    /// The body.
+    pub body: String,
+    /// The proposing branch, in the short `heads/…`-less form the API expects
+    /// for a same-repo pull request (e.g. `bloomery/land/<bloom>`).
+    pub head: String,
+    /// The branch to merge into.
+    pub base: String,
+}
+
 /// A git ref as the source port reads and writes it: its short name (the
 /// `heads/…` form, no leading `refs/`) and the 40/64-hex object sha it targets.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -254,6 +308,54 @@ pub trait GitDataApi {
     /// # Errors
     /// A transport fault or an error status.
     fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GithubError>;
+}
+
+/// The pull-request surface the land path drives — Bloomery proposes a
+/// resolved bloom by opening one, then watches it to observe the landing
+/// (ADR-0149 §The bloom).
+///
+/// A third sibling of [`GithubApi`] and [`GitDataApi`] for the reason those two
+/// are separate: the projection has no use for pull requests and the land path
+/// has no use for issues, so each backend stays generic over only the surface
+/// it touches. Both [`ReqwestGithub`] and the test `FakeGithub` implement it,
+/// so the land path is exercised with no token and no network.
+///
+/// There is no merge verb. Bloomery opens the pull request and observes the
+/// outcome; a person merges it. Landing on a protected mainline is a decision
+/// the repository's own review gate owns, and a verb with no caller would be an
+/// unexercised path into the one operation that cannot be undone.
+pub trait PullRequestApi {
+    /// Open a pull request.
+    ///
+    /// # Errors
+    /// A transport fault or an error status — a `Status { status: 422, .. }`
+    /// is GitHub's refusal for a duplicate head or an empty diff, which the
+    /// land path distinguishes by looking the existing one up.
+    fn create_pull_request(&self, new: &NewPullRequest) -> Result<PullRequest, GithubError>;
+
+    /// Read pull request `number`, or `None` if it does not exist — a clean 404
+    /// is `Ok(None)`, not an error, matching [`GitDataApi::get_ref`].
+    ///
+    /// # Errors
+    /// A transport fault or a non-404 error status.
+    fn get_pull_request(&self, number: u64) -> Result<Option<PullRequest>, GithubError>;
+
+    /// Find the most recent pull request proposing `head`, **in any state**, if
+    /// one exists. What makes opening a landing idempotent: a re-drained land
+    /// entry adopts the pull request it already opened instead of opening a
+    /// second one.
+    ///
+    /// Any state, not just open, and that is load-bearing. A landing branch is
+    /// per-bloom and Bloomery-owned, so whatever pull request sits on it *is*
+    /// that bloom's landing proposal whatever has happened to it — and the
+    /// states a watch most needs to find it in are exactly the ones it is no
+    /// longer open in. Filtering to open would make a merged proposal invisible
+    /// to the next poll, which would then open a fresh one instead of observing
+    /// the landing that already happened.
+    ///
+    /// # Errors
+    /// A transport fault or an error status.
+    fn find_pull_request_for_head(&self, head: &str) -> Result<Option<PullRequest>, GithubError>;
 }
 
 /// A client or transport failure. A clean not-found is `Ok(None)` at the API
@@ -556,6 +658,10 @@ impl<T: HttpTransport> ReqwestGithub<T> {
     fn actions_url(&self, suffix: &str) -> String {
         format!("{}/repos/{}/actions/{suffix}", self.api_base, self.repo_path)
     }
+
+    fn pulls_url(&self, suffix: &str) -> String {
+        format!("{}/repos/{}/pulls{suffix}", self.api_base, self.repo_path)
+    }
 }
 
 impl ReqwestGithub<ReqwestTransport> {
@@ -630,6 +736,56 @@ impl GhRef {
     fn into_git_ref(self) -> GitRef {
         let name = self.ref_name.strip_prefix("refs/").unwrap_or(&self.ref_name).to_owned();
         GitRef { name, sha: self.object.sha }
+    }
+}
+
+#[derive(Deserialize)]
+struct GhPullRequestHead {
+    sha: String,
+}
+
+#[derive(Deserialize)]
+struct GhPullRequestBase {
+    #[serde(rename = "ref")]
+    ref_name: String,
+}
+
+#[derive(Deserialize)]
+struct GhPullRequest {
+    number: u64,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    merged: bool,
+    #[serde(default)]
+    merge_commit_sha: Option<String>,
+    head: GhPullRequestHead,
+    base: GhPullRequestBase,
+}
+
+impl GhPullRequest {
+    fn into_pull_request(self) -> PullRequest {
+        // `merged` is absent from the list endpoint's objects (it is a detail-
+        // view field), so a listed pull request decodes `merged: false` and the
+        // closed state is what a caller reads. The land watch re-reads by
+        // number through the detail route, where the field is present.
+        let state = if self.state == "open" {
+            PullRequestState::Open
+        } else {
+            PullRequestState::Closed
+        };
+        PullRequest {
+            number: self.number,
+            head_sha: self.head.sha,
+            base: self.base.ref_name,
+            state,
+            merged: self.merged,
+            // Blanked unless the pull request actually merged: GitHub populates
+            // the field on an open one with a throwaway test-merge commit that
+            // is on no branch, and admitting that as a landing would record a
+            // mainline head that exists nowhere.
+            merge_commit_sha: self.merged.then_some(self.merge_commit_sha).flatten(),
+        }
     }
 }
 
@@ -994,6 +1150,43 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         let response = self.request(Method::Post, self.git_url("commits"), Some(payload))?;
         let gh: GhCommit = decode(&response)?;
         Ok(gh.into_git_commit())
+    }
+}
+
+impl<T: HttpTransport> PullRequestApi for ReqwestGithub<T> {
+    fn create_pull_request(&self, new: &NewPullRequest) -> Result<PullRequest, GithubError> {
+        let payload = serde_json::json!({
+            "title": new.title,
+            "body": new.body,
+            "head": new.head,
+            "base": new.base,
+        })
+        .to_string();
+        let response = self.request(Method::Post, self.pulls_url(""), Some(payload))?;
+        let gh: GhPullRequest = decode(&response)?;
+        Ok(gh.into_pull_request())
+    }
+
+    fn get_pull_request(&self, number: u64) -> Result<Option<PullRequest>, GithubError> {
+        let Some(response) = self.request_opt(Method::Get, self.pulls_url(&format!("/{number}")))? else {
+            return Ok(None);
+        };
+        let gh: GhPullRequest = decode(&response)?;
+        Ok(Some(gh.into_pull_request()))
+    }
+
+    fn find_pull_request_for_head(&self, head: &str) -> Result<Option<PullRequest>, GithubError> {
+        // The list endpoint qualifies `head` as `owner:branch`. Same-repo pull
+        // requests are all this path opens, so the owner is our own — taken
+        // from the configured `owner/repo` rather than asked for separately.
+        let owner = self.repo_path.split('/').next().unwrap_or(&self.repo_path);
+        let url =
+            self.pulls_url(&format!("?head={owner}:{head}&state=all&sort=created&direction=desc&per_page={PER_PAGE}"));
+        let pulls: Vec<GhPullRequest> = decode(&self.request(Method::Get, url, None)?)?;
+        // Newest first, so the first match is the current proposal; no page walk
+        // is owed the way `list_matching_refs` owes one to an unbounded ref
+        // enumeration, since only the most recent one is ever adopted.
+        Ok(pulls.into_iter().next().map(GhPullRequest::into_pull_request))
     }
 }
 
@@ -1472,5 +1665,116 @@ mod tests {
         let result = transport.execute(request);
         assert!(matches!(result, Err(GithubError::Transport(_))), "expected a transport error, got {result:?}");
         assert!(started.elapsed() < Duration::from_secs(5), "transport did not bound the stalled request");
+    }
+
+    use super::{NewPullRequest, PullRequestApi, PullRequestState};
+
+    #[test]
+    fn create_pull_request_posts_the_repo_pulls_route_with_head_and_base() {
+        let github = client(
+            201,
+            r#"{"number":7,"state":"open","merged":false,"merge_commit_sha":null,
+                "head":{"sha":"deadbeef"},"base":{"ref":"main"}}"#,
+        );
+        let pull = github
+            .create_pull_request(&NewPullRequest {
+                title: "bloomery: land".into(),
+                body: "b".into(),
+                head: "bloomery/land/abcd".into(),
+                base: "main".into(),
+            })
+            .expect("2xx create decodes");
+
+        assert_eq!(pull.number, 7);
+        assert_eq!(pull.head_sha, "deadbeef");
+        assert_eq!(pull.base, "main");
+        assert_eq!(pull.state, PullRequestState::Open);
+
+        let request = github.transport.last.borrow().clone().expect("a request was sent");
+        assert_eq!(request.method, Method::Post);
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/pulls");
+        let sent: serde_json::Value = serde_json::from_str(&request.body.unwrap()).unwrap();
+        assert_eq!(sent["head"], "bloomery/land/abcd");
+        assert_eq!(sent["base"], "main");
+    }
+
+    // Tripwire: GitHub populates `merge_commit_sha` on an *open* pull request
+    // with a throwaway test-merge commit that is on no branch. Admitting that as
+    // a landing would record a mainline head that exists nowhere and seal the
+    // next bloom on it, so the decode blanks the field until the pull request
+    // actually merged.
+    #[test]
+    fn merge_commit_sha_is_blank_until_the_pull_request_actually_merged() {
+        let open = client(
+            200,
+            r#"{"number":7,"state":"open","merged":false,"merge_commit_sha":"7e57e57e57",
+                "head":{"sha":"deadbeef"},"base":{"ref":"main"}}"#,
+        );
+        let pull = open.get_pull_request(7).expect("2xx decodes").expect("present");
+        assert_eq!(pull.merge_commit_sha, None, "an open pull request's test-merge sha is not a landing");
+        assert!(!pull.merged);
+
+        let merged = client(
+            200,
+            r#"{"number":7,"state":"closed","merged":true,"merge_commit_sha":"5quash3d",
+                "head":{"sha":"deadbeef"},"base":{"ref":"main"}}"#,
+        );
+        let pull = merged.get_pull_request(7).expect("2xx decodes").expect("present");
+        assert_eq!(pull.state, PullRequestState::Closed);
+        assert!(pull.merged);
+        // The squash commit, not the proposed head — what mainline became.
+        assert_eq!(pull.merge_commit_sha.as_deref(), Some("5quash3d"));
+
+        // A closed-unmerged pull request is the operator's rejection: closed,
+        // not merged, and carrying no landing sha whatever the field held.
+        let rejected = client(
+            200,
+            r#"{"number":7,"state":"closed","merged":false,"merge_commit_sha":"7e57e57e57",
+                "head":{"sha":"deadbeef"},"base":{"ref":"main"}}"#,
+        );
+        let pull = rejected.get_pull_request(7).expect("2xx decodes").expect("present");
+        assert_eq!(pull.state, PullRequestState::Closed);
+        assert!(!pull.merged);
+        assert_eq!(pull.merge_commit_sha, None);
+    }
+
+    #[test]
+    fn get_pull_request_maps_404_to_none() {
+        let github = client(404, r#"{"message":"Not Found"}"#);
+        assert_eq!(github.get_pull_request(7).expect("404 is Ok(None)"), None);
+    }
+
+    // Tripwire: the list endpoint only filters when `head` is qualified as
+    // `owner:branch`. An unqualified value silently matches nothing, so the land
+    // path would believe it had never proposed this bloom and open a fresh pull
+    // request on every poll tick.
+    #[test]
+    fn find_pull_request_for_head_qualifies_the_branch_with_the_repo_owner() {
+        let github = client(
+            200,
+            r#"[{"number":7,"state":"open","merged":false,"merge_commit_sha":null,
+                 "head":{"sha":"deadbeef"},"base":{"ref":"main"}}]"#,
+        );
+        let found = github.find_pull_request_for_head("bloomery/land/abcd").expect("2xx decodes").expect("present");
+        assert_eq!(found.number, 7);
+
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(request.method, Method::Get);
+        assert!(
+            request.url.contains("head=octo:bloomery/land/abcd"),
+            "the head filter must be owner-qualified, got {}",
+            request.url,
+        );
+        // Tripwire: any state, newest first. Filtering to open would hide a
+        // merged proposal from the poll that has to observe it, and the land
+        // path would open a second one instead of admitting the landing.
+        assert!(request.url.contains("state=all"), "a merged proposal must stay findable, got {}", request.url);
+        assert!(request.url.contains("direction=desc"), "newest first, got {}", request.url);
+    }
+
+    #[test]
+    fn find_pull_request_for_head_reports_none_when_the_branch_has_never_been_proposed() {
+        let github = client(200, "[]");
+        assert_eq!(github.find_pull_request_for_head("bloomery/land/abcd").expect("2xx decodes"), None);
     }
 }
