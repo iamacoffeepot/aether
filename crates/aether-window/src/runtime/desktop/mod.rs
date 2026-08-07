@@ -781,8 +781,8 @@ impl NativeActor for DesktopWindowCapability {
                 };
                 window.set_minimized(false);
                 window.set_visible(true);
-                window.focus_window();
                 activate_application();
+                window.focus_window();
                 ApplyWindowCommandResult::Focus(FocusWindowResult::Ok)
             }
             WindowCommand::RequestRedraw => {
