@@ -25,6 +25,13 @@ mod config;
 #[cfg(feature = "runtime")]
 pub use config::{StoreConfig, StoreOverlay};
 
+// Resolving a *bloom's* sealed configuration, distinct from `config` above,
+// which is this capability's own boot config (ADR-0090).
+#[cfg(feature = "runtime")]
+mod resolve;
+#[cfg(feature = "runtime")]
+pub use resolve::{ConfigResolveError, resolve_config};
+
 use aether_actor::actor;
 
 /// Addressing identity for the `aether.store` capability.

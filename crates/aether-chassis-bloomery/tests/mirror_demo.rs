@@ -17,8 +17,8 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomDraft, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Snapshot, StageCatalog,
-    WorkpieceId, reduce, view_of,
+    BloomDraft, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Snapshot,
+    StageCatalog, WorkpieceId, reduce, view_of,
 };
 use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
 use aether_chassis_bloomery::bloomery::ProjectionShell;
@@ -34,6 +34,7 @@ fn membership(name: &str, revision: u8) -> Membership {
     Membership {
         workpiece: WorkpieceId(name.into()),
         scope_revision,
+        configs: ConfigRegistry::default(),
         approval: Evidence { subject: scope_revision, kind: EvidenceKind::Approval, detail: digest(200) },
     }
 }

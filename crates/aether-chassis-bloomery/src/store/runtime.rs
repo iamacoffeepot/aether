@@ -11,9 +11,9 @@
 use super::StoreCapability;
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, ClaimSeal, ClaimSealResult, DrainOutbox,
-    DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, OutboxEntry, RecordDispatchDescription,
-    RecordDispatchDescriptionResult, RecordScopeRevision, RecordScopeRevisionResult, ReleaseMembership,
-    ReleaseMembershipResult, Supersede, SupersedeResult,
+    DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, OutboxEntry, RecordConfig, RecordConfigResult,
+    RecordDispatchDescription, RecordDispatchDescriptionResult, RecordScopeRevision, RecordScopeRevisionResult,
+    ReleaseMembership, ReleaseMembershipResult, Supersede, SupersedeResult,
 };
 use aether_actor::runtime;
 // The control-plane transact-mails the wasm control actor drives — `Commit` and
@@ -203,6 +203,26 @@ pub trait StoreBackend: Send {
     /// never a dispatch failure.
     fn lookup_scope_revision(&mut self, digest: &[u8]) -> rusqlite::Result<Option<Vec<u8>>>;
 
+    /// Store an authored configuration's canonical bytes under its address
+    /// (ADR-0174), so a sealed [`ConfigRegistry`](aether_bloomery::ConfigRegistry)
+    /// entry resolves to content at the point of use. Idempotent by content
+    /// addressing.
+    ///
+    /// `kind` rides alongside the bytes so a resolution can check that what is
+    /// stored is the kind the registry key claims. The address already binds the
+    /// kind — it is domain-separated by the name — so this catches a row written
+    /// by some path that did not compute the address that way, rather than a
+    /// mismatch the address itself would admit.
+    fn record_config(&mut self, digest: &[u8], kind: &str, bytes: &[u8]) -> rusqlite::Result<()>;
+
+    /// The configuration kind and bytes stored under `digest`, or `None` when
+    /// nothing was authored for it.
+    ///
+    /// A `None` here is a *sealed address with no content*, which the caller
+    /// must refuse rather than default past — unlike an unsealed kind, which
+    /// never reaches this call at all.
+    fn lookup_config(&mut self, digest: &[u8]) -> rusqlite::Result<Option<(String, Vec<u8>)>>;
+
     /// Record a member's advisory work-order description (#3595), keyed by
     /// (`bloom`, `workpiece`). The coordinator persists it at seal so it survives
     /// to dispatch — the api cap that holds the operator's text and the executor
@@ -356,6 +376,11 @@ CREATE TABLE IF NOT EXISTS scope_revision (
     digest   BLOB PRIMARY KEY,
     revision BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS config (
+    digest BLOB PRIMARY KEY,
+    kind   TEXT NOT NULL,
+    bytes  BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS review_findings (
     bloom     BLOB NOT NULL,
     workpiece TEXT NOT NULL,
@@ -500,6 +525,22 @@ impl StoreBackend for SqliteStore {
     fn lookup_scope_revision(&mut self, digest: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
         let mut stmt = self.conn.prepare("SELECT revision FROM scope_revision WHERE digest = ?1")?;
         let mut rows = stmt.query_map(rusqlite::params![digest], |row| row.get::<_, Vec<u8>>(0))?;
+        // The digest is the primary key, so there is at most one row.
+        rows.next().transpose()
+    }
+
+    fn record_config(&mut self, digest: &[u8], kind: &str, bytes: &[u8]) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO config (digest, kind, bytes) VALUES (?1, ?2, ?3)",
+            rusqlite::params![digest, kind, bytes],
+        )?;
+        Ok(())
+    }
+
+    fn lookup_config(&mut self, digest: &[u8]) -> rusqlite::Result<Option<(String, Vec<u8>)>> {
+        let mut stmt = self.conn.prepare("SELECT kind, bytes FROM config WHERE digest = ?1")?;
+        let mut rows =
+            stmt.query_map(rusqlite::params![digest], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
         // The digest is the primary key, so there is at most one row.
         rows.next().transpose()
     }
@@ -835,6 +876,15 @@ impl NativeActor for StoreCapability {
         match state.backend.record_scope_revision(&digest, &revision) {
             Ok(()) => RecordScopeRevisionResult::Ok,
             Err(error) => RecordScopeRevisionResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_record_config(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: RecordConfig) -> RecordConfigResult {
+        let RecordConfig { digest, kind, bytes } = mail;
+        match state.backend.record_config(&digest, &kind, &bytes) {
+            Ok(()) => RecordConfigResult::Ok,
+            Err(error) => RecordConfigResult::Err { error: error.to_string() },
         }
     }
 

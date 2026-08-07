@@ -499,3 +499,126 @@ fn dispatch_description_records_looks_up_and_is_key_scoped() {
     store.record_dispatch_description(&bloom, "wp-a", "revised work order").unwrap();
     assert_eq!(store.lookup_dispatch_description(&bloom, "wp-a").unwrap().as_deref(), Some("revised work order"));
 }
+
+// The sealed-configuration resolution path (ADR-0174). A test kind stands in
+// for a real configuration: the resolver is generic over `ConfigKind`, so what
+// it resolves is the contract and which kind is incidental.
+mod sealed_config {
+    use aether_bloomery::{ConfigKind, ConfigRegistry, ConfigScopes, config_address};
+    use aether_data::Kind;
+    use aether_data::wire::to_vec;
+    use serde::{Deserialize, Serialize};
+
+    use super::memory;
+    use crate::store::{ConfigResolveError, StoreBackend, resolve_config};
+
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    #[kind(name = "aether.bloomery.test_lane_config")]
+    struct LaneConfig {
+        lane: String,
+    }
+
+    /// Author `config` the way `POST /configs` does — encode, address, store —
+    /// and hand back the address a registry would seal.
+    fn author(store: &mut dyn StoreBackend, config: &LaneConfig) -> aether_bloomery::Digest {
+        let bytes = to_vec(config).unwrap();
+        let address = config.address();
+        store.record_config(address.as_bytes(), LaneConfig::NAME, &bytes).unwrap();
+        address
+    }
+
+    fn sealing(store: &mut dyn StoreBackend, lane: &str) -> ConfigRegistry {
+        let address = author(store, &LaneConfig { lane: lane.to_owned() });
+        let mut registry = ConfigRegistry::default();
+        registry.insert::<LaneConfig>(address);
+        registry
+    }
+
+    // The case a flat field on the sealed types cannot express: two members
+    // configuring the *same kind* differently, each resolving its own. This is
+    // the whole reason the registry is per-scope rather than per-bloom.
+    #[test]
+    fn two_members_resolve_their_own_config_of_one_kind() {
+        let mut store = memory();
+        let (first, second) = (sealing(&mut store, "cheap"), sealing(&mut store, "expensive"));
+        let bloom = ConfigRegistry::default();
+
+        let resolved = |store: &mut dyn StoreBackend, member: &ConfigRegistry| {
+            resolve_config::<LaneConfig>(store, ConfigScopes::member_of(member, &bloom)).unwrap()
+        };
+
+        assert_eq!(resolved(&mut store, &first).unwrap().lane, "cheap");
+        assert_eq!(resolved(&mut store, &second).unwrap().lane, "expensive");
+    }
+
+    // The scope chain resolves outward: a member without an entry takes the
+    // bloom's, and a member with one takes its own over the bloom's.
+    #[test]
+    fn the_member_scope_shadows_the_bloom_scope() {
+        let mut store = memory();
+        let bloom = sealing(&mut store, "bloom-wide");
+        let member = sealing(&mut store, "member-only");
+        let bare = ConfigRegistry::default();
+
+        let shadowed =
+            resolve_config::<LaneConfig>(&mut store, ConfigScopes::member_of(&member, &bloom)).unwrap().unwrap();
+        assert_eq!(shadowed.lane, "member-only");
+
+        let inherited =
+            resolve_config::<LaneConfig>(&mut store, ConfigScopes::member_of(&bare, &bloom)).unwrap().unwrap();
+        assert_eq!(inherited.lane, "bloom-wide", "a member sealing nothing takes the bloom's");
+    }
+
+    // Nothing sealed anywhere is `None`, which the caller reads as "take the
+    // calibrated default". Distinct from the two refusals below.
+    #[test]
+    fn an_unsealed_kind_resolves_to_nothing() {
+        let mut store = memory();
+        let empty = ConfigRegistry::default();
+        assert!(resolve_config::<LaneConfig>(&mut store, ConfigScopes::bloom_wide(&empty)).unwrap().is_none());
+    }
+
+    // Tripwire: a sealed address with no stored row refuses. Falling through to
+    // the default here would run one configuration while the receipt attests
+    // another — the exact divergence the registry exists to close, so the
+    // distinction between "unsealed" and "sealed but unresolvable" is the
+    // load-bearing behaviour of this resolver.
+    #[test]
+    fn a_sealed_address_with_no_content_refuses_rather_than_defaulting() {
+        let mut store = memory();
+        let mut registry = ConfigRegistry::default();
+        registry.insert::<LaneConfig>(LaneConfig { lane: "never authored".to_owned() }.address());
+
+        let error = resolve_config::<LaneConfig>(&mut store, ConfigScopes::bloom_wide(&registry)).unwrap_err();
+        assert!(matches!(error, ConfigResolveError::Missing { .. }), "got {error:?}");
+    }
+
+    // Tripwire: the stored row's kind is checked against the registry key. The
+    // address is domain-separated by kind name, so a mismatch means some path
+    // wrote a row without addressing it that way — decoding whatever is at the
+    // address would then hand the caller another kind's bytes.
+    #[test]
+    fn a_row_filed_under_another_kind_refuses() {
+        let mut store = memory();
+        let config = LaneConfig { lane: "cheap".to_owned() };
+        let address = config.address();
+        store.record_config(address.as_bytes(), "aether.bloomery.some_other_kind", &to_vec(&config).unwrap()).unwrap();
+
+        let mut registry = ConfigRegistry::default();
+        registry.insert::<LaneConfig>(address);
+
+        let error = resolve_config::<LaneConfig>(&mut store, ConfigScopes::bloom_wide(&registry)).unwrap_err();
+        assert!(matches!(error, ConfigResolveError::KindMismatch { .. }), "got {error:?}");
+    }
+
+    // Tripwire: the address the typed path computes is the address the generic
+    // authoring route computes from a kind name plus canonical bytes. If these
+    // diverged, a configuration authored over `POST /configs` would seal at an
+    // address no typed resolution could reach — and the failure would surface as
+    // a missing row at dispatch, far from its cause.
+    #[test]
+    fn the_route_and_the_typed_path_address_a_config_identically() {
+        let config = LaneConfig { lane: "cheap".to_owned() };
+        assert_eq!(config.address(), config_address(LaneConfig::NAME, &to_vec(&config).unwrap()));
+    }
+}

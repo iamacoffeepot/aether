@@ -258,8 +258,8 @@ mod tests {
     use std::time::Duration;
 
     use aether_bloomery::{
-        BloomDraft, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandingReceipt, Membership,
-        Snapshot, StageCatalog, Topic, WorkpieceId, reduce, view_of,
+        BloomDraft, BloomId, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey,
+        LandingReceipt, Membership, Snapshot, StageCatalog, Topic, WorkpieceId, reduce, view_of,
     };
     use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
     use aether_data::wire::{from_bytes, to_vec};
@@ -309,6 +309,7 @@ mod tests {
         let member = Membership {
             workpiece: WorkpieceId("reactor-core".into()),
             scope_revision,
+            configs: ConfigRegistry::default(),
             approval: Evidence { subject: scope_revision, kind: EvidenceKind::Approval, detail: digest(200) },
         };
         let base = digest(0);

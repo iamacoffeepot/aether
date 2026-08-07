@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use aether_bloomery::{
-    BloomDraft, BloomRecord, BloomSpec, BloomStatus, Decisions, Digest, Event, Evidence, EvidenceKind, Fact,
-    IdempotencyKey, Membership, ResolutionClaim, Snapshot, StageCatalog, WorkpieceId, reduce,
+    BloomDraft, BloomRecord, BloomSpec, BloomStatus, ConfigRegistry, Decisions, Digest, Event, Evidence, EvidenceKind,
+    Fact, IdempotencyKey, Membership, ResolutionClaim, Snapshot, StageCatalog, WorkpieceId, reduce,
 };
 
 /// A distinct digest named by one seed byte.
@@ -27,6 +27,7 @@ pub fn membership(name: &str, revision: u8) -> Membership {
     Membership {
         workpiece: workpiece(name),
         scope_revision,
+        configs: ConfigRegistry::default(),
         approval: Evidence { subject: scope_revision, kind: EvidenceKind::Approval, detail: digest(200) },
     }
 }

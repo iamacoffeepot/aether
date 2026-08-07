@@ -50,6 +50,7 @@
 //! constructors and the bloom-id URL codec.
 
 mod blooms;
+mod configs;
 mod drafts;
 mod hex;
 mod reads;
@@ -82,7 +83,7 @@ use super::dto::WorkpiecesView;
 use crate::artifacts::{ArtifactsCapability, Get, GetResult};
 use crate::bloomery::ApprovalPolicy;
 use crate::signing::VerifyResult;
-use crate::store::{RecordDispatchDescriptionResult, RecordScopeRevisionResult, StoreCapability};
+use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult, RecordScopeRevisionResult, StoreCapability};
 
 /// Composer-supplied params for the REST control api cap (ADR-0156 §3 `Params`
 /// channel): the tier-policy file the pre-seal approve gate loads at init (issue
@@ -141,6 +142,7 @@ impl NativeActor for BloomeryApiCapability {
             pending: HashMap::new(),
             verifying: HashMap::new(),
             seals: HashMap::new(),
+            configs: HashMap::new(),
             scope_revisions: HashMap::new(),
             next_seal: 1,
             seal_verifications: HashMap::new(),
@@ -156,6 +158,15 @@ impl NativeActor for BloomeryApiCapability {
     #[http::route(Post, "/workpieces")]
     fn on_post_workpieces(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
         let routed = state.stage_workpiece(&ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /configs` — content-address a configuration of any kind in the
+    /// descriptor inventory so a draft or a member can name it (ADR-0174). One
+    /// route for every configuration kind: adding a kind adds no route.
+    #[http::route(Post, "/configs")]
+    fn on_post_configs(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = state.author_config(&ctx, &ctx.request().body);
         finish(state, ctx, routed)
     }
 
@@ -357,6 +368,19 @@ impl NativeActor for BloomeryApiCapability {
             RecordScopeRevisionResult::Err { error } => Some(error),
         };
         state.resolve_scope_revision_write(ctx, error.as_deref());
+    }
+
+    /// The store's reply to an authored configuration's write (ADR-0174). The
+    /// authoring route deferred its caller on this, so the reply answers with the
+    /// address on a durable write and a `500` on a failed one — a caller never
+    /// gets an address it could seal against a row that is not there.
+    #[handler::manual]
+    fn on_record_config_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: RecordConfigResult) {
+        let error = match mail {
+            RecordConfigResult::Ok => None,
+            RecordConfigResult::Err { error } => Some(error),
+        };
+        state.resolve_config_write(ctx, error.as_deref());
     }
 
     /// The store's reply to a fire-and-forget dispatch-description write (#3595).

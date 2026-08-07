@@ -23,8 +23,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    BloomDraft, Digest, Evidence, EvidenceKind, KeyId, Membership, Provenance, SignatureEnvelope, StageCatalog,
-    Statement, Workpiece, WorkpieceId,
+    BloomDraft, ConfigRegistry, Digest, Evidence, EvidenceKind, KeyId, Membership, Provenance, SignatureEnvelope,
+    StageCatalog, Statement, Workpiece, WorkpieceId,
 };
 use aether_chassis_bloomery::api::{MemberProjection, SealRequest};
 use aether_chassis_bloomery::bloomery::{AdrTouch, Completeness};
@@ -248,6 +248,7 @@ fn valid_draft(workpiece: &str) -> BloomDraft {
     let member = Membership {
         workpiece: WorkpieceId(workpiece.to_owned()),
         scope_revision,
+        configs: ConfigRegistry::default(),
         approval: Evidence {
             subject: scope_revision,
             kind: EvidenceKind::Approval,
@@ -270,6 +271,7 @@ fn two_member_draft() -> BloomDraft {
     let member = |wp: &str, revision: Digest| Membership {
         workpiece: WorkpieceId(wp.to_owned()),
         scope_revision: revision,
+        configs: ConfigRegistry::default(),
         approval: Evidence { subject: revision, kind: EvidenceKind::Approval, detail: Digest::from_bytes([9; 32]) },
     };
     BloomDraft {
@@ -594,6 +596,74 @@ fn assert_mixed_above_auto_seal(http_port: u16, wp1_revision: Digest) {
     let (status, view) = get_json(http_port, &format!("/blooms/{mixed_bloom}"));
     assert_eq!(status, 200, "the mixed bloom is live");
     assert_eq!(view["members"].as_array().unwrap().len(), 2, "both members sealed");
+}
+
+// ADR-0174 — `POST /configs` is one authoring route for every configuration
+// kind, replacing a route per kind. The contract it has to hold is the same one
+// #4588 established for the scope revision, generalized: the address it hands
+// back is a pure function of (kind, content), and a `200` means that address
+// resolves to a durable row rather than to nothing.
+//
+// The kind used here is incidental — the route resolves whatever the descriptor
+// inventory carries, so a store mail kind exercises the same path a real
+// configuration will. What the test pins is the route's own logic: schema
+// resolution, encoding through that schema, addressing, and the deferral.
+#[test]
+fn authoring_a_config_stores_it_under_a_stable_content_address() {
+    let http_port = free_port();
+    let rpc_port = free_port();
+    let (_policy_dir, policy_path) = test_policy();
+    let mut child = spawn(http_port, rpc_port, &policy_path);
+
+    let result = std::panic::catch_unwind(|| {
+        wait_for_200(http_port, "/drafts");
+
+        let request = |value: Value| serde_json::json!({ "kind": "aether.store.drain_outbox", "value": value });
+
+        let (status, authored) =
+            send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": "construct" })));
+        assert_eq!(status, 200, "authoring answers only once the store write lands");
+        assert!(
+            authored["digest"].as_array().is_some_and(|bytes| bytes.len() == 32),
+            "the reply names a 32-byte address"
+        );
+        assert_eq!(authored["kind"], "aether.store.drain_outbox", "the reply names the key a registry seals under");
+        let digest = authored["digest"].clone();
+
+        // Idempotent by content addressing: re-authoring rewrites the same row
+        // rather than creating a second address a seal would have to choose
+        // between.
+        let (status, again) =
+            send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": "construct" })));
+        assert_eq!(status, 200);
+        assert_eq!(again["digest"], digest, "the same content under the same kind keeps its address");
+
+        let (status, other) =
+            send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": "refine" })));
+        assert_eq!(status, 200);
+        assert_ne!(other["digest"], digest, "changed content changes the address");
+
+        // A kind this binary does not carry is a client error, not a server one:
+        // the vocabulary is fixed at build time, so no retry helps.
+        let (status, _) = send_json(
+            http_port,
+            "POST",
+            "/configs",
+            &serde_json::json!({ "kind": "aether.bloomery.no_such_config", "value": {} }),
+        );
+        assert_eq!(status, 400, "an unknown kind is refused before any write");
+
+        // A value that does not fit the kind's schema is refused inline too, so a
+        // typo cannot reach the store as bytes that will not decode at dispatch.
+        let (status, _) = send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": 7 })));
+        assert_eq!(status, 400, "a value that does not match the schema is refused before any write");
+    });
+
+    let _ = child.kill();
+    let _ = child.wait();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 // #4588 — `POST /scope-revisions` is the authoring half of a per-workpiece
