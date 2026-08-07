@@ -404,8 +404,8 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::{
-        Budget, Conclusion, Digest, ExecutionStatus, ExecutorBackend, NetworkProfile, Nonce, REVIEW_CRITIC_COMMAND,
-        ReasoningEffort, ResolvedModel, Transformation, WorkHandle, WorkOrder,
+        Budget, Conclusion, Digest, ExecutionStatus, ExecutorBackend, Harness, NetworkProfile, Nonce,
+        REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolvedModel, Transformation, WorkHandle, WorkOrder,
     };
 
     use std::sync::Arc;
@@ -450,8 +450,11 @@ mod tests {
     fn model_order(nonce: &str) -> WorkOrder {
         let mut order = order(nonce);
         order.transformation.command = REVIEW_CRITIC_COMMAND.to_owned();
-        order.transformation.model =
-            Some(ResolvedModel { model: "claude-opus-5".to_owned(), effort: ReasoningEffort::XHigh });
+        order.transformation.model = Some(ResolvedModel {
+            harness: Harness::Claude,
+            model: "claude-opus-5".to_owned(),
+            effort: ReasoningEffort::XHigh,
+        });
         order
     }
 

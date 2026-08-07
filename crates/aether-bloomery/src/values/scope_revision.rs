@@ -17,7 +17,7 @@ use alloc::string::String;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
-use crate::values::{AgentProfile, ReasoningEffort};
+use crate::values::{AgentProfile, Harness, ReasoningEffort};
 
 /// A per-workpiece override of the construct lane's model + reasoning effort
 /// (ADR-0149 §The line, #3511) — the successor of today's free-text `model:*`
@@ -44,16 +44,24 @@ impl ModelOverride {
     #[must_use]
     pub fn resolve(&self, default: &AgentProfile) -> ResolvedModel {
         ResolvedModel {
+            harness: default.harness,
             model: self.model.clone().unwrap_or_else(|| default.model.clone()),
             effort: self.reasoning_effort.unwrap_or(default.effort),
         }
     }
 }
 
-/// The effective model + reasoning effort a construct attempt runs under, after
-/// resolving a [`ModelOverride`] against its stage profile default.
+/// The effective harness + model + reasoning effort a construct attempt runs
+/// under, after resolving a [`ModelOverride`] against its stage profile default.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ResolvedModel {
+    /// The harness the attempt's lane forks. Resolved straight from the stage
+    /// profile — [`ModelOverride`] deliberately offers no harness field, so
+    /// which CLI runs a stage is a line-wide calibration a per-workpiece scope
+    /// revision cannot reach around. It still travels this channel rather than
+    /// its own so it inherits the attestation the model already has: the sealed
+    /// bloom pins the profile digest, and the profile names the harness.
+    pub harness: Harness,
     /// The model the attempt runs under.
     pub model: String,
     /// The reasoning effort the attempt runs at.
@@ -91,7 +99,7 @@ mod tests {
     use crate::values::ToolPolicy;
 
     fn profile(model: &str, effort: ReasoningEffort) -> AgentProfile {
-        AgentProfile { model: String::from(model), effort, tools: ToolPolicy::Full }
+        AgentProfile { harness: Harness::Claude, model: String::from(model), effort, tools: ToolPolicy::Full }
     }
 
     // A scope revision carrying an override round-trips through its content-
@@ -131,5 +139,28 @@ mod tests {
             ModelOverride { model: Some(String::from("claude-opus-4-8")), reasoning_effort: None }.resolve(&default);
         assert_eq!(model_only.model, "claude-opus-4-8", "set model wins");
         assert_eq!(model_only.effort, ReasoningEffort::Medium, "unset effort still falls through");
+    }
+
+    // The harness is line-wide calibration, not per-workpiece scope: it comes
+    // from the stage profile whatever the override says, because `ModelOverride`
+    // carries no harness field to say it with. A resolution that read the
+    // harness from anywhere else would let a sealed scope revision run a stage
+    // under a CLI its profile digest does not attest.
+    #[test]
+    fn resolve_takes_the_harness_from_the_profile_and_no_override_reaches_it() {
+        let muse = AgentProfile {
+            harness: Harness::Muse,
+            model: String::from("claude-sonnet-5"),
+            effort: ReasoningEffort::Medium,
+            tools: ToolPolicy::Full,
+        };
+
+        let fully_overridden = ModelOverride {
+            model: Some(String::from("claude-opus-4-8")),
+            reasoning_effort: Some(ReasoningEffort::Max),
+        }
+        .resolve(&muse);
+        assert_eq!(fully_overridden.harness, Harness::Muse, "the profile's harness survives a full model override");
+        assert_eq!(ModelOverride::default().resolve(&muse).harness, Harness::Muse, "and an empty one");
     }
 }

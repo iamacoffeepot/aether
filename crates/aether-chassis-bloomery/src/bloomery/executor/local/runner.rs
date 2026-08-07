@@ -26,6 +26,10 @@ pub struct RunSpec<'a> {
     pub evidence_dir: &'a Path,
     /// The idempotency nonce stamped into the evidence (`--nonce`).
     pub nonce: &'a str,
+    /// The resolved harness a model lane forks (`--harness`) — which agent CLI
+    /// executes the stage. `None` for a mechanical verify lane, which runs a
+    /// compiler and ignores it, exactly as it ignores `--model`.
+    pub harness: Option<&'a str>,
     /// The resolved model the `construct.implement` lane runs under (`--model`);
     /// `None` for a mechanical verify lane, which ignores it.
     pub model: Option<&'a str>,

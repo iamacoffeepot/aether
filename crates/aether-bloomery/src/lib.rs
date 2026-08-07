@@ -91,7 +91,7 @@ pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
 pub use study_report::{BloomGrade, StudyReport, grade};
 pub use values::{
     AgentProfile, Artifact, Attempt, BloomDraft, BloomSpec, Budget, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef,
-    Evidence, EvidenceKind, Forecast, LandingReceipt, Membership, ModelOverride, NetworkProfile, Observation,
+    Evidence, EvidenceKind, Forecast, Harness, LandingReceipt, Membership, ModelOverride, NetworkProfile, Observation,
     Provenance, Question, REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedModel,
     ScopeRevision, StageBinding, StageCatalog, StageReceipt, Statement, StudyCost, StudyRecord, ToolPolicy,
     Transformation, Workpiece, is_model_lane,

@@ -26,7 +26,8 @@ mod verify;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
-use anyhow::Result;
+use aether_bloomery::Harness;
+use anyhow::{Result, bail};
 use clap::Args;
 use serde::Serialize;
 
@@ -54,7 +55,13 @@ pub struct TransformArgs {
     /// lane.
     #[arg(long)]
     subject: Option<String>,
-    /// The model the `construct.implement` lane runs headless Claude under —
+    /// Which agent CLI the model lanes fork — the harness the coordinator
+    /// resolved from the stage's sealed `AgentProfile` (#4578). Ignored by the
+    /// verify lane, which runs a compiler. Absent when the coordinator resolved
+    /// none, which falls back to the lane's default harness.
+    #[arg(long)]
+    harness: Option<String>,
+    /// The model the `construct.implement` lane runs its harness under —
     /// the effective model the coordinator resolved from the sealed
     /// scope-revision (#3511). Ignored by the verify lane.
     #[arg(long)]
@@ -121,6 +128,44 @@ pub fn run(args: &TransformArgs) -> Result<()> {
 /// lanes end on.
 fn write_evidence_json(out: &Path, evidence: &serde_json::Value) -> Result<()> {
     write_json_pretty(&out.join("evidence.json"), evidence)
+}
+
+/// The lane default when the coordinator resolved no harness — the operator's
+/// ambient CLI, matching how an absent `--model` / `--effort` falls back to the
+/// child's own defaults (#3592) rather than refusing the run.
+const DEFAULT_HARNESS: Harness = Harness::Claude;
+
+/// The harness a model lane forks for this run: the resolved `--harness` when
+/// the coordinator named one, [`DEFAULT_HARNESS`] when it did not.
+///
+/// An unrecognized spelling is a hard error rather than a fallback. A dispatch
+/// that names a harness this binary cannot parse is a version skew between the
+/// coordinator and the worker's checkout, and silently running the default
+/// would produce evidence attributed to a harness that never ran — the exact
+/// claim the sealed profile digest is supposed to make verifiable.
+fn resolve_harness(harness: Option<&str>) -> Result<Harness> {
+    let Some(name) = harness else {
+        return Ok(DEFAULT_HARNESS);
+    };
+    Harness::from_name(name).map_or_else(|| bail!("unrecognized harness `{name}`"), Ok)
+}
+
+/// Run one model lane's `prompt` under the resolved harness and return the
+/// derived result record — the seam both model lanes (`construct.implement` and
+/// `review.critic`) go through, so a harness is chosen once rather than per
+/// lane.
+///
+/// Every arm returns the same record envelope, which is what lets the lanes
+/// stay harness-agnostic: `construct.rs` reads `result_record.is_error` and
+/// `review.rs` reads `result.result` for the critic's verdict text, neither
+/// knowing which CLI produced them.
+fn run_model_lane(prompt: &str, args: &TransformArgs) -> Result<serde_json::Value> {
+    match resolve_harness(args.harness.as_deref())? {
+        Harness::Claude => claude::run_headless_claude(prompt, args),
+        harness @ (Harness::Codex | Harness::Muse) => {
+            bail!("harness `{}` has no lane arm in this worker build", harness.as_str())
+        }
+    }
 }
 
 #[cfg(test)]

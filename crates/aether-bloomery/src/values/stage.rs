@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::StageId;
-use crate::values::{AgentProfile, Budget, ReasoningEffort, ResolvedModel, ToolPolicy};
+use crate::values::{AgentProfile, Budget, Harness, ReasoningEffort, ResolvedModel, ToolPolicy};
 
 /// The declared output name every dispatched attempt uploads its result record
 /// under — the study/verdict envelope the intake broker binds to the displayed
@@ -241,11 +241,12 @@ impl StageCatalog {
     /// references the returned profile by [`digest`](AgentProfile::digest), so a
     /// recalibration is a new digest and re-digests the catalog.
     ///
-    /// The model/effort values are the initial calibration — refinable without
-    /// an ADR (a change re-digests the catalog), like the per-binding tag/gate
-    /// strings. `tools` is [`ToolPolicy::Full`] across the v1 line: every stage
-    /// runs a real process over the full tool surface; the finer tiers exist so
-    /// a later calibration can bound a stage without a vocabulary change.
+    /// The harness/model/effort values are the initial calibration — refinable
+    /// without an ADR (a change re-digests the catalog), like the per-binding
+    /// tag/gate strings. `tools` is [`ToolPolicy::Full`] across the v1 line:
+    /// every stage runs a real process over the full tool surface; the finer
+    /// tiers exist so a later calibration can bound a stage without a vocabulary
+    /// change.
     /// The model id every opus-tier stage below resolves to. Named once so a
     /// generation refresh is one edit rather than a sweep over the arms — the
     /// rows carry a tier, and only this line carries an id that can age.
@@ -259,6 +260,12 @@ impl StageCatalog {
         // Calibrated once, grouped by tier: the design-adjacent stages run opus
         // (scope/construct/study at high effort, refine at medium), review's
         // finders run sonnet@high, and the mechanical remainder runs sonnet@medium.
+        //
+        // Every stage names [`Harness::Claude`]: the harness axis exists so a
+        // stage *can* be calibrated onto another CLI, and the arms that run one
+        // land with the lanes that implement them. A mechanical stage's harness
+        // is inert — it runs a compiler, and `is_model_lane` keeps the resolved
+        // value off its argv entirely.
         let (model, effort): (&str, ReasoningEffort) = match stage {
             StageId::Scope | StageId::Construct | StageId::Study => (Self::OPUS_MODEL, ReasoningEffort::High),
             StageId::Refine => (Self::OPUS_MODEL, ReasoningEffort::Medium),
@@ -270,7 +277,7 @@ impl StageCatalog {
             | StageId::AggregateVerify
             | StageId::Land => (Self::SONNET_MODEL, ReasoningEffort::Medium),
         };
-        AgentProfile { model: String::from(model), effort, tools: ToolPolicy::Full }
+        AgentProfile { harness: Harness::Claude, model: String::from(model), effort, tools: ToolPolicy::Full }
     }
 }
 
@@ -526,9 +533,15 @@ mod tests {
     // `claude-opus-4-8` to `claude-opus-5`, which changes their `AgentProfile`
     // digests and so the line. A recalibration is an intended catalog edit — see
     // `profile_of`, whose model and effort values are refinable without an ADR.
+    // Repinned again for #4578: every profile gains a `harness` field, so every
+    // binding's `AgentProfile` digest moves and the line with it. A vocabulary
+    // addition is an intended catalog edit for the same reason a recalibration
+    // is — and it is the point of the axis: which CLI ran a stage becomes
+    // something the sealed catalog digest attests rather than a worker-local
+    // accident.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x7f, 0x16, 0xea, 0x91, 0x4e, 0xff, 0xdb, 0x24, 0xc9, 0x83, 0x1e, 0x11, 0x10, 0x7a, 0x8a, 0x95, 0x42, 0xb3,
-        0xd9, 0xd4, 0xc8, 0x8d, 0x30, 0xad, 0x66, 0x16, 0x1c, 0xaa, 0x78, 0x27, 0x50, 0xa1,
+        0xfc, 0xdb, 0x2f, 0x0c, 0x83, 0x01, 0x50, 0xa2, 0xd9, 0x08, 0xf1, 0xe4, 0x39, 0xb0, 0x13, 0x95, 0xc1, 0x5d,
+        0x71, 0x47, 0xab, 0x05, 0x98, 0x33, 0x83, 0x51, 0x8e, 0x03, 0xe2, 0x69, 0x1e, 0x53,
     ];
 
     #[test]

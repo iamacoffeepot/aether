@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
-    Conclusion, Digest, ExecutionStatus, ExecutorBackend, Nonce, ReasoningEffort, ResolvedModel, StageId,
+    Conclusion, Digest, ExecutionStatus, ExecutorBackend, Harness, Nonce, ReasoningEffort, ResolvedModel, StageId,
     Transformation, WorkHandle,
 };
 use aether_bloomery_github::StageVerdict;
@@ -283,6 +283,7 @@ fn recording_executor(
 #[derive(Clone, Default)]
 struct SeenSpec {
     evidence_dir: Option<PathBuf>,
+    harness: Option<String>,
     model: Option<String>,
     effort: Option<String>,
 }
@@ -298,6 +299,7 @@ impl TransformRunner for CapturingRunner {
     fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
         *self.seen.lock().unwrap() = SeenSpec {
             evidence_dir: Some(spec.evidence_dir.to_owned()),
+            harness: spec.harness.map(str::to_owned),
             model: spec.model.map(str::to_owned),
             effort: spec.effort.map(str::to_owned),
         };
@@ -350,13 +352,21 @@ fn submit_spawns_the_model_lane_under_the_orders_resolved_profile() {
     let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path());
 
     let mut order = construct_order(digest(5), &test_nonce("profile"));
-    order.transformation.model =
-        Some(ResolvedModel { model: "claude-opus-4-8".to_owned(), effort: ReasoningEffort::XHigh });
+    order.transformation.model = Some(ResolvedModel {
+        harness: Harness::Muse,
+        model: "claude-opus-4-8".to_owned(),
+        effort: ReasoningEffort::XHigh,
+    });
     exec.submit(&order).unwrap();
 
-    let SeenSpec { model, effort, .. } = seen.lock().unwrap().clone();
+    let SeenSpec { harness, model, effort, .. } = seen.lock().unwrap().clone();
     assert_eq!(model.as_deref(), Some("claude-opus-4-8"), "the spawn names the order's resolved model");
     assert_eq!(effort.as_deref(), Some("xhigh"), "the spawn names the order's resolved effort tier");
+    // The third axis (#4578): the harness the profile calibrated must reach the
+    // spawn too, or the run silently executes under whichever CLI the worker
+    // defaults to while the receipt attests the sealed profile — the same
+    // divergence #4324 fixed for model and effort.
+    assert_eq!(harness.as_deref(), Some("muse"), "the spawn names the order's resolved harness");
 }
 
 // The complement: an order carrying no resolved profile names neither flag, so the
@@ -370,9 +380,10 @@ fn submit_names_no_model_when_the_order_carries_no_profile() {
 
     exec.submit(&construct_order(digest(5), &test_nonce("ambient"))).unwrap();
 
-    let SeenSpec { model, effort, .. } = seen.lock().unwrap().clone();
+    let SeenSpec { harness, model, effort, .. } = seen.lock().unwrap().clone();
     assert_eq!(model, None, "no resolved profile means no model is named");
     assert_eq!(effort, None, "no resolved profile means no effort is named");
+    assert_eq!(harness, None, "no resolved profile means no harness is named either");
 }
 
 #[test]

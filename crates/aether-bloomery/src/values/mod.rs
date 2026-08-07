@@ -15,7 +15,7 @@ mod statement;
 mod study;
 
 pub use bloom::{BloomDraft, BloomSpec, LandingReceipt, Membership, ResolutionClaim, ResolvedBloom};
-pub use profile::{AgentProfile, ReasoningEffort, ToolPolicy};
+pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use question::Question;
 pub use scope_revision::{ModelOverride, ResolvedModel, ScopeRevision};
 pub use stage::{
