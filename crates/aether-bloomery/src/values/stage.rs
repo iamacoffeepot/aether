@@ -254,30 +254,49 @@ impl StageCatalog {
     /// The model id every sonnet-tier stage below resolves to, named for the
     /// same reason as [`Self::OPUS_MODEL`].
     const SONNET_MODEL: &'static str = "claude-sonnet-5";
+    /// The model id the muse-harness stages resolve to.
+    ///
+    /// The **contributor** tier, deliberately: it is roughly an order of
+    /// magnitude cheaper than standard `muse-spark-1.2`, which is what makes
+    /// running every model lane on it affordable at all. Its terms state that
+    /// content may be used for product improvement — sound here because this
+    /// repository is public and a bloom's lanes see only its own source, and a
+    /// decision to re-take before a Bloomery instance is ever pointed at a
+    /// private repository. Naming it in the catalog is what makes that choice
+    /// attestable rather than an operator's ambient default.
+    const MUSE_MODEL: &'static str = "muse-spark-1.2-contributor";
 
     #[must_use]
     pub fn profile_of(stage: StageId) -> AgentProfile {
-        // Calibrated once, grouped by tier: the design-adjacent stages run opus
-        // (scope/construct/study at high effort, refine at medium), review's
-        // finders run sonnet@high, and the mechanical remainder runs sonnet@medium.
+        // The four **dispatched model lanes** — the ones that actually fork an
+        // agent CLI — run muse: Construct and its Refine repair re-entry, and
+        // the two review positions. That is the whole set `is_model_lane`
+        // recognizes, so this is the calibration that decides what writes the
+        // code and what judges it.
         //
-        // Every stage names [`Harness::Claude`]: the harness axis exists so a
-        // stage *can* be calibrated onto another CLI, and the arms that run one
-        // land with the lanes that implement them. A mechanical stage's harness
-        // is inert — it runs a compiler, and `is_model_lane` keeps the resolved
-        // value off its argv entirely.
-        let (model, effort): (&str, ReasoningEffort) = match stage {
-            StageId::Scope | StageId::Construct | StageId::Study => (Self::OPUS_MODEL, ReasoningEffort::High),
-            StageId::Refine => (Self::OPUS_MODEL, ReasoningEffort::Medium),
-            StageId::Review | StageId::AggregateReview => (Self::SONNET_MODEL, ReasoningEffort::High),
+        // The remaining stages keep their Claude calibration and it is inert:
+        // Scope and Approve are pre-seal operator/host processes, Study is not
+        // dispatched as a worker lane, and the mechanical stages run a compiler.
+        // `is_model_lane` keeps the resolved harness off every one of their
+        // argvs, so their harness names a CLI none of them forks.
+        //
+        // Harness and model move together, and must: a model id belongs to the
+        // provider its harness talks to, so a lane pointed at muse while still
+        // naming an Anthropic id would dispatch an id its harness cannot resolve.
+        let (harness, model, effort): (Harness, &str, ReasoningEffort) = match stage {
+            StageId::Construct | StageId::Review | StageId::AggregateReview => {
+                (Harness::Muse, Self::MUSE_MODEL, ReasoningEffort::High)
+            }
+            StageId::Refine => (Harness::Muse, Self::MUSE_MODEL, ReasoningEffort::Medium),
+            StageId::Scope | StageId::Study => (Harness::Claude, Self::OPUS_MODEL, ReasoningEffort::High),
             StageId::Sketch
             | StageId::Approve
             | StageId::Verify
             | StageId::Integrate
             | StageId::AggregateVerify
-            | StageId::Land => (Self::SONNET_MODEL, ReasoningEffort::Medium),
+            | StageId::Land => (Harness::Claude, Self::SONNET_MODEL, ReasoningEffort::Medium),
         };
-        AgentProfile { harness: Harness::Claude, model: String::from(model), effort, tools: ToolPolicy::Full }
+        AgentProfile { harness, model: String::from(model), effort, tools: ToolPolicy::Full }
     }
 }
 
@@ -511,6 +530,34 @@ mod tests {
         }
     }
 
+    // Tripwire: a model lane's harness and model id agree. A model id belongs to
+    // the provider its harness talks to, so a stage moved onto a model lane — or
+    // recalibrated onto a different harness — while keeping the other half of
+    // the pair would dispatch an id its harness cannot resolve. The failure is
+    // remote and late (the child CLI rejects the model mid-run), so the pairing
+    // is pinned here where it is authored.
+    #[test]
+    fn every_dispatched_model_lane_pairs_its_harness_with_that_harnesss_model() {
+        for binding in StageCatalog::line().bindings {
+            if !is_model_lane(&binding.process) {
+                continue;
+            }
+            let profile = StageCatalog::profile_of(binding.stage);
+            assert_eq!(
+                profile.harness,
+                Harness::Muse,
+                "{:?} is a dispatched model lane, so it must name the calibrated model harness",
+                binding.stage,
+            );
+            assert_eq!(
+                profile.model,
+                StageCatalog::MUSE_MODEL,
+                "{:?} runs under muse, so its model id must be a muse id",
+                binding.stage,
+            );
+        }
+    }
+
     // Tripwire: the line catalog's digest. Computed over the authored bindings,
     // so it drifts the moment any consumes/produces/profile/process/gate/retry
     // value changes — catching an unintended catalog edit. Recompute-and-repin
@@ -539,9 +586,14 @@ mod tests {
     // is — and it is the point of the axis: which CLI ran a stage becomes
     // something the sealed catalog digest attests rather than a worker-local
     // accident.
+    // Repinned again for #4579: the four dispatched model lanes recalibrate onto
+    // the muse harness and its model id, moving their profile digests and the
+    // line with them. A recalibration is an intended catalog edit — see
+    // `profile_of`, whose harness/model/effort values are refinable without an
+    // ADR.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0xfc, 0xdb, 0x2f, 0x0c, 0x83, 0x01, 0x50, 0xa2, 0xd9, 0x08, 0xf1, 0xe4, 0x39, 0xb0, 0x13, 0x95, 0xc1, 0x5d,
-        0x71, 0x47, 0xab, 0x05, 0x98, 0x33, 0x83, 0x51, 0x8e, 0x03, 0xe2, 0x69, 0x1e, 0x53,
+        0x1a, 0xc6, 0x09, 0x6c, 0x13, 0x3e, 0x43, 0x37, 0xfa, 0x88, 0x10, 0x0a, 0x47, 0x11, 0x0b, 0x5c, 0xb7, 0xf2,
+        0x71, 0xb7, 0x15, 0x50, 0x41, 0xe0, 0xa5, 0xd0, 0xe2, 0xdb, 0x27, 0xf3, 0xb4, 0x40,
     ];
 
     #[test]

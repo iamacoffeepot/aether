@@ -17,7 +17,7 @@ mod study;
 pub use bloom::{BloomDraft, BloomSpec, LandingReceipt, Membership, ResolutionClaim, ResolvedBloom};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use question::Question;
-pub use scope_revision::{ModelOverride, ResolvedModel, ScopeRevision};
+pub use scope_revision::{AgentSelection, ModelOverride, ResolvedModel, ScopeRevision};
 pub use stage::{
     Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, NetworkProfile, REVIEW_CRITIC_COMMAND, StageBinding,
     StageCatalog, Transformation, is_model_lane,
