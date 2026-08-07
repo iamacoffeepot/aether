@@ -93,15 +93,23 @@ pub(super) fn render_shape(ty: &SchemaType) -> String {
                 let parts: Vec<String> = variants
                     .iter()
                     .map(|v| match v {
-                        EnumVariant::Unit { name, .. } => name.to_string(),
+                        EnumVariant::Unit { name, .. } => {
+                            serde_json::to_string(name.as_ref()).expect("a string always JSON-serializes")
+                        }
                         EnumVariant::Tuple { name, fields, .. } => {
+                            let tag = serde_json::to_string(name.as_ref()).expect("a string always JSON-serializes");
                             let inner: Vec<String> = fields.iter().map(|f| render(f, depth + 1)).collect();
-                            format!("{}({})", name, inner.join(", "))
+                            if inner.len() == 1 {
+                                format!("{{ {tag}: {} }}", inner[0])
+                            } else {
+                                format!("{{ {tag}: [{}] }}", inner.join(", "))
+                            }
                         }
                         EnumVariant::Struct { name, fields, .. } => {
+                            let tag = serde_json::to_string(name.as_ref()).expect("a string always JSON-serializes");
                             let inner: Vec<String> =
                                 fields.iter().map(|f| format!("{}: {}", f.name, render(&f.ty, depth + 1))).collect();
-                            format!("{} {{ {} }}", name, inner.join(", "))
+                            format!("{{ {tag}: {{ {} }} }}", inner.join(", "))
                         }
                     })
                     .collect();

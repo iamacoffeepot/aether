@@ -29,20 +29,69 @@ fn render_shape_unit_kind() {
     assert_eq!(shape, "{}", "unit schema should render as {{}}");
 }
 
-/// `render_shape` on an enum kind produces `Var1 | Var2(…) | …`
-/// with variants separated by ` | `.
+/// Enum shapes spell the externally tagged JSON envelope accepted by
+/// `aether-codec`: strings for unit variants and one-key objects for
+/// tuple and struct variants.
 #[test]
 fn render_shape_enum_kind() {
-    use aether_data::{EnumVariant, SchemaType as ST};
+    use aether_data::{EnumVariant, NamedField, Primitive, SchemaType as ST};
     use std::borrow::Cow;
     let schema = ST::Enum {
-        variants: Cow::Borrowed(&[
+        variants: Cow::Owned(vec![
             EnumVariant::Unit { name: Cow::Borrowed("Off"), discriminant: 0 },
             EnumVariant::Tuple { name: Cow::Borrowed("On"), discriminant: 1, fields: Cow::Borrowed(&[ST::Bool]) },
+            EnumVariant::Tuple {
+                name: Cow::Borrowed("Pair"),
+                discriminant: 2,
+                fields: Cow::Borrowed(&[ST::Bool, ST::Scalar(Primitive::U32)]),
+            },
+            EnumVariant::Struct {
+                name: Cow::Borrowed("Fault"),
+                discriminant: 3,
+                fields: Cow::Owned(vec![NamedField { name: Cow::Borrowed("reason"), ty: ST::String }]),
+            },
         ]),
     };
     let shape = render_shape(&schema);
-    assert_eq!(shape, "Off | On(bool)", "enum shape should be Var1 | Var2(inner)");
+    assert_eq!(shape, r#""Off" | { "On": bool } | { "Pair": [bool, u32] } | { "Fault": { reason: String } }"#,);
+}
+
+/// A nested public enum remains inside its containing request field. The
+/// compact shape must therefore lead directly to params the live codec
+/// accepts instead of making the variant look like a top-level request key.
+#[test]
+fn render_shape_nested_window_mode_matches_codec_params() {
+    use aether_data::{NamedField, Schema, SchemaCell};
+    use aether_kinds::WindowMode;
+
+    let schema = SchemaType::Struct {
+        fields: vec![
+            NamedField { name: "mode".into(), ty: <WindowMode as Schema>::SCHEMA },
+            NamedField { name: "width".into(), ty: SchemaType::Option(SchemaCell::owned(<u32 as Schema>::SCHEMA)) },
+            NamedField { name: "height".into(), ty: SchemaType::Option(SchemaCell::owned(<u32 as Schema>::SCHEMA)) },
+        ]
+        .into(),
+        repr_c: false,
+    };
+
+    assert_eq!(
+        render_shape(&schema),
+        concat!(
+            r#"{ mode: "Windowed" | "FullscreenBorderless" | "#,
+            r#"{ "FullscreenExclusive": { width: u32, height: u32, refresh_mhz: u32 } }, "#,
+            "width: Option<u32>, height: Option<u32> }",
+        ),
+    );
+    assert!(
+        aether_codec::encode_schema(&serde_json::json!({"mode": "Windowed", "width": 1600, "height": 1200}), &schema,)
+            .is_ok(),
+        "the documented nested mode params encode",
+    );
+    assert!(
+        aether_codec::encode_schema(&serde_json::json!({"Windowed": {"width": 1600, "height": 1200}}), &schema,)
+            .is_err(),
+        "the misleading top-level variant form remains outside the descriptor",
+    );
 }
 
 /// Tripwire: projection owns the summary-line trim (issue 3006). Multi-line
