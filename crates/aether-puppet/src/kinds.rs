@@ -117,23 +117,38 @@ pub struct EyeArchetype {
 ///
 /// Channel names follow the rigging reference: `ARKit` where `ARKit` has
 /// an opinion, `ARKit`-style where it does not — ears being the obvious
-/// gap. Everything at zero is the rest pose, and a subject at rest skins
-/// nothing: the drawing extracted at load is the drawing that ships.
+/// gap. This kind is absolute: every mail replaces the complete pose,
+/// and an omitted or zero-valued channel is at rest rather than left at
+/// its previous value. Everything at zero is the rest pose, and a subject
+/// at rest skins nothing: the drawing extracted at load is the drawing
+/// that ships.
+///
+/// Deformation clamps each value to the subject's authored arc before any
+/// CPU or GPU bone map is derived: yaw `[-28, 28]`, pitch `[-12, 12]`,
+/// roll `[-12, 12]`, jaw `[-12, 12]`, each ear flick `[-22, 22]`, and
+/// each ear twist `[-22.5, 22.5]` degrees. Values outside an arc alias its
+/// nearest endpoint without changing the wire shape.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.puppet.pose")]
 pub struct Pose {
-    /// Turn, about the head pivot. Shared with the neck, so it reads as a
-    /// neck carrying a head rather than a head swivelling on a post.
+    /// Turn, about the head pivot, clamped to `[-28, 28]`. Shared with the
+    /// neck, so it reads as a neck carrying a head rather than a head
+    /// swivelling on a post.
     pub yaw: f32,
+    /// Nod about the head pivot, clamped to `[-12, 12]`.
     pub pitch: f32,
+    /// Tilt about the head pivot, clamped to `[-12, 12]`.
     pub roll: f32,
-    /// The mandible, hinged below and in front of the ear canal.
+    /// The mandible, hinged below and in front of the ear canal, clamped
+    /// to `[-12, 12]`.
     pub jaw: f32,
-    /// The blade swinging out of the midline plane.
+    /// The blade swinging out of the midline plane, clamped to
+    /// `[-22, 22]` on each side.
     pub ear_flick_left: f32,
     pub ear_flick_right: f32,
     /// Aim, not flap: the cup sweeping toward a sound about the blade's
-    /// own long axis. Clamped to the arc an ear actually has.
+    /// own long axis. Clamped to `[-22.5, 22.5]`, the arc an ear actually
+    /// has.
     pub ear_twist_left: f32,
     pub ear_twist_right: f32,
 }

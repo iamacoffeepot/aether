@@ -58,7 +58,7 @@ use aether_puppet::easel::survey::{self, Survey};
 use aether_puppet::easel::{View, accent};
 use aether_puppet::extract::{self, Settings};
 use aether_puppet::feature::{Curve3, Drawing, FeatureClass, Half, Pen, SurfacePoint};
-use aether_puppet::labels::{CLASSES, HAIR, Labels};
+use aether_puppet::labels::{CLASSES, DRESS, EYE, HAIR, INNER_EAR, LIPS, Labels, SKIN};
 use aether_puppet::mesh::Mesh;
 use aether_puppet::weld;
 use aether_puppet::{
@@ -466,6 +466,311 @@ fn chart_controls_capture() {
     eprintln!("pace: wrote unjudged chart-control evidence to {}", output.display());
 }
 
+/// Capture issue 4339's complete bounded-pose evidence without private
+/// subject or rig assets. The instrument generates a puppet-like OBJ,
+/// material field, rig descriptor, and dense weights in the harness save
+/// sandbox, loads them through `aether.puppet.load`, then drives only the
+/// public absolute pose inbox.
+///
+/// Every raw is full resolution. The sheet is only an index for inspection;
+/// it is not a visual verdict, and every raw still requires owner review.
+///
+/// ```text
+/// cargo xtask dist --no-bins --profile release
+/// AETHER_PUPPET_RIG_LIMIT_DIR=/path/to/output \
+/// cargo test -p aether-puppet --release --test pace_instrument \
+///     -- --ignored --nocapture rig_channel_limits_capture
+/// ```
+#[test]
+#[ignore = "visual hold; needs a release-profile component wasm"]
+fn rig_channel_limits_capture() {
+    let Some(wasm) = require_runtime("aether_puppet") else {
+        return;
+    };
+    let output = required_output_dir("AETHER_PUPPET_RIG_LIMIT_DIR");
+    let fixture = rig_channel_fixture();
+    let save = init_save_sandbox("puppet-rig-limits");
+    fs::write(save.join("subject.obj"), &fixture.obj).expect("stage the generated rig-limit subject");
+    fs::write(save.join("labels.npy"), &fixture.labels).expect("stage the generated rig-limit material field");
+    fs::create_dir_all(save.join("rig")).expect("stage the generated rig-limit directory");
+    fs::write(save.join("rig/rig.txt"), &fixture.descriptor).expect("stage the generated rig descriptor");
+    fs::write(save.join("rig/weights.npy"), &fixture.weights).expect("stage the generated rig weights");
+
+    let mesh = Mesh::from_obj_bytes(&fixture.obj, RELAXATION).expect("the generated rig-limit OBJ parses");
+    assert_eq!(mesh.positions.len(), fixture.vertices, "the generated rig weights cover the staged OBJ exactly");
+    deform::Skin::parse(&fixture.weights, &fixture.descriptor, fixture.vertices)
+        .expect("the generated descriptor and weights bind the staged OBJ");
+
+    // `mounted_staged_at` asserts that a requested rig binds at least one
+    // bone in the public load reply before it returns the harness.
+    let mut harness = mounted_staged_at(save, &wasm, true, false, PINNED);
+    harness.execute(vec![("prime", HarnessOp::advance(24))]).expect("prime the generated rig before capture");
+
+    let mut frames = Vec::with_capacity(17);
+    let neutral = capture_rig_limit_pose(&mut harness, &Pose::default());
+    let neutral_path = output.join("neutral.png");
+    fs::write(&neutral_path, &neutral).expect("write the neutral rig-limit raw");
+    frames.push(("neutral".to_owned(), neutral));
+
+    for (name, channel, limit) in [
+        ("yaw", Channel::Yaw, deform::YAW_LIMIT),
+        ("pitch", Channel::Pitch, deform::PITCH_LIMIT),
+        ("roll", Channel::Roll, deform::ROLL_LIMIT),
+        ("jaw", Channel::Jaw, deform::JAW_LIMIT),
+        ("left-ear-flick", Channel::EarFlickLeft, deform::FLICK_LIMIT),
+        ("right-ear-flick", Channel::EarFlickRight, deform::FLICK_LIMIT),
+        ("left-ear-twist", Channel::EarTwistLeft, deform::TWIST_LIMIT),
+        ("right-ear-twist", Channel::EarTwistRight, deform::TWIST_LIMIT),
+    ] {
+        for (sign, direction) in [("negative", -1.0), ("positive", 1.0)] {
+            let label = format!("{name}-{sign}");
+            let endpoint = pose_channel(channel, direction * limit);
+            let png = capture_rig_limit_pose(&mut harness, &endpoint);
+            let path = output.join(format!("{label}.png"));
+            fs::write(&path, &png).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+
+            let saturated = capture_rig_limit_pose(&mut harness, &pose_channel(channel, direction * limit * 4.0));
+            assert_eq!(saturated, png, "an over-limit {label} request must render exactly as its authored endpoint");
+            frames.push((label, png));
+        }
+    }
+
+    let sheet_path = output.join("rig-channel-limits-sheet.png");
+    fs::write(&sheet_path, labeled_control_sheet(&frames)).expect("write the labeled rig-limit contact sheet");
+    for (label, _) in &frames {
+        let path = output.join(format!("{label}.png"));
+        assert!(path.metadata().is_ok_and(|metadata| metadata.len() > 0), "expected raw {}", path.display());
+    }
+    assert!(
+        sheet_path.metadata().is_ok_and(|metadata| metadata.len() > 0),
+        "expected contact sheet {}",
+        sheet_path.display(),
+    );
+
+    eprintln!("pace: wrote unjudged self-contained rig-limit evidence to {}", output.display());
+}
+
+fn capture_rig_limit_pose(harness: &mut SubstrateHarness, pose: &Pose) -> Vec<u8> {
+    harness
+        .execute(vec![
+            ("pose", HarnessOp::send_and_settle(PUPPET, pose)),
+            ("settle", HarnessOp::advance(8)),
+            ("capture", HarnessOp::capture()),
+        ])
+        .expect("settle and capture an isolated rig-limit pose")
+        .captured("capture")
+        .expect("the rig-limit capture ran")
+        .to_vec()
+}
+
+fn pose_channel(channel: Channel, degrees: f32) -> Pose {
+    let mut pose = Pose::default();
+    channel.apply(&mut pose, degrees);
+
+    pose
+}
+
+const RIG_FIXTURE_BONES: usize = 6;
+const RIG_FIXTURE_FIELD_SIDE: usize = 48;
+
+#[derive(Clone, Copy)]
+struct RigFixturePart {
+    centre: Vec3,
+    scale: Vec3,
+    class: u8,
+    bone: usize,
+    priority: u8,
+}
+
+struct RigChannelFixture {
+    obj: Vec<u8>,
+    labels: Vec<u8>,
+    descriptor: String,
+    weights: Vec<u8>,
+    vertices: usize,
+}
+
+/// Disconnected, slightly overlapping ellipsoids keep every semantic part
+/// legible while making one-hot bone ownership unambiguous. Eyes and lips
+/// project just ahead of the head and jaw; the ears clear the crown; the
+/// dress remains below the neck. That makes head, jaw, both ears, both eyes,
+/// lips, and dress independently inspectable in every isolated raw.
+fn rig_channel_fixture() -> RigChannelFixture {
+    let parts = [
+        RigFixturePart {
+            centre: Vec3::new(0.0, -0.88, -0.04),
+            scale: Vec3::new(0.60, 0.72, 0.40),
+            class: DRESS,
+            bone: 0,
+            priority: 5,
+        },
+        RigFixturePart {
+            centre: Vec3::new(0.0, -0.28, 0.0),
+            scale: Vec3::new(0.24, 0.34, 0.22),
+            class: SKIN,
+            bone: 1,
+            priority: 4,
+        },
+        RigFixturePart {
+            centre: Vec3::new(0.0, 0.36, 0.0),
+            scale: Vec3::new(0.56, 0.62, 0.44),
+            class: HAIR,
+            bone: 2,
+            priority: 6,
+        },
+        RigFixturePart {
+            centre: Vec3::new(0.0, 0.02, 0.18),
+            scale: Vec3::new(0.38, 0.24, 0.30),
+            class: SKIN,
+            bone: 3,
+            priority: 3,
+        },
+        RigFixturePart {
+            centre: Vec3::new(0.58, 0.68, -0.01),
+            scale: Vec3::new(0.22, 0.42, 0.14),
+            class: INNER_EAR,
+            bone: 4,
+            priority: 2,
+        },
+        RigFixturePart {
+            centre: Vec3::new(-0.58, 0.68, -0.01),
+            scale: Vec3::new(0.22, 0.42, 0.14),
+            class: INNER_EAR,
+            bone: 5,
+            priority: 2,
+        },
+        RigFixturePart {
+            centre: Vec3::new(0.21, 0.45, 0.42),
+            scale: Vec3::new(0.10, 0.12, 0.07),
+            class: EYE,
+            bone: 2,
+            priority: 0,
+        },
+        RigFixturePart {
+            centre: Vec3::new(-0.21, 0.45, 0.42),
+            scale: Vec3::new(0.10, 0.12, 0.07),
+            class: EYE,
+            bone: 2,
+            priority: 0,
+        },
+        RigFixturePart {
+            centre: Vec3::new(0.0, 0.08, 0.45),
+            scale: Vec3::new(0.17, 0.07, 0.05),
+            class: LIPS,
+            bone: 3,
+            priority: 1,
+        },
+    ];
+    let mut obj = String::new();
+    let mut next_vertex = 1u32;
+    let mut dense_weights = Vec::new();
+    for part in parts {
+        let first = next_vertex;
+        append_sphere(&mut obj, &mut next_vertex, 12, 24, part.centre, part.scale);
+        for _ in first..next_vertex {
+            let mut row = [0.0f32; RIG_FIXTURE_BONES];
+            row[part.bone] = 1.0;
+            dense_weights.extend(row);
+        }
+    }
+    let vertices = next_vertex as usize - 1;
+    assert_eq!(dense_weights.len(), vertices * RIG_FIXTURE_BONES);
+
+    let descriptor = "bones chest neck head jaw ear_left ear_right\n\
+                      neck_share 0.35\n\
+                      pivot head 0.0 0.22 0.0\n\
+                      pivot jaw 0.0 0.16 0.18\n\
+                      pivot ear_left 0.48 0.58 0.0\n\
+                      pivot ear_right -0.48 0.58 0.0\n\
+                      axis ear_left 0.0 1.0 0.0\n\
+                      axis ear_right 0.0 1.0 0.0\n"
+        .to_owned();
+
+    RigChannelFixture {
+        obj: obj.into_bytes(),
+        labels: rig_fixture_labels(&parts),
+        descriptor,
+        weights: float_npy(&dense_weights, (vertices, RIG_FIXTURE_BONES)),
+        vertices,
+    }
+}
+
+fn rig_fixture_labels(parts: &[RigFixturePart]) -> Vec<u8> {
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for part in parts {
+        min.x = min.x.min(part.centre.x - part.scale.x);
+        min.y = min.y.min(part.centre.y - part.scale.y);
+        min.z = min.z.min(part.centre.z - part.scale.z);
+        max.x = max.x.max(part.centre.x + part.scale.x);
+        max.y = max.y.max(part.centre.y + part.scale.y);
+        max.z = max.z.max(part.centre.z + part.scale.z);
+    }
+    let centre = (min + max) * 0.5;
+    let span = (max - min).to_array().into_iter().fold(0.0f32, f32::max);
+    let side = span * (1.0 + 2.0 * LABEL_PAD);
+    let origin = centre - Vec3::splat(side * 0.5);
+    let spacing = side / (RIG_FIXTURE_FIELD_SIDE - 1) as f32;
+    let mut cells = Vec::with_capacity(RIG_FIXTURE_FIELD_SIDE.pow(3));
+
+    for x in 0..RIG_FIXTURE_FIELD_SIDE {
+        for y in 0..RIG_FIXTURE_FIELD_SIDE {
+            for z in 0..RIG_FIXTURE_FIELD_SIDE {
+                let at = origin + Vec3::new(x as f32, y as f32, z as f32) * spacing;
+                let mut selected: Option<(u8, f32, u8)> = None;
+                for part in parts {
+                    let offset = at - part.centre;
+                    let distance = (offset.x / part.scale.x).powi(2)
+                        + (offset.y / part.scale.y).powi(2)
+                        + (offset.z / part.scale.z).powi(2);
+                    if distance > 2.25 {
+                        continue;
+                    }
+                    if selected.is_none_or(|(priority, best, _)| {
+                        part.priority < priority || (part.priority == priority && distance < best)
+                    }) {
+                        selected = Some((part.priority, distance, part.class));
+                    }
+                }
+                cells.push(selected.map_or(0, |(_, _, class)| class));
+            }
+        }
+    }
+
+    u8_npy(&cells, (RIG_FIXTURE_FIELD_SIDE, RIG_FIXTURE_FIELD_SIDE, RIG_FIXTURE_FIELD_SIDE))
+}
+
+fn float_npy(values: &[f32], shape: (usize, usize)) -> Vec<u8> {
+    assert_eq!(shape.0.checked_mul(shape.1), Some(values.len()));
+    let dictionary = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({}, {}), }}", shape.0, shape.1);
+    let padding = (16 - ((10 + dictionary.len() + 1) % 16)) % 16;
+    let mut header = dictionary;
+    header.extend(iter::repeat_n(' ', padding));
+    header.push('\n');
+
+    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+    bytes.extend(u16::try_from(header.len()).expect("a short generated weight header").to_le_bytes());
+    bytes.extend(header.as_bytes());
+    bytes.extend(values.iter().flat_map(|value| value.to_le_bytes()));
+    bytes
+}
+
+fn u8_npy(values: &[u8], shape: (usize, usize, usize)) -> Vec<u8> {
+    assert_eq!(shape.0.checked_mul(shape.1).and_then(|plane| plane.checked_mul(shape.2)), Some(values.len()));
+    let dictionary =
+        format!("{{'descr': '|u1', 'fortran_order': False, 'shape': ({}, {}, {}), }}", shape.0, shape.1, shape.2);
+    let padding = (16 - ((10 + dictionary.len() + 1) % 16)) % 16;
+    let mut header = dictionary;
+    header.extend(iter::repeat_n(' ', padding));
+    header.push('\n');
+
+    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+    bytes.extend(u16::try_from(header.len()).expect("a short generated label header").to_le_bytes());
+    bytes.extend(header.as_bytes());
+    bytes.extend(values);
+    bytes
+}
+
 /// Raw before/after evidence for issue 4568's small-canvas capacity fix.
 ///
 /// Exactly four physical window sizes are captured from release-profile
@@ -817,13 +1122,16 @@ fn capture_control_family<K: Kind>(harness: &mut SubstrateHarness, output: &Path
 /// Arrange half-resolution thumbnails in reading order. Labels are a tiny
 /// embedded bitmap alphabet so the evidence instrument adds no font or image
 /// dependency to the crate.
-fn labeled_control_sheet(frames: &[(&str, Vec<u8>)]) -> Vec<u8> {
+fn labeled_control_sheet<L: AsRef<str>>(frames: &[(L, Vec<u8>)]) -> Vec<u8> {
     const COLUMNS: usize = 4;
     const LABEL_HEIGHT: u32 = 36;
 
     let decoded: Vec<_> = frames
         .iter()
-        .map(|(label, png)| (*label, decode_png(png).unwrap_or_else(|error| panic!("decode {label}: {error}"))))
+        .map(|(label, png)| {
+            let label = label.as_ref();
+            (label, decode_png(png).unwrap_or_else(|error| panic!("decode {label}: {error}")))
+        })
         .collect();
     let first = &decoded[0].1;
     assert!(

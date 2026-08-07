@@ -112,6 +112,80 @@ It resolves from three sources, in order:
 A `focus` on a box that carries face classes is inert — the face wins — so the
 record is only worth writing on a subject that has none.
 
+## Pose the rig
+
+`aether.puppet.pose` is an absolute eight-channel command in degrees. Every
+mail replaces the complete pose; omitted or zero-valued channels are at rest,
+not left at their previous values. For example, this turns the head while
+holding the jaw and both ears at rest:
+
+```json
+{
+  "yaw": 18.0,
+  "pitch": 0.0,
+  "roll": 0.0,
+  "jaw": 0.0,
+  "ear_flick_left": 0.0,
+  "ear_flick_right": 0.0,
+  "ear_twist_left": 0.0,
+  "ear_twist_right": 0.0
+}
+```
+
+The deformation layer clamps the complete pose before deriving either CPU or
+GPU bone transforms. Values beyond an authored arc therefore alias its nearest
+endpoint everywhere the pose is consumed, without changing the mail shape.
+The current candidate authored bounds are:
+
+| Channel | Inclusive range |
+| --- | ---: |
+| `yaw` | `-28°..=28°` |
+| `pitch` | `-12°..=12°` |
+| `roll` | `-12°..=12°` |
+| `jaw` | `-12°..=12°` |
+| `ear_flick_left` | `-22°..=22°` |
+| `ear_flick_right` | `-22°..=22°` |
+| `ear_twist_left` | `-22.5°..=22.5°` |
+| `ear_twist_right` | `-22.5°..=22.5°` |
+
+All-zero mail is the exact identity pose. Yaw is shared with the neck; ear
+flick swings the blade, while ear twist aims the cup about the blade's own long
+axis.
+
+### Capture every rig limit without private assets
+
+The ignored release-profile instrument generates its own puppet-like OBJ,
+material field, six-bone descriptor, and per-vertex weights in the harness
+save sandbox. Its head, jaw, left and right ears, eyes, lips, and dress are
+separate visible regions. No crossfeed or authored subject directory is used.
+
+Build the release component and run the named instrument:
+
+```text
+cargo xtask dist --no-bins --profile release
+AETHER_PUPPET_RIG_LIMIT_DIR=/path/to/output \
+cargo test -p aether-puppet --release --test pace_instrument \
+  -- --ignored --nocapture rig_channel_limits_capture
+```
+
+The output directory receives `neutral.png`, both
+`yaw-{negative,positive}.png`, `pitch-{negative,positive}.png`,
+`roll-{negative,positive}.png`, `jaw-{negative,positive}.png`,
+`left-ear-flick-{negative,positive}.png`,
+`right-ear-flick-{negative,positive}.png`,
+`left-ear-twist-{negative,positive}.png`, and
+`right-ear-twist-{negative,positive}.png`, plus
+`rig-channel-limits-sheet.png`. Each channel raw holds the other seven
+channels at zero. The instrument also sends an over-limit request after every
+endpoint and asserts that its full-resolution capture is byte-identical to the
+endpoint, but does not preserve those redundant aliases.
+
+The contact sheet is navigation, not acceptance. Before a PR changing these
+bounds may merge, the owner must explicitly inspect and accept `neutral.png`
+and every one of the sixteen positive/negative full-resolution channel raws.
+An automated pass or inspection of the contact sheet alone does not satisfy
+this gate.
+
 ## Drive the chart
 
 The four controls compose over one chart state. They do not reload or

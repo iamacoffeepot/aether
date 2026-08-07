@@ -44,6 +44,21 @@ use crate::feature::Curve3;
 use crate::mesh::{Anchorage, Mesh};
 use crate::npy;
 
+/// Half the authored head-turn arc, in degrees.
+pub const YAW_LIMIT: f32 = 28.0;
+
+/// Half the authored head-nod arc, in degrees.
+pub const PITCH_LIMIT: f32 = 12.0;
+
+/// Half the authored head-tilt arc, in degrees.
+pub const ROLL_LIMIT: f32 = 12.0;
+
+/// Half the authored jaw arc, in degrees.
+pub const JAW_LIMIT: f32 = 12.0;
+
+/// Half the authored ear-flick arc, in degrees.
+pub const FLICK_LIMIT: f32 = 22.0;
+
 /// Half the arc an ear can actually turn through, in degrees. A fox aims
 /// an ear by rotating it about its own long axis; past this the blade is
 /// doing something an ear does not do.
@@ -789,8 +804,9 @@ impl Skin {
     /// that has turned is drawn by turning the viewer, not the face.
     pub fn head(&self, pose: &Pose) -> Rigid {
         let pivot = self.pivot("head");
+        let pose = bounded_pose(pose);
 
-        Rigid::sample(|p| turn(p, pivot, pose, 1.0))
+        Rigid::sample(|p| turn(p, pivot, &pose, 1.0))
     }
 
     /// Where each bone sends a point at this pose.
@@ -799,8 +815,9 @@ impl Skin {
     /// does both. The chest is the pedestal and never moves — it is what
     /// the rest of the figure is posed against.
     pub fn transforms(&self, pose: &Pose) -> Vec<Rigid> {
+        let pose = bounded_pose(pose);
         let head_pivot = self.pivot("head");
-        let head = |p: Vec3, share: f32| turn(p, head_pivot, pose, share);
+        let head = |p: Vec3, share: f32| turn(p, head_pivot, &pose, share);
 
         self.descriptor
             .bones
@@ -823,14 +840,11 @@ impl Skin {
                         } else {
                             pose.ear_twist_right
                         };
-                        let (twist, side) = (
-                            twist.clamp(-TWIST_LIMIT, TWIST_LIMIT),
-                            if left {
-                                1.0
-                            } else {
-                                -1.0
-                            },
-                        );
+                        let side = if left {
+                            1.0
+                        } else {
+                            -1.0
+                        };
                         let axis = bone.axis.map_or(Vec3::Y, Vec3::from_array);
 
                         // Aim first, about the blade's own axis, so the cup
@@ -943,6 +957,26 @@ impl Skin {
     }
 }
 
+/// The one authored-boundary crossing for the complete absolute pose.
+///
+/// Keeping this at the deformation boundary means the CPU silhouette,
+/// the head map used by the chart, and the bone table consumed by every
+/// GPU pose all derive from the same bounded values. The wire kind stays
+/// absolute and unchanged; values beyond the authored arcs simply alias
+/// their nearest endpoint here.
+fn bounded_pose(pose: &Pose) -> Pose {
+    Pose {
+        yaw: pose.yaw.clamp(-YAW_LIMIT, YAW_LIMIT),
+        pitch: pose.pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT),
+        roll: pose.roll.clamp(-ROLL_LIMIT, ROLL_LIMIT),
+        jaw: pose.jaw.clamp(-JAW_LIMIT, JAW_LIMIT),
+        ear_flick_left: pose.ear_flick_left.clamp(-FLICK_LIMIT, FLICK_LIMIT),
+        ear_flick_right: pose.ear_flick_right.clamp(-FLICK_LIMIT, FLICK_LIMIT),
+        ear_twist_left: pose.ear_twist_left.clamp(-TWIST_LIMIT, TWIST_LIMIT),
+        ear_twist_right: pose.ear_twist_right.clamp(-TWIST_LIMIT, TWIST_LIMIT),
+    }
+}
+
 /// Yaw, then pitch, then roll about the head pivot, at `share` of each.
 fn turn(p: Vec3, pivot: Vec3, pose: &Pose, share: f32) -> Vec3 {
     let turned = rotate(p, pivot, Vec3::Y, pose.yaw * share);
@@ -1042,8 +1076,126 @@ mod tests {
         bytes
     }
 
-    fn quarter_turn() -> Pose {
-        Pose { yaw: 90.0, ..Pose::default() }
+    fn authored_turn() -> Pose {
+        Pose { yaw: YAW_LIMIT, ..Pose::default() }
+    }
+
+    fn complete_rig() -> Skin {
+        let descriptor = "bones chest neck head jaw ear_left ear_right\n\
+                          neck_share 0.35\n\
+                          pivot head 0.0 0.4 0.0\n\
+                          pivot jaw 0.0 0.0 0.2\n\
+                          pivot ear_left 0.5 0.6 0.0\n\
+                          pivot ear_right -0.5 0.6 0.0\n\
+                          axis ear_left 0.0 1.0 0.0\n\
+                          axis ear_right 0.0 1.0 0.0\n";
+        Skin::parse(&npy(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0], (1, 6)), descriptor, 1).expect("a complete six-bone rig")
+    }
+
+    #[test]
+    fn every_pose_channel_saturates_in_isolation() {
+        let cases = [
+            (
+                "yaw negative",
+                Pose { yaw: -YAW_LIMIT * 4.0, ..Pose::default() },
+                Pose { yaw: -YAW_LIMIT, ..Pose::default() },
+            ),
+            (
+                "yaw positive",
+                Pose { yaw: YAW_LIMIT * 4.0, ..Pose::default() },
+                Pose { yaw: YAW_LIMIT, ..Pose::default() },
+            ),
+            (
+                "pitch negative",
+                Pose { pitch: -PITCH_LIMIT * 4.0, ..Pose::default() },
+                Pose { pitch: -PITCH_LIMIT, ..Pose::default() },
+            ),
+            (
+                "pitch positive",
+                Pose { pitch: PITCH_LIMIT * 4.0, ..Pose::default() },
+                Pose { pitch: PITCH_LIMIT, ..Pose::default() },
+            ),
+            (
+                "roll negative",
+                Pose { roll: -ROLL_LIMIT * 4.0, ..Pose::default() },
+                Pose { roll: -ROLL_LIMIT, ..Pose::default() },
+            ),
+            (
+                "roll positive",
+                Pose { roll: ROLL_LIMIT * 4.0, ..Pose::default() },
+                Pose { roll: ROLL_LIMIT, ..Pose::default() },
+            ),
+            (
+                "jaw negative",
+                Pose { jaw: -JAW_LIMIT * 4.0, ..Pose::default() },
+                Pose { jaw: -JAW_LIMIT, ..Pose::default() },
+            ),
+            (
+                "jaw positive",
+                Pose { jaw: JAW_LIMIT * 4.0, ..Pose::default() },
+                Pose { jaw: JAW_LIMIT, ..Pose::default() },
+            ),
+            (
+                "left flick negative",
+                Pose { ear_flick_left: -FLICK_LIMIT * 4.0, ..Pose::default() },
+                Pose { ear_flick_left: -FLICK_LIMIT, ..Pose::default() },
+            ),
+            (
+                "left flick positive",
+                Pose { ear_flick_left: FLICK_LIMIT * 4.0, ..Pose::default() },
+                Pose { ear_flick_left: FLICK_LIMIT, ..Pose::default() },
+            ),
+            (
+                "right flick negative",
+                Pose { ear_flick_right: -FLICK_LIMIT * 4.0, ..Pose::default() },
+                Pose { ear_flick_right: -FLICK_LIMIT, ..Pose::default() },
+            ),
+            (
+                "right flick positive",
+                Pose { ear_flick_right: FLICK_LIMIT * 4.0, ..Pose::default() },
+                Pose { ear_flick_right: FLICK_LIMIT, ..Pose::default() },
+            ),
+            (
+                "left twist negative",
+                Pose { ear_twist_left: -TWIST_LIMIT * 4.0, ..Pose::default() },
+                Pose { ear_twist_left: -TWIST_LIMIT, ..Pose::default() },
+            ),
+            (
+                "left twist positive",
+                Pose { ear_twist_left: TWIST_LIMIT * 4.0, ..Pose::default() },
+                Pose { ear_twist_left: TWIST_LIMIT, ..Pose::default() },
+            ),
+            (
+                "right twist negative",
+                Pose { ear_twist_right: -TWIST_LIMIT * 4.0, ..Pose::default() },
+                Pose { ear_twist_right: -TWIST_LIMIT, ..Pose::default() },
+            ),
+            (
+                "right twist positive",
+                Pose { ear_twist_right: TWIST_LIMIT * 4.0, ..Pose::default() },
+                Pose { ear_twist_right: TWIST_LIMIT, ..Pose::default() },
+            ),
+        ];
+        let skin = complete_rig();
+
+        for (label, over_limit, endpoint) in cases {
+            assert_eq!(bounded_pose(&over_limit), endpoint, "{label} must change only its own channel");
+            assert_eq!(
+                skin.transforms(&over_limit).iter().map(Rigid::rows).collect::<Vec<_>>(),
+                skin.transforms(&endpoint).iter().map(Rigid::rows).collect::<Vec<_>>(),
+                "{label} must alias its authored endpoint throughout deformation",
+            );
+        }
+    }
+
+    #[test]
+    fn neutral_pose_remains_exact_identity() {
+        let neutral = Pose::default();
+        let skin = complete_rig();
+
+        assert_eq!(bounded_pose(&neutral), neutral);
+        assert_eq!(skin.head(&neutral).rows(), Rigid::IDENTITY.rows());
+        assert!(skin.transforms(&neutral).iter().all(|transform| transform.rows() == Rigid::IDENTITY.rows()));
     }
 
     /// A strip of two triangles standing in the `xy` plane, and a rig that
@@ -1269,7 +1421,7 @@ mod tests {
             assert_eq!(skin.influences(vertex), (expected_joints, expected_shares));
         }
 
-        let transforms = skin.transforms(&quarter_turn());
+        let transforms = skin.transforms(&authored_turn());
         let point = Vec3::new(0.2, 0.7, 1.1);
         for (vertex, row) in rows.iter().enumerate() {
             let legacy = row.iter().zip(&transforms).fold(Rigid::ZERO, |blend, (&share, transform)| {
@@ -1323,7 +1475,7 @@ mod tests {
     /// appears once she moves.
     #[test]
     fn the_inverse_carries_a_point_back_through_the_pose() {
-        let pose = quarter_turn();
+        let pose = authored_turn();
         let skin = Skin::parse(&npy(&[1.0, 0.0, 0.5, 0.5], (2, 2)), descriptor(), 2).expect("a two-vertex rig");
         let head = skin.head(&pose);
 
@@ -1338,18 +1490,19 @@ mod tests {
     /// whole rig — a blend that normalised them away, or applied the
     /// dominant bone alone, moves a half-weighted vertex the full distance
     /// and turns every soft boundary on the figure into a crease. The two
-    /// vertices here are the same point under a quarter turn at full and
+    /// vertices here are the same point under one authored turn at full and
     /// half share, so the half-weighted one has to land short of the other
     /// and off the arc between them.
     #[test]
     fn a_shared_vertex_travels_its_own_share_of_the_way() {
         let skin = Skin::parse(&npy(&[0.0, 1.0, 0.5, 0.5], (2, 2)), descriptor(), 2).expect("a two-vertex rig");
-        let transforms = skin.transforms(&quarter_turn());
+        let transforms = skin.transforms(&authored_turn());
 
         let at = Vec3::new(0.0, 1.0, 1.0);
         let (whole, shared) = (skin.at_vertex(&transforms, 0).point(at), skin.at_vertex(&transforms, 1).point(at));
 
-        assert!((whole - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-5, "a fully bound vertex takes the whole turn");
+        let expected = rotate(at, Vec3::ZERO, Vec3::Y, YAW_LIMIT);
+        assert!((whole - expected).length() < 1e-5, "a fully bound vertex takes the whole authored turn");
         assert!(
             (shared - (at + whole) * 0.5).length() < 1e-5,
             "a half-bound vertex lands halfway between rest and posed, at {shared:?}",
@@ -1375,7 +1528,7 @@ mod tests {
     #[test]
     fn a_posed_curve_point_lands_on_the_posed_surface() {
         let (rest, skin) = strip();
-        let transforms = skin.transforms(&quarter_turn());
+        let transforms = skin.transforms(&authored_turn());
 
         // A level set of height, which cuts both triangles across their
         // interiors rather than along an edge.
@@ -1456,7 +1609,7 @@ mod tests {
     #[test]
     fn the_two_corner_binding_poses_a_point_where_the_curve_pass_does() {
         let (rest, skin) = strip();
-        let transforms = skin.transforms(&quarter_turn());
+        let transforms = skin.transforms(&authored_turn());
         let bound = Bound { rest: &rest, skin: &skin };
 
         let heights: Vec<f32> = rest.positions.iter().map(|p| p.y).collect();
