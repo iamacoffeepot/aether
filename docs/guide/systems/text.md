@@ -31,7 +31,7 @@ applies projection, clipping, blending, and frame lifetime. See
 `text` feature. Its fontdue-backed native state is compiled only with
 `text-runtime`; wasm senders can use the kinds without linking fontdue or
 substrate runtime types. The split is defined in
-[`text/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/mod.rs).
+[`text/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/lib.rs).
 
 ## Public mail surface
 

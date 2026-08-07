@@ -62,7 +62,7 @@ waits on a request that cannot complete.
 
 ## Change route
 
-- Marker and typed helpers: `crates/aether-clipboard/src/mod.rs`
+- Marker and typed helpers: `crates/aether-clipboard/src/lib.rs`
 - Kinds: `crates/aether-clipboard/src/kinds.rs`
 - System/in-memory runtime: `crates/aether-clipboard/src/runtime/mod.rs`
 - Unsupported runtime: `crates/aether-clipboard/src/runtime/headless.rs`

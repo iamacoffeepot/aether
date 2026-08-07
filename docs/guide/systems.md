@@ -20,6 +20,9 @@ scheduler or settlement invariant.
 
 ## Hosted code and discovery
 
+For the hosted-code overview and replacement boundary, start with
+[Hosted code and live replacement](systems/hosted-code.md).
+
 | System | Owns |
 |---|---|
 | [Components](systems/components.md) | wasm load/drop/replace, exports, config and state transfer |
@@ -39,7 +42,7 @@ The [operating chapter](operating/component-registry.md) covers that lifecycle.
 | [TCP](systems/tcp.md) | framed listeners and session actors |
 | [RPC](systems/rpc.md) | hub/engine process transport |
 | [Clipboard](systems/clipboard.md) | text clipboard with deterministic/headless backends |
-| [Content generation](systems/content-generation.md) | Anthropic/Gemini provider queues and staged media |
+| [Content generation](systems/content-generation.md) | Anthropic/Gemini provider queues, the `aether.process` CLI edge, and staged media |
 | [Player sessions](systems/player-sessions.md) | trusted session/gateway tier over TCP and tick-native sim |
 
 These all cross trust or blocking boundaries. Read [Platform and network I/O](systems/platform-io.md)
@@ -47,9 +50,13 @@ for the common rules.
 
 ## Media, interaction, and product tools
 
+For the media and product-tools overview, start with
+[Media, interaction, and product tools](systems/media-and-tools.md).
+
 | System | Owns |
 |---|---|
 | [Rendering and camera](systems/rendering.md) | GPU draw queues, textures, materials, capture and matrices |
+| [Render programs](systems/render-programs.md) | authored GPU programs, bindings, transients and passes |
 | [Text](systems/text.md) | font atlas, layout, batches and metrics |
 | [Mesh authoring](systems/mesh-authoring.md) | DSL, parser, tessellation and viewer load |
 | [Audio](systems/audio.md) | realtime events, scheduling, instruments, tracks and effects |
@@ -57,6 +64,7 @@ for the common rules.
 | [Window](systems/window.md) | mode, title, focus and unsupported replies |
 | [Widgets](systems/widgets.md) | controls, focus, scroll, panel/editor composition |
 | [World and terrain](systems/world-and-terrain.md) | chunk data, proposals, picking, mesh and workbench |
+| [Puppet controls](systems/puppet.md) | articulated character pose, gaze, expression and turntable control |
 
 Native capabilities own devices; kit actors compose them into product behavior.
 
