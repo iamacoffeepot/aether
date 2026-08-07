@@ -279,6 +279,12 @@ pub struct RedispatchPayload {
     pub question: Digest,
     /// The adopting answer's digest.
     pub answer: Digest,
+    /// The answer statement's exact asserted bytes — the decision text the
+    /// executor reactor overlays onto the re-dispatched lane's advisory
+    /// channel (#3664). Carried through rather than resolved host-side: the
+    /// host has no store of statement bodies, and the reducer held the
+    /// statement when it decided.
+    pub words: Vec<u8>,
 }
 
 /// The per-member attempt dispatch outbox payload (ADR-0149 §The line): the

@@ -505,8 +505,9 @@ fn project(
             Decision::EmitReceipt(receipt) => {
                 outbox.push(OutboxPayload::new(Topic::LandingReceipt, to_vec(receipt)?));
             }
-            Decision::RedispatchStage { bloom, question, answer } => {
-                let payload = RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer };
+            Decision::RedispatchStage { bloom, question, answer, words } => {
+                let payload =
+                    RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer, words: words.clone() };
                 outbox.push(OutboxPayload::new(Topic::Redispatch, to_vec(&payload)?));
             }
             Decision::DispatchAttempt { bloom, workpiece, stage, transformation, scope_revision, candidate } => {

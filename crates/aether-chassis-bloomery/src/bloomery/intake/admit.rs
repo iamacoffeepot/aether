@@ -200,7 +200,11 @@ fn persist_aggregate_findings(
 // The read-side reconstruction lives here beside its sole caller `admit_uploaded`;
 // the write-side `to_stored` lives with `record_dispatch` in the dispatch module.
 impl DispatchRecord {
-    fn from_stored(order: &OutstandingOrder) -> Option<Self> {
+    /// The typed record a stored row holds, or `None` when a column does not
+    /// decode (a corrupt row, never a well-formed one). Also how the redispatch
+    /// drain rebuilds a held order's lane for replay (#3664), which then
+    /// overrides `nonce` so the replay is a distinct attempt.
+    pub(crate) fn from_stored(order: &OutstandingOrder) -> Option<Self> {
         Some(Self {
             nonce: Nonce(order.nonce.clone()),
             bloom: BloomId(digest_from_slice(&order.bloom)?),
@@ -209,6 +213,7 @@ impl DispatchRecord {
             candidate: digest_from_slice(&order.candidate)?,
             displayed_digest: digest_from_slice(&order.displayed_digest)?,
             stage: from_bytes(&order.stage).ok()?,
+            transformation: from_bytes(&order.transformation).ok()?,
         })
     }
 }
@@ -278,7 +283,12 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     //   bloom-level AggregateReview position, never a member dispatch) is a
     //   corrupt order and is refused, never routed to Integrate.
     let mut aggregate_findings: Option<FindingsDecomposition> = None;
+    // The question digest a parked admission raises its hold under (the evidence
+    // detail, per the reducer's `RecordEvidence` fold) — the key the held order is
+    // filed under below, captured before the evidence moves into the fact.
+    let mut parked_under = None;
     let event = if upload.verdict == StageVerdict::Parked {
+        parked_under = Some(evidence.detail);
         Event {
             idempotency_key: IdempotencyKey(format!("aether.bloomery.park:{}", record.nonce.0)),
             fact: Fact::AdmitEvidence { bloom: record.bloom, evidence },
@@ -349,6 +359,18 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
         return Ok(AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(record.stage)));
     };
     let admit = Admit { event: to_vec(&event)? };
+    // A parked attempt's order is re-filed under the question it raised, *before*
+    // the consume below spends it (#3664). The admission is what raises the hold,
+    // and the answer that releases it names only the question — so without this
+    // row the redispatch has no lane to replay and the bloom wedges on a decision
+    // that was made. Ordering matters in one direction only: a write fault here
+    // leaves the order live and the upload retryable, whereas filing after the
+    // consume would spend the order into a state no retry can reach. The
+    // converse orphan is inert — a row under a question whose evidence never
+    // admitted raises no hold, so nothing ever looks it up.
+    if let Some(question) = parked_under {
+        store.record_parked_question(question.as_bytes(), &stored)?;
+    }
     // Consume-once, only now that the admission is fully constructed. A lost race
     // to consumption between the lookup and here reads as a replay.
     if !store.consume_order(&record.nonce.0)? {

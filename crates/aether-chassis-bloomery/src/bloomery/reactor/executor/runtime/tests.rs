@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use aether_bloomery::{
     AggregateReviewPayload, BloomId, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Nonce,
-    ReviewPass, StageCatalog, StageId, Topic, Transformation, WorkHandle, WorkOrder, WorkpieceId,
+    RedispatchPayload, ReviewPass, StageCatalog, StageId, Topic, Transformation, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -19,11 +19,11 @@ use aether_data::wire::{from_bytes, to_vec};
 
 use super::{
     BACKOFF_CAP, CandidatePush, NameEvidenceClaims, TrackedHandle, backoff_delay, candidate_ref_name,
-    drain_and_dispatch, drain_and_dispatch_aggregate, is_stale, next_backoff, pull_and_admit, push_admitted_candidates,
-    seed_tracked, select_stale_handles,
+    drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_stale, next_backoff, pull_and_admit,
+    push_admitted_candidates, seed_tracked, select_stale_handles,
 };
 use crate::bloomery::executor::local::testing::FixedRunner;
-use crate::bloomery::intake::{Admission, attempt_artifact_name};
+use crate::bloomery::intake::{Admission, AdmitDecision, UploadedEvidence, admit_uploaded, attempt_artifact_name};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::{ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle};
 use crate::store::{SqliteStore, StoreBackend};
@@ -833,4 +833,137 @@ fn drain_threads_persisted_findings_onto_the_construct_order() {
         description.contains("## Findings\n\nclippy: off-by-one in the loop bound"),
         "the findings follow as their own labeled section",
     );
+}
+
+// Park one dispatched construct attempt on `question` and return the outbox
+// sequence of the redispatch its answer decides. Drives the real paths on both
+// sides — `drain_and_dispatch` files the order, `admit_uploaded` re-files it
+// under the question — so the two halves agree on the key by construction rather
+// than by a hand-built row.
+fn park_and_answer(
+    store: &mut SqliteStore,
+    shell: &ExecutorShell,
+    bloom: BloomId,
+    workpiece: &str,
+    question: aether_bloomery::Digest,
+    words: &str,
+) -> u64 {
+    let (dispatched, subject) = enqueue_construct_dispatch(store, bloom, workpiece, 5);
+    drain_and_dispatch(store, shell).unwrap();
+    store.ack_topic(Topic::Dispatch, dispatched).unwrap();
+
+    let upload = UploadedEvidence {
+        nonce: Nonce(format!("dispatch-{dispatched}")),
+        subject: digest(subject),
+        verdict: StageVerdict::Parked,
+        detail: question,
+        candidate: None,
+        findings: None,
+    };
+    assert!(matches!(admit_uploaded(store, &upload).unwrap(), AdmitDecision::Admitted(_)), "the parked upload admits");
+
+    // The bytes the control projection enqueues from the reducer's
+    // `Decision::RedispatchStage` once an author-signed answer adopts the hold.
+    let payload =
+        RedispatchPayload { bloom: bloom.0, question, answer: digest(0xA1), words: words.as_bytes().to_vec() };
+    store.enqueue_topic(Topic::Redispatch, &to_vec(&payload).unwrap()).unwrap()
+}
+
+// ADR-0151 / #3664 — the whole parked-question loop: a dispatched lane parks, the
+// admission files its order under the question that raised the hold, and the
+// redispatch an adopted answer decides replays that exact lane with the decision
+// on its advisory channel. This is the path that shipped broken — `Topic::Redispatch`
+// had no drainer, so answering returned 200 and the bloom wedged forever — and
+// nothing covered it because the only answer test asserted the `NoMatchingHold`
+// rejection.
+//
+// The description assertions are the load-bearing half. A replay that reaches the
+// executor but carries only the original order is not a fix: the lane sees exactly
+// the inputs that made it park and parks again on the same question, trading a
+// silent wedge for a loop.
+#[test]
+fn an_answered_park_replays_the_held_lane_carrying_the_decision() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let question = digest(0x9A);
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-held", "build the widget").unwrap();
+
+    let sequence = park_and_answer(&mut store, &shell, bloom, "wp-held", question, "drop the cache; ship it");
+    let (handles, ack_through, transient) = drain_and_redispatch(&mut store, &shell).unwrap();
+
+    assert_eq!(handles.len(), 1, "the released question re-dispatches its held attempt");
+    assert_eq!(ack_through, Some(sequence), "the replay acks its outbox entry");
+    assert_eq!(transient, None);
+
+    let orders = backend.orders();
+    let replay = orders.last().expect("the replay reached the executor");
+    assert_eq!(replay.nonce.0, format!("redispatch-{sequence}"), "the replay is its own attempt, not the spent nonce");
+    let description = replay.transformation.description.as_deref().expect("the construct lane carries its prompt");
+    assert!(description.starts_with("build the widget"), "the held order's work order survives the replay");
+    assert!(
+        description.contains("## Decision\n\ndrop the cache; ship it"),
+        "the answer that released the hold reaches the lane, or it parks again on the same question",
+    );
+
+    // The hold's row is spent with its replay, so a re-drain cannot double-submit.
+    assert!(
+        store.lookup_parked_question(bloom.0.as_bytes(), question.as_bytes()).unwrap().is_none(),
+        "the held order clears once its replay dispatches",
+    );
+}
+
+// Tripwire: the held row is consumed only *after* the replay dispatches. Deleting
+// first would make a transient submit failure absorbing — the outbox entry
+// re-drains (it is never acked) against a row that is already gone, so the
+// redispatch is lost for good and the bloom wedges on an answered question. The
+// same ordering the integrate correspondence landed on in #3667.
+#[test]
+fn a_failed_replay_leaves_the_held_order_re_dispatchable() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    let question = digest(0x9A);
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-held", "build the widget").unwrap();
+
+    let backend = Arc::new(CapturingBackend::default());
+    let sequence =
+        park_and_answer(&mut store, &ExecutorShell::new(Arc::clone(&backend)), bloom, "wp-held", question, "ship it");
+
+    // A 500 is transient, so the drain stops its ack prefix rather than parking.
+    let (handles, ack_through, transient) = drain_and_redispatch(&mut store, &failing_shell(500)).unwrap();
+    assert!(handles.is_empty(), "nothing submitted");
+    assert_eq!(ack_through, None, "the failed entry is not acked past");
+    assert_eq!(transient, Some(sequence), "the failure re-drives on a backoff");
+
+    // Unacked, the entry re-drains — and the held order is still there to replay.
+    let (handles, ack_through, _) =
+        drain_and_redispatch(&mut store, &ExecutorShell::new(Arc::clone(&backend))).unwrap();
+    assert_eq!(handles.len(), 1, "the retry replays the still-held order");
+    assert_eq!(ack_through, Some(sequence));
+}
+
+// A redispatch naming a question no dispatched attempt parked under can never
+// resolve, so it is acked past rather than left to wedge the queue behind it —
+// the same "permanent refusal parks the entry" reasoning `drain_and_dispatch`
+// applies to a 4xx. Catches a well-meant `break` here turning one unresolvable
+// entry into a stalled topic.
+#[test]
+fn a_redispatch_with_no_held_order_acks_past_instead_of_wedging_the_topic() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+
+    let payload =
+        RedispatchPayload { bloom: bloom.0, question: digest(0x9A), answer: digest(0xA1), words: b"ship it".to_vec() };
+    let orphan = store.enqueue_topic(Topic::Redispatch, &to_vec(&payload).unwrap()).unwrap();
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-held", "build the widget").unwrap();
+    let live = park_and_answer(&mut store, &shell, bloom, "wp-held", digest(0x9B), "ship it");
+
+    let (handles, ack_through, _) = drain_and_redispatch(&mut store, &shell).unwrap();
+
+    assert_eq!(handles.len(), 1, "the entry behind the unresolvable one still dispatches");
+    assert_eq!(ack_through, Some(live), "the ack prefix covers both, not just up to the orphan");
+    assert!(orphan < live);
 }

@@ -29,9 +29,12 @@ pub struct ExecutorReactorCapability;
 impl ExecutorReactorCapability {
     /// The outbox topics this reactor drains — its half of the producer/reactor
     /// pairing the topic tripwire checks against [`Topic::ALL`]. The executor
-    /// reactor is the sole drainer of both the per-member [`Topic::Dispatch`]
-    /// and the whole-bloom [`Topic::AggregateReview`] (ADR-0153).
-    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::Dispatch, Topic::AggregateReview];
+    /// reactor is the sole drainer of the per-member [`Topic::Dispatch`], the
+    /// whole-bloom [`Topic::AggregateReview`] (ADR-0153), and the
+    /// [`Topic::Redispatch`] replay of an answered parked question (ADR-0151,
+    /// #3664) — all three submit through the same executor shell and ride the
+    /// same intake cycle.
+    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::Dispatch, Topic::AggregateReview, Topic::Redispatch];
 }
 
 mod runtime;

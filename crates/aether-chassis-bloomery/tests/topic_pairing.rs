@@ -4,11 +4,11 @@
 //! the reducer-minted ones each effectful `Decision` projects onto, plus the
 //! host-minted ones the host both produces and drains — must be drained by
 //! exactly one host reactor, otherwise its enqueued rows accumulate in the store's
-//! outbox forever, undelivered and silent. That is not hypothetical:
-//! `Topic::Redispatch` is a live orphan (#3664), the exact failure the shared
-//! string consts never checked. This test collects every reactor's declared drain
-//! set and asserts the 1:1 pairing against `Topic::ALL`, with the still-orphaned
-//! topics named in an explicit exception set.
+//! outbox forever, undelivered and silent. That was not hypothetical:
+//! `Topic::Redispatch` was a live orphan until #3664 gave it its drainer, the
+//! exact failure the shared string consts never checked. This test collects every
+//! reactor's declared drain set and asserts the 1:1 pairing against `Topic::ALL`,
+//! with any still-orphaned topics named in an explicit exception set.
 
 use aether_bloomery::Topic;
 use aether_chassis_bloomery::bloomery::{
@@ -20,11 +20,7 @@ use aether_chassis_bloomery::bloomery::{
 /// the moment one gains a reactor this list is wrong and the test below fails,
 /// forcing the entry's removal — so the exception can never outlive the orphan it
 /// documents.
-const KNOWN_ORPHANS: &[Topic] = &[
-    // #3664 — the parked-question redispatch the reducer enqueues from an
-    // adopted answer (ADR-0151), with no host reactor yet.
-    Topic::Redispatch,
-];
+const KNOWN_ORPHANS: &[Topic] = &[];
 
 /// Every bloomery outbox [`Topic`] pairs with exactly one draining host reactor —
 /// except the still-orphaned ones, which pair with none.

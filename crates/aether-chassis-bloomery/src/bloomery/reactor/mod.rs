@@ -21,7 +21,8 @@
 //!
 //! - [`executor`] — drains the dispatch / redispatch / aggregate-review topics,
 //!   submits attempts through the [`ExecutorShell`](crate::bloomery::ExecutorShell),
-//!   and admits matched results.
+//!   and admits matched results. The redispatch drain replays the attempt an
+//!   answered parked question held (ADR-0151, #3664).
 //! - [`integrate`] — folds each resolved member's claimed candidate tree onto the
 //!   bloom's integration branch (ADR-0152).
 //! - [`land`] — issues the source-port compare-and-swap that lands a resolved

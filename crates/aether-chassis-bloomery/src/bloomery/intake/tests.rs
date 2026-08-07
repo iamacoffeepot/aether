@@ -8,7 +8,7 @@ use std::sync::Arc;
 use aether_bloomery::{
     BloomDraft, BloomId, BloomRecord, BloomStatus, Budget, Decision, Digest, Event, Evidence, EvidenceKind,
     EvidenceRef, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce, Outcome, Snapshot,
-    StageCatalog, StageId, Transformation, WorkHandle, WorkOrder, WorkpieceId, reduce,
+    StageCatalog, StageId, Transformation, WorkHandle, WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -38,20 +38,17 @@ fn shell(fake: FakeGithub) -> ExecutorShell {
     ExecutorShell::new(Arc::new(ActionsExecutor::new(fake.clone(), Arc::new(fake), lanes, PINNED_REF)))
 }
 
-fn work_order(nonce: &str) -> WorkOrder {
-    WorkOrder {
-        transformation: Transformation {
-            command: "verify.clippy".to_owned(),
-            inputs: Vec::new(),
-            checkout: Digest::from_bytes([0xC0; 32]),
-            outputs: Vec::new(),
-            image: "iama/verify:1".to_owned(),
-            limits: Budget::default(),
-            network: NetworkProfile::None,
-            description: None,
-            model: None,
-        },
-        nonce: Nonce(nonce.to_owned()),
+fn transformation() -> Transformation {
+    Transformation {
+        command: "verify.clippy".to_owned(),
+        inputs: Vec::new(),
+        checkout: Digest::from_bytes([0xC0; 32]),
+        outputs: Vec::new(),
+        image: "iama/verify:1".to_owned(),
+        limits: Budget::default(),
+        network: NetworkProfile::None,
+        description: None,
+        model: None,
     }
 }
 
@@ -76,6 +73,7 @@ fn dispatch_record(
         // tests' oracle. The non-terminal `AttemptCompleted` path is exercised
         // by its own test.
         stage: StageId::Verify,
+        transformation: transformation(),
     }
 }
 
@@ -282,7 +280,7 @@ fn dispatch_and_record_submits_then_writes_the_order_row() {
     let candidate = Digest::from_bytes([5; 32]);
     let record = dispatch_record("n-dispatch", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
 
-    let handle = dispatch_and_record(&shell, &mut store, &work_order("n-dispatch"), &record).unwrap();
+    let handle = dispatch_and_record(&shell, &mut store, &record).unwrap();
     assert_eq!(handle, WorkHandle::new(Nonce("n-dispatch".to_owned())));
     // The dispatch reached the executor surface...
     assert_eq!(fake.dispatched_nonces(), vec!["n-dispatch".to_owned()]);
@@ -309,7 +307,7 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
     let shell = shell(fake.clone());
     let mut store = store();
     let record = dispatch_record("n-e2e", bloom, &workpiece, scope_revision, candidate);
-    let handle = dispatch_and_record(&shell, &mut store, &work_order("n-e2e"), &record).unwrap();
+    let handle = dispatch_and_record(&shell, &mut store, &record).unwrap();
 
     // The worker's run completed and uploaded one nonce-named evidence artifact.
     let run_id = fake.seed_run("n-e2e", RunStatus::Completed, Some(RunConclusion::Success));
@@ -358,7 +356,7 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let record = dispatch_record("n-bad", bloom, &workpiece, scope_revision, candidate);
-    let handle = dispatch_and_record(&shell, &mut store, &work_order("n-bad"), &record).unwrap();
+    let handle = dispatch_and_record(&shell, &mut store, &record).unwrap();
 
     let run_id = fake.seed_run("n-bad", RunStatus::Completed, Some(RunConclusion::Success));
     fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name: "evidence-n-bad-log".to_owned(), size_bytes: 10 }]);
@@ -399,7 +397,7 @@ fn a_pending_handle_is_reported_and_neither_completed_nor_admitted() {
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let record = dispatch_record("n-pending", bloom, &workpiece, scope_revision, candidate);
-    let handle = dispatch_and_record(&shell, &mut store, &work_order("n-pending"), &record).unwrap();
+    let handle = dispatch_and_record(&shell, &mut store, &record).unwrap();
 
     let _ = fake.seed_run("n-pending", RunStatus::InProgress, None);
 

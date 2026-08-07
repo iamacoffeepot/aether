@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery::{BloomId, Digest, Nonce, StageId, WorkHandle, WorkOrder, WorkpieceId};
+use aether_bloomery::{BloomId, Digest, Nonce, StageId, Transformation, WorkHandle, WorkOrder, WorkpieceId};
 use aether_bloomery_github::{ExecutorError, GithubError};
 use aether_data::wire::to_vec;
 
@@ -39,9 +39,20 @@ pub struct DispatchRecord {
     /// as a `Fact::AttemptCompleted` advancing the member's cursor; the terminal
     /// `Review` admits as a `Fact::Integrate`; a parked outcome as a `Question`.
     pub stage: StageId,
+    /// The transformation this order dispatched — the record's half of the
+    /// [`WorkOrder`] the executor receives, and the exact lane a parked attempt
+    /// is re-dispatched by replaying (#3664).
+    pub transformation: Transformation,
 }
 
 impl DispatchRecord {
+    /// The [`WorkOrder`] this record dispatches: the record *is* the order plus
+    /// its reducer context, so the two cannot name different nonces or lanes.
+    #[must_use]
+    pub fn to_order(&self) -> WorkOrder {
+        WorkOrder { transformation: self.transformation.clone(), nonce: self.nonce.clone() }
+    }
+
     fn to_stored(&self) -> OutstandingOrder {
         OutstandingOrder {
             nonce: self.nonce.0.clone(),
@@ -53,6 +64,9 @@ impl DispatchRecord {
             // The StageId as its canonical wire bytes — a stable, compact column
             // the intake decodes back on admit (never a hand-rolled int mapping).
             stage: to_vec(&self.stage).unwrap_or_default(),
+            // Same convention for the transformation, so a parked attempt's lane
+            // survives into `parked_question` for the redispatch to replay.
+            transformation: to_vec(&self.transformation).unwrap_or_default(),
         }
     }
 }
@@ -126,10 +140,9 @@ impl DispatchError {
 pub fn dispatch_and_record(
     shell: &ExecutorShell,
     store: &mut dyn StoreBackend,
-    order: &WorkOrder,
     record: &DispatchRecord,
 ) -> Result<WorkHandle, DispatchError> {
-    let handle = shell.submit(order).map_err(DispatchError::Submit)?;
+    let handle = shell.submit(&record.to_order()).map_err(DispatchError::Submit)?;
     if let Err(store_error) = record_dispatch(store, record) {
         // The order reached the worker lane but its reducer context never
         // landed, so it is untracked either way; best-effort cancel the run

@@ -118,7 +118,7 @@ pub(super) fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: 
         outcome: Outcome::AnswerAdopted { bloom: *bloom, question },
         effects: alloc::vec![
             Decision::ReleaseHold { bloom: *bloom, question },
-            Decision::RedispatchStage { bloom: *bloom, question, answer: answer_digest },
+            Decision::RedispatchStage { bloom: *bloom, question, answer: answer_digest, words: answer.words.clone() },
         ],
     }
 }
