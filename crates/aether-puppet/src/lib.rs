@@ -572,11 +572,6 @@ impl Puppet {
         // their vertex stage can pose them, and whether the tone gate
         // runs on the GPU at all — an unrigged subject's curves were
         // gated at load, against normals nothing turns.
-        let posing = strokes::Posing {
-            bound: self.skin.as_ref().map(|skin| deform::Bound { rest: subject, skin }),
-            bones: self.bones,
-            tone: easel::program::sight::ToneUniforms::of(&self.settings, self.skin.is_some()),
-        };
         let drawing = Drawing { resident: &self.surface, volatile: &self.volatile };
         let required_texels = match easel::program::sight::required_texels(drawing) {
             Ok(required_texels) => required_texels,
@@ -609,6 +604,12 @@ impl Puppet {
             );
             return;
         }
+        let subject = self.subject.as_ref().expect("a frame is only resolved once a subject is in");
+        let posing = strokes::Posing {
+            bound: self.skin.as_ref().map(|skin| deform::Bound { rest: subject, skin }),
+            bones: self.bones,
+            tone: easel::program::sight::ToneUniforms::of(&self.settings, self.skin.is_some()),
+        };
         let drawing = Drawing { resident: &self.surface, volatile: &self.volatile };
         if !self.strokes.solve(drawing, frame.eye, view_proj, bias, posing) && self.strokes.live() {
             tracing::warn!(
