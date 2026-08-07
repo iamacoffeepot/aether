@@ -16,6 +16,7 @@
 //! context cap, and lazy lease expiry — and deliberately omits the
 //! `workspace_tree_hash` gate #3341 measured and removed.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::SessionPoolCapability;
@@ -53,8 +54,27 @@ pub trait SessionBackend: Send {
         now: u64,
     ) -> rusqlite::Result<Option<LeasedSession>>;
     /// Deposit `session_bytes` + `manifest` for `key`, unleased — upserting the
-    /// one pooled session per key (a warm resume updates, a cold deposit inserts).
-    fn release(&mut self, key: &SessionKey, session_bytes: &str, manifest: &SessionManifest) -> rusqlite::Result<()>;
+    /// one pooled session per key (a warm resume updates, a cold deposit
+    /// inserts) — provided `lease` is the lease the row currently holds.
+    fn release(
+        &mut self,
+        key: &SessionKey,
+        lease: Option<&LeaseToken>,
+        session_bytes: &str,
+        manifest: &SessionManifest,
+    ) -> rusqlite::Result<ReleaseOutcome>;
+}
+
+/// What a [`SessionBackend::release`] did. A refusal is an outcome, not an
+/// error: the store worked, and the caller simply no longer holds the lease it
+/// presented (#3665).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseOutcome {
+    /// The session was deposited, unleased.
+    Deposited,
+    /// The presented lease is not the one the row holds, so nothing was
+    /// written — a stale holder returning past its expiry.
+    NotLeaseHolder,
 }
 
 /// Is a pooled session eligible to lease? Ports `agent-pool.mjs`'s
@@ -121,9 +141,17 @@ CREATE TABLE IF NOT EXISTS sessions (
     read_files          TEXT    NOT NULL,
     deposited_at        INTEGER NOT NULL,
     leased_until        INTEGER,
+    lease_token         TEXT,
     PRIMARY KEY (model, effort, task)
 );
 ";
+
+/// Distinguishes two acquires that land in the same wall-clock second, so a
+/// lease token is unique to its acquire rather than to its second (#3665). The
+/// token's other components are all key-derived, so without this two racing
+/// acquires of the same key mint equal tokens and the ownership check below
+/// cannot tell them apart.
+static LEASE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// A WAL-mode `SQLite` pool. Opening runs the migration idempotently, so
 /// reopening the same file resumes against the persisted pool.
@@ -191,16 +219,62 @@ impl SessionBackend for SqliteSessionStore {
             return Ok(None);
         }
         let lease_expiry = now.saturating_add(self.lease_ttl_secs);
+        let lease = LeaseToken(format!(
+            "{}:{}:{}:{now}:{}",
+            key.model,
+            key.effort,
+            key.task,
+            LEASE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        // The token is persisted, not merely handed out: `release` proves
+        // ownership by comparing against this column, and a token it never sees
+        // is a token it cannot check (#3665).
         tx.execute(
-            "UPDATE sessions SET leased_until = ?4 WHERE model = ?1 AND effort = ?2 AND task = ?3",
-            rusqlite::params![key.model, key.effort, key.task, i64::try_from(lease_expiry).unwrap_or(i64::MAX)],
+            "UPDATE sessions SET leased_until = ?4, lease_token = ?5 WHERE model = ?1 AND effort = ?2 AND task = ?3",
+            rusqlite::params![
+                key.model,
+                key.effort,
+                key.task,
+                i64::try_from(lease_expiry).unwrap_or(i64::MAX),
+                lease.0
+            ],
         )?;
         tx.commit()?;
-        let lease = LeaseToken(format!("{}:{}:{}:{now}", key.model, key.effort, key.task));
         Ok(Some(LeasedSession { lease, session_bytes, parent_receipt: receipt }))
     }
 
-    fn release(&mut self, key: &SessionKey, session_bytes: &str, manifest: &SessionManifest) -> rusqlite::Result<()> {
+    fn release(
+        &mut self,
+        key: &SessionKey,
+        lease: Option<&LeaseToken>,
+        session_bytes: &str,
+        manifest: &SessionManifest,
+    ) -> rusqlite::Result<ReleaseOutcome> {
+        // Prove ownership before depositing (#3665). A release presenting a
+        // lease the row no longer holds is a stale holder returning after its
+        // lease expired and was re-acquired by someone else; depositing anyway
+        // would overwrite the live holder's session bytes with an older
+        // transcript and clear their lease, so a third holder could then acquire
+        // a transcript still being resumed. Refusing is what makes the lease
+        // exclusive rather than advisory.
+        //
+        // A cold deposit (`None`) is held to the same rule: it is legitimate
+        // only against a row nobody holds, or no row at all. Otherwise dropping
+        // the token would be a way to win the race by presenting nothing.
+        let held: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT lease_token FROM sessions WHERE model = ?1 AND effort = ?2 AND task = ?3",
+                rusqlite::params![key.model, key.effort, key.task],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        if let Some(held) = held
+            && held.as_deref() != lease.map(|lease| lease.0.as_str())
+        {
+            return Ok(ReleaseOutcome::NotLeaseHolder);
+        }
+
         // The read set is audit-only (#3341) — carried as JSON so a caller's
         // path list round-trips without a delimiter convention.
         let read_files = serde_json::to_string(&manifest.read_files).unwrap_or_else(|_| "[]".to_owned());
@@ -220,7 +294,8 @@ impl SessionBackend for SqliteSessionStore {
                workspace_tree_hash = excluded.workspace_tree_hash,
                read_files = excluded.read_files,
                deposited_at = excluded.deposited_at,
-               leased_until = NULL",
+               leased_until = NULL,
+               lease_token = NULL",
             rusqlite::params![
                 key.model,
                 key.effort,
@@ -235,7 +310,7 @@ impl SessionBackend for SqliteSessionStore {
                 i64::try_from(manifest.deposited_at).unwrap_or(i64::MAX),
             ],
         )?;
-        Ok(())
+        Ok(ReleaseOutcome::Deposited)
     }
 }
 
@@ -299,9 +374,10 @@ impl NativeActor for SessionPoolCapability {
 
     #[handler::single]
     fn on_release(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Release) -> ReleaseResult {
-        let Release { key, lease: _, session_bytes, manifest } = mail;
-        match state.backend.release(&key, &session_bytes, &manifest) {
-            Ok(()) => ReleaseResult::Ok,
+        let Release { key, lease, session_bytes, manifest } = mail;
+        match state.backend.release(&key, lease.as_ref(), &session_bytes, &manifest) {
+            Ok(ReleaseOutcome::Deposited) => ReleaseResult::Ok,
+            Ok(ReleaseOutcome::NotLeaseHolder) => ReleaseResult::NotLeaseHolder,
             Err(error) => ReleaseResult::Err { error: error.to_string() },
         }
     }
