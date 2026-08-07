@@ -1,6 +1,12 @@
 # Release phase schema
 
-Each aether release is tracked entirely on GitHub issue labels — there is no project board. Phase and all issue metadata ride `phase:*` / `type:*` / `size:*` / `model:*` labels, set by the `/release-*` skills, so every operation with a REST form uses REST and the contended GraphQL pool stays free. GraphQL is reserved for facts and mutations GitHub does not expose over REST, including closing-issue references, review-thread reads and resolution, and PR un-draft. `release-project-init.sh <version>` ensures the label vocabulary exists.
+Each Aether release is tracked entirely on GitHub issue labels — there is no
+project board. Phase and all issue metadata ride `phase:*` / `type:*` / `size:*`
+/ `model:*` labels. The executable Codex contracts are the matching `$scope`,
+`$approve`, `$implement`, `$findings`, `$land`, `$bounce`, and `$release-init`
+skills plus their shared
+[GitHub workflow contract](https://github.com/iamacoffeepot/aether/blob/main/.agents/skills/_shared/github-workflow.md).
+Read those sources for exact mutations; this page owns the lifecycle vocabulary.
 
 ## Phase — the `phase:*` label
 
@@ -9,19 +15,28 @@ The lifecycle vocabulary is the `phase:*` label set, the canonical phase state f
 | Phase     | Label             | Meaning                                            | Advances by      |
 |-----------|-------------------|----------------------------------------------------|------------------|
 | Backlog   | *(no label)*      | Not yet picked up for this release                 | User             |
-| Define    | `phase:define`    | Problem framing in progress                        | User + `/scope`  |
-| Design    | `phase:design`    | Tradeoffs / options / ADR drafting                 | User + `/scope`  |
-| Plan      | `phase:plan`      | Sequencing, dependencies, declared surface          | User + `/scope`  |
-| Ready     | `phase:ready`     | Agent-ready; awaiting dispatch                     | Gate: `/approve` |
-| Building  | `phase:building`  | PR open; head unproven, CI not green, or declared-surface gate red | Reconciler |
-| QA        | `phase:qa`        | CI green; review/dogfood verdict owed              | Reconciler       |
-| Findings  | `phase:findings`  | QA findings open — threads or rollups unresolved   | Reconciler       |
-| Held      | `phase:held`      | CI green, QA complete, all threads resolved; land-eligible | Reconciler |
+| Define    | `phase:define`    | Problem framing in progress                        | User + `$scope`  |
+| Design    | `phase:design`    | Tradeoffs / options / ADR drafting                 | User + `$scope`  |
+| Plan      | `phase:plan`      | Sequencing, dependencies, declared surface          | User + `$scope`  |
+| Ready     | `phase:ready`     | Agent-ready; awaiting dispatch                     | Gate: `$approve` |
+| Building  | `phase:building`  | Contracted state: PR head unproven, CI not green, or declared-surface gate red | Intended reconciler |
+| QA        | `phase:qa`        | Contracted state: CI green; review/dogfood verdict owed | Intended reconciler |
+| Findings  | `phase:findings`  | Contracted state: QA findings remain open          | Intended reconciler |
+| Held      | `phase:held`      | Contracted state: CI and QA clear; land-eligible   | Intended reconciler |
 | Done      | *(no label)*      | PR merged, issue closed                            | Auto             |
 | Bounced   | `phase:bounced`   | Phase regression — see the `bounce-to:*` label     | User triage      |
 | Stalled   | `phase:stalled`   | Env/tooling failure, blocks dispatch               | User triage      |
 
-`Building` / `QA` / `Findings` / `Held` are the computed post-green resting states, written only by the reconciler workflow (`.github/workflows/reconciler.yml`) — see [The reconciler](#the-reconciler) below. `Executing` and `Refine` are **superseded** by this vocabulary: `phase:executing` maps to `phase:building` (straight rename) and `phase:refine` decomposes into `qa` / `findings` / `held`. The live skills no longer write either, and `release-project-init.sh` no longer creates them; the reconciler still migrates a straggler `executing` / `refine` label — one left on an in-flight PR from before the vocabulary flip — forward on its next recompute, so no PR stalls on the retired name.
+`Building` / `QA` / `Findings` / `Held` are computed post-Ready resting states
+in the Codex lifecycle contract. The contract reserves their writes for a
+reconciler, so skills do not assert those labels themselves. The checked-in
+`main` tree does not currently contain `.github/workflows/reconciler.yml` (or
+the hosted Review and Dogfood workflows that would supply its QA facts).
+Consequently the phase meanings remain the intended contract, but the hosted
+post-Ready transitions are unavailable until that machinery is checked in.
+
+`Executing` and `Refine` are retired vocabulary. Current skills never write
+them, and `release-project-init.sh` no longer creates them.
 
 ## Issue metadata — all labels
 
@@ -29,15 +44,15 @@ Phase and every other axis ride labels — durable, REST-cheap, and the signal t
 
 | Metadata      | Lives as                                | Set by | Notes |
 |---------------|-----------------------------------------|--------|-------|
-| Type          | `type:*` label                          | `/sketch` at filing | Mirrors the conventional-commit prefix |
-| Size          | `size:s\|m\|l` label                    | `/scope` at Plan | Dispatch context-cost prior; `size:xl` marks a fat issue needing breakdown |
-| Model route   | `model:*` label                         | `/scope` at Plan | Routes the implementing agent's model |
-| Agent-ready   | `phase:ready` label                     | `/approve` | "Ready" *is* the eligibility signal |
-| Bounce target | `bounce-to:plan\|design\|define` label  | `/bounce` (or a self-bouncing skill) | Present only while `phase:bounced`; `/scope` reads it to resume, then clears it |
+| Type          | `type:*` label                          | `$sketch` at filing | Mirrors the conventional-commit prefix |
+| Size          | `size:s\|m\|l` label                    | `$scope` at Plan | Dispatch context-cost prior; `size:xl` marks a fat issue needing breakdown |
+| Model route   | `model:*` label                         | `$scope` at Plan | Routes the implementing agent's model |
+| Agent-ready   | `phase:ready` label                     | `$approve` | "Ready" *is* the eligibility signal |
+| Bounce target | `bounce-to:plan\|design\|define` label  | `$bounce` (or a self-bouncing skill) | Present only while `phase:bounced`; `$scope` reads it to resume, then clears it |
 
 The ADR link lives in the issue's `## Design notes` section; per-issue auth budgets aren't persisted in v1 (a breach is noted in the self-bounce comment).
 
-At Plan, `/scope` emits a fenced `## Declared surface` glob list. `/approve`
+At Plan, `$scope` emits a fenced `## Declared surface` glob list. `$approve`
 validates that it covers the planned targets and resolves the most restrictive
 `auto|judge|human` tier from `approval-policy.yml` over every path
 each declaration can permit, including higher-tier files inside a declared
@@ -45,36 +60,34 @@ subtree. An explicit `ADR flag:` or declared ADR edit makes the issue
 ADR-bearing; the maturity-aware ADR hard gate (ADR-0146 §6) human-routes a new
 or established (non-`Proposed`) ADR, while a change touching only still-`Proposed`
 ADRs defers to the policy lookup (`docs/adr/**` is `judge`).
-The hosted judge is currently shadow-only, so `judge` still requires owner
-confirmation; `auto` does not. The hosted tick dispatches an approval run only
-for an exact `auto` result, and the headless gate resolves the tier again
-before writing Ready. A verified owner-applied `approval:pre-approved` label
+The `$approve` judge tier is currently shadow-only, so `judge` still requires
+owner confirmation; `auto` does not. A verified owner-applied
+`approval:pre-approved` label
 makes a non-ADR issue's effective tier `auto` without bypassing any other gate;
 an agent-applied label has no authority, and ADR work has no override. The same
 declared surface later bounds the implementation diff. A validated pure umbrella instead carries the exact
 `N/A — pure umbrella; no implementation PR` declaration and routes to human
 approval; it never produces an implementation PR.
 
-`Approval gate` is a required status, so the reconciler posts it on every PR
-path. A PR with no closing issue, an issue outside the reconciler phase domain,
-or an issue with no fenced `## Declared surface` receives a passing no-op status
-rather than silence. When the section exists, the reconciler treats its globs as
-the implementation boundary and compares every changed PR path. An escaping
-diff stays in Building until it is trimmed, the repository owner edits the
-declaration, or the owner applies `approval:surface-ok`.
+The declared surface is still the approved implementation boundary: `$approve`
+validates it, and `$implement` requires the implementation handoff and diff
+review to stay inside it. There is currently no hosted `Approval gate` status
+because the reconciler workflow is absent. Branch protection requires only
+`CI pass` and `Lint title`, and has no required-pull-request-review rule.
 
 ## Issue dependencies
 
-GitHub's native feature, not a custom field: `gh issue edit <n> --add-dependency <m>` and the dependency graph view.
+Dependencies use GitHub's native issue relation, not a custom field. `$scope`
+records them and `$approve` checks them; read those skills for exact mechanics.
 
-## Phase-transition rules (enforced by the `/release-*` skills)
+## Contracted phase transitions
 
 ```
 Backlog  → Define     body has a problem statement
 Define   → Design     if multi-PR, umbrella issue exists; if architectural, ADR drafted
 Design   → Plan       tradeoffs aired; ADR merged if applicable
 Plan     → Ready      dependencies declared, one concept per issue (sets phase:ready)
-Ready    → Building   /implement opens a PR; the reconciler sees it on first firing
+Ready    → Building   $implement opens a PR; the intended reconciler observes it
 Building → QA         CI green on the PR head and any declared-surface gate clear
 QA       → Findings   review / dogfood verdict in, and findings are open
 QA       → Held       review / dogfood verdict in, and nothing is open
@@ -85,22 +98,30 @@ Building/QA/Findings/Held → Bounced    an upstream-phase issue surfaces (sets 
 Any      → Stalled    env/tooling failure (not the issue's fault)
 ```
 
-The `Building → QA → Findings → Held` stretch is not a fixed walk — the reconciler recomputes the whole target from observable facts on every firing, so a PR jumps straight to `Held` when everything is already in, and any push demotes a `Held` / `Findings` / `QA` PR back to `Building` on the fresh head. The superseded legacy edges (`Ready → Executing`, `Executing → Refine`, `Refine → Done`) no longer fire from any live skill; the reconciler still migrates a straggler `executing` / `refine` label — left on an in-flight PR from before the flip — forward on its next recompute.
+The intended `Building → QA → Findings → Held` stretch is not a fixed walk: a
+reconciler derives the target from observable facts, so a fresh push returns the
+contracted state to Building until the new head is proven. No live skill emits
+the superseded legacy edges (`Ready → Executing`, `Executing → Refine`, or
+`Refine → Done`).
 
-## The reconciler
+## Hosted lifecycle availability
 
-The post-green stretch (`building` → `qa` → `findings` → `held`) is computed, not asserted. One hosted workflow, `.github/workflows/reconciler.yml` (name `Reconciler`, no Claude, no cargo), is the **sole writer** of `phase:building` / `phase:qa` / `phase:findings` / `phase:held`. It never writes `define` / `design` / `plan` / `ready` / `bounced` / `stalled` — those stay owned by their skills. On every relevant event it resolves the PR, finds the issue it closes (GraphQL `closingIssuesReferences`), gates on that issue's phase being in the reconciler domain (`ready` / `executing` / `building` / `refine` / `qa` / `findings` / `held`), reads the ground-truth facts, computes one target phase by a first-match table, and writes it with the atomic non-phase-preserving label `PUT`.
+The checked-in Actions directory is the authority for hosted automation. On
+current `main`, `reconciler.yml`, `review.yml`, `dogfood.yml`, and
+`quality-eval.yml` are absent. Related scripts and the `$implement`, `$findings`,
+`$land`, `$review`, and `$dogfood` skills preserve the intended contracts, but
+they do not make an absent Actions entry point runnable. Treat a skill step that
+needs one of those workflows as unavailable, not as evidence that GitHub is
+already enforcing the transition.
 
-**Facts** (per-head unless noted): CI check-runs conclusion on the PR's current head SHA; the native `reviewDecision` (`APPROVED` / `CHANGES_REQUESTED` / `REVIEW_REQUIRED`) aggregated from critic's required native review; an optional fenced `## Declared surface` block compared with the PR's changed paths; the `dogfood:unresolved` PR label; whether the closing issue's `## Dogfood brief` is present and not `N/A`; the issue's dogfood marker `verdict=`; and the GraphQL `reviewThreads(isResolved: false)` count.
-
-**Computation** (first match wins): a declared-surface escape, just-fired `synchronize`, or CI-not-green head → `building`; a review verdict owed for this head or a dogfood trial owed with no verdict in → `qa`; findings open (unresolved labels or threads) → `findings`; otherwise → `held` (land-eligible). Every firing recomputes from scratch, so a missed event self-heals on the next one. Every exit path posts `Approval gate`; the enforced path writes it before advisory label/comment mirrors and verifies that only a repository-owner-applied `approval:surface-ok` waiver counts.
-
-**Triggers**: `pull_request` (`opened` / `reopened` / `synchronize` / `ready_for_review` / `labeled` / `unlabeled` — the payload carries the PR; `synchronize` is the push-demotes path; label events wake it when a QA post job flips `dogfood:unresolved`, and a `pull_request_review` event wakes it on a native review verdict); `workflow_run` on **CI only** (CI runs are `pull_request`-triggered, so their head branch resolves the PR; Review and Dogfood runs anchor to `main` and cannot be resolved this way); `workflow_dispatch` with a `pr` input (the manual re-reconcile, and the authoritative QA-completion hand-off — the Review and Dogfood post jobs each poke it with the exact PR number they know); and a `*/15` `schedule` backstop that recomputes every open PR in the domain (the supported answer to thread resolves / unresolves having no Actions event, and the self-heal for any missed poke).
+Current branch protection requires the `CI pass` and `Lint title` status checks
+only. Automated review, dogfood, reconciliation, and declared-surface status are
+not merge gates in the present repository configuration.
 
 ## Operations
 
-- **Bootstrap a release:** `release-project-init.sh <version>` — ensures the `phase:*` / `bounce-to:*` / `size:*` / `model:*` labels exist (REST `gh label create`).
-- **File an issue:** `/sketch` — REST `POST …/issues` with the `type:*` (and `crate:*`) labels; a fresh issue is Backlog by label-absence.
-- **Advance phase:** the `/release-*` skills swap the `phase:*` label atomically over REST (`PUT …/issues/<n>/labels`, replacing the prior `phase:*` with the new one); Backlog and Done delete the label rather than swap it.
-
-Every operation with a REST form rides REST — there is no board to write. The few GraphQL-only review-thread, closing-reference, and un-draft operations are called directly rather than through convenience commands.
+- **Bootstrap lifecycle labels:** `$release-init` ensures the phase, bounce,
+  size, and model-routing vocabulary exists.
+- **File an issue:** `$sketch` creates a Backlog issue and its filing labels.
+- **Advance phase:** use the skill that owns the target phase; the shared GitHub
+  workflow contract defines the exact mutation and label-preservation rules.

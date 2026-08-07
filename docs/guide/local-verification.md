@@ -28,11 +28,16 @@ aggregate `CI pass` check combines applicable gates such as formatting, clippy,
 docs, marker/feature boundary builds, workspace tests, duplicate-code and
 unused-dependency checks, wasm packaging, and contract jobs. Path filters can make a job intentionally inapplicable.
 
-The automated Rust review is enforced by GitHub's native required review, not
-by `CI pass`: critic submits a native `APPROVE` / `REQUEST_CHANGES` verdict and
-branch protection blocks the merge until it is APPROVE. Documentation Pages,
-PR-title validation, review, dogfood, and reconciliation have their own workflow
-responsibilities.
+Branch protection currently requires two status checks: `CI pass` and `Lint
+title`. It does not configure required pull-request reviews. `CI pass` proves
+the applicable tree checks; it does not prove automated review, dogfood, or
+lifecycle reconciliation.
+
+The Codex skills retain contracts for those post-Ready activities, but current
+`main` has no `review.yml`, `dogfood.yml`, `reconciler.yml`, or
+`quality-eval.yml` Actions entry point. Related scripts do not become hosted
+checks without workflow YAML. Treat those activities as unavailable hosted
+machinery, not as implicit merge gates.
 
 Do not copy a list from a CI log into a shell and run it. Logs are evidence;
 commands come from checked-in workflows and repository guidance.
@@ -81,8 +86,8 @@ design decision.
 
 ## Watching a draft PR
 
-Implementation PRs stay draft while CI/review/dogfood facts accumulate. The
-repository helper can wait for the aggregate:
+Implementation PRs stay draft while their required facts accumulate. The
+repository helper can wait for the checked-in CI aggregate:
 
 ```sh
 scripts/wave-status.sh --wait <pr>
@@ -92,8 +97,9 @@ Inspect the first deterministic red rather than waiting for every expensive job.
 After pushing a fix, evaluate the new head SHA; results on the superseded head
 do not prove the current one.
 
-The [agent workflow](contributing/agent-workflow.md) explains how Building, QA,
-Findings, and Held are computed by the reconciler.
+The [agent workflow](contributing/agent-workflow.md) explains the contracted
+Building, QA, Findings, and Held semantics and identifies the currently absent
+hosted post-Ready machinery.
 
 ## Targeted local checks
 

@@ -187,10 +187,17 @@ Keep these concepts separate:
 
 - local formatting and lint feedback;
 - full CI build and test proof;
-- automated review and dogfood QA;
+- contracted review and dogfood QA, whether or not hosted entry points exist;
 - landing a pull request;
 - packaging with `cargo xtask dist` or `cargo xtask package`;
 - publishing a versioned release.
+
+Do not infer a hosted workflow from a skill, script, historical workflow name,
+or prose description. Confirm that its `.github/workflows/*.yml` entry point is
+present in the checked-in tree, then verify current branch protection before
+calling it a merge gate. Current `main` has no hosted Reconciler, Review,
+Dogfood, or quality-evaluation workflow; only `CI pass` and `Lint title` are
+required status checks, and required pull-request reviews are not configured.
 
 The checked-in [Release workflow](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/release.yml)
 currently builds a manually dispatched Windows `loco-motion` package artifact.
