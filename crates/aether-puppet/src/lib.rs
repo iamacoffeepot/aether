@@ -215,6 +215,11 @@ pub struct Puppet {
     dragging: bool,
     cursor: Vec2,
     aspect: f32,
+    /// The last physical window extent. Canvas selection combines this
+    /// aspect with the active drawing's exact field requirement.
+    window: Option<(u32, u32)>,
+    /// Exact visibility-field texels the last solved drawing needs.
+    drawing_texels: usize,
     /// Last frame's view-dependent curves, and the frame they were solved
     /// for: the silhouette, the charted face and the suggestive contours.
     /// The other half of the drawing is `surface` — until a pose moves it
@@ -355,6 +360,10 @@ struct Awaiting3 {
 }
 
 impl Puppet {
+    /// Long edge of the frustum-shaped stand-in used before a window is
+    /// announced. This preserves the ink layer's pre-window behaviour.
+    const STAND_IN_LONG_EDGE: u32 = 1200;
+
     fn eye(&self) -> Vec3 {
         let (azimuth, elevation) = (self.look.azimuth.to_radians(), self.look.elevation.to_radians());
         let (sin_a, cos_a) = azimuth.sin_cos();
@@ -383,6 +392,46 @@ impl Puppet {
 
     fn view_projection(&self) -> ViewProjection {
         ViewProjection { view_proj: self.view_matrix().to_cols_array() }
+    }
+
+    /// Requested pixels for the shared canvas. Before the first window
+    /// announcement, keep the historical 1200-pixel frustum-shaped stand-in.
+    fn requested_canvas(&self) -> (u32, u32) {
+        if let Some(window) = self.window {
+            return window;
+        }
+        let aspect = if self.aspect.is_finite() && self.aspect > 0.0 {
+            self.aspect
+        } else {
+            1.0
+        };
+        if aspect >= 1.0 {
+            (Self::STAND_IN_LONG_EDGE, ((Self::STAND_IN_LONG_EDGE as f32 / aspect).round() as u32).max(1))
+        } else {
+            (((Self::STAND_IN_LONG_EDGE as f32 * aspect).round() as u32).max(1), Self::STAND_IN_LONG_EDGE)
+        }
+    }
+
+    /// Resolve once, then point both program layers at the identical
+    /// extent. On refusal they still move together to the largest canvas
+    /// this aspect can provide, leaving blank replacement textures rather
+    /// than a stale drawing at the old aspect.
+    fn recanvas(&mut self, required_texels: usize) -> Result<(), easel::CanvasCapacityError> {
+        let (width, height) = self.requested_canvas();
+        let canvas = match easel::resolve_canvas(width, height, required_texels) {
+            Ok(canvas) => canvas,
+            Err(error) => {
+                let ceiling = easel::resolve_canvas(width, height, error.capacity)
+                    .expect("the reported ceiling capacity fits its own canvas");
+                self.easel.resized(ceiling);
+                self.strokes.resized(ceiling);
+                return Err(error);
+            }
+        };
+        self.easel.resized(canvas);
+        self.strokes.resized(canvas);
+
+        Ok(())
     }
 
     /// The charted face, planted on `subject`. Empty without a material
@@ -523,13 +572,46 @@ impl Puppet {
         // their vertex stage can pose them, and whether the tone gate
         // runs on the GPU at all — an unrigged subject's curves were
         // gated at load, against normals nothing turns.
+        let drawing = Drawing { resident: &self.surface, volatile: &self.volatile };
+        let required_texels = match easel::program::sight::required_texels(drawing) {
+            Ok(required_texels) => required_texels,
+            Err(easel::program::sight::LayoutError::CurveTooLong { id, curve, points }) => {
+                tracing::warn!(
+                    target: "aether_puppet",
+                    curve,
+                    curve_id = id.0,
+                    points,
+                    maximum = easel::program::sight::MAX_CURVE_POINTS,
+                    "visibility field curve exceeds the bounded reduction; no ink this frame",
+                );
+                return;
+            }
+            Err(easel::program::sight::LayoutError::OverCapacity { .. }) => {
+                unreachable!("a capacity-free requirement query cannot report field capacity")
+            }
+        };
+        self.drawing_texels = required_texels;
+        if let Err(error) = self.recanvas(required_texels) {
+            let (width, height) = self.requested_canvas();
+            tracing::warn!(
+                target: "aether_puppet",
+                needed = error.needed,
+                capacity = error.capacity,
+                requested_width = width,
+                requested_height = height,
+                canvas_long_edge = easel::CANVAS_LONG_EDGE,
+                "visibility field capacity exceeded under the canvas ceiling; no ink this frame",
+            );
+            return;
+        }
+        let subject = self.subject.as_ref().expect("a frame is only resolved once a subject is in");
         let posing = strokes::Posing {
             bound: self.skin.as_ref().map(|skin| deform::Bound { rest: subject, skin }),
             bones: self.bones,
             tone: easel::program::sight::ToneUniforms::of(&self.settings, self.skin.is_some()),
         };
         let drawing = Drawing { resident: &self.surface, volatile: &self.volatile };
-        if !self.strokes.solve(drawing, frame.eye, view_proj, bias, self.aspect, posing) && self.strokes.live() {
+        if !self.strokes.solve(drawing, frame.eye, view_proj, bias, posing) && self.strokes.live() {
             tracing::warn!(
                 target: "aether_puppet",
                 curves = drawing.len(),
@@ -557,6 +639,8 @@ impl WasmActor for Puppet {
             dragging: false,
             cursor: Vec2::new(0.0, 0.0),
             aspect: ASPECT_UNTIL_MEASURED,
+            window: None,
+            drawing_texels: 0,
             volatile: Vec::new(),
             drawn_from: None,
             owed: None,
@@ -614,12 +698,23 @@ impl WasmActor for Puppet {
     fn on_window_size(&mut self, _ctx: &mut WasmCtx<'_>, size: WindowSize) {
         if size.width > 0 && size.height > 0 {
             let aspect = size.width as f32 / size.height as f32;
-            self.easel.resized(size.width, size.height);
-            self.strokes.resized(size.width, size.height);
+            let window_changed = self.window != Some((size.width, size.height));
+            self.window = Some((size.width, size.height));
             self.gpu_silhouette.resized(size.width, size.height);
             if self.aspect != aspect {
                 self.aspect = aspect;
                 self.drawn_from = None;
+            }
+            if window_changed && let Err(error) = self.recanvas(self.drawing_texels) {
+                tracing::warn!(
+                    target: "aether_puppet",
+                    needed = error.needed,
+                    capacity = error.capacity,
+                    requested_width = size.width,
+                    requested_height = size.height,
+                    canvas_long_edge = easel::CANVAS_LONG_EDGE,
+                    "visibility field capacity exceeded under the canvas ceiling",
+                );
             }
         }
     }

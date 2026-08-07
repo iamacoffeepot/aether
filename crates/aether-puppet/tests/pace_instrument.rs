@@ -1,10 +1,9 @@
 //! What one frame of the shipped drawing costs, and what it looks like
 //! at the framing every visual A/B is pinned to.
 //!
-//! Both are instruments rather than gates — they need a 434k-face
-//! subject and its material field, neither of which lives in the
-//! repository — so both are `#[ignore]`d and read the same
-//! `AETHER_CROSSFEED_DIR` the field's own cross-feed does.
+//! These are instruments rather than gates. Most use the shipped
+//! 434k-face subject and its material field through `AETHER_CROSSFEED_DIR`;
+//! focused regressions may generate their own deterministic subject.
 //!
 //! Two rules the numbers here depend on, both learned the hard way:
 //!
@@ -37,8 +36,10 @@
 
 use std::cmp::Reverse;
 use std::env;
-use std::fmt::{self, Display, Formatter};
+use std::f32::consts::{PI, TAU};
+use std::fmt::{self, Display, Formatter, Write as _};
 use std::fs;
+use std::iter;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -57,7 +58,7 @@ use aether_puppet::easel::survey::{self, Survey};
 use aether_puppet::easel::{View, accent};
 use aether_puppet::extract::{self, Settings};
 use aether_puppet::feature::{Curve3, Drawing, FeatureClass, Half, Pen, SurfacePoint};
-use aether_puppet::labels::{CLASSES, Labels};
+use aether_puppet::labels::{CLASSES, HAIR, Labels};
 use aether_puppet::mesh::Mesh;
 use aether_puppet::weld;
 use aether_puppet::{
@@ -173,6 +174,20 @@ fn mounted_at(dir: &Path, wasm: &Path, pass_timings: bool, dimensions: (u32, u32
             fs::copy(rig.join(name), save.join("rig").join(name)).expect("stage the rig");
         }
     }
+
+    mounted_staged_at(save, wasm, rig.is_dir(), pass_timings, dimensions)
+}
+
+/// Mount assets already written into the harness sandbox. The generated
+/// small-canvas fixture uses this entry; directory-backed instruments keep
+/// staging through [`mounted_at`] above.
+fn mounted_staged_at(
+    save: &Path,
+    wasm: &Path,
+    rigged: bool,
+    pass_timings: bool,
+    dimensions: (u32, u32),
+) -> SubstrateHarness {
     // Exercise the shipped settle-pump default. The harness keeps this
     // frame's exact lifecycle chain at the fine floor while outstanding,
     // so a silent guest handler is no longer measured through the default
@@ -215,7 +230,7 @@ fn mounted_at(dir: &Path, wasm: &Path, pass_timings: bool, dimensions: (u32, u32
                     path: "subject.obj".to_owned(),
                     labels: "labels.npy".to_owned(),
                     material_field_padding: 0.12,
-                    rig: if rig.is_dir() {
+                    rig: if rigged {
                         "rig".to_owned()
                     } else {
                         String::new()
@@ -228,7 +243,7 @@ fn mounted_at(dir: &Path, wasm: &Path, pass_timings: bool, dimensions: (u32, u32
     match subject.reply::<PuppetLoadResult>("subject").expect("decode the puppet's LoadResult") {
         PuppetLoadResult::Ok { bones, .. } => {
             eprintln!("pace: subject loaded with {bones} bones");
-            assert!(!rig.is_dir() || bones > 0, "a staged rig that binds no bones is a rig the subject refused");
+            assert!(!rigged || bones > 0, "a staged rig that binds no bones is a rig the subject refused");
         }
         PuppetLoadResult::Err { reason } => panic!("the puppet refused the subject: {reason}"),
     }
@@ -449,6 +464,230 @@ fn chart_controls_capture() {
     );
 
     eprintln!("pace: wrote unjudged chart-control evidence to {}", output.display());
+}
+
+/// Raw before/after evidence for issue 4568's small-canvas capacity fix.
+///
+/// Exactly four physical window sizes are captured from release-profile
+/// baseline and candidate components under one generated mascot-like subject
+/// and pinned camera. Nested shells inside its torso are invisible capacity
+/// ballast: the outer body occludes them in the raw frame, while their curves
+/// still exercise the visibility field selected by `Puppet::resolve`. The
+/// files are left full-resolution and unmodified. A CSV beside them counts
+/// pixels that differ from the render cap's configured default clear color;
+/// the count is evidence for inspection, never a visual verdict.
+///
+/// ```text
+/// AETHER_PUPPET_SMALL_CANVAS_BASELINE_WASM=/path/to/baseline/aether_puppet.wasm \
+/// AETHER_PUPPET_SMALL_CANVAS_DIR=/path/to/output \
+/// cargo test -p aether-puppet --release --test pace_instrument \
+///     -- --ignored --nocapture small_canvas_capacity_capture
+/// ```
+#[test]
+#[ignore = "visual hold; needs baseline and candidate release components"]
+fn small_canvas_capacity_capture() {
+    let Some(candidate) = require_runtime("aether_puppet") else {
+        return;
+    };
+    let baseline = PathBuf::from(
+        env::var("AETHER_PUPPET_SMALL_CANVAS_BASELINE_WASM")
+            .expect("AETHER_PUPPET_SMALL_CANVAS_BASELINE_WASM must name the baseline release component"),
+    );
+    assert!(baseline.is_file(), "the baseline release component does not exist");
+    let output = required_output_dir("AETHER_PUPPET_SMALL_CANVAS_DIR");
+    let fixture = small_canvas_fixture();
+    let save = init_save_sandbox("puppet-pace");
+    fs::write(save.join("subject.obj"), &fixture.obj).expect("stage the generated puppet subject");
+    fs::write(save.join("labels.npy"), &fixture.labels).expect("stage the generated puppet labels");
+    let mut census = vec![
+        "variant,width,height,non_clear_pixels,total_pixels,required_texels,ballast_shells,clear_rgba,subject,seed,camera,wasm_profile".to_owned(),
+    ];
+
+    for dimensions in [(512, 512), (656, 656), (664, 664), PINNED] {
+        for (variant, wasm) in [("baseline", baseline.as_path()), ("candidate", candidate.as_path())] {
+            let png = capture_small_canvas(save, wasm, dimensions);
+            let name = format!("{}x{}-{variant}.png", dimensions.0, dimensions.1);
+            fs::write(output.join(name), &png).expect("write raw small-canvas capture");
+            let decoded = decode_png(&png).expect("decode small-canvas capture for its pixel census");
+            assert_eq!((decoded.width, decoded.height), dimensions, "the raw capture keeps the requested extent");
+            let non_clear = decoded.rgba.chunks_exact(4).filter(|pixel| *pixel != [0x0d, 0x12, 0x20, 0xff]).count();
+            census.push(format!(
+                "{variant},{},{},{non_clear},{},{},{},0d1220ff,generated-puppet,53756d697265,azimuth=0;elevation=3;distance=5.4;height=0,release",
+                dimensions.0,
+                dimensions.1,
+                decoded.rgba.len() / 4,
+                fixture.required_texels,
+                fixture.ballast_shells,
+            ));
+        }
+    }
+
+    fs::write(output.join("non-clear-census.csv"), format!("{}\n", census.join("\n")))
+        .expect("write the machine-readable non-clear pixel census");
+    eprintln!(
+        "pace: wrote unjudged small-canvas raw pairs for {} required texels ({} hidden shells) and census to {}",
+        fixture.required_texels,
+        fixture.ballast_shells,
+        output.display(),
+    );
+}
+
+fn capture_small_canvas(save: &Path, wasm: &Path, dimensions: (u32, u32)) -> Vec<u8> {
+    let mut harness = mounted_staged_at(save, wasm, false, false, dimensions);
+    harness
+        .execute(vec![
+            ("look", HarnessOp::send_and_settle(PUPPET, &look(AZIMUTH))),
+            ("settle", HarnessOp::advance(24)),
+            ("capture", HarnessOp::capture()),
+        ])
+        .expect("settle and capture the small canvas")
+        .captured("capture")
+        .expect("the small-canvas capture ran")
+        .to_vec()
+}
+
+const SMALL_CANVAS_REQUIREMENT_FLOOR: usize = 656 * 656;
+const SMALL_CANVAS_REQUIREMENT_CEILING: usize = 664 * 664;
+const BALLAST_SHELL_LIMIT: usize = 2_048;
+
+struct SmallCanvasFixture {
+    obj: Vec<u8>,
+    labels: Vec<u8>,
+    required_texels: usize,
+    ballast_shells: usize,
+}
+
+/// Build the inspectable outer mascot once, then add concentric low-poly
+/// shells inside its torso until the exact actor-side drawing requirement
+/// crosses the reported failure boundary. Each shell contributes far less
+/// than the eight-pixel capacity band, so the first crossing remains below
+/// the 664-square ceiling.
+fn small_canvas_fixture() -> SmallCanvasFixture {
+    let labels = small_canvas_labels();
+    let mut obj = String::new();
+    let mut next_vertex = 1u32;
+    append_sphere(&mut obj, &mut next_vertex, 24, 64, Vec3::new(0.0, 0.38, 0.0), Vec3::new(0.72, 0.76, 0.54));
+    append_sphere(&mut obj, &mut next_vertex, 24, 64, Vec3::new(0.0, -0.72, -0.04), Vec3::new(0.62, 0.90, 0.42));
+    for side in [-1.0, 1.0] {
+        append_sphere(
+            &mut obj,
+            &mut next_vertex,
+            10,
+            28,
+            Vec3::new(side * 0.42, 1.02, -0.02),
+            Vec3::new(0.20, 0.48, 0.16),
+        );
+    }
+
+    let mut required_texels = small_canvas_required_texels(obj.as_bytes(), &labels);
+    let mut ballast_shells = 0usize;
+    while required_texels <= SMALL_CANVAS_REQUIREMENT_FLOOR {
+        assert!(ballast_shells < BALLAST_SHELL_LIMIT, "generated ballast did not reach the 656-square boundary");
+        let scale = 0.16 + 0.78 * (ballast_shells + 1) as f32 / BALLAST_SHELL_LIMIT as f32;
+        let centre = Vec3::new(0.0, -0.72, -0.04);
+        let size = Vec3::new(0.50 * scale, 0.72 * scale, 0.32 * scale);
+
+        let mut shell = String::new();
+        let mut shell_vertex = 1u32;
+        append_sphere(&mut shell, &mut shell_vertex, 8, 16, centre, size);
+        required_texels += small_canvas_required_texels(shell.as_bytes(), &labels) - 1;
+        append_sphere(&mut obj, &mut next_vertex, 8, 16, centre, size);
+        ballast_shells += 1;
+    }
+
+    let measured = small_canvas_required_texels(obj.as_bytes(), &labels);
+    assert_eq!(measured, required_texels, "component-wise calibration must match the actor's combined drawing");
+    assert!(
+        (SMALL_CANVAS_REQUIREMENT_FLOOR + 1..=SMALL_CANVAS_REQUIREMENT_CEILING).contains(&measured),
+        "generated fixture needs {measured} texels, outside the 656-square through 664-square capacity band",
+    );
+
+    SmallCanvasFixture { obj: obj.into_bytes(), labels, required_texels: measured, ballast_shells }
+}
+
+/// The actor's exact unrigged load/resolve extraction over the generated
+/// subject. Keeping this native preflight beside the fixture makes its
+/// capacity contract explicit before either baseline or candidate wasm runs.
+fn small_canvas_required_texels(obj: &[u8], labels: &[u8]) -> usize {
+    let settings = Settings::default();
+    let mesh = Mesh::from_obj_bytes(obj, settings.relaxation).expect("the generated puppet OBJ parses");
+    let palette = Palette::canonical();
+    let labels = Labels::decode(labels, palette.classes(), mesh.min, mesh.max, LABEL_PAD)
+        .expect("the generated puppet labels decode");
+    assert!(anchor::Anchors::measure(&mesh, &labels).is_none(), "the all-hair fixture carries no chart anchors");
+
+    let resident = extract::tone_gate(extract::surface(&mesh, Some(&labels), None, &settings), &settings);
+    let volatile = extract::silhouettes(&mesh, small_canvas_eye());
+
+    sight::required_texels(Drawing { resident: &resident, volatile: &volatile })
+        .expect("the generated curves stay within the bounded per-curve reduction")
+}
+
+fn small_canvas_eye() -> Vec3 {
+    let (azimuth, elevation) = (AZIMUTH.to_radians(), ELEVATION.to_radians());
+    let (sin_azimuth, cos_azimuth) = azimuth.sin_cos();
+    let (sin_elevation, cos_elevation) = elevation.sin_cos();
+
+    Vec3::new(sin_azimuth * cos_elevation, sin_elevation, cos_azimuth * cos_elevation) * DISTANCE
+}
+
+/// Append one outward-wound UV sphere transformed into an ellipsoid. The
+/// axis mapping is a rotation: the generator's poles become the mascot's
+/// vertical axis without reversing its winding.
+fn append_sphere(obj: &mut String, next_vertex: &mut u32, rings: u32, segments: u32, centre: Vec3, scale: Vec3) {
+    let transformed =
+        |x: f32, y: f32, z: f32| Vec3::new(centre.x + x * scale.x, centre.y + z * scale.y, centre.z - y * scale.z);
+    let first = *next_vertex;
+    let top = transformed(0.0, 0.0, 1.0);
+    writeln!(obj, "v {} {} {}", top.x, top.y, top.z).expect("write generated top vertex");
+    for ring in 1..rings {
+        let latitude = PI * ring as f32 / rings as f32;
+        let radius = latitude.sin();
+        let z = latitude.cos();
+        for segment in 0..segments {
+            let longitude = TAU * segment as f32 / segments as f32;
+            let at = transformed(radius * longitude.cos(), radius * longitude.sin(), z);
+            writeln!(obj, "v {} {} {}", at.x, at.y, at.z).expect("write generated ring vertex");
+        }
+    }
+    let bottom = transformed(0.0, 0.0, -1.0);
+    writeln!(obj, "v {} {} {}", bottom.x, bottom.y, bottom.z).expect("write generated bottom vertex");
+
+    for segment in 0..segments {
+        let next = (segment + 1) % segments;
+        writeln!(obj, "f {first} {} {}", first + 1 + segment, first + 1 + next).expect("write generated top faces");
+    }
+    for ring in 0..rings - 2 {
+        let upper = first + 1 + ring * segments;
+        let lower = upper + segments;
+        for segment in 0..segments {
+            let next = (segment + 1) % segments;
+            let (a, b, c, d) = (upper + segment, upper + next, lower + segment, lower + next);
+            writeln!(obj, "f {a} {c} {d}\nf {a} {d} {b}").expect("write generated band faces");
+        }
+    }
+    let bottom_vertex = first + 1 + (rings - 1) * segments;
+    let last_ring = bottom_vertex - segments;
+    for segment in 0..segments {
+        let next = (segment + 1) % segments;
+        writeln!(obj, "f {bottom_vertex} {} {}", last_ring + next, last_ring + segment)
+            .expect("write generated bottom faces");
+    }
+    *next_vertex = bottom_vertex + 1;
+}
+
+fn small_canvas_labels() -> Vec<u8> {
+    let dictionary = "{'descr': '|u1', 'fortran_order': False, 'shape': (2, 2, 2), }";
+    let padding = (16 - ((10 + dictionary.len() + 1) % 16)) % 16;
+    let mut header = dictionary.to_owned();
+    header.extend(iter::repeat_n(' ', padding));
+    header.push('\n');
+
+    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+    bytes.extend(u16::try_from(header.len()).expect("a short generated label header").to_le_bytes());
+    bytes.extend(header.as_bytes());
+    bytes.extend([HAIR; 8]);
+    bytes
 }
 
 /// Raw owner-inspection evidence for the resident silhouette candidate.

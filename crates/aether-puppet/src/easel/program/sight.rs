@@ -580,6 +580,30 @@ fn points_of(spans: &[Span]) -> usize {
     spans.iter().map(|span| span.len as usize).sum()
 }
 
+/// Exact field texels `drawing` needs: one per point, one barrier before
+/// every curve, and the leading barrier before the first curve.
+///
+/// Canvas selection asks this before placement so it can promote a small
+/// requested extent without first attempting a lossy layout. The curve
+/// bound is part of the same query: more canvas cannot make an unbounded
+/// reduction valid.
+pub fn required_texels(drawing: Drawing<'_>) -> Result<usize, LayoutError> {
+    let mut needed = 1usize;
+    let mut curve = 0u32;
+    for half in [drawing.resident, drawing.volatile] {
+        for drawn in half {
+            let points = drawn.points.len();
+            if points > MAX_CURVE_POINTS {
+                return Err(LayoutError::CurveTooLong { id: curve_id(drawn), curve, points });
+            }
+            needed += points + 1;
+            curve += 1;
+        }
+    }
+
+    Ok(needed)
+}
+
 /// Place a drawing's curves in a field of `field` texels.
 ///
 /// The resident half is placed first and the volatile half after it, so
@@ -600,6 +624,10 @@ fn points_of(spans: &[Span]) -> usize {
 /// inherits the barrier the resident region's last span left.
 pub fn layout(drawing: Drawing<'_>, field: (u32, u32)) -> Result<Layout, LayoutError> {
     let capacity = field.0 as usize * field.1 as usize;
+    let needed = required_texels(drawing)?;
+    if needed > capacity {
+        return Err(LayoutError::OverCapacity { needed, capacity });
+    }
 
     let mut spans: Vec<Span> = Vec::with_capacity(drawing.len());
     let mut by_curve = vec![0u32; drawing.len()];
@@ -612,17 +640,12 @@ pub fn layout(drawing: Drawing<'_>, field: (u32, u32)) -> Result<Layout, LayoutE
 
         for (id, curve) in order {
             let points = half[(curve - base) as usize].points.len();
-            if points > MAX_CURVE_POINTS {
-                return Err(LayoutError::CurveTooLong { id, curve, points });
-            }
             by_curve[curve as usize] = spans.len() as u32;
             spans.push(Span { id, curve, start: cursor as u32, len: points as u32 });
             cursor += points + 1;
         }
     }
-    if cursor > capacity {
-        return Err(LayoutError::OverCapacity { needed: cursor, capacity });
-    }
+    debug_assert_eq!(cursor, needed);
 
     Ok(Layout { spans, by_curve, resident: drawing.resident.len(), occupied: cursor })
 }
@@ -1410,7 +1433,14 @@ mod tests {
         );
 
         let many = [curve(1, 0.0, 40), curve(2, 1.0, 40)];
-        assert!(matches!(layout(whole(&many), (8, 8)), Err(LayoutError::OverCapacity { capacity: 64, .. })));
+        let drawing = whole(&many);
+        assert_eq!(required_texels(drawing), Ok(83), "80 points, two curve barriers, and the leading barrier");
+        assert!(
+            matches!(layout(drawing, (82, 1)), Err(LayoutError::OverCapacity { needed: 83, capacity: 82 })),
+            "immediately below the requirement",
+        );
+        assert_eq!(layout(drawing, (83, 1)).expect("the exact requirement fits").occupied(), 83);
+        assert_eq!(layout(drawing, (84, 1)).expect("one spare texel fits").occupied(), 83);
     }
 
     /// Tripwire: the uniform blob lays one window down per reach-scan
