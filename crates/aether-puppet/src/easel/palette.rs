@@ -20,7 +20,7 @@
 //! [`Palette::decode_text`] reads. [`Palette::canonical`] is the box this
 //! crate was tuned on, and what a subject that names no palette gets.
 
-use aether_math::Vec2;
+use aether_math::{Vec2, Vec3};
 
 use super::image;
 use crate::labels::{self, CLASSES};
@@ -217,6 +217,15 @@ pub struct Palette {
     /// Child to parent, in the order they were declared.
     remaps: Vec<(u8, u8)>,
     reserves: Vec<u8>,
+    /// Where the hand's attention is anchored, in the subject's own space.
+    ///
+    /// Only a subject whose vocabulary carries no face needs one: R3 has
+    /// the care field decay from the drawn features, and a face supplies
+    /// those itself. A scene has no face to find, so it says where to
+    /// look — the keep, the tower — and the care field radiates from
+    /// there instead. Absent on a subject that says nothing, which is
+    /// painted at one even looseness rather than refused.
+    focus: Option<Vec3>,
 }
 
 /// The canonical box in the sidecar's own format.
@@ -324,6 +333,8 @@ impl Palette {
             materials: vec![hair, entry(DRESS, "dress", 0x4a_56_61, 0.5, 0.5, 0.3), skin, inner_ear, tuft, brow, iris],
             remaps: vec![(LIPS, SKIN)],
             reserves: vec![labels::EYE],
+            // She has a face, and a face anchors its own attention.
+            focus: None,
         }
     }
 
@@ -358,6 +369,17 @@ impl Palette {
     #[must_use]
     pub fn face_classes(&self) -> Vec<u8> {
         FACE_CLASSES.iter().filter_map(|&name| self.class_named(name)).collect()
+    }
+
+    /// The authored point the hand's attention is anchored at, in the
+    /// subject's own space, for a subject with no face to find.
+    ///
+    /// Read through [`CareSource::resolve`](super::field::CareSource::resolve)
+    /// rather than directly: a box that carries face classes anchors its
+    /// attention on those, and this is the fall-back behind them.
+    #[must_use]
+    pub fn focus(&self) -> Option<Vec3> {
+        self.focus
     }
 
     /// Where a region falls through when the paint policy names no
@@ -407,6 +429,7 @@ impl Palette {
     /// air      <class> <halo> <across> <down> <pigment> <cap>   what it leaves past its own edge
     /// remap    <child> <parent>                           the child takes the parent's wash
     /// reserve  <class>                                    paper, left bare
+    /// focus    <x> <y> <z>                                where the hand's attention is anchored
     /// ```
     ///
     /// Every class the vocabulary declares must be painted, remapped or
@@ -429,6 +452,7 @@ impl Palette {
             materials: draft.materials,
             remaps: draft.remaps,
             reserves: draft.reserves,
+            focus: draft.focus,
         };
         palette.validate()?;
 
@@ -513,6 +537,7 @@ struct Draft {
     materials: Vec<Material>,
     remaps: Vec<(u8, u8)>,
     reserves: Vec<u8>,
+    focus: Option<Vec3>,
 }
 
 impl Draft {
@@ -529,6 +554,7 @@ impl Draft {
             ["air", name, halo, across, down, pigment, cap] => self.air(name, [halo, across, down, pigment, cap], line),
             ["remap", child, parent] => self.remap(child, parent, line),
             ["reserve", name] => self.reserve(name, line),
+            ["focus", x, y, z] => self.focus(x, y, z, line),
             [record, ..] if RECORDS.contains(record) => Err(format!("palette line {line} has malformed {record} data")),
             [record, ..] => Err(format!("palette line {line} has unknown record '{record}'")),
             [] => unreachable!("empty palette lines are skipped"),
@@ -650,6 +676,20 @@ impl Draft {
         Ok(())
     }
 
+    /// Where the hand's attention is anchored, in the subject's own space.
+    fn focus(&mut self, x: &str, y: &str, z: &str, line: usize) -> Result<(), String> {
+        let at = Vec3::new(
+            palette_float(x, line, "focus")?,
+            palette_float(y, line, "focus")?,
+            palette_float(z, line, "focus")?,
+        );
+        if self.focus.replace(at).is_some() {
+            return Err(format!("palette line {line} repeats the focus"));
+        }
+
+        Ok(())
+    }
+
     /// The class a record names: a vocabulary entry, or one of the closed
     /// set of meta-materials the chart supplies coverage for.
     fn class(&self, name: &str, line: usize) -> Result<u8, String> {
@@ -678,7 +718,7 @@ impl Draft {
 /// Every record the format declares, for the malformed-versus-unknown
 /// split: a line whose first field is one of these got its own record
 /// wrong, and anything else is not a record at all.
-const RECORDS: [&str; 7] = ["classes", "material", "lit", "small", "air", "remap", "reserve"];
+const RECORDS: [&str; 8] = ["classes", "material", "lit", "small", "air", "remap", "reserve", "focus"];
 
 /// A set of class ids as one bit per id — how a class predicate crosses
 /// into a shader, where the vocabulary itself cannot go.

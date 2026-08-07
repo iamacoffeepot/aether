@@ -64,6 +64,7 @@ small    <class>                                         a region too small to l
 air      <class> <halo> <across> <down> <pigment> <cap>  what it leaves in the air past its edge
 remap    <child> <parent>                                the child takes the parent's wash
 reserve  <class>                                         paper, left bare
+focus    <x> <y> <z>                                     where the hand's attention is anchored
 ```
 
 Every class the vocabulary declares must be painted, remapped or reserved
@@ -88,6 +89,28 @@ face: the chart, the iris and the blush activate only when `lips`, `brow` and
 
 `aether-puppet`'s own `Palette::canonical` box, written in this format, is the
 crate's `CANONICAL_TEXT` constant — the worked example to copy from.
+
+### Where the hand's attention is
+
+The care field decides how closely the hand is held: cut to the line near what
+the picture is about, relaxing into a free wash as it moves away. That gradient
+*is* the painting, so a subject with none is painted at one flat looseness.
+
+It resolves from three sources, in order:
+
+1. **The drawn features** the box's vocabulary carries — `lips`, `brow`, `eye`.
+   A face anchors its own attention and needs nothing authored, which is the
+   canonical subject and is unchanged.
+2. **The authored `focus`**, a point in the subject's own space, for a subject
+   with no face to find. A scene says where to look — the keep, the tower — and
+   care decays from there through the same ramp the face path uses. The point is
+   projected per frame, so it stays put on the subject through an orbit.
+3. **Neither**, in which case the hand is held level and mid-way. Not the
+   loosest: an empty seed set reads as infinitely far, and a subject that simply
+   never said where to look should not be painted at its loosest everywhere.
+
+A `focus` on a box that carries face classes is inert — the face wins — so the
+record is only worth writing on a subject that has none.
 
 ## Drive the chart
 

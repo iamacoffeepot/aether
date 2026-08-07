@@ -68,7 +68,7 @@ use aether_render::{
 };
 
 use crate::easel::accent::{self, Eye};
-use crate::easel::field::{self, WashParams};
+use crate::easel::field::{self, CareSource, WashParams};
 use crate::easel::image::{self, Rng};
 use crate::easel::palette::{self, HAIR_CLASS, Palette, SKIN_CLASS};
 use crate::easel::survey;
@@ -1292,6 +1292,12 @@ pub struct Frame<'a> {
     /// `None` for a subject with no charted face — the accents neutralize
     /// through zeroed counts and a zeroed blush cap.
     pub faces: Option<Faces<'a>>,
+    /// Where the hand's attention is, resolved onto this frame's canvas.
+    ///
+    /// Per frame rather than per subject because the authored arm of it
+    /// is a point in the subject's own space: which texel it lands on is
+    /// the camera's answer, and it moves through an orbit.
+    pub care: CareSource,
 }
 
 /// The windows the seed and the canvas fix, rolled once and re-placed per
@@ -1348,12 +1354,11 @@ impl WashProgram {
     /// entering the frame shifts every later material's stream.
     pub fn seed_uniforms(&self, seed: u64, canvas: Canvas, presence: Presence) -> SeedUniforms {
         debug_assert_eq!(canvas.height, self.canvas_height, "a develop must ride the graph laid for its own canvas");
-        let (_, body_height) = canvas.body_at(self.divisor);
         let mut blob = Blob(vec![0u8; self.uniform_bytes as usize]);
         let mut rng = Rng::new(seed);
 
         blob.window(self.seam, &LiftExtentUniforms { source_scale: 1.0 / self.divisor as f32 }.encode());
-        care::encode(&mut blob.0, self.care, body_height, palette::class_set(&self.palette.face_classes()));
+        care::encode_hops(&mut blob.0, self.care);
         blob.window(self.flow.gradient_blur.window, &self.flow.gradient_blur.encode());
         for (index, (select, pool)) in self.flow.tensors.iter().enumerate() {
             blob.window(*select, &flow::SelectUniforms { channel: flow::COMPONENTS[index] }.encode());
@@ -1464,6 +1469,7 @@ impl WashProgram {
         let canvas = seed.canvas;
         let (_, body_height) = canvas.body_at(self.divisor);
         let mut blob = Blob(seed.blob.clone());
+        care::encode_frame(&mut blob.0, self.care, body_height, &frame.care);
 
         let charted = frame.faces.as_ref();
         let fine_eyes = charted.map_or_else(Vec::new, |faces| face::eyes(faces.fine, faces.presence, canvas.height));
