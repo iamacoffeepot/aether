@@ -205,7 +205,7 @@ pub fn silhouettes(mesh: &Mesh, eye: Vec3) -> Vec<Curve3> {
     let template =
         Curve3 { points: Vec::new(), class: FeatureClass::Silhouette, pen: Pen::Ink, seed: 0, authored: false };
 
-    weld::curves(to_points(mesh.level_set(&mesh.facing(eye), &[], 0.0)), &template)
+    weld::curves(to_points(mesh.silhouette_level_set(eye)), &template)
 }
 
 /// Hatching as three crossing families of world-space plane cuts.

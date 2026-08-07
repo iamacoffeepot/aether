@@ -96,7 +96,7 @@ impl Rigid {
 
     /// The affine map `send` performs, read off its action on the origin
     /// and the three basis vectors.
-    fn sample(send: impl Fn(Vec3) -> Vec3) -> Self {
+    pub(crate) fn sample(send: impl Fn(Vec3) -> Vec3) -> Self {
         let translation = send(Vec3::ZERO);
 
         Self { columns: [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| send(axis) - translation), translation }
@@ -111,6 +111,31 @@ impl Rigid {
     /// stands off its surface by.
     pub fn direction(&self, v: Vec3) -> Vec3 {
         self.columns[0] * v.x + self.columns[1] * v.y + self.columns[2] * v.z
+    }
+
+    /// A conservative image of a sphere under this affine map.
+    ///
+    /// Live bones are rotations, but the operator bound deliberately does
+    /// not rely on exact orthonormal float columns: it encloses any small
+    /// sampling drift as well as the exact rotated sphere.
+    pub(crate) fn bound_sphere(&self, centre: Vec3, radius: f32) -> Option<(Vec3, f32)> {
+        let gram = [0, 1, 2].map(|row| [0, 1, 2].map(|column| self.columns[row].dot(self.columns[column])));
+        // Gershgorin bounds the largest eigenvalue of A^T A; its square
+        // root bounds the largest stretch of A and stays at one for an
+        // exact rotation.
+        let stretch_squared = [0, 1, 2]
+            .map(|row| {
+                gram[row][row]
+                    + (0..3).filter(|&column| column != row).map(|column| gram[row][column].abs()).sum::<f32>()
+            })
+            .into_iter()
+            .fold(0.0f32, f32::max);
+        let stretch = stretch_squared.sqrt();
+        let centre = self.point(centre);
+        let radius = radius * stretch * (1.0 + 8.0 * f32::EPSILON);
+
+        (centre.x.is_finite() && centre.y.is_finite() && centre.z.is_finite() && radius.is_finite() && radius >= 0.0)
+            .then_some((centre, radius))
     }
 
     /// The inverse, given the linear part is a rotation: its transpose,
@@ -630,6 +655,30 @@ impl Skin {
 
     pub fn bones(&self) -> usize {
         self.descriptor.bones.len()
+    }
+
+    pub(crate) fn vertices(&self) -> usize {
+        self.weights.len() / self.bones()
+    }
+
+    /// Bones whose weight survives the exact CPU skin loop, plus the
+    /// largest scale error introduced by dropping the rest.
+    ///
+    /// The mask is the node hierarchy's pose vocabulary. The error makes
+    /// its position sphere conservative even when harmonic tails below
+    /// [`MINIMUM_SHARE`] do not sum to an exact affine partition.
+    pub(crate) fn silhouette_binding(&self, vertex: usize) -> (u8, f32) {
+        let row = &self.weights[vertex * self.bones()..(vertex + 1) * self.bones()];
+        let mut bones = 0u8;
+        let mut held = 0.0f32;
+        for (bone, &weight) in row.iter().enumerate() {
+            if weight > MINIMUM_SHARE {
+                bones |= 1 << bone;
+                held += weight;
+            }
+        }
+
+        (bones, (1.0 - held).abs())
     }
 
     /// One vertex's bone binding as the vertex stage takes it: the
@@ -1313,8 +1362,9 @@ mod tests {
         );
         assert!(!curves.is_empty(), "the level set crosses the strip");
 
-        let mut posed = rest.deformable();
+        let mut posed = rest.deformable(&skin);
         skin.pose_surface(&transforms, &rest, &mut posed.positions, &mut posed.normals);
+        posed.rebound(&transforms);
         let before: Vec<Vec3> = curves.iter().flat_map(|curve| &curve.points).map(|point| point.pos).collect();
         skin.pose_curves(&transforms, &posed, &mut curves);
 
@@ -1380,8 +1430,9 @@ mod tests {
         let crossings = rest.level_set(&heights, &[], 0.5);
         assert!(!crossings.is_empty(), "the level set crosses the strip");
 
-        let mut posed = rest.deformable();
+        let mut posed = rest.deformable(&skin);
         skin.pose_surface(&transforms, &rest, &mut posed.positions, &mut posed.normals);
+        posed.rebound(&transforms);
 
         let mut moved = 0.0f32;
         for crossing in crossings.into_iter().flatten() {
@@ -1453,5 +1504,15 @@ mod tests {
             Skin::parse(&npy(&spread, (1, spread.len())), &descriptor, 1).err().as_deref(),
             Some("rig weights vertex 0 has 5 influences above the minimum 0.0001, but the puppet carries at most 4"),
         );
+    }
+
+    #[test]
+    fn silhouette_binding_matches_the_exact_pose_threshold() {
+        let skin = Skin::parse(&npy(&[0.999_95, 0.000_05], (1, 2)), "bones held dropped\n", 1)
+            .expect("one meaningful and one harmonic-tail weight");
+        let (bones, error) = skin.silhouette_binding(0);
+
+        assert_eq!(bones, 0b01, "only the transform the pose loop applies is meaningful");
+        assert_eq!(error.to_bits(), (1.0f32 - 0.999_95).abs().to_bits(), "the dropped mass widens position bounds");
     }
 }

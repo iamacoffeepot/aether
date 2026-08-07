@@ -1,4 +1,4 @@
-//! A bounding-volume hierarchy over the triangles, for occlusion only.
+//! A bounding-volume hierarchy over the subject's triangles.
 //!
 //! Every visible point has to prove nothing stands between it and the
 //! eye, and against 868k triangles the linear answer is hopeless. Only
@@ -11,7 +11,11 @@
 //! what they cost is the number of nodes they open, so the tree earns a
 //! slower build.
 
+use std::sync::Arc;
+
 use aether_math::Vec3;
+
+use crate::deform::{BONE_LIMIT, Rigid, Skin};
 
 const LEAF_SIZE: usize = 8;
 
@@ -41,6 +45,19 @@ fn expand(bounds: (Vec3, Vec3), with: (Vec3, Vec3)) -> (Vec3, Vec3) {
 
 const EMPTY: (Vec3, Vec3) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
 
+#[derive(Clone, Copy)]
+struct Sphere {
+    centre: Vec3,
+    radius: f32,
+}
+
+#[derive(Clone, Copy)]
+struct Cone {
+    axis: Vec3,
+    half_angle: f32,
+}
+
+#[derive(Clone)]
 struct Node {
     min: Vec3,
     max: Vec3,
@@ -49,6 +66,20 @@ struct Node {
     start: u32,
     /// Triangle count for a leaf, `0` for an interior node.
     count: u32,
+    sphere: Sphere,
+    cone: Cone,
+}
+
+#[derive(Clone)]
+struct Topology {
+    nodes: Vec<Node>,
+    order: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Binding {
+    bones: u8,
+    weight_error: f32,
 }
 
 /// One triangle in the form the ray test actually reads it: a corner and
@@ -69,9 +100,19 @@ struct Tri {
 }
 
 pub struct Bvh {
-    nodes: Vec<Node>,
-    order: Vec<u32>,
+    topology: Arc<Topology>,
     tris: Vec<Tri>,
+}
+
+/// The reusable silhouette half of the face hierarchy.
+///
+/// Posed meshes share the rest topology and carry only the node bindings
+/// needed to conservatively move its bounds. The ray-only triangle cache
+/// stays on [`Bvh`], so cloning this never enables posed occlusion.
+#[derive(Clone)]
+pub(crate) struct SilhouetteBvh {
+    topology: Arc<Topology>,
+    bindings: Arc<[Binding]>,
 }
 
 fn bounds_of(centres: &[Vec3], order: &[u32]) -> (Vec3, Vec3) {
@@ -82,6 +123,50 @@ fn bounds_of(centres: &[Vec3], order: &[u32]) -> (Vec3, Vec3) {
             Vec3::new(max.x.max(c.x), max.y.max(c.y), max.z.max(c.z)),
         )
     })
+}
+
+fn finite(v: Vec3) -> bool {
+    v.x.is_finite() && v.y.is_finite() && v.z.is_finite()
+}
+
+fn node_sphere(positions: &[Vec3], faces: &[[u32; 3]], order: &[u32], min: Vec3, max: Vec3) -> Sphere {
+    let centre = (min + max) * 0.5;
+    if !finite(centre) {
+        return Sphere { centre: Vec3::ZERO, radius: f32::INFINITY };
+    }
+    let mut radius = 0.0f32;
+    for position in order.iter().flat_map(|&face| faces[face as usize]).map(|corner| positions[corner as usize]) {
+        if !finite(position) {
+            return Sphere { centre, radius: f32::INFINITY };
+        }
+        radius = radius.max((position - centre).length());
+    }
+
+    Sphere { centre, radius: radius * (1.0 + 8.0 * f32::EPSILON) }
+}
+
+fn node_cone(normals: &[Vec3], faces: &[[u32; 3]], order: &[u32]) -> Cone {
+    let mut sum = Vec3::ZERO;
+    let mut held = 0usize;
+    for normal in order.iter().flat_map(|&face| faces[face as usize]).map(|corner| normals[corner as usize]) {
+        if !finite(normal) {
+            return Cone { axis: Vec3::Y, half_angle: f32::INFINITY };
+        }
+        sum += normal;
+        held += 1;
+    }
+    if held == 0 || !finite(sum) || sum.length_squared() < 1e-12 {
+        return Cone { axis: Vec3::Y, half_angle: f32::INFINITY };
+    }
+
+    let axis = sum.normalize();
+    let half_angle = order
+        .iter()
+        .flat_map(|&face| faces[face as usize])
+        .map(|corner| axis.dot(normals[corner as usize]).clamp(-1.0, 1.0).acos())
+        .fold(0.0f32, f32::max);
+
+    Cone { axis, half_angle: half_angle + 16.0 * f32::EPSILON }
 }
 
 /// Partition `slice` in place and return how many triangles went left.
@@ -174,7 +259,7 @@ fn split(slice: &mut [u32], boxes: &[(Vec3, Vec3)], key: impl Fn(u32) -> f32, fr
 }
 
 impl Bvh {
-    pub fn build(positions: &[Vec3], faces: &[[u32; 3]]) -> Self {
+    pub fn build(positions: &[Vec3], normals: &[Vec3], faces: &[[u32; 3]]) -> Self {
         let centres: Vec<Vec3> = faces
             .iter()
             .map(|f| (positions[f[0] as usize] + positions[f[1] as usize] + positions[f[2] as usize]) / 3.0)
@@ -193,7 +278,16 @@ impl Bvh {
 
         let mut order: Vec<u32> = (0..faces.len() as u32).collect();
         let mut nodes = Vec::with_capacity(faces.len() / 4);
-        nodes.push(Node { min: Vec3::splat(0.0), max: Vec3::splat(0.0), start: 0, count: 0 });
+        let empty_sphere = Sphere { centre: Vec3::ZERO, radius: 0.0 };
+        let empty_cone = Cone { axis: Vec3::Y, half_angle: f32::INFINITY };
+        nodes.push(Node {
+            min: Vec3::splat(0.0),
+            max: Vec3::splat(0.0),
+            start: 0,
+            count: 0,
+            sphere: empty_sphere,
+            cone: empty_cone,
+        });
 
         // Explicit stack rather than recursion: the depth is data-driven and
         // a degenerate split pattern should not be able to blow the real one.
@@ -205,9 +299,11 @@ impl Bvh {
             // Grow to the true triangle bounds, not just the centroids —
             // a centroid box would clip geometry out of its own node.
             let (lo, hi) = slice.iter().fold((min, max), |bounds, &i| expand(bounds, boxes[i as usize]));
+            let sphere = node_sphere(positions, faces, slice, lo, hi);
+            let cone = node_cone(normals, faces, slice);
 
             if slice.len() <= LEAF_SIZE {
-                nodes[node] = Node { min: lo, max: hi, start: start as u32, count: slice.len() as u32 };
+                nodes[node] = Node { min: lo, max: hi, start: start as u32, count: slice.len() as u32, sphere, cone };
                 continue;
             }
 
@@ -224,9 +320,9 @@ impl Bvh {
             let middle = split(slice, &boxes, key, min.to_array()[axis], extent.to_array()[axis]);
 
             let left = nodes.len();
-            nodes.push(Node { min: lo, max: hi, start: 0, count: 0 });
-            nodes.push(Node { min: lo, max: hi, start: 0, count: 0 });
-            nodes[node] = Node { min: lo, max: hi, start: left as u32, count: 0 };
+            nodes.push(Node { min: lo, max: hi, start: 0, count: 0, sphere, cone });
+            nodes.push(Node { min: lo, max: hi, start: 0, count: 0, sphere, cone });
+            nodes[node] = Node { min: lo, max: hi, start: left as u32, count: 0, sphere, cone };
 
             stack.push((left, start, start + middle));
             stack.push((left + 1, start + middle, end));
@@ -241,7 +337,15 @@ impl Bvh {
             })
             .collect();
 
-        Self { nodes, order, tris }
+        Self { topology: Arc::new(Topology { nodes, order }), tris }
+    }
+
+    pub(crate) fn silhouette(&self, skin: &Skin, faces: &[[u32; 3]]) -> SilhouetteBvh {
+        SilhouetteBvh::bound(Arc::clone(&self.topology), skin, faces)
+    }
+
+    pub(crate) fn silhouette_faces(&self, eye: Vec3) -> Vec<usize> {
+        candidate_faces(&self.topology, &[], eye, &[])
     }
 
     /// Is anything hit strictly between `t_min` and `t_max` along the ray?
@@ -260,7 +364,7 @@ impl Bvh {
 
         while depth > 0 {
             depth -= 1;
-            let node = &self.nodes[stack[depth] as usize];
+            let node = &self.topology.nodes[stack[depth] as usize];
 
             if slab_entry(node.min, node.max, origin, inv, t_min, t_max).is_none() {
                 continue;
@@ -284,6 +388,189 @@ impl Bvh {
     }
 }
 
+impl SilhouetteBvh {
+    fn bound(topology: Arc<Topology>, skin: &Skin, faces: &[[u32; 3]]) -> Self {
+        let vertex_bindings: Vec<Binding> = (0..skin.vertices())
+            .map(|vertex| {
+                let (bones, weight_error) = skin.silhouette_binding(vertex);
+                Binding { bones, weight_error }
+            })
+            .collect();
+        let mut bindings = vec![Binding::default(); topology.nodes.len()];
+
+        // Children are always appended after their parent, so a reverse
+        // pass can fold leaves into interiors without another stack.
+        for node_index in (0..topology.nodes.len()).rev() {
+            let node = &topology.nodes[node_index];
+            bindings[node_index] = if node.count == 0 {
+                let left = node.start as usize;
+                Binding {
+                    bones: bindings[left].bones | bindings[left + 1].bones,
+                    weight_error: bindings[left].weight_error.max(bindings[left + 1].weight_error),
+                }
+            } else {
+                let mut binding = Binding::default();
+                for &face in &topology.order[node.start as usize..(node.start + node.count) as usize] {
+                    for corner in faces[face as usize] {
+                        let vertex = vertex_bindings[corner as usize];
+                        binding.bones |= vertex.bones;
+                        binding.weight_error = binding.weight_error.max(vertex.weight_error);
+                    }
+                }
+                binding
+            };
+        }
+
+        Self { topology, bindings: bindings.into() }
+    }
+
+    pub(crate) fn faces(&self, eye: Vec3, transforms: &[Rigid]) -> Vec<usize> {
+        candidate_faces(&self.topology, &self.bindings, eye, transforms)
+    }
+}
+
+fn merge_spheres(a: Sphere, b: Sphere) -> Option<Sphere> {
+    if !finite(a.centre)
+        || !finite(b.centre)
+        || !a.radius.is_finite()
+        || !b.radius.is_finite()
+        || a.radius < 0.0
+        || b.radius < 0.0
+    {
+        return None;
+    }
+
+    let between = b.centre - a.centre;
+    let distance = between.length();
+    if !distance.is_finite() {
+        return None;
+    }
+    if a.radius >= distance + b.radius {
+        return Some(a);
+    }
+    if b.radius >= distance + a.radius {
+        return Some(b);
+    }
+    if distance <= 0.0 {
+        return Some(Sphere { centre: a.centre, radius: a.radius.max(b.radius) });
+    }
+
+    let radius = (distance + a.radius + b.radius) * 0.5;
+    let centre = a.centre + between * ((radius - a.radius) / distance);
+    Some(Sphere { centre, radius: radius * (1.0 + 8.0 * f32::EPSILON) })
+}
+
+fn posed_sphere(rest: Sphere, binding: Binding, transforms: &[Rigid]) -> Option<Sphere> {
+    let mut posed = None;
+    for bone in 0..BONE_LIMIT {
+        if binding.bones & (1 << bone) == 0 {
+            continue;
+        }
+        let (centre, radius) = transforms.get(bone)?.bound_sphere(rest.centre, rest.radius)?;
+        let transformed = Sphere { centre, radius };
+        posed = Some(match posed {
+            None => transformed,
+            Some(held) => merge_spheres(held, transformed)?,
+        });
+    }
+
+    let mut posed = posed.unwrap_or(rest);
+    if !binding.weight_error.is_finite() || binding.weight_error < 0.0 {
+        return None;
+    }
+    let reach = posed.centre.length() + posed.radius;
+    posed.radius += binding.weight_error * reach;
+    posed.radius *= 1.0 + 8.0 * f32::EPSILON;
+
+    finite(posed.centre).then_some(posed).filter(|sphere| sphere.radius.is_finite())
+}
+
+fn posed_cone(rest: Cone, binding: Binding, transforms: &[Rigid]) -> Option<Cone> {
+    if !finite(rest.axis) || !rest.half_angle.is_finite() || rest.half_angle < 0.0 {
+        return None;
+    }
+
+    // The rest axis is included because `normalize_or(rest_normal)` is
+    // the exact live fallback when a blended normal cancels.
+    let mut axes = vec![rest.axis];
+    for bone in 0..BONE_LIMIT {
+        if binding.bones & (1 << bone) == 0 {
+            continue;
+        }
+        let axis = transforms.get(bone)?.direction(rest.axis);
+        if !finite(axis) || axis.length_squared() < 1e-12 {
+            return None;
+        }
+        axes.push(axis.normalize());
+    }
+
+    let sum = axes.iter().copied().fold(Vec3::ZERO, |sum, axis| sum + axis);
+    if !finite(sum) || sum.length_squared() < 1e-12 {
+        return None;
+    }
+    let axis = sum.normalize();
+    let half_angle = axes
+        .iter()
+        .map(|&candidate| axis.dot(candidate).clamp(-1.0, 1.0).acos())
+        .fold(rest.half_angle, |wide, angle| wide.max(rest.half_angle + angle))
+        + 32.0 * f32::EPSILON;
+
+    (half_angle < core::f32::consts::FRAC_PI_2).then_some(Cone { axis, half_angle })
+}
+
+fn uniformly_signed(node: &Node, binding: Binding, eye: Vec3, transforms: &[Rigid]) -> bool {
+    if !finite(eye) {
+        return false;
+    }
+    let Some(sphere) = posed_sphere(node.sphere, binding, transforms) else {
+        return false;
+    };
+    let to_centre = sphere.centre - eye;
+    let distance = to_centre.length();
+    if !distance.is_finite() || distance <= sphere.radius || distance <= 0.0 {
+        return false;
+    }
+    let ratio = sphere.radius / distance;
+    if !ratio.is_finite() || !(0.0..1.0).contains(&ratio) {
+        return false;
+    }
+    let view_half_angle = ratio.asin() + 16.0 * f32::EPSILON;
+    let Some(normal) = posed_cone(node.cone, binding, transforms) else {
+        return false;
+    };
+    let view_axis = to_centre / distance;
+    let between = view_axis.dot(normal.axis).clamp(-1.0, 1.0).acos();
+    let uncertainty = view_half_angle + normal.half_angle;
+    let boundary = core::f32::consts::FRAC_PI_2;
+    let margin = 64.0 * f32::EPSILON;
+
+    between + uncertainty < boundary - margin || between - uncertainty > boundary + margin
+}
+
+fn candidate_faces(topology: &Topology, bindings: &[Binding], eye: Vec3, transforms: &[Rigid]) -> Vec<usize> {
+    let mut candidates = Vec::new();
+    let mut stack = vec![0u32];
+
+    while let Some(node_index) = stack.pop() {
+        let node = &topology.nodes[node_index as usize];
+        let binding = bindings.get(node_index as usize).copied().unwrap_or_default();
+        if uniformly_signed(node, binding, eye, transforms) {
+            continue;
+        }
+        if node.count == 0 {
+            stack.push(node.start + 1);
+            stack.push(node.start);
+            continue;
+        }
+        candidates.extend(
+            topology.order[node.start as usize..(node.start + node.count) as usize].iter().map(|&face| face as usize),
+        );
+    }
+
+    candidates.sort_unstable();
+    candidates
+}
+
 impl Bvh {
     /// Nearest hit along the ray, as `(t, face)`. Used to drop authored
     /// face marks onto whatever surface lies behind them.
@@ -295,7 +582,7 @@ impl Bvh {
 
         while depth > 0 {
             depth -= 1;
-            let node = &self.nodes[stack[depth] as usize];
+            let node = &self.topology.nodes[stack[depth] as usize];
             let limit = best.map_or(t_max, |(t, _)| t);
 
             if slab_entry(node.min, node.max, origin, inv, t_min, limit).is_none() {
@@ -313,7 +600,7 @@ impl Bvh {
             for (slot, tri) in leaf.clone().zip(&self.tris[leaf]) {
                 let hit = triangle_t(tri.a, tri.e1, tri.e2, origin, dir, t_min, best.map_or(t_max, |(t, _)| t));
                 if let Some(t) = hit {
-                    best = Some((t, self.order[slot] as usize));
+                    best = Some((t, self.topology.order[slot] as usize));
                 }
             }
         }
@@ -368,6 +655,8 @@ fn triangle_t(a: Vec3, e1: Vec3, e2: Vec3, origin: Vec3, dir: Vec3, t_min: f32, 
 mod tests {
     use super::*;
 
+    use crate::deform::npy;
+
     /// A wall of `across * across` unit quads in the `z = 1` plane, its
     /// corner at the origin. Every triangle's centroid shares a `z`, so
     /// the build meets a flat axis on every descent — and there are enough
@@ -407,7 +696,8 @@ mod tests {
     #[test]
     fn no_triangle_falls_out_of_the_tree() {
         let (positions, faces) = wall(8);
-        let bvh = Bvh::build(&positions, &faces);
+        let normals = vec![Vec3::Z; positions.len()];
+        let bvh = Bvh::build(&positions, &normals, &faces);
 
         for face in &faces {
             let centre = face.iter().fold(Vec3::splat(0.0), |sum, &i| sum + positions[i as usize]) / 3.0;
@@ -428,9 +718,103 @@ mod tests {
     #[test]
     fn a_ray_past_the_wall_s_edge_is_clear() {
         let (positions, faces) = wall(8);
-        let bvh = Bvh::build(&positions, &faces);
+        let normals = vec![Vec3::Z; positions.len()];
+        let bvh = Bvh::build(&positions, &normals, &faces);
 
         assert!(!bvh.occluded(Vec3::new(-0.5, 4.0, 0.0), Vec3::new(0.0, 0.0, 1.0), 1e-4, 2.0), "left of the wall");
         assert!(!bvh.occluded(Vec3::new(4.0, 4.0, 0.0), Vec3::new(0.0, 0.0, 1.0), 1e-4, 0.5), "stops short of it");
+    }
+
+    #[test]
+    fn posed_spheres_and_cones_contain_blended_bone_images() {
+        let rest_sphere = Sphere { centre: Vec3::new(0.2, -0.1, 0.4), radius: 0.75 };
+        let rest_cone = Cone { axis: Vec3::Z, half_angle: 0.2 };
+        let transforms = [
+            Rigid::sample(|p| p.rotate_axis_angle(Vec3::Y, 0.35) + Vec3::new(0.2, 0.0, 0.0)),
+            Rigid::sample(|p| p.rotate_axis_angle(Vec3::X, -0.45) + Vec3::new(-0.1, 0.15, 0.0)),
+        ];
+        let binding = Binding { bones: 0b11, weight_error: 0.0 };
+        let sphere = posed_sphere(rest_sphere, binding, &transforms).expect("finite transformed sphere");
+        let cone = posed_cone(rest_cone, binding, &transforms).expect("narrow transformed cone");
+
+        for share in [0.0, 0.2, 0.5, 0.8, 1.0] {
+            for direction in [Vec3::X, Vec3::Y, Vec3::Z, -Vec3::X, -Vec3::Y, -Vec3::Z] {
+                let point = rest_sphere.centre + direction * rest_sphere.radius;
+                let posed = transforms[0].point(point) * share + transforms[1].point(point) * (1.0 - share);
+                assert!((posed - sphere.centre).length() <= sphere.radius, "posed point escaped its node sphere");
+            }
+
+            let normal = Vec3::Z.rotate_axis_angle(Vec3::Y, rest_cone.half_angle);
+            let posed =
+                (transforms[0].direction(normal) * share + transforms[1].direction(normal) * (1.0 - share)).normalize();
+            let angle = cone.axis.dot(posed).clamp(-1.0, 1.0).acos();
+            assert!(angle <= cone.half_angle, "posed normal escaped its node cone");
+        }
+    }
+
+    #[test]
+    fn merged_nodes_keep_every_meaningful_bone() {
+        let (positions, faces) = wall(3);
+        let normals = vec![Vec3::Z; positions.len()];
+        let weights: Vec<f32> = (0..positions.len())
+            .flat_map(|vertex| {
+                if vertex % 2 == 0 {
+                    [1.0, 0.0]
+                } else {
+                    [0.0, 1.0]
+                }
+            })
+            .collect();
+        let skin =
+            Skin::parse(&npy(&weights, (positions.len(), 2)), "bones chest head\npivot head 0 0 0\n", positions.len())
+                .expect("two bone wall");
+        let silhouette = Bvh::build(&positions, &normals, &faces).silhouette(&skin, &faces);
+
+        assert_eq!(silhouette.bindings[0].bones, 0b11, "the root merges both child masks");
+        assert!(silhouette.bindings.iter().all(|binding| binding.bones != 0), "every occupied node has a bone");
+    }
+
+    #[test]
+    fn every_uncertain_bound_descends() {
+        let ordinary = Node {
+            min: Vec3::splat(-1.0),
+            max: Vec3::splat(1.0),
+            start: 0,
+            count: 1,
+            sphere: Sphere { centre: Vec3::X, radius: 0.25 },
+            cone: Cone { axis: Vec3::Y, half_angle: 0.0 },
+        };
+
+        assert!(!uniformly_signed(&ordinary, Binding::default(), Vec3::X, &[]), "eye on sphere centre");
+        assert!(
+            !uniformly_signed(
+                &Node { sphere: Sphere { centre: Vec3::X, radius: 1.0 }, ..ordinary.clone() },
+                Binding::default(),
+                Vec3::ZERO,
+                &[],
+            ),
+            "eye on sphere boundary"
+        );
+        assert!(!uniformly_signed(&ordinary, Binding::default(), Vec3::splat(f32::NAN), &[]), "non-finite eye");
+        assert!(
+            !uniformly_signed(
+                &Node { cone: Cone { axis: Vec3::Y, half_angle: core::f32::consts::FRAC_PI_2 }, ..ordinary.clone() },
+                Binding::default(),
+                Vec3::ZERO,
+                &[],
+            ),
+            "hemisphere-wide cone"
+        );
+        assert!(!uniformly_signed(&ordinary, Binding::default(), Vec3::ZERO, &[]), "exact perpendicularity");
+
+        let opposite = Rigid::sample(|p| p.rotate_axis_angle(Vec3::Y, core::f32::consts::PI));
+        assert!(
+            posed_cone(Cone { axis: Vec3::X, half_angle: 0.0 }, Binding { bones: 1, weight_error: 0.0 }, &[opposite])
+                .is_none(),
+            "cancelling axes are uncertifiable"
+        );
+
+        let signed = Node { cone: Cone { axis: Vec3::X, half_angle: 0.0 }, ..ordinary };
+        assert!(uniformly_signed(&signed, Binding::default(), Vec3::ZERO, &[]), "a strict positive bound prunes");
     }
 }

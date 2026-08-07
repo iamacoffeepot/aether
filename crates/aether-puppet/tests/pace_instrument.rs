@@ -449,7 +449,8 @@ fn chart_controls_capture() {
 
 /// Raw owner-inspection evidence for the resident silhouette candidate.
 ///
-/// Every view writes the untouched CPU baseline, the opt-in candidate, an
+/// The pinned, mid-orbit, and held cases each write the untouched
+/// accelerated-CPU baseline, the independent opt-in candidate, an
 /// unamplified per-channel absolute difference, and the candidate's
 /// exceptional-junction overlay. The instrument deliberately makes no
 /// visual assertion; disposition belongs to the owner.
@@ -480,16 +481,12 @@ fn gpu_silhouette_capture() {
 
 fn silhouette_views() -> [(&'static str, Pose, Look); 3] {
     [
-        ("rest", Pose::default(), look(AZIMUTH)),
+        ("pinned", Pose::default(), look(AZIMUTH)),
+        ("mid-orbit", Pose::default(), look(32.0)),
         (
-            "pose",
+            "held",
             Pose { yaw: 22.0, pitch: -6.0, jaw: 7.0, ear_twist_left: 18.0, ear_twist_right: -18.0, ..Pose::default() },
             look(AZIMUTH),
-        ),
-        (
-            "articulation",
-            Pose { yaw: -12.0, pitch: 5.0, jaw: 16.0, ear_twist_left: -22.5, ear_twist_right: 22.5, ..Pose::default() },
-            look(32.0),
         ),
     ]
 }
@@ -1179,13 +1176,16 @@ const PHASE_YAW: f32 = 18.0;
 fn time_the_pose_moved_half(at: &Subject, skin: &deform::Skin, view: &View) {
     let pose = Pose { yaw: PHASE_YAW, ..Pose::default() };
     let transforms = skin.transforms(&pose);
-    let mut posed = at.mesh.deformable();
+    let mut posed = at.mesh.deformable(skin);
 
     phase("pose — the surface skin, per vertex", PHASE_REPEATS, || {
         skin.pose_surface(&transforms, &at.mesh, &mut posed.positions, &mut posed.normals);
     });
-    posed.rebound();
-    phase("pose — silhouette off the posed surface", PHASE_REPEATS, || extract::silhouettes(&posed, view.eye));
+    posed.rebound(&transforms);
+    phase("pose — silhouette, accelerated", PHASE_REPEATS, || extract::silhouettes(&posed, view.eye));
+    phase("pose — silhouette, retained linear oracle", PHASE_REPEATS, || {
+        posed.level_set(&posed.facing(view.eye), &[], 0.0)
+    });
 
     // What a posed frame packs now: the volatile half alone, against the
     // resident half that stays on the GPU. The same pack

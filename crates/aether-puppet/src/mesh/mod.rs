@@ -18,7 +18,8 @@ pub mod bvh;
 
 use aether_math::Vec3;
 
-use bvh::Bvh;
+use crate::deform::{Rigid, Skin};
+use bvh::{Bvh, SilhouetteBvh};
 
 pub struct Mesh {
     pub positions: Vec<Vec3>,
@@ -33,6 +34,11 @@ pub struct Mesh {
     /// Absent on a posed copy, which is never asked a ray question — see
     /// [`Self::deformable`].
     bvh: Option<Bvh>,
+    /// The shared hierarchy without its ray-only triangle cache, present
+    /// only on a posed copy.
+    silhouette: Option<SilhouetteBvh>,
+    /// The exact bone maps used to write this posed copy.
+    silhouette_transforms: Vec<Rigid>,
     /// Cached, because the occlusion bias reads it once per ray sample and
     /// the honest computation walks every face.
     mean_edge: f32,
@@ -85,15 +91,13 @@ impl Mesh {
     }
 
     /// A copy of this mesh for a pose to be written into, sharing its
-    /// faces and carrying no ray accelerator.
+    /// silhouette topology and carrying no ray accelerator.
     ///
     /// The positions and normals arrive as the rest ones and are
     /// overwritten by [`Skin::pose_surface`]; [`Self::rebound`] closes the
-    /// pose off. No accelerator because nothing asks the posed surface a
-    /// ray question: the chart plants its face in the model's own frontal
-    /// plane, which is a question about the sculpt, and the eye is carried
-    /// into that frame rather than the face being planted on a head that
-    /// has turned.
+    /// pose off. The ray cache stays absent because nothing asks the posed
+    /// surface an occlusion question; only the topology and meaningful-bone
+    /// bindings needed by silhouette extraction ride along.
     ///
     /// The mean edge length rides along rather than being re-measured. A
     /// bust rig is near-isometric, and this length sets the occlusion bias
@@ -101,7 +105,7 @@ impl Mesh {
     /// self-occlusion along every long curve.
     ///
     /// [`Skin::pose_surface`]: crate::deform::Skin::pose_surface
-    pub fn deformable(&self) -> Self {
+    pub fn deformable(&self, skin: &Skin) -> Self {
         Self {
             positions: self.positions.clone(),
             faces: self.faces.clone(),
@@ -109,13 +113,17 @@ impl Mesh {
             min: self.min,
             max: self.max,
             bvh: None,
+            silhouette: self.bvh.as_ref().map(|bvh| bvh.silhouette(skin, &self.faces)),
+            silhouette_transforms: Vec::new(),
             mean_edge: self.mean_edge,
         }
     }
 
-    /// Re-measure the bounds after the positions were posed in place.
-    pub fn rebound(&mut self) {
+    /// Re-measure the bounds and retain the exact transforms after posing.
+    pub fn rebound(&mut self, transforms: &[Rigid]) {
         (self.min, self.max) = bounds_of(&self.positions);
+        self.silhouette_transforms.clear();
+        self.silhouette_transforms.extend_from_slice(transforms);
     }
 
     /// Where an anchorage sits on *this* mesh.
@@ -147,9 +155,19 @@ impl Mesh {
                 / positions.len() as f32;
         tracing::debug!(target: "aether_puppet", agreement, "normal orientation");
 
-        let bvh = Some(Bvh::build(&positions, &faces));
+        let bvh = Some(Bvh::build(&positions, &normals, &faces));
         let mean_edge = mean_edge_length(&positions, &faces);
-        Self { positions, faces, normals, min, max, bvh, mean_edge }
+        Self {
+            positions,
+            faces,
+            normals,
+            min,
+            max,
+            bvh,
+            silhouette: None,
+            silhouette_transforms: Vec::new(),
+            mean_edge,
+        }
     }
 
     pub fn centre(&self) -> Vec3 {
@@ -191,7 +209,15 @@ impl Mesh {
     /// `i` and `j` name the edge's two corners *within* `face`, so the
     /// crossing can report where inside the face it landed as well as
     /// where in the world — the [`Anchorage`] a pose carries it by.
-    fn crossing(&self, face: usize, i: usize, j: usize, values: &[f32], aux: &[f32], iso: f32) -> Crossing {
+    fn crossing_with(
+        &self,
+        face: usize,
+        i: usize,
+        j: usize,
+        value: &impl Fn(usize) -> f32,
+        aux: &[f32],
+        iso: f32,
+    ) -> Crossing {
         let corners = self.faces[face];
         let (lo_corner, hi_corner) = if corners[i] < corners[j] {
             (i, j)
@@ -200,11 +226,11 @@ impl Mesh {
         };
         let (lo, hi) = (corners[lo_corner] as usize, corners[hi_corner] as usize);
 
-        let span = values[hi] - values[lo];
+        let span = value(hi) - value(lo);
         let t = if span.abs() < 1e-20 {
             0.5
         } else {
-            (iso - values[lo]) / span
+            (iso - value(lo)) / span
         };
 
         let mut shares = [0.0f32; 3];
@@ -223,9 +249,9 @@ impl Mesh {
     }
 
     /// The segment, if any, where `iso` crosses one triangle.
-    fn march(&self, face: usize, values: &[f32], aux: &[f32], iso: f32) -> Option<[Crossing; 2]> {
+    fn march_with(&self, face: usize, value: &impl Fn(usize) -> f32, aux: &[f32], iso: f32) -> Option<[Crossing; 2]> {
         let corners = self.faces[face];
-        let above = corners.map(|c| values[c as usize] >= iso);
+        let above = corners.map(|c| value(c as usize) >= iso);
         if above[0] == above[1] && above[1] == above[2] {
             return None;
         }
@@ -239,12 +265,37 @@ impl Mesh {
         };
         let (a, b) = ((odd + 1) % 3, (odd + 2) % 3);
 
-        Some([self.crossing(face, odd, a, values, aux, iso), self.crossing(face, odd, b, values, aux, iso)])
+        Some([self.crossing_with(face, odd, a, value, aux, iso), self.crossing_with(face, odd, b, value, aux, iso)])
+    }
+
+    fn march(&self, face: usize, values: &[f32], aux: &[f32], iso: f32) -> Option<[Crossing; 2]> {
+        self.march_with(face, &|vertex| values[vertex], aux, iso)
     }
 
     /// Every segment of the single level set `values = iso`.
     pub fn level_set(&self, values: &[f32], aux: &[f32], iso: f32) -> Vec<[Crossing; 2]> {
         (0..self.faces.len()).filter_map(|f| self.march(f, values, aux, iso)).collect()
+    }
+
+    /// The silhouette's exact zero crossings after conservative BVH
+    /// pruning. Leaves use the same facing and crossing arithmetic as the
+    /// linear oracle; sorting candidates restores original face order
+    /// before welding observes them.
+    pub(crate) fn silhouette_level_set(&self, eye: Vec3) -> Vec<[Crossing; 2]> {
+        let faces = if let Some(silhouette) = &self.silhouette {
+            silhouette.faces(eye, &self.silhouette_transforms)
+        } else if let Some(bvh) = &self.bvh {
+            bvh.silhouette_faces(eye)
+        } else {
+            (0..self.faces.len()).collect()
+        };
+
+        faces
+            .into_iter()
+            .filter_map(|face| {
+                self.march_with(face, &|vertex| (self.positions[vertex] - eye).dot(self.normals[vertex]), &[], 0.0)
+            })
+            .collect()
     }
 
     /// Every level set of `values` at integer multiples of `spacing`,
@@ -575,6 +626,156 @@ fn relax(normals: &[Vec3], faces: &[[u32; 3]]) -> Vec<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::Pose;
+    use crate::deform::npy;
+    use crate::feature::{Curve3, FeatureClass, Pen, SurfacePoint};
+    use crate::weld;
+
+    fn grid() -> Mesh {
+        let mut positions = Vec::new();
+        let mut faces = Vec::new();
+        for row in 0..4 {
+            for column in 0..4 {
+                positions.push(Vec3::new(column as f32 - 1.5, row as f32 - 1.5, 1.0));
+            }
+        }
+        let corner = |row: usize, column: usize| (row * 4 + column) as u32;
+        for row in 0..3 {
+            for column in 0..3 {
+                faces.push([corner(row, column), corner(row, column + 1), corner(row + 1, column + 1)]);
+                faces.push([corner(row, column), corner(row + 1, column + 1), corner(row + 1, column)]);
+            }
+        }
+
+        Mesh::build(positions, faces, 0)
+    }
+
+    fn replace_normals(mesh: &mut Mesh, normals: Vec<Vec3>) {
+        mesh.normals = normals;
+        mesh.bvh = Some(Bvh::build(&mesh.positions, &mesh.normals, &mesh.faces));
+    }
+
+    fn assert_vec_bits(actual: Vec3, expected: Vec3) {
+        assert_eq!(actual.x.to_bits(), expected.x.to_bits());
+        assert_eq!(actual.y.to_bits(), expected.y.to_bits());
+        assert_eq!(actual.z.to_bits(), expected.z.to_bits());
+    }
+
+    fn assert_crossings_identical(actual: &[[Crossing; 2]], expected: &[[Crossing; 2]]) {
+        assert_eq!(actual.len(), expected.len(), "active face count");
+        for (actual, expected) in actual.iter().flatten().zip(expected.iter().flatten()) {
+            assert_vec_bits(actual.pos, expected.pos);
+            assert_vec_bits(actual.normal, expected.normal);
+            assert_eq!(actual.strength.to_bits(), expected.strength.to_bits());
+            assert_eq!(actual.at.face, expected.at.face);
+            assert_eq!(actual.at.u.to_bits(), expected.at.u.to_bits());
+            assert_eq!(actual.at.v.to_bits(), expected.at.v.to_bits());
+        }
+    }
+
+    fn oracle_curves(mesh: &Mesh, eye: Vec3) -> Vec<Curve3> {
+        let segments = mesh
+            .level_set(&mesh.facing(eye), &[], 0.0)
+            .into_iter()
+            .map(|crossings| crossings.map(|crossing| SurfacePoint::anchored(&crossing)))
+            .collect();
+        let template =
+            Curve3 { points: Vec::new(), class: FeatureClass::Silhouette, pen: Pen::Ink, seed: 0, authored: false };
+
+        weld::curves(segments, &template)
+    }
+
+    fn assert_curves_identical(actual: &[Curve3], expected: &[Curve3]) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert_eq!(actual.class, expected.class);
+            assert_eq!(actual.pen, expected.pen);
+            assert_eq!(actual.seed, expected.seed);
+            assert_eq!(actual.authored, expected.authored);
+            assert_eq!(actual.points.len(), expected.points.len());
+            for (actual, expected) in actual.points.iter().zip(&expected.points) {
+                assert_vec_bits(actual.pos, expected.pos);
+                assert_vec_bits(actual.normal, expected.normal);
+                assert_vec_bits(actual.probe, expected.probe);
+                assert_eq!(actual.weight.to_bits(), expected.weight.to_bits());
+                let (actual, expected) = (actual.anchorage.expect("extracted"), expected.anchorage.expect("extracted"));
+                assert_eq!(actual.face, expected.face);
+                assert_eq!(actual.u.to_bits(), expected.u.to_bits());
+                assert_eq!(actual.v.to_bits(), expected.v.to_bits());
+            }
+        }
+    }
+
+    /// Exhaust every assignment of four repeated vertex-sign lanes over a
+    /// tree large enough to split. This covers uniform prunes, mixed
+    /// descent, exact zeros, and original-face restoration at the leaves.
+    #[test]
+    fn accelerated_silhouette_is_the_bit_exact_linear_level_set() {
+        for signs in 0u32..16 {
+            let mut mesh = grid();
+            let vertices = mesh.positions.len();
+            replace_normals(
+                &mut mesh,
+                (0..vertices)
+                    .map(|vertex| {
+                        if signs & (1 << (vertex % 4)) == 0 {
+                            Vec3::Z
+                        } else {
+                            -Vec3::Z
+                        }
+                    })
+                    .collect(),
+            );
+
+            for eye in [Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.5, -0.5, 3.0)] {
+                let expected = mesh.level_set(&mesh.facing(eye), &[], 0.0);
+                let actual = mesh.silhouette_level_set(eye);
+                assert_crossings_identical(&actual, &expected);
+                assert_curves_identical(&crate::extract::silhouettes(&mesh, eye), &oracle_curves(&mesh, eye));
+            }
+        }
+    }
+
+    /// Dense rest/pose eye coverage across identity, one-bone, and blended
+    /// bindings. The posed accelerator sees the same transforms as the
+    /// skin loop and must preserve crossings and welded stroke identity.
+    #[test]
+    fn posed_silhouette_matches_the_linear_oracle_across_eyes_and_bones() {
+        let mut rest = grid();
+        let normals = rest.positions.iter().map(|p| Vec3::new(p.x * 0.45, p.y * 0.35, 1.0).normalize()).collect();
+        replace_normals(&mut rest, normals);
+
+        let weights: Vec<f32> = (0..rest.positions.len())
+            .flat_map(|vertex| match vertex % 3 {
+                0 => [1.0, 0.0],
+                1 => [0.0, 1.0],
+                _ => [0.35, 0.65],
+            })
+            .collect();
+        let skin = Skin::parse(
+            &npy(&weights, (rest.positions.len(), 2)),
+            "bones chest head\npivot head 0.0 0.0 0.0\n",
+            rest.positions.len(),
+        )
+        .expect("two meaningful bone lanes");
+        let transforms = skin.transforms(&Pose { yaw: 31.0, pitch: -11.0, roll: 7.0, ..Pose::default() });
+        let mut posed = rest.deformable(&skin);
+        skin.pose_surface(&transforms, &rest, &mut posed.positions, &mut posed.normals);
+        posed.rebound(&transforms);
+
+        for x in -3..=3 {
+            for y in -2..=2 {
+                for z in [0.0, 1.0, 2.5, 6.0] {
+                    let eye = Vec3::new(x as f32 * 0.8, y as f32 * 0.7, z);
+                    let expected = posed.level_set(&posed.facing(eye), &[], 0.0);
+                    let actual = posed.silhouette_level_set(eye);
+                    assert_crossings_identical(&actual, &expected);
+                    assert_curves_identical(&crate::extract::silhouettes(&posed, eye), &oracle_curves(&posed, eye));
+                }
+            }
+        }
+    }
 
     /// Tripwire: the address a crossing records is the address the
     /// crossing is at.
