@@ -5,21 +5,19 @@ out-of-process operation.
 
 ```text
 operator (agent, human, test, client)
-                 │
-          MCP or framed RPC
-                 ▼
-       hub control plane and stores
-                 │ engine id
-                 ▼
-┌──────────────── one substrate / engine ────────────────┐
-│ chassis: selected drivers and native capability actors  │
-│                                                        │
-│ registry → mail rings → scheduler → actor handlers      │
-│                              ├─ native capability state │
-│                              └─ wasm component state    │
-│                                                        │
-│ lifecycle + settlement + logs/traces/cost evidence      │
-└────────────────────────────────────────────────────────┘
+├─ MCP or framed RPC → hub fleet control plane
+│                         ├─ engine proxy → desktop/headless child
+│                         └─ binary select/fork ──────────────┐
+└─ REST or typed RPC ─────────────────────────────────────────┤
+                                                            ▼
+                                             Bloomery application
+                                             chassis + stores
+
+Each hosted process composes the shared runtime layers:
+ registry → mail rings → scheduler → actor handlers
+                              ├─ native state
+                              └─ wasm state
+ lifecycle + settlement + logs/traces/cost evidence
 ```
 
 ## The boundaries
@@ -27,7 +25,11 @@ operator (agent, human, test, client)
 **Operator boundary.** `aether-mcp` adapts task-shaped JSON tools to the same
 typed mail/RPC contracts other clients can use. A stable tunnel can preserve an
 MCP session while volatile backends restart. The hub supervises a fleet; every
-per-engine operation names an `engine_id`.
+per-engine operation names an `engine_id`. Bloomery is a dedicated first-party
+development control-plane application with its own chassis, stores, and
+operator ingress. It can run standalone or be uploaded, selected, and forked
+through the hub's binary/fleet path; its chassis does not itself own the hub's
+`FleetServer`.
 
 **Process boundary.** Framed RPC carries control calls and mail between the hub
 and child substrates. The hub owns artifact stores and proxy/heartbeat state.
@@ -71,8 +73,9 @@ project replies.
 | Guest SDK | `aether-actor`, `aether-behavior` and derive crates | actor/behavior authoring, exports, contexts, replies |
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm host, settlement |
 | Native services | one `aether-<capability>` crate per cap | chassis resource actors and public capability kinds |
-| Process profiles | `aether-chassis` + `aether-chassis-*` | desktop/headless/hub/harness composition over one shared layer; the shippable package depot comes from `cargo xtask package` |
-| Product actors | `aether-kit-*`, `aether-mesh` | camera, UI, world/terrain, sim, geometry authoring |
+| Process profiles | `aether-chassis` + `aether-chassis-*` | desktop/headless/hub/harness composition plus the dedicated Bloomery application chassis; the shippable package depot comes from `cargo xtask package` |
+| Development control plane | `aether-bloomery`, `aether-bloomery-github`, `aether-chassis-bloomery` | bounded development state/reduction, GitHub projection and source adapter, and the Bloomery host process |
+| Product actors | `aether-kit-*`, `aether-mesh`, `aether-puppet` | camera, UI, world/terrain, sim, geometry authoring, mascot rendering |
 | Operator bridge | `aether-mcp` | live tools, JSON/schema adaptation, hub RPC and caches |
 | Build/test tooling | `xtask`, fixtures, `fuzz/` | artifact discovery, bundles, compatibility fixtures, fuzz targets |
 
@@ -83,10 +86,13 @@ with their own capability crate, not in a universal central kind catalog
 
 ## Chassis composition
 
-Desktop, headless, hub, and substrate-harness processes reuse the substrate but install
-different drivers/capabilities. Source presence does not imply every chassis has
-a working actor. Some unsupported surfaces deliberately install a fail-fast
-fallback so requests resolve with errors rather than hang.
+Five checked-in chassis profiles reuse the substrate but install different
+drivers and capabilities: desktop, headless, hub, substrate harness, and
+Bloomery. Bloomery's dedicated application chassis can run directly or through
+the fleet launch path; the generic hub and headless profiles do not absorb its
+development services or become build servers. Source presence does not imply
+every chassis has a working actor. Some unsupported surfaces deliberately
+install a fail-fast fallback so requests resolve with errors rather than hang.
 
 Ask the live engine with `describe_handlers`/`describe_kinds`, or inspect the
 specific builder in its `aether-chassis-<chassis>` crate.

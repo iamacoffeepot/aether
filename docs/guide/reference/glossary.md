@@ -135,12 +135,22 @@ capabilities, and components.
 **Chassis**
 
 A process composition that selects drivers, capability runtimes, and frame-loop
-behavior. Desktop, headless, hub, and substrate harness are distinct chassis.
+behavior. Desktop, headless, hub, substrate harness, and Bloomery are distinct
+checked-in chassis profiles.
 
 **Hub**
 
 The control-plane chassis that stores binary/component artifacts, supervises a
 fleet of child engines, and routes engine RPC.
+
+**Bloomery**
+
+The first-party Aether application and dedicated chassis for bounded software
+development work. Its checked-in reducer, host services, API, and adapters are
+substantial realization of Proposed ADR-0149, not evidence that the ADR is
+Accepted. The binary can run standalone or through the hub's binary/fleet launch
+path, but does not itself own `FleetServer`. GitHub is a source/projection
+adapter, not Bloomery's state authority.
 
 **Engine proxy**
 
@@ -209,6 +219,19 @@ not granting more applies backpressure.
 
 An Architecture Decision Record under `docs/adr/`. Accepted governs intended
 design; Proposed does not; Superseded remains history.
+
+**Bloom**
+
+Bloomery's bounded source transaction: once sealed, an immutable promise over
+specific workpiece scope revisions, a base, policy/toolchain inputs, and a
+budget. Its members integrate and land as one artifact, or a successor bloom
+supersedes it.
+
+**Workpiece**
+
+The stable identity of one intended change admitted to a bloom. A GitHub issue
+can project a workpiece, but the issue is not the canonical identity and an
+umbrella collection is not itself an admissible workpiece.
 
 **Realization**
 
