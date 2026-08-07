@@ -32,5 +32,5 @@ pub use executor::{Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, Wo
 pub use projection::{BloomView, MemberView, PendingDecisionView, ProjectionBackend, ViewDocument};
 pub use source::{
     Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, IntegrateOutcome, IntegrationPosition,
-    LandOutcome, SourceBackend, SourceSnapshot,
+    LandOutcome, LandProposal, SourceBackend, SourceSnapshot,
 };

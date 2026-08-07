@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use aether_bloomery::{
     BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome, IntegrationPosition,
-    LandOutcome, Snapshot, SourceBackend, SourceSnapshot, WorkpieceId,
+    LandOutcome, LandProposal, Snapshot, SourceBackend, SourceSnapshot, WorkpieceId,
 };
 use aether_bloomery_github::{
     CorrespondenceError, GitObjectId, GitSource, GithubError, SharedCorrespondence, SourceError,
@@ -161,14 +161,22 @@ impl SourceShell {
         self.backend.integrate(bloom, candidate, expected)
     }
 
-    /// Compare-and-swap mainline from `expected_base` to `new_head`.
+    /// Propose landing `new_head` onto mainline, guarded by `expected_base`.
     ///
     /// # Errors
-    /// [`SourceError::LandingDisabled`] while the CAS-land gate is off, or a
+    /// [`SourceError::LandingDisabled`] while the land gate is off, or a
     /// transport/backend fault (a moved base is the clean
     /// [`LandOutcome::BaseMoved`], not an error).
     pub fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, SourceError> {
         self.backend.land(bloom, expected_base, new_head)
+    }
+
+    /// Read where a previously issued land proposal has got to.
+    ///
+    /// # Errors
+    /// A transport or backend fault.
+    pub fn poll_land(&self, bloom: &BloomId, expected_base: &Digest, number: u64) -> Result<LandProposal, SourceError> {
+        self.backend.poll_land(bloom, expected_base, number)
     }
 
     /// Acquire `bloom`'s claim refs — one per member workpiece plus the
@@ -255,7 +263,8 @@ mod tests {
     use aether_bloomery_github::{GitSource, SharedCorrespondence};
 
     use super::{
-        Arc, BloomId, Digest, IntegrateOutcome, LandOutcome, Snapshot, SourceBackend, SourceError, SourceShell,
+        Arc, BloomId, Digest, IntegrateOutcome, LandOutcome, LandProposal, Snapshot, SourceBackend, SourceError,
+        SourceShell,
     };
 
     #[test]
@@ -338,18 +347,28 @@ mod tests {
             other => panic!("expected Integrated, got {other:?}"),
         };
 
-        // Land the integrated head against the genesis base — the reverse-resolve
-        // of the real mainline object returns the genesis base and the CAS
-        // proceeds, settling with no Malformed / UnresolvedCorrespondence fault.
-        match shell.land(&bloom, &Snapshot::GENESIS_MAINLINE, &head).unwrap() {
-            LandOutcome::Landed(receipt) => {
-                assert_eq!(receipt.previous_base, Snapshot::GENESIS_MAINLINE);
-                assert_eq!(receipt.new_head, head, "mainline advanced onto the integrated head commit");
-            }
+        // Propose landing the integrated head against the genesis base — the
+        // reverse-resolve of the real mainline object returns the genesis base,
+        // so the guard passes and a proposal is opened with no Malformed /
+        // UnresolvedCorrespondence fault.
+        let number = match shell.land(&bloom, &Snapshot::GENESIS_MAINLINE, &head).unwrap() {
+            LandOutcome::Proposed { number } => number,
             LandOutcome::BaseMoved { expected, actual } => {
-                panic!("expected Landed, got BaseMoved {{ expected: {expected:?}, actual: {actual:?} }}")
+                panic!("expected Proposed, got BaseMoved {{ expected: {expected:?}, actual: {actual:?} }}")
             }
-        }
+        };
+        assert_eq!(shell.poll_land(&bloom, &Snapshot::GENESIS_MAINLINE, number).unwrap(), LandProposal::Open);
+
+        // The operator merges it, and the receipt attests the commit mainline
+        // actually became — closing the whole genesis-to-receipt path the
+        // reactor drives.
+        fake.merge_pull_request(number, &"5c".repeat(20));
+        let landed = shell.poll_land(&bloom, &Snapshot::GENESIS_MAINLINE, number).unwrap();
+        let LandProposal::Landed(receipt) = landed else {
+            panic!("expected Landed, got {landed:?}")
+        };
+        assert_eq!(receipt.previous_base, Snapshot::GENESIS_MAINLINE);
+        assert_ne!(receipt.new_head, head, "the landed head is the merge commit, not the proposed head");
     }
 
     #[test]

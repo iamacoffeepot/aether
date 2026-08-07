@@ -69,4 +69,4 @@ pub use inward::{
 };
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
 pub use projection::GithubProjection;
-pub use source::{GitSource, SharedCorrespondence, SourceError};
+pub use source::{GitSource, SharedCorrespondence, SourceError, to_hex};

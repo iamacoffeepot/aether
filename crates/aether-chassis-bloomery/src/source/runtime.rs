@@ -14,15 +14,15 @@
 
 use aether_actor::runtime;
 use aether_bloomery::{
-    BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, Digest, IntegrateOutcome, LandOutcome, WorkpieceId,
+    BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, Digest, IntegrateOutcome, LandOutcome, LandProposal, WorkpieceId,
 };
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::SourceCapability;
 use super::kinds::{
     ClaimResult, ClaimSeal, CompleteRelease, CompleteTransfer, EnumerateClaims, EnumerateClaimsResult, Integrate,
-    IntegrateResult, Land, LandResult, ListCheckpoints, ListCheckpointsResult, RecordCheckpoint,
-    RecordCheckpointResult, ReleaseSeal, Snapshot, SnapshotResult, TransferSeal,
+    IntegrateResult, Land, LandResult, ListCheckpoints, ListCheckpointsResult, PollLand, PollLandResult,
+    RecordCheckpoint, RecordCheckpointResult, ReleaseSeal, Snapshot, SnapshotResult, TransferSeal,
 };
 use crate::bloomery::SourceShell;
 
@@ -185,15 +185,35 @@ impl SourceCapabilityState {
             Err(error) => return LandResult::Err { error: error.to_string() },
         };
         match self.shell.land(&bloom, &expected_base, &new_head) {
-            Ok(LandOutcome::Landed(receipt)) => match to_vec(&receipt) {
-                Ok(receipt) => LandResult::Landed { receipt },
-                Err(error) => LandResult::Err { error: error.to_string() },
-            },
+            Ok(LandOutcome::Proposed { number }) => LandResult::Proposed { number },
             Ok(LandOutcome::BaseMoved { expected, actual }) => match (to_vec(&expected), to_vec(&actual)) {
                 (Ok(expected), Ok(actual)) => LandResult::BaseMoved { expected, actual },
                 (Err(error), _) | (_, Err(error)) => LandResult::Err { error: error.to_string() },
             },
             Err(error) => LandResult::Err { error: error.to_string() },
+        }
+    }
+
+    /// Decode `bloom` / `expected_base`, poll the proposal, and encode where it
+    /// has got to.
+    #[must_use]
+    pub fn poll_land(&self, bloom: &[u8], expected_base: &[u8], number: u64) -> PollLandResult {
+        let bloom: BloomId = match from_bytes(bloom) {
+            Ok(bloom) => bloom,
+            Err(error) => return PollLandResult::Err { error: error.to_string() },
+        };
+        let expected_base: Digest = match from_bytes(expected_base) {
+            Ok(expected_base) => expected_base,
+            Err(error) => return PollLandResult::Err { error: error.to_string() },
+        };
+        match self.shell.poll_land(&bloom, &expected_base, number) {
+            Ok(LandProposal::Open) => PollLandResult::Open,
+            Ok(LandProposal::Landed(receipt)) => match to_vec(&receipt) {
+                Ok(receipt) => PollLandResult::Landed { receipt },
+                Err(error) => PollLandResult::Err { error: error.to_string() },
+            },
+            Ok(LandProposal::Declined) => PollLandResult::Declined,
+            Err(error) => PollLandResult::Err { error: error.to_string() },
         }
     }
 
@@ -460,6 +480,12 @@ impl NativeActor for SourceCapability {
     #[handler::single]
     fn on_land(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Land) -> LandResult {
         state.land(&mail.bloom, &mail.expected_base, &mail.new_head)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    #[handler::single]
+    fn on_poll_land(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: PollLand) -> PollLandResult {
+        state.poll_land(&mail.bloom, &mail.expected_base, mail.number)
     }
 
     #[allow(clippy::needless_pass_by_value)]

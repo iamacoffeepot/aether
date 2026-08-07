@@ -1,26 +1,39 @@
 //! The runtime for the land-reactor capability (ADR-0149 migration step 3 —
 //! issue #3559).
 //!
-//! A poll-driven loop that turns the reducer's land decisions into the
-//! source-port compare-and-swap that is now the landing of record:
+//! A poll-driven loop that turns the reducer's land decisions into a landing
+//! proposal on the source port, and watches that proposal to its terminal.
+//!
+//! Mainline is protected, so landing is two steps rather than one write: the
+//! port proposes the resolved head, a person accepts it, and the reactor admits
+//! the landing it observes.
 //!
 //! 1. **Drain.** Each tick drains the store's `aether.bloomery.land` outbox topic
 //!    (its own connection, mirroring the executor reactor's store ownership) and
 //!    decodes each [`LandPayload`] — the resolving
-//!    bloom, its sealed `expected_base`, and the `new_head` mainline advances to.
-//! 2. **Land.** It issues the [`SourceShell::land`] compare-and-swap against
-//!    `expected_base`. On [`LandOutcome::Landed`] it admits a [`Fact::Land`] back
-//!    to the control core — where [`reduce_land`](aether_bloomery) advances the
-//!    mainline and emits the [`LandingReceipt`](aether_bloomery::LandingReceipt)
-//!    that the mirror reactor projects outward. On [`LandOutcome::BaseMoved`] it
-//!    declines to land: a moved mainline forces supersession, never a land onto
-//!    the new head (ADR-0149 §The bloom), and V1 permits one unlanded bloom per
-//!    mainline so this is the defensive case. The bloom stays `Resolved` and thus
-//!    supersedable through the intent-native supersede path — a reactor has no
-//!    re-authored successor spec to fabricate, and the ADR's successor-seal is a
-//!    caller act, not a reactor one. The declined entry is acked (a definitive
-//!    refusal, not a transient fault) so it does not re-drive forever; a transport
-//!    fault stops the ack prefix so the entry re-drains next tick.
+//!    bloom, its sealed `expected_base`, and the `new_head` being proposed.
+//! 2. **Propose.** It issues [`SourceShell::land`] against `expected_base`. On
+//!    [`LandOutcome::BaseMoved`] it declines: a moved mainline forces
+//!    supersession, never a land onto the new head (ADR-0149 §The bloom), and V1
+//!    permits one unlanded bloom per mainline so this is the defensive case. The
+//!    bloom stays `Resolved` and thus supersedable through the intent-native
+//!    supersede path — a reactor has no re-authored successor spec to fabricate,
+//!    and the ADR's successor-seal is a caller act, not a reactor one.
+//! 3. **Watch.** On [`LandOutcome::Proposed`] it polls the proposal in the same
+//!    pass. Accepted, it admits a [`Fact::Land`] back to the control core —
+//!    where [`reduce_land`](aether_bloomery) advances the mainline and emits the
+//!    [`LandingReceipt`](aether_bloomery::LandingReceipt) the mirror reactor
+//!    projects outward — carrying the head the *receipt* attests, since a squash
+//!    accept makes mainline a commit that is not the one proposed. Declined, the
+//!    bloom lands in the same place a moved base leaves it.
+//!
+//! **The outbox is the watch.** A still-open proposal simply leaves its entry
+//! unacked, so it re-drains next tick — no second table to keep in step, durable
+//! and crash-replayed for free, and safe to redrive because issuing a land is
+//! idempotent (a redrive adopts the proposal it already opened). A declined or
+//! base-moved entry is acked (a definitive refusal, not a transient fault) so it
+//! does not re-drive forever; a transport fault stops the ack prefix so the entry
+//! re-drains next tick.
 //!
 //! Config-gated exactly like the mirror / executor reactors: unconfigured (empty
 //! token/owner/repo) mounts disabled — no shell, no store, no timer — so a
@@ -32,7 +45,7 @@ use std::time::Duration;
 
 use aether_actor::Addressable;
 use aether_actor::runtime;
-use aether_bloomery::{Admit, BloomId, Digest, Event, Fact, IdempotencyKey, LandOutcome, LandPayload};
+use aether_bloomery::{Admit, BloomId, Digest, Event, Fact, IdempotencyKey, LandOutcome, LandPayload, LandProposal};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
@@ -42,6 +55,8 @@ use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
 use super::LandReactorCapability;
+use aether_bloomery_github::SourceError;
+
 use crate::bloomery::SourceShell;
 use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
@@ -107,6 +122,46 @@ fn land_key(bloom: &Digest) -> IdempotencyKey {
     IdempotencyKey(key)
 }
 
+/// What watching an issued land proposal told the drain loop to do with its
+/// outbox entry.
+enum Watched {
+    /// Still open — leave the entry unacked so it re-drains next tick.
+    Open,
+    /// Terminal with nothing to admit: the proposal was declined, the same place
+    /// a moved base leaves the bloom.
+    Declined,
+    /// Terminal — mainline moved; admit this and ack the entry.
+    Landed(Admit),
+}
+
+/// Poll an issued land proposal and fold its state into the drain loop's three
+/// outcomes.
+fn watch_proposal(
+    source: &SourceShell,
+    bloom: &BloomId,
+    payload: &LandPayload,
+    number: u64,
+) -> Result<Watched, SourceError> {
+    match source.poll_land(bloom, &payload.expected_base, number)? {
+        LandProposal::Open => Ok(Watched::Open),
+        LandProposal::Declined => Ok(Watched::Declined),
+        LandProposal::Landed(receipt) => {
+            // Mainline actually moved. Admit `Fact::Land` carrying the head the
+            // receipt attests — the commit mainline *became*, which under a
+            // squash accept is not the head that was proposed. Re-deriving it
+            // from the payload would record a mainline that exists nowhere and
+            // seal the next bloom on it.
+            let event = Event {
+                idempotency_key: land_key(&payload.bloom),
+                fact: Fact::Land { bloom: *bloom, new_head: receipt.new_head },
+            };
+            to_vec(&event)
+                .map(|bytes| Watched::Landed(Admit { event: bytes }))
+                .map_err(|error| SourceError::Malformed(format!("land event did not encode: {error}")))
+        }
+    }
+}
+
 /// Drain the land topic and issue each entry's compare-and-swap, returning the
 /// [`Admit`]s to forward to the control core (one per landed bloom) and the
 /// highest contiguously-processed outbox sequence to ack (`None` when nothing
@@ -130,25 +185,43 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
         };
         let bloom = BloomId(payload.bloom);
         match source.land(&bloom, &payload.expected_base, &payload.new_head) {
-            Ok(LandOutcome::Landed(_receipt)) => {
-                // The durable CAS advanced mainline — admit `Fact::Land` so the
-                // reducer folds the advanced mainline + landing receipt. The
-                // receipt from the source is the same one `reduce_land` recomputes
-                // from `expected_base` + `new_head`, so we carry only the head.
-                let event = Event {
-                    idempotency_key: land_key(&payload.bloom),
-                    fact: Fact::Land { bloom, new_head: payload.new_head },
-                };
-                let Ok(bytes) = to_vec(&event) else {
-                    tracing::warn!(
-                        target: "aether_chassis_bloomery::land",
-                        sequence = entry.sequence,
-                        "land event did not encode; stopping the ack prefix to re-drive",
-                    );
-                    break;
-                };
-                admits.push(Admit { event: bytes });
-                ack_through = Some(entry.sequence);
+            Ok(LandOutcome::Proposed { number }) => {
+                match watch_proposal(source, &bloom, &payload, number) {
+                    Ok(Watched::Landed(admit)) => {
+                        admits.push(admit);
+                        ack_through = Some(entry.sequence);
+                    }
+                    Ok(Watched::Declined) => {
+                        tracing::warn!(
+                            target: "aether_chassis_bloomery::land",
+                            sequence = entry.sequence,
+                            number,
+                            "landing proposal was declined; the resolved bloom stays supersedable",
+                        );
+                        ack_through = Some(entry.sequence);
+                    }
+                    // Still open: leave the entry unacked so it re-drains next
+                    // tick. The outbox *is* the watch — durable already, and
+                    // replayed after a crash — and issuing a land is idempotent,
+                    // so the redrive adopts the same proposal rather than
+                    // opening another. No second table to keep in step.
+                    //
+                    // An open proposal holds the ack prefix, which parks any
+                    // later land entry behind it. That matches the invariant
+                    // rather than fighting it: V1 permits one sealed, unlanded
+                    // bloom per mainline, so there is at most one to park.
+                    Ok(Watched::Open) => break,
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "aether_chassis_bloomery::land",
+                            sequence = entry.sequence,
+                            number,
+                            %error,
+                            "land watch failed; stopping the ack prefix to re-drive",
+                        );
+                        break;
+                    }
+                }
             }
             Ok(LandOutcome::BaseMoved { .. }) => {
                 // A moved mainline forces supersession, never a land onto the new
