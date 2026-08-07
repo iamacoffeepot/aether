@@ -19,7 +19,10 @@
 //!   coordinator never sees it.
 
 mod claude;
+mod codex;
 mod construct;
+mod lane;
+mod muse;
 mod review;
 mod verify;
 
@@ -162,9 +165,8 @@ fn resolve_harness(harness: Option<&str>) -> Result<Harness> {
 fn run_model_lane(prompt: &str, args: &TransformArgs) -> Result<serde_json::Value> {
     match resolve_harness(args.harness.as_deref())? {
         Harness::Claude => claude::run_headless_claude(prompt, args),
-        harness @ (Harness::Codex | Harness::Muse) => {
-            bail!("harness `{}` has no lane arm in this worker build", harness.as_str())
-        }
+        Harness::Codex => codex::run(prompt, args),
+        Harness::Muse => muse::run(prompt, args),
     }
 }
 

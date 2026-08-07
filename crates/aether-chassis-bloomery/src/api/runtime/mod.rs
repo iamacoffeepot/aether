@@ -54,6 +54,7 @@ mod drafts;
 mod hex;
 mod reads;
 mod response;
+mod scope_revisions;
 mod seal;
 mod state;
 mod workpieces;
@@ -154,6 +155,18 @@ impl NativeActor for BloomeryApiCapability {
     #[http::route(Post, "/workpieces")]
     fn on_post_workpieces(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
         let routed = state.stage_workpiece(&ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /scope-revisions` — content-address a scope revision so a
+    /// workpiece can name it. The route that makes a per-workpiece harness /
+    /// model override settable at all.
+    #[http::route(Post, "/scope-revisions")]
+    fn on_post_scope_revisions(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+    ) -> http::Outcome {
+        let routed = ApiCapabilityState::author_scope_revision(&ctx.request().body);
         finish(state, ctx, routed)
     }
 
