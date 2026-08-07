@@ -173,6 +173,12 @@ default call returns a compact `[{name, shape}]` listing of every kind — a one
 field rendering per kind, small enough to read in one shot. Start with
 `families: true` for a sorted `[{family, count}]` digest; combine it with a
 case-sensitive `prefix` to digest one subtree (`full` is ignored in this mode).
+Compact enum shapes use the externally tagged JSON envelope that `send_mail`
+accepts: a unit variant is a quoted string such as `"Windowed"`, a tuple
+variant is a one-key object such as `{ "Ok": value }` (or an array body for
+multiple fields), and a struct variant is a one-key object such as
+`{ "Err": { reason: String } }`. When an enum appears inside a struct, that
+notation remains inside its named field; it does not become a top-level key.
 Use `names: ["aether.fs.write"]` for exact kinds, then add `full: true` when you
 need their nested `SchemaType`. `names` cannot combine with `families` or
 `prefix`, and a bare unfiltered `full: true` call is refused so schema output

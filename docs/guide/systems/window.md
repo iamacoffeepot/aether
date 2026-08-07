@@ -112,6 +112,14 @@ apply it asynchronously, so the reply does not prove observed focus.
 There is no implicit focused or current target. The boot window is named
 `main` and is simply the first `WindowSpec` realized after winit resumes.
 
+For an MCP `send_mail` request, `mode` remains a field of the
+`aether.window.set_mode` params object and the optional windowed dimensions
+sit beside it:
+
+```json
+{"mode": "Windowed", "width": 1600, "height": 1200}
+```
+
 `WindowId` is the raw mailbox identity of the named child, wrapped as a
 wire-safe `u64` newtype. That same value keys manager state, render targets,
 input events, and `WindowSelector::One`; callers do not maintain a separate
