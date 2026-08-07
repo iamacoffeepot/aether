@@ -11,7 +11,7 @@
 //! what they cost is the number of nodes they open, so the tree earns a
 //! slower build.
 
-use std::sync::Arc;
+use std::{f32::consts::FRAC_PI_2, sync::Arc};
 
 use aether_math::Vec3;
 
@@ -57,7 +57,7 @@ struct Cone {
     half_angle: f32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 struct Node {
     min: Vec3,
     max: Vec3,
@@ -492,30 +492,30 @@ fn posed_cone(rest: Cone, binding: Binding, transforms: &[Rigid]) -> Option<Cone
 
     // The rest axis is included because `normalize_or(rest_normal)` is
     // the exact live fallback when a blended normal cancels.
-    let mut axes = vec![rest.axis];
+    let mut candidates = vec![rest.axis];
     for bone in 0..BONE_LIMIT {
         if binding.bones & (1 << bone) == 0 {
             continue;
         }
-        let axis = transforms.get(bone)?.direction(rest.axis);
-        if !finite(axis) || axis.length_squared() < 1e-12 {
+        let candidate = transforms.get(bone)?.direction(rest.axis);
+        if !finite(candidate) || candidate.length_squared() < 1e-12 {
             return None;
         }
-        axes.push(axis.normalize());
+        candidates.push(candidate.normalize());
     }
 
-    let sum = axes.iter().copied().fold(Vec3::ZERO, |sum, axis| sum + axis);
+    let sum = candidates.iter().copied().fold(Vec3::ZERO, |sum, candidate| sum + candidate);
     if !finite(sum) || sum.length_squared() < 1e-12 {
         return None;
     }
-    let axis = sum.normalize();
-    let half_angle = axes
+    let cone_axis = sum.normalize();
+    let half_angle = candidates
         .iter()
-        .map(|&candidate| axis.dot(candidate).clamp(-1.0, 1.0).acos())
+        .map(|&candidate| cone_axis.dot(candidate).clamp(-1.0, 1.0).acos())
         .fold(rest.half_angle, |wide, angle| wide.max(rest.half_angle + angle))
         + 32.0 * f32::EPSILON;
 
-    (half_angle < core::f32::consts::FRAC_PI_2).then_some(Cone { axis, half_angle })
+    (half_angle < FRAC_PI_2).then_some(Cone { axis: cone_axis, half_angle })
 }
 
 fn uniformly_signed(node: &Node, binding: Binding, eye: Vec3, transforms: &[Rigid]) -> bool {
@@ -541,7 +541,7 @@ fn uniformly_signed(node: &Node, binding: Binding, eye: Vec3, transforms: &[Rigi
     let view_axis = to_centre / distance;
     let between = view_axis.dot(normal.axis).clamp(-1.0, 1.0).acos();
     let uncertainty = view_half_angle + normal.half_angle;
-    let boundary = core::f32::consts::FRAC_PI_2;
+    let boundary = FRAC_PI_2;
     let margin = 64.0 * f32::EPSILON;
 
     between + uncertainty < boundary - margin || between - uncertainty > boundary + margin
@@ -654,6 +654,8 @@ fn triangle_t(a: Vec3, e1: Vec3, e2: Vec3, origin: Vec3, dir: Vec3, t_min: f32, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::f32::consts::PI;
 
     use crate::deform::npy;
 
@@ -788,7 +790,7 @@ mod tests {
         assert!(!uniformly_signed(&ordinary, Binding::default(), Vec3::X, &[]), "eye on sphere centre");
         assert!(
             !uniformly_signed(
-                &Node { sphere: Sphere { centre: Vec3::X, radius: 1.0 }, ..ordinary.clone() },
+                &Node { sphere: Sphere { centre: Vec3::X, radius: 1.0 }, ..ordinary },
                 Binding::default(),
                 Vec3::ZERO,
                 &[],
@@ -798,7 +800,7 @@ mod tests {
         assert!(!uniformly_signed(&ordinary, Binding::default(), Vec3::splat(f32::NAN), &[]), "non-finite eye");
         assert!(
             !uniformly_signed(
-                &Node { cone: Cone { axis: Vec3::Y, half_angle: core::f32::consts::FRAC_PI_2 }, ..ordinary.clone() },
+                &Node { cone: Cone { axis: Vec3::Y, half_angle: FRAC_PI_2 }, ..ordinary },
                 Binding::default(),
                 Vec3::ZERO,
                 &[],
@@ -807,7 +809,7 @@ mod tests {
         );
         assert!(!uniformly_signed(&ordinary, Binding::default(), Vec3::ZERO, &[]), "exact perpendicularity");
 
-        let opposite = Rigid::sample(|p| p.rotate_axis_angle(Vec3::Y, core::f32::consts::PI));
+        let opposite = Rigid::sample(|p| p.rotate_axis_angle(Vec3::Y, PI));
         assert!(
             posed_cone(Cone { axis: Vec3::X, half_angle: 0.0 }, Binding { bones: 1, weight_error: 0.0 }, &[opposite])
                 .is_none(),

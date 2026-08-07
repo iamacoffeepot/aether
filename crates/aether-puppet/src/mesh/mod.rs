@@ -282,13 +282,10 @@ impl Mesh {
     /// linear oracle; sorting candidates restores original face order
     /// before welding observes them.
     pub(crate) fn silhouette_level_set(&self, eye: Vec3) -> Vec<[Crossing; 2]> {
-        let faces = if let Some(silhouette) = &self.silhouette {
-            silhouette.faces(eye, &self.silhouette_transforms)
-        } else if let Some(bvh) = &self.bvh {
-            bvh.silhouette_faces(eye)
-        } else {
-            (0..self.faces.len()).collect()
-        };
+        let faces = self.silhouette.as_ref().map_or_else(
+            || self.bvh.as_ref().map_or_else(|| (0..self.faces.len()).collect(), |bvh| bvh.silhouette_faces(eye)),
+            |silhouette| silhouette.faces(eye, &self.silhouette_transforms),
+        );
 
         faces
             .into_iter()
@@ -627,10 +624,10 @@ fn relax(normals: &[Vec3], faces: &[[u32; 3]]) -> Vec<Vec3> {
 mod tests {
     use super::*;
 
-    use crate::Pose;
     use crate::deform::npy;
     use crate::feature::{Curve3, FeatureClass, Pen, SurfacePoint};
     use crate::weld;
+    use crate::{Pose, extract};
 
     fn grid() -> Mesh {
         let mut positions = Vec::new();
@@ -732,7 +729,7 @@ mod tests {
                 let expected = mesh.level_set(&mesh.facing(eye), &[], 0.0);
                 let actual = mesh.silhouette_level_set(eye);
                 assert_crossings_identical(&actual, &expected);
-                assert_curves_identical(&crate::extract::silhouettes(&mesh, eye), &oracle_curves(&mesh, eye));
+                assert_curves_identical(&extract::silhouettes(&mesh, eye), &oracle_curves(&mesh, eye));
             }
         }
     }
@@ -771,7 +768,7 @@ mod tests {
                     let expected = posed.level_set(&posed.facing(eye), &[], 0.0);
                     let actual = posed.silhouette_level_set(eye);
                     assert_crossings_identical(&actual, &expected);
-                    assert_curves_identical(&crate::extract::silhouettes(&posed, eye), &oracle_curves(&posed, eye));
+                    assert_curves_identical(&extract::silhouettes(&posed, eye), &oracle_curves(&posed, eye));
                 }
             }
         }
