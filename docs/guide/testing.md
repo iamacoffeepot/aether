@@ -132,11 +132,13 @@ The contract is real only when the pinned value is computed.
 ## Where the test goes
 
 Once a test clears the bar, the harness follows from what it checks. Engine-internal
-and visual correctness goes to **SubstrateHarness** (`aether-harness-substrate`)
-with a concrete assertion (`captured`, `reply`, `count_observed`); behavior over the
-wire — recipient-name resolution, fleet lifecycle, the RPC boundary — goes to
+correctness goes to **SubstrateHarness** (`aether-harness-substrate`) with a concrete
+assertion (`captured`, `reply`, `count_observed`); visual reductions and failure
+artifacts go through **SubstrateHarness Capture** (`aether-harness-substrate-capture`).
+Behavior over the wire — recipient-name resolution, fleet lifecycle, the RPC boundary — goes to
 **FleetHarness** (the `aether-harness-fleet` crate). FleetHarness is
-headless, so any rendered-output assertion has to be SubstrateHarness, and any
+headless, so any rendered-output assertion has to use SubstrateHarness plus its capture
+extension, and any
 externally-addressable-over-the-wire assertion has to be FleetHarness.
 
 For overlay rendering, split structural and raster proof deliberately. Assert exact
@@ -159,7 +161,7 @@ above, not a second copy worth keeping.
 Within a SubstrateHarness visual test, reach for the narrowest oracle first. A concrete typed
 observation (`reply::<R>`, `count_observed`) beats a pixel check whenever the mail
 already carries the answer. When the behavior is genuinely visual, the
-`substrate_harness::visual` frame reductions (`not_all_black`, `differs_from_background`,
+`aether_harness_substrate_capture::visual` frame reductions (`not_all_black`, `differs_from_background`,
 `coverage`, `centroid`, `bounding_box`) turn a captured PNG into a scalar or coordinate
 assertion — pin a band, not an exact pixel, since GPU / anti-aliasing nondeterminism
 makes an exact golden image the wrong primary oracle.
@@ -168,7 +170,7 @@ makes an exact golden image the wrong primary oracle.
 
 A frame reduction that fails leaves only its scalar diagnostic in the test log — the
 captured pixels it was scored against are gone by the time you read it. Arm
-`substrate_harness::artifacts::ArtifactGuard` around the capture and its checks for a widget-
+`aether_harness_substrate_capture::ArtifactGuard` around the capture and its checks for a widget-
 heavy scenario where that scalar isn't enough to see what actually rendered:
 
 ```rust

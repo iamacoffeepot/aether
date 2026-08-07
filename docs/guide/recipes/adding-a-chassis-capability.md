@@ -30,12 +30,12 @@ current source as you go — a capability is a recompile-class recipe, so
 the symbols here rot faster than the explainers (see
 [the staleness rule](#staleness)).
 
-The identity lives in [`text/mod.rs`][mod]; the state and handler bodies
+The identity lives in [`text/lib.rs`][lib]; the state and handler bodies
 in [`text/runtime/mod.rs`][runtime]; the owned kinds in
 [`text/kinds.rs`][kinds].
 
 [text]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src
-[mod]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/mod.rs
+[lib]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/lib.rs
 [runtime]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/runtime/mod.rs
 [kinds]: https://github.com/iamacoffeepot/aether/blob/main/crates/aether-text/src/kinds.rs
 
@@ -55,12 +55,12 @@ the builder rejects a collision at boot
 A capability is split into two halves (ADR-0122). The **identity** is a
 ZST struct carrying only the addressing; the state-bearing **runtime**
 lives in a feature-gated `runtime` module. `#[actor(singleton)]` sits on
-the identity in `mod.rs`, and a separate `#[runtime] impl NativeActor for
+the identity in `lib.rs`, and a separate `#[runtime] impl NativeActor for
 X` in the runtime module names the runtime through `type State`
 (ADR-0123):
 
 ```rust
-// text/mod.rs — the identity half, always-on.
+// text/lib.rs — the identity half, always-on.
 use aether_actor::actor;
 
 /// `aether.text` cap identity: a ZST carrying only the addressing —
@@ -74,7 +74,7 @@ pub struct TextCapability;
 // impl NativeActor` — lives in `runtime/`, gated once here on the cap's
 // feature. The struct-hosted `#[actor]` above reads that module off disk
 // to lift the identity.
-#[cfg(feature = "text-runtime")]
+#[cfg(feature = "runtime")]
 mod runtime;
 ```
 
@@ -138,8 +138,8 @@ The pieces:
   lift the identity from the `#[runtime] impl`.
 - **`#[runtime] impl NativeActor for TextCapability`** carries the
   behaviour. The `#[runtime]` attribute emits the runtime surface ungated
-  — the `#[cfg(feature = "text-runtime")]` rides the `mod runtime;` line in
-  `mod.rs`, so every impl already exists only on a build where the runtime
+  — the `#[cfg(feature = "runtime")]` rides the `mod runtime;` line in
+  `lib.rs`, so every impl already exists only on a build where the runtime
   module is present. No inner `#[cfg]` is needed.
 - **`type State`** names the runtime struct holding the cap's mutable
   state. It lives in the feature-gated `runtime` module so it never
@@ -306,15 +306,14 @@ only when standing up a new chassis kind.
 
 ### Heavy native deps
 
-Text's runtime half pulls `fontdue`, a native-only dependency, so it names
-a cap-specific feature — `text-runtime` — on its `mod runtime;` line:
-`#[cfg(feature = "text-runtime")] mod runtime;`. The identity markers stay
+Text's runtime half pulls `fontdue`, a native-only dependency, through its
+generic `runtime` feature on the `mod runtime;` line:
+`#[cfg(feature = "runtime")] mod runtime;`. The identity markers stay
 always-on (so guests still address the cap by type) while `fontdue` only
 enters when the feature is on. The renderer's `wgpu` (`render-runtime`)
-and audio's `cpal` (`audio-runtime`) gate the same way. A cap whose
-runtime needs no heavy dep still gates its `mod runtime;` line — on the
-generic `runtime` feature — so the split holds; it just shares the common
-gate rather than minting a cap-specific one.
+and audio's `cpal` (`audio-runtime`) gate the same way. A cap whose runtime
+needs no heavy dep still gates its `mod runtime;` line on the generic
+`runtime` feature, so the split holds without minting a cap-specific gate.
 
 ## 6. Test it in-process
 
@@ -322,7 +321,7 @@ A native cap compiles into the substrate, so its tests drive a real
 handler with mail — no wasm, no FFI, no MCP session. (`export!`'s FFI
 shims are wasm32-only and belong to *components*, not capabilities; a
 native cap has nothing to cross-compile.) Text's in-crate pattern, in its
-`#[cfg(all(test, feature = "text-runtime"))] mod tests`:
+`#[cfg(all(test, feature = "runtime"))] mod tests`:
 
 1. Build a `NativeBinding` over a loopback mailer with `ctx_binding()` —
    `test_mailer_and_rx()` gives a `Mailer` plus the `Receiver<EgressEvent>`

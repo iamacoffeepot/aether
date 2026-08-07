@@ -72,6 +72,9 @@ current source.
   dispatch it with a uniform blob, and draw its output texture.
 - **Serving HTTP from a component** (recompile) — the `aether.http.server`
   capability, the request/response handler, and claiming a route.
+- **[Driving a bloom over the REST control API](recipes/bloomery-rest-api.md)**
+  (drive-only) — boot the Bloomery coordinator, stage and seal a draft, and
+  inspect its live state through the localhost control surface.
 - **Debugging a hung settlement** (drive-only) — reading a stuck mail chain
   with the trace tools.
 
