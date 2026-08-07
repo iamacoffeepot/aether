@@ -304,6 +304,38 @@ pub struct RecordScopeRevision {
     pub revision: Vec<u8>,
 }
 
+/// Store an authored configuration's canonical bytes under its address
+/// (ADR-0174), so a sealed registry entry resolves to content at the point of
+/// use.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.store.record_config")]
+pub struct RecordConfig {
+    /// The configuration's content address (its digest's raw bytes) — the value
+    /// a registry entry names it by.
+    #[serde(with = "aether_data::bytes")]
+    pub digest: Vec<u8>,
+    /// The kind name the bytes decode as, which is also the registry key.
+    pub kind: String,
+    /// The configuration itself, as its canonical `aether_data::wire` bytes.
+    #[serde(with = "aether_data::bytes")]
+    pub bytes: Vec<u8>,
+}
+
+/// Reply to [`RecordConfig`]. The authoring route answers its caller from this,
+/// so a `200` means the configuration is durable and a later seal naming the
+/// address will actually resolve it.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.store.record_config_result")]
+pub enum RecordConfigResult {
+    /// The configuration is stored under its address.
+    Ok,
+    /// The write failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
 /// Reply to [`RecordScopeRevision`]. The authoring route answers its caller from
 /// this, so a `200` means the revision is durable and a later seal naming the
 /// digest will actually resolve it.

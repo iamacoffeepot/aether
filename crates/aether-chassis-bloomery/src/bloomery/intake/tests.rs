@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomDraft, BloomId, BloomRecord, BloomStatus, Budget, Decision, Digest, Event, Evidence, EvidenceKind,
-    EvidenceRef, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce, Outcome, Snapshot,
-    StageCatalog, StageId, Transformation, WorkHandle, WorkpieceId, reduce,
+    BloomDraft, BloomId, BloomRecord, BloomStatus, Budget, ConfigRegistry, Decision, Digest, Event, Evidence,
+    EvidenceKind, EvidenceRef, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce,
+    Outcome, Snapshot, StageCatalog, StageId, Transformation, WorkHandle, WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -85,6 +85,7 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
     let member = Membership {
         workpiece: workpiece.clone(),
         scope_revision,
+        configs: ConfigRegistry::default(),
         approval: Evidence {
             subject: scope_revision,
             kind: EvidenceKind::Approval,
@@ -94,6 +95,7 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
     let spec = BloomDraft {
         proposals: vec![member],
         base: Digest::default(),
+        configs: ConfigRegistry::default(),
         stage_catalog: Digest::default(),
         toolchain: Digest::default(),
         policy: Digest::default(),
@@ -417,6 +419,7 @@ fn sealed_via_reducer(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snaps
     let member = Membership {
         workpiece: workpiece.clone(),
         scope_revision,
+        configs: ConfigRegistry::default(),
         approval: Evidence {
             subject: scope_revision,
             kind: EvidenceKind::Approval,

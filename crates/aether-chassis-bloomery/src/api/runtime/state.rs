@@ -15,6 +15,7 @@ use aether_kinds::trace::Settled;
 use aether_substrate::actor::native::{NativeActorMailbox, NativeCtx};
 use aether_substrate::{InboundMail, Mailer};
 
+use super::configs::ConfigView;
 use super::response::error_response;
 use super::scope_revisions::ScopeRevisionView;
 use crate::bloomery::ApprovalPolicy;
@@ -85,6 +86,7 @@ pub struct ApiCapabilityState {
     /// the write dispatch's `MailId.correlation_id`. The reply carries only
     /// success or failure, so the view the caller gets back waits here rather
     /// than being rebuilt from it.
+    pub(super) configs: HashMap<u64, ConfigView>,
     pub(super) scope_revisions: HashMap<u64, ScopeRevisionView>,
     /// Each in-flight above-auto member verification, keyed by its `Verify`
     /// dispatch `MailId.correlation_id`, back-pointing at the held [`PendingSeal`]

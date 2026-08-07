@@ -24,8 +24,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    Admit, AdmitResult, BloomDraft, CONTROL_CORE_NAMESPACE, Digest, Event, Evidence, EvidenceKind, Fact,
-    IdempotencyKey, Membership, Outcome, Query, QueryResult, StageCatalog, ViewDocument, WorkpieceId,
+    Admit, AdmitResult, BloomDraft, CONTROL_CORE_NAMESPACE, ConfigRegistry, Digest, Event, Evidence, EvidenceKind,
+    Fact, IdempotencyKey, Membership, Outcome, Query, QueryResult, StageCatalog, ViewDocument, WorkpieceId,
 };
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::{from_bytes, to_vec};
@@ -196,6 +196,7 @@ fn seal_event(key: &str, base: u8, workpiece: &str) -> Event {
     let member = Membership {
         workpiece: WorkpieceId(workpiece.to_owned()),
         scope_revision,
+        configs: ConfigRegistry::default(),
         approval: Evidence {
             subject: scope_revision,
             kind: EvidenceKind::Approval,

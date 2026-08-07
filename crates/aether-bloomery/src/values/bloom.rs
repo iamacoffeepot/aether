@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::{BloomId, WorkpieceId};
-use crate::values::{Budget, Evidence, Forecast};
+use crate::values::{Budget, ConfigRegistry, ConfigScopes, Evidence, Forecast};
 
 /// One workpiece's admission into a bloom: its identity, the exact scope
 /// revision the bloom pins, and the approval evidence bound to that
@@ -26,6 +26,10 @@ pub struct Membership {
     pub workpiece: WorkpieceId,
     /// The exact scope-revision digest sealed into the bloom.
     pub scope_revision: Digest,
+    /// This member's configuration, resolved ahead of the bloom's (ADR-0174).
+    /// Empty is the ordinary case — a member configures only what it wants to
+    /// differ from the bloom-wide choice.
+    pub configs: ConfigRegistry,
     /// The approval evidence, bound to `scope_revision`.
     pub approval: Evidence,
 }
@@ -40,6 +44,9 @@ pub struct BloomDraft {
     pub proposals: Vec<Membership>,
     /// The one base source digest the bloom seals against.
     pub base: Digest,
+    /// The bloom-wide configuration (ADR-0174), resolved when no member seals
+    /// its own entry for a kind.
+    pub configs: ConfigRegistry,
     /// The frozen stage-catalog digest.
     pub stage_catalog: Digest,
     /// The frozen toolchain digest.
@@ -55,24 +62,25 @@ pub struct BloomDraft {
 impl BloomDraft {
     /// Freeze the draft into an immutable spec with a canonical member order.
     ///
-    /// Members are sorted by scope-revision digest first (ADR-0149 §The bloom:
-    /// "sorted workpiece scope-revision digests"), then by every remaining field
-    /// — workpiece, then the approval evidence — and de-duplicated, so a draft
+    /// Members are sorted over their full content and de-duplicated, so a draft
     /// and the same draft with its proposals in any other order, or with an
     /// exact proposal repeated, seal to byte-identical specs and therefore the
-    /// same [`BloomId`]. The tail keys past the revision matter: sorting on the
-    /// revision alone left two members sharing a revision (or a workpiece)
-    /// order-undetermined, so their input position leaked into the id. Ordering
-    /// over the *full* member content makes the key a total order, so the id is
-    /// a stable function of the member *set*, not its order — even for a
-    /// degenerate set the reducer will later reject at admission.
+    /// same [`BloomId`]. Ordering over the full member content is what makes the
+    /// key a total order: sorting on any single field leaves two members sharing
+    /// that field order-undetermined, so their input position leaks into the id.
+    /// The id is then a stable function of the member *set*, not its order —
+    /// even for a degenerate set the reducer will later reject at admission.
+    ///
+    /// The sort leads on `workpiece` because that is the member's identity; the
+    /// remaining keys break ties among proposals that name the same workpiece.
     #[must_use]
     pub fn seal(&self) -> BloomSpec {
         let mut members = self.proposals.clone();
         members.sort_by(|a, b| {
-            a.scope_revision
-                .cmp(&b.scope_revision)
-                .then_with(|| a.workpiece.cmp(&b.workpiece))
+            a.workpiece
+                .cmp(&b.workpiece)
+                .then_with(|| a.scope_revision.cmp(&b.scope_revision))
+                .then_with(|| a.configs.cmp(&b.configs))
                 .then_with(|| a.approval.subject.cmp(&b.approval.subject))
                 .then_with(|| a.approval.kind.cmp(&b.approval.kind))
                 .then_with(|| a.approval.detail.cmp(&b.approval.detail))
@@ -81,6 +89,7 @@ impl BloomDraft {
         BloomSpec {
             members,
             base: self.base,
+            configs: self.configs.clone(),
             stage_catalog: self.stage_catalog,
             toolchain: self.toolchain,
             policy: self.policy,
@@ -100,6 +109,7 @@ impl BloomDraft {
 pub struct BloomSpec {
     members: Vec<Membership>,
     base: Digest,
+    configs: ConfigRegistry,
     stage_catalog: Digest,
     toolchain: Digest,
     policy: Digest,
@@ -129,6 +139,20 @@ impl BloomSpec {
     #[must_use]
     pub const fn base(&self) -> Digest {
         self.base
+    }
+
+    /// The bloom-wide configuration registry (ADR-0174) — the outer scope every
+    /// member's lookup falls through to.
+    #[must_use]
+    pub const fn configs(&self) -> &ConfigRegistry {
+        &self.configs
+    }
+
+    /// The scope chain a lookup on `member`'s behalf walks: that member's
+    /// registry, then this bloom's.
+    #[must_use]
+    pub const fn scopes<'a>(&'a self, member: &'a Membership) -> ConfigScopes<'a> {
+        ConfigScopes::member_of(&member.configs, &self.configs)
     }
 
     /// The frozen stage-catalog digest.

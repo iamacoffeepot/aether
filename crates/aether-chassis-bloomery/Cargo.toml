@@ -30,6 +30,7 @@ runtime = [
     "dep:aether-rpc",
     "dep:aether-trace",
     "dep:aether-kinds",
+    "dep:aether-codec",
     "dep:dirs",
     "dep:ed25519-dalek",
     "dep:aether-bloomery-github",
@@ -76,6 +77,11 @@ aether-rpc = { path = "../aether-rpc", optional = true }
 aether-trace = { path = "../aether-trace", optional = true }
 # The substrate kind vocabulary — `BinaryManifest` for the `--describe` probe.
 aether-kinds = { path = "../aether-kinds", optional = true }
+# `POST /configs` encodes an authored configuration's JSON through its kind's
+# schema (ADR-0174), the same `encode_schema` path the MCP `send_mail` front
+# uses. The recovery + contract tests also dial the `bloomery` bin over raw wire
+# frames (`aether_codec::frame`, the FleetHarness pattern).
+aether-codec = { path = "../aether-codec", optional = true }
 # Platform data-dir resolution for the artifacts store-root default (mirrors
 # the hub engines cap's `resolve_fleet_store_root`).
 dirs = { version = "6", optional = true }
@@ -115,12 +121,6 @@ signal-hook = { version = "0.3", optional = true }
 inventory = { workspace = true }
 
 [dev-dependencies]
-# The recovery + contract tests round-trip real bloom-protocol events through
-# the journal (`aether_bloomery` value types encoded with `aether_data::wire`)
-# and use temp-file databases for the reopen tests. The cross-process recovery
-# test dials the `bloomery` bin over raw wire frames (`aether_codec::frame`,
-# the FleetHarness pattern).
-aether-codec = { path = "../aether-codec" }
 # The mirror demo (#3459 step 7) drives the projection against the adapter's
 # in-process `FakeGithub` double, so it needs no token or network.
 aether-bloomery-github = { path = "../aether-bloomery-github", features = ["testing"] }

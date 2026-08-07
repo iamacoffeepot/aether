@@ -49,11 +49,10 @@ proptest! {
     }
 
     // Invariant 1 (tie-break) — members sharing one scope_revision still seal
-    // canonically: the sort key falls through past the revision to the workpiece
-    // (then the approval evidence), so the same same-revision set in any order
-    // seals byte-identically. Tripwire: sorting on the revision alone (the
-    // pre-total-order key) left same-revision members order-undetermined, so a
-    // stable sort leaked their input position into the id.
+    // canonically: the sort key is the member's full content, so the same
+    // same-revision set in any order seals byte-identically. Tripwire: sorting on
+    // any single field leaves members agreeing on it order-undetermined, so a
+    // stable sort leaks their input position into the id.
     #[test]
     fn seal_is_canonical_over_shared_revision_members(names in btree_set("wp-[a-z]{1,5}", 2..6)) {
         let names: Vec<String> = names.into_iter().collect();
@@ -479,11 +478,13 @@ fn supersession_dispatches_every_non_inherited_successor_member() {
             _ => None,
         })
         .collect();
+    // Canonical member order leads on the workpiece (ADR-0174 re-keyed the sort
+    // when `configs` joined the member), so "grown" dispatches before "wedged".
     assert_eq!(
         dispatched,
         vec![
-            (workpiece("wedged"), StageId::Construct, successor_base),
             (workpiece("grown"), StageId::Construct, successor_base),
+            (workpiece("wedged"), StageId::Construct, successor_base),
         ],
         "exactly the non-inherited members dispatch, at Construct, against the successor's base",
     );
@@ -1558,5 +1559,59 @@ fn the_completing_integrate_dispatches_the_integration_fold_in_member_order() {
             assert_eq!(candidates, &vec![digest(21), digest(22)], "every member's candidate, in member order");
         }
         other => panic!("expected a DispatchIntegration, got {other:?}"),
+    }
+}
+
+// The sealed configuration registry (ADR-0174). A test kind stands in for a
+// real configuration; what matters is that the seal covers the registry at both
+// scopes, which is what makes a receipt's configuration claim mean anything.
+mod sealed_config {
+    use aether_bloomery::{BloomDraft, ConfigKind, ConfigRegistry, StageCatalog};
+    use serde::{Deserialize, Serialize};
+
+    use crate::common::{digest, membership};
+
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    #[kind(name = "aether.bloomery.test_seal_config")]
+    struct LaneConfig {
+        lane: String,
+    }
+
+    fn sealing(lane: &str) -> ConfigRegistry {
+        let mut registry = ConfigRegistry::default();
+        registry.insert::<LaneConfig>(LaneConfig { lane: lane.to_owned() }.address());
+        registry
+    }
+
+    fn draft_with(bloom: ConfigRegistry, member: ConfigRegistry) -> BloomDraft {
+        let mut proposal = membership("wp-a", 1);
+        proposal.configs = member;
+        BloomDraft {
+            proposals: vec![proposal],
+            base: digest(1),
+            configs: bloom,
+            stage_catalog: StageCatalog::line_digest(),
+            ..BloomDraft::default()
+        }
+    }
+
+    // Tripwire: the bloom id covers the configuration sealed at both scopes. A
+    // registry the id did not cover would let two blooms with different
+    // configurations share an identity, so a receipt naming one could not
+    // distinguish which actually ran — the attestation the registry replaces
+    // bespoke fields to provide.
+    #[test]
+    fn the_seal_covers_the_configuration_at_both_scopes() {
+        let bare = draft_with(ConfigRegistry::default(), ConfigRegistry::default()).seal().id();
+
+        let bloom_scoped = draft_with(sealing("cheap"), ConfigRegistry::default()).seal().id();
+        assert_ne!(bare, bloom_scoped, "a bloom-scoped entry moves the id");
+
+        let member_scoped = draft_with(ConfigRegistry::default(), sealing("cheap")).seal().id();
+        assert_ne!(bare, member_scoped, "a member-scoped entry moves the id");
+        assert_ne!(bloom_scoped, member_scoped, "the same entry at a different scope is a different bloom");
+
+        let other_value = draft_with(sealing("expensive"), ConfigRegistry::default()).seal().id();
+        assert_ne!(bloom_scoped, other_value, "changing the sealed content moves the id");
     }
 }

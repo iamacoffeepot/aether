@@ -24,7 +24,7 @@ The machinery to key on the content's *type* instead already exists in full:
 
 - `inventory::collect!(DescriptorEntry)` in `aether-data` gives every native binary a name → `KindDescriptor { name, schema }` map, materialized by `aether_kinds::descriptors::all()`. The MCP `describe_kinds` tool resolves through it.
 - `aether_codec::encode_schema` / `decode_schema` convert JSON to canonical wire bytes and back over a `SchemaType`, the same path `send_mail` encodes params through.
-- `KindId` is a compile-time const on every `#[derive(Kind)]` type, is the workspace's existing currency for type-keyed lookup, and round-trips JSON exactly.
+- `Kind::NAME` is a compile-time const on every `#[derive(Kind)]` type, and it is the same string the descriptor inventory keys on, so a type and a JSON request name a configuration identically.
 - The `scope_revision` table added in #4588 is already a content-addressed blob store under a digest key.
 
 The SDK also already resolves by type without a string key at the call site. `ctx.actor::<RenderCapability>()` names a mailbox by the capability's type; a config lookup that reads `configs.resolve::<K>()` is the same move against a sealed table.
@@ -34,7 +34,7 @@ The SDK also already resolves by type without a string key at the call site. `ct
 A bloom's configuration is a sealed, kind-keyed registry, and the bespoke digest fields are removed.
 
 ```rust
-pub type ConfigRegistry = BTreeMap<KindId, Digest>;
+pub type ConfigRegistry = BTreeMap<String, Digest>;   // keyed by `Kind::NAME`
 
 pub struct BloomDraft  { pub configs: ConfigRegistry, .. }
 pub struct Membership  { pub configs: ConfigRegistry, .. }
@@ -42,7 +42,7 @@ pub struct Membership  { pub configs: ConfigRegistry, .. }
 
 Five properties define it.
 
-**At most one entry per kind.** This is what makes the lookup typed rather than named — `configs.resolve::<K>()` needs no key argument, because `K::ID` is the key. A caller that needs two configurations of the same underlying shape declares a newtype kind for the second; the wrapper is the disambiguator, so the registry never needs a name-plus-type composite key.
+**At most one entry per kind.** This is what makes the lookup typed rather than named — `configs.resolve::<K>()` needs no key argument, because `K::NAME` is the key. A caller that needs two configurations of the same underlying shape declares a newtype kind for the second; the wrapper is the disambiguator, so the registry never needs a name-plus-type composite key.
 
 **Resolution walks a scope chain, and registries layer rather than nest.** A lookup starts at the member's registry, falls through to the bloom's, and ends at the caller-supplied default:
 
@@ -62,7 +62,7 @@ POST /configs  { "kind": "aether.bloomery.toolchain", "value": { .. } }
 
 The host resolves the kind name to its schema through the descriptor inventory, encodes the JSON to canonical bytes with `encode_schema`, digests them, stores them, and answers with the address. The route defers on the store reply, so a `200` is a durability claim — the #4588 precedent, and load-bearing for the same reason: a lost config reintroduces the divergence the registry exists to close. `POST /scope-revisions` becomes one instance of this rather than a special case.
 
-**A sealed key the host cannot resolve is a loud failure.** If a registry names a `KindId` with no descriptor in the resolving binary, or a digest with no stored content, the dispatch fails rather than proceeding on a default. Silently defaulting past a sealed entry would attest a configuration that never applied, which is the failure mode this whole decision exists to remove. Absence is a valid state and resolves to the default; a present-but-unresolvable entry is not.
+**A sealed key the host cannot resolve is a loud failure.** If a registry names a kind with no descriptor in the resolving binary, or a digest with no stored content, the dispatch fails rather than proceeding on a default. Silently defaulting past a sealed entry would attest a configuration that never applied, which is the failure mode this whole decision exists to remove. Absence is a valid state and resolves to the default; a present-but-unresolvable entry is not.
 
 ### What stays outside the registry
 
@@ -85,14 +85,13 @@ The wrapper-kind route is available if that map ever proves awkward — `Constru
 - `stage_catalog`, `toolchain`, and `policy` resolve through the registry at their points of use, or are deleted where they have no consumer. No field stays sealed and inert either way, which is the outcome that matters more than which of the two each field gets.
 - The canonical member order in `BloomDraft::seal` re-keys. Sorting currently leads on `scope_revision`; with configuration alongside it the sort leads on `workpiece` and carries the registry and approval as tiebreakers, which stays a total order over the member set and so keeps the bloom id a stable function of that set rather than of its input order.
 - This re-digests every spec and every membership. The migration is free today because no bloom has sealed a configuration the registry would have to carry forward, and it will not stay free — which is the argument for deciding now rather than after three more bespoke fields.
-- `KindId` is a 64-bit FNV-1a of the kind name, not a cryptographic digest, and it now appears as a key inside an attested structure. A collision would let two configuration kinds address one slot. The vocabulary is small and authored, so the practical risk is negligible, but it is a genuine weakening relative to a digest-keyed table and is recorded rather than waved through.
-- Sealed registry bytes are not self-describing offline: an auditor reading them without the resolving binary sees `knd-…` rather than a kind name. Receipts and query surfaces resolve the name host-side, where the inventory is present, so the human-facing artifacts stay readable. Anyone reading raw sealed bytes needs the descriptor set alongside them.
+- A string key costs more bytes per entry than a fixed-width id would, and it is the one string in a structure whose other identities are typed. Sealed registry bytes are legible to anyone reading them without the binaries that produced them, which is the compensating property.
 - Follow-on work, each its own change: the registry types and their sealing; the generic `POST /configs` route; migrating the scope revision's override into the member registry and widening the approval binding; resolving or deleting each of the three inert fields.
 
 ## Alternatives considered
 
 - **Wire the three inert fields one at a time, as #4588 did for the scope revision.** The straightforward path, and the one the board is already on. Rejected because it pays the same store-table-plus-route-plus-resolution cost three more times and leaves the next configuration paying it again, with a sealed-value-type change each time.
-- **Key the registry by kind name rather than `KindId`.** Sealed bytes become self-describing offline and the collision concern disappears. Rejected because the key would be the one string in a structure whose every other identity is typed, and the readability it buys is already available where it is read — receipts resolve host-side. Worth revisiting if sealed bytes ever need to be audited without the binaries.
+- **Key the registry by `KindId`.** Compact, fixed-width, and the workspace's existing currency for type-keyed lookup, so it was this record's original choice. Rejected during implementation on a durability finding: the `Kind` derive folds the kind's *schema* into its id (`fnv1a_64_prefixed(KIND_DOMAIN, canonical(name, schema))`), so adding a field to a configuration kind moves its id and orphans that entry in every bloom already sealed. A key inside an immutable record has to survive its type growing a field, and a name does. The secondary benefit is that a `KindId` collision could have let two kinds address one slot; keying on the name it hashes removes the question.
 - **Nest per-member registries inside the bloom's registry.** One table instead of two. Rejected because the scope hierarchy then lives inside the sealed value types, so a new scope level is a re-digest; layering puts it in the resolver where it costs nothing.
 - **Allow multiple entries per kind under a name-plus-type key.** Removes the need for wrapper newtypes. Rejected because it removes the typed lookup with it — every call site would carry a string, which is the ambient string-keyed configuration ADR-0162 rejected one layer down.
 - **Do nothing until a third configuration kind is genuinely wanted.** The honest counter-argument: only `ScopeRevision` and `StageCatalog` are actively wanted, and a registry for two entries is over-built. It does not survive the field count — there are already four, three inert — and the intent is that a process can be handed configuration generally rather than through a fixed list.

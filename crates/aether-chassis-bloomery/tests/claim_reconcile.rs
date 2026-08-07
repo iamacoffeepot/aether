@@ -37,9 +37,10 @@ use aether_bloomery::control::{
     release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
-    BloomDraft, BloomId, BloomSpec, ClaimRefKind, ClaimRefState, ClaimSeal, Decisions, Digest, EnumerateClaimsResult,
-    Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, ReleaseSeal, ResolutionClaim, SealConflict,
-    SealError, Snapshot, StageCatalog, SupersedeError, TransferSeal, WorkpieceId, reduce,
+    BloomDraft, BloomId, BloomSpec, ClaimRefKind, ClaimRefState, ClaimSeal, ConfigRegistry, Decisions, Digest,
+    EnumerateClaimsResult, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, ReleaseSeal,
+    ResolutionClaim, SealConflict, SealError, Snapshot, StageCatalog, SupersedeError, TransferSeal, WorkpieceId,
+    reduce,
 };
 use aether_bloomery_github::GitSource;
 use aether_bloomery_github::testing::FakeGithub;
@@ -63,6 +64,7 @@ fn membership(name: &str, revision: u8) -> Membership {
     Membership {
         workpiece: workpiece(name),
         scope_revision,
+        configs: ConfigRegistry::default(),
         approval: Evidence { subject: scope_revision, kind: EvidenceKind::Approval, detail: digest(200) },
     }
 }
