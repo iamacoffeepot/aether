@@ -12,7 +12,8 @@ use super::StoreCapability;
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, ClaimSeal, ClaimSealResult, DrainOutbox,
     DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, OutboxEntry, RecordDispatchDescription,
-    RecordDispatchDescriptionResult, ReleaseMembership, ReleaseMembershipResult, Supersede, SupersedeResult,
+    RecordDispatchDescriptionResult, RecordScopeRevision, RecordScopeRevisionResult, ReleaseMembership,
+    ReleaseMembershipResult, Supersede, SupersedeResult,
 };
 use aether_actor::runtime;
 // The control-plane transact-mails the wasm control actor drives — `Commit` and
@@ -192,6 +193,16 @@ pub trait StoreBackend: Send {
     /// The study artifact digest recorded for (`bloom`, `attempt_digest`), or
     /// `None` when no study record has been admitted for that attempt.
     fn lookup_study(&mut self, bloom: &[u8], attempt_digest: &[u8]) -> rusqlite::Result<Option<String>>;
+    /// Store an authored scope revision's content under its own digest (#4588),
+    /// so a dispatch resolving a member's sealed `scope_revision` finds the
+    /// override it addresses. Idempotent by content addressing.
+    fn record_scope_revision(&mut self, digest: &[u8], revision: &[u8]) -> rusqlite::Result<()>;
+
+    /// The revision content stored under `digest`, or `None` when nothing was
+    /// authored through the store for it. A miss is the calibrated-default path,
+    /// never a dispatch failure.
+    fn lookup_scope_revision(&mut self, digest: &[u8]) -> rusqlite::Result<Option<Vec<u8>>>;
+
     /// Record a member's advisory work-order description (#3595), keyed by
     /// (`bloom`, `workpiece`). The coordinator persists it at seal so it survives
     /// to dispatch — the api cap that holds the operator's text and the executor
@@ -341,6 +352,10 @@ CREATE TABLE IF NOT EXISTS dispatch_description (
     description TEXT NOT NULL,
     PRIMARY KEY (bloom, workpiece)
 );
+CREATE TABLE IF NOT EXISTS scope_revision (
+    digest   BLOB PRIMARY KEY,
+    revision BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS review_findings (
     bloom     BLOB NOT NULL,
     workpiece TEXT NOT NULL,
@@ -471,6 +486,21 @@ impl StoreBackend for SqliteStore {
             self.conn.prepare("SELECT study_artifact FROM study_index WHERE bloom = ?1 AND attempt_digest = ?2")?;
         let mut rows = stmt.query_map(rusqlite::params![bloom, attempt_digest], |row| row.get::<_, String>(0))?;
         // The (bloom, attempt_digest) pair is the primary key, so at most one row.
+        rows.next().transpose()
+    }
+
+    fn record_scope_revision(&mut self, digest: &[u8], revision: &[u8]) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO scope_revision (digest, revision) VALUES (?1, ?2)",
+            rusqlite::params![digest, revision],
+        )?;
+        Ok(())
+    }
+
+    fn lookup_scope_revision(&mut self, digest: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
+        let mut stmt = self.conn.prepare("SELECT revision FROM scope_revision WHERE digest = ?1")?;
+        let mut rows = stmt.query_map(rusqlite::params![digest], |row| row.get::<_, Vec<u8>>(0))?;
+        // The digest is the primary key, so there is at most one row.
         rows.next().transpose()
     }
 
@@ -792,6 +822,19 @@ impl NativeActor for StoreCapability {
         match state.backend.release_membership(&bloom) {
             Ok(released) => ReleaseMembershipResult::Ok { released },
             Err(error) => ReleaseMembershipResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_record_scope_revision(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: RecordScopeRevision,
+    ) -> RecordScopeRevisionResult {
+        let RecordScopeRevision { digest, revision } = mail;
+        match state.backend.record_scope_revision(&digest, &revision) {
+            Ok(()) => RecordScopeRevisionResult::Ok,
+            Err(error) => RecordScopeRevisionResult::Err { error: error.to_string() },
         }
     }
 

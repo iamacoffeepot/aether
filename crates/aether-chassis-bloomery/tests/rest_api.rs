@@ -595,3 +595,68 @@ fn assert_mixed_above_auto_seal(http_port: u16, wp1_revision: Digest) {
     assert_eq!(status, 200, "the mixed bloom is live");
     assert_eq!(view["members"].as_array().unwrap().len(), 2, "both members sealed");
 }
+
+// #4588 — `POST /scope-revisions` is the authoring half of a per-workpiece
+// harness / model choice, and it only means anything if the digest it hands back
+// addresses something durable. Before this, the route was pure content addressing
+// with nothing stored, so an operator could author a revision, seal a workpiece
+// naming its digest, and watch the fleet default run anyway.
+//
+// The test pins the contract the seal depends on: the route answers only once the
+// write lands (a `200` is a durability claim, not an arithmetic one), and the
+// digest is a pure function of the content — so re-authoring the same revision
+// re-addresses the same row, and a changed override addresses a different one.
+// The resolving end is covered by the executor drain's own tests; what this
+// catches is the two ends disagreeing about the address.
+#[test]
+fn authoring_a_scope_revision_stores_it_under_a_stable_content_address() {
+    let http_port = free_port();
+    let rpc_port = free_port();
+    let (_policy_dir, policy_path) = test_policy();
+    let mut child = spawn(http_port, rpc_port, &policy_path);
+
+    let result = std::panic::catch_unwind(|| {
+        wait_for_200(http_port, "/drafts");
+
+        let muse = serde_json::json!({
+            "model_override": {
+                "agent": { "harness": "Muse", "model": "muse-spark-1.2-contributor" },
+                "reasoning_effort": "Low",
+            }
+        });
+        let (status, authored) = send_json(http_port, "POST", "/scope-revisions", &muse);
+        assert_eq!(status, 200, "authoring answers only once the store write lands");
+        let digest = authored["digest"].clone();
+        assert!(digest.as_array().is_some_and(|bytes| bytes.len() == 32), "the reply names a 32-byte address");
+        assert_eq!(authored["scope_revision"], muse, "the revision is echoed as authored");
+
+        // Idempotent: identical content re-addresses the same row, so re-authoring
+        // is safe rather than a second revision the seal would have to choose
+        // between.
+        let (status, again) = send_json(http_port, "POST", "/scope-revisions", &muse);
+        assert_eq!(status, 200);
+        assert_eq!(again["digest"], digest, "the same content keeps its address");
+
+        // A changed override is a different revision, which is what makes the
+        // sealed digest an attestation of the choice rather than of the shape.
+        let claude = serde_json::json!({
+            "model_override": {
+                "agent": { "harness": "Claude", "model": "claude-opus-5" },
+                "reasoning_effort": "Low",
+            }
+        });
+        let (status, other) = send_json(http_port, "POST", "/scope-revisions", &claude);
+        assert_eq!(status, 200);
+        assert_ne!(other["digest"], digest, "a changed override changes the address");
+
+        // A malformed body is still refused inline, before any write.
+        let (status, _) = send_json(http_port, "POST", "/scope-revisions", &serde_json::json!({"nope": 1}));
+        assert_eq!(status, 400, "a body that is not a scope revision is refused");
+    });
+
+    let _ = child.kill();
+    let _ = child.wait();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}

@@ -42,7 +42,7 @@ use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AggregateReviewPayload, BloomId, Digest, DispatchPayload, ExecutionStatus, Fact, ModelOverride, Nonce,
-    RedispatchPayload, ReviewPass, StageId, Topic, Transformation, WorkHandle, WorkpieceId,
+    RedispatchPayload, ReviewPass, ScopeRevision, StageId, Topic, WorkHandle, WorkpieceId,
 };
 use aether_bloomery_github::SharedCorrespondence;
 use aether_data::wire::from_bytes;
@@ -256,26 +256,27 @@ impl AdmitSink for CollectingSink {
 /// way the attempt that parked did.
 fn overlay_member_advisory(
     store: &mut dyn StoreBackend,
-    transformation: &mut Transformation,
-    bloom: &[u8],
-    workpiece: &str,
-    stage: StageId,
+    record: &mut DispatchRecord,
     sequence: u64,
 ) -> rusqlite::Result<()> {
-    if transformation.command != CONSTRUCT_IMPLEMENT_COMMAND {
+    if record.transformation.command != CONSTRUCT_IMPLEMENT_COMMAND {
         return Ok(());
     }
+    let (bloom, workpiece) = (record.bloom.0.as_bytes().to_vec(), record.workpiece.0.clone());
 
-    // The stage's calibrated agent profile (ADR-0149 §The line), resolved
-    // host-side and overlaid the same way the description below is: the reducer
-    // names the stage catalog by digest and never resolves it, so without this
-    // the lane runs under whatever model the runner's ambient default happens to
-    // be and the receipt attests a profile that never ran. `stage` is what
-    // separates Construct from Refine here — both dispatch the same command at
-    // different calibrated efforts.
-    transformation.model = Some(dispatch_model(stage, &ModelOverride::default()));
-    if let Some(description) = store.lookup_dispatch_description(bloom, workpiece)? {
-        transformation.description = Some(description);
+    // The stage's calibrated agent profile (ADR-0149 §The line) as overridden by
+    // the member's sealed scope revision, resolved host-side and overlaid the
+    // same way the description below is: the reducer names both the stage catalog
+    // and the revision by digest and resolves neither, so without this the lane
+    // runs under whatever model the runner's ambient default happens to be and
+    // the receipt attests a profile that never ran. `stage` is what separates
+    // Construct from Refine — both dispatch the same command at different
+    // calibrated efforts — and the override is what separates one member from
+    // its siblings within a stage.
+    let model_override = lookup_model_override(store, &record.scope_revision, sequence)?;
+    record.transformation.model = Some(dispatch_model(record.stage, &model_override));
+    if let Some(description) = store.lookup_dispatch_description(&bloom, &workpiece)? {
+        record.transformation.description = Some(description);
     } else {
         tracing::warn!(
             target: "aether_chassis_bloomery::executor",
@@ -292,15 +293,54 @@ fn overlay_member_advisory(
     // the empty workpiece key until the decomposition slices them per member, and
     // every re-opened member reads that bloom row. The assembled prompt is plain
     // markdown concatenation, so the section header composes in-channel.
-    let findings = match store.lookup_review_findings(bloom, workpiece)? {
+    let findings = match store.lookup_review_findings(&bloom, &workpiece)? {
         Some(findings) => Some(findings),
-        None => store.lookup_review_findings(bloom, "")?,
+        None => store.lookup_review_findings(&bloom, "")?,
     };
     if let Some(findings) = findings {
-        let task = transformation.description.take().unwrap_or_default();
-        transformation.description = Some(format!("{task}\n\n## Findings\n\n{findings}"));
+        let task = record.transformation.description.take().unwrap_or_default();
+        record.transformation.description = Some(format!("{task}\n\n## Findings\n\n{findings}"));
     }
     Ok(())
+}
+
+/// Resolve a member's sealed `scope_revision` digest back into the
+/// [`ModelOverride`] it addresses (#4588). The authoring route stored the
+/// revision under exactly this digest, so the lookup is the resolving half of
+/// the content addressing a membership pins.
+///
+/// A miss resolves to `ModelOverride::default()` — the stage's calibrated
+/// profile — rather than failing the dispatch: a revision authored out-of-band is
+/// as unresolvable to an auditor reading the sealed spec as it is here, so the
+/// honest outcome is the default, logged. A row that will not decode is a
+/// corrupt store rather than an absent one, so it warns.
+fn lookup_model_override(
+    store: &mut dyn StoreBackend,
+    scope_revision: &Digest,
+    sequence: u64,
+) -> rusqlite::Result<ModelOverride> {
+    let Some(stored) = store.lookup_scope_revision(scope_revision.as_bytes())? else {
+        tracing::debug!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            scope_revision = ?scope_revision,
+            "no scope revision stored for the dispatched member; resolving the stage's calibrated profile",
+        );
+        return Ok(ModelOverride::default());
+    };
+    match from_bytes::<ScopeRevision>(&stored) {
+        Ok(revision) => Ok(revision.model_override),
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                scope_revision = ?scope_revision,
+                %error,
+                "stored scope revision did not decode; resolving the stage's calibrated profile",
+            );
+            Ok(ModelOverride::default())
+        }
+    }
 }
 
 /// Drain the dispatch topic and submit each entry through the executor, recording
@@ -343,22 +383,13 @@ fn drain_and_dispatch(
             );
             break;
         }
-        let mut transformation = payload.transformation;
-        overlay_member_advisory(
-            store,
-            &mut transformation,
-            payload.bloom.as_bytes(),
-            &payload.workpiece.0,
-            payload.stage,
-            entry.sequence,
-        )?;
         // The record's axes come from the payload's explicit fields (ADR-0152):
         // the true scope revision always, and the displayed digest — what the
         // returning evidence must bind to — the candidate tree when the member
         // has one, else the scope revision. `subject` (inputs[0]) agrees with
         // the displayed digest by reducer construction.
         let displayed = payload.candidate.unwrap_or(payload.scope_revision);
-        let record = DispatchRecord {
+        let mut record = DispatchRecord {
             nonce: Nonce(format!("dispatch-{}", entry.sequence)),
             bloom: BloomId(payload.bloom),
             workpiece: payload.workpiece,
@@ -366,8 +397,10 @@ fn drain_and_dispatch(
             candidate: displayed,
             displayed_digest: displayed,
             stage: payload.stage,
-            transformation,
+            transformation: payload.transformation,
         };
+
+        overlay_member_advisory(store, &mut record, entry.sequence)?;
         match dispatch_and_record(executor, store, &record) {
             Ok(handle) => {
                 handles.push(handle);
@@ -612,14 +645,7 @@ fn resolve_replay(
     // A fresh nonce off the outbox sequence, so the replay is its own attempt
     // rather than a re-run of the spent one the park consumed.
     record.nonce = Nonce(format!("redispatch-{sequence}"));
-    overlay_member_advisory(
-        store,
-        &mut record.transformation,
-        &held.bloom,
-        &record.workpiece.0,
-        record.stage,
-        sequence,
-    )?;
+    overlay_member_advisory(store, &mut record, sequence)?;
 
     match str::from_utf8(&payload.words) {
         Ok(answer) if record.transformation.command == CONSTRUCT_IMPLEMENT_COMMAND => {
