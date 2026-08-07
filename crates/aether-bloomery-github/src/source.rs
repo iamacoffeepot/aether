@@ -738,13 +738,31 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
         let candidate_tree_sha = self.resolve_git_sha(candidate, "candidate tree digest")?;
         let commit = self.client.create_commit("bloomery integrate", &candidate_tree_sha, &[current.sha])?;
         let head = digest_of(&IntegratedHead { bloom: *bloom, tree: *candidate });
+        let commit_object = GitObjectId::from_hex(&commit.sha)
+            .ok_or_else(|| SourceError::Malformed(format!("integrate commit sha `{}`", commit.sha)))?;
+
+        // Record the correspondence *before* advancing the ref, never after
+        // (#3667). The two writes are not atomic, so one of them observes a
+        // fault first, and the orders are not symmetric:
+        //
+        //   record → advance:  a fault leaves a correspondence for a commit no
+        //                      ref names. Nothing resolves it, and the retry
+        //                      re-creates a byte-identical commit (same tree,
+        //                      same parent, so git hands back the same sha) and
+        //                      re-records it idempotently. Recoverable.
+        //   advance → record:  a fault leaves the head with no correspondence,
+        //                      and the retry now reads `current_tree ==
+        //                      candidate`, so the stale-checkpoint guard above
+        //                      returns before reaching the record. The head is
+        //                      never landable (`land` faults on an unresolved
+        //                      correspondence) and never re-integratable — an
+        //                      absorbing state with no recovery path.
+        //
+        // The commit exists either way by this point; only its reachability is
+        // in question, and an unreferenced commit is ordinary git garbage.
+        self.correspondence.record(&head, &commit_object)?;
         match self.client.update_ref(&integration, &commit.sha, false) {
-            Ok(_) => {
-                let commit_object = GitObjectId::from_hex(&commit.sha)
-                    .ok_or_else(|| SourceError::Malformed(format!("integrate commit sha `{}`", commit.sha)))?;
-                self.correspondence.record(&head, &commit_object)?;
-                Ok(IntegrateOutcome::Integrated { tree: *candidate, head })
-            }
+            Ok(_) => Ok(IntegrateOutcome::Integrated { tree: *candidate, head }),
             // A 422 is GitHub's non-fast-forward refusal: a concurrent writer
             // moved the branch between our read and our update. That is the
             // same stale-checkpoint condition — re-read and report it as such.
@@ -1002,6 +1020,8 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
 mod tests {
     use std::slice::from_ref;
 
+    use crate::correspondence::{CorrespondenceError, GitObjectId};
+
     use aether_bloomery::{
         BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome,
         LandOutcome, LandProposal, SourceBackend, WorkpieceId,
@@ -1155,6 +1175,53 @@ mod tests {
         fake.seed_git_object(&another);
         let stale = source.integrate(&bloom, &another, &expected).unwrap();
         assert_eq!(stale, IntegrateOutcome::StaleCheckpoint { actual: candidate });
+    }
+
+    /// A correspondence whose reads work but whose `record` always faults,
+    /// standing in for the durable store failing mid-integrate.
+    struct RecordFaults(FakeGithub);
+
+    impl Correspondence for RecordFaults {
+        fn record(&self, _digest: &Digest, _git: &GitObjectId) -> Result<(), CorrespondenceError> {
+            Err(CorrespondenceError::new("store fault"))
+        }
+
+        fn resolve_git(&self, digest: &Digest) -> Result<Option<GitObjectId>, CorrespondenceError> {
+            self.0.resolve_git(digest)
+        }
+
+        fn resolve_digest(&self, git: &GitObjectId) -> Result<Option<Digest>, CorrespondenceError> {
+            self.0.resolve_digest(git)
+        }
+    }
+
+    #[test]
+    fn a_correspondence_fault_leaves_the_integration_ref_re_integratable() {
+        // Tripwire: the correspondence record must precede the ref advance
+        // (#3667). Recording after would move the branch to the candidate tree
+        // and *then* fault, so the retry below reads `current_tree == candidate`
+        // and returns StaleCheckpoint forever — the head never landable and
+        // never re-integratable. The ref staying put is what keeps the retry a
+        // retry.
+        let (fake, bloom, base) = seeded();
+        let base_tree = git_source(&fake, false).snapshot(&base).unwrap().tree;
+        let expected = git_source(&fake, false).checkpoint(&bloom, &base_tree).unwrap();
+        let candidate = digest(50);
+        fake.seed_git_object(&candidate);
+
+        let faulting = GitSource::new(fake.clone(), Arc::new(RecordFaults(fake.clone())), false);
+        assert!(faulting.integrate(&bloom, &candidate, &expected).is_err(), "the store fault surfaces");
+
+        // The retry runs against a working store and still sees its own
+        // checkpoint, so it integrates rather than refusing as stale.
+        let outcome = git_source(&fake, false).integrate(&bloom, &candidate, &expected).unwrap();
+        let IntegrateOutcome::Integrated { head, .. } = outcome else {
+            panic!("the retry must integrate, got {outcome:?}");
+        };
+        assert!(
+            fake.resolve_git(&head).unwrap().is_some(),
+            "the retried head resolves — the state the fault left is recoverable",
+        );
     }
 
     #[test]
