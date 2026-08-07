@@ -447,7 +447,7 @@ impl Puppet {
         }
 
         skin.pose_surface(&self.transforms, subject, &mut posed.positions, &mut posed.normals);
-        posed.rebound();
+        posed.rebound(&self.transforms);
     }
 
     /// Everything the frame's drawing is: the surface posed, the curves
@@ -781,7 +781,7 @@ impl WasmActor for Puppet {
         if self.skin.is_none() {
             self.surface = extract::tone_gate(mem::take(&mut self.surface), &self.settings);
         }
-        self.posed = self.skin.as_ref().map(|_| subject.deformable());
+        self.posed = self.skin.as_ref().map(|skin| subject.deformable(skin));
         // A fresh subject stands at rest, and `subject_changed` below has
         // already staged it, so the first frame owes no skinning at all.
         self.posed_at = Some(Pose::default());
