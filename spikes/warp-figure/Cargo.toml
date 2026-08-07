@@ -1,0 +1,57 @@
+[package]
+name = "warp-figure"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Spike crate: one wasm actor that demonstrates "stretch the space, never emit
+# voxels" — a chunky voxel humanoid built once in material space, its surface
+# extracted once onto a shared corner lattice, and a time-varying displacement
+# field applied to those corners every frame.
+#
+# Its own workspace root (the empty `[workspace]` table below) so `main` never
+# carries a `spikes/` member and the spike's feature resolution stays isolated
+# from the engine workspace — a shared feature unification is what strips
+# `export!` off a component and produces a dead ~54 KB wasm.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `export!` gates its emitted FFI entry surface on the invoking crate's
+# `library` feature. Nothing embeds this spike, so the feature is never
+# enabled — it is declared only so `unexpected_cfgs` recognizes the value the
+# macro expands to.
+library = []
+
+[dependencies]
+aether-actor = { path = "../../crates/aether-actor" }
+aether-kinds = { path = "../../crates/aether-kinds" }
+# Marker-only guest faces: the spike addresses these caps by mail, it does not
+# host their runtimes.
+aether-lifecycle = { path = "../../crates/aether-lifecycle", default-features = false }
+aether-render = { path = "../../crates/aether-render", default-features = false }
+aether-math = { path = "../../crates/aether-math" }
+
+[lints.rust]
+unused_qualifications = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+self_named_module_files = "deny"
+uninlined_format_args = "deny"
+unreadable_literal = "deny"
+
+# Mirrors the engine workspace's opt-outs: the `WasmActor` dispatch ABI fixes
+# `&mut self` / `&mut ctx` on handlers whether or not a given body mutates
+# through them, and the rest are idiom-fight / doc-burden picks the workspace
+# already settled.
+float_cmp = "allow"
+missing_const_for_fn = "allow"
+missing_errors_doc = "allow"
+needless_pass_by_ref_mut = "allow"
+too_long_first_doc_paragraph = "allow"
