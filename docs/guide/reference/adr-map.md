@@ -32,7 +32,7 @@ rg -l 'HTTP server|settlement|component' docs/adr
 | Instanced actors | ADR-0079 | ADR-0114, ADR-0138 |
 | Reply classes | ADR-0112 | ADR-0134 |
 | Behavior scripting | ADR-0137 | current `aether-behavior` code |
-| Capability-owned kinds | ADR-0121 | ADR-0122 marker/runtime split |
+| Capability-owned kinds | ADR-0121 | ADR-0122 marker/runtime split; current per-capability crates such as `crates/aether-audio`, `crates/aether-http`, and `crates/aether-component` |
 
 ## Scheduling, lifecycle, and evidence
 
@@ -55,7 +55,8 @@ rg -l 'HTTP server|settlement|component' docs/adr
 | Stable MCP tunnel | ADR-0089 |
 | Layered configuration | ADR-0090 |
 | Binary/component artifact stores | ADR-0115, ADR-0116 |
-| Autonomous pipeline | ADR-0146 (**Proposed**) |
+| Hosted autonomous pipeline (retired) | ADR-0146 (**Superseded**); follow the current [agent workflow](../contributing/agent-workflow.md) and `.agents/skills/` |
+| Hosted required-review gate (retired) | ADR-0148 (**Superseded**); follow the current [agent workflow](../contributing/agent-workflow.md) and `.agents/skills/` |
 | Release branches | ADR-0092 (**Proposed; not current policy**) |
 
 ## Platform I/O

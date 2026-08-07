@@ -1,6 +1,6 @@
 # ADR-0148: Native required-review merge gate
 
-- **Status:** Accepted (demoted to defense-in-depth, 2026-07-17 — see note below)
+- **Status:** Superseded (#3829 — the hosted critic/reconciler review gate was retired; use `.agents/skills/` and `docs/guide/contributing/agent-workflow.md`)
 - **Date:** 2026-07-12
 
 > **Demotion note (2026-07-17, ADR-0149 migration step 3).** Landing authority

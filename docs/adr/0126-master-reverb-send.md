@@ -1,6 +1,6 @@
 # ADR-0126: Master reverb send on the audio mixer
 
-- **Status:** Accepted (shipped — master reverb send in the `aether.audio` capability; `crates/aether-capabilities/src/audio/runtime/reverb.rs`)
+- **Status:** Accepted (shipped — master reverb send in `crates/aether-audio/src/runtime/reverb.rs`)
 - **Date:** 2026-07-03
 
 ## Context

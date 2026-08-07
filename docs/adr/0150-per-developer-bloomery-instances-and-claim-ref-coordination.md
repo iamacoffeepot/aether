@@ -1,6 +1,6 @@
 # ADR-0150: Per-developer Bloomery instances and claim-ref coordination
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — Bloomery claim-ref coordination in `crates/aether-bloomery/src/control/claim_plan.rs` and `crates/aether-bloomery/src/port/source.rs`)
 - **Date:** 2026-07-16
 
 ## Context

@@ -1,6 +1,6 @@
 # ADR-0136: HTTP Route Target Sets
 
-- **Status:** Accepted (shipped — HTTP route target sets / `#[router(shared)]`; `crates/aether-capabilities/src/http/server/runtime/routing.rs`)
+- **Status:** Accepted (shipped — HTTP route target sets and `#[router(shared)]` in `crates/aether-http/src/server/runtime/routing.rs`)
 - **Date:** 2026-07-05
 
 Amends **ADR-0130** (HTTP route registration): a route's target grows from one mailbox to a set of member mailboxes that N handler instances opt into together, with per-request selection spreading load across live members. Registration, conflict, and dead-target semantics otherwise stand. Builds on the sharded dispatch of **ADR-0135**.

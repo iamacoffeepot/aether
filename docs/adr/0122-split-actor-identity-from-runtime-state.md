@@ -1,6 +1,6 @@
 # ADR-0122: Split Actor Identity From Runtime State
 
-- **Status:** Accepted (shipped — the identity/runtime split across every capability in `aether-capabilities`; see `docs/guide/capability-anatomy.md`)
+- **Status:** Accepted (shipped — per-capability crates such as `crates/aether-audio` and `crates/aether-http` split actor identity from `runtime/`; see `docs/guide/capability-anatomy.md`)
 - **Date:** 2026-06-23
 
 ## Context

@@ -1,6 +1,6 @@
 # ADR-0149: Bloomery — bounded development blooms on a first-party control plane
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — bounded Bloomery state transitions in `crates/aether-bloomery/src/reduce/` and the control surface in `crates/aether-bloomery/src/control/`)
 - **Date:** 2026-07-15
 
 ## Context

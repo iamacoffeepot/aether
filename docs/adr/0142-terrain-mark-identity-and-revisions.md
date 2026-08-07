@@ -1,6 +1,6 @@
 # ADR-0142: Terrain mark identity and revisions
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — revisioned terrain marks in `crates/aether-kit-terrain/src/mark/`, covered by `crates/aether-kit-terrain/tests/mark_scenario.rs`)
 - **Date:** 2026-07-09
 
 ## Context
