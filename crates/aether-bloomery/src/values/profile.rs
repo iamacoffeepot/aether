@@ -20,13 +20,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
 
-/// How a stage's agent runs: model, reasoning effort, and tool policy. A
-/// digest-addressed, versioned policy artifact (ADR-0149 §The value
+/// How a stage's agent runs: harness, model, reasoning effort, and tool policy.
+/// A digest-addressed, versioned policy artifact (ADR-0149 §The value
 /// vocabulary) — its [`digest`](Self::digest) *is* its version, so a changed
 /// calibration is a new profile and a distinct configuration is a distinct
 /// artifact.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AgentProfile {
+    /// The harness that runs the model — which CLI the model lane forks.
+    pub harness: Harness,
     /// The model identity the stage runs under (e.g. `claude-opus-4-8`).
     pub model: String,
     /// The reasoning-effort tier the harness runs the model at.
@@ -47,6 +49,56 @@ impl AgentProfile {
     #[must_use]
     pub fn digest(&self) -> Digest {
         digest_of(self)
+    }
+}
+
+/// The harness a model lane forks — *which* agent CLI executes the stage, as
+/// opposed to the model it executes under. A closed set, so a stored profile
+/// can never name a harness the executor has no arm for, and a new harness is a
+/// compile error at every match rather than an unrecognized string at dispatch.
+///
+/// Orthogonal to [`model`](AgentProfile::model): the harness selects the
+/// process the runner spawns and the transcript shape the result record is
+/// derived from, while the model selects what that process runs. The mechanical
+/// lanes name no harness at all — they run a compiler.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Harness {
+    /// The Claude Code CLI, headless.
+    Claude,
+    /// The Codex CLI, headless.
+    Codex,
+    /// The Muse Code CLI, headless.
+    Muse,
+}
+
+impl Harness {
+    /// The harness's runner-facing name — the exact token the executor renders
+    /// onto the model lane's `--harness` argv and the transform entrypoint
+    /// parses back, so the calibrated harness reaches the child verbatim rather
+    /// than through a second spelling the runner invents (the convention
+    /// [`ReasoningEffort::as_str`] already sets).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Muse => "muse",
+        }
+    }
+
+    /// The harness a runner-facing name denotes, or `None` when the name
+    /// matches no arm. The inverse of [`as_str`](Self::as_str) — the parse the
+    /// transform entrypoint runs over its `--harness` flag, fail-closed so an
+    /// unrecognized spelling is a legible refusal rather than a silent fallback
+    /// to whichever harness happens to be first.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            "muse" => Some(Self::Muse),
+            _ => None,
+        }
     }
 }
 
@@ -107,14 +159,17 @@ mod tests {
     // canonical aether-wire bytes under its DOMAIN tag, so it drifts the moment
     // the content-addressing logic, the DOMAIN string, or the profile's field
     // layout changes. Recompute-and-repin only when such a change is intended.
+    // Repinned for #4578: the profile gains its `harness` field, which changes
+    // the canonical bytes of every profile including this fixture's.
     const GOLDEN_PROFILE_DIGEST: [u8; 32] = [
-        0x5d, 0x34, 0xe7, 0x04, 0xe5, 0x51, 0xc3, 0xd0, 0xe3, 0x38, 0x19, 0xc0, 0x67, 0x3d, 0x01, 0xd2, 0x7d, 0xb1,
-        0x72, 0xe7, 0x5d, 0x98, 0xd5, 0xa9, 0x56, 0x28, 0x11, 0x05, 0x26, 0x3a, 0x5e, 0xe6,
+        0x79, 0x57, 0x38, 0x07, 0x86, 0xca, 0x49, 0x48, 0xd0, 0x3d, 0xfb, 0xad, 0xe8, 0x7e, 0xb1, 0x00, 0x78, 0x38,
+        0x91, 0x56, 0xe4, 0x9b, 0xf3, 0xc4, 0xd0, 0xc4, 0xf1, 0xf2, 0x02, 0xd7, 0x0a, 0xaa,
     ];
 
     #[test]
     fn agent_profile_digest_matches_pinned_golden() {
         let profile = AgentProfile {
+            harness: Harness::Claude,
             model: String::from("claude-opus-4-8"),
             effort: ReasoningEffort::High,
             tools: ToolPolicy::Full,
@@ -124,5 +179,22 @@ mod tests {
             GOLDEN_PROFILE_DIGEST,
             "AgentProfile content addressing drifted from the pinned golden digest"
         );
+    }
+
+    // The two directions of the harness's runner-facing spelling are independent
+    // matches, so an arm added to one and forgotten in the other renders a
+    // harness the transform entrypoint then refuses to parse — a dispatch that
+    // fails at the child rather than at the calibration. Round-tripping every
+    // variant is what catches the half-added arm.
+    #[test]
+    fn every_harness_round_trips_through_its_runner_facing_name() {
+        for harness in [Harness::Claude, Harness::Codex, Harness::Muse] {
+            assert_eq!(
+                Harness::from_name(harness.as_str()),
+                Some(harness),
+                "{harness:?} does not round-trip through its runner-facing name",
+            );
+        }
+        assert_eq!(Harness::from_name("gpt"), None, "an unrecognized name is a legible refusal, not a fallback");
     }
 }

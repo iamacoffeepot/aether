@@ -199,9 +199,9 @@ impl ExecutorBackend for LocalExecutor {
         // (the scope-revision digest the broker displayed), falling back to the
         // checkout only for a malformed order that carries no input.
         let subject = order.transformation.inputs.first().copied().unwrap_or(order.transformation.checkout);
-        // Model/effort/task ride the model-driven lanes (construct and the
-        // review critic), mirroring `transform-model.yml`'s argv; a verify lane
-        // ignores them. `is_construct` stays narrower — it selects the
+        // Harness/model/effort/task ride the model-driven lanes (construct and
+        // the review critic), mirroring `transform-model.yml`'s argv; a verify
+        // lane ignores them. `is_construct` stays narrower — it selects the
         // construct-specific evidence gate (substantive-conclusion, #3596),
         // which the review lane's `status`-stamped evidence must not ride.
         let is_construct = order.transformation.command == CONSTRUCT_IMPLEMENT_COMMAND;
@@ -218,6 +218,7 @@ impl ExecutorBackend for LocalExecutor {
             worktree_dir: &worktree_dir,
             evidence_dir: &evidence_dir,
             nonce: &nonce,
+            harness: profile.map(|resolved| resolved.harness.as_str()),
             model: profile.map(|resolved| resolved.model.as_str()),
             effort: profile.map(|resolved| resolved.effort.as_str()),
             // The work-order description rides the order's transformation (#3595),

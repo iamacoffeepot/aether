@@ -50,6 +50,9 @@ impl TransformRunner for ProcessTransformRunner {
             .args(["--nonce", spec.nonce]);
         if is_model_lane(spec.command) {
             cargo.args(["--subject", spec.checkout_hex]);
+            if let Some(harness) = spec.harness {
+                cargo.args(["--harness", harness]);
+            }
             if let Some(model) = spec.model {
                 cargo.args(["--model", model]);
             }

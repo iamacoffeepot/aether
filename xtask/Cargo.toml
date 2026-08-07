@@ -11,6 +11,13 @@ publish = false
 # decoder reads — rather than re-implementing the byte layout, so xtask
 # depends on the chassis crate that owns `package::{PackageManifest,
 # PackageEntry, Sha256, encode_manifest}`.
+# The model lanes fork the harness the coordinator resolved from the stage's
+# sealed `AgentProfile` and hands over as `--harness` (#4578). xtask parses the
+# flag back through `aether_bloomery::Harness` rather than re-spelling the
+# vocabulary locally: the domain crate owns the one spelling, the same way it
+# owns `CONSTRUCT_IMPLEMENT_COMMAND`, so a drifted copy cannot render a harness
+# this entrypoint then refuses to parse.
+aether-bloomery = { path = "../crates/aether-bloomery" }
 aether-chassis = { path = "../crates/aether-chassis" }
 anyhow = { workspace = true }
 cargo_metadata = "0.23.1"

@@ -139,9 +139,17 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // the stage's resolved agent profile, which the reducer authors `None` on every
 // `DispatchAttempt` and the host overlays at dispatch — the same additive shape
 // change to the decided output the `description` field made, recomputed.
+// Repinned again for #4578: `AgentProfile` gains its `harness` field, so every
+// binding's profile digest moves and the line catalog with them. The scripted
+// draft seals `StageCatalog::line_digest()`, so the sealed spec — and the bloom
+// id derived from it — move too, and every decision naming that bloom changes
+// value. A vocabulary addition to the catalog is an intended edit, recomputed.
+// Repinned again for #4579: the four dispatched model lanes recalibrate onto the
+// muse harness, moving the line catalog and so the sealed spec and bloom id the
+// scripted draft derives from it — the same mechanism as the #4578 repin.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0x4a, 0x7e, 0x5c, 0x1d, 0xd9, 0x65, 0xca, 0x51, 0xa6, 0xcb, 0x1c, 0x60, 0x4d, 0x16, 0xa6, 0xdc, 0xd7, 0xa1, 0x97,
-    0x96, 0xc4, 0x40, 0x6e, 0xff, 0x12, 0xa9, 0x35, 0x1c, 0x15, 0x0f, 0x42, 0x96,
+    0x3a, 0xfb, 0x5b, 0x2d, 0x87, 0x37, 0xd6, 0x4c, 0x39, 0x99, 0x2f, 0x2e, 0x63, 0x75, 0x97, 0x32, 0x00, 0x48, 0x98,
+    0xdf, 0x7c, 0xe1, 0xac, 0x7e, 0xb6, 0xfd, 0x68, 0xa8, 0x8b, 0x23, 0xdf, 0x99,
 ];
 
 #[test]

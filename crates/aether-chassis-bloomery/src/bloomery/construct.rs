@@ -69,7 +69,7 @@ pub fn build_construct_order(scope_revision: &ScopeRevision, base: Digest, nonce
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery::{ModelOverride, StageCatalog, StageId};
+    use aether_bloomery::{AgentSelection, Harness, ModelOverride, StageCatalog, StageId};
 
     use super::*;
 
@@ -93,7 +93,10 @@ mod tests {
     fn a_set_override_wins_over_the_default() {
         let default_construct = StageCatalog::profile_of(StageId::Construct);
         let overridden = ScopeRevision {
-            model_override: ModelOverride { model: Some("claude-sonnet-5".to_owned()), reasoning_effort: None },
+            model_override: ModelOverride {
+                agent: Some(AgentSelection { harness: Harness::Claude, model: "claude-sonnet-5".to_owned() }),
+                reasoning_effort: None,
+            },
         };
         let (_, resolved) = build_construct_order(&overridden, Digest::from_bytes([5; 32]), Nonce("n-2".to_owned()));
 
@@ -107,7 +110,10 @@ mod tests {
     #[test]
     fn the_order_pins_the_scope_revision_it_resolved() {
         let rev = ScopeRevision {
-            model_override: ModelOverride { model: Some("claude-sonnet-5".to_owned()), reasoning_effort: None },
+            model_override: ModelOverride {
+                agent: Some(AgentSelection { harness: Harness::Claude, model: "claude-sonnet-5".to_owned() }),
+                reasoning_effort: None,
+            },
         };
         let (order, _) = build_construct_order(&rev, Digest::from_bytes([5; 32]), Nonce("n-3".to_owned()));
         assert!(

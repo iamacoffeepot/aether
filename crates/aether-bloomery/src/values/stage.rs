@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::StageId;
-use crate::values::{AgentProfile, Budget, ReasoningEffort, ResolvedModel, ToolPolicy};
+use crate::values::{AgentProfile, Budget, Harness, ReasoningEffort, ResolvedModel, ToolPolicy};
 
 /// The declared output name every dispatched attempt uploads its result record
 /// under — the study/verdict envelope the intake broker binds to the displayed
@@ -241,11 +241,12 @@ impl StageCatalog {
     /// references the returned profile by [`digest`](AgentProfile::digest), so a
     /// recalibration is a new digest and re-digests the catalog.
     ///
-    /// The model/effort values are the initial calibration — refinable without
-    /// an ADR (a change re-digests the catalog), like the per-binding tag/gate
-    /// strings. `tools` is [`ToolPolicy::Full`] across the v1 line: every stage
-    /// runs a real process over the full tool surface; the finer tiers exist so
-    /// a later calibration can bound a stage without a vocabulary change.
+    /// The harness/model/effort values are the initial calibration — refinable
+    /// without an ADR (a change re-digests the catalog), like the per-binding
+    /// tag/gate strings. `tools` is [`ToolPolicy::Full`] across the v1 line:
+    /// every stage runs a real process over the full tool surface; the finer
+    /// tiers exist so a later calibration can bound a stage without a vocabulary
+    /// change.
     /// The model id every opus-tier stage below resolves to. Named once so a
     /// generation refresh is one edit rather than a sweep over the arms — the
     /// rows carry a tier, and only this line carries an id that can age.
@@ -253,24 +254,49 @@ impl StageCatalog {
     /// The model id every sonnet-tier stage below resolves to, named for the
     /// same reason as [`Self::OPUS_MODEL`].
     const SONNET_MODEL: &'static str = "claude-sonnet-5";
+    /// The model id the muse-harness stages resolve to.
+    ///
+    /// The **contributor** tier, deliberately: it is roughly an order of
+    /// magnitude cheaper than standard `muse-spark-1.2`, which is what makes
+    /// running every model lane on it affordable at all. Its terms state that
+    /// content may be used for product improvement — sound here because this
+    /// repository is public and a bloom's lanes see only its own source, and a
+    /// decision to re-take before a Bloomery instance is ever pointed at a
+    /// private repository. Naming it in the catalog is what makes that choice
+    /// attestable rather than an operator's ambient default.
+    const MUSE_MODEL: &'static str = "muse-spark-1.2-contributor";
 
     #[must_use]
     pub fn profile_of(stage: StageId) -> AgentProfile {
-        // Calibrated once, grouped by tier: the design-adjacent stages run opus
-        // (scope/construct/study at high effort, refine at medium), review's
-        // finders run sonnet@high, and the mechanical remainder runs sonnet@medium.
-        let (model, effort): (&str, ReasoningEffort) = match stage {
-            StageId::Scope | StageId::Construct | StageId::Study => (Self::OPUS_MODEL, ReasoningEffort::High),
-            StageId::Refine => (Self::OPUS_MODEL, ReasoningEffort::Medium),
-            StageId::Review | StageId::AggregateReview => (Self::SONNET_MODEL, ReasoningEffort::High),
+        // The four **dispatched model lanes** — the ones that actually fork an
+        // agent CLI — run muse: Construct and its Refine repair re-entry, and
+        // the two review positions. That is the whole set `is_model_lane`
+        // recognizes, so this is the calibration that decides what writes the
+        // code and what judges it.
+        //
+        // The remaining stages keep their Claude calibration and it is inert:
+        // Scope and Approve are pre-seal operator/host processes, Study is not
+        // dispatched as a worker lane, and the mechanical stages run a compiler.
+        // `is_model_lane` keeps the resolved harness off every one of their
+        // argvs, so their harness names a CLI none of them forks.
+        //
+        // Harness and model move together, and must: a model id belongs to the
+        // provider its harness talks to, so a lane pointed at muse while still
+        // naming an Anthropic id would dispatch an id its harness cannot resolve.
+        let (harness, model, effort): (Harness, &str, ReasoningEffort) = match stage {
+            StageId::Construct | StageId::Review | StageId::AggregateReview => {
+                (Harness::Muse, Self::MUSE_MODEL, ReasoningEffort::High)
+            }
+            StageId::Refine => (Harness::Muse, Self::MUSE_MODEL, ReasoningEffort::Medium),
+            StageId::Scope | StageId::Study => (Harness::Claude, Self::OPUS_MODEL, ReasoningEffort::High),
             StageId::Sketch
             | StageId::Approve
             | StageId::Verify
             | StageId::Integrate
             | StageId::AggregateVerify
-            | StageId::Land => (Self::SONNET_MODEL, ReasoningEffort::Medium),
+            | StageId::Land => (Harness::Claude, Self::SONNET_MODEL, ReasoningEffort::Medium),
         };
-        AgentProfile { model: String::from(model), effort, tools: ToolPolicy::Full }
+        AgentProfile { harness, model: String::from(model), effort, tools: ToolPolicy::Full }
     }
 }
 
@@ -504,6 +530,34 @@ mod tests {
         }
     }
 
+    // Tripwire: a model lane's harness and model id agree. A model id belongs to
+    // the provider its harness talks to, so a stage moved onto a model lane — or
+    // recalibrated onto a different harness — while keeping the other half of
+    // the pair would dispatch an id its harness cannot resolve. The failure is
+    // remote and late (the child CLI rejects the model mid-run), so the pairing
+    // is pinned here where it is authored.
+    #[test]
+    fn every_dispatched_model_lane_pairs_its_harness_with_that_harnesss_model() {
+        for binding in StageCatalog::line().bindings {
+            if !is_model_lane(&binding.process) {
+                continue;
+            }
+            let profile = StageCatalog::profile_of(binding.stage);
+            assert_eq!(
+                profile.harness,
+                Harness::Muse,
+                "{:?} is a dispatched model lane, so it must name the calibrated model harness",
+                binding.stage,
+            );
+            assert_eq!(
+                profile.model,
+                StageCatalog::MUSE_MODEL,
+                "{:?} runs under muse, so its model id must be a muse id",
+                binding.stage,
+            );
+        }
+    }
+
     // Tripwire: the line catalog's digest. Computed over the authored bindings,
     // so it drifts the moment any consumes/produces/profile/process/gate/retry
     // value changes — catching an unintended catalog edit. Recompute-and-repin
@@ -526,9 +580,20 @@ mod tests {
     // `claude-opus-4-8` to `claude-opus-5`, which changes their `AgentProfile`
     // digests and so the line. A recalibration is an intended catalog edit — see
     // `profile_of`, whose model and effort values are refinable without an ADR.
+    // Repinned again for #4578: every profile gains a `harness` field, so every
+    // binding's `AgentProfile` digest moves and the line with it. A vocabulary
+    // addition is an intended catalog edit for the same reason a recalibration
+    // is — and it is the point of the axis: which CLI ran a stage becomes
+    // something the sealed catalog digest attests rather than a worker-local
+    // accident.
+    // Repinned again for #4579: the four dispatched model lanes recalibrate onto
+    // the muse harness and its model id, moving their profile digests and the
+    // line with them. A recalibration is an intended catalog edit — see
+    // `profile_of`, whose harness/model/effort values are refinable without an
+    // ADR.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x7f, 0x16, 0xea, 0x91, 0x4e, 0xff, 0xdb, 0x24, 0xc9, 0x83, 0x1e, 0x11, 0x10, 0x7a, 0x8a, 0x95, 0x42, 0xb3,
-        0xd9, 0xd4, 0xc8, 0x8d, 0x30, 0xad, 0x66, 0x16, 0x1c, 0xaa, 0x78, 0x27, 0x50, 0xa1,
+        0x1a, 0xc6, 0x09, 0x6c, 0x13, 0x3e, 0x43, 0x37, 0xfa, 0x88, 0x10, 0x0a, 0x47, 0x11, 0x0b, 0x5c, 0xb7, 0xf2,
+        0x71, 0xb7, 0x15, 0x50, 0x41, 0xe0, 0xa5, 0xd0, 0xe2, 0xdb, 0x27, 0xf3, 0xb4, 0x40,
     ];
 
     #[test]

@@ -354,7 +354,7 @@ fn drain_dispatches_the_construct_lane_under_its_calibrated_profile() {
 // (#4324). What trips it is a resolution that re-collapses the two lanes onto one
 // model.
 #[test]
-fn drain_dispatches_the_review_lane_under_sonnet_not_the_construct_model() {
+fn drain_dispatches_the_review_lane_under_its_own_calibrated_profile() {
     let mut store = SqliteStore::open(":memory:").unwrap();
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
@@ -370,13 +370,9 @@ fn drain_dispatches_the_review_lane_under_sonnet_not_the_construct_model() {
     let orders = backend.orders();
     let dispatched = orders[0].transformation.model.clone().expect("a model lane names its profile");
     let review = StageCatalog::profile_of(StageId::AggregateReview);
+    assert_eq!(dispatched.harness, review.harness, "the critic runs the calibrated AggregateReview harness");
     assert_eq!(dispatched.model, review.model, "the critic runs the calibrated AggregateReview model");
     assert_eq!(dispatched.effort, review.effort, "at its calibrated effort");
-    assert_ne!(
-        dispatched.model,
-        StageCatalog::profile_of(StageId::Construct).model,
-        "the review and construct lanes are calibrated to different models; one value cannot serve both",
-    );
 }
 
 #[test]

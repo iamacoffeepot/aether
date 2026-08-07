@@ -5,8 +5,8 @@
 
 use anyhow::Result;
 
-use crate::transform::claude::{assemble_construct_prompt, run_headless_claude};
-use crate::transform::{TransformArgs, write_evidence_json};
+use crate::transform::claude::assemble_construct_prompt;
+use crate::transform::{TransformArgs, run_model_lane, write_evidence_json};
 
 /// The typed id of the model-driven review lane — the member line's terminal
 /// critic (`Transformation::for_member_stage` dispatches it for the Review
@@ -74,7 +74,7 @@ fn stamp_review_evidence(nonce: Option<&str>, passed: bool, record: &serde_json:
 /// credential, so it runs worker-side — never on the zero-secret path.
 pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
     let prompt = assemble_construct_prompt(REVIEW_INSTRUCTIONS, args.subject.as_deref(), args.task.as_deref());
-    let record = run_headless_claude(&prompt, args)?;
+    let record = run_model_lane(&prompt, args)?;
     write_evidence_json(&args.out, &stamp_review_evidence(args.nonce.as_deref(), review_conclusion(&record), &record))
 }
 

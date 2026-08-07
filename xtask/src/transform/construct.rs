@@ -7,8 +7,8 @@ use std::process::Command;
 
 use anyhow::Result;
 
-use crate::transform::claude::{assemble_construct_prompt, run_headless_claude};
-use crate::transform::{TransformArgs, write_evidence_json};
+use crate::transform::claude::assemble_construct_prompt;
+use crate::transform::{TransformArgs, run_model_lane, write_evidence_json};
 
 /// The typed id of the model-driven construct lane (#3511). Recognized here so
 /// an unknown id stays unmapped exactly as in the verify lane.
@@ -82,7 +82,7 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
     // instruction source and the checked-out subject, never from a skill in the
     // worker's checkout. It is piped on the child's stdin.
     let prompt = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, args.subject.as_deref(), args.task.as_deref());
-    let record = run_headless_claude(&prompt, args)?;
+    let record = run_model_lane(&prompt, args)?;
 
     // Inspect the worktree (cwd) for the candidate change the run's whole job is
     // to leave (#3596): the gate demands a substantive conclusion, and an empty

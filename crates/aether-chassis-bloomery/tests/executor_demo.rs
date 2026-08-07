@@ -20,8 +20,8 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    Budget, Conclusion, Digest, ExecutionStatus, NetworkProfile, Nonce, ReasoningEffort, ResolvedModel, Transformation,
-    WorkHandle, WorkOrder,
+    Budget, Conclusion, Digest, ExecutionStatus, Harness, NetworkProfile, Nonce, ReasoningEffort, ResolvedModel,
+    Transformation, WorkHandle, WorkOrder,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{ActionsExecutor, Artifact, LaneWorkflows, RunConclusion, RunStatus};
@@ -44,7 +44,11 @@ fn work_order(nonce: &str) -> WorkOrder {
             description: None,
             // A model lane carries the profile the host resolved onto it; the
             // backend refuses to dispatch one that does not.
-            model: Some(ResolvedModel { model: "claude-opus-5".to_owned(), effort: ReasoningEffort::High }),
+            model: Some(ResolvedModel {
+                harness: Harness::Claude,
+                model: "claude-opus-5".to_owned(),
+                effort: ReasoningEffort::High,
+            }),
         },
         nonce: Nonce(nonce.to_owned()),
     }
