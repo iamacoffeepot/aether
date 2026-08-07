@@ -39,10 +39,10 @@ use crate::digest::Digest;
 /// so declaring a configuration is declaring a kind and nothing further. The
 /// blanket impl is also what keeps the typed and generic authoring paths in
 /// agreement: [`address`](ConfigKind::address) domain-separates on
-/// [`Kind::NAME`], which is the one string the generic `POST /configs` route
-/// has in hand, so a value addressed from Rust and the same value addressed
-/// from JSON land on the same digest by construction rather than by a
-/// convention someone has to hold.
+/// [`Kind::NAME`](aether_data::Kind::NAME), which is the one string the generic
+/// `POST /configs` route has in hand, so a value addressed from Rust and the
+/// same value addressed from JSON land on the same digest by construction
+/// rather than by a convention someone has to hold.
 pub trait ConfigKind: aether_data::Kind + Serialize {
     /// The address this value seals under.
     ///
