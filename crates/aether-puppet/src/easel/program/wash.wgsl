@@ -15,16 +15,14 @@
 // (input n at @binding(2 * n)), samplers undeclared because every read is
 // a textureLoad at the writing fragment's own texel.
 
-// Class ids the coverage derives from, as the f32s the class plane
-// carries (labels.rs SKIN / LIPS): the mouth is drawn rather than
-// painted, so it falls through into the skin wash (palette.rs
-// `remapped`).
-const MASK_SKIN: f32 = 1.0;
-const MASK_LIPS: f32 = 6.0;
-
 struct MaskParams {
-    // The material class this mask selects.
-    material_class: f32,
+    // Which classes this mask counts, one bit per class id: the
+    // material's own, plus every class the subject's box remaps onto it
+    // (palette.rs `covered_by` over `remapped`). A set rather than an id
+    // because the fall-through table is authored per subject — the mouth
+    // falling through into the skin wash is her box's rule, not this
+    // shader's.
+    covered: u32,
     // 1: select every labelled texel instead — the figure mask the
     // atmosphere stain is cut back by.
     figure: u32,
@@ -43,8 +41,7 @@ struct MaskParams {
 @fragment
 fn fs_mask(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let labelled = round(textureLoad(mask_packed, vec2<i32>(position.xy), 0).r * 255.0);
-    let remapped = select(labelled, MASK_SKIN, labelled == MASK_LIPS);
-    let covered = select(f32(remapped == mask_params.material_class), f32(labelled != 0.0), mask_params.figure == 1u);
+    let covered = select(in_class_set(mask_params.covered, labelled), f32(labelled != 0.0), mask_params.figure == 1u);
     return vec4<f32>(covered, 0.0, 0.0, 1.0);
 }
 

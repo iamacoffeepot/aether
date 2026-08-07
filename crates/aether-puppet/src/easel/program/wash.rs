@@ -10,7 +10,7 @@
 //! ([`super::flow`]), how closely the hand is held off the bake's class
 //! channel ([`super::care`]), and the face paint off the chart's aperture
 //! loops ([`super::face`]) — and then, for every entry in
-//! [`palette::MATERIALS`], a coverage mask, a value plane, a tight wash, a
+//! [`palette::Palette`], a coverage mask, a value plane, a tight wash, a
 //! loose wash under the care ramp for a material the hand relaxes over,
 //! the flow smear for the hair, the lid lift for the iris, the glaze
 //! dropped into the wet hair, the atmosphere stain for a material that
@@ -70,9 +70,8 @@ use aether_render::{
 use crate::easel::accent::{self, Eye};
 use crate::easel::field::{self, WashParams};
 use crate::easel::image::{self, Rng};
-use crate::easel::palette;
+use crate::easel::palette::{self, HAIR_CLASS, Palette, SKIN_CLASS};
 use crate::easel::survey;
-use crate::labels::{HAIR, SKIN};
 
 use super::sheet::{
     CoatParams, LostEdgeParams, SHEET_PARAMS_BYTES, care_mix_pass, coat_absorb_pass, first_coat_absorb_pass,
@@ -257,8 +256,10 @@ impl Grain {
 
 /// Uniform window for `fs_mask` — the WGSL `MaskParams` block.
 pub struct MaskUniforms {
-    /// The class this mask selects.
-    pub material_class: u8,
+    /// Which classes this mask counts, as a class bit set
+    /// ([`Palette::covered_by`]): the material's own plus every class the
+    /// subject's box remaps onto it.
+    pub covered: u32,
     /// Select every labelled texel instead (the figure mask).
     pub figure: bool,
 }
@@ -268,7 +269,7 @@ impl MaskUniforms {
 
     pub fn encode(&self) -> [u8; Self::BYTES as usize] {
         let mut bytes = [0u8; Self::BYTES as usize];
-        bytes[0..4].copy_from_slice(&f32::from(self.material_class).to_le_bytes());
+        bytes[0..4].copy_from_slice(&self.covered.to_le_bytes());
         bytes[4..8].copy_from_slice(&u32::from(self.figure).to_le_bytes());
         bytes
     }
@@ -489,6 +490,11 @@ pub struct WashProgram {
     /// for otherwise.
     divisor: u32,
     register: ProgramRegister,
+    /// The box the graph was laid from, kept because every window this
+    /// program writes is a value out of it — the two encoders zip it
+    /// against `materials`, so a plan and the entry it was laid for cannot
+    /// come apart.
+    palette: Palette,
     materials: Vec<MaterialPlan>,
     flow: FlowPlan,
     face: FacePlan,
@@ -939,11 +945,13 @@ impl Graph {
     /// absorbed past the seam. Which of the two is [`Grain`]'s to say.
     fn material(
         &mut self,
+        palette: &Palette,
         material: &palette::Material,
         fields: &Fields,
         light: &mut Option<InputSlot>,
         fine_coats: &mut Vec<(InputSlot, u32)>,
     ) -> MaterialPlan {
+        let named = |name| palette.class_named(name) == Some(material.class);
         let fine = material.class >= palette::META;
         let grain = if fine {
             Grain::accent(self.divisor)
@@ -954,7 +962,7 @@ impl Graph {
 
         let (mask, mask_window) = if fine {
             (fields.iris, None)
-        } else if material.class == SKIN {
+        } else if named(SKIN_CLASS) {
             (fields.skin, None)
         } else {
             let window = self.window(MaskUniforms::BYTES);
@@ -964,7 +972,7 @@ impl Graph {
         let value = self.glue("fs_shade", vec![binding(PACKED)], shade, ShadeUniforms::BYTES, extent);
 
         let (tight_density, tight) = self.wash_chain(mask, Some(value), &field::held_params(material), grain);
-        let (mut density, loose) = match field::freed_params(material) {
+        let (mut density, loose) = match field::freed_params(palette, material) {
             Some(freed) => {
                 let (loose_density, plan) = self.wash_chain(mask, Some(value), &freed, grain);
                 let mixed = self.plane(extent);
@@ -979,7 +987,7 @@ impl Graph {
             None => (tight_density, None),
         };
 
-        let smear = (material.class == HAIR).then(|| {
+        let smear = named(HAIR_CLASS).then(|| {
             let window = self.window(pigment::SmearUniforms::BYTES);
             let (scratch, out) = (self.plane(extent), self.plane(extent));
             let [flow_x, flow_y, coherence] = fields.flow;
@@ -1004,8 +1012,8 @@ impl Graph {
             window
         };
 
-        let glaze = (material.class == HAIR).then(|| {
-            let (glaze_density, plan) = self.wash_chain(mask, None, &field::glaze_wash_params(), grain);
+        let glaze = named(HAIR_CLASS).then(|| {
+            let (glaze_density, plan) = self.wash_chain(mask, None, &field::glaze_wash_params(palette), grain);
             let (absorbed, coat) = self.absorb(*light, glaze_density, extent);
             *light = Some(absorbed);
             (plan, coat)
@@ -1051,8 +1059,8 @@ struct Fields {
 /// on is a question about how many pixels it covers. A blob written by
 /// [`WashProgram::seed_uniforms`] belongs to the graph laid for its own
 /// sheet.
-pub fn program(canvas_height: usize) -> WashProgram {
-    program_at(canvas_height, BODY_DIVISOR)
+pub fn program(canvas_height: usize, palette: &Palette) -> WashProgram {
+    program_at(canvas_height, palette, BODY_DIVISOR)
 }
 
 /// The same graph, with the notch at a divisor the caller names.
@@ -1063,7 +1071,7 @@ pub fn program(canvas_height: usize) -> WashProgram {
 /// oracle at a budget that accounts for quantization alone. Laying the
 /// shipped divisor beside it in the same scenario is then a measurement of
 /// what the notch itself costs, rather than an assertion about it.
-pub fn program_at(canvas_height: usize, divisor: u32) -> WashProgram {
+pub fn program_at(canvas_height: usize, palette: &Palette, divisor: u32) -> WashProgram {
     let mut graph = Graph::new(canvas_height, divisor);
     let body = graph.body;
 
@@ -1107,9 +1115,10 @@ pub fn program_at(canvas_height: usize, divisor: u32) -> WashProgram {
     let mut fine_coats: Vec<(InputSlot, u32)> = Vec::new();
 
     let fields = Fields { care, flow: [flow_x, flow_y, coherence], iris: iris_mask, lid_weight, skin };
-    let materials = palette::MATERIALS
+    let materials = palette
+        .materials()
         .iter()
-        .map(|material| graph.material(material, &fields, &mut light, &mut fine_coats))
+        .map(|material| graph.material(palette, material, &fields, &mut light, &mut fine_coats))
         .collect();
 
     let (light, blush_coat) = graph.absorb(light, blush, body);
@@ -1166,6 +1175,7 @@ pub fn program_at(canvas_height: usize, divisor: u32) -> WashProgram {
     WashProgram {
         divisor,
         register,
+        palette: palette.clone(),
         materials,
         flow: flow_plan,
         face: face_plan,
@@ -1213,11 +1223,14 @@ struct ChainData<'a> {
 pub struct Presence(u16);
 
 impl Presence {
-    /// Which materials [`Placement`] puts on the canvas.
+    /// Which of the box's materials [`Placement`] puts on the canvas.
+    ///
+    /// One bit per entry in mixing order, which is why the box is bounded
+    /// at [`Palette::PRESENCE_LIMIT`] entries.
     #[must_use]
-    pub fn of(placement: &Placement<'_>) -> Self {
+    pub fn of(placement: &Placement<'_>, palette: &Palette) -> Self {
         let mut bits = 0u16;
-        for (index, material) in palette::MATERIALS.iter().enumerate() {
+        for (index, material) in palette.materials().iter().enumerate() {
             if placement.centre_of(material.class).is_some() {
                 bits |= 1 << index;
             }
@@ -1313,6 +1326,15 @@ impl WashProgram {
         self.canvas_height
     }
 
+    /// The painter's box this graph was laid from. A subject arriving with
+    /// a different one wants its own graph: how many chains there are and
+    /// which of them smear, glaze or throw a stain is the box's answer,
+    /// not a value any window could be rewritten with.
+    #[must_use]
+    pub fn palette(&self) -> &Palette {
+        &self.palette
+    }
+
     /// Every window the seed and the canvas fix — which is all of them but
     /// the two eye frames and one centroid per chain.
     ///
@@ -1331,7 +1353,7 @@ impl WashProgram {
         let mut rng = Rng::new(seed);
 
         blob.window(self.seam, &LiftExtentUniforms { source_scale: 1.0 / self.divisor as f32 }.encode());
-        care::encode(&mut blob.0, self.care, body_height);
+        care::encode(&mut blob.0, self.care, body_height, palette::class_set(&self.palette.face_classes()));
         blob.window(self.flow.gradient_blur.window, &self.flow.gradient_blur.encode());
         for (index, (select, pool)) in self.flow.tensors.iter().enumerate() {
             blob.window(*select, &flow::SelectUniforms { channel: flow::COMPONENTS[index] }.encode());
@@ -1342,16 +1364,23 @@ impl WashProgram {
         }
 
         blob.window(self.face.clip_blur.window, &self.face.clip_blur.encode());
-        blob.window(self.face.skin_mask, &MaskUniforms { material_class: SKIN, figure: false }.encode());
+        let skin = self.palette.class_named(SKIN_CLASS).unwrap_or_default();
+        blob.window(
+            self.face.skin_mask,
+            &MaskUniforms { covered: self.palette.covered_by(skin), figure: false }.encode(),
+        );
         blob.window(self.face.skin_blur.window, &self.face.skin_blur.encode());
         blob.window(self.face.flush_blur.window, &self.face.flush_blur.encode());
 
-        for (index, (material, plan)) in palette::MATERIALS.iter().zip(&self.materials).enumerate() {
+        for (index, (material, plan)) in self.palette.materials().iter().zip(&self.materials).enumerate() {
             let (width, height) = plan.grain.pixels(canvas, self.divisor);
             let source_scale = plan.grain.source_scale;
 
             if let Some(window) = plan.mask {
-                blob.window(window, &MaskUniforms { material_class: material.class, figure: false }.encode());
+                blob.window(
+                    window,
+                    &MaskUniforms { covered: self.palette.covered_by(material.class), figure: false }.encode(),
+                );
             }
             let lit = material.shade_lit.unwrap_or(palette::LIT);
             blob.window(plan.shade, &ShadeUniforms { shade_floor: material.shade_floor, lit, source_scale }.encode());
@@ -1367,7 +1396,7 @@ impl WashProgram {
                 width,
                 height,
             );
-            if let (Some(freed), Some(loose)) = (field::freed_params(material), plan.loose.as_ref()) {
+            if let (Some(freed), Some(loose)) = (field::freed_params(&self.palette, material), plan.loose.as_ref()) {
                 encode_chain(
                     &mut blob,
                     loose,
@@ -1383,7 +1412,7 @@ impl WashProgram {
             }
 
             if let Some((glaze, coat)) = plan.glaze.as_ref() {
-                let glaze_params = field::glaze_wash_params();
+                let glaze_params = field::glaze_wash_params(&self.palette);
                 encode_chain(
                     &mut blob,
                     glaze,
@@ -1396,7 +1425,7 @@ impl WashProgram {
             }
 
             if let (Some(policy), Some(atmosphere)) = (material.atmosphere.as_ref(), plan.atmosphere.as_ref()) {
-                blob.window(atmosphere.figure, &MaskUniforms { material_class: 0, figure: true }.encode());
+                blob.window(atmosphere.figure, &MaskUniforms { covered: 0, figure: true }.encode());
                 blob.window(atmosphere.halo_blur.window, &atmosphere.halo_blur.encode());
                 blob.window(atmosphere.standing_blur.window, &atmosphere.standing_blur.encode());
                 blob.window(atmosphere.spill, &SpillUniforms { drift: policy.carried(height) }.encode());
@@ -1429,7 +1458,7 @@ impl WashProgram {
     pub fn frame_uniforms(&self, seed: &SeedUniforms, frame: &Frame<'_>) -> Vec<u8> {
         assert_eq!(
             seed.presence,
-            Presence::of(&frame.placement),
+            Presence::of(&frame.placement, &self.palette),
             "the seed slice was rolled for a different set of visible materials",
         );
         let canvas = seed.canvas;
@@ -1449,7 +1478,7 @@ impl WashProgram {
         };
         blob.window(self.blush_coat, &CoatParams { pigment: palette::BLUSH_PIGMENT, cap: blush_cap }.encode());
 
-        for (material, plan) in palette::MATERIALS.iter().zip(&self.materials) {
+        for (material, plan) in self.palette.materials().iter().zip(&self.materials) {
             if let Some(window) = plan.lift {
                 blob.window(window, &LiftUniforms { gate: f32::from(charted.is_some()) }.encode());
             }
@@ -1569,12 +1598,13 @@ mod tests {
     /// and the iris to be on the fine side of the line.
     #[test]
     fn the_notch_cuts_the_body_and_spares_the_iris() {
-        let program = program(1200);
+        let palette = Palette::canonical();
+        let program = program(1200, &palette);
         let fine = program.materials.iter().filter(|plan| plan.grain.fine).count();
 
         assert_eq!(fine, 1, "exactly one material — the iris — develops at the sheet's own pixels");
         assert!(
-            palette::MATERIALS.last().is_some_and(|material| material.class >= palette::META),
+            palette.materials().last().is_some_and(|material| material.class >= palette::META),
             "the fine material must be last in the box, so the seam cuts one contiguous run of coats",
         );
         assert!(
@@ -1593,7 +1623,7 @@ mod tests {
     /// can otherwise silently drift back to doing the old work.
     #[test]
     fn the_first_wash_batch_pairs_support_and_removes_neutral_passes() {
-        let program = program(960);
+        let program = program(960, &Palette::canonical());
         let valued_chains = program
             .materials
             .iter()
@@ -1636,7 +1666,7 @@ mod tests {
     #[test]
     fn the_seed_slice_covers_every_window_the_graph_laid() {
         let canvas = Canvas { width: 120, height: 160 };
-        let program = program(canvas.height);
+        let program = program(canvas.height, &Palette::canonical());
         let seed = program.seed_uniforms(0x5e_ed, canvas, Presence(u16::MAX));
 
         assert_eq!(seed.blob.len(), program.uniform_bytes as usize);

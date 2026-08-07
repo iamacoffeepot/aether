@@ -507,7 +507,8 @@ fn edge_slope() -> f32 {
 /// expressed in the units the question is asked in. `None` when the
 /// class has no boundary in either plane.
 fn level_set_drift(cpu: &[u8], gpu: &[u8], class: u8, width: usize, height: usize) -> Option<(f32, f32)> {
-    let soften = |classes: &[u8]| image::blur(&palette::mask_of(classes, class), width, height, WATER_PIXELS);
+    let palette = palette::Palette::canonical();
+    let soften = |classes: &[u8]| image::blur(&palette.mask_of(classes, class), width, height, WATER_PIXELS);
     let (oracle, measured) = (soften(cpu), soften(gpu));
     let floor = edge_slope() * GRADIENT_FRACTION;
 
@@ -719,7 +720,7 @@ fn split_field(mesh: &Mesh) -> Labels {
     bytes.extend([labels::HAIR; 4]);
     bytes.extend([labels::SKIN; 4]);
 
-    Labels::decode(&bytes, mesh.min, mesh.max, LABEL_PAD).expect("split field")
+    Labels::decode(&bytes, palette::Palette::canonical().classes(), mesh.min, mesh.max, LABEL_PAD).expect("split field")
 }
 
 /// Tripwire: the packed tone channel's ceiling stays above every
@@ -735,7 +736,7 @@ fn split_field(mesh: &Mesh) -> Labels {
 /// because it clips the oracle too. Nothing else would notice.
 #[test]
 fn the_packed_tone_channel_clips_below_every_consumer() {
-    for material in palette::MATERIALS {
+    for material in palette::Palette::canonical().materials() {
         let lit = material.shade_lit.unwrap_or(palette::LIT);
         assert!(
             lit < TONE_CEILING,
@@ -949,9 +950,14 @@ fn crossfeed_the_gpu_bake_against_the_cpu_oracle() {
 
     let mesh = Mesh::from_obj_bytes(&fs::read(dir.join("subject.obj")).expect("read subject.obj"), 0)
         .expect("parse the subject");
-    let labels =
-        Labels::decode(&fs::read(dir.join("labels.npy")).expect("read labels.npy"), mesh.min, mesh.max, LABEL_PAD)
-            .expect("parse the material field");
+    let labels = Labels::decode(
+        &fs::read(dir.join("labels.npy")).expect("read labels.npy"),
+        palette::Palette::canonical().classes(),
+        mesh.min,
+        mesh.max,
+        LABEL_PAD,
+    )
+    .expect("parse the material field");
     let scores = labels.vertex_scores(&mesh.positions);
     let (eye, view_proj) = camera(AZIMUTH, CROSSFEED_WIDTH, CROSSFEED_HEIGHT);
 

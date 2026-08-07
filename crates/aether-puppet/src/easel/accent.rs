@@ -24,10 +24,9 @@ use aether_math::{Mat4, Vec2};
 
 use super::field::Planes;
 use super::image;
-use super::palette;
+use super::palette::{self, EYE_CLASS, Palette, SKIN_CLASS};
 use super::regions;
 use crate::chart::EyeFrame;
-use crate::labels::{EYE, SKIN};
 
 /// How far the aperture clip is softened, in reference-sheet pixels, and
 /// where its edge is taken afterwards.
@@ -207,12 +206,12 @@ impl Accents {
 /// `frames` are the chart's planted eye frames and `view_proj` the camera
 /// the maps under them were baked through — the same one the ink was drawn
 /// from, which is what puts the paint in the drawing's own eyes.
-pub fn paint(frames: &[EyeFrame], view_proj: &Mat4, planes: &Planes<'_>) -> Accents {
+pub fn paint(frames: &[EyeFrame], view_proj: &Mat4, planes: &Planes<'_>, palette: &Palette) -> Accents {
     let eyes = project(frames, view_proj, planes.width, planes.height);
     let (iris, lift) = irises(&eyes, planes);
-    let presence = presences(&eyes, planes);
+    let presence = presences(&eyes, planes, palette);
 
-    Accents { iris, lift, blush: blush(&eyes, planes, &presence) }
+    Accents { iris, lift, blush: blush(&eyes, planes, palette, &presence) }
 }
 
 /// The planted frames through the develop's camera. An eye the near plane
@@ -380,8 +379,11 @@ pub fn apple_of(eye: &Eye, midline: f32) -> (Vec2, Vec2) {
 /// scenarios feed it these, so the two are held together on the accent
 /// placement rather than on the presence policy.
 #[must_use]
-pub fn presences(eyes: &[Eye], planes: &Planes<'_>) -> Vec<f32> {
-    let seen = palette::mask_of(planes.classes, EYE);
+pub fn presences(eyes: &[Eye], planes: &Planes<'_>, palette: &Palette) -> Vec<f32> {
+    let Some(eye_class) = palette.class_named(EYE_CLASS) else {
+        return vec![0.0; eyes.len()];
+    };
+    let seen = palette.mask_of(planes.classes, eye_class);
 
     eyes.iter()
         .map(|eye| {
@@ -393,9 +395,12 @@ pub fn presences(eyes: &[Eye], planes: &Planes<'_>) -> Vec<f32> {
 }
 
 /// The cheek flush, hung off both eye frames.
-fn blush(eyes: &[Eye], planes: &Planes<'_>, presence: &[f32]) -> Vec<f32> {
+fn blush(eyes: &[Eye], planes: &Planes<'_>, palette: &Palette, presence: &[f32]) -> Vec<f32> {
     let (width, height) = (planes.width, planes.height);
     let mut flush = vec![0.0; width * height];
+    let Some(skin_class) = palette.class_named(SKIN_CLASS) else {
+        return flush;
+    };
     if eyes.is_empty() {
         return flush;
     }
@@ -418,7 +423,8 @@ fn blush(eyes: &[Eye], planes: &Planes<'_>, presence: &[f32]) -> Vec<f32> {
         }
     }
 
-    let skin = image::blur(&palette::mask_of(planes.classes, SKIN), width, height, image::tuned(SKIN_BLUR, height));
+    let skin =
+        image::blur(&palette.mask_of(planes.classes, skin_class), width, height, image::tuned(SKIN_BLUR, height));
     for ((at, &under), &facing) in flush.iter_mut().zip(&skin).zip(planes.facing) {
         *at *= under * image::smoothstep(FACING.0, FACING.1, facing);
     }
@@ -451,6 +457,8 @@ fn visible(eye: &Eye, seen: &[f32], planes: &Planes<'_>) -> f32 {
 mod tests {
     use super::*;
     use aether_math::Vec3;
+
+    use crate::labels::{EYE, SKIN};
 
     /// A canvas big enough to hold an eye at the scale the accents were
     /// tuned for, and small enough to paint in a test.
@@ -521,7 +529,7 @@ mod tests {
         let (classes, tone, facing) = planes();
         let planes = Planes { classes: &classes, tone: &tone, facing: &facing, width: WIDE, height: TALL };
 
-        paint(frames, &camera(), &planes)
+        paint(frames, &camera(), &planes, &Palette::canonical())
     }
 
     /// The canvas pixel a world point lands on under `camera`.
@@ -598,7 +606,7 @@ mod tests {
         let (classes, tone, facing) = (vec![SKIN; WIDE * TALL], vec![0.5; WIDE * TALL], vec![1.0; WIDE * TALL]);
         let planes = Planes { classes: &classes, tone: &tone, facing: &facing, width: WIDE, height: TALL };
 
-        let accents = paint(&EYES.map(frame), &camera(), &planes);
+        let accents = paint(&EYES.map(frame), &camera(), &planes, &Palette::canonical());
         assert!(accents.blush.iter().all(|&at| at == 0.0), "an eye absent from the bake blushes nowhere");
     }
 }

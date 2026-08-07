@@ -39,6 +39,18 @@ pub struct Load {
     /// rather than applied to whatever turned up. Empty leaves the subject
     /// unposable, which is what [`LoadResult::Ok`]'s `bones` then reports.
     pub rig: String,
+    /// Optional path to the painter's box this subject is painted out of
+    /// (`aether_puppet::easel::palette::Palette::decode_text`): its class
+    /// vocabulary, one entry per painted class, the fall-throughs and the
+    /// classes left as bare paper.
+    ///
+    /// The box is per subject because pigments are. A hillside's rock and
+    /// timber are not her indigo and rose, and a field's cells name
+    /// classes by position — so the same byte means one thing under her
+    /// vocabulary and another under a scene's, and the field is validated
+    /// against whichever box is going to paint it. Empty paints with the
+    /// canonical box, which is what she was tuned on.
+    pub palette: String,
 }
 
 impl Default for Load {
@@ -49,6 +61,7 @@ impl Default for Load {
             labels: String::new(),
             material_field_padding: DEFAULT_MATERIAL_FIELD_PADDING,
             rig: String::new(),
+            palette: String::new(),
         }
     }
 }

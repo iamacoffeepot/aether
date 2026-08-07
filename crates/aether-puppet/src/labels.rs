@@ -18,8 +18,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::npy;
 
-/// Class indices as the source spike writes them: `0` unlabelled, then
-/// `index + 1` into its material list.
+/// The canonical subject's class indices, as the source spike writes them:
+/// `0` unlabelled, then `index + 1` into its material list.
+///
+/// These name positions in *her* vocabulary and nothing more. Another
+/// subject's field carries its own vocabulary, where class `3` is whatever
+/// that box called its third class — so runtime code asks the active
+/// vocabulary by name ([`class_in`]) rather than comparing against these.
 pub const SKIN: u8 = 1;
 pub const DRESS: u8 = 2;
 pub const HAIR: u8 = 3;
@@ -29,7 +34,14 @@ pub const LIPS: u8 = 6;
 pub const BROW: u8 = 7;
 pub const EYE: u8 = 8;
 
-/// How many labelled classes the field carries, `SKIN..=EYE`.
+/// How many labelled classes a field may carry.
+///
+/// A ceiling rather than a count: the bake packs one indicator lane per
+/// class into a fixed vertex layout ([`super::easel::program::bake`]) and
+/// the score vectors that feed it are fixed-size arrays, so a vocabulary
+/// longer than this has nowhere to put its last class. The canonical
+/// vocabulary fills it exactly, which is where the number came from; a
+/// shorter one leaves the tail lanes at zero.
 pub const CLASSES: usize = EYE as usize;
 
 /// The canonical field's one-based class vocabulary. Cell `0` is unlabelled;
@@ -52,18 +64,18 @@ const SCORE_SIGMA: f32 = 1.2;
 /// is under half a percent of its peak.
 const SCORE_REACH: i32 = 3;
 
-pub fn class_of(name: &str) -> Option<u8> {
-    match name {
-        "skin" => Some(SKIN),
-        "dress" => Some(DRESS),
-        "hair" => Some(HAIR),
-        "inner_ear" => Some(INNER_EAR),
-        "tuft" => Some(TUFT),
-        "lips" => Some(LIPS),
-        "brow" => Some(BROW),
-        "eye" => Some(EYE),
-        _ => None,
-    }
+/// The class `name` takes in a one-based vocabulary, or `None` when the
+/// vocabulary does not carry it at all.
+///
+/// The one place a class name becomes a number. Which classes a subject has
+/// is authored per subject, so every question of the form "where is the
+/// eye" is asked here against that subject's own vocabulary — a missing
+/// answer is a subject that simply has no such region, not an error.
+#[must_use]
+pub fn class_in(vocabulary: &[String], name: &str) -> Option<u8> {
+    let index = vocabulary.iter().position(|at| at == name)?;
+
+    u8::try_from(index + 1).ok()
 }
 
 /// A decoded material lattice with all interpretation declared in memory.
@@ -86,15 +98,21 @@ pub struct MaterialField {
 pub type Labels = MaterialField;
 
 impl MaterialField {
-    /// Decode a `uint8` C-order cubic `.npy` and place it against `min`/`max`,
-    /// the bounds of the mesh it was baked from, using the caller-declared
-    /// bake padding.
+    /// Decode a `uint8` C-order cubic `.npy` against `vocabulary` — the
+    /// class names of the box that will paint it — and place it against
+    /// `min`/`max`, the bounds of the mesh it was baked from, using the
+    /// caller-declared bake padding.
     ///
     /// Bytes rather than a path: a guest has no filesystem, so the field
     /// arrives by mail from `aether.fs` like the mesh does. Only `NumPy` 1.0
     /// `|u1`, C-order arrays shaped exactly `(n, n, n)` with `n >= 2` are
     /// accepted; the diagnostic names any framing or metadata mismatch.
-    pub fn decode(bytes: &[u8], min: Vec3, max: Vec3, padding: f32) -> Result<Self, String> {
+    ///
+    /// The vocabulary is the palette's rather than a constant: a cell names
+    /// a class by position, so the same byte means rock under one box and
+    /// hair under another, and a field whose cells run past the box that
+    /// has to paint them is refused with the cell and the class named.
+    pub fn decode(bytes: &[u8], vocabulary: &[String], min: Vec3, max: Vec3, padding: f32) -> Result<Self, String> {
         let array = npy::parse(bytes).map_err(|error| format!("material field refused: {error}"))?;
         if array.descr != "|u1" {
             return Err(format!("material field dtype is '{}', expected '|u1'", array.descr));
@@ -114,11 +132,11 @@ impl MaterialField {
             u32::try_from(*nz).map_err(|_| format!("material field z dimension {nz} exceeds u32"))?,
         ];
         if let Some((cell, &class)) =
-            array.payload.iter().enumerate().find(|&(_, &class)| usize::from(class) > CLASS_VOCABULARY.len())
+            array.payload.iter().enumerate().find(|&(_, &class)| usize::from(class) > vocabulary.len())
         {
             return Err(format!(
                 "material field cell {cell} names class {class}, but the vocabulary has {} classes",
-                CLASS_VOCABULARY.len(),
+                vocabulary.len(),
             ));
         }
 
@@ -127,7 +145,7 @@ impl MaterialField {
             cells: array.payload.to_vec(),
             origin: [0.0; 3],
             spacing: [1.0; 3],
-            classes: CLASS_VOCABULARY.into_iter().map(str::to_owned).collect(),
+            classes: vocabulary.to_vec(),
         };
         field.place_against(min, max, padding);
 
@@ -205,6 +223,21 @@ impl MaterialField {
 
     pub fn is(&self, p: Vec3, wanted: &[u8]) -> bool {
         wanted.contains(&self.sample(p))
+    }
+
+    /// The class this field's own vocabulary calls `name`, if it carries
+    /// it. The field is stamped with the vocabulary it was decoded
+    /// against, so whoever holds the field can ask it directly rather than
+    /// carrying the palette alongside.
+    #[must_use]
+    pub fn class_named(&self, name: &str) -> Option<u8> {
+        class_in(&self.classes, name)
+    }
+
+    /// Whichever of `names` this vocabulary carries, as classes.
+    #[must_use]
+    pub fn classes_named(&self, names: &[&str]) -> Vec<u8> {
+        names.iter().filter_map(|&name| self.class_named(name)).collect()
     }
 
     /// Every class's blurred indicator evaluated at `p` — the source

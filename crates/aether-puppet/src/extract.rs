@@ -15,6 +15,7 @@ use aether_math::Vec3;
 
 use crate::anchor::{Anchor, Anchors};
 use crate::chart;
+use crate::easel::palette::{FACE_CLASSES, SKIN_CLASS};
 use crate::feature::{Curve3, FeatureClass, Pen, SurfacePoint};
 use crate::labels::{self, Labels};
 use crate::math3::noise;
@@ -256,13 +257,13 @@ pub fn creases(mesh: &Mesh, labels: Option<&Labels>, settings: &Settings) -> Vec
     // classes the chart takes over swap out rather than stack — at rest as
     // much as in speech, because her lips are the shallowest feature on her
     // face and the sculpt cannot supply a mouth worth drawing at any shape.
+    // Which classes the chart takes over is a question about the
+    // subject's own vocabulary, asked of the field it stamped: a class id
+    // is a position in that vocabulary and means nothing on its own.
     let charted = settings.face.is_some();
-    let classes: Vec<u8> = settings
-        .crease_classes
-        .iter()
-        .copied()
-        .filter(|&class| !(charted && matches!(class, labels::LIPS | labels::BROW | labels::EYE)))
-        .collect();
+    let face = labels.map(|field| field.classes_named(&FACE_CLASSES)).unwrap_or_default();
+    let classes: Vec<u8> =
+        settings.crease_classes.iter().copied().filter(|class| !(charted && face.contains(class))).collect();
 
     let relief = mesh.relief(settings.relief_fine, settings.relief_coarse);
     let steepness = mesh.gradient(&relief);
@@ -339,14 +340,11 @@ pub fn suggestive(mesh: &Mesh, rest: &Mesh, labels: Option<&Labels>, eye: Vec3, 
         seed: 0x5966_0000,
         authored: false,
     };
+    let skin = labels.map(|field| field.classes_named(&[SKIN_CLASS])).unwrap_or_default();
     let segments: Vec<_> = mesh
         .suggestive(eye, settings.suggestive, settings.suggestive_gate)
         .into_iter()
-        .filter(|[a, b]| {
-            labels.is_none_or(|field| {
-                field.is(rest.at(a.at), &[labels::SKIN]) && field.is(rest.at(b.at), &[labels::SKIN])
-            })
-        })
+        .filter(|[a, b]| labels.is_none_or(|field| field.is(rest.at(a.at), &skin) && field.is(rest.at(b.at), &skin)))
         .collect();
 
     weld::curves(to_points(segments), &template)
@@ -383,11 +381,12 @@ fn nose_creases(mesh: &Mesh, labels: &Labels, window: &Anchor, settings: &Settin
     let template =
         Curve3 { points: Vec::new(), class: FeatureClass::Decal, pen: Pen::Ink, seed: 0x0503_0000, authored: false };
 
+    let skin = labels.classes_named(&[SKIN_CLASS]);
     let segments: Vec<_> = mesh
         .level_set(&relief, &steepness, settings.nose_relief)
         .into_iter()
         .filter(|[a, b]| inside(a.pos) && inside(b.pos))
-        .filter(|[a, b]| labels.is(a.pos, &[labels::SKIN]) || labels.is(b.pos, &[labels::SKIN]))
+        .filter(|[a, b]| labels.is(a.pos, &skin) || labels.is(b.pos, &skin))
         .collect();
 
     weld::curves(to_points(segments), &template)

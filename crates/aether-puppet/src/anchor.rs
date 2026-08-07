@@ -14,7 +14,8 @@
 
 use aether_math::{Vec2, Vec3};
 
-use crate::labels::{self, Labels};
+use crate::easel::palette::{EYE_CLASS, LIPS_CLASS};
+use crate::labels::Labels;
 use crate::mesh::Mesh;
 
 /// A feature's measured extent in the frontal plane, and how far forward
@@ -65,7 +66,8 @@ impl Anchors {
 /// Where the mouth is, measured from the `lips` class — from the field,
 /// saying nothing about how it looks.
 fn mouth(mesh: &Mesh, labels: &Labels) -> Option<Anchor> {
-    let cells: Vec<Vec3> = mesh.positions.iter().copied().filter(|&p| labels.sample(p) == labels::LIPS).collect();
+    let lips = labels.class_named(LIPS_CLASS)?;
+    let cells: Vec<Vec3> = mesh.positions.iter().copied().filter(|&p| labels.sample(p) == lips).collect();
 
     (!cells.is_empty()).then(|| bounds(&cells))
 }
@@ -74,15 +76,14 @@ fn mouth(mesh: &Mesh, labels: &Labels) -> Option<Anchor> {
 /// brow above it is measured from the same anchor — a brow's whole job is
 /// to be a certain distance above a certain eye.
 fn eyes(mesh: &Mesh, labels: &Labels) -> Vec<(f32, Anchor)> {
+    let Some(eye) = labels.class_named(EYE_CLASS) else {
+        return Vec::new();
+    };
     let mut anchors: Vec<(f32, Anchor)> = [-1.0f32, 1.0]
         .into_iter()
         .filter_map(|side| {
-            let cells: Vec<Vec3> = mesh
-                .positions
-                .iter()
-                .copied()
-                .filter(|&p| p.x * side > 0.0 && labels.sample(p) == labels::EYE)
-                .collect();
+            let cells: Vec<Vec3> =
+                mesh.positions.iter().copied().filter(|&p| p.x * side > 0.0 && labels.sample(p) == eye).collect();
 
             (cells.len() >= 16).then(|| (side, bounds(&cells)))
         })

@@ -25,6 +25,23 @@
 // pass pipeline binds only its own window (aether-render builds one
 // pipeline per pass over this shared module).
 
+// Whether a class id is in a class bit set (palette.rs `class_set`),
+// as the one-or-zero coverage a mask plane carries.
+//
+// Which classes a predicate holds for is authored per subject — the box
+// names its own vocabulary, its own fall-through and its own drawn
+// features — so no pass here compares a class id against a constant. The
+// resolved set arrives in a uniform and this reads it. Ids past the word
+// carry no bit; only a meta-material's id reaches there, and it never
+// appears in a class plane.
+fn in_class_set(classes: u32, labelled: f32) -> f32 {
+    let index = u32(labelled);
+    if index >= 32u {
+        return 0.0;
+    }
+    return f32((classes & (1u << index)) != 0u);
+}
+
 // The CPU planes' mirror-at-edge read: image.rs `reflected` applied per
 // axis — half-sample symmetric, so index -1 reads texel 0. Replicating
 // the edge instead would pull a border average toward the edge texel's

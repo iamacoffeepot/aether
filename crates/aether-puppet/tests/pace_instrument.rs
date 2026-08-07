@@ -49,6 +49,7 @@ use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_
 use aether_harness_substrate_capture::visual::{decode_png, encode_png};
 use aether_kinds::{CostRow, CostTail, CostTailResult, LoadComponent, LoadResult, Render, WindowId, WindowSize};
 use aether_math::{Mat4, Vec2, Vec3};
+use aether_puppet::easel::palette::Palette;
 use aether_puppet::easel::program::wash::{Canvas, Faces, Frame, Placement, Presence};
 use aether_puppet::easel::program::{bake, face, sight, stroke, wash};
 use aether_puppet::easel::survey::{self, Survey};
@@ -217,6 +218,7 @@ fn mounted_at(dir: &Path, wasm: &Path, pass_timings: bool, dimensions: (u32, u32
                     } else {
                         String::new()
                     },
+                    palette: String::new(),
                 },
             ),
         )])
@@ -1027,9 +1029,14 @@ fn the_drawing_divides_by_volatility() {
     };
     let mesh = Mesh::from_obj_bytes(&fs::read(dir.join("subject.obj")).expect("read subject.obj"), RELAXATION)
         .expect("parse the subject");
-    let labels =
-        Labels::decode(&fs::read(dir.join("labels.npy")).expect("read labels.npy"), mesh.min, mesh.max, LABEL_PAD)
-            .expect("parse the material field");
+    let labels = Labels::decode(
+        &fs::read(dir.join("labels.npy")).expect("read labels.npy"),
+        Palette::canonical().classes(),
+        mesh.min,
+        mesh.max,
+        LABEL_PAD,
+    )
+    .expect("parse the material field");
     let settings = Settings::default();
     let anchors = anchor::Anchors::measure(&mesh, &labels);
     let resident = extract::tone_gate(extract::surface(&mesh, Some(&labels), anchors.as_ref(), &settings), &settings);
@@ -1227,7 +1234,8 @@ fn pack(drawing: Drawing<'_>, eye: Vec3) -> Volatile {
 /// a held view now skips entirely.
 fn time_the_develop(at: &Subject, view: &View, canvas: Canvas) {
     let (body_width, body_height) = canvas.body();
-    let survey = phase("survey::measure — per subject", 1, || Survey::measure(&at.mesh, &at.scores));
+    let palette = Palette::canonical();
+    let survey = phase("survey::measure — per subject", 1, || Survey::measure(&at.mesh, &at.scores, &palette));
     let centroids = phase("survey::centroids", PHASE_REPEATS, || {
         survey.centroids(&at.mesh, view.eye, &view.view_proj, body_width, body_height)
     });
@@ -1244,12 +1252,13 @@ fn time_the_develop(at: &Subject, view: &View, canvas: Canvas) {
         fine_eyes.iter().map(|eye| survey::presence(&at.mesh, view.eye, &frames[eye.frame()].aperture)).collect()
     });
 
-    let program = phase("wash::program — the graph lay, per canvas height", 1, || wash::program(canvas.height));
+    let program =
+        phase("wash::program — the graph lay, per canvas height", 1, || wash::program(canvas.height, &palette));
     // The stain poles are a few dozen float operations and are stood in
     // for rather than reconstructed; what the blob write is priced
     // against is the placement's shape.
     let placement = Placement { centroids: &centroids, stains: &centroids, iris: iris_of(&fine_eyes) };
-    let wanted = Presence::of(&placement);
+    let wanted = Presence::of(&placement, &palette);
     let slice =
         phase("seed_uniforms — per canvas and visible set", 1, || program.seed_uniforms(SHEET_SEED, canvas, wanted));
     let frame = Frame { placement, faces: Some(Faces { fine: &fine_eyes, body: &body_eyes, presence: &presence }) };
@@ -1317,9 +1326,14 @@ impl Subject {
     fn load(dir: &Path) -> Self {
         let mesh = Mesh::from_obj_bytes(&fs::read(dir.join("subject.obj")).expect("read subject.obj"), RELAXATION)
             .expect("parse the subject");
-        let labels =
-            Labels::decode(&fs::read(dir.join("labels.npy")).expect("read labels.npy"), mesh.min, mesh.max, LABEL_PAD)
-                .expect("parse the material field");
+        let labels = Labels::decode(
+            &fs::read(dir.join("labels.npy")).expect("read labels.npy"),
+            Palette::canonical().classes(),
+            mesh.min,
+            mesh.max,
+            LABEL_PAD,
+        )
+        .expect("parse the material field");
         let settings = Settings::default();
         let anchors = anchor::Anchors::measure(&mesh, &labels).expect("the subject carries a charted face");
         let scores = labels.vertex_scores(&mesh.positions);

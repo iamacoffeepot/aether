@@ -111,6 +111,7 @@ fn the_sheet_stands_behind_the_ink() {
                         labels: field,
                         material_field_padding: 0.12,
                         rig: String::new(),
+                        palette: String::new(),
                     },
                 ),
             ),

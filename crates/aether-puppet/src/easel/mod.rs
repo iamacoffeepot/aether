@@ -49,6 +49,7 @@ use aether_render::{
     TextureUsage, UpdateGeometry,
 };
 
+use palette::Palette;
 use program::sight::ToneUniforms;
 use program::wash::{self, Canvas, Faces, Frame, Placement, Presence, SeedUniforms, WashBindings, WashProgram};
 use program::{bake, face};
@@ -163,6 +164,12 @@ pub struct Subject<'a> {
     /// vertices already cost.
     pub posed: Option<&'a Mesh>,
     pub scores: &'a [[f32; labels::CLASSES]],
+    /// The box this subject is painted out of — its own authored one, or
+    /// the built-in canonical box when it named none. Everything the
+    /// develop reads of a class goes through it: the fall-through, which
+    /// entries exist, and which classes the face machinery has to work
+    /// over.
+    pub palette: &'a Palette,
     pub settings: &'a Settings,
     /// The ink coverage plane for this eye: where the drawing landed,
     /// which the flow solve reads to find which way the hair runs.
@@ -439,11 +446,29 @@ impl Easel {
 
     /// A new subject or field arrived; everything measured off the old one
     /// has to be measured again.
+    ///
+    /// The wash graph is not among them. Its structure follows the
+    /// painter's box rather than the subject, and most subjects arrive
+    /// with the same box — so the next develop re-lays it only if the box
+    /// under it actually changed, and a reload of the same box costs no
+    /// re-register.
     pub fn subject_changed(&mut self) {
         self.survey = None;
         self.packed[SUBJECT_GEOMETRY] = None;
         self.geometries[SUBJECT_GEOMETRY] = Resident::Absent;
         self.derived_for = None;
+    }
+
+    /// Drop the wash graph and retire whatever program stands for it, so
+    /// the next develop lays one for what has changed underneath.
+    fn relay_wash(&mut self) {
+        self.program = None;
+        self.stale_programs.extend(self.programs[WASH].take());
+        for sent_for in &mut self.registering {
+            if *sent_for == Registering::Wash {
+                *sent_for = Registering::Stale;
+            }
+        }
     }
 
     /// The chart changed while the subject and its resident geometry did not.
@@ -590,7 +615,7 @@ impl Easel {
         // reads.
         let surface = posed.unwrap_or(mesh);
 
-        let survey = self.survey.get_or_insert_with(|| Survey::measure(mesh, scores));
+        let survey = self.survey.get_or_insert_with(|| Survey::measure(mesh, scores, subject.palette));
         if self.packed[SUBJECT_GEOMETRY].is_none() && self.geometries[SUBJECT_GEOMETRY] == Resident::Absent {
             self.packed[SUBJECT_GEOMETRY] = Some(GeometryBytes {
                 vertices: bake::vertices(mesh, scores, settings, *skin),
@@ -627,24 +652,23 @@ impl Easel {
         let presence: Vec<f32> =
             fine_eyes.iter().map(|eye| survey::presence(mesh, charting, &rested[eye.frame()].aperture)).collect();
 
-        let stains = stain_centres(&centroids, body_height);
+        let stains = stain_centres(subject.palette, &centroids, body_height);
         let placement = Placement { centroids: &centroids, stains: &stains, iris: iris_centre(&fine_eyes) };
-        let wanted = Presence::of(&placement);
+        let wanted = Presence::of(&placement, subject.palette);
 
-        // A canvas of a new height wants its own graph: how far the water
-        // reaches in pixels is what decides the extent each blur sweeps
-        // at, so the structure follows the height and a resize re-lays it.
-        // The bake graph knows no canvas and survives the re-lay.
-        if self.program.as_ref().is_none_or(|program| program.canvas_height() != canvas.height) {
-            self.program = None;
-            self.stale_programs.extend(self.programs[WASH].take());
-            for sent_for in &mut self.registering {
-                if *sent_for == Registering::Wash {
-                    *sent_for = Registering::Stale;
-                }
-            }
+        // A canvas of a new height wants its own graph, and so does a new
+        // painter's box: how far the water reaches in pixels decides the
+        // extent each blur sweeps at, and the box decides how many chains
+        // there are and which of them smear, glaze or throw a stain. The
+        // bake graph knows neither and survives the re-lay.
+        if self
+            .program
+            .as_ref()
+            .is_none_or(|program| program.canvas_height() != canvas.height || program.palette() != subject.palette)
+        {
+            self.relay_wash();
         }
-        let program = self.program.get_or_insert_with(|| wash::program(canvas.height));
+        let program = self.program.get_or_insert_with(|| wash::program(canvas.height, subject.palette));
         let slice = self
             .seed_slice
             .take()
@@ -1008,15 +1032,21 @@ impl Easel {
 /// anyway: displacing a blur is not the same as pouring deliberately.
 /// Deciding where the air ought to go is a taste pass, and when it is
 /// taken the pole is what it will name.
-fn stain_centres(centroids: &[Option<Vec2>; survey::SLOTS], height: usize) -> [Option<Vec2>; survey::SLOTS] {
+fn stain_centres(
+    palette: &Palette,
+    centroids: &[Option<Vec2>; survey::SLOTS],
+    height: usize,
+) -> [Option<Vec2>; survey::SLOTS] {
     let mut stains = [None; survey::SLOTS];
-    for material in palette::MATERIALS {
+    for material in palette.materials() {
         let Some(policy) = material.atmosphere.as_ref() else {
             continue;
         };
         let drift = policy.carried(height);
-        stains[usize::from(material.class)] =
-            centroids.get(usize::from(material.class)).copied().flatten().map(|centre| centre + drift);
+        let Some(slot) = stains.get_mut(usize::from(material.class)) else {
+            continue;
+        };
+        *slot = centroids.get(usize::from(material.class)).copied().flatten().map(|centre| centre + drift);
     }
 
     stains
@@ -1045,9 +1075,16 @@ fn iris_centre(eyes: &[accent::Eye]) -> Option<Vec2> {
 mod tests {
     use super::*;
 
+    use std::sync::LazyLock;
+
     use crate::deform::bone_uniform;
     use crate::labels::CLASSES;
     use crate::mesh::Mesh;
+
+    /// Every fixture here is her own classes, so the box is hers. Held
+    /// once rather than built per literal, because a `Subject` borrows
+    /// the box it is painted out of.
+    static PALETTE: LazyLock<Palette> = LazyLock::new(Palette::canonical);
 
     /// A stand-in for the ink layer's coverage plane. Nothing here reads
     /// it — the render cap does — so any id the easel would not otherwise
@@ -1111,6 +1148,7 @@ mod tests {
                 mesh: &mesh,
                 posed: None,
                 scores: &scores,
+                palette: &PALETTE,
                 settings: &settings,
                 ink: Some(INK),
                 chart: None,
@@ -1164,6 +1202,7 @@ mod tests {
                 mesh,
                 posed: None,
                 scores,
+                palette: &PALETTE,
                 settings,
                 ink: Some(INK),
                 chart: None,
@@ -1211,6 +1250,7 @@ mod tests {
             mesh: &mesh,
             posed: None,
             scores: &scores,
+            palette: &PALETTE,
             settings: &settings,
             ink: Some(INK),
             chart: None,
@@ -1253,6 +1293,7 @@ mod tests {
             mesh: &mesh,
             posed: None,
             scores: &scores,
+            palette: &PALETTE,
             settings: &settings,
             ink: Some(INK),
             chart: None,
@@ -1279,6 +1320,7 @@ mod tests {
             mesh: &mesh,
             posed: None,
             scores: &scores,
+            palette: &PALETTE,
             settings: &settings,
             ink: Some(INK),
             chart: None,
@@ -1329,6 +1371,7 @@ mod tests {
             mesh: &mesh,
             posed: None,
             scores: &scores,
+            palette: &PALETTE,
             settings: &settings,
             ink: Some(INK),
             chart: None,
@@ -1370,6 +1413,7 @@ mod tests {
             mesh: &mesh,
             posed: None,
             scores: &scores,
+            palette: &PALETTE,
             settings: &settings,
             ink: Some(replacement),
             chart: None,
@@ -1396,7 +1440,8 @@ mod tests {
         let mut easel = Easel::default();
         easel.resized(800, 1000);
         let canvas = easel.canvas().expect("a resized easel has a canvas");
-        easel.seed_slice = Some(wash::program(canvas.height).seed_uniforms(SHEET_SEED, canvas, Presence::default()));
+        easel.seed_slice =
+            Some(wash::program(canvas.height, &PALETTE).seed_uniforms(SHEET_SEED, canvas, Presence::default()));
 
         easel.resized(800, 1000);
         assert!(easel.seed_slice.is_some(), "a same-size announcement must not orphan the accident stream");
@@ -1414,6 +1459,7 @@ mod tests {
             mesh: &mesh,
             posed: None,
             scores: &scores,
+            palette: &PALETTE,
             settings: &settings,
             ink: Some(INK),
             chart: None,

@@ -463,14 +463,17 @@ fn the_wash_program_develops_the_cpu_sheet() {
     let (width, height) = (CANVAS_WIDTH, CANVAS_HEIGHT);
     let canvas = Canvas { width, height };
 
+    // Her own box: the fixture is her classes, so the oracle and the
+    // program are both laid from the one this crate was tuned on.
+    let palette = palette::Palette::canonical();
     let (classes, tone, facing) = subject();
     let planes = Planes { classes: &classes, tone: &tone, facing: &facing, width, height };
     let frames = EYE_WORLD_X.map(eye_frame);
-    let accents = accent::paint(&frames, &camera(), &planes);
+    let accents = accent::paint(&frames, &camera(), &planes, &palette);
     let flow = image::structure_tensor_flow(&striped_ink(), width, height);
     assert_flow_reaches_the_hair(&flow, &classes);
 
-    let sheet = Sheet::new(planes, SEED);
+    let sheet = Sheet::new(planes, &palette, SEED);
     let coats = sheet.coats(Some(&flow), Some(&accents));
     assert_every_coat_contributes(&coats);
     let expected = palette::composite(&coats, sheet.paper_shade());
@@ -484,8 +487,8 @@ fn the_wash_program_develops_the_cpu_sheet() {
     // in production are gated by the pinned-framing picture instead, which
     // is the only place there is a subject to survey.
     let mut centroids: [Option<Vec2>; SLOTS] = [None; SLOTS];
-    for material in palette::MATERIALS.iter().filter(|material| material.class < palette::META) {
-        centroids[usize::from(material.class)] = field::centroid(&palette::mask_of(&classes, material.class), width);
+    for material in palette.materials().iter().filter(|material| material.class < palette::META) {
+        centroids[usize::from(material.class)] = field::centroid(&palette.mask_of(&classes, material.class), width);
     }
     // The stain's pole, taken off the oracle's own spill pixels. The
     // develop estimates this off the geometry (`easel::stain_centres`),
@@ -493,22 +496,22 @@ fn the_wash_program_develops_the_cpu_sheet() {
     // framing — feeding it in here instead would put it underneath every
     // other comparison in the scenario.
     let mut stains: [Option<Vec2>; SLOTS] = [None; SLOTS];
-    for material in palette::MATERIALS {
+    for material in palette.materials() {
         if let Some(policy) = material.atmosphere.as_ref() {
-            let mask = palette::mask_of(&classes, material.class);
+            let mask = palette.mask_of(&classes, material.class);
             stains[usize::from(material.class)] = field::centroid(&sheet.atmosphere_spill(&mask, policy), width);
         }
     }
     let iris = accents.mask(palette::IRIS).and_then(|mask| field::centroid(mask, width));
 
     let fine_eyes = accent::project(&frames, &camera(), width, height);
-    let presence = accent::presences(&fine_eyes, &planes);
+    let presence = accent::presences(&fine_eyes, &planes, &palette);
 
     let mut reports = Vec::new();
     for (divisor, left, budget, label) in
         [(1u32, EXACT_LEFT, &EXACT, "un-notched"), (wash::BODY_DIVISOR, NOTCHED_LEFT, &NOTCHED, "notched")]
     {
-        let develop = stage(&mut harness, divisor, canvas, &classes, &tone, &facing, &fine_eyes);
+        let develop = stage(&mut harness, divisor, canvas, &planes, &fine_eyes, &palette);
         let body = canvas.body_at(divisor);
         let body_eyes = accent::project(&frames, &camera(), body.0, body.1);
         // Every body-extent chain places its accidents in the body's own
@@ -524,7 +527,7 @@ fn the_wash_program_develops_the_cpu_sheet() {
             placement: Placement { centroids: &centroids, stains: &stains, iris },
             faces: Some(Faces { fine: &fine_eyes, body: &body_eyes, presence: &presence }),
         };
-        let seed = develop.program.seed_uniforms(SEED, canvas, Presence::of(&placement));
+        let seed = develop.program.seed_uniforms(SEED, canvas, Presence::of(&placement, &palette));
 
         let dispatch = ProgramDispatch {
             program_id: register(&mut harness, &develop.program),
@@ -572,11 +575,11 @@ fn stage(
     harness: &mut SubstrateHarness,
     divisor: u32,
     canvas: Canvas,
-    classes: &[u8],
-    tone: &[f32],
-    facing: &[f32],
+    planes: &Planes<'_>,
     eyes: &[accent::Eye],
+    palette: &palette::Palette,
 ) -> Develop {
+    let Planes { classes, tone, facing, .. } = *planes;
     let body = canvas.body_at(divisor);
     let fine = (canvas.width, canvas.height);
     let coarse = field::paper(SEED, body.0, body.1);
@@ -603,7 +606,7 @@ fn stage(
         },
     )];
 
-    Develop { program: wash::program_at(canvas.height, divisor), bindings, ink, geometries }
+    Develop { program: wash::program_at(canvas.height, palette, divisor), bindings, ink, geometries }
 }
 
 /// The smear must have something to ride: without coherent flow inside

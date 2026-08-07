@@ -34,7 +34,7 @@ use crate::labels::CLASSES;
 use crate::mesh::Mesh;
 use crate::visibility;
 
-use super::palette;
+use super::palette::Palette;
 
 /// Centroid slots, indexed by class id: `0` is the background, which
 /// never carries one, and the labelled classes run up to
@@ -67,12 +67,13 @@ pub struct Survey {
 
 impl Survey {
     /// Measure `mesh` under `scores`
-    /// ([`Labels::vertex_scores`](crate::labels::Labels::vertex_scores)).
-    pub fn measure(mesh: &Mesh, scores: &[[f32; CLASSES]]) -> Self {
+    /// ([`Labels::vertex_scores`](crate::labels::Labels::vertex_scores)),
+    /// with the fall-through of the box that will paint it.
+    pub fn measure(mesh: &Mesh, scores: &[[f32; CLASSES]], palette: &Palette) -> Self {
         let class = (0..mesh.positions.len())
             .map(|index| {
                 let indicators = scores.get(index).copied().unwrap_or([0.0; CLASSES]);
-                palette::remapped(argmax_class(&indicators))
+                palette.remapped(argmax_class(&indicators))
             })
             .collect();
 
@@ -177,6 +178,11 @@ mod tests {
     use super::*;
     use crate::labels::{HAIR, SKIN};
 
+    /// Every fixture here is her own classes, so the box is hers.
+    fn palette() -> Palette {
+        Palette::canonical()
+    }
+
     /// A quad split into two triangles at `z = 0`, facing `+z`, and
     /// standing well inside the frame — a corner exactly on the frame's
     /// edge projects onto a column the canvas does not have, and is
@@ -211,7 +217,7 @@ mod tests {
             score[usize::from(class) - 1] = 1.0;
         }
 
-        let survey = Survey::measure(&mesh, &scores);
+        let survey = Survey::measure(&mesh, &scores, &palette());
         let centroids = survey.centroids(&mesh, Vec3::new(0.0, 0.0, 5.0), &orthographic(), 100, 100);
 
         let hair = centroids[usize::from(HAIR)].expect("the hair side is in view");
@@ -234,7 +240,7 @@ mod tests {
             score[usize::from(HAIR) - 1] = 1.0;
         }
 
-        let survey = Survey::measure(&mesh, &scores);
+        let survey = Survey::measure(&mesh, &scores, &palette());
         let behind = Mat4::orthographic_rh(-1.0, 1.0, -1.0, 1.0, 1.0, 10.0)
             * Mat4::look_at_rh(Vec3::new(0.0, 0.0, -5.0), Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0));
 
