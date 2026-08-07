@@ -82,7 +82,7 @@ use super::dto::WorkpiecesView;
 use crate::artifacts::{ArtifactsCapability, Get, GetResult};
 use crate::bloomery::ApprovalPolicy;
 use crate::signing::VerifyResult;
-use crate::store::{RecordDispatchDescriptionResult, StoreCapability};
+use crate::store::{RecordDispatchDescriptionResult, RecordScopeRevisionResult, StoreCapability};
 
 /// Composer-supplied params for the REST control api cap (ADR-0156 §3 `Params`
 /// channel): the tier-policy file the pre-seal approve gate loads at init (issue
@@ -141,6 +141,7 @@ impl NativeActor for BloomeryApiCapability {
             pending: HashMap::new(),
             verifying: HashMap::new(),
             seals: HashMap::new(),
+            scope_revisions: HashMap::new(),
             next_seal: 1,
             seal_verifications: HashMap::new(),
         })
@@ -166,7 +167,7 @@ impl NativeActor for BloomeryApiCapability {
         state: &mut ApiCapabilityState,
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
     ) -> http::Outcome {
-        let routed = ApiCapabilityState::author_scope_revision(&ctx.request().body);
+        let routed = state.author_scope_revision(&ctx, &ctx.request().body);
         finish(state, ctx, routed)
     }
 
@@ -339,6 +340,23 @@ impl NativeActor for BloomeryApiCapability {
         } else {
             state.resolve_verify(ctx, mail);
         }
+    }
+
+    /// The store's reply to an authored scope revision's write (#4588). The
+    /// authoring route deferred its caller on this, so the reply answers with the
+    /// digest on a durable write and a `500` on a failed one — a caller never
+    /// gets an address it could seal against a row that is not there.
+    #[handler::manual]
+    fn on_record_scope_revision_result(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Manual>,
+        mail: RecordScopeRevisionResult,
+    ) {
+        let error = match mail {
+            RecordScopeRevisionResult::Ok => None,
+            RecordScopeRevisionResult::Err { error } => Some(error),
+        };
+        state.resolve_scope_revision_write(ctx, error.as_deref());
     }
 
     /// The store's reply to a fire-and-forget dispatch-description write (#3595).

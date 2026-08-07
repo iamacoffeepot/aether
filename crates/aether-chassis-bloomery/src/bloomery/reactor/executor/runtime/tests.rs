@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    AggregateReviewPayload, BloomId, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Nonce,
-    RedispatchPayload, ReviewPass, StageCatalog, StageId, Topic, Transformation, WorkHandle, WorkOrder, WorkpieceId,
+    AgentSelection, AggregateReviewPayload, BloomId, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend,
+    Fact, Harness, ModelOverride, Nonce, ReasoningEffort, RedispatchPayload, ReviewPass, ScopeRevision, StageCatalog,
+    StageId, Topic, Transformation, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -164,16 +165,28 @@ fn enqueue_dispatch_at(
     subject: u8,
     stage: StageId,
 ) -> (u64, u8) {
+    (enqueue_dispatch_with_revision(store, bloom, workpiece, digest(subject), stage), subject)
+}
+
+// The same enqueue against an explicit scope-revision digest — the axis a stored
+// revision's model override is resolved by (#4588), which the `subject`-seeded
+// form above cannot express independently of the dispatched subject.
+fn enqueue_dispatch_with_revision(
+    store: &mut SqliteStore,
+    bloom: BloomId,
+    workpiece: &str,
+    scope_revision: aether_bloomery::Digest,
+    stage: StageId,
+) -> u64 {
     let payload = DispatchPayload {
         bloom: bloom.0,
         workpiece: WorkpieceId(workpiece.to_owned()),
         stage,
-        transformation: Transformation::for_member_stage(stage, digest(subject), digest(0xC0)),
-        scope_revision: digest(subject),
+        transformation: Transformation::for_member_stage(stage, scope_revision, digest(0xC0)),
+        scope_revision,
         candidate: None,
     };
-    let sequence = store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
-    (sequence, subject)
+    store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap()
 }
 
 // ADR-0153 — the aggregate-review topic drains into a bloom-level order: the
@@ -966,4 +979,81 @@ fn a_redispatch_with_no_held_order_acks_past_instead_of_wedging_the_topic() {
     assert_eq!(handles.len(), 1, "the entry behind the unresolvable one still dispatches");
     assert_eq!(ack_through, Some(live), "the ack prefix covers both, not just up to the orphan");
     assert!(orphan < live);
+}
+
+// #4588 — the sealed scope revision governs the run, not just the receipt. A
+// member's `scope_revision` digest resolves against the stored revision at
+// dispatch, so an authored `AgentSelection` reaches the lane instead of the
+// stage's calibrated default.
+//
+// This is the same attest-what-did-not-run divergence #4324 and #4327 closed for
+// the model and the harness, in the place that stayed open longest: the override
+// was sealed and attestable and *inert*, so an operator could pin a harness and
+// watch the fleet default run anyway. The sibling member is the control — it
+// stores no revision and must still resolve the calibrated profile, so the test
+// fails both on an override that does not apply and on one that leaks across
+// members.
+#[test]
+fn a_stored_scope_revision_overrides_the_calibrated_profile_for_its_member_alone() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+
+    // An override that differs from the calibrated Construct profile on both
+    // axes, so neither a harness nor a model regression can pass by coincidence.
+    let calibrated = StageCatalog::profile_of(StageId::Construct);
+    let revision = ScopeRevision {
+        model_override: ModelOverride {
+            agent: Some(AgentSelection { harness: Harness::Claude, model: "claude-opus-5".to_owned() }),
+            reasoning_effort: Some(ReasoningEffort::Low),
+        },
+    };
+    // The override is only evidence if it differs from what a no-op resolution
+    // would produce; a recalibration that collapses them silently guts the test.
+    let selection = revision.model_override.agent.clone().expect("the override names an agent");
+    assert_ne!(selection.model, calibrated.model, "the override must differ from the calibrated model");
+    assert_ne!(selection.harness, calibrated.harness, "and from the calibrated harness");
+    assert_ne!(revision.model_override.reasoning_effort, Some(calibrated.effort), "and from the calibrated effort");
+
+    // The overridden member's dispatch names the revision's digest as its scope
+    // revision — the same address the authoring route stored it under.
+    let overridden = revision.digest();
+    store.record_scope_revision(overridden.as_bytes(), &to_vec(&revision).unwrap()).unwrap();
+    enqueue_dispatch_with_revision(&mut store, bloom, "wp-pinned", overridden, StageId::Construct);
+    enqueue_dispatch_at(&mut store, bloom, "wp-default", 6, StageId::Construct);
+
+    drain_and_dispatch(&mut store, &shell).unwrap();
+
+    let orders = backend.orders();
+    let dispatched = |index: usize| orders[index].transformation.model.clone().expect("a model lane names its profile");
+    assert_eq!(dispatched(0).harness, selection.harness, "the sealed harness reaches the lane");
+    assert_eq!(dispatched(0).model, selection.model, "and the sealed model with it");
+    assert_eq!(dispatched(0).effort, ReasoningEffort::Low, "and the sealed effort");
+
+    assert_eq!(dispatched(1).model, calibrated.model, "a member with no stored revision keeps the calibrated model");
+    assert_eq!(dispatched(1).harness, calibrated.harness, "and the calibrated harness");
+}
+
+// Tripwire: a `scope_revision` digest with no stored row resolves the stage
+// default rather than failing the dispatch. A revision authored out-of-band is as
+// unresolvable to an auditor reading the sealed spec as it is here, so the honest
+// outcome is the calibrated profile — never a wedged member. Catches a resolution
+// that hard-errors (or drops `transformation.model` entirely) on the miss path,
+// which is every bloom sealed before this landed.
+#[test]
+fn an_unstored_scope_revision_still_dispatches_the_calibrated_profile() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    enqueue_dispatch_with_revision(&mut store, bloom, "wp-unstored", digest(0x77), StageId::Construct);
+
+    let (handles, _, _) = drain_and_dispatch(&mut store, &shell).unwrap();
+
+    assert_eq!(handles.len(), 1, "the member dispatches rather than wedging on an unresolvable revision");
+    let calibrated = StageCatalog::profile_of(StageId::Construct);
+    let dispatched = backend.orders()[0].transformation.model.clone().expect("the lane still names a profile");
+    assert_eq!(dispatched.model, calibrated.model);
+    assert_eq!(dispatched.effort, calibrated.effort);
 }
