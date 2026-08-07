@@ -31,7 +31,7 @@
 
 use core::f32::consts::TAU;
 
-use aether_math::Vec2;
+use aether_math::{Vec2, Vec3};
 
 use super::accent::Accents;
 use super::image::{self, Flow, Rng};
@@ -319,6 +319,18 @@ const SPATTER_STRENGTH: (f32, f32) = (0.4, 0.7);
 pub(crate) const CARE_NEAR: f32 = 160.0;
 pub(crate) const CARE_FAR: f32 = 600.0;
 
+/// How closely the hand is held over a subject that anchors its attention
+/// nowhere at all.
+///
+/// Mid-way rather than either end, and the two ends are why. Wholly free
+/// is what the sheet reports for a pixel nothing reached, which is the
+/// right answer for the far corner of a subject that *has* a focus and the
+/// wrong one for a subject that has none — it would paint an unauthored
+/// scene at its loosest everywhere. Wholly held is worse: it cuts every
+/// region to the line and the wash stops reading as watercolour. Level and
+/// in the middle paints the subject, and says nothing it was not told.
+pub(crate) const CARE_EVEN: f32 = 0.5;
+
 /// Fraction of its granulation a material keeps in its tight coat.
 ///
 /// The tight wash sits under the loose one across the whole care ramp, so
@@ -473,10 +485,10 @@ pub fn paper(seed: u64, width: usize, height: usize) -> Paper {
 }
 
 impl<'a> Sheet<'a> {
-    pub fn new(planes: Planes<'a>, palette: &'a Palette, seed: u64) -> Self {
+    pub fn new(planes: Planes<'a>, palette: &'a Palette, source: &CareSource, seed: u64) -> Self {
         let (width, height) = (planes.width, planes.height);
         let Paper { noise, shade } = paper(seed, width, height);
-        let care = care_field(planes.classes, &palette.face_classes(), width, height);
+        let care = care_field(planes.classes, source, width, height);
 
         Self { planes, palette, seed, noise, shade, care }
     }
@@ -968,16 +980,84 @@ pub(crate) fn atmosphere_wash_params() -> WashParams {
 /// Distance from the drawn features, by chamfer transform: near the face
 /// the painter cuts like gongbi, and past the fall of the hair the hand
 /// relaxes into xieyi. The transition is the painting.
-/// `features` is the palette's own answer to which classes are drawn
-/// features ([`Palette::face_classes`]) — a class id means only what the
-/// active vocabulary says it means, so the seed set is asked for rather
-/// than assumed.
-pub fn care_field(classes: &[u8], features: &[u8], width: usize, height: usize) -> Vec<f32> {
-    let features: Vec<bool> = classes.iter().map(|at| features.contains(at)).collect();
-    let distance = image::chamfer_distance(&features, width, height);
+/// `source` is where the attention is, already resolved for this canvas
+/// ([`CareSource::resolve`]).
+pub fn care_field(classes: &[u8], source: &CareSource, width: usize, height: usize) -> Vec<f32> {
     let (far, near) = (image::tuned(CARE_FAR, height), image::tuned(CARE_NEAR, height));
+    let ramp = |distance: f32| image::smoothstep(far, near, distance);
 
-    distance.iter().map(|&at| image::smoothstep(far, near, at)).collect()
+    match source {
+        CareSource::Features(features) => {
+            let drawn: Vec<bool> = classes.iter().map(|at| features.contains(at)).collect();
+
+            image::chamfer_distance(&drawn, width, height).iter().map(|&at| ramp(at)).collect()
+        }
+        // One seed rather than a region, so the distance is the distance
+        // and no transform is needed to find it.
+        CareSource::Anchor(at) => (0..width * height)
+            .map(|index| ramp((Vec2::new((index % width) as f32, (index / width) as f32) - *at).length()))
+            .collect(),
+        CareSource::Even => vec![CARE_EVEN; width * height],
+    }
+}
+
+/// Where the care field radiates from, resolved onto one canvas.
+///
+/// The order is the whole of R3's answer to a subject that is not her.
+/// Care follows attention, and a face carries its own — so a subject with
+/// one needs nothing authored, a subject without one says where to look,
+/// and a subject that says nothing is still painted rather than refused.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CareSource {
+    /// The drawn features the box's vocabulary carries. Every pixel
+    /// labelled one is a seed, so the hand is held along a mouth rather
+    /// than around a point somewhere in it.
+    Features(Vec<u8>),
+    /// The authored focus, in this canvas' own texels.
+    Anchor(Vec2),
+    /// Neither: nothing on the sheet to measure a distance from.
+    Even,
+}
+
+impl CareSource {
+    /// Resolve the ladder for one canvas: the box's drawn features, else
+    /// its authored focus put through `project`, else nothing.
+    ///
+    /// `project` takes the focus from the subject's own space to canvas
+    /// texels and answers `None` for a point this view cannot see, which
+    /// falls through the same way an unauthored one does.
+    #[must_use]
+    pub fn resolve(palette: &Palette, project: impl FnOnce(Vec3) -> Option<Vec2>) -> Self {
+        let features = palette.face_classes();
+        if !features.is_empty() {
+            return Self::Features(features);
+        }
+
+        palette.focus().and_then(project).map_or(Self::Even, Self::Anchor)
+    }
+
+    /// Which arm the box lands on, before any camera has placed the
+    /// anchor.
+    ///
+    /// Which arm is the box's answer; only the anchor's *position* is the
+    /// camera's. The GPU ramp is fixed per subject and cannot wait for a
+    /// frame to learn which arm it is on, so it asks here — the ladder
+    /// walked with the anchor left at the origin, since nothing reads the
+    /// position off this.
+    #[must_use]
+    pub fn of(palette: &Palette) -> Self {
+        Self::resolve(palette, |_| Some(Vec2::new(0.0, 0.0)))
+    }
+
+    /// Which arm, as the WGSL `CARE_FROM_*` constants read it.
+    #[must_use]
+    pub fn arm(&self) -> u32 {
+        match self {
+            Self::Features(_) => 0,
+            Self::Anchor(_) => 1,
+            Self::Even => 2,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1025,7 +1105,7 @@ mod tests {
         let (classes, tone, facing) = subject(width, height);
         let planes = Planes { classes: &classes, tone: &tone, facing: &facing, width, height };
         let palette = Palette::canonical();
-        let sheet = Sheet::new(planes, &palette, seed);
+        let sheet = Sheet::new(planes, &palette, &CareSource::of(&palette), seed);
 
         palette::composite(&sheet.coats(None, None), sheet.paper_shade())
     }
@@ -1060,7 +1140,8 @@ mod tests {
         let (classes, tone, facing) = subject(width, height);
         let planes = Planes { classes: &classes, tone: &tone, facing: &facing, width, height };
 
-        for coat in Sheet::new(planes, &Palette::canonical(), 0x5e_ed).coats(None, None) {
+        let palette = Palette::canonical();
+        for coat in Sheet::new(planes, &palette, &CareSource::of(&palette), 0x5e_ed).coats(None, None) {
             assert!(coat.density.iter().all(|at| at.is_finite()), "class {} laid down a NaN", coat.class);
         }
     }
@@ -1120,7 +1201,7 @@ mod tests {
             height,
         };
         let palette = Palette::canonical();
-        let sheet = Sheet::new(planes, &palette, 1);
+        let sheet = Sheet::new(planes, &palette, &CareSource::of(&palette), 1);
 
         let density = sheet.wash(&vec![0.0; width * height], None, &WashParams::loose(), &mut Rng::new(1));
         assert!(density.iter().all(|&at| at == 0.0), "an uncovered region must lay down no pigment");
@@ -1162,7 +1243,7 @@ mod tests {
         let tone = vec![0.5; width * height];
         let palette = Palette::canonical();
         let planes = Planes { classes: &classes, tone: &tone, facing: &tone, width, height };
-        let sheet = Sheet::new(planes, &palette, 0x5e_ed);
+        let sheet = Sheet::new(planes, &palette, &CareSource::of(&palette), 0x5e_ed);
         let mask = palette.mask_of(&classes, HAIR);
         let policy = palette
             .materials()
@@ -1214,7 +1295,7 @@ mod tests {
         let tone = vec![0.5; width * height];
 
         let planes = Planes { classes: &classes, tone: &tone, facing: &tone, width, height };
-        let coats = Sheet::new(planes, &hillside, 0x5e_ed).coats(None, None);
+        let coats = Sheet::new(planes, &hillside, &CareSource::of(&hillside), 0x5e_ed).coats(None, None);
 
         let laid: Vec<u32> = coats.iter().map(|coat| coat.pigment).collect();
         assert_eq!(laid, [0x7a_6f_63, 0x6b_53_34, 0x5c_7a_4a], "the hillside paints its own three and nothing else");
@@ -1225,5 +1306,82 @@ mod tests {
             "no pigment of hers may reach a subject that is not her: {laid:x?}",
         );
         assert!(!laid.contains(&GLAZE_PIGMENT), "the glaze belongs to her hair, not to whatever class 3 happens to be");
+    }
+
+    /// A one-class box, optionally naming where to look.
+    fn hillside(focus: Option<&str>) -> Palette {
+        let focus = focus.map_or_else(String::new, |at| format!("focus {at}\n"));
+
+        Palette::decode_text(&format!("classes rock\nmaterial rock 0x7a6f63 0.4 0.6 0.35\n{focus}"))
+            .expect("the hillside box is well formed")
+    }
+
+    /// Tripwire: the care field radiates from the authored focus, and a
+    /// subject that authors none is still painted.
+    ///
+    /// R3 has care decay from the drawn features, so a subject with no
+    /// face classes seeds nothing — and an empty flood reads as
+    /// infinitely far, which the descending ramp resolves to a wholly
+    /// free hand *everywhere*. That is not an error and never will be:
+    /// the scene paints, at one looseness, with no gradient and nothing
+    /// to say it lost one. Both halves are pinned here — that an anchor
+    /// actually produces the gradient, and that its absence produces a
+    /// level hand rather than the loosest one.
+    #[test]
+    fn care_radiates_from_the_authored_focus_and_falls_back_to_a_level_hand() {
+        let (width, height) = (400, 300);
+        let classes = vec![1u8; width * height];
+        let at = Vec2::new(100.0, 150.0);
+        let index = |x: usize, y: usize| y * width + x;
+
+        let anchored = care_field(&classes, &CareSource::Anchor(at), width, height);
+        assert!(anchored[index(100, 150)] > 0.99, "the hand is cut to the line where the box said to look");
+        assert!(anchored[index(399, 20)] < 0.01, "and wholly free the far corner away: {}", anchored[index(399, 20)]);
+        for step in 1..8 {
+            let (near, far) = (index(100 + step * 20, 150), index(100 + (step + 1) * 20, 150));
+            assert!(anchored[near] >= anchored[far], "the hand only relaxes as it leaves the focus, never tightens");
+        }
+
+        // Level, and level short of either end: the loosest hand is what
+        // an unseeded flood already produced, and is the answer this arm
+        // exists to replace.
+        let level = care_field(&classes, &CareSource::Even, width, height);
+        assert!(level.iter().all(|&at| at == CARE_EVEN), "an unanchored subject is painted at one even looseness");
+        assert!(level.iter().all(|&at| at > 0.0 && at < 1.0), "and short of both the free hand and the cut one");
+    }
+
+    /// Tripwire: the three sources are tried in R3's own order.
+    ///
+    /// The order carries the rule. A face anchors its own attention, so a
+    /// box that has one must never be diverted by a stray authored point;
+    /// a box without one must reach its focus rather than silently
+    /// painting flat; and a focus this view cannot place has to fall the
+    /// rest of the way rather than leaving the flood empty, which would
+    /// read as the loosest hand instead of the level one.
+    #[test]
+    fn the_care_source_is_resolved_in_order() {
+        let seen = Vec2::new(4.0, 5.0);
+
+        assert!(
+            matches!(CareSource::resolve(&Palette::canonical(), |_| Some(seen)), CareSource::Features(_)),
+            "her face anchors her own attention, whatever else a box says",
+        );
+
+        let anchored = hillside(Some("1 2 3"));
+        assert_eq!(
+            CareSource::resolve(&anchored, |at| (at == Vec3::new(1.0, 2.0, 3.0)).then_some(seen)),
+            CareSource::Anchor(seen),
+            "a box with no face reaches its authored focus, projected",
+        );
+        assert_eq!(
+            CareSource::resolve(&anchored, |_| None),
+            CareSource::Even,
+            "a focus this view cannot place falls the rest of the way",
+        );
+        assert_eq!(
+            CareSource::resolve(&hillside(None), |_| Some(seen)),
+            CareSource::Even,
+            "and a box that says nothing"
+        );
     }
 }

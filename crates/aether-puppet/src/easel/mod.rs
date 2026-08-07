@@ -676,7 +676,13 @@ impl Easel {
             .unwrap_or_else(|| program.seed_uniforms(SHEET_SEED, canvas, wanted));
 
         let faces = chart.as_ref().map(|_| Faces { fine: &fine_eyes, body: &body_eyes, presence: &presence });
-        let frame = Frame { placement, faces };
+        // Where the hand's attention is. The authored arm is a point in
+        // the subject's own space, so it is projected here, at the body's
+        // extent — which is where the care chain's own planes stand.
+        let care = field::CareSource::resolve(subject.palette, |at| {
+            regions::on_canvas(&view.view_proj, at, body_width, body_height)
+        });
+        let frame = Frame { placement, faces, care };
 
         self.uniforms = Some(Uniforms {
             bake: bake::BakeUniforms {

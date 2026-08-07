@@ -29,7 +29,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-use super::field::{Planes, Sheet};
+use super::field::{CareSource, Planes, Sheet};
 use super::palette::Palette;
 
 /// Seed for the diagnostic sheet. Arbitrary but fixed, so two runs over
@@ -73,9 +73,12 @@ fn crossfeed_the_wash_with_external_planes() {
     // The reference board is her own, so its planes are read out of the
     // box she was tuned on.
     let palette = Palette::canonical();
+    // The board's own planes carry her classes, so the hand is held
+    // where her face is; no camera is involved and none is needed.
+    let care = CareSource::of(&palette);
     for (run, facing) in [("real", &facing), ("flat", &flat)] {
         let planes = Planes { classes: &classes, tone: &tone, facing, width, height };
-        let sheet = Sheet::new(planes, &palette, SEED);
+        let sheet = Sheet::new(planes, &palette, &care, SEED);
         let coats = sheet.coats(None, None);
         for (index, coat) in coats.iter().enumerate() {
             write_f32_plane(&dir.join(format!("density-{run}-{index}-{}.bin", coat.class)), &coat.density);

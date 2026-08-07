@@ -49,6 +49,7 @@ use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_
 use aether_harness_substrate_capture::visual::{decode_png, encode_png};
 use aether_kinds::{CostRow, CostTail, CostTailResult, LoadComponent, LoadResult, Render, WindowId, WindowSize};
 use aether_math::{Mat4, Vec2, Vec3};
+use aether_puppet::easel::field::CareSource;
 use aether_puppet::easel::palette::Palette;
 use aether_puppet::easel::program::wash::{Canvas, Faces, Frame, Placement, Presence};
 use aether_puppet::easel::program::{bake, face, sight, stroke, wash};
@@ -1272,7 +1273,9 @@ fn time_the_develop(at: &Subject, view: &View, canvas: Canvas) {
     let wanted = Presence::of(&placement, &palette);
     let slice =
         phase("seed_uniforms — per canvas and visible set", 1, || program.seed_uniforms(SHEET_SEED, canvas, wanted));
-    let frame = Frame { placement, faces: Some(Faces { fine: &fine_eyes, body: &body_eyes, presence: &presence }) };
+    let care = CareSource::of(&palette);
+    let frame =
+        Frame { placement, faces: Some(Faces { fine: &fine_eyes, body: &body_eyes, presence: &presence }), care };
     let wash_uniforms =
         phase("frame_uniforms — the wash blob", PHASE_REPEATS, || program.frame_uniforms(&slice, &frame));
     phase("bake uniforms", PHASE_REPEATS, || {

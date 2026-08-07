@@ -9,10 +9,12 @@
 //! contract: the hop schedule, the uniform windows, and the pass builder
 //! that lays the whole transform into a graph.
 
+use aether_math::Vec2;
 use aether_render::{InputSlot, OutputSlot, PassStage, ProgramPass, SlotExtent, SlotSpec, TextureFormat};
 
-use crate::easel::field::{CARE_FAR, CARE_NEAR};
+use crate::easel::field::{CARE_FAR, CARE_NEAR, CareSource};
 use crate::easel::image;
+use crate::easel::palette;
 
 /// The care WGSL. Never registered alone — the wash program's
 /// [`module`](super::wash::module) concatenates it with the op modules
@@ -54,13 +56,22 @@ pub struct SeedUniforms {
     /// ([`Palette::face_classes`](crate::easel::palette::Palette::face_classes)
     /// through [`class_set`](crate::easel::palette::class_set)).
     pub features: u32,
+    /// Which arm the develop resolved to, per [`CareSource::arm`].
+    pub source: u32,
+    /// The authored focus in this plane's own texels.
+    pub anchor: Vec2,
 }
 
 impl SeedUniforms {
-    pub const BYTES: u32 = 4;
+    pub const BYTES: u32 = 16;
 
     pub fn encode(&self) -> [u8; Self::BYTES as usize] {
-        self.features.to_le_bytes()
+        let mut bytes = [0u8; Self::BYTES as usize];
+        bytes[0..4].copy_from_slice(&self.features.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.source.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.anchor.x.to_le_bytes());
+        bytes[12..16].copy_from_slice(&self.anchor.y.to_le_bytes());
+        bytes
     }
 }
 
@@ -83,21 +94,25 @@ pub struct RampUniforms {
     /// `CARE_FAR` and `CARE_NEAR` at this canvas' own height.
     pub far: f32,
     pub near: f32,
+    /// Which arm the develop resolved to, per [`CareSource::arm`]. The
+    /// unanchored one has no distance to ramp and short-circuits.
+    pub source: u32,
 }
 
 impl RampUniforms {
-    pub const BYTES: u32 = 8;
+    pub const BYTES: u32 = 12;
 
     /// The ramp resolved for one canvas, through the same
     /// [`image::tuned`] the CPU field converts with.
-    pub fn for_canvas(height: usize) -> Self {
-        Self { far: image::tuned(CARE_FAR, height), near: image::tuned(CARE_NEAR, height) }
+    pub fn for_canvas(height: usize, source: u32) -> Self {
+        Self { far: image::tuned(CARE_FAR, height), near: image::tuned(CARE_NEAR, height), source }
     }
 
     pub fn encode(&self) -> [u8; Self::BYTES as usize] {
         let mut bytes = [0u8; Self::BYTES as usize];
         bytes[0..4].copy_from_slice(&self.far.to_le_bytes());
         bytes[4..8].copy_from_slice(&self.near.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.source.to_le_bytes());
         bytes
     }
 }
@@ -116,7 +131,7 @@ const HOPS_AT: u32 = SeedUniforms::BYTES;
 /// channel. `carry` and `relay` are indices of two [`plane_slot`]
 /// transients the flood ping-pongs between; the caller declares them,
 /// distinct from each other and from `output`. The chain's uniform windows encode at `uniform_offset`
-/// through [`encode`].
+/// through [`encode_hops`] and [`encode_frame`].
 pub fn passes(classes: InputSlot, carry: u32, relay: u32, output: OutputSlot, uniform_offset: u32) -> Vec<ProgramPass> {
     let mut passes = Vec::with_capacity(HOPS.len() + 2);
     passes.push(pass(SEED_ENTRY, classes, OutputSlot::Transient { index: carry }, uniform_offset, SeedUniforms::BYTES));
@@ -144,24 +159,39 @@ pub fn passes(classes: InputSlot, carry: u32, relay: u32, output: OutputSlot, un
     passes
 }
 
-/// Write the chain's windows: the subject's drawn features, the hop
-/// schedule and the canvas' own ramp.
-///
-/// Every value here is fixed by the subject's box, the schedule and the
-/// canvas height, so this belongs to the develop's static uniform slice —
-/// nothing in it turns with the view.
-pub fn encode(blob: &mut [u8], uniform_offset: u32, height: usize, features: u32) {
-    let at = uniform_offset as usize;
-    blob[at..at + SeedUniforms::BYTES as usize].copy_from_slice(&SeedUniforms { features }.encode());
-
-    let hops_at = at + HOPS_AT as usize;
+/// Write the hop schedule, which nothing but the schedule decides.
+pub fn encode_hops(blob: &mut [u8], uniform_offset: u32) {
+    let hops_at = uniform_offset as usize + HOPS_AT as usize;
     for (hop, &step) in HOPS.iter().enumerate() {
         let window = hops_at + hop * JumpUniforms::BYTES as usize;
         blob[window..window + JumpUniforms::BYTES as usize].copy_from_slice(&JumpUniforms { step }.encode());
     }
+}
 
-    let ramp = hops_at + HOPS.len() * JumpUniforms::BYTES as usize;
-    blob[ramp..ramp + RampUniforms::BYTES as usize].copy_from_slice(&RampUniforms::for_canvas(height).encode());
+/// Write the two windows that read the resolved source: the seed and the
+/// ramp.
+///
+/// Both per frame, and the ramp is the reason. The authored focus is a
+/// point in the subject's own space, so a view can fail to place it at
+/// all — and when it does, the source falls through to the level hand
+/// ([`CareSource::resolve`]). A ramp fixed per subject would still be on
+/// the anchor arm for that frame and would resolve the empty flood to a
+/// wholly free hand instead, so the CPU oracle and this would disagree on
+/// exactly the frames the fall-through exists for.
+pub fn encode_frame(blob: &mut [u8], uniform_offset: u32, height: usize, source: &CareSource) {
+    let (features, anchor) = match source {
+        CareSource::Features(classes) => (palette::class_set(classes), Vec2::new(0.0, 0.0)),
+        CareSource::Anchor(at) => (0, *at),
+        CareSource::Even => (0, Vec2::new(0.0, 0.0)),
+    };
+
+    let at = uniform_offset as usize;
+    let seeded = SeedUniforms { features, source: source.arm(), anchor };
+    blob[at..at + SeedUniforms::BYTES as usize].copy_from_slice(&seeded.encode());
+
+    let ramp = at + HOPS_AT as usize + HOPS.len() * JumpUniforms::BYTES as usize;
+    let resolved = RampUniforms::for_canvas(height, source.arm());
+    blob[ramp..ramp + RampUniforms::BYTES as usize].copy_from_slice(&resolved.encode());
 }
 
 fn pass(

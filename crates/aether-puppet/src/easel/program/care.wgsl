@@ -61,27 +61,52 @@ fn care_seed_distance(seed: f32, here: vec2<f32>, width: f32) -> f32 {
     return dot(offset, offset);
 }
 
+// Where the attention is, matching `field::CareSource`'s three arms. The
+// order is R3's: a face anchors its own attention, a subject without one
+// says where to look, and a subject that says nothing is painted level.
+const CARE_FROM_FEATURES: u32 = 0u;
+const CARE_FROM_ANCHOR: u32 = 1u;
+const CARE_FROM_NOTHING: u32 = 2u;
+
+// How closely the hand is held over a subject anchoring its attention
+// nowhere — `field::CARE_EVEN`.
+const CARE_EVEN: f32 = 0.5;
+
 struct CareSeedParams {
     // Which classes the hand is held tight around, as a class bit set
     // (`palette::Palette::face_classes` through `class_set`). Authored
     // rather than constant: a subject with no eye in its vocabulary seeds
     // nothing here, and the empty set says so exactly.
     features: u32,
+    // Which of the three arms above this subject resolved to.
+    source: u32,
+    // The authored focus in this plane's own texels, for the anchor arm.
+    // Per frame rather than per subject: the point is in the subject's
+    // space and the camera decides where it lands.
+    anchor: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> care_seed_params: CareSeedParams;
 
-// The flood's first plane: every feature texel seeds itself, everything
-// else is unseeded. `field::care_field`'s `features` predicate, verbatim.
+// The flood's first plane: every seed texel carries its own index and
+// everything else is unseeded. `field::care_field`'s own predicate, by
+// arm — a region of drawn features, or the single texel the authored
+// focus landed on.
 @fragment
 fn fs_care_seed(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let at = vec2<i32>(position.xy);
     let size = textureDimensions(care_source);
-    let labelled = round(textureLoad(care_source, at, 0).r * 255.0);
-    let feature = in_class_set(care_seed_params.features, labelled) > 0.0;
-
     let index = f32(at.y) * f32(size.x) + f32(at.x);
-    return vec4<f32>(select(CARE_UNSEEDED, index, feature), 0.0, 0.0, 1.0);
+
+    var seeded = false;
+    if care_seed_params.source == CARE_FROM_FEATURES {
+        let labelled = round(textureLoad(care_source, at, 0).r * 255.0);
+        seeded = in_class_set(care_seed_params.features, labelled) > 0.0;
+    } else if care_seed_params.source == CARE_FROM_ANCHOR {
+        seeded = all(at == vec2<i32>(round(care_seed_params.anchor)));
+    }
+
+    return vec4<f32>(select(CARE_UNSEEDED, index, seeded), 0.0, 0.0, 1.0);
 }
 
 struct CareJumpParams {
@@ -127,6 +152,9 @@ struct CareRampParams {
     // `far`, cut to the line at `near`.
     far: f32,
     near: f32,
+    // Which arm the seed pass took, because one of them has no distance
+    // to ramp at all.
+    source: u32,
 }
 
 @group(0) @binding(0) var<uniform> care_ramp: CareRampParams;
@@ -134,8 +162,18 @@ struct CareRampParams {
 // The flooded seeds resolved into how closely the hand is held —
 // `field::care_field`'s own final map, over the distance the flood
 // found.
+//
+// The unanchored subject short-circuits rather than falling out of the
+// ramp. Its flood is empty, and an empty flood reports the unreached
+// sentinel everywhere, which the descending ramp resolves to a wholly
+// free hand — the right answer for the far corner of a subject that has
+// a focus, and the wrong one for a subject that has none.
 @fragment
 fn fs_care_ramp(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    if care_ramp.source == CARE_FROM_NOTHING {
+        return vec4<f32>(CARE_EVEN, 0.0, 0.0, 1.0);
+    }
+
     let size = textureDimensions(care_source);
     let at = vec2<i32>(position.xy);
     let seed = textureLoad(care_source, at, 0).r;

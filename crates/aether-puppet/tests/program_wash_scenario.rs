@@ -466,6 +466,9 @@ fn the_wash_program_develops_the_cpu_sheet() {
     // Her own box: the fixture is her classes, so the oracle and the
     // program are both laid from the one this crate was tuned on.
     let palette = palette::Palette::canonical();
+    // Her classes, so the hand is held where her face is — the same
+    // arm the program resolves for itself.
+    let care = field::CareSource::of(&palette);
     let (classes, tone, facing) = subject();
     let planes = Planes { classes: &classes, tone: &tone, facing: &facing, width, height };
     let frames = EYE_WORLD_X.map(eye_frame);
@@ -473,7 +476,7 @@ fn the_wash_program_develops_the_cpu_sheet() {
     let flow = image::structure_tensor_flow(&striped_ink(), width, height);
     assert_flow_reaches_the_hair(&flow, &classes);
 
-    let sheet = Sheet::new(planes, &palette, SEED);
+    let sheet = Sheet::new(planes, &palette, &care, SEED);
     let coats = sheet.coats(Some(&flow), Some(&accents));
     assert_every_coat_contributes(&coats);
     let expected = palette::composite(&coats, sheet.paper_shade());
@@ -526,6 +529,7 @@ fn the_wash_program_develops_the_cpu_sheet() {
         let frame = Frame {
             placement: Placement { centroids: &centroids, stains: &stains, iris },
             faces: Some(Faces { fine: &fine_eyes, body: &body_eyes, presence: &presence }),
+            care: care.clone(),
         };
         let seed = develop.program.seed_uniforms(SEED, canvas, Presence::of(&placement, &palette));
 
