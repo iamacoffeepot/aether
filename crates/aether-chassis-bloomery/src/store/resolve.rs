@@ -1,8 +1,8 @@
 //! Resolving a sealed configuration back to its content (ADR-0174).
 //!
-//! The reducer seals a [`ConfigRegistry`] of addresses and resolves nothing; the
-//! host walks the scope chain, fetches the address the innermost scope sealed,
-//! and decodes it. This is that walk.
+//! The reducer seals a [`ConfigRegistry`](aether_bloomery::ConfigRegistry) of
+//! addresses and resolves nothing; the host walks the scope chain, fetches the
+//! address the innermost scope sealed, and decodes it. This is that walk.
 //!
 //! The distinction the error type carries is the load-bearing one. A kind *no*
 //! scope sealed is [`None`] — absence is a valid state and the caller takes its
