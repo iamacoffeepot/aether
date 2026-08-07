@@ -303,6 +303,11 @@ mod tests {
             candidate: attempt,
             displayed_digest: attempt,
             stage: aether_bloomery::StageId::Verify,
+            transformation: aether_bloomery::Transformation::for_member_stage(
+                aether_bloomery::StageId::Verify,
+                attempt,
+                Digest::from_bytes([0xC0; 32]),
+            ),
         };
         record_dispatch(store, &record).unwrap();
     }

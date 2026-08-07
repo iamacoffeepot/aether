@@ -99,6 +99,14 @@ pub enum Decision {
         /// The adopting answer's digest — grounds the re-dispatched attempt's
         /// instruction slot.
         answer: Digest,
+        /// The answer statement's exact asserted bytes, forwarded so the host
+        /// can overlay the decision onto the re-dispatched lane's advisory
+        /// channel (#3664). The reducer resolves nothing here — it holds the
+        /// adopting [`Statement`](crate::Statement) already, and a lane
+        /// re-dispatched without the decision that released it re-parks on the
+        /// same question. Carrying content is the
+        /// [`Decision::DispatchAttempt`] precedent, not an exception to it.
+        words: Vec<u8>,
     },
     /// Dispatch an attempt of `stage` against `workpiece`'s subject in `bloom` —
     /// the transactional-outbox intent the host drains and submits through the

@@ -101,6 +101,13 @@ pub struct OutstandingOrder {
     /// `Fact::AttemptCompleted` that advances the member's cursor, the terminal
     /// `Review` as a `Fact::Integrate`, and a parked outcome as a `Question`.
     pub stage: Vec<u8>,
+    /// The dispatched [`Transformation`](aether_bloomery::Transformation) as its
+    /// canonical `aether_data::wire` bytes, following the `stage` column's
+    /// convention. Persisted because a parked attempt is re-dispatched by
+    /// *replaying* it (#3664), and the transformation's `checkout` is reducer-only
+    /// state (`spec.base()`, or the cursor's candidate) that no other column
+    /// carries — so re-deriving it host-side is not possible.
+    pub transformation: Vec<u8>,
 }
 
 /// The outcome of recording an [`OutstandingOrder`]: written, or its nonce was
@@ -160,6 +167,22 @@ pub trait StoreBackend: Send {
     /// restart, rather than only from the (already-consumed-nothing) empty
     /// vec `init` used to start with.
     fn list_outstanding_nonces(&mut self) -> rusqlite::Result<Vec<String>>;
+
+    /// Hold a parked attempt's order under the question digest that parked it
+    /// (ADR-0151, #3664) — the order is consumed from `outstanding_orders` on
+    /// admission, so without this the redispatch an adopted answer decides has
+    /// nothing to replay. Idempotent on `(bloom, question)`: a re-admitted park
+    /// overwrites rather than conflicting.
+    fn record_parked_question(&mut self, question: &[u8], order: &OutstandingOrder) -> rusqlite::Result<()>;
+
+    /// The order held under `question`, or `None` when nothing parked under it.
+    /// Read before the replay dispatches and consumed only after it succeeds, so
+    /// a transient dispatch failure re-drains against a row that is still there.
+    fn lookup_parked_question(&mut self, bloom: &[u8], question: &[u8]) -> rusqlite::Result<Option<OutstandingOrder>>;
+
+    /// Release the held order once its replay has dispatched. `true` when a row
+    /// was removed.
+    fn consume_parked_question(&mut self, bloom: &[u8], question: &[u8]) -> rusqlite::Result<bool>;
     /// Record a per-bloom study index row (issue #3523): the study artifact
     /// digest for a graded attempt, keyed by (`bloom`, `attempt_digest`).
     /// Last-writer-wins on the key — a re-admit of the same attempt overwrites,
@@ -291,7 +314,20 @@ CREATE TABLE IF NOT EXISTS outstanding_orders (
     scope_revision   BLOB NOT NULL,
     candidate        BLOB NOT NULL,
     displayed_digest BLOB NOT NULL,
-    stage            BLOB NOT NULL
+    stage            BLOB NOT NULL,
+    transformation   BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS parked_question (
+    bloom            BLOB NOT NULL,
+    question         BLOB NOT NULL,
+    nonce            TEXT NOT NULL,
+    workpiece        TEXT NOT NULL,
+    scope_revision   BLOB NOT NULL,
+    candidate        BLOB NOT NULL,
+    displayed_digest BLOB NOT NULL,
+    stage            BLOB NOT NULL,
+    transformation   BLOB NOT NULL,
+    PRIMARY KEY (bloom, question)
 );
 CREATE TABLE IF NOT EXISTS study_index (
     bloom          BLOB NOT NULL,
@@ -322,21 +358,49 @@ fn is_constraint_violation(error: &rusqlite::Error) -> bool {
     )
 }
 
+/// The [`OutstandingOrder`] columns, in the order [`order_from_row`] reads them.
+/// Both tables that hold an order — `outstanding_orders` keyed by nonce and
+/// `parked_question` keyed by the question that parked it — select through this
+/// one spelling, so they cannot drift apart column-wise.
+const ORDER_COLUMNS: &str =
+    "nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage, transformation";
+
+/// Read an [`OutstandingOrder`] from a row selected with [`ORDER_COLUMNS`].
+fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutstandingOrder> {
+    Ok(OutstandingOrder {
+        nonce: row.get(0)?,
+        bloom: row.get(1)?,
+        workpiece: row.get(2)?,
+        scope_revision: row.get(3)?,
+        candidate: row.get(4)?,
+        displayed_digest: row.get(5)?,
+        stage: row.get(6)?,
+        transformation: row.get(7)?,
+    })
+}
+
+/// An [`OutstandingOrder`]'s columns as positional parameters matching
+/// [`ORDER_COLUMNS`], for the two tables that insert one.
+fn order_params(order: &OutstandingOrder) -> [&dyn rusqlite::ToSql; 8] {
+    [
+        &order.nonce,
+        &order.bloom,
+        &order.workpiece,
+        &order.scope_revision,
+        &order.candidate,
+        &order.displayed_digest,
+        &order.stage,
+        &order.transformation,
+    ]
+}
+
 impl StoreBackend for SqliteStore {
     fn record_order(&mut self, order: &OutstandingOrder) -> rusqlite::Result<RecordOutcome> {
         let changed = self.conn.execute(
-            "INSERT OR IGNORE INTO outstanding_orders \
-             (nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![
-                order.nonce,
-                order.bloom,
-                order.workpiece,
-                order.scope_revision,
-                order.candidate,
-                order.displayed_digest,
-                order.stage
-            ],
+            &format!(
+                "INSERT OR IGNORE INTO outstanding_orders ({ORDER_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+            ),
+            order_params(order).as_slice(),
         )?;
         Ok(if changed == 0 {
             RecordOutcome::Duplicate
@@ -346,21 +410,9 @@ impl StoreBackend for SqliteStore {
     }
 
     fn lookup_order(&mut self, nonce: &str) -> rusqlite::Result<Option<OutstandingOrder>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage \
-             FROM outstanding_orders WHERE nonce = ?1",
-        )?;
-        let mut rows = stmt.query_map(rusqlite::params![nonce], |row| {
-            Ok(OutstandingOrder {
-                nonce: row.get(0)?,
-                bloom: row.get(1)?,
-                workpiece: row.get(2)?,
-                scope_revision: row.get(3)?,
-                candidate: row.get(4)?,
-                displayed_digest: row.get(5)?,
-                stage: row.get(6)?,
-            })
-        })?;
+        let mut stmt =
+            self.conn.prepare(&format!("SELECT {ORDER_COLUMNS} FROM outstanding_orders WHERE nonce = ?1"))?;
+        let mut rows = stmt.query_map(rusqlite::params![nonce], order_from_row)?;
         // The nonce is the primary key, so there is at most one row.
         rows.next().transpose()
     }
@@ -374,6 +426,36 @@ impl StoreBackend for SqliteStore {
         let mut stmt = self.conn.prepare("SELECT nonce FROM outstanding_orders")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect()
+    }
+
+    fn record_parked_question(&mut self, question: &[u8], order: &OutstandingOrder) -> rusqlite::Result<()> {
+        // `question` leads the parameter list so the order's own columns keep the
+        // ?1.. positions `order_params` produces.
+        self.conn.execute(
+            &format!(
+                "INSERT OR REPLACE INTO parked_question (question, {ORDER_COLUMNS}) \
+                 VALUES (?9, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+            ),
+            [order_params(order).as_slice(), &[&question as &dyn rusqlite::ToSql]].concat().as_slice(),
+        )?;
+        Ok(())
+    }
+
+    fn lookup_parked_question(&mut self, bloom: &[u8], question: &[u8]) -> rusqlite::Result<Option<OutstandingOrder>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {ORDER_COLUMNS} FROM parked_question WHERE bloom = ?1 AND question = ?2"))?;
+        let mut rows = stmt.query_map(rusqlite::params![bloom, question], order_from_row)?;
+        // `(bloom, question)` is the primary key, so there is at most one row.
+        rows.next().transpose()
+    }
+
+    fn consume_parked_question(&mut self, bloom: &[u8], question: &[u8]) -> rusqlite::Result<bool> {
+        let removed = self.conn.execute(
+            "DELETE FROM parked_question WHERE bloom = ?1 AND question = ?2",
+            rusqlite::params![bloom, question],
+        )?;
+        Ok(removed > 0)
     }
 
     fn record_study(&mut self, bloom: &[u8], attempt_digest: &[u8], study_artifact: &str) -> rusqlite::Result<()> {

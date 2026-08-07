@@ -315,6 +315,7 @@ fn order(nonce: &str) -> OutstandingOrder {
         candidate: vec![5; 32],
         displayed_digest: vec![5; 32],
         stage: vec![9],
+        transformation: vec![7, 7],
     }
 }
 

@@ -42,7 +42,7 @@ use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AggregateReviewPayload, BloomId, Digest, DispatchPayload, ExecutionStatus, Fact, ModelOverride, Nonce,
-    ReviewPass, StageId, Topic, WorkHandle, WorkOrder, WorkpieceId,
+    RedispatchPayload, ReviewPass, StageId, Topic, Transformation, WorkHandle, WorkpieceId,
 };
 use aether_bloomery_github::SharedCorrespondence;
 use aether_data::wire::from_bytes;
@@ -242,6 +242,67 @@ impl AdmitSink for CollectingSink {
     }
 }
 
+/// Thread the host-resolved axes — the stage's agent profile and the member's
+/// advisory work-order description (#3595) — onto a member `transformation`
+/// about to dispatch. Only the model-driven `construct.implement` lane reads
+/// them (Construct / Refine); the mechanical verify/review lanes never name a
+/// task, so neither look one up nor warn on its absence. A store read fault
+/// propagates via `?` (re-drained next tick); a missing row leaves the
+/// description `None` and warns — a legible subject-only run, never a silent
+/// blind dispatch.
+///
+/// Shared by the first dispatch of a stage and the replay of a parked one
+/// (#3664), so a re-dispatched lane resolves its profile and prompt exactly the
+/// way the attempt that parked did.
+fn overlay_member_advisory(
+    store: &mut dyn StoreBackend,
+    transformation: &mut Transformation,
+    bloom: &[u8],
+    workpiece: &str,
+    stage: StageId,
+    sequence: u64,
+) -> rusqlite::Result<()> {
+    if transformation.command != CONSTRUCT_IMPLEMENT_COMMAND {
+        return Ok(());
+    }
+
+    // The stage's calibrated agent profile (ADR-0149 §The line), resolved
+    // host-side and overlaid the same way the description below is: the reducer
+    // names the stage catalog by digest and never resolves it, so without this
+    // the lane runs under whatever model the runner's ambient default happens to
+    // be and the receipt attests a profile that never ran. `stage` is what
+    // separates Construct from Refine here — both dispatch the same command at
+    // different calibrated efforts.
+    transformation.model = Some(dispatch_model(stage, &ModelOverride::default()));
+    if let Some(description) = store.lookup_dispatch_description(bloom, workpiece)? {
+        transformation.description = Some(description);
+    } else {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            workpiece = %workpiece,
+            "no work-order description persisted for the dispatched construct member; assembling a subject-only prompt",
+        );
+    }
+
+    // A failing verdict's persisted findings ride the same advisory channel as
+    // their own labeled section (#3656, ADR-0153), so a Refine re-entry's prompt
+    // names both the original order and what the failing gate flagged. The member
+    // row wins; a failing aggregate review persists bloom-scoped findings under
+    // the empty workpiece key until the decomposition slices them per member, and
+    // every re-opened member reads that bloom row. The assembled prompt is plain
+    // markdown concatenation, so the section header composes in-channel.
+    let findings = match store.lookup_review_findings(bloom, workpiece)? {
+        Some(findings) => Some(findings),
+        None => store.lookup_review_findings(bloom, "")?,
+    };
+    if let Some(findings) = findings {
+        let task = transformation.description.take().unwrap_or_default();
+        transformation.description = Some(format!("{task}\n\n## Findings\n\n{findings}"));
+    }
+    Ok(())
+}
+
 /// Drain the dispatch topic and submit each entry through the executor, recording
 /// its intake context. Returns the newly-tracked handles and the highest
 /// contiguously-submitted outbox sequence to ack (`None` when nothing submitted).
@@ -282,56 +343,15 @@ fn drain_and_dispatch(
             );
             break;
         }
-        // Thread the host-resolved axes — the stage's agent profile and the
-        // member's advisory work-order description (#3595) — onto the construct
-        // lane. Only the model-driven `construct.implement` lane reads them
-        // (Construct / Refine); the mechanical verify/review lanes never name a
-        // task, so neither look it up nor warn on its absence. A store read fault
-        // propagates via `?` (re-drained next tick); a missing row leaves the
-        // description `None` and warns — a legible subject-only run, never a
-        // silent blind dispatch.
         let mut transformation = payload.transformation;
-        if transformation.command == CONSTRUCT_IMPLEMENT_COMMAND {
-            // The stage's calibrated agent profile (ADR-0149 §The line), resolved
-            // host-side and overlaid the same way the description below is: the
-            // reducer names the stage catalog by digest and never resolves it, so
-            // without this the lane runs under whatever model the runner's ambient
-            // default happens to be and the receipt attests a profile that never
-            // ran. `payload.stage` is what separates Construct from Refine here —
-            // both dispatch the same command at different calibrated efforts.
-            transformation.model = Some(dispatch_model(payload.stage, &ModelOverride::default()));
-            if let Some(description) =
-                store.lookup_dispatch_description(payload.bloom.as_bytes(), &payload.workpiece.0)?
-            {
-                transformation.description = Some(description);
-            } else {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    sequence = entry.sequence,
-                    workpiece = %payload.workpiece.0,
-                    "no work-order description persisted for the dispatched construct member; assembling a subject-only prompt",
-                );
-            }
-            // A failing verdict's persisted findings ride the same advisory
-            // channel as their own labeled section (#3656, ADR-0153), so a
-            // Refine re-entry's prompt names both the original order and what
-            // the failing gate flagged. The member row wins; a failing
-            // aggregate review persists bloom-scoped findings under the empty
-            // workpiece key until the decomposition slices them per member,
-            // and every re-opened member reads that bloom row. The assembled
-            // prompt is plain markdown concatenation, so the section header
-            // composes in-channel.
-            let findings = match store.lookup_review_findings(payload.bloom.as_bytes(), &payload.workpiece.0)? {
-                Some(findings) => Some(findings),
-                None => store.lookup_review_findings(payload.bloom.as_bytes(), "")?,
-            };
-            if let Some(findings) = findings {
-                let task = transformation.description.take().unwrap_or_default();
-                transformation.description = Some(format!("{task}\n\n## Findings\n\n{findings}"));
-            }
-        }
-        let nonce = Nonce(format!("dispatch-{}", entry.sequence));
-        let order = WorkOrder { transformation, nonce: nonce.clone() };
+        overlay_member_advisory(
+            store,
+            &mut transformation,
+            payload.bloom.as_bytes(),
+            &payload.workpiece.0,
+            payload.stage,
+            entry.sequence,
+        )?;
         // The record's axes come from the payload's explicit fields (ADR-0152):
         // the true scope revision always, and the displayed digest — what the
         // returning evidence must bind to — the candidate tree when the member
@@ -339,15 +359,16 @@ fn drain_and_dispatch(
         // the displayed digest by reducer construction.
         let displayed = payload.candidate.unwrap_or(payload.scope_revision);
         let record = DispatchRecord {
-            nonce,
+            nonce: Nonce(format!("dispatch-{}", entry.sequence)),
             bloom: BloomId(payload.bloom),
             workpiece: payload.workpiece,
             scope_revision: payload.scope_revision,
             candidate: displayed,
             displayed_digest: displayed,
             stage: payload.stage,
+            transformation,
         };
-        match dispatch_and_record(executor, store, &order, &record) {
+        match dispatch_and_record(executor, store, &record) {
             Ok(handle) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -505,10 +526,8 @@ fn drain_and_dispatch_aggregate(
         if let Some(task) = task {
             transformation.description = Some(task);
         }
-        let nonce = Nonce(format!("dispatch-{}", entry.sequence));
-        let order = WorkOrder { transformation, nonce: nonce.clone() };
         let record = DispatchRecord {
-            nonce,
+            nonce: Nonce(format!("dispatch-{}", entry.sequence)),
             bloom: BloomId(payload.bloom),
             // A bloom-level order has no member axis (ADR-0153): the stage
             // discriminates at intake, and the empty workpiece never routes.
@@ -517,8 +536,9 @@ fn drain_and_dispatch_aggregate(
             candidate: displayed,
             displayed_digest: displayed,
             stage: StageId::AggregateReview,
+            transformation,
         };
-        match dispatch_and_record(executor, store, &order, &record) {
+        match dispatch_and_record(executor, store, &record) {
             Ok(handle) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -542,6 +562,165 @@ fn drain_and_dispatch_aggregate(
                     sequence = entry.sequence,
                     %error,
                     "aggregate-review submit/record failed; stopping the ack prefix to re-drive",
+                );
+                transient_failure = Some(entry.sequence);
+                break;
+            }
+        }
+    }
+    Ok((handles, ack_through, transient_failure))
+}
+
+/// The advisory section a re-dispatched lane reads the owner's decision from.
+/// Composes in-channel beside `## Findings`, the same plain-markdown way.
+const DECISION_SECTION: &str = "## Decision";
+
+/// Assemble the replay a released question's held order dispatches: the held
+/// lane under a fresh nonce, its advisory channel re-resolved, and the answer
+/// that released the hold appended as its own section.
+///
+/// `Ok(None)` means the entry names nothing replayable — no held row, or a row
+/// whose columns do not decode. Neither clears on retry, so the caller acks past
+/// it; a store fault is the `Err` that re-drains.
+fn resolve_replay(
+    store: &mut dyn StoreBackend,
+    payload: &RedispatchPayload,
+    sequence: u64,
+) -> rusqlite::Result<Option<DispatchRecord>> {
+    let Some(held) = store.lookup_parked_question(payload.bloom.as_bytes(), payload.question.as_bytes())? else {
+        // Either the park predates this reactor, or the answer named a hold no
+        // dispatched attempt raised.
+        tracing::error!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            bloom = ?payload.bloom,
+            question = ?payload.question,
+            "no parked order held under the released question; acking past the redispatch",
+        );
+        return Ok(None);
+    };
+    let Some(mut record) = DispatchRecord::from_stored(&held) else {
+        tracing::error!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            nonce = %held.nonce,
+            "held order did not decode into a dispatch record; acking past the redispatch",
+        );
+        return Ok(None);
+    };
+
+    // A fresh nonce off the outbox sequence, so the replay is its own attempt
+    // rather than a re-run of the spent one the park consumed.
+    record.nonce = Nonce(format!("redispatch-{sequence}"));
+    overlay_member_advisory(
+        store,
+        &mut record.transformation,
+        &held.bloom,
+        &record.workpiece.0,
+        record.stage,
+        sequence,
+    )?;
+
+    match str::from_utf8(&payload.words) {
+        Ok(answer) if record.transformation.command == CONSTRUCT_IMPLEMENT_COMMAND => {
+            let task = record.transformation.description.take().unwrap_or_default();
+            record.transformation.description = Some(format!("{task}\n\n{DECISION_SECTION}\n\n{answer}"));
+        }
+        Ok(_) => tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            command = %record.transformation.command,
+            "re-dispatching a lane with no advisory channel; it cannot see the answer and will park again",
+        ),
+        Err(error) => tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            %error,
+            "answer statement is not UTF-8; re-dispatching without the decision overlay",
+        ),
+    }
+    Ok(Some(record))
+}
+
+/// Drain the redispatch topic and replay each released question's held attempt
+/// (ADR-0151, #3664). An adopted answer releases the hold and decides a
+/// re-dispatch; this is the half that performs it — it looks the parked order up
+/// under `(bloom, question)`, overlays the answer onto the lane's advisory
+/// channel, and submits it under a fresh nonce.
+///
+/// The overlay is load-bearing, not decoration: a lane replayed without the
+/// decision that released it sees exactly the inputs that made it park and parks
+/// again on the same question, so the bloom would wedge in a loop rather than
+/// silently. A lane with no advisory channel (the mechanical zero-egress
+/// `verify.check`) cannot be told anything, and warns rather than replaying a
+/// question it has no way to answer.
+///
+/// Same ack-prefix / park / backoff semantics as [`drain_and_dispatch`]: a
+/// decode, lookup, or submit failure stops the ack prefix so the entry re-drains
+/// rather than being acked past. The held row is consumed only *after* the
+/// replay dispatches, so a transient failure re-drains against a row still there
+/// — the ordering the integrate correspondence learned the hard way (#3667).
+fn drain_and_redispatch(
+    store: &mut dyn StoreBackend,
+    executor: &ExecutorShell,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    let entries = store.drain_topic(Topic::Redispatch)?;
+    let mut handles = Vec::new();
+    let mut ack_through = None;
+    let mut transient_failure = None;
+    for entry in entries {
+        let Ok(payload) = from_bytes::<RedispatchPayload>(&entry.payload) else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                "redispatch outbox entry did not decode; stopping the ack prefix to re-drain",
+            );
+            break;
+        };
+        let Some(record) = resolve_replay(store, &payload, entry.sequence)? else {
+            // The entry names nothing replayable and never will, so ack past it
+            // rather than wedge the queue behind it.
+            ack_through = Some(entry.sequence);
+            continue;
+        };
+
+        match dispatch_and_record(executor, store, &record) {
+            Ok(handle) => {
+                handles.push(handle);
+                ack_through = Some(entry.sequence);
+                // The replay is submitted and tracked, so the hold's row has done
+                // its job. A delete fault here leaves an orphan row nothing reads
+                // (the outbox entry it answered is acked), never a lost redispatch.
+                if let Err(error) = store.consume_parked_question(payload.bloom.as_bytes(), payload.question.as_bytes())
+                {
+                    tracing::warn!(
+                        target: "aether_chassis_bloomery::executor",
+                        sequence = entry.sequence,
+                        %error,
+                        "redispatched attempt submitted but its parked row did not clear",
+                    );
+                }
+            }
+            Err(error) if error.is_permanent() => {
+                tracing::error!(
+                    target: "aether_chassis_bloomery::executor",
+                    sequence = entry.sequence,
+                    bloom = ?record.bloom.0,
+                    workpiece = %record.workpiece.0,
+                    stage = ?record.stage,
+                    nonce = %record.nonce.0,
+                    %error,
+                    "redispatch submit refused permanently; parking the entry instead of re-driving",
+                );
+                ack_through = Some(entry.sequence);
+                break;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    sequence = entry.sequence,
+                    %error,
+                    "redispatch submit/record failed; stopping the ack prefix to re-drive",
                 );
                 transient_failure = Some(entry.sequence);
                 break;
@@ -897,6 +1076,25 @@ impl NativeActor for ExecutorReactorCapability {
                 }
                 Err(error) => {
                     tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-review drain failed");
+                }
+            }
+            // Replay the attempts whose parked questions were answered (#3664),
+            // on the same shared handle tracking and backoff window.
+            match drain_and_redispatch(store, &executor) {
+                Ok((handles, ack_through, transient_failure)) => {
+                    if let Some(sequence) = ack_through
+                        && let Err(error) = store.ack_topic(Topic::Redispatch, sequence)
+                    {
+                        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "redispatch ack failed; entries re-drive");
+                    }
+                    let now = Instant::now();
+                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
+                    if transient_failure.is_some() {
+                        state.backoff = next_backoff(state.backoff.as_ref(), transient_failure);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "redispatch drain failed");
                 }
             }
         }
