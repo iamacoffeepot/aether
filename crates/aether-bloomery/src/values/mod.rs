@@ -15,7 +15,9 @@ mod stage;
 mod statement;
 mod study;
 
-pub use bloom::{BloomDraft, BloomSpec, LandingReceipt, MemberSubject, Membership, ResolutionClaim, ResolvedBloom};
+pub use bloom::{
+    BloomDraft, BloomSpec, LandingReceipt, MemberCandidate, MemberSubject, Membership, ResolutionClaim, ResolvedBloom,
+};
 pub use config::{
     ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, ResolvedConfigs, Unproducible, config_address,
     decode_config,

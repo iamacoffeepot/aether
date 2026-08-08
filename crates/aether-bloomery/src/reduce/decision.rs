@@ -10,7 +10,8 @@ use super::{FoldedIntegration, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
-    AgentProfile, ConfigRegistry, Evidence, LandingReceipt, ResolutionClaim, ResolvedBloom, Transformation,
+    AgentProfile, ConfigRegistry, Evidence, LandingReceipt, MemberCandidate, ResolutionClaim, ResolvedBloom,
+    Transformation,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -196,9 +197,12 @@ pub enum Decision {
         bloom: BloomId,
         /// The sealed base the integration branch bootstraps at.
         base: Digest,
-        /// Every member's claimed candidate tree, in member order — the fold
-        /// sequence, and the resolve's integration lineage.
-        candidates: Vec<Digest>,
+        /// Every member's workpiece and claimed candidate tree, in member
+        /// order — the fold sequence, and the resolve's integration lineage.
+        /// The workpiece rides along because a fold that must *combine* work
+        /// merges each member's candidate ref, which is addressed by workpiece;
+        /// the tree alone cannot be merged.
+        members: Vec<MemberCandidate>,
     },
     /// Record (or clear) the folded integration held on the bloom while its
     /// aggregate review runs (ADR-0153): a verified [`Fact::Resolve`](crate::Fact::Resolve) sets it,

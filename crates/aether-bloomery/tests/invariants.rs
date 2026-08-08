@@ -1651,9 +1651,16 @@ fn the_completing_integrate_dispatches_the_integration_fold_in_member_order() {
 
     let (_, second) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 22) }));
     match second.effects.iter().find(|e| matches!(e, Decision::DispatchIntegration { .. })) {
-        Some(Decision::DispatchIntegration { base, candidates, .. }) => {
+        Some(Decision::DispatchIntegration { base, members, .. }) => {
             assert_eq!(*base, spec_base, "the fold bootstraps at the sealed base");
-            assert_eq!(candidates, &vec![digest(21), digest(22)], "every member's candidate, in member order");
+            let folded: Vec<(&str, Digest)> =
+                members.iter().map(|member| (member.workpiece.0.as_str(), member.candidate)).collect();
+            assert_eq!(
+                folded,
+                vec![("alpha", digest(21)), ("beta", digest(22))],
+                "every member's workpiece and candidate, in member order — the workpiece addresses the \
+                 candidate ref a combining fold merges",
+            );
         }
         other => panic!("expected a DispatchIntegration, got {other:?}"),
     }

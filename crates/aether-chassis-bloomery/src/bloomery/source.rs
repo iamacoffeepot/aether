@@ -179,6 +179,22 @@ impl SourceShell {
         self.backend.integrate(bloom, candidate, expected)
     }
 
+    /// Fold the candidate at `candidate_ref` in by merging it — what a fold that
+    /// must combine work built against different points uses instead of
+    /// [`integrate`](Self::integrate)'s tree-replace.
+    ///
+    /// # Errors
+    /// The integration branch or candidate ref is missing, or the source is
+    /// unreachable.
+    pub fn integrate_merge(
+        &self,
+        bloom: &BloomId,
+        candidate_ref: &str,
+        expected: &Checkpoint,
+    ) -> Result<IntegrateOutcome, SourceError> {
+        self.backend.integrate_merge(bloom, candidate_ref, expected)
+    }
+
     /// Propose landing `new_head` onto mainline, guarded by `expected_base`.
     ///
     /// # Errors

@@ -6,7 +6,7 @@ use super::{BloomStatus, Decision, Decisions, FoldedIntegration, IntegrateError,
 use crate::digest::Digest;
 use crate::ids::BloomId;
 use crate::ids::StageId;
-use crate::values::{ResolutionClaim, Transformation};
+use crate::values::{MemberCandidate, ResolutionClaim, Transformation};
 
 pub(super) fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &ResolutionClaim) -> Decisions {
     let Some(record) = snapshot.blooms.get(bloom) else {
@@ -36,19 +36,20 @@ pub(super) fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &Res
         .iter()
         .all(|member| member.workpiece == claim.workpiece || record.claims.contains_key(&member.workpiece));
     if complete {
-        let candidates = record
+        let members = record
             .spec
             .members()
             .iter()
             .filter_map(|member| {
-                if member.workpiece == claim.workpiece {
+                let candidate = if member.workpiece == claim.workpiece {
                     Some(claim.candidate)
                 } else {
                     record.claims.get(&member.workpiece).map(|recorded| recorded.candidate)
-                }
+                };
+                candidate.map(|candidate| MemberCandidate { workpiece: member.workpiece.clone(), candidate })
             })
             .collect();
-        effects.push(Decision::DispatchIntegration { bloom: *bloom, base: record.spec.base(), candidates });
+        effects.push(Decision::DispatchIntegration { bloom: *bloom, base: record.spec.base(), members });
     }
     Decisions { outcome: Outcome::Integrated { bloom: *bloom, workpiece: claim.workpiece.clone() }, effects }
 }
