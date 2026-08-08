@@ -22,10 +22,10 @@ use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::{
-    BACKOFF_CAP, CandidatePush, GithubMirrorConfig, NameEvidenceClaims, TrackedHandle, backoff_delay,
-    candidate_ref_name, drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_stale,
-    missing_connection_knobs, next_backoff, pull_and_admit, push_admitted_candidates, seed_tracked,
-    select_stale_handles,
+    BACKOFF_CAP, CandidatePush, GithubMirrorConfig, NameEvidenceClaims, TrackedHandle, UnconfiguredGithubExecutor,
+    backoff_delay, candidate_ref_name, drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch,
+    is_disabled_mount, is_stale, missing_connection_knobs, next_backoff, pull_and_admit, push_admitted_candidates,
+    seed_tracked, select_stale_handles,
 };
 use crate::bloomery::executor::local::testing::FixedRunner;
 use crate::bloomery::intake::{Admission, AdmitDecision, UploadedEvidence, admit_uploaded, attempt_artifact_name};
@@ -1185,4 +1185,106 @@ fn an_empty_token_is_named_even_when_owner_and_repo_are_set() {
     let config = GithubMirrorConfig { owner: "o".to_owned(), repo: "r".to_owned(), ..GithubMirrorConfig::default() };
 
     assert_eq!(missing_connection_knobs(&config), ["GITHUB_TOKEN"]);
+}
+
+#[test]
+fn mount_decision_covers_all_four_combinations() {
+    // 1. Unconfigured GitHub + local lanes enabled (the default) => mount with
+    // local backend only, rather than disabled.
+    let unconfigured_local_on = GithubMirrorConfig::default();
+    assert!(
+        !is_disabled_mount(&unconfigured_local_on),
+        "unconfigured GitHub with local lane enabled must mount (local-only)"
+    );
+
+    // 2. Unconfigured GitHub + local lanes disabled => still disabled.
+    let unconfigured_local_off = GithubMirrorConfig { local_lane_enabled: false, ..GithubMirrorConfig::default() };
+    assert!(
+        is_disabled_mount(&unconfigured_local_off),
+        "unconfigured GitHub with local lanes disabled must stay disabled"
+    );
+
+    // 3. Fully configured + local enabled => enabled (RoutingExecutor over both backends).
+    let configured_local_on = GithubMirrorConfig {
+        token: "t".to_owned(),
+        owner: "o".to_owned(),
+        repo: "r".to_owned(),
+        local_lane_enabled: true,
+        ..GithubMirrorConfig::default()
+    };
+    assert!(!is_disabled_mount(&configured_local_on), "fully configured with local enabled must mount");
+
+    // 4. Fully configured + local disabled => enabled (bare Actions backend).
+    let configured_local_off = GithubMirrorConfig {
+        token: "t".to_owned(),
+        owner: "o".to_owned(),
+        repo: "r".to_owned(),
+        local_lane_enabled: false,
+        ..GithubMirrorConfig::default()
+    };
+    assert!(!is_disabled_mount(&configured_local_off), "fully configured with local disabled must mount");
+}
+
+#[test]
+fn unconfigured_github_with_local_enabled_routes_construct_locally_and_fails_actions_with_missing_knobs() {
+    use std::sync::Arc;
+
+    use aether_bloomery::{ExecutorBackend, WorkOrder};
+    use aether_bloomery_github::{ExecutorError, GithubError};
+
+    // Build the local-only routing shell the reactor mounts when GitHub is
+    // unconfigured but local lanes are enabled: construct lanes go local,
+    // everything else (verify) hits the unconfigured GitHub stub that fails
+    // naming the missing knobs.
+    let missing = "GITHUB_TOKEN, AETHER_GITHUB_OWNER, AETHER_GITHUB_REPO";
+    let actions = Arc::new(UnconfiguredGithubExecutor { missing: missing.to_owned() });
+    let local_backend = Arc::new(CapturingBackend::default());
+    let routing = RoutingExecutor::new(actions, Arc::clone(&local_backend), vec!["construct.".to_owned()]);
+    let shell = ExecutorShell::new(Arc::new(routing));
+
+    // Verify that a construct order (local lane) still submits through the local
+    // backend even though GitHub is unconfigured.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    enqueue_dispatch_at(&mut store, bloom, "wp-construct", 5, StageId::Construct);
+    let (handles, ack_through, transient) = drain_and_dispatch(&mut store, &shell).unwrap();
+    assert_eq!(handles.len(), 1, "construct lane must dispatch locally when GitHub is unconfigured");
+    assert_eq!(ack_through, Some(1));
+    assert_eq!(transient, None);
+    assert_eq!(local_backend.orders().len(), 1, "the construct order reached the local backend");
+    store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
+
+    // Verify that a verify order (Actions lane) fails at submit with a permanent
+    // error naming the missing knobs, rather than accumulating silently.
+    enqueue_dispatch_at(&mut store, bloom, "wp-verify", 6, StageId::Verify);
+    let (handles, ack_through, transient) = drain_and_dispatch(&mut store, &shell).unwrap();
+    assert!(handles.is_empty(), "verify lane must not dispatch when GitHub is unconfigured");
+    assert_eq!(ack_through, Some(2), "the permanently refused entry parks (acked past) rather than re-driving");
+    assert_eq!(transient, None, "a permanent refusal is not tracked as a transient backoff");
+    store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
+    assert!(store.drain_topic(Topic::Dispatch).unwrap().is_empty(), "the parked verify entry does not re-drain");
+
+    // The error the stub raises must be permanent and must name the missing knobs.
+    let error = ExecutorError::Github(GithubError::Status {
+        status: 400,
+        body: format!("GitHub not configured; missing connection knobs: {missing}"),
+    });
+    let dispatch_error =
+        crate::bloomery::intake::DispatchError::Submit(crate::bloomery::ExecutorPortError::Actions(error));
+    assert!(dispatch_error.is_permanent(), "the unconfigured-GitHub error must be permanent so it parks");
+    assert!(dispatch_error.to_string().contains("GITHUB_TOKEN"), "the failure reason must name the missing knobs");
+    assert!(dispatch_error.to_string().contains("AETHER_GITHUB_OWNER"));
+    assert!(dispatch_error.to_string().contains("AETHER_GITHUB_REPO"));
+
+    // Directly verify the stub's submit error also names the missing knobs.
+    let stub = UnconfiguredGithubExecutor { missing: missing.to_owned() };
+    let order = WorkOrder {
+        transformation: aether_bloomery::Transformation::for_member_stage(StageId::Verify, digest(6), digest(0xC0)),
+        nonce: aether_bloomery::Nonce("x".to_owned()),
+    };
+    let err = stub.submit(&order).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("GITHUB_TOKEN"), "UnconfiguredGithubExecutor must name GITHUB_TOKEN");
+    assert!(msg.contains("AETHER_GITHUB_OWNER"));
+    assert!(msg.contains("AETHER_GITHUB_REPO"));
 }
