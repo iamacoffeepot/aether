@@ -423,15 +423,10 @@ fn extract_loops(boundary: &[(VertexId, VertexId)], vertices: &[Point3], plane: 
                 break;
             }
             loop_verts.push(cur);
-            let next = pick_continuation(vertices, axes, &outgoing, &visited, prev, cur);
-            match next {
-                Some(n) => {
-                    visited.insert((cur, n));
-                    prev = cur;
-                    cur = n;
-                }
-                None => return None,
-            }
+            let next = pick_continuation(vertices, axes, &outgoing, &visited, prev, cur)?;
+            visited.insert((cur, next));
+            prev = cur;
+            cur = next;
         }
         if loop_verts.len() < 3 {
             return None;

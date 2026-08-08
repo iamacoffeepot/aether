@@ -47,9 +47,10 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ inputs.subject }}
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        with:
-          components: rustfmt, clippy
+      # The pinned toolchain, not a channel: this lane's verdict is only worth
+      # anything if it was produced by the compiler the merge gate runs (ci.yml
+      # resolves the same file). `rust-toolchain.toml` declares the components.
+      - run: rustup toolchain install
       - name: Install ALSA dev headers (cpal Linux backend)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - id: transform

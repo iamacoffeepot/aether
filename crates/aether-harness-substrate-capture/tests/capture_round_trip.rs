@@ -37,7 +37,7 @@ fn boot_advance_capture_round_trip() {
     assert!(
         png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
         "captured bytes are not a PNG: first 8 bytes={:?}",
-        &png.iter().take(8).copied().collect::<Vec<u8>>(),
+        png.iter().take(8).copied().collect::<Vec<u8>>(),
     );
 }
 
@@ -87,7 +87,7 @@ fn capture_frame_send_and_await_reply_returns_png() {
             assert!(
                 png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
                 "captured bytes are not a PNG: first 8 bytes={:?}",
-                &png.iter().take(8).copied().collect::<Vec<u8>>(),
+                png.iter().take(8).copied().collect::<Vec<u8>>(),
             );
         }
         CaptureFrameResult::Err { error } => {

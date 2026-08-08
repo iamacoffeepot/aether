@@ -116,10 +116,7 @@ impl ApprovalPolicy {
                 if !saw_rules || pending.is_some() {
                     return None;
                 }
-                match parse_scalar(rest) {
-                    Some(glob) => pending = Some(glob),
-                    None => return None,
-                }
+                pending = Some(parse_scalar(rest)?);
                 continue;
             }
             if let Some(rest) = line.strip_prefix("    tier:") {
