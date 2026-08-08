@@ -15,8 +15,8 @@ use super::{
 use crate::digest::Digest;
 use crate::ids::BloomId;
 use crate::values::{
-    BloomSpec, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, EvidenceKind, Membership, ModelOverride,
-    ResolvedConfigs, StageCatalog, Transformation, Unproducible,
+    BloomSpec, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, EvidenceKind, MemberCandidate, Membership,
+    ModelOverride, ResolvedConfigs, StageCatalog, Transformation, Unproducible,
 };
 
 /// Build the seal-time entry-stage dispatch effects for one member: seed its
@@ -333,10 +333,12 @@ pub(super) fn reduce_supersede(
     // predecessor never integrated (the wedged-member escape hatch) would
     // otherwise be claimed but never executed, leaving the successor
     // unresolvable.
+    let mut every_member_inherited = true;
     for member in successor.members() {
         let inherited =
             record.claims.get(&member.workpiece).is_some_and(|claim| claim.scope_revision == member.scope_revision);
         if !inherited {
+            every_member_inherited = false;
             effects.extend(entry_dispatch_effects(
                 successor_id,
                 member,
@@ -345,6 +347,32 @@ pub(super) fn reduce_supersede(
                 &catalog,
             ));
         }
+    }
+    // A successor every one of whose members arrived already integrated has a
+    // complete claim set the instant it seals, and no member left to run — so
+    // nothing downstream would ever dispatch its fold. `reduce_integrate`
+    // dispatches integration on the claim that *completes* the set, and here no
+    // claim arrives: they were all inherited in this same decision. Without
+    // this the successor is claimed, complete, and permanently unresolvable —
+    // the predecessor's work carried over and then stranded.
+    //
+    // This is the re-base shape: the same members at the same scope revisions
+    // on a new base. Those candidates were built against the predecessor's
+    // base, so the successor needs its own fold rather than a reuse of the
+    // predecessor's integration — and that fold has to combine rather than
+    // state, which is what the merge-based fold is for.
+    if every_member_inherited {
+        let members = successor
+            .members()
+            .iter()
+            .filter_map(|member| {
+                record
+                    .claims
+                    .get(&member.workpiece)
+                    .map(|claim| MemberCandidate { workpiece: member.workpiece.clone(), candidate: claim.candidate })
+            })
+            .collect();
+        effects.push(Decision::DispatchIntegration { bloom: successor_id, base: successor.base(), members });
     }
     effects.push(Decision::MarkSuperseded { bloom: *predecessor, by: successor_id });
     Decisions { outcome: Outcome::Superseded { predecessor: *predecessor, successor: successor_id }, effects }
