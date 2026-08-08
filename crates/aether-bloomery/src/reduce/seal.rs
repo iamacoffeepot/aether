@@ -6,6 +6,8 @@ use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use serde::de::DeserializeOwned;
+
 use super::attempt::stage_profile;
 use super::{
     BloomStatus, Decision, Decisions, Outcome, SealConflict, SealError, Snapshot, StageProgress, SupersedeError,
@@ -13,7 +15,8 @@ use super::{
 use crate::digest::Digest;
 use crate::ids::BloomId;
 use crate::values::{
-    BloomSpec, ConfigRegistry, ConfigScopes, EvidenceKind, Membership, ResolvedConfigs, StageCatalog, Transformation,
+    BloomSpec, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, EvidenceKind, Membership, ModelOverride,
+    ResolvedConfigs, StageCatalog, Transformation, Unproducible,
 };
 
 /// Build the seal-time entry-stage dispatch effects for one member: seed its
@@ -74,11 +77,13 @@ pub(super) fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec, configs: &Resol
     if let Err(error) = validate_configs(spec, configs) {
         return Decisions::rejected(Outcome::SealRejected(error));
     }
-    // The sealed catalog must be one the line can actually run — a bloom is
-    // graded against the exact catalog it promised (ADR-0149 §The line).
-    if let Err(error) = validate_stage_catalog(spec, configs) {
-        return Decisions::rejected(Outcome::SealRejected(error));
-    }
+    // The sealed catalog must be one the line can actually run, and every
+    // member's override must be one that catalog can honour — a bloom is graded
+    // against the exact line it promised (ADR-0149 §The line).
+    let catalog = match validate_line(spec, configs) {
+        Ok(catalog) => catalog,
+        Err(error) => return Decisions::rejected(Outcome::SealRejected(error)),
+    };
     // All-or-nothing admission: any member already in a foreign active bloom
     // aborts the whole seal, naming the conflict — a failed batch admission
     // leaves no claims (ADR-0149 §The bloom).
@@ -99,7 +104,6 @@ pub(super) fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec, configs: &Resol
     for member in spec.members() {
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom });
     }
-    let catalog = StageCatalog::sealed_in(ConfigScopes::bloom_wide(spec.configs()), configs);
     for member in spec.members() {
         effects.extend(entry_dispatch_effects(bloom, member, spec.base(), spec.configs(), &catalog));
     }
@@ -132,25 +136,72 @@ fn validate_member_admission(members: &[Membership]) -> Result<(), SealError> {
     Ok(())
 }
 
-/// The seal-time stage-catalog admission (ADR-0174): whatever catalog the spec
-/// seals must be one the line can run.
+/// The seal-time line admission (ADR-0174, #4601): whatever catalog the spec
+/// seals must be one the line can run, and every member's model override must be
+/// one that catalog can honour. Returns the resolved catalog, which the caller
+/// goes on to dispatch against — the door and the dispatch read one value, so
+/// they cannot be admitting one line and running another.
 ///
-/// Structural rather than equality against the compiled line, which is the whole
-/// point — an operator seals a catalog *because* it differs, choosing a cheap
-/// harness for construct and an expensive one for review. What cannot differ is
-/// that every stage is bound exactly once, every binding names a routable
-/// process, and every retry budget is a number the reducer can count to. A
-/// catalog failing any of those would seal a bloom whose members wedge with no
-/// attempt ever made.
+/// The catalog check is structural rather than equality against the compiled
+/// line, which is the whole point — an operator seals a catalog *because* it
+/// differs, choosing a cheap harness for construct and an expensive one for
+/// review. What cannot differ is that every stage is bound exactly once, every
+/// binding names a routable process, and every retry budget is a number the
+/// reducer can count to. A catalog failing any of those would seal a bloom whose
+/// members wedge with no attempt ever made.
 ///
-/// A spec sealing no catalog passes: it runs [`StageCatalog::line`], which is
-/// authored in Rust and structurally valid by construction. Both admission doors
-/// run this, so a successor promises a runnable line exactly as a fresh seal
-/// does; supersession wraps the error as [`SupersedeError::InvalidMember`].
-fn validate_stage_catalog(spec: &BloomSpec, configs: &ResolvedConfigs) -> Result<(), SealError> {
-    StageCatalog::sealed_in(ConfigScopes::bloom_wide(spec.configs()), configs)
-        .validate()
-        .map_err(SealError::UnrunnableStageCatalog)
+/// The override check runs against that same resolved catalog, because which
+/// stages fork an agent is exactly what a catalog decides. A member naming a
+/// stage the catalog runs no model at has authored a choice nothing resolves.
+///
+/// A spec sealing neither passes: it runs [`StageCatalog::line`] with no
+/// override, both structurally valid by construction. Both admission doors run
+/// this, so a successor promises a runnable line exactly as a fresh seal does;
+/// supersession wraps the error as [`SupersedeError::InvalidMember`].
+fn validate_line(spec: &BloomSpec, configs: &ResolvedConfigs) -> Result<StageCatalog, SealError> {
+    let catalog = sealed_config::<StageCatalog>(ConfigScopes::bloom_wide(spec.configs()), configs)?
+        .unwrap_or_else(StageCatalog::line);
+    catalog.validate().map_err(SealError::UnrunnableStageCatalog)?;
+
+    for member in spec.members() {
+        let scopes = ConfigScopes::member_of(&member.configs, spec.configs());
+        sealed_config::<ModelOverride>(scopes, configs)?
+            .unwrap_or_default()
+            .validate(&catalog)
+            .map_err(|error| SealError::UnusableModelOverride { workpiece: member.workpiece.clone(), error })?;
+    }
+    Ok(catalog)
+}
+
+/// Resolve a configuration the seal door itself must read, refusing rather than
+/// defaulting when a scope sealed one whose content will not produce.
+///
+/// The typed counterpart of [`validate_configs`]'s name-keyed walk, and the
+/// reason both exist. That walk holds no Rust type, so it catches an address
+/// with no content and content filed under the wrong kind but cannot try the
+/// decode; this closes the third case for the kinds the door reads by type.
+/// Without it a catalog whose stored bytes no longer decode — the shape of a
+/// configuration authored before a breaking change to its kind — would fall
+/// through to the compiled line and seal a bloom running a line its receipt does
+/// not name.
+fn sealed_config<K: ConfigKind + DeserializeOwned>(
+    scopes: ConfigScopes<'_>,
+    configs: &ResolvedConfigs,
+) -> Result<Option<K>, SealError> {
+    // Only a sealed address can fail, so reading it first keeps the error able to
+    // name what it was reaching for.
+    let Some(address) = scopes.address::<K>() else {
+        return Ok(None);
+    };
+    configs.resolve::<K>(scopes).map_err(|error| SealError::UnproducibleConfig {
+        kind: String::from(K::NAME),
+        address,
+        reason: match error {
+            ConfigResolveError::Missing { .. } => Unproducible::Absent,
+            ConfigResolveError::KindMismatch { stored, .. } => Unproducible::MisfiledAs(stored),
+            ConfigResolveError::Decode { .. } => Unproducible::Undecodable,
+        },
+    })
 }
 
 /// The seal-time configuration admission (ADR-0174): every address the spec's
@@ -239,18 +290,18 @@ pub(super) fn reduce_supersede(
     if let Err(error) = validate_configs(successor, configs) {
         return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
     }
-    // And to seal's catalog admission, so a successor cannot introduce a line
-    // that cannot run.
-    if let Err(error) = validate_stage_catalog(successor, configs) {
-        return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
-    }
+    // And to seal's line admission, so a successor cannot introduce a catalog
+    // that cannot run or an override that catalog cannot honour.
+    let catalog = match validate_line(successor, configs) {
+        Ok(catalog) => catalog,
+        Err(error) => return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error))),
+    };
     // Supersession is a second door into `active`, so it runs the same
     // all-or-nothing conflict scan as seal — but the predecessor's own holds are
     // released in this decision set, so only a foreign bloom's hold conflicts.
     if let Some(conflict) = membership_conflict(snapshot, successor.members(), Some(predecessor)) {
         return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::MembershipConflict(conflict)));
     }
-    let catalog = StageCatalog::sealed_in(ConfigScopes::bloom_wide(successor.configs()), configs);
     let mut effects = Vec::new();
     // Release the predecessor's memberships, then claim the successor's, then
     // inherit the predecessor's still-valid resolution claims, then name it

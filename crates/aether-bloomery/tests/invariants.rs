@@ -13,12 +13,14 @@
 
 mod common;
 
+use aether_bloomery::ConfigKind;
 use aether_bloomery::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, Artifact, AttemptCompletedError, BloomStatus,
     CandidateRef, CatalogError, Decision, Digest, Evidence, EvidenceKind, Fact, KeyId, LandError, Observation, Outcome,
     Provenance, Question, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId,
-    Statement, SupersedeError, reduce,
+    Statement, SupersedeError, Unproducible, reduce,
 };
+use aether_data::Kind;
 use aether_data::wire::to_vec;
 use common::{
     claim, digest, draft, draft_with_catalog, event, membership, sealed_and_resolved, splice_bloom, step, workpiece,
@@ -289,6 +291,38 @@ fn an_absent_catalog_runs_the_line_but_an_empty_one_is_refused() {
         "an empty catalog binds nothing and is refused: {:?}",
         decided.outcome,
     );
+}
+
+// Tripwire: content that is present and correctly filed but does not decode is a
+// refusal, not a fall-through to the compiled line (ADR-0174). The name-keyed
+// walk over the registry holds no Rust type, so it can only see that *something*
+// is filed under the right kind; only a typed resolution reaches the decode. This
+// is the shape of a configuration authored before a breaking change to its kind
+// — the registry keys on the kind name precisely so it survives schema
+// evolution, which is what leaves the decode as the sole place a stale value
+// surfaces. Falling through here would seal a bloom running a line its receipt
+// does not name.
+#[test]
+fn a_sealed_catalog_whose_bytes_do_not_decode_is_refused() {
+    let catalog = StageCatalog::line();
+    let (draft, _) = draft_with_catalog(1, vec![membership("wp", 10)], &catalog);
+
+    // Correctly filed at the sealed address, so the name-keyed walk passes it —
+    // the bytes are what will not produce a catalog.
+    let mut configs = ResolvedConfigs::default();
+    configs.insert(catalog.address(), StageCatalog::NAME, vec![0xff]);
+
+    let decided = reduce(&Snapshot::new(digest(1)), &event("stale", Fact::Seal(draft.seal())), &configs);
+    assert_eq!(
+        decided.outcome,
+        Outcome::SealRejected(SealError::UnproducibleConfig {
+            kind: String::from(StageCatalog::NAME),
+            address: catalog.address(),
+            reason: Unproducible::Undecodable,
+        }),
+        "undecodable content refuses rather than running the compiled line"
+    );
+    assert!(decided.effects.is_empty(), "a refused seal claims nothing");
 }
 
 // C3 — a Resolved bloom is supersedable: the ADR's primary supersession trigger
@@ -1763,8 +1797,12 @@ mod sealed_catalog {
         reduce,
     };
 
-    use crate::common::{approved, digest, draft_with_catalog, event, membership, workpiece};
-    use aether_bloomery::Snapshot;
+    use crate::common::{
+        approved, digest, draft_with_catalog, draft_with_member_override, event, membership, workpiece,
+    };
+    use aether_bloomery::{ModelOverride, OverrideError, SealError, Snapshot, StageOverride};
+
+    use std::collections::BTreeMap;
 
     /// The compiled line with `Construct` recalibrated onto a distinct agent — the
     /// "cheap harness for construct, expensive for review" the issue names.
@@ -1779,6 +1817,41 @@ mod sealed_catalog {
             }
         }
         catalog
+    }
+
+    // Tripwire: a member's per-stage override is refused at the door when the
+    // sealed catalog runs no model at that stage (#4601). The operator authored a
+    // sentence about which model runs where; an entry nothing resolves would let
+    // them seal it, watch the calibrated default run, and read a receipt that
+    // mentions neither. Verify is the case that matters — it is a real stage with
+    // a real binding, so only reading the binding's *process* catches it.
+    #[test]
+    fn an_override_keyed_to_a_stage_running_no_model_is_refused_at_seal() {
+        let escalate = |stage| ModelOverride {
+            per_stage: BTreeMap::from([(
+                stage,
+                StageOverride { agent: None, reasoning_effort: Some(ReasoningEffort::Max) },
+            )]),
+            ..ModelOverride::default()
+        };
+
+        let (draft, configs) = draft_with_member_override(1, membership("wp", 10), &escalate(StageId::Verify));
+        let decided = reduce(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(draft.seal())), &configs);
+        assert_eq!(
+            decided.outcome,
+            Outcome::SealRejected(SealError::UnusableModelOverride {
+                workpiece: workpiece("wp"),
+                error: OverrideError::StageRunsNoModel(StageId::Verify),
+            }),
+            "a stage the line runs mechanically cannot carry a model choice"
+        );
+        assert!(decided.effects.is_empty(), "a refused seal claims nothing");
+
+        // The control: the same override keyed to a model lane seals. Without it
+        // the test above would pass on a door that refused every override.
+        let (draft, configs) = draft_with_member_override(1, membership("wp", 10), &escalate(StageId::Refine));
+        let decided = reduce(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(draft.seal())), &configs);
+        assert!(matches!(decided.outcome, Outcome::Sealed(_)), "a model lane admits one: {:?}", decided.outcome);
     }
 
     // Tripwire: the entry dispatch carries the profile the *sealed* catalog names,

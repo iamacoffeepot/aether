@@ -11,8 +11,8 @@ use aether_data::wire::to_vec;
 
 use aether_bloomery::{
     BloomDraft, BloomRecord, BloomSpec, BloomStatus, ConfigKind, ConfigRegistry, Decisions, Digest, Event, Evidence,
-    EvidenceKind, Fact, IdempotencyKey, Membership, ResolutionClaim, ResolvedConfigs, Snapshot, StageCatalog,
-    WorkpieceId, reduce,
+    EvidenceKind, Fact, IdempotencyKey, Membership, ModelOverride, ResolutionClaim, ResolvedConfigs, Snapshot,
+    StageCatalog, WorkpieceId, reduce,
 };
 
 /// A distinct digest named by one seed byte.
@@ -60,6 +60,24 @@ pub fn draft_with_catalog(base: u8, members: Vec<Membership>, catalog: &StageCat
     resolved.insert(catalog.address(), StageCatalog::NAME, to_vec(catalog).expect("catalog encodes"));
 
     (BloomDraft { proposals: members, base: digest(base), configs, ..BloomDraft::default() }, resolved)
+}
+
+/// A draft whose sole member seals `override_` in its own registry, with the
+/// [`ResolvedConfigs`] that produce it — the member-scoped counterpart of
+/// [`draft_with_catalog`].
+pub fn draft_with_member_override(
+    base: u8,
+    member: Membership,
+    override_: &ModelOverride,
+) -> (BloomDraft, ResolvedConfigs) {
+    let mut member = member;
+    member.configs.insert::<ModelOverride>(override_.address());
+    let member = approved(member);
+
+    let mut resolved = ResolvedConfigs::default();
+    resolved.insert(override_.address(), ModelOverride::NAME, to_vec(override_).expect("override encodes"));
+
+    (BloomDraft { proposals: vec![member], base: digest(base), ..BloomDraft::default() }, resolved)
 }
 
 /// A resolution claim integrated at `revision`, whose evidence binds to its

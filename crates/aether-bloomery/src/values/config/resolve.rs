@@ -117,14 +117,20 @@ struct StoredConfig {
 /// [`ResolvedConfigs`].
 ///
 /// The distinction is whether fetching would help. Absent content is a caller
-/// that has not looked yet; mis-filed content is already wrong at rest and will
-/// be just as wrong after another fetch.
+/// that has not looked yet; the other two are already wrong at rest and will be
+/// just as wrong after another fetch.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Unproducible {
     /// No content is available at that address.
     Absent,
     /// Content is available but declares a different kind than the registry key.
     MisfiledAs(String),
+    /// Content is available and correctly filed, but does not decode as its
+    /// kind. Only a typed resolution can reach this: the name-keyed walk
+    /// [`unproducible_in`](ResolvedConfigs::unproducible_in) holds no Rust type
+    /// to decode against, so a caller that must read the value reports it and a
+    /// caller merely filling the set never sees it.
+    Undecodable,
 }
 
 impl ResolvedConfigs {

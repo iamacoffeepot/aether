@@ -7,10 +7,12 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use std::collections::BTreeMap;
+
 use aether_bloomery::{
     AgentSelection, AggregateReviewPayload, BloomId, ConfigKind, ConfigRegistry, DispatchPayload, EvidenceRef,
     ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce, ReasoningEffort, RedispatchPayload,
-    ReviewPass, StageCatalog, StageId, Topic, Transformation, WorkHandle, WorkOrder, WorkpieceId,
+    ReviewPass, StageCatalog, StageId, StageOverride, Topic, Transformation, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -1020,6 +1022,7 @@ fn a_sealed_model_override_beats_the_calibrated_profile_for_its_member_alone() {
     let override_ = ModelOverride {
         agent: Some(AgentSelection { harness: Harness::Claude, model: "claude-opus-5".to_owned() }),
         reasoning_effort: Some(ReasoningEffort::Low),
+        ..ModelOverride::default()
     };
     // The override is only evidence if it differs from what a no-op resolution
     // would produce; a recalibration that collapses them silently guts the test.
@@ -1047,6 +1050,60 @@ fn a_sealed_model_override_beats_the_calibrated_profile_for_its_member_alone() {
 
     assert_eq!(dispatched(1).model, calibrated.model, "a member sealing nothing keeps the calibrated model");
     assert_eq!(dispatched(1).harness, calibrated.harness, "and the calibrated harness");
+}
+
+// Tripwire: one member's two model lanes resolve to different agents from one
+// sealed override (#4601) — print cheap on Construct, escalate on the Refine
+// re-entry a failing Verify routes into.
+//
+// The whole path, not just the resolution rule: both lanes carry the *same*
+// member registry and differ only in the stage on the dispatch record, so an
+// overlay that dropped the stage would resolve both to the member-wide agent and
+// still satisfy every per-member assertion above. Construct is the control here
+// — it must keep its calibrated muse profile while its sibling escalates, which
+// is what distinguishes a per-stage entry from a member-wide one that happens to
+// name the same agent.
+#[test]
+fn one_members_construct_and_refine_dispatch_under_different_agents() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+
+    let calibrated = StageCatalog::profile_of(StageId::Construct);
+    let escalate = ModelOverride {
+        per_stage: BTreeMap::from([(
+            StageId::Refine,
+            StageOverride {
+                agent: Some(AgentSelection { harness: Harness::Claude, model: "claude-opus-5".to_owned() }),
+                reasoning_effort: Some(ReasoningEffort::Max),
+            },
+        )]),
+        ..ModelOverride::default()
+    };
+    // The escalation is only evidence if it differs from the calibration both
+    // lanes would otherwise take; a recalibration that collapses them guts this.
+    assert_ne!(calibrated.harness, Harness::Claude, "the Refine entry must escalate off the calibrated harness");
+
+    let address = escalate.address();
+    store.record_config(address.as_bytes(), ModelOverride::NAME, &to_vec(&escalate).unwrap()).unwrap();
+    let mut configs = ConfigRegistry::default();
+    configs.insert::<ModelOverride>(address);
+
+    for stage in [StageId::Construct, StageId::Refine] {
+        enqueue_dispatch_with_configs(&mut store, bloom, "wp-escalating", digest(5), stage, configs.clone());
+    }
+
+    drain_and_dispatch(&mut store, &shell).unwrap();
+
+    let orders = backend.orders();
+    let dispatched = |index: usize| orders[index].transformation.model.clone().expect("a model lane names its profile");
+    assert_eq!(dispatched(0).harness, calibrated.harness, "Construct keeps the cheap calibrated harness");
+    assert_eq!(dispatched(0).model, calibrated.model, "and its model");
+
+    assert_eq!(dispatched(1).harness, Harness::Claude, "Refine escalates to the sealed harness");
+    assert_eq!(dispatched(1).model, "claude-opus-5", "and the sealed model with it");
+    assert_eq!(dispatched(1).effort, ReasoningEffort::Max, "and the sealed effort");
 }
 
 // Tripwire: a member that seals *no* override dispatches the calibrated profile,
