@@ -400,9 +400,17 @@ fn drain_and_dispatch_submits_each_dispatch_and_records_its_order() {
 // compiled line for a bloom that sealed a different catalog (ADR-0174).
 //
 // The profile the payload carries is what selects it, and the reducer resolved
-// that from the bloom's sealed catalog by stage. Construct and Refine dispatch the
-// same `construct.implement` command at different calibrated efforts, so a
-// dispatch resolving off the command would collapse them.
+// that from the bloom's sealed catalog by stage.
+//
+// This no longer discriminates per-stage resolution from per-command resolution.
+// Construct and Refine dispatch the same `construct.implement` command, and the
+// effort difference that used to separate them is gone (#4685) — as of that
+// recalibration all four dispatched model lanes carry identical profiles, so a
+// dispatch resolving off the command would satisfy these assertions too. What
+// survives is the weaker claim that each order carries its stage's calibrated
+// profile rather than an ambient or dispatch-time one. Restoring the sharper
+// tripwire needs a sealed catalog whose stages are deliberately calibrated apart
+// (#4686), not a coincidence in the compiled line.
 #[test]
 fn drain_dispatches_the_construct_lane_under_its_calibrated_profile() {
     let mut store = SqliteStore::open(":memory:").unwrap();
@@ -421,7 +429,6 @@ fn drain_dispatches_the_construct_lane_under_its_calibrated_profile() {
     assert_eq!(dispatched(0).model, construct.model, "the construct order runs the calibrated Construct model");
     assert_eq!(dispatched(0).effort, construct.effort, "at the calibrated Construct effort");
     assert_eq!(dispatched(1).effort, refine.effort, "the refine order runs at its own calibrated effort");
-    assert_ne!(dispatched(0).effort, dispatched(1).effort, "the stage, not the shared command, picks the profile");
 }
 
 // The sharper half of the same tripwire: the review lane resolves *its own*
