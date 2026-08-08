@@ -282,7 +282,7 @@ fn overlay_member_advisory(
     // its siblings within a stage.
     let model_override =
         resolve_config::<ModelOverride>(store, ConfigScopes::bloom_wide(&record.configs))?.unwrap_or_default();
-    record.transformation.model = Some(dispatch_model(&record.profile, &model_override));
+    record.transformation.model = Some(dispatch_model(record.stage, &record.profile, &model_override));
     if let Some(description) = store.lookup_dispatch_description(&bloom, &workpiece)? {
         record.transformation.description = Some(description);
     } else {
@@ -540,7 +540,8 @@ fn drain_and_dispatch_aggregate(
         let mut transformation = payload.transformation;
         // The aggregate critic is a model lane too, so it takes its calibrated
         // profile on the same overlay channel as the member lane above.
-        transformation.model = Some(dispatch_model(&payload.profile, &ModelOverride::default()));
+        transformation.model =
+            Some(dispatch_model(StageId::AggregateReview, &payload.profile, &ModelOverride::default()));
         // The evidence-binding subject is the integrated tree the reducer
         // pinned as inputs[0] — also the displayed digest the returning
         // verdict must bind.

@@ -11,7 +11,7 @@
 //! dispatched model is exactly the one the bloom froze and the study stage grades
 //! cost against exactly that.
 
-use aether_bloomery::{AgentProfile, ModelOverride, ResolvedModel};
+use aether_bloomery::{AgentProfile, ModelOverride, ResolvedModel, StageId};
 
 /// The typed command id the model-driven construct lane dispatches. The runner's
 /// `xtask transform` entrypoint maps this id to a headless-Claude invocation.
@@ -37,7 +37,13 @@ pub use aether_bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 /// would run the *compiled* line for a bloom that sealed a different one — the
 /// same divergence #4324 and #4327 closed for the model and the harness, one
 /// layer down.
+///
+/// `stage` selects which of the override's per-stage entries applies (#4601).
+/// Two lanes of one member — Construct and the Refine re-entry a failing Verify
+/// routes into — carry the same member registry and different calibrations, so
+/// dropping the stage here would resolve both to whichever agent the member-wide
+/// fields name and silently undo the distinction the operator sealed.
 #[must_use]
-pub fn dispatch_model(profile: &AgentProfile, model_override: &ModelOverride) -> ResolvedModel {
-    model_override.resolve(profile)
+pub fn dispatch_model(stage: StageId, profile: &AgentProfile, model_override: &ModelOverride) -> ResolvedModel {
+    model_override.resolve(stage, profile)
 }

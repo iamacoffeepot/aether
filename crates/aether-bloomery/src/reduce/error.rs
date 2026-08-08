@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{CatalogError, Unproducible};
+use crate::values::{CatalogError, OverrideError, Unproducible};
 
 /// Why an aggregate-review completion was refused (ADR-0153).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -79,8 +79,22 @@ pub enum SealError {
         kind: String,
         /// The address sealed for it.
         address: Digest,
-        /// Whether the content is absent, or present under another kind.
+        /// Why the content could not be produced.
         reason: Unproducible,
+    },
+    /// A member sealed a [`ModelOverride`](crate::ModelOverride) that cannot
+    /// apply under the bloom's sealed catalog (#4601) — a stage named twice, or
+    /// a stage the catalog binds to no model lane.
+    ///
+    /// Refused at the door for the reason the whole override exists: an operator
+    /// authored a sentence about which model runs where, and an entry nothing
+    /// resolves would leave them believing a choice took effect while the lane
+    /// ran the calibrated default the receipt does not mention.
+    UnusableModelOverride {
+        /// The member whose registry sealed it.
+        workpiece: WorkpieceId,
+        /// What makes the override unusable.
+        error: OverrideError,
     },
 }
 
