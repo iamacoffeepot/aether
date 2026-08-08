@@ -22,9 +22,10 @@ use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::{
-    BACKOFF_CAP, CandidatePush, NameEvidenceClaims, TrackedHandle, backoff_delay, candidate_ref_name,
-    drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_stale, next_backoff, pull_and_admit,
-    push_admitted_candidates, seed_tracked, select_stale_handles,
+    BACKOFF_CAP, CandidatePush, GithubMirrorConfig, NameEvidenceClaims, TrackedHandle, backoff_delay,
+    candidate_ref_name, drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_stale,
+    missing_connection_knobs, next_backoff, pull_and_admit, push_admitted_candidates, seed_tracked,
+    select_stale_handles,
 };
 use crate::bloomery::executor::local::testing::FixedRunner;
 use crate::bloomery::intake::{Admission, AdmitDecision, UploadedEvidence, admit_uploaded, attempt_artifact_name};
@@ -1151,4 +1152,37 @@ fn a_sealed_config_with_no_content_parks_rather_than_running_the_default() {
     assert_eq!(handles.len(), 1, "only the member behind the parked one dispatches");
     assert_eq!(backend.orders()[0].transformation.inputs[0], digest(6), "and it is the sibling, not the parked member");
     assert!(ack_through.is_some_and(|acked| acked > sequence), "the parked entry is acked past so the queue unblocks");
+}
+
+#[test]
+fn the_disabled_mount_names_every_empty_connection_knob() {
+    // Tripwire: the warning exists to answer "why did nothing dispatch?" in one
+    // line (#4625). A predicate that collapsed to a bool — or listed only the
+    // first empty knob — sends the operator back to reading `init` to find out
+    // which of the three is missing, which is the cost this replaces.
+    let missing = missing_connection_knobs(&GithubMirrorConfig::default());
+
+    assert_eq!(missing, ["GITHUB_TOKEN", "AETHER_GITHUB_OWNER", "AETHER_GITHUB_REPO"]);
+}
+
+#[test]
+fn a_fully_configured_connection_reports_nothing_missing() {
+    let config = GithubMirrorConfig {
+        token: "t".to_owned(),
+        owner: "o".to_owned(),
+        repo: "r".to_owned(),
+        ..GithubMirrorConfig::default()
+    };
+
+    assert!(missing_connection_knobs(&config).is_empty(), "all three present must mount the reactor enabled");
+}
+
+#[test]
+fn an_empty_token_is_named_even_when_owner_and_repo_are_set() {
+    // The exact shape that cost a live bring-up: `token` resolves from the
+    // unprefixed `GITHUB_TOKEN`, so setting `AETHER_GITHUB_TOKEN` beside a
+    // correct owner/repo leaves it empty and the reactor silently declines.
+    let config = GithubMirrorConfig { owner: "o".to_owned(), repo: "r".to_owned(), ..GithubMirrorConfig::default() };
+
+    assert_eq!(missing_connection_knobs(&config), ["GITHUB_TOKEN"]);
 }

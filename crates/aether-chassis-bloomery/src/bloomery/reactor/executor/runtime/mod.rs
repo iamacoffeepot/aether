@@ -960,6 +960,20 @@ fn pull_and_admit(
     sink.0.into_iter().map(|admission| admission.admit).collect()
 }
 
+/// The GitHub connection knobs that are empty, in the order an operator would
+/// set them — the executor reactor mounts disabled unless all three are present.
+///
+/// Returned as names rather than a bare bool so the disabled-mount warning can
+/// say *which* knob is missing (#4625). `token` reads the conventional
+/// unprefixed `GITHUB_TOKEN`, unlike its `AETHER_GITHUB_`-prefixed siblings, so
+/// it is the one most often left empty by accident.
+fn missing_connection_knobs(config: &GithubMirrorConfig) -> Vec<&'static str> {
+    [("GITHUB_TOKEN", &config.token), ("AETHER_GITHUB_OWNER", &config.owner), ("AETHER_GITHUB_REPO", &config.repo)]
+        .into_iter()
+        .filter_map(|(name, value)| value.is_empty().then_some(name))
+        .collect()
+}
+
 #[runtime]
 impl NativeActor for ExecutorReactorCapability {
     type State = ExecutorReactorState;
@@ -974,11 +988,19 @@ impl NativeActor for ExecutorReactorCapability {
 
         // Unconfigured → disabled: no shell, no store, no timer. The dispatch
         // outbox accumulates and drains once a token/owner/repo is supplied.
-        let configured = !(config.token.is_empty() || config.owner.is_empty() || config.repo.is_empty());
-        if !configured {
-            tracing::info!(
+        let missing = missing_connection_knobs(&config);
+        if !missing.is_empty() {
+            // A `warn`, not an `info` (#4625): declining to mount is the one
+            // condition that makes every later seal look healthy and never
+            // dispatch, so it must not sit below the boot chatter. Naming the
+            // empty knobs turns diagnosis from a code-read into a read of this
+            // line — `token` in particular resolves from the unprefixed
+            // `GITHUB_TOKEN`, so `AETHER_GITHUB_TOKEN` is the obvious guess and
+            // silently does nothing.
+            tracing::warn!(
                 target: "aether_chassis_bloomery::executor",
-                "executor dispatch reactor mounted disabled (unconfigured token/owner/repo); dispatch outbox will accumulate",
+                missing = %missing.join(", "),
+                "executor dispatch reactor mounted disabled (unconfigured); dispatch outbox will accumulate and no sealed bloom will dispatch",
             );
             return Ok(ExecutorReactorState {
                 executor: None,
