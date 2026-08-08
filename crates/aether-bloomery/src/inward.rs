@@ -2,7 +2,7 @@
 //!
 //! The one inward channel ADR-0149 permits: a reviewer verdict or check-run
 //! conclusion on work **Bloomery itself dispatched** normalizes into an
-//! [`Evidence`](crate::values::Evidence) artifact bound to the exact digest
+//! [`crate::values::Evidence`] artifact bound to the exact digest
 //! Bloomery displayed, ready to enter the reducer like any other attempt
 //! result. Free-form platform activity is never translated — a comment never
 //! becomes a command; this channel carries only a verdict over a digest
