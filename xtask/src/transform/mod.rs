@@ -91,12 +91,27 @@ struct Evidence {
     status: &'static str,
     exit_code: Option<i32>,
     log: String,
+    /// A failing run's distilled diagnostics (#4641), read back host-side and
+    /// persisted per member so a `Refine` re-entry is directed by them — the
+    /// same top-level `findings` channel the review critic stamps.
+    ///
+    /// Absent on a pass, and absent on a lane that produces no diagnostics, so
+    /// the channel stays presence-driven rather than needing a lane flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    findings: Option<String>,
 }
 
 /// Assembles the evidence record from a captured run's status — pure
 /// so it's testable without spawning a process.
-fn build_evidence(command: &str, nonce: Option<String>, status: ExitStatus, log_file: String) -> Evidence {
+fn build_evidence(
+    command: &str,
+    nonce: Option<String>,
+    status: ExitStatus,
+    log_file: String,
+    findings: Option<String>,
+) -> Evidence {
     Evidence {
+        findings,
         command: command.to_string(),
         nonce,
         status: if status.success() {
@@ -180,7 +195,8 @@ mod tests {
         use std::process::ExitStatus;
 
         let pass = ExitStatus::from_raw(0);
-        let evidence = build_evidence("verify.fmt", Some("nonce-1".to_string()), pass, "verify.fmt.log".to_string());
+        let evidence =
+            build_evidence("verify.fmt", Some("nonce-1".to_string()), pass, "verify.fmt.log".to_string(), None);
         assert_eq!(evidence.command, "verify.fmt");
         assert_eq!(evidence.nonce, Some("nonce-1".to_string()));
         assert_eq!(evidence.status, "pass");
@@ -188,7 +204,7 @@ mod tests {
         assert_eq!(evidence.log, "verify.fmt.log");
 
         let fail = ExitStatus::from_raw(1 << 8);
-        let evidence = build_evidence("verify.clippy", None, fail, "verify.clippy.log".to_string());
+        let evidence = build_evidence("verify.clippy", None, fail, "verify.clippy.log".to_string(), None);
         assert_eq!(evidence.status, "fail");
         assert_eq!(evidence.exit_code, Some(1));
         assert_eq!(evidence.nonce, None);
