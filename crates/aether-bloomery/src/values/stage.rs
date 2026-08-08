@@ -418,11 +418,19 @@ impl StageCatalog {
         // Harness and model move together, and must: a model id belongs to the
         // provider its harness talks to, so a lane pointed at muse while still
         // naming an Anthropic id would dispatch an id its harness cannot resolve.
+        //
+        // Refine sits on Construct's tier rather than below it (#4685). It is
+        // handed a candidate that failed plus the findings against it, and asked
+        // to reconcile both — strictly more than Construct's clean start, so
+        // calibrating it lower asks the harder half of the loop to run on less.
+        // A repair that needs the approach reconsidered, rather than a line
+        // patched, is exactly where that shortfall shows: the ceiling is Verify's
+        // retry budget, so a member that cannot converge spends the whole budget
+        // and wedges.
         let (harness, model, effort): (Harness, &str, ReasoningEffort) = match stage {
-            StageId::Construct | StageId::Review | StageId::AggregateReview => {
+            StageId::Construct | StageId::Refine | StageId::Review | StageId::AggregateReview => {
                 (Harness::Muse, Self::MUSE_MODEL, ReasoningEffort::High)
             }
-            StageId::Refine => (Harness::Muse, Self::MUSE_MODEL, ReasoningEffort::Medium),
             StageId::Scope | StageId::Study => (Harness::Claude, Self::OPUS_MODEL, ReasoningEffort::High),
             StageId::Sketch
             | StageId::Approve
@@ -730,9 +738,12 @@ mod tests {
     // rather than by digest, so the catalog's own bytes now contain each stage's
     // calibration instead of a reference to it. One resolution of a sealed catalog
     // yields everything a dispatch needs — see `StageBinding::profile`.
+    // Repinned again for #4685: Refine recalibrates from medium to high effort,
+    // joining Construct on the tier it repairs against. A recalibration is an
+    // intended catalog edit — see `profile_of`.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x9d, 0x55, 0x53, 0xdb, 0x37, 0xf5, 0x12, 0x4d, 0xb0, 0x9e, 0xb7, 0x9b, 0x4b, 0x9c, 0x5d, 0xec, 0x96, 0xdd,
-        0x2b, 0x0f, 0x88, 0x45, 0xe0, 0x9d, 0x28, 0x53, 0x06, 0x44, 0x10, 0xab, 0xb6, 0x4b,
+        0x9e, 0x4a, 0x07, 0x68, 0x6e, 0x88, 0xb2, 0x54, 0x5c, 0x1a, 0x7e, 0xfd, 0xb8, 0xaf, 0x1a, 0xca, 0x12, 0x15,
+        0xdf, 0xe6, 0xb2, 0xb1, 0xc5, 0x6d, 0x39, 0x41, 0x6a, 0x55, 0xe8, 0xd2, 0xce, 0xc1,
     ];
 
     // Tripwire: the compiled line passes the same validation an authored catalog
