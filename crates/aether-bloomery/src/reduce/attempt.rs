@@ -4,7 +4,7 @@
 use super::{AttemptCompletedError, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{CandidateRef, ConfigRegistry, Evidence, StageCatalog, Transformation};
+use crate::values::{AgentProfile, CandidateRef, ConfigRegistry, Evidence, StageCatalog, Transformation};
 
 /// The move-and-dispatch effect pair every cursor move of
 /// [`reduce_attempt_completed`] emits — an advance, a Refine re-entry, and a
@@ -16,9 +16,8 @@ pub(super) fn move_effects(
     workpiece: &WorkpieceId,
     scope_revision: Digest,
     progress: StageProgress,
-    subject: Digest,
-    checkout: Digest,
-    configs: ConfigRegistry,
+    targets: DispatchTargets,
+    sealed: SealedLine<'_>,
 ) -> [Decision; 2] {
     [
         Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress },
@@ -26,12 +25,48 @@ pub(super) fn move_effects(
             bloom,
             workpiece: workpiece.clone(),
             stage: progress.stage,
-            transformation: Transformation::for_member_stage(progress.stage, subject, checkout),
+            transformation: Transformation::for_member_stage(progress.stage, targets.subject, targets.checkout),
             scope_revision,
             candidate: progress.candidate.map(|current| current.tree),
-            configs,
+            profile: stage_profile(sealed.catalog, progress.stage),
+            configs: sealed.configs,
         },
     ]
+}
+
+/// The two independent digests one dispatch aims at (ADR-0152). Paired because
+/// they move together per stage and are easy to transpose: `subject` binds the
+/// returned evidence, `checkout` is the git commit the worker checks out, and
+/// swapping them dispatches work against the wrong tree while binding evidence to
+/// something no one built.
+#[derive(Clone, Copy)]
+pub(super) struct DispatchTargets {
+    /// The digest the returned evidence must bind to.
+    pub subject: Digest,
+    /// The git commit the attempt's worker checks out.
+    pub checkout: Digest,
+}
+
+/// What a dispatch inherits from the bloom that sealed it (ADR-0174): the
+/// flattened configuration registry it resolves through, and the stage catalog
+/// that calibrates it. Both come off the bloom's record, so they travel together.
+pub(super) struct SealedLine<'a> {
+    /// The member's registry layered over the bloom's.
+    pub configs: ConfigRegistry,
+    /// The catalog the bloom sealed, or the compiled line when it sealed none.
+    pub catalog: &'a StageCatalog,
+}
+
+/// The profile a catalog calibrates one stage at, falling back to the compiled
+/// line when the catalog binds no such stage.
+///
+/// The fallback is unreachable for any catalog a bloom actually runs — the seal
+/// door refuses one that leaves a stage unbound — so it exists to keep the
+/// dispatch total rather than to express a policy. Dispatching *something* the
+/// operator would recognize beats a panic in the one path that has no way to
+/// report a refusal.
+pub(super) fn stage_profile(catalog: &StageCatalog, stage: StageId) -> AgentProfile {
+    catalog.profile_for(stage).cloned().unwrap_or_else(|| StageCatalog::profile_of(stage))
 }
 
 /// Reduce a per-member attempt completion (ADR-0149 §The line,
@@ -140,9 +175,8 @@ pub(super) fn reduce_attempt_completed(
             workpiece,
             member.scope_revision,
             progress,
-            subject,
-            checkout,
-            member.configs.layered_over(record.spec.configs()),
+            DispatchTargets { subject, checkout },
+            SealedLine { configs: member.configs.layered_over(record.spec.configs()), catalog: &record.stage_catalog },
         ));
         return Decisions {
             outcome: Outcome::AttemptAdvanced { bloom: *bloom, workpiece: workpiece.clone(), from: stage, to: next },
@@ -160,16 +194,18 @@ pub(super) fn reduce_attempt_completed(
     // silent integrate.
     if stage == StageId::Verify {
         let rolls = repair_rolls + 1;
-        if rolls < StageCatalog::retry_budget_of(StageId::Verify).unwrap_or(1) {
+        if rolls < record.stage_catalog.retry_budget_of(StageId::Verify).unwrap_or(1) {
             let progress = StageProgress { stage: StageId::Refine, attempts: 1, candidate, repair_rolls: rolls };
             effects.extend(move_effects(
                 *bloom,
                 workpiece,
                 member.scope_revision,
                 progress,
-                subject,
-                checkout,
-                member.configs.layered_over(record.spec.configs()),
+                DispatchTargets { subject, checkout },
+                SealedLine {
+                    configs: member.configs.layered_over(record.spec.configs()),
+                    catalog: &record.stage_catalog,
+                },
             ));
             return Decisions {
                 outcome: Outcome::RefineReentered { bloom: *bloom, workpiece: workpiece.clone(), rolls },
@@ -184,7 +220,7 @@ pub(super) fn reduce_attempt_completed(
     // A failing gate re-dispatches the same stage while its retry budget allows;
     // an exhausted budget wedges the member — it stops dispatching rather than
     // looping (the tripwire).
-    let budget = StageCatalog::retry_budget_of(stage).unwrap_or(1);
+    let budget = record.stage_catalog.retry_budget_of(stage).unwrap_or(1);
     if attempts < budget {
         let attempt = attempts + 1;
         let progress = StageProgress { stage, attempts: attempt, candidate, repair_rolls };
@@ -193,9 +229,8 @@ pub(super) fn reduce_attempt_completed(
             workpiece,
             member.scope_revision,
             progress,
-            subject,
-            checkout,
-            member.configs.layered_over(record.spec.configs()),
+            DispatchTargets { subject, checkout },
+            SealedLine { configs: member.configs.layered_over(record.spec.configs()), catalog: &record.stage_catalog },
         ));
         return Decisions {
             outcome: Outcome::AttemptRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, attempt },

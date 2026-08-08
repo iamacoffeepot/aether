@@ -58,7 +58,7 @@ fn replay(journal: &[Event]) -> (Vec<Decisions>, Snapshot) {
     for ev in journal {
         let decoded: Event = from_bytes(&to_vec(ev).unwrap()).unwrap();
         let outcome = reduce(&snapshot, &decoded, &ResolvedConfigs::default());
-        snapshot = snapshot.apply(&decoded, &outcome);
+        snapshot = snapshot.apply(&decoded, &outcome, &ResolvedConfigs::default());
         decisions.push(outcome);
     }
     (decisions, snapshot)
@@ -163,9 +163,14 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // Repinned again for #4607: `BloomSpec` drops the `toolchain` and `policy`
 // digests, which nothing read (ADR-0174: no field stays sealed and inert), so the
 // sealed spec loses two fields and the bloom id derived from it moves.
+// Repinned again for #4587: `BloomSpec` drops its `stage_catalog` digest for a
+// sealed `StageCatalog` config entry (ADR-0174), so the sealed spec loses a field
+// and the bloom id derived from it moves; and every `DispatchAttempt` gains the
+// `profile` the reducer resolves from that catalog, so the decision stream
+// carries it too.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0xc7, 0x4e, 0x06, 0xa8, 0x82, 0x04, 0x64, 0x93, 0x17, 0xa8, 0xf4, 0x01, 0xdd, 0xd5, 0x4f, 0xe7, 0x5f, 0x52, 0x53,
-    0x87, 0xea, 0xa6, 0x8b, 0xd0, 0x82, 0x49, 0xb3, 0x4f, 0x44, 0x8e, 0xb6, 0x36,
+    0xe1, 0x32, 0x03, 0xc5, 0x86, 0x80, 0x61, 0xc4, 0x8f, 0x7c, 0xea, 0x8a, 0x85, 0x28, 0x9b, 0x54, 0x13, 0x3e, 0xa9,
+    0xa5, 0x8d, 0xa6, 0x4b, 0x6d, 0xd4, 0x7a, 0x10, 0x33, 0xaa, 0xb6, 0xf0, 0x83,
 ];
 
 #[test]

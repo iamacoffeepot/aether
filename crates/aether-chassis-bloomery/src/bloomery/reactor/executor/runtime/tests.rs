@@ -181,6 +181,9 @@ fn enqueue_dispatch_with_configs(
     configs: ConfigRegistry,
 ) -> u64 {
     let payload = DispatchPayload {
+        // What a real dispatch carries: the profile the bloom's sealed catalog
+        // calibrates *this* stage at, resolved by the reducer (ADR-0174).
+        profile: StageCatalog::line().profile_for(stage).cloned().expect("the line binds every stage"),
         bloom: bloom.0,
         workpiece: WorkpieceId(workpiece.to_owned()),
         stage,
@@ -207,6 +210,7 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
     store.record_dispatch_description(bloom.0.as_bytes(), "wp-a", "build the widget").unwrap();
     store.record_dispatch_description(bloom.0.as_bytes(), "wp-b", "wire the widget").unwrap();
     let payload = AggregateReviewPayload {
+        profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: bloom.0,
         transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
         pass: ReviewPass::Full,
@@ -251,6 +255,7 @@ fn the_second_aggregate_roll_frames_a_delta_confirm_against_the_frozen_findings(
     store.record_dispatch_description(bloom.0.as_bytes(), "wp-a", "build the widget").unwrap();
     store.record_review_findings(bloom.0.as_bytes(), "", "[wp-a] The widget leaks its handle.").unwrap();
     let payload = AggregateReviewPayload {
+        profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: bloom.0,
         transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
         pass: ReviewPass::DeltaConfirm,
@@ -288,6 +293,7 @@ fn a_fresh_roll_one_aggregate_dispatch_clears_the_stale_frozen_row() {
     store.record_dispatch_description(bloom.0.as_bytes(), "wp-a", "build the widget").unwrap();
     store.record_review_findings(bloom.0.as_bytes(), "", "[wp-a] stale findings from the spent cycle").unwrap();
     let payload = AggregateReviewPayload {
+        profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: bloom.0,
         transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
         pass: ReviewPass::Full,
@@ -334,13 +340,15 @@ fn drain_and_dispatch_submits_each_dispatch_and_records_its_order() {
 // calibrated agent profile. The model used to come from a config knob whose empty
 // default omitted `--model` altogether, so the lane silently ran at the operator's
 // ambient model while the sealed catalog — the thing a receipt attests (ADR-0149
-// §The line) — was never consulted (#4324). Pinned against `profile_of` rather
-// than a literal so a recalibration moves both together; what trips it is the
-// dispatch dropping back to ambient or to a dispatch-time choice.
+// §The line) — was never consulted (#4324). Pinned against the line's own bindings
+// rather than a literal so a recalibration moves both together; what trips it is
+// the dispatch dropping back to ambient, to a dispatch-time choice, or to the
+// compiled line for a bloom that sealed a different catalog (ADR-0174).
 //
-// The stage, not the command, is what selects the profile: Construct and Refine
-// dispatch the same `construct.implement` command at different calibrated efforts,
-// so resolving off the command would collapse them.
+// The profile the payload carries is what selects it, and the reducer resolved
+// that from the bloom's sealed catalog by stage. Construct and Refine dispatch the
+// same `construct.implement` command at different calibrated efforts, so a
+// dispatch resolving off the command would collapse them.
 #[test]
 fn drain_dispatches_the_construct_lane_under_its_calibrated_profile() {
     let mut store = SqliteStore::open(":memory:").unwrap();
@@ -375,6 +383,7 @@ fn drain_dispatches_the_review_lane_under_its_own_calibrated_profile() {
     let backend = Arc::new(CapturingBackend::default());
     let shell = ExecutorShell::new(Arc::clone(&backend));
     let payload = AggregateReviewPayload {
+        profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: digest(1),
         transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
         pass: ReviewPass::Full,
@@ -454,6 +463,7 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
     let mut subjectless = Transformation::for_member_stage(StageId::Construct, digest(9), digest(0xC0));
     subjectless.inputs.clear();
     let payload = DispatchPayload {
+        profile: StageCatalog::profile_of(StageId::Construct),
         bloom: bloom.0,
         workpiece: WorkpieceId("wp-none".to_owned()),
         stage: StageId::Construct,
@@ -757,6 +767,7 @@ fn drain_stamps_the_record_axes_from_the_payload() {
     let bloom = BloomId(digest(1));
     let candidate_tree = digest(0xAB);
     let payload = DispatchPayload {
+        profile: StageCatalog::profile_of(StageId::Construct),
         bloom: bloom.0,
         workpiece: WorkpieceId("wp-cand".to_owned()),
         stage: StageId::Verify,

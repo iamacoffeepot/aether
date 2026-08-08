@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::StageId;
-use crate::values::{AgentProfile, Budget, Harness, ReasoningEffort, ResolvedModel, ToolPolicy};
+use crate::values::{
+    AgentProfile, Budget, ConfigScopes, Harness, ReasoningEffort, ResolvedConfigs, ResolvedModel, ToolPolicy,
+};
 
 /// The declared output name every dispatched attempt uploads its result record
 /// under — the study/verdict envelope the intake broker binds to the displayed
@@ -51,8 +53,57 @@ pub fn is_model_lane(command: &str) -> bool {
     command == CONSTRUCT_IMPLEMENT_COMMAND || command == REVIEW_CRITIC_COMMAND
 }
 
-/// One stage's declared contract (ADR-0149 §The line).
+/// Whether a binding's `process` names something an executor can actually route.
+///
+/// The dispatched lanes are the typed commands the host routes on; the rest are
+/// the pre-seal and host-native positions whose `process` names the code that
+/// runs them rather than a worker lane. A catalog naming anything else would seal
+/// a stage nothing can execute, and the member would wedge with no attempt ever
+/// made — a failure that belongs at the seal door, where the operator is still
+/// holding the catalog they wrote.
+fn is_known_process(process: &str) -> bool {
+    is_model_lane(process)
+        || matches!(
+            process,
+            "sketch"
+                | "aether.bloomery.api"
+                | "aether.bloomery.approve_gate"
+                | "transform.verify"
+                | "review"
+                | "integrate"
+                | "aggregate-verify"
+                | "aggregate-review"
+                | "source.cas_land"
+                | "retrospect"
+        )
+}
+
+/// Why a caller-authored [`StageCatalog`] cannot be sealed.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum CatalogError {
+    /// A stage of the closed vocabulary has no binding.
+    UnboundStage(StageId),
+    /// A stage is bound more than once, so which binding runs is undetermined.
+    DuplicateStage(StageId),
+    /// A binding names a process no executor routes.
+    UnknownProcess {
+        /// The stage whose binding names it.
+        stage: StageId,
+        /// The unroutable process name.
+        process: String,
+    },
+    /// A retry budget is zero (the stage could never run) or above
+    /// [`StageCatalog::MAX_RETRY_BUDGET`].
+    RetryBudgetOutOfRange {
+        /// The stage whose binding carries it.
+        stage: StageId,
+        /// The out-of-range budget.
+        budget: u32,
+    },
+}
+
+/// One stage's declared contract (ADR-0149 §The line).
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct StageBinding {
     /// The stage this binding declares.
     pub stage: StageId,
@@ -60,11 +111,17 @@ pub struct StageBinding {
     pub consumes: Vec<String>,
     /// The artifact-kind tags this stage produces.
     pub produces: Vec<String>,
-    /// The calibrated [`AgentProfile`] this stage runs under, referenced by
-    /// digest — *how* it runs (model, reasoning effort, tool policy). *Who*
-    /// runs is not stored: the `iama-{stage}` worker identity is derived from
+    /// The calibrated [`AgentProfile`] this stage runs under — *how* it runs
+    /// (harness, model, reasoning effort, tool policy). *Who* runs is not
+    /// stored: the `iama-{stage}` worker identity is derived from
     /// [`stage`](Self::stage) via [`StageId::worker_identity`].
-    pub profile: Digest,
+    ///
+    /// Carried inline rather than by digest. A digest would name a second
+    /// artifact the resolver would have to fetch separately, and there is
+    /// nothing to fetch it from — a profile is authored as part of the catalog,
+    /// never on its own. Inline, one resolution of the catalog yields everything
+    /// a dispatch needs.
+    pub profile: AgentProfile,
     /// The skill or process the stage executes.
     pub process: String,
     /// The completion gate that decides the stage is done.
@@ -73,10 +130,19 @@ pub struct StageBinding {
     pub retry_budget: u32,
 }
 
-/// The closed set of stage bindings the line runs. Frozen as a digest the
-/// bloom seals (ADR-0149 §The line) so an executed bloom is graded against
-/// the exact catalog it promised.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+/// The set of stage bindings a bloom runs (ADR-0149 §The line).
+///
+/// Sealed as a configuration rather than a field (ADR-0174), so an operator can
+/// author a catalog — choosing a cheap harness for construct and an expensive
+/// one for review — and the bloom attests exactly the line it ran. A bloom that
+/// seals none runs [`line`](Self::line), the calibration compiled into this
+/// crate.
+///
+/// Read by the *reducer*, not only at dispatch: the retry budgets decide
+/// re-dispatch versus wedge. That is why the catalog resolves through
+/// [`ResolvedConfigs`] rather than host-side only.
+#[derive(aether_data::Kind, aether_data::Schema, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[kind(name = "aether.bloomery.stage_catalog")]
 pub struct StageCatalog {
     /// The bindings, one per stage in the catalog.
     pub bindings: Vec<StageBinding>,
@@ -155,13 +221,82 @@ impl StageCatalog {
         Self::MEMBER_LINE.get(index + 1).copied()
     }
 
-    /// The retry budget of a stage's binding in the line catalog — the attempt
-    /// allowance the reducer's completion gate caps re-dispatch at (ADR-0149 §The
-    /// line). `None` for a stage the catalog does not bind (unreachable for the
-    /// closed [`StageId`] set, but total by construction).
+    /// The catalog `scopes` seals, or [`line`](Self::line) when it seals none.
+    ///
+    /// The one place the "which catalog does this bloom run" question is answered,
+    /// so the seal door, the snapshot fold, and anything later cannot give
+    /// different answers for the same spec. An unresolvable entry falls back to
+    /// the line: `reduce` refuses a spec naming content it was not given, so by
+    /// the time this is reachable the address resolved once already.
     #[must_use]
-    pub fn retry_budget_of(stage: StageId) -> Option<u32> {
-        Self::line().bindings.into_iter().find(|binding| binding.stage == stage).map(|binding| binding.retry_budget)
+    pub fn sealed_in(scopes: ConfigScopes<'_>, configs: &ResolvedConfigs) -> Self {
+        configs.resolve::<Self>(scopes).ok().flatten().unwrap_or_else(Self::line)
+    }
+
+    /// This catalog's binding for one stage, or `None` when it binds none.
+    ///
+    /// Total for a catalog that passed [`validate`](Self::validate), which is
+    /// every catalog a sealed bloom runs — the seal door admits nothing that
+    /// leaves a stage unbound.
+    #[must_use]
+    pub fn binding(&self, stage: StageId) -> Option<&StageBinding> {
+        self.bindings.iter().find(|binding| binding.stage == stage)
+    }
+
+    /// The retry budget this catalog gives a stage — the attempt allowance the
+    /// reducer's completion gate caps re-dispatch at (ADR-0149 §The line).
+    #[must_use]
+    pub fn retry_budget_of(&self, stage: StageId) -> Option<u32> {
+        self.binding(stage).map(|binding| binding.retry_budget)
+    }
+
+    /// The [`AgentProfile`] this catalog runs a stage under.
+    #[must_use]
+    pub fn profile_for(&self, stage: StageId) -> Option<&AgentProfile> {
+        self.binding(stage).map(|binding| &binding.profile)
+    }
+
+    /// The ceiling on a binding's retry budget.
+    ///
+    /// A budget is an attempt allowance the reducer counts up to before wedging a
+    /// member, so an unbounded one is an unbounded spend on a lane that is not
+    /// converging. The cap is deliberately generous — it exists to stop a
+    /// typo'd `1000`, not to express a calibration opinion.
+    pub const MAX_RETRY_BUDGET: u32 = 16;
+
+    /// Check that a caller-authored catalog is one the line can actually run
+    /// (ADR-0174).
+    ///
+    /// Structural, not equality against the compiled line: the point of sealing a
+    /// catalog is that it may *differ*. What cannot differ is that every stage is
+    /// bound exactly once, every binding names a process some executor routes, and
+    /// every retry budget is a number the reducer can count to.
+    ///
+    /// # Errors
+    ///
+    /// [`CatalogError`] naming the first violation found, in that order.
+    pub fn validate(&self) -> Result<(), CatalogError> {
+        for stage in StageId::ALL {
+            let bound = self.bindings.iter().filter(|binding| binding.stage == *stage).count();
+            if bound == 0 {
+                return Err(CatalogError::UnboundStage(*stage));
+            }
+            if bound > 1 {
+                return Err(CatalogError::DuplicateStage(*stage));
+            }
+        }
+        for binding in &self.bindings {
+            if !is_known_process(&binding.process) {
+                return Err(CatalogError::UnknownProcess {
+                    stage: binding.stage,
+                    process: String::from(&binding.process),
+                });
+            }
+            if binding.retry_budget == 0 || binding.retry_budget > Self::MAX_RETRY_BUDGET {
+                return Err(CatalogError::RetryBudgetOutOfRange { stage: binding.stage, budget: binding.retry_budget });
+            }
+        }
+        Ok(())
     }
 
     /// The authored binding for one stage. An exhaustive `match` over the closed
@@ -226,7 +361,7 @@ impl StageCatalog {
             stage,
             consumes: consumes.iter().map(|tag| String::from(*tag)).collect(),
             produces: produces.iter().map(|tag| String::from(*tag)).collect(),
-            profile: Self::profile_of(stage).digest(),
+            profile: Self::profile_of(stage),
             process: String::from(process),
             completion_gate: String::from(completion_gate),
             retry_budget,
@@ -523,7 +658,7 @@ mod tests {
         for binding in StageCatalog::line().bindings {
             assert_eq!(
                 binding.profile,
-                StageCatalog::profile_of(binding.stage).digest(),
+                StageCatalog::profile_of(binding.stage),
                 "binding for {:?} does not reference its calibrated profile digest",
                 binding.stage
             );
@@ -591,10 +726,25 @@ mod tests {
     // line with them. A recalibration is an intended catalog edit — see
     // `profile_of`, whose harness/model/effort values are refinable without an
     // ADR.
+    // Repinned again for #4587: `StageBinding` carries its `AgentProfile` inline
+    // rather than by digest, so the catalog's own bytes now contain each stage's
+    // calibration instead of a reference to it. One resolution of a sealed catalog
+    // yields everything a dispatch needs — see `StageBinding::profile`.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x1a, 0xc6, 0x09, 0x6c, 0x13, 0x3e, 0x43, 0x37, 0xfa, 0x88, 0x10, 0x0a, 0x47, 0x11, 0x0b, 0x5c, 0xb7, 0xf2,
-        0x71, 0xb7, 0x15, 0x50, 0x41, 0xe0, 0xa5, 0xd0, 0xe2, 0xdb, 0x27, 0xf3, 0xb4, 0x40,
+        0x9d, 0x55, 0x53, 0xdb, 0x37, 0xf5, 0x12, 0x4d, 0xb0, 0x9e, 0xb7, 0x9b, 0x4b, 0x9c, 0x5d, 0xec, 0x96, 0xdd,
+        0x2b, 0x0f, 0x88, 0x45, 0xe0, 0x9d, 0x28, 0x53, 0x06, 0x44, 0x10, 0xab, 0xb6, 0x4b,
     ];
+
+    // Tripwire: the compiled line passes the same validation an authored catalog
+    // must. It is the fallback every unconfigured bloom runs, so a line that fails
+    // its own rule would refuse every seal — and the rule is authored by hand
+    // against binding values authored by hand, which is exactly where the two
+    // drift. Caught for real when `is_known_process` first omitted `Review`'s
+    // `review` process.
+    #[test]
+    fn the_compiled_line_satisfies_the_rule_authored_catalogs_are_held_to() {
+        assert_eq!(StageCatalog::line().validate(), Ok(()));
+    }
 
     #[test]
     fn line_digest_matches_pinned_golden() {

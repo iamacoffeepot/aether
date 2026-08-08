@@ -308,6 +308,7 @@ fn reopen_converges_via_journal_replay_and_outbox_republish() {
 
 fn order(nonce: &str) -> OutstandingOrder {
     OutstandingOrder {
+        profile: Vec::new(),
         nonce: nonce.to_owned(),
         bloom: vec![1; 32],
         workpiece: "wp-return".to_owned(),

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::Unproducible;
+use crate::values::{CatalogError, Unproducible};
 
 /// Why an aggregate-review completion was refused (ADR-0153).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -57,16 +57,15 @@ pub enum SealError {
     /// A sealed or resolved bloom already occupies the mainline. V1 permits one
     /// unlanded bloom per mainline; a successor seals via supersession instead.
     ActiveBloomExists(BloomId),
-    /// The sealing spec froze a stage-catalog digest that is not the line the
-    /// pipeline runs ([`StageCatalog::line_digest`](crate::StageCatalog::line_digest)). An executed bloom is
-    /// graded against the exact catalog it promised (ADR-0149 §The line), so a
-    /// bloom that promises an unknown line — including the zero default — is
-    /// inadmissible. V1 knows exactly one catalog; the `found` field leaves room
-    /// for a known-catalog *set* later.
-    UnknownStageCatalog {
-        /// The unrecognized catalog digest the spec sealed.
-        found: Digest,
-    },
+    /// The sealing spec sealed a [`StageCatalog`](crate::StageCatalog) the line
+    /// cannot run (ADR-0174) — a stage left unbound or bound twice, a process no
+    /// executor routes, or a retry budget outside the countable range.
+    ///
+    /// Refused at the door because the alternative is a member that wedges with
+    /// no attempt ever made, long after the operator who authored the catalog has
+    /// moved on. Sealing *no* catalog is not this error: it runs the compiled
+    /// line, which is structurally valid by construction.
+    UnrunnableStageCatalog(CatalogError),
     /// The sealing spec's configuration registry names content the reducer could
     /// not be given (ADR-0174). Either the caller did not fetch it, or what it
     /// fetched is filed under a different kind than the registry key claims.

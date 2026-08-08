@@ -54,7 +54,7 @@ macro_rules! stage_vocabulary {
         /// pipeline is these stages compiled into Rust, not a workflow language.
         /// The set is closed and exhaustively matched — a new stage is a code
         /// change, never a config entry.
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+        #[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
         pub enum StageId {
             $($(#[$vmeta])* $variant),+
         }

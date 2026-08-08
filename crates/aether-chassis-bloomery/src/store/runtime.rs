@@ -116,6 +116,13 @@ pub struct OutstandingOrder {
     /// registry over the bloom's, and a replay cannot reconstruct that from the
     /// remaining columns.
     pub configs: Vec<u8>,
+    /// The [`AgentProfile`](aether_bloomery::AgentProfile) the bloom's sealed
+    /// stage catalog calibrates this stage at (ADR-0174) as its canonical
+    /// `aether_data::wire` bytes, on the same reasoning as `configs`: the reducer
+    /// resolved it from a catalog no host-side column carries, so a replay cannot
+    /// reconstruct it — and re-deriving it from the compiled line would dispatch
+    /// the fleet default for a bloom that sealed something else.
+    pub profile: Vec<u8>,
 }
 
 /// The outcome of recording an [`OutstandingOrder`]: written, or its nonce was
@@ -352,7 +359,8 @@ CREATE TABLE IF NOT EXISTS outstanding_orders (
     displayed_digest BLOB NOT NULL,
     stage            BLOB NOT NULL,
     transformation   BLOB NOT NULL,
-    configs          BLOB NOT NULL
+    configs          BLOB NOT NULL,
+    profile          BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS parked_question (
     bloom            BLOB NOT NULL,
@@ -365,6 +373,7 @@ CREATE TABLE IF NOT EXISTS parked_question (
     stage            BLOB NOT NULL,
     transformation   BLOB NOT NULL,
     configs          BLOB NOT NULL,
+    profile          BLOB NOT NULL,
     PRIMARY KEY (bloom, question)
 );
 CREATE TABLE IF NOT EXISTS study_index (
@@ -406,7 +415,7 @@ fn is_constraint_violation(error: &rusqlite::Error) -> bool {
 /// `parked_question` keyed by the question that parked it — select through this
 /// one spelling, so they cannot drift apart column-wise.
 const ORDER_COLUMNS: &str =
-    "nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage, transformation, configs";
+    "nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage, transformation, configs, profile";
 
 /// Read an [`OutstandingOrder`] from a row selected with [`ORDER_COLUMNS`].
 fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutstandingOrder> {
@@ -420,12 +429,13 @@ fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutstandingOrder>
         stage: row.get(6)?,
         transformation: row.get(7)?,
         configs: row.get(8)?,
+        profile: row.get(9)?,
     })
 }
 
 /// An [`OutstandingOrder`]'s columns as positional parameters matching
 /// [`ORDER_COLUMNS`], for the two tables that insert one.
-fn order_params(order: &OutstandingOrder) -> [&dyn rusqlite::ToSql; 9] {
+fn order_params(order: &OutstandingOrder) -> [&dyn rusqlite::ToSql; 10] {
     [
         &order.nonce,
         &order.bloom,
@@ -436,6 +446,7 @@ fn order_params(order: &OutstandingOrder) -> [&dyn rusqlite::ToSql; 9] {
         &order.stage,
         &order.transformation,
         &order.configs,
+        &order.profile,
     ]
 }
 
@@ -443,7 +454,7 @@ impl StoreBackend for SqliteStore {
     fn record_order(&mut self, order: &OutstandingOrder) -> rusqlite::Result<RecordOutcome> {
         let changed = self.conn.execute(
             &format!(
-                "INSERT OR IGNORE INTO outstanding_orders ({ORDER_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+                "INSERT OR IGNORE INTO outstanding_orders ({ORDER_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
             ),
             order_params(order).as_slice(),
         )?;
@@ -479,7 +490,7 @@ impl StoreBackend for SqliteStore {
         self.conn.execute(
             &format!(
                 "INSERT OR REPLACE INTO parked_question (question, {ORDER_COLUMNS}) \
-                 VALUES (?10, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+                 VALUES (?11, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
             ),
             [order_params(order).as_slice(), &[&question as &dyn rusqlite::ToSql]].concat().as_slice(),
         )?;

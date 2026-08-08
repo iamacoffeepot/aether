@@ -24,8 +24,8 @@ pub use model_override::{AgentSelection, ModelOverride, ResolvedModel};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use question::Question;
 pub use stage::{
-    Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, NetworkProfile, REVIEW_CRITIC_COMMAND, StageBinding,
-    StageCatalog, Transformation, is_model_lane,
+    Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, NetworkProfile, REVIEW_CRITIC_COMMAND,
+    StageBinding, StageCatalog, Transformation, is_model_lane,
 };
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 pub use study::{StudyCost, StudyRecord};

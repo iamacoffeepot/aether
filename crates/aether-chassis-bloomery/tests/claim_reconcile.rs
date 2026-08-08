@@ -39,8 +39,8 @@ use aether_bloomery::control::{
 use aether_bloomery::{
     BloomDraft, BloomId, BloomSpec, ClaimRefKind, ClaimRefState, ClaimSeal, ConfigRegistry, Decisions, Digest,
     EnumerateClaimsResult, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, ReleaseSeal,
-    ResolutionClaim, ResolvedConfigs, SealConflict, SealError, Snapshot, StageCatalog, SupersedeError, TransferSeal,
-    WorkpieceId, reduce,
+    ResolutionClaim, ResolvedConfigs, SealConflict, SealError, Snapshot, SupersedeError, TransferSeal, WorkpieceId,
+    reduce,
 };
 use aether_bloomery_github::GitSource;
 use aether_bloomery_github::testing::FakeGithub;
@@ -75,13 +75,7 @@ fn membership(name: &str, revision: u8) -> Membership {
 /// A draft sealing on `base` with the given memberships, stamped with the line
 /// catalog digest the reducer admits.
 fn spec(base: u8, members: Vec<Membership>) -> BloomSpec {
-    BloomDraft {
-        proposals: members,
-        base: digest(base),
-        stage_catalog: StageCatalog::line_digest(),
-        ..Default::default()
-    }
-    .seal()
+    BloomDraft { proposals: members, base: digest(base), ..Default::default() }.seal()
 }
 
 fn event(key: &str, fact: Fact) -> Event {
@@ -92,7 +86,7 @@ fn event(key: &str, fact: Fact) -> Event {
 /// snapshot built this way IS the replay-rebuilt snapshot a restart sees.
 fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
     let decisions = reduce(snapshot, event, &ResolvedConfigs::default());
-    (snapshot.apply(event, &decisions), decisions)
+    (snapshot.apply(event, &decisions, &ResolvedConfigs::default()), decisions)
 }
 
 /// Seal `spec` into a fresh snapshot on its base mainline.

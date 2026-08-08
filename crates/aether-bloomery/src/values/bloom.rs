@@ -84,10 +84,10 @@ pub struct BloomDraft {
     /// The one base source digest the bloom seals against.
     pub base: Digest,
     /// The bloom-wide configuration (ADR-0174), resolved when no member seals
-    /// its own entry for a kind.
+    /// its own entry for a kind. A sealed
+    /// [`StageCatalog`](crate::StageCatalog) entry here is what chooses agents
+    /// per stage; sealing none runs the compiled line.
     pub configs: ConfigRegistry,
-    /// The frozen stage-catalog digest.
-    pub stage_catalog: Digest,
     /// The predetermined resource ceiling.
     pub budget: Budget,
     /// The sealed forecast study grades against.
@@ -125,7 +125,6 @@ impl BloomDraft {
             members,
             base: self.base,
             configs: self.configs.clone(),
-            stage_catalog: self.stage_catalog,
             budget: self.budget,
             forecast: self.forecast,
         }
@@ -143,7 +142,6 @@ pub struct BloomSpec {
     members: Vec<Membership>,
     base: Digest,
     configs: ConfigRegistry,
-    stage_catalog: Digest,
     budget: Budget,
     forecast: Forecast,
 }
@@ -194,12 +192,6 @@ impl BloomSpec {
     #[must_use]
     pub const fn scopes<'a>(&'a self, member: &'a Membership) -> ConfigScopes<'a> {
         ConfigScopes::member_of(&member.configs, &self.configs)
-    }
-
-    /// The frozen stage-catalog digest.
-    #[must_use]
-    pub const fn stage_catalog(&self) -> Digest {
-        self.stage_catalog
     }
 
     /// The predetermined resource ceiling.

@@ -62,6 +62,7 @@ fn dispatch_record(
     candidate: Digest,
 ) -> DispatchRecord {
     DispatchRecord {
+        profile: StageCatalog::profile_of(StageId::Construct),
         nonce: Nonce(nonce.to_owned()),
         bloom,
         workpiece: workpiece.clone(),
@@ -99,7 +100,6 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
         proposals: vec![member],
         base: Digest::default(),
         configs: ConfigRegistry::default(),
-        stage_catalog: Digest::default(),
         budget: Budget::default(),
         forecast: Forecast::default(),
     }
@@ -110,6 +110,7 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
     snapshot.blooms.insert(
         bloom,
         BloomRecord {
+            stage_catalog: StageCatalog::line(),
             spec,
             status: BloomStatus::Sealed,
             claims: BTreeMap::new(),
@@ -429,18 +430,12 @@ fn sealed_via_reducer(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snaps
     };
     // The approval binds the member's whole subject (ADR-0174).
     member.approval.subject = member.subject();
-    let spec = BloomDraft {
-        proposals: vec![member],
-        base: Digest::default(),
-        stage_catalog: StageCatalog::line_digest(),
-        ..BloomDraft::default()
-    }
-    .seal();
+    let spec = BloomDraft { proposals: vec![member], base: Digest::default(), ..BloomDraft::default() }.seal();
     let bloom = spec.id();
     let snapshot = Snapshot::new(Digest::default());
     let seal = Event { idempotency_key: IdempotencyKey("seal".to_owned()), fact: Fact::Seal(spec) };
     let decisions = reduce(&snapshot, &seal, &ResolvedConfigs::default());
-    let snapshot = snapshot.apply(&seal, &decisions);
+    let snapshot = snapshot.apply(&seal, &decisions, &ResolvedConfigs::default());
     (snapshot, bloom)
 }
 
@@ -491,7 +486,7 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
         decisions.outcome,
         Outcome::AttemptAdvanced { from: StageId::Construct, to: StageId::Verify, .. }
     ));
-    let next = snapshot.apply(&admission.event, &decisions);
+    let next = snapshot.apply(&admission.event, &decisions, &ResolvedConfigs::default());
     assert_eq!(
         next.blooms.get(&bloom).unwrap().progress.get(&workpiece).unwrap().stage,
         StageId::Verify,
