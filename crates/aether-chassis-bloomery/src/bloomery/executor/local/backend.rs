@@ -75,8 +75,7 @@ impl LocalExecutor {
     /// agent profile the host overlaid at dispatch (ADR-0149 §The line).
     #[must_use]
     pub fn from_config(config: &GithubMirrorConfig, correspondence: SharedCorrespondence) -> Self {
-        let identity =
-            CaptureIdentity { name: config.capture_author_name.clone(), email: config.capture_author_email.clone() };
+        let identity = CaptureIdentity { name: config.operator_name.clone(), email: config.operator_email.clone() };
 
         Self::new(Arc::new(ProcessTransformRunner::new(identity)), correspondence, config.local_worktree_base.clone())
     }

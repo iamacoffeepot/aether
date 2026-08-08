@@ -12,12 +12,13 @@ use aether_bloomery_github::GitObjectId;
 use super::error::LocalExecutorError;
 use super::runner::{CapturedObjects, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 
-/// The identity a candidate capture commits under (#4630).
+/// The operator a candidate capture is authored as (#4630), resolved from the
+/// `AETHER_BLOOMERY_OPERATOR_*` knobs.
 ///
 /// Both fields empty — the default — means *inherit the host's ambient git
 /// identity*: a bloom is the operator's own work delegated to a machine, not a
 /// separate contributor, so the commit history reads that way with no
-/// configuration at all. A deployment that wants a distinct machine identity
+/// configuration at all. A deployment that wants a distinct, stable identity
 /// sets both knobs explicitly.
 #[derive(Debug, Clone, Default)]
 pub struct CaptureIdentity {
