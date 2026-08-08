@@ -126,6 +126,13 @@ pub struct SupersedeRequest {
     /// Override the admit idempotency key; defaults to the successor bloom id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// One projection per successor member, the same shape [`SealRequest`]
+    /// carries. Supersession is a second door into `active` claiming a fresh
+    /// membership set, so it runs the same approve gate a first seal does and
+    /// takes the gate-authored approval from it (#4638) — a draft's own
+    /// `approval` is a placeholder either way.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projections: Vec<MemberProjection>,
     /// The successor's per-member work-order descriptions, keyed by workpiece id
     /// — the same advisory model context [`SealRequest::descriptions`] carries,
     /// and required here for the same reason (#4631).

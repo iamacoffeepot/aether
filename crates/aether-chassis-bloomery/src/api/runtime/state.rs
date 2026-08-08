@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use aether_actor::{HandlesKind, Manual};
-use aether_bloomery::{Admit, BloomDraft, Digest, Event, Statement, Workpiece};
+use aether_bloomery::{Admit, BloomDraft, BloomId, Digest, Event, Statement, Workpiece};
 use aether_data::wire::to_vec;
 use aether_data::{Kind, MailId, MailboxId};
 use aether_http as http;
@@ -110,6 +110,8 @@ pub(super) struct VerifyPending {
 pub(super) struct PendingSeal {
     /// The held HTTP reply obligation.
     pub(super) inbound: InboundMail,
+    /// The predecessor this seal supersedes, or `None` for a first seal.
+    pub(super) predecessor: Option<BloomId>,
     /// The gated draft: auto members carry their gate-formed approval; each
     /// above-auto member's approval is overwritten by
     /// [`verified_statement_approval`](crate::bloomery::verified_statement_approval) as its signature verifies.
@@ -147,6 +149,9 @@ pub(super) struct SealVerify {
 /// its map insert to the same adapter.
 pub(super) struct PendingSealSetup {
     pub(super) gated: BloomDraft,
+    /// The predecessor this seal supersedes, or `None` for a first seal — which
+    /// door the completed seal admits through (#4638).
+    pub(super) predecessor: Option<BloomId>,
     pub(super) descriptions: BTreeMap<String, String>,
     pub(super) idempotency_key: Option<String>,
     /// One entry per above-auto member — the dispatched `Verify` correlation and
@@ -256,7 +261,7 @@ pub(super) fn finish(
             http::Outcome::Deferred
         }
         Routed::DeferredSeal(setup) => {
-            let PendingSealSetup { gated, descriptions, idempotency_key, verifications } = *setup;
+            let PendingSealSetup { gated, predecessor, descriptions, idempotency_key, verifications } = *setup;
             let seal = state.next_seal;
             state.next_seal += 1;
             let remaining = verifications.len();
@@ -267,7 +272,9 @@ pub(super) fn finish(
                     .insert(correlation, SealVerify { seal, member_index, scope_revision, statement });
             }
             let inbound = ctx.take_inbound();
-            state.seals.insert(seal, PendingSeal { inbound, gated, descriptions, idempotency_key, remaining });
+            state
+                .seals
+                .insert(seal, PendingSeal { inbound, predecessor, gated, descriptions, idempotency_key, remaining });
             http::Outcome::Deferred
         }
     }
