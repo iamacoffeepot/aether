@@ -2,7 +2,7 @@
 //!
 //! The small part of the inward channel that genuinely parses a runner's
 //! output format: decoding the `scripts/agent-usage-record.mjs` JSON object
-//! into gradeable [`StudyCost`](aether_bloomery::StudyCost) columns. The
+//! into gradeable [`StudyCost`] columns. The
 //! platform-free stage-verdict vocabulary (`StageVerdict`, `StageResult`,
 //! `InwardError`, `normalize_stage_result`, `StudyResult`,
 //! `normalize_study_result`) lives in `aether-bloomery` as domain vocabulary;
