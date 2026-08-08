@@ -19,15 +19,16 @@
 // clutters the store methods.
 #![allow(clippy::significant_drop_tightening)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::{BloomId, Digest};
 use sha2::{Digest as _, Sha256};
 
 use crate::client::{
-    ActionsApi, Artifact, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, Issue, NewComment, NewIssue,
-    NewPullRequest, PullRequest, PullRequestApi, PullRequestState, RunConclusion, RunStatus, WorkflowRun,
+    ActionsApi, Artifact, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, Issue, MergeResult,
+    NewComment, NewIssue, NewPullRequest, PullRequest, PullRequestApi, PullRequestState, RunConclusion, RunStatus,
+    WorkflowRun, strip_heads,
 };
 use crate::correspondence::{Correspondence, CorrespondenceError, GitObjectId};
 use crate::executor::INPUT_NONCE;
@@ -107,6 +108,10 @@ struct State {
     // treats as digest-addressed handles, so they need no separate store.
     refs: HashMap<String, String>,
     commits: HashMap<String, StoredCommit>,
+    // Merges armed to conflict, as (base, head) bare branch names. A fake holds
+    // no real file content, so a collision cannot arise from what is seeded and
+    // has to be stated outright.
+    merge_conflicts: HashSet<(String, String)>,
     // The Actions surface the executor port drives: recorded dispatches (a
     // `workflow_dispatch` creates no resolvable run synchronously, so a
     // dispatched-but-unseeded nonce inspects `Unknown`), and the runs a test
@@ -316,6 +321,26 @@ impl FakeGithub {
         self.seed_correspondence(digest, &to_hex(digest));
     }
 
+    /// Arm a merge of `head` into `base` (bare branch names) to answer with a
+    /// conflict — the cross-member collision a fold parks on, which no amount of
+    /// seeded content can otherwise provoke from a fake with no real diffs.
+    pub fn seed_merge_conflict(&self, base: &str, head: &str) {
+        self.lock().merge_conflicts.insert((base.to_owned(), head.to_owned()));
+    }
+
+    /// The tree sha `name` resolves to — a branch (bare name) through its ref,
+    /// or a commit sha directly, mirroring what the merge endpoint accepts as a
+    /// head.
+    fn tree_at(&self, name: &str) -> Result<String, GithubError> {
+        let state = self.lock();
+        let sha = state.refs.get(&format!("heads/{name}")).map_or(name, String::as_str);
+        state
+            .commits
+            .get(sha)
+            .map(|stored| stored.tree.clone())
+            .ok_or_else(|| GithubError::Status { status: 404, body: format!("no commit or branch {name}") })
+    }
+
     /// The nonces of the dispatches recorded so far, in dispatch order — an
     /// executor test's way to assert a `submit` reached the Actions surface.
     #[must_use]
@@ -396,7 +421,11 @@ fn commit_sha(message: &str, tree: &str, parents: &[String]) -> String {
         hasher.update([0u8]);
         hasher.update(parent.as_bytes());
     }
-    let bytes: [u8; 32] = hasher.finalize().into();
+    hex_of(&hasher.finalize().into())
+}
+
+// 64 lowercase hex — the sha form the port's `digest_from_hex` round-trips.
+fn hex_of(bytes: &[u8; 32]) -> String {
     let mut out = String::with_capacity(64);
     for byte in bytes {
         out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
@@ -466,6 +495,53 @@ impl GitDataApi for FakeGithub {
         self.lock().commits.insert(sha.clone(), StoredCommit { tree: tree.to_owned(), message: message.to_owned() });
         Ok(GitCommit { sha, tree: tree.to_owned(), message: message.to_owned() })
     }
+
+    fn merge(&self, base: &str, head: &str, message: &str) -> Result<MergeResult, GithubError> {
+        let (base, head) = (strip_heads(base), strip_heads(head));
+        let base_tree = self.tree_at(base)?;
+        let head_tree = self.tree_at(head)?;
+
+        // Nothing to merge when the base already carries the head's content.
+        if base_tree == head_tree {
+            return Ok(MergeResult::AlreadyUpToDate);
+        }
+        if self.lock().merge_conflicts.contains(&(base.to_owned(), head.to_owned())) {
+            return Ok(MergeResult::Conflict {
+                detail: format!("{{\"message\":\"Merge conflict\"}} ({head} into {base})"),
+            });
+        }
+
+        // The one property worth modelling: a merge's tree is a function of
+        // *both* sides. A fake that echoed the head's tree would let a caller
+        // that actually tree-replaces pass — the precise bug merging exists to
+        // prevent — so the combined tree must differ from either input.
+        let tree = merged_tree(&base_tree, &head_tree);
+        let sha = commit_sha(message, &tree, &[base.to_owned(), head.to_owned()]);
+        let mut state = self.lock();
+        state.commits.insert(sha.clone(), StoredCommit { tree: tree.clone(), message: message.to_owned() });
+        // A real merge commits onto the base branch, so the ref advances.
+        if let Some(target) = state.refs.get_mut(&format!("heads/{base}")) {
+            target.clone_from(&sha);
+        }
+        Ok(MergeResult::Merged(GitCommit { sha, tree, message: message.to_owned() }))
+    }
+}
+
+/// The tree a merge of `base` and `head` lands on. Order-independent, so
+/// merging the same two sides either way agrees, and distinct from both inputs.
+fn merged_tree(base: &str, head: &str) -> String {
+    let (first, second) = if base <= head {
+        (base, head)
+    } else {
+        (head, base)
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"merged-tree");
+    hasher.update([0u8]);
+    hasher.update(first.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(second.as_bytes());
+    hex_of(&hasher.finalize().into())
 }
 
 impl Correspondence for FakeGithub {
@@ -657,5 +733,64 @@ impl GithubApi for FakeGithub {
         };
         body.clone_into(&mut comment.body);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    //! The fake's merge is the seam every fold test will stand on, and nothing
+    //! else exercises it yet — so its contract is pinned here rather than
+    //! discovered later through a port test that passes for the wrong reason.
+
+    use super::{FakeGithub, GitDataApi, MergeResult};
+
+    // Seed `branch` at a commit carrying `tree`, and hand back that commit's sha.
+    fn branch_at(fake: &FakeGithub, branch: &str, tree: &str) -> String {
+        let commit = fake.create_commit(branch, tree, &[]).unwrap();
+        fake.seed_ref(&format!("heads/{branch}"), &commit.sha);
+        commit.sha
+    }
+
+    #[test]
+    fn a_merge_combines_both_sides_rather_than_taking_the_heads_tree() {
+        // Tripwire: the whole reason the fold moves off `create_commit` is that
+        // stating the head's tree onto a moved base reverts what the base
+        // gained. A fake that echoed the head's tree would let exactly that bug
+        // pass its port test, so the combined tree must equal neither input.
+        let fake = FakeGithub::new();
+        branch_at(&fake, "integration", "base-tree");
+        branch_at(&fake, "candidate", "head-tree");
+
+        let MergeResult::Merged(commit) = fake.merge("heads/integration", "heads/candidate", "fold").unwrap() else {
+            panic!("two divergent trees merge");
+        };
+        assert_ne!(commit.tree, "head-tree", "a merge is not a tree-replace");
+        assert_ne!(commit.tree, "base-tree", "nor a no-op");
+
+        // A real merge commits onto the base branch, so the fold's next read of
+        // the integration branch must see the merge, not the pre-merge position.
+        assert_eq!(fake.get_ref("heads/integration").unwrap().unwrap().sha, commit.sha, "the base branch advanced");
+    }
+
+    #[test]
+    fn an_already_contained_head_reports_nothing_to_do_and_an_armed_pair_conflicts() {
+        let fake = FakeGithub::new();
+        branch_at(&fake, "integration", "same-tree");
+        branch_at(&fake, "candidate", "same-tree");
+        assert_eq!(
+            fake.merge("heads/integration", "heads/candidate", "fold").unwrap(),
+            MergeResult::AlreadyUpToDate,
+            "a base already carrying the head's content has nothing to merge",
+        );
+
+        let fake = FakeGithub::new();
+        branch_at(&fake, "integration", "base-tree");
+        branch_at(&fake, "candidate", "head-tree");
+        fake.seed_merge_conflict("integration", "candidate");
+        assert!(
+            matches!(fake.merge("heads/integration", "heads/candidate", "fold").unwrap(), MergeResult::Conflict { .. }),
+            "an armed pair collides — the only way a contentless fake can model one",
+        );
     }
 }
