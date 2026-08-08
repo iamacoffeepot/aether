@@ -1,6 +1,6 @@
 # ADR-0129: HTTP server websocket upgrade
 
-- **Status:** Accepted (shipped — HTTP websocket upgrade in the `aether.http` server capability; `crates/aether-capabilities/src/http/server/runtime/websocket.rs`)
+- **Status:** Accepted (shipped — HTTP websocket upgrade in `crates/aether-http/src/server/runtime/websocket.rs`)
 - **Amended by:** ADR-0132 — the data-phase kinds (`WebSocketMessage`, `WebSocketClose`) carry an explicit `stream_id` and outbound mail routes by it; the causal-chain-root routing this ADR describes for outbound messages is superseded.
 - **Date:** 2026-07-03
 

@@ -1,6 +1,6 @@
 # ADR-0130: HTTP Server Route Registration
 
-- **Status:** Accepted (shipped — HTTP server route registration in the `aether.http` server capability; `crates/aether-capabilities/src/http/server/mod.rs`)
+- **Status:** Accepted (shipped — HTTP server route registration in `crates/aether-http/src/server/mod.rs`)
 - **Date:** 2026-07-03
 
 Extends **ADR-0108** (the `aether.http.server` capability), realizing the routing refinements its §Follow-on parked. Mirrors the declare-interest-by-mail model of **ADR-0021** / **ADR-0083** (input-stream subscriptions) and rides the shared lifecycle `wire` hook of iamacoffeepot/aether#2048. Composes unchanged with **ADR-0128** (response streaming) and **ADR-0129** (websocket upgrade), both of which act downstream of dispatch, keyed by the request's correlation.

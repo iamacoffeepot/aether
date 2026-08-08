@@ -1,6 +1,6 @@
 # ADR-0121: Capabilities own their kinds
 
-- **Status:** Accepted (shipped — capability-owned kinds across `aether-capabilities`; see `docs/guide/capability-anatomy.md`)
+- **Status:** Accepted (shipped — capability-owned kinds live in per-capability crates such as `crates/aether-audio` and `crates/aether-http`; see `docs/guide/capability-anatomy.md`)
 - **Date:** 2026-06-22
 
 ## Context

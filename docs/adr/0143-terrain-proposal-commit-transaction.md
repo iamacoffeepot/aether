@@ -1,6 +1,6 @@
 # ADR-0143: Terrain proposal/commit transaction
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — terrain proposal/commit transactions in `crates/aether-kit-terrain/src/world/proposal.rs`, covered by `crates/aether-kit-terrain/tests/proposal_scenario.rs`)
 - **Date:** 2026-07-09
 
 ## Context

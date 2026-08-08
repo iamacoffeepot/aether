@@ -1,6 +1,6 @@
 # ADR-0132: Explicit Stream Id for Websocket Messages
 
-- **Status:** Accepted (shipped — explicit `stream_id` on websocket messages; `crates/aether-capabilities/src/http/server/runtime/websocket.rs`)
+- **Status:** Accepted (shipped — explicit `stream_id` on websocket messages in `crates/aether-http/src/server/runtime/websocket.rs`)
 - **Date:** 2026-07-04
 
 Amends **ADR-0129** (HTTP server websocket upgrade): replaces its causal-chain-root routing for data-phase websocket mail with an explicit `stream_id` carried on the wire, the correlation posture **ADR-0128** established for mid-session mail on short chains.

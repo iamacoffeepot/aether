@@ -1,6 +1,6 @@
 # ADR-0158: Per-sender bounded async egress dispatch
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — bounded per-sender async egress in `crates/aether-http/src/client/egress.rs`)
 - **Date:** 2026-07-21
 
 ## Context

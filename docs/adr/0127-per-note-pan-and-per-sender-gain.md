@@ -1,6 +1,6 @@
 # ADR-0127: Per-note pan and per-sender gain for the synth mixer
 
-- **Status:** Accepted (shipped — per-note pan + per-sender gain in the `aether.audio` capability; `crates/aether-capabilities/src/audio/runtime/{voice,synth}.rs`)
+- **Status:** Accepted (shipped — per-note pan and per-sender gain in `crates/aether-audio/src/runtime/voice.rs` and `crates/aether-audio/src/runtime/synth.rs`)
 - **Date:** 2026-07-03
 
 ## Context

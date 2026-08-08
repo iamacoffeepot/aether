@@ -1,6 +1,6 @@
 # ADR-0147: Module Boot Actor and Default Export Slot
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — module boot and default-export loading in `crates/aether-component/src/component/runtime/load.rs`, covered by `crates/aether-component/tests/boot.rs`)
 - **Date:** 2026-07-11
 
 ## Context

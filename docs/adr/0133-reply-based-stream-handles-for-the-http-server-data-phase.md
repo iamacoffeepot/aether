@@ -1,6 +1,6 @@
 # ADR-0133: Reply-Based Stream Handles for the HTTP Server Data Phase
 
-- **Status:** Accepted (shipped — reply-based stream handles for the HTTP server data phase; `crates/aether-capabilities/src/http/stream.rs`)
+- **Status:** Accepted (shipped — reply-based stream handles for the HTTP server data phase in `crates/aether-http/src/stream.rs`)
 - **Date:** 2026-07-04
 
 Amends **ADR-0128** (response streaming), **ADR-0129** (websocket upgrade), and **ADR-0132** (explicit stream id): replaces their handler→cap addressing — the typed singleton send at `HttpServerCapability` — with a durable stream handle that addresses whoever actually dispatched the stream to the handler. The payload `stream_id` keying ADR-0132 established is unchanged. Builds on the causal-chain model of **ADR-0080** and the reply machinery of **ADR-0013** / **ADR-0017**.

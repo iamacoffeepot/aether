@@ -1,6 +1,6 @@
 # ADR-0135: Sharded HTTP Server Dispatch
 
-- **Status:** Accepted (shipped — sharded HTTP server dispatch; `crates/aether-capabilities/src/http/server/shard/`)
+- **Status:** Accepted (shipped — sharded HTTP server dispatch in `crates/aether-http/src/server/shard/`)
 - **Date:** 2026-07-05
 
 Restructures the `aether.http.server` capability's request path for throughput. Amends **ADR-0108** (the single-actor dispatch topology of §5, the trust-cap enforcement seat of §6) and **ADR-0128** (which actor answers the reader's streaming decision in §4). The streaming, websocket, and routing wire contracts (ADR-0128/0129/0130/0132/0133) are unchanged — this ADR moves work between actors and threads; it does not change any kind, any handler-visible semantics, or any external mail surface.

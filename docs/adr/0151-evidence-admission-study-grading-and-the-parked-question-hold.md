@@ -1,6 +1,6 @@
 # ADR-0151: Evidence admission, study grading, and the parked-question hold
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — evidence, parked-question, and study flows in `crates/aether-bloomery/src/control/` and `crates/aether-chassis-bloomery/src/store/runtime.rs`)
 - **Date:** 2026-07-16
 
 ## Context

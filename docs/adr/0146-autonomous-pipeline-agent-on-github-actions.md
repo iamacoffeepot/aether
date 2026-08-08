@@ -1,6 +1,6 @@
 # ADR-0146: Autonomous Pipeline Agent on GitHub Actions
 
-- **Status:** Proposed
+- **Status:** Superseded (#3829 — the hosted autonomous pipeline workflows were retired; use `.agents/skills/` and `docs/guide/contributing/agent-workflow.md`)
 - **Date:** 2026-07-11
 
 ## Context
