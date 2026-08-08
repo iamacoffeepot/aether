@@ -15,7 +15,7 @@ use serde::Serialize;
 use std::fs;
 
 use super::error::LocalExecutorError;
-use super::process_runner::ProcessTransformRunner;
+use super::process_runner::{CaptureIdentity, ProcessTransformRunner};
 use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::intake::attempt_artifact_name;
@@ -75,7 +75,9 @@ impl LocalExecutor {
     /// agent profile the host overlaid at dispatch (ADR-0149 §The line).
     #[must_use]
     pub fn from_config(config: &GithubMirrorConfig, correspondence: SharedCorrespondence) -> Self {
-        Self::new(Arc::new(ProcessTransformRunner), correspondence, config.local_worktree_base.clone())
+        let identity = CaptureIdentity { name: config.operator_name.clone(), email: config.operator_email.clone() };
+
+        Self::new(Arc::new(ProcessTransformRunner::new(identity)), correspondence, config.local_worktree_base.clone())
     }
 
     // Lock the registry, recovering the guard on a poisoned mutex rather than

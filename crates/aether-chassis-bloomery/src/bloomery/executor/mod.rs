@@ -39,7 +39,8 @@ pub mod local;
 mod routing;
 
 pub use local::{
-    LocalExecutor, LocalExecutorError, ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, TransformRunner,
+    CaptureIdentity, LocalExecutor, LocalExecutorError, ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec,
+    TransformRunner,
 };
 pub use routing::RoutingExecutor;
 
