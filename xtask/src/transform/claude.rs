@@ -8,7 +8,7 @@ use std::{fs, thread};
 
 use anyhow::{Context, Result, bail};
 
-use crate::transform::TransformArgs;
+use crate::transform::{TransformArgs, conventions};
 
 /// The headless-Claude argv the `construct.implement` lane runs (#3511): `-p`
 /// non-interactive, emitting the stream-json transcript the in-repo
@@ -35,13 +35,24 @@ fn construct_argv(model: Option<&str>, effort: Option<&str>) -> Vec<String> {
 }
 
 /// Assemble the headless-Claude prompt for the construct lane from the lane-owned
-/// `instructions`, the checked-out `subject`, and the work-order `task` — pure so
-/// the assembly is testable without spawning Claude (#3572). The subject header
-/// names the exact sealed tree the worker is on; the `## Task` section carries the
-/// operator's work-order description (#3595) so the model is told *what* to build,
-/// not just *where*. A `None` task appends no section — the subject-only prompt
-/// still stands (the fail-legible path for a member with no persisted description).
-pub(super) fn assemble_construct_prompt(instructions: &str, subject: Option<&str>, task: Option<&str>) -> String {
+/// `instructions`, the subject tree's `conventions`, the checked-out `subject`,
+/// and the work-order `task` — pure so the assembly is testable without spawning
+/// Claude (#3572). The subject header names the exact sealed tree the worker is
+/// on; the `## Task` section carries the operator's work-order description
+/// (#3595) so the model is told *what* to build, not just *where*.
+///
+/// Both optional sections are presence-driven: a `None` task appends none (the
+/// fail-legible path for a member with no persisted description), and `None`
+/// conventions append none (a subject tree that carries no conventions file,
+/// #4647). The order is deliberate — conventions are long and general, the work
+/// order is short and specific, so the task stays last where the instructions
+/// promise it.
+pub(super) fn assemble_construct_prompt(
+    instructions: &str,
+    conventions: Option<&str>,
+    subject: Option<&str>,
+    task: Option<&str>,
+) -> String {
     let subject_line = subject.map_or_else(
         || "You are working in the checked-out subject tree — the sealed source this work order named.".to_owned(),
         |subject| {
@@ -51,8 +62,10 @@ pub(super) fn assemble_construct_prompt(instructions: &str, subject: Option<&str
             )
         },
     );
+    let conventions_section =
+        conventions.map_or_else(String::new, |text| format!("\n{}\n", conventions::section(text)));
     let task_section = task.map_or_else(String::new, |task| format!("\n## Task\n\n{task}\n"));
-    format!("{instructions}\n\n## Subject\n\n{subject_line}\n{task_section}")
+    format!("{instructions}\n{conventions_section}\n## Subject\n\n{subject_line}\n{task_section}")
 }
 
 /// The last `max` bytes of `s`, snapped forward to a char boundary — for

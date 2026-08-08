@@ -3,10 +3,12 @@
 //! order, run the critic headless, and fold its `VERDICT:` line into the
 //! pass/fail status the local backend reads. Fail-closed at every shortfall.
 
+use std::path::Path;
+
 use anyhow::Result;
 
 use crate::transform::claude::assemble_construct_prompt;
-use crate::transform::{TransformArgs, run_model_lane, write_evidence_json};
+use crate::transform::{TransformArgs, conventions, run_model_lane, write_evidence_json};
 
 /// The typed id of the model-driven review lane — the member line's terminal
 /// critic (`Transformation::for_member_stage` dispatches it for the Review
@@ -73,7 +75,16 @@ fn stamp_review_evidence(nonce: Option<&str>, passed: bool, record: &serde_json:
 /// (see [`review_conclusion`]). Like the construct lane it needs a Claude
 /// credential, so it runs worker-side — never on the zero-secret path.
 pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
-    let prompt = assemble_construct_prompt(REVIEW_INSTRUCTIONS, args.subject.as_deref(), args.task.as_deref());
+    // Pillars 3 and 5 judge the candidate against the repository's stated
+    // conventions, so the critic is given them rather than told to go and read
+    // them (#4647) — a critic without the rules cannot cite the one a candidate
+    // broke, and passes convention drift by default.
+    let prompt = assemble_construct_prompt(
+        REVIEW_INSTRUCTIONS,
+        conventions::read(Path::new(".")).as_deref(),
+        args.subject.as_deref(),
+        args.task.as_deref(),
+    );
     let record = run_model_lane(&prompt, args)?;
     write_evidence_json(&args.out, &stamp_review_evidence(args.nonce.as_deref(), review_conclusion(&record), &record))
 }

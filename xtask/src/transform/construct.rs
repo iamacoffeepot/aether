@@ -8,7 +8,7 @@ use std::process::Command;
 use anyhow::Result;
 
 use crate::transform::claude::assemble_construct_prompt;
-use crate::transform::{TransformArgs, run_model_lane, write_evidence_json};
+use crate::transform::{TransformArgs, conventions, run_model_lane, write_evidence_json};
 
 /// The typed id of the model-driven construct lane (#3511). Recognized here so
 /// an unknown id stays unmapped exactly as in the verify lane.
@@ -80,8 +80,16 @@ fn capture_produced_candidate(out_dir: &Path) -> bool {
 pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
     // The lane owns its process: the prompt is assembled from the in-repo
     // instruction source and the checked-out subject, never from a skill in the
-    // worker's checkout. It is piped on the child's stdin.
-    let prompt = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, args.subject.as_deref(), args.task.as_deref());
+    // worker's checkout. It is piped on the child's stdin. The subject tree's own
+    // conventions ride along (#4647) — read from the cwd the lane runs in, which
+    // is that checkout — so they reach the agent whichever harness is forked,
+    // rather than depending on the CLI to go and find them.
+    let prompt = assemble_construct_prompt(
+        CONSTRUCT_INSTRUCTIONS,
+        conventions::read(Path::new(".")).as_deref(),
+        args.subject.as_deref(),
+        args.task.as_deref(),
+    );
     let record = run_model_lane(&prompt, args)?;
 
     // Inspect the worktree (cwd) for the candidate change the run's whole job is
@@ -161,7 +169,8 @@ mod tests {
     // never reads `.claude/skills/implement` (#3572). Pure: no Claude spawn.
     #[test]
     fn construct_prompt_assembles_from_the_in_repo_instructions_and_subject() {
-        let prompt = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("thread the work order"));
+        let prompt =
+            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("abc123"), Some("thread the work order"));
         assert!(prompt.starts_with(CONSTRUCT_INSTRUCTIONS), "the lane's own instruction source leads the prompt");
         assert!(prompt.contains("## Subject"), "the checked-out subject is appended as its own section");
         assert!(prompt.contains("abc123"), "the exact checked-out commit is named in the prompt");
@@ -178,16 +187,41 @@ mod tests {
         assert!(prompt.contains("thread the work order"), "the task text is named in the prompt");
 
         // With no subject supplied, the prompt still stands and names no commit.
-        let subjectless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("still has a task"));
+        let subjectless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, None, Some("still has a task"));
         assert!(subjectless.contains("## Subject"));
         assert!(subjectless.contains("\n## Task\n"));
         assert!(subjectless.starts_with(CONSTRUCT_INSTRUCTIONS));
 
         // With no task, the prompt still stands and appends no `## Task` section —
         // the fail-legible subject-only path for a member with no description.
-        let taskless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), None);
+        let taskless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("abc123"), None);
         assert!(taskless.contains("## Subject"));
         assert!(!taskless.contains("\n## Task\n"), "no persisted description means no task section");
         assert!(taskless.starts_with(CONSTRUCT_INSTRUCTIONS));
+    }
+
+    // The conventions the subject tree carries ride the prompt itself (#4647)
+    // rather than being pointed at, because only one of the three harnesses the
+    // lane can fork reads a conventions file on its own. The order is what the
+    // instructions promise: the work order stays last, after the long general
+    // rules, so `## Task` is still the section at the end.
+    #[test]
+    fn conventions_ride_the_prompt_ahead_of_the_work_order() {
+        let prompt = assemble_construct_prompt(
+            CONSTRUCT_INSTRUCTIONS,
+            Some("Tests must earn their place."),
+            Some("abc123"),
+            Some("thread the work order"),
+        );
+        assert!(prompt.contains("Tests must earn their place."), "the tree's conventions are carried verbatim");
+        let conventions_at = prompt.find("\n## Conventions\n").expect("the conventions get their own section");
+        let task_at = prompt.find("\n## Task\n").expect("the work order keeps its section");
+        assert!(conventions_at < task_at, "the work order stays last, where the instructions say it is");
+
+        // A subject tree carrying no conventions file drops the section rather
+        // than failing the dispatch or emitting an empty heading.
+        let bare = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("abc123"), Some("build it"));
+        assert!(!bare.contains("\n## Conventions\n"), "no conventions file means no conventions section");
+        assert!(bare.contains("\n## Task\n"), "the rest of the prompt is unaffected");
     }
 }

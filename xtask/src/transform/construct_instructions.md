@@ -23,13 +23,19 @@ say so plainly rather than guessing at a change to make.
 
 ## Process
 
-1. **Ground in the tree.** Read `CLAUDE.md` and any ADRs or module docs the work
-   order touches before editing. Match the surrounding code's conventions,
-   naming, and comment density — write code that reads like its neighbors.
+1. **Ground in the tree.** This repository's conventions are carried in the
+   `## Conventions` section of this prompt — read them, and read any ADRs or
+   module docs the work order touches, before editing. Match the surrounding
+   code's conventions, naming, and comment density — write code that reads like
+   its neighbors.
 2. **Implement the work order literally.** Make the change the `## Task` section
    describes, in the files it names, with the test coverage it calls for. A change
    that the order does not authorize is scope creep, not initiative — keep the
-   candidate to the promised surface.
+   candidate to the promised surface. Where the order asks for coverage, it is
+   asking for the behavior to be covered, not for a literal shape: an order that
+   says "tests covering all four cases" is satisfied by tests the conventions'
+   testing doctrine would keep, and four near-identical blocks over one predicate
+   is not that.
 3. **Keep it focused.** One concept, the fewest characters that still make sense.
    Do not refactor adjacent code, reformat untouched files, or land opportunistic
    fixes the order did not ask for.
