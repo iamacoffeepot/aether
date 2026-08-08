@@ -248,7 +248,7 @@ pub fn is_active_unlanded(status: BloomStatus) -> bool {
 
 /// The id of a bloom still `Sealed` or `Resolved` (an unlanded active bloom),
 /// if any — the input to the V1 one-active-bloom-per-mainline guard.
-fn active_unlanded_bloom(snapshot: &Snapshot) -> Option<BloomId> {
+pub(super) fn active_unlanded_bloom(snapshot: &Snapshot) -> Option<BloomId> {
     snapshot.blooms.iter().find(|(_, record)| is_active_unlanded(record.status)).map(|(id, _)| *id)
 }
 

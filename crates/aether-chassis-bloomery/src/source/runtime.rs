@@ -12,10 +12,13 @@
 //! `put` / `get` split, so the handler tests can drive these methods directly
 //! over an explicit [`SourceShell`].
 
-use aether_actor::runtime;
+use aether_actor::{Addressable, runtime};
 use aether_bloomery::{
-    BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, Digest, IntegrateOutcome, LandOutcome, LandProposal, WorkpieceId,
+    Admit, BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, Digest, Event, Fact, IdempotencyKey, IntegrateOutcome,
+    LandOutcome, LandProposal, WorkpieceId,
 };
+use aether_bloomery_github::to_hex;
+use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::SourceCapability;
@@ -25,6 +28,69 @@ use super::kinds::{
     RecordCheckpoint, RecordCheckpointResult, ReleaseSeal, Snapshot, SnapshotResult, TransferSeal,
 };
 use crate::bloomery::SourceShell;
+use crate::control::ControlCore;
+
+/// Observe the repository's live mainline head and admit it to the control core
+/// (#4667).
+///
+/// `snapshot.mainline` is the base a land compare-and-swaps against, and a land
+/// is the only thing that ever moved it — so the pointer tracks the repository
+/// only while blooms are mainline's sole authors. Any merged pull request breaks
+/// that assumption, and once it drifts every bloom sealed afterwards bases on a
+/// head the repository has left: its workers check out stale code and its land
+/// refuses against a base nothing sits at any more.
+///
+/// Boot is where this runs because boot is where the shell already reads the
+/// live head, and because this capability owns no timer — the same tradeoff the
+/// genesis reconcile above documents. A deploy therefore fast-forwards, and a
+/// coordinator left running while others merge drifts until the next restart.
+/// Re-observing on a cadence is the follow-up; it belongs in a capability that
+/// already holds a timer rather than in this otherwise stateless one.
+///
+/// The reducer decides what the observation *means* — unchanged, an advance, or
+/// held behind an in-flight bloom — so this reports and does not interpret. The
+/// idempotency key carries the observed head, so re-observing an unchanged head
+/// dedups at the reducer rather than re-deciding.
+fn observe_mainline(state: &SourceCapabilityState, ctx: &mut NativeCtx<'_>) {
+    let head = match state.shell.observe_mainline_head() {
+        Ok(head) => head,
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::source",
+                %error,
+                "mainline observation failed; mainline stays where the last land left it until a restart re-observes"
+            );
+            return;
+        }
+    };
+
+    let event = Event {
+        idempotency_key: IdempotencyKey(format!("observe-mainline-{}", to_hex(&head))),
+        fact: Fact::ObserveMainline { head },
+    };
+    match to_vec(&event) {
+        Ok(bytes) => {
+            // Fire-and-forget for the same reason the land reactor's admits are:
+            // local mail to the control actor is reliable, and the idempotency
+            // key dedups a resend.
+            let _ = ctx.send_envelope_detached(
+                <ControlCore as Addressable>::resolve(0, ()),
+                Admit::ID,
+                &Admit { event: bytes }.encode_into_bytes(),
+            );
+            tracing::info!(
+                target: "aether_chassis_bloomery::source",
+                head = %to_hex(&head),
+                "observed the repository's mainline head"
+            );
+        }
+        Err(error) => tracing::warn!(
+            target: "aether_chassis_bloomery::source",
+            %error,
+            "mainline observation did not encode"
+        ),
+    }
+}
 
 /// Decode one `aether_data::wire`-encoded [`WorkpieceId`] per entry, or a
 /// [`ClaimResult::Err`] naming the first decode failure.
@@ -424,7 +490,7 @@ impl NativeActor for SourceCapability {
     /// recovery is a process restart — which re-runs `init` then this boot
     /// reconcile. That is the deliberate tradeoff against wiring a poll loop
     /// into a capability that is otherwise stateless between requests.
-    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
         if !state.claims_enabled {
             return;
         }
@@ -439,6 +505,7 @@ impl NativeActor for SourceCapability {
                 "genesis mainline reconcile failed; first land may fault until a process restart re-runs the boot reconcile"
             ),
         }
+        observe_mainline(state, ctx);
     }
 
     // The `#[handler::single]` contract requires the mail by value; every

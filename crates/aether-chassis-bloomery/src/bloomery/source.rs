@@ -129,6 +129,23 @@ impl SourceShell {
         self.seed_mainline(&Snapshot::GENESIS_MAINLINE, &self.backend.mainline_head_sha()?)
     }
 
+    /// Observe the repository's live mainline head as the digest naming it
+    /// (#4667) — what a `Fact::ObserveMainline` carries.
+    ///
+    /// Distinct from [`reconcile_genesis_mainline`](Self::reconcile_genesis_mainline),
+    /// which binds a sentinel *once* and must never re-point. This reads the
+    /// head every time and names it; the control core decides whether that means
+    /// anything. Splitting the two is the point: the genesis seed is a historical
+    /// anchor and the observation is a live pointer, and collapsing them into one
+    /// re-seeding read is precisely what defeats base-moved detection.
+    ///
+    /// # Errors
+    /// The mainline ref is unreachable, the head sha is malformed, or the
+    /// correspondence store faulted.
+    pub fn observe_mainline_head(&self) -> Result<Digest, SourceError> {
+        self.backend.observe_mainline_head()
+    }
+
     /// Snapshot the source at `base`.
     ///
     /// # Errors

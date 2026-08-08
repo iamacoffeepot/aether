@@ -16,9 +16,9 @@ mod common;
 use aether_bloomery::ConfigKind;
 use aether_bloomery::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, Artifact, AttemptCompletedError, BloomStatus,
-    CandidateRef, CatalogError, Decision, Digest, Evidence, EvidenceKind, Fact, KeyId, LandError, Observation, Outcome,
-    Provenance, Question, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId,
-    Statement, SupersedeError, Unproducible, reduce,
+    CandidateRef, CatalogError, Decision, Digest, Evidence, EvidenceKind, Fact, KeyId, LandError, Observation,
+    ObserveMainlineError, Outcome, Provenance, Question, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope,
+    Snapshot, StageCatalog, StageId, Statement, SupersedeError, Unproducible, reduce,
 };
 use aether_data::Kind;
 use aether_data::wire::to_vec;
@@ -1978,5 +1978,71 @@ mod sealed_catalog {
             "the sealed budget of 1 wedges on the first failure: {:?}",
             decided.outcome,
         );
+    }
+}
+
+/// The mainline-observation rule (#4667): the coordinator's mainline pointer
+/// follows the repository, and is held while a bloom is in flight.
+mod observed_mainline {
+    use super::*;
+
+    // Tripwire: mainline follows the repository, not only the coordinator's own
+    // lands (#4667). An observation of a head mainline has not reached must move
+    // it, or every bloom sealed afterwards bases on a head the repository left —
+    // the drift this fact exists to close.
+    #[test]
+    fn an_observed_head_advances_mainline() {
+        let snapshot = Snapshot::new(digest(1));
+        let observed = event("observe", Fact::ObserveMainline { head: digest(9) });
+
+        let (next, decided) = step(&snapshot, &observed);
+
+        assert!(
+            matches!(decided.outcome, Outcome::MainlineAdvanced { from, to } if from == digest(1) && to == digest(9)),
+            "an observation past mainline advances it: {:?}",
+            decided.outcome,
+        );
+        assert_eq!(next.mainline, digest(9), "and the fold moves the pointer the decision named");
+    }
+
+    // Tripwire: re-observing the head mainline already sits at decides nothing.
+    // A host that observes on a cadence submits this fact constantly, so the
+    // steady state must be a no-op with no effects — an `AdvanceMainline` here
+    // would churn the outbox on every poll.
+    #[test]
+    fn re_observing_the_current_head_decides_nothing() {
+        let snapshot = Snapshot::new(digest(1));
+        let observed = event("observe", Fact::ObserveMainline { head: digest(1) });
+
+        let decided = reduce(&snapshot, &observed, &ResolvedConfigs::default());
+
+        assert!(
+            matches!(decided.outcome, Outcome::MainlineUnchanged(head) if head == digest(1)),
+            "observing the current head is a no-op: {:?}",
+            decided.outcome,
+        );
+        assert!(decided.effects.is_empty(), "and it decides no effects: {:?}", decided.effects);
+    }
+
+    // Tripwire: an observation is held while a bloom is in flight. The bloom's
+    // sealed base is the one head it may land on, so advancing under it converts
+    // its land into a `BaseMismatch` only a hand-driven supersession clears. The
+    // hold is what keeps an unrelated merge from stranding work in progress.
+    #[test]
+    fn an_observation_is_held_while_a_bloom_is_in_flight() {
+        let (snapshot, spec) = sealed_and_resolved(1, vec![membership("wp", 10)], 30);
+        let observed = event("observe", Fact::ObserveMainline { head: digest(9) });
+
+        let (next, decided) = step(&snapshot, &observed);
+
+        assert!(
+            matches!(
+                decided.outcome,
+                Outcome::ObserveMainlineRejected(ObserveMainlineError::BloomInFlight(bloom)) if bloom == spec.id()
+            ),
+            "the in-flight bloom holds the advance: {:?}",
+            decided.outcome,
+        );
+        assert_eq!(next.mainline, digest(1), "and mainline stays where the in-flight bloom sealed against");
     }
 }

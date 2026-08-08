@@ -164,6 +164,24 @@ pub enum Fact {
         /// is parsed.
         implicated: Vec<WorkpieceId>,
     },
+    /// The repository's mainline head, as the host observed it (#4667).
+    ///
+    /// `snapshot.mainline` is the base a land compare-and-swaps against, and a
+    /// land is the only thing that moved it — which makes it a mirror of the
+    /// repository only while blooms are mainline's sole authors. They are not:
+    /// any merged pull request moves the real head, so without this fact the
+    /// pointer drifts behind arbitrarily far and every bloom sealed afterwards
+    /// bases on a head the repository has left.
+    ///
+    /// The host reads the live head and mints (or reverse-resolves) its digest;
+    /// the reducer only compares. An observation that names the head mainline is
+    /// already at is a no-op, so re-observing on a cadence is free. Appended past
+    /// [`Fact::AggregateReviewCompleted`] so the prior facts' wire discriminants
+    /// are unchanged.
+    ObserveMainline {
+        /// The observed head's digest, correspondence-bound to the real commit.
+        head: Digest,
+    },
 }
 
 impl Fact {
