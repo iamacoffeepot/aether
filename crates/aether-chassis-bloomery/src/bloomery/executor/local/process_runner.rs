@@ -89,6 +89,22 @@ impl TransformRunner for ProcessTransformRunner {
         if git_in(worktree_dir, &["status", "--porcelain"])?.trim().is_empty() {
             return Ok(None);
         }
+        // Normalize formatting before the candidate is minted (#4627). `Verify`
+        // runs `cargo fmt -- --check`, so an agent that edits after its last
+        // format pass fails a gate whose fix is deterministic and instant — and
+        // pays a whole `Refine` re-entry, a retry off its budget, and a receipt
+        // whose `actual_retries` then measures formatting discipline rather than
+        // the difficulty of the change. Here rather than in the agent's prompt
+        // or the xtask arm for the reason the capture path already exists: it is
+        // the host's trust domain, downstream of every harness, so one call
+        // normalizes every agent identically instead of depending on each one's
+        // discipline. It is also the last point before the tree digest, so the
+        // formatted tree is what gets attested.
+        //
+        // Best-effort: formatting is a convenience, never a verdict. A workspace
+        // whose fmt fails (a parse error mid-edit, a missing toolchain) still
+        // captures and still faces the real gate, which is `Verify`'s job.
+        format_worktree(worktree_dir);
         git_in(worktree_dir, &["add", "--all"])?;
         // Commit under the bloomery's own fixed identity, in the host's trust
         // domain (ADR-0152: the child never stages, commits, or holds
@@ -116,6 +132,27 @@ impl TransformRunner for ProcessTransformRunner {
         let tree = GitObjectId::from_hex(tree_hex.trim())
             .ok_or_else(|| LocalExecutorError::Worktree(format!("malformed capture tree sha `{}`", tree_hex.trim())))?;
         Ok(Some(CapturedObjects { commit, tree }))
+    }
+}
+
+/// Run `cargo fmt` over the scratch worktree, logging rather than failing.
+///
+/// Deliberately infallible: the candidate's correctness is `Verify`'s call, and
+/// a capture that refused over a formatter would turn a convenience into a new
+/// way to lose work.
+fn format_worktree(worktree_dir: &Path) {
+    match Command::new("cargo").current_dir(worktree_dir).arg("fmt").output() {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            stderr = %tail(&String::from_utf8_lossy(&output.stderr), 500),
+            "cargo fmt over the capture worktree exited non-zero; capturing the candidate unformatted",
+        ),
+        Err(error) => tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            %error,
+            "could not spawn cargo fmt over the capture worktree; capturing the candidate unformatted",
+        ),
     }
 }
 
