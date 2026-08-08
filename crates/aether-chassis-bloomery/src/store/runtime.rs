@@ -12,8 +12,8 @@ use super::StoreCapability;
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, ClaimSeal, ClaimSealResult, DrainOutbox,
     DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, OutboxEntry, RecordConfig, RecordConfigResult,
-    RecordDispatchDescription, RecordDispatchDescriptionResult, RecordScopeRevision, RecordScopeRevisionResult,
-    ReleaseMembership, ReleaseMembershipResult, Supersede, SupersedeResult,
+    RecordDispatchDescription, RecordDispatchDescriptionResult, ReleaseMembership, ReleaseMembershipResult, Supersede,
+    SupersedeResult,
 };
 use aether_actor::runtime;
 // The control-plane transact-mails the wasm control actor drives — `Commit` and
@@ -109,6 +109,12 @@ pub struct OutstandingOrder {
     /// state (`spec.base()`, or the cursor's candidate) that no other column
     /// carries — so re-deriving it host-side is not possible.
     pub transformation: Vec<u8>,
+    /// The sealed [`ConfigRegistry`](aether_bloomery::ConfigRegistry) the lane
+    /// runs under (ADR-0174) as its canonical `aether_data::wire` bytes, on the
+    /// same reasoning as `transformation`: the reducer flattened the member's
+    /// registry over the bloom's, and a replay cannot reconstruct that from the
+    /// remaining columns.
+    pub configs: Vec<u8>,
 }
 
 /// The outcome of recording an [`OutstandingOrder`]: written, or its nonce was
@@ -193,16 +199,6 @@ pub trait StoreBackend: Send {
     /// The study artifact digest recorded for (`bloom`, `attempt_digest`), or
     /// `None` when no study record has been admitted for that attempt.
     fn lookup_study(&mut self, bloom: &[u8], attempt_digest: &[u8]) -> rusqlite::Result<Option<String>>;
-    /// Store an authored scope revision's content under its own digest (#4588),
-    /// so a dispatch resolving a member's sealed `scope_revision` finds the
-    /// override it addresses. Idempotent by content addressing.
-    fn record_scope_revision(&mut self, digest: &[u8], revision: &[u8]) -> rusqlite::Result<()>;
-
-    /// The revision content stored under `digest`, or `None` when nothing was
-    /// authored through the store for it. A miss is the calibrated-default path,
-    /// never a dispatch failure.
-    fn lookup_scope_revision(&mut self, digest: &[u8]) -> rusqlite::Result<Option<Vec<u8>>>;
-
     /// Store an authored configuration's canonical bytes under its address
     /// (ADR-0174), so a sealed [`ConfigRegistry`](aether_bloomery::ConfigRegistry)
     /// entry resolves to content at the point of use. Idempotent by content
@@ -346,7 +342,8 @@ CREATE TABLE IF NOT EXISTS outstanding_orders (
     candidate        BLOB NOT NULL,
     displayed_digest BLOB NOT NULL,
     stage            BLOB NOT NULL,
-    transformation   BLOB NOT NULL
+    transformation   BLOB NOT NULL,
+    configs          BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS parked_question (
     bloom            BLOB NOT NULL,
@@ -358,6 +355,7 @@ CREATE TABLE IF NOT EXISTS parked_question (
     displayed_digest BLOB NOT NULL,
     stage            BLOB NOT NULL,
     transformation   BLOB NOT NULL,
+    configs          BLOB NOT NULL,
     PRIMARY KEY (bloom, question)
 );
 CREATE TABLE IF NOT EXISTS study_index (
@@ -371,10 +369,6 @@ CREATE TABLE IF NOT EXISTS dispatch_description (
     workpiece   TEXT NOT NULL,
     description TEXT NOT NULL,
     PRIMARY KEY (bloom, workpiece)
-);
-CREATE TABLE IF NOT EXISTS scope_revision (
-    digest   BLOB PRIMARY KEY,
-    revision BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS config (
     digest BLOB PRIMARY KEY,
@@ -403,7 +397,7 @@ fn is_constraint_violation(error: &rusqlite::Error) -> bool {
 /// `parked_question` keyed by the question that parked it — select through this
 /// one spelling, so they cannot drift apart column-wise.
 const ORDER_COLUMNS: &str =
-    "nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage, transformation";
+    "nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage, transformation, configs";
 
 /// Read an [`OutstandingOrder`] from a row selected with [`ORDER_COLUMNS`].
 fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutstandingOrder> {
@@ -416,12 +410,13 @@ fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutstandingOrder>
         displayed_digest: row.get(5)?,
         stage: row.get(6)?,
         transformation: row.get(7)?,
+        configs: row.get(8)?,
     })
 }
 
 /// An [`OutstandingOrder`]'s columns as positional parameters matching
 /// [`ORDER_COLUMNS`], for the two tables that insert one.
-fn order_params(order: &OutstandingOrder) -> [&dyn rusqlite::ToSql; 8] {
+fn order_params(order: &OutstandingOrder) -> [&dyn rusqlite::ToSql; 9] {
     [
         &order.nonce,
         &order.bloom,
@@ -431,6 +426,7 @@ fn order_params(order: &OutstandingOrder) -> [&dyn rusqlite::ToSql; 8] {
         &order.displayed_digest,
         &order.stage,
         &order.transformation,
+        &order.configs,
     ]
 }
 
@@ -438,7 +434,7 @@ impl StoreBackend for SqliteStore {
     fn record_order(&mut self, order: &OutstandingOrder) -> rusqlite::Result<RecordOutcome> {
         let changed = self.conn.execute(
             &format!(
-                "INSERT OR IGNORE INTO outstanding_orders ({ORDER_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                "INSERT OR IGNORE INTO outstanding_orders ({ORDER_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
             ),
             order_params(order).as_slice(),
         )?;
@@ -474,7 +470,7 @@ impl StoreBackend for SqliteStore {
         self.conn.execute(
             &format!(
                 "INSERT OR REPLACE INTO parked_question (question, {ORDER_COLUMNS}) \
-                 VALUES (?9, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                 VALUES (?10, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
             ),
             [order_params(order).as_slice(), &[&question as &dyn rusqlite::ToSql]].concat().as_slice(),
         )?;
@@ -511,21 +507,6 @@ impl StoreBackend for SqliteStore {
             self.conn.prepare("SELECT study_artifact FROM study_index WHERE bloom = ?1 AND attempt_digest = ?2")?;
         let mut rows = stmt.query_map(rusqlite::params![bloom, attempt_digest], |row| row.get::<_, String>(0))?;
         // The (bloom, attempt_digest) pair is the primary key, so at most one row.
-        rows.next().transpose()
-    }
-
-    fn record_scope_revision(&mut self, digest: &[u8], revision: &[u8]) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO scope_revision (digest, revision) VALUES (?1, ?2)",
-            rusqlite::params![digest, revision],
-        )?;
-        Ok(())
-    }
-
-    fn lookup_scope_revision(&mut self, digest: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
-        let mut stmt = self.conn.prepare("SELECT revision FROM scope_revision WHERE digest = ?1")?;
-        let mut rows = stmt.query_map(rusqlite::params![digest], |row| row.get::<_, Vec<u8>>(0))?;
-        // The digest is the primary key, so there is at most one row.
         rows.next().transpose()
     }
 
@@ -863,19 +844,6 @@ impl NativeActor for StoreCapability {
         match state.backend.release_membership(&bloom) {
             Ok(released) => ReleaseMembershipResult::Ok { released },
             Err(error) => ReleaseMembershipResult::Err { error: error.to_string() },
-        }
-    }
-
-    #[handler::single]
-    fn on_record_scope_revision(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        mail: RecordScopeRevision,
-    ) -> RecordScopeRevisionResult {
-        let RecordScopeRevision { digest, revision } = mail;
-        match state.backend.record_scope_revision(&digest, &revision) {
-            Ok(()) => RecordScopeRevisionResult::Ok,
-            Err(error) => RecordScopeRevisionResult::Err { error: error.to_string() },
         }
     }
 

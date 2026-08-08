@@ -214,6 +214,7 @@ impl DispatchRecord {
             displayed_digest: digest_from_slice(&order.displayed_digest)?,
             stage: from_bytes(&order.stage).ok()?,
             transformation: from_bytes(&order.transformation).ok()?,
+            configs: from_bytes(&order.configs).ok()?,
         })
     }
 }

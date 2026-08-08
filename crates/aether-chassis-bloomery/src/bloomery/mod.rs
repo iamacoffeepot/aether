@@ -23,7 +23,7 @@ pub use approve::{
 };
 pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};
 pub use cli::BloomeryCli;
-pub use construct::{CONSTRUCT_IMPLEMENT_COMMAND, build_construct_order, dispatch_model};
+pub use construct::{CONSTRUCT_IMPLEMENT_COMMAND, dispatch_model};
 pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
 pub use executor::{
     ExecutorPortError, ExecutorShell, LocalExecutor, LocalExecutorError, ProcessTransformRunner, RoutingExecutor,

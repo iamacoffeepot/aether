@@ -210,7 +210,7 @@ fn projection() -> Digest {
 /// revision — the base a gate test varies.
 fn request(surface: &[&str]) -> AdmissionRequest {
     AdmissionRequest {
-        scope_revision: revision(),
+        subject: revision(),
         declared_surface: surface.iter().map(|s| (*s).to_owned()).collect(),
         completeness: complete(),
         adr_touch: AdrTouch::None,

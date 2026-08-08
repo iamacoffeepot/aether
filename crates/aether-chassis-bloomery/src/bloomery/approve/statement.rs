@@ -32,8 +32,8 @@ pub enum StatementRejected {
 ///
 /// # Errors
 /// [`StatementRejected::WrongSubject`] or [`StatementRejected::NotAnAuthorSignature`].
-pub fn precheck_statement(scope_revision: Digest, statement: &Statement) -> Result<(), StatementRejected> {
-    if statement.words.as_slice() != scope_revision.as_bytes() {
+pub fn precheck_statement(subject: Digest, statement: &Statement) -> Result<(), StatementRejected> {
+    if statement.words.as_slice() != subject.as_bytes() {
         return Err(StatementRejected::WrongSubject);
     }
     if !statement.is_instruction_capable() {
@@ -43,7 +43,7 @@ pub fn precheck_statement(scope_revision: Digest, statement: &Statement) -> Resu
 }
 
 /// Form the above-auto membership `approval` [`Evidence`] for a statement whose
-/// signature **has already verified** — bound to the `scope_revision` and
+/// signature **has already verified** — bound to the member `subject` and
 /// detailing the signed statement, so the seal-time `validate_member_admission`
 /// accepts it exactly as it does an auto approval.
 ///
@@ -55,8 +55,8 @@ pub fn precheck_statement(scope_revision: Digest, statement: &Statement) -> Resu
 /// having verified authority (via [`Statement::verify_authority`] or the signing
 /// port) and run [`precheck_statement`] first.
 #[must_use]
-pub fn verified_statement_approval(scope_revision: Digest, statement: &Statement) -> Evidence {
-    Evidence { subject: scope_revision, kind: EvidenceKind::Approval, detail: digest_of(statement) }
+pub fn verified_statement_approval(subject: Digest, statement: &Statement) -> Evidence {
+    Evidence { subject, kind: EvidenceKind::Approval, detail: digest_of(statement) }
 }
 
 /// Populate an above-auto membership `approval` from an owner-authorized signed

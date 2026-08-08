@@ -41,8 +41,8 @@ use std::time::{Duration, Instant};
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, AggregateReviewPayload, BloomId, Digest, DispatchPayload, ExecutionStatus, Fact, ModelOverride, Nonce,
-    RedispatchPayload, ReviewPass, ScopeRevision, StageId, Topic, WorkHandle, WorkpieceId,
+    Admit, AggregateReviewPayload, BloomId, ConfigRegistry, ConfigScopes, Digest, DispatchPayload, ExecutionStatus,
+    Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, StageId, Topic, WorkHandle, WorkpieceId,
 };
 use aether_bloomery_github::SharedCorrespondence;
 use aether_data::wire::from_bytes;
@@ -64,7 +64,7 @@ use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::control::ControlCore;
-use crate::store::{SqliteStore, StoreBackend};
+use crate::store::{ConfigResolveError, SqliteStore, StoreBackend, resolve_config};
 
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the dispatch topic and pulls matched results. Zero-field — the timer carries
@@ -251,6 +251,13 @@ impl AdmitSink for CollectingSink {
 /// description `None` and warns — a legible subject-only run, never a silent
 /// blind dispatch.
 ///
+/// A sealed configuration that cannot be resolved is a
+/// [`ConfigResolveError`] rather than a fall-through to the calibrated default
+/// (ADR-0174): dispatching on the default while the receipt attests the sealed
+/// override is exactly the divergence the registry closes, so the caller parks
+/// the member instead. A member that sealed *no* override resolves to the
+/// default, which is not an error and changes nothing.
+///
 /// Shared by the first dispatch of a stage and the replay of a parked one
 /// (#3664), so a re-dispatched lane resolves its profile and prompt exactly the
 /// way the attempt that parked did.
@@ -258,7 +265,7 @@ fn overlay_member_advisory(
     store: &mut dyn StoreBackend,
     record: &mut DispatchRecord,
     sequence: u64,
-) -> rusqlite::Result<()> {
+) -> Result<(), ConfigResolveError> {
     if record.transformation.command != CONSTRUCT_IMPLEMENT_COMMAND {
         return Ok(());
     }
@@ -273,7 +280,8 @@ fn overlay_member_advisory(
     // Construct from Refine — both dispatch the same command at different
     // calibrated efforts — and the override is what separates one member from
     // its siblings within a stage.
-    let model_override = lookup_model_override(store, &record.scope_revision, sequence)?;
+    let model_override =
+        resolve_config::<ModelOverride>(store, ConfigScopes::bloom_wide(&record.configs))?.unwrap_or_default();
     record.transformation.model = Some(dispatch_model(record.stage, &model_override));
     if let Some(description) = store.lookup_dispatch_description(&bloom, &workpiece)? {
         record.transformation.description = Some(description);
@@ -302,45 +310,6 @@ fn overlay_member_advisory(
         record.transformation.description = Some(format!("{task}\n\n## Findings\n\n{findings}"));
     }
     Ok(())
-}
-
-/// Resolve a member's sealed `scope_revision` digest back into the
-/// [`ModelOverride`] it addresses (#4588). The authoring route stored the
-/// revision under exactly this digest, so the lookup is the resolving half of
-/// the content addressing a membership pins.
-///
-/// A miss resolves to `ModelOverride::default()` — the stage's calibrated
-/// profile — rather than failing the dispatch: a revision authored out-of-band is
-/// as unresolvable to an auditor reading the sealed spec as it is here, so the
-/// honest outcome is the default, logged. A row that will not decode is a
-/// corrupt store rather than an absent one, so it warns.
-fn lookup_model_override(
-    store: &mut dyn StoreBackend,
-    scope_revision: &Digest,
-    sequence: u64,
-) -> rusqlite::Result<ModelOverride> {
-    let Some(stored) = store.lookup_scope_revision(scope_revision.as_bytes())? else {
-        tracing::debug!(
-            target: "aether_chassis_bloomery::executor",
-            sequence,
-            scope_revision = ?scope_revision,
-            "no scope revision stored for the dispatched member; resolving the stage's calibrated profile",
-        );
-        return Ok(ModelOverride::default());
-    };
-    match from_bytes::<ScopeRevision>(&stored) {
-        Ok(revision) => Ok(revision.model_override),
-        Err(error) => {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::executor",
-                sequence,
-                scope_revision = ?scope_revision,
-                %error,
-                "stored scope revision did not decode; resolving the stage's calibrated profile",
-            );
-            Ok(ModelOverride::default())
-        }
-    }
 }
 
 /// Drain the dispatch topic and submit each entry through the executor, recording
@@ -398,9 +367,28 @@ fn drain_and_dispatch(
             displayed_digest: displayed,
             stage: payload.stage,
             transformation: payload.transformation,
+            configs: payload.configs,
         };
 
-        overlay_member_advisory(store, &mut record, entry.sequence)?;
+        if let Err(error) = overlay_member_advisory(store, &mut record, entry.sequence) {
+            if let ConfigResolveError::Store(error) = error {
+                return Err(error);
+            }
+            // A sealed configuration that will not resolve never resolves on
+            // retry, so this parks like a permanent submit refusal: the entry
+            // leaves the outbox, the queue behind it unblocks, and the member
+            // stalls visibly rather than running under a configuration its
+            // receipt does not attest.
+            tracing::error!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                workpiece = %record.workpiece.0,
+                %error,
+                "sealed configuration did not resolve; parking the dispatch rather than running the default",
+            );
+            ack_through = Some(entry.sequence);
+            continue;
+        }
         match dispatch_and_record(executor, store, &record) {
             Ok(handle) => {
                 handles.push(handle);
@@ -570,6 +558,10 @@ fn drain_and_dispatch_aggregate(
             displayed_digest: displayed,
             stage: StageId::AggregateReview,
             transformation,
+            // A bloom-level lane resolves no member configuration: the overlay
+            // reads a registry only for `construct.implement`, and this is the
+            // review critic's command.
+            configs: ConfigRegistry::default(),
         };
         match dispatch_and_record(executor, store, &record) {
             Ok(handle) => {
@@ -645,7 +637,19 @@ fn resolve_replay(
     // A fresh nonce off the outbox sequence, so the replay is its own attempt
     // rather than a re-run of the spent one the park consumed.
     record.nonce = Nonce(format!("redispatch-{sequence}"));
-    overlay_member_advisory(store, &mut record, sequence)?;
+    if let Err(error) = overlay_member_advisory(store, &mut record, sequence) {
+        if let ConfigResolveError::Store(error) = error {
+            return Err(error);
+        }
+        tracing::error!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            workpiece = %record.workpiece.0,
+            %error,
+            "sealed configuration did not resolve on replay; acking past the redispatch",
+        );
+        return Ok(None);
+    }
 
     match str::from_utf8(&payload.words) {
         Ok(answer) if record.transformation.command == CONSTRUCT_IMPLEMENT_COMMAND => {

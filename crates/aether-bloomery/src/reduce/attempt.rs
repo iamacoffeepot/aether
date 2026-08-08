@@ -4,7 +4,7 @@
 use super::{AttemptCompletedError, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{CandidateRef, Evidence, StageCatalog, Transformation};
+use crate::values::{CandidateRef, ConfigRegistry, Evidence, StageCatalog, Transformation};
 
 /// The move-and-dispatch effect pair every cursor move of
 /// [`reduce_attempt_completed`] emits — an advance, a Refine re-entry, and a
@@ -18,6 +18,7 @@ pub(super) fn move_effects(
     progress: StageProgress,
     subject: Digest,
     checkout: Digest,
+    configs: ConfigRegistry,
 ) -> [Decision; 2] {
     [
         Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress },
@@ -28,6 +29,7 @@ pub(super) fn move_effects(
             transformation: Transformation::for_member_stage(progress.stage, subject, checkout),
             scope_revision,
             candidate: progress.candidate.map(|current| current.tree),
+            configs,
         },
     ]
 }
@@ -133,7 +135,15 @@ pub(super) fn reduce_attempt_completed(
     let repair_rolls = cursor.repair_rolls;
     if let Some(next) = next.filter(|_| passed) {
         let progress = StageProgress { stage: next, attempts: 1, candidate, repair_rolls };
-        effects.extend(move_effects(*bloom, workpiece, member.scope_revision, progress, subject, checkout));
+        effects.extend(move_effects(
+            *bloom,
+            workpiece,
+            member.scope_revision,
+            progress,
+            subject,
+            checkout,
+            member.configs.layered_over(record.spec.configs()),
+        ));
         return Decisions {
             outcome: Outcome::AttemptAdvanced { bloom: *bloom, workpiece: workpiece.clone(), from: stage, to: next },
             effects,
@@ -152,7 +162,15 @@ pub(super) fn reduce_attempt_completed(
         let rolls = repair_rolls + 1;
         if rolls < StageCatalog::retry_budget_of(StageId::Verify).unwrap_or(1) {
             let progress = StageProgress { stage: StageId::Refine, attempts: 1, candidate, repair_rolls: rolls };
-            effects.extend(move_effects(*bloom, workpiece, member.scope_revision, progress, subject, checkout));
+            effects.extend(move_effects(
+                *bloom,
+                workpiece,
+                member.scope_revision,
+                progress,
+                subject,
+                checkout,
+                member.configs.layered_over(record.spec.configs()),
+            ));
             return Decisions {
                 outcome: Outcome::RefineReentered { bloom: *bloom, workpiece: workpiece.clone(), rolls },
                 effects,
@@ -170,7 +188,15 @@ pub(super) fn reduce_attempt_completed(
     if attempts < budget {
         let attempt = attempts + 1;
         let progress = StageProgress { stage, attempts: attempt, candidate, repair_rolls };
-        effects.extend(move_effects(*bloom, workpiece, member.scope_revision, progress, subject, checkout));
+        effects.extend(move_effects(
+            *bloom,
+            workpiece,
+            member.scope_revision,
+            progress,
+            subject,
+            checkout,
+            member.configs.layered_over(record.spec.configs()),
+        ));
         return Decisions {
             outcome: Outcome::AttemptRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, attempt },
             effects,

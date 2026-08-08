@@ -57,16 +57,19 @@ fn workpiece(name: &str) -> WorkpieceId {
     WorkpieceId(name.into())
 }
 
-/// A membership whose approval evidence is bound to the scope revision, so it
-/// seals admissibly through `reduce`.
+/// A membership whose approval evidence is bound to its subject — the workpiece,
+/// scope revision, and sealed configuration together (ADR-0174) — so it seals
+/// admissibly through `reduce`. Built in two steps because the subject covers
+/// everything but the approval itself.
 fn membership(name: &str, revision: u8) -> Membership {
-    let scope_revision = digest(revision);
-    Membership {
+    let mut member = Membership {
         workpiece: workpiece(name),
-        scope_revision,
+        scope_revision: digest(revision),
         configs: ConfigRegistry::default(),
-        approval: Evidence { subject: scope_revision, kind: EvidenceKind::Approval, detail: digest(200) },
-    }
+        approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
+    };
+    member.approval.subject = member.subject();
+    member
 }
 
 /// A draft sealing on `base` with the given memberships, stamped with the line

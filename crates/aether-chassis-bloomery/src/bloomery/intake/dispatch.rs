@@ -3,7 +3,9 @@
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery::{BloomId, Digest, Nonce, StageId, Transformation, WorkHandle, WorkOrder, WorkpieceId};
+use aether_bloomery::{
+    BloomId, ConfigRegistry, Digest, Nonce, StageId, Transformation, WorkHandle, WorkOrder, WorkpieceId,
+};
 use aether_bloomery_github::{ExecutorError, GithubError};
 use aether_data::wire::to_vec;
 
@@ -43,6 +45,12 @@ pub struct DispatchRecord {
     /// [`WorkOrder`] the executor receives, and the exact lane a parked attempt
     /// is re-dispatched by replaying (#3664).
     pub transformation: Transformation,
+    /// The configuration this dispatch runs under (ADR-0174) — the member's
+    /// registry layered over the bloom's, as the reducer flattened it. Persisted
+    /// with the order for the same reason the transformation is: a parked
+    /// attempt re-dispatches by replaying the stored order (#3664), and nothing
+    /// else host-side carries it.
+    pub configs: ConfigRegistry,
 }
 
 impl DispatchRecord {
@@ -67,6 +75,9 @@ impl DispatchRecord {
             // Same convention for the transformation, so a parked attempt's lane
             // survives into `parked_question` for the redispatch to replay.
             transformation: to_vec(&self.transformation).unwrap_or_default(),
+            // Same convention again for the sealed configuration the lane runs
+            // under, so a replay resolves the same overrides the parked attempt did.
+            configs: to_vec(&self.configs).unwrap_or_default(),
         }
     }
 }

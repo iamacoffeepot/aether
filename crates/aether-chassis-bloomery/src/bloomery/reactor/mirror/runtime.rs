@@ -306,12 +306,15 @@ mod tests {
     /// workpiece issue when reconciled.
     fn encoded_view() -> Vec<u8> {
         let scope_revision = digest(10);
-        let member = Membership {
+        let mut member = Membership {
             workpiece: WorkpieceId("reactor-core".into()),
             scope_revision,
             configs: ConfigRegistry::default(),
-            approval: Evidence { subject: scope_revision, kind: EvidenceKind::Approval, detail: digest(200) },
+            approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
         };
+        // The approval binds the member's whole subject (ADR-0174), which is only
+        // computable once the rest of the member is built.
+        member.approval.subject = member.subject();
         let base = digest(0);
         // The seal-time catalog admission (ADR-0149 §The line) rejects the zero
         // default, so the draft must promise the one line the pipeline runs.

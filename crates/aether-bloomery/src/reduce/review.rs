@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use super::attempt::move_effects;
 use super::{AggregateReviewError, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{Evidence, ResolvedBloom, StageCatalog};
+use crate::values::{ConfigRegistry, Evidence, ResolvedBloom, StageCatalog};
 
 /// Reduce a whole-bloom aggregate-review verdict (ADR-0153). A passing verdict
 /// resolves the bloom from its held fold — [`Decision::SetResolved`] plus the
@@ -136,6 +136,7 @@ pub(super) fn reduce_aggregate_review_completed(
             progress,
             subject,
             checkout,
+            member.map_or_else(ConfigRegistry::default, |m| m.configs.layered_over(record.spec.configs())),
         ));
     }
     Decisions { outcome: Outcome::AggregateReviewReentered { bloom: *bloom, members: implicated, rolls }, effects }

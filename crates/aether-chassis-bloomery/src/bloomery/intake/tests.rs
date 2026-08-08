@@ -74,6 +74,7 @@ fn dispatch_record(
         // by its own test.
         stage: StageId::Verify,
         transformation: transformation(),
+        configs: ConfigRegistry::default(),
     }
 }
 
@@ -82,16 +83,18 @@ fn dispatch_record(
 // against. reduce_integrate checks membership + evidence binding only, so the
 // spec's catalog/base need not be admissible.
 fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot, BloomId) {
-    let member = Membership {
+    let mut member = Membership {
         workpiece: workpiece.clone(),
         scope_revision,
         configs: ConfigRegistry::default(),
         approval: Evidence {
-            subject: scope_revision,
+            subject: Digest::default(),
             kind: EvidenceKind::Approval,
             detail: Digest::from_bytes([3; 32]),
         },
     };
+    // The approval binds the member's whole subject (ADR-0174).
+    member.approval.subject = member.subject();
     let spec = BloomDraft {
         proposals: vec![member],
         base: Digest::default(),
@@ -416,16 +419,18 @@ fn a_pending_handle_is_reported_and_neither_completed_nor_admitted() {
 // member's stage cursor is seeded at the entry stage and the entry dispatch is
 // emitted (#3505) — the state the per-member advance composition starts from.
 fn sealed_via_reducer(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot, BloomId) {
-    let member = Membership {
+    let mut member = Membership {
         workpiece: workpiece.clone(),
         scope_revision,
         configs: ConfigRegistry::default(),
         approval: Evidence {
-            subject: scope_revision,
+            subject: Digest::default(),
             kind: EvidenceKind::Approval,
             detail: Digest::from_bytes([3; 32]),
         },
     };
+    // The approval binds the member's whole subject (ADR-0174).
+    member.approval.subject = member.subject();
     let spec = BloomDraft {
         proposals: vec![member],
         base: Digest::default(),

@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::reduce::Decision;
-use crate::values::Transformation;
+use crate::values::{ConfigRegistry, Transformation};
 
 /// One active-membership mutation the store applies inside the combined
 /// [`Commit`] transaction: a workpiece claimed (or released) for a bloom. The
@@ -313,6 +313,10 @@ pub struct DispatchPayload {
     /// (ADR-0152). The reactor displays it as the evidence-binding digest;
     /// `None` displays the scope revision.
     pub candidate: Option<Digest>,
+    /// The configuration the attempt runs under (ADR-0174) — the member's
+    /// registry layered over the bloom's. The reactor resolves each address it
+    /// needs against the store.
+    pub configs: ConfigRegistry,
 }
 
 /// The integration dispatch outbox payload (ADR-0152 §Resolution drives

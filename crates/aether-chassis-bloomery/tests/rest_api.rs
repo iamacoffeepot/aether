@@ -87,11 +87,25 @@ fn projection_at(
     }
 }
 
-/// An author-signed statement over `revision`'s bytes by the allowlisted `owner`
+/// A member built the way the draft fixtures build one, so its
+/// [`subject`](Membership::subject) — what an above-auto author signs and what
+/// the seal validates against (ADR-0174) — is computed in exactly one place.
+fn member(workpiece: &str, revision: Digest, detail: Digest) -> Membership {
+    let mut member = Membership {
+        workpiece: WorkpieceId(workpiece.to_owned()),
+        scope_revision: revision,
+        configs: ConfigRegistry::default(),
+        approval: Evidence { subject: Digest::default(), kind: EvidenceKind::Approval, detail },
+    };
+    member.approval.subject = member.subject();
+    member
+}
+
+/// An author-signed statement over `subject`'s bytes by the allowlisted `owner`
 /// — the above-auto member's owner approval the seal path verifies through the
 /// `aether.signing` capability.
-fn owner_signed_statement(revision: Digest) -> Statement {
-    let words = revision.as_bytes().to_vec();
+fn owner_signed_statement(subject: Digest) -> Statement {
+    let words = subject.as_bytes().to_vec();
     Statement {
         words: words.clone(),
         provenance: Provenance::AuthorSignature(SignatureEnvelope {
@@ -245,18 +259,8 @@ fn bloom_hex(bloom_id: &Value) -> String {
 /// the reducer requires (`StageCatalog::line_digest`, not the zero default).
 fn valid_draft(workpiece: &str) -> BloomDraft {
     let scope_revision = Digest::from_bytes([7; 32]);
-    let member = Membership {
-        workpiece: WorkpieceId(workpiece.to_owned()),
-        scope_revision,
-        configs: ConfigRegistry::default(),
-        approval: Evidence {
-            subject: scope_revision,
-            kind: EvidenceKind::Approval,
-            detail: Digest::from_bytes([9; 32]),
-        },
-    };
     BloomDraft {
-        proposals: vec![member],
+        proposals: vec![member(workpiece, scope_revision, Digest::from_bytes([9; 32]))],
         base: Digest::from_bytes([1; 32]),
         stage_catalog: StageCatalog::line_digest(),
         ..BloomDraft::default()
@@ -268,14 +272,9 @@ fn valid_draft(workpiece: &str) -> BloomDraft {
 /// gate re-forms both approvals from the request projections; the placeholder
 /// details here only have to be reducer-admissible before the gate replaces them.
 fn two_member_draft() -> BloomDraft {
-    let member = |wp: &str, revision: Digest| Membership {
-        workpiece: WorkpieceId(wp.to_owned()),
-        scope_revision: revision,
-        configs: ConfigRegistry::default(),
-        approval: Evidence { subject: revision, kind: EvidenceKind::Approval, detail: Digest::from_bytes([9; 32]) },
-    };
+    let detail = Digest::from_bytes([9; 32]);
     BloomDraft {
-        proposals: vec![member("wp-1", member_revision()), member("wp-2", Digest::from_bytes([8; 32]))],
+        proposals: vec![member("wp-1", member_revision(), detail), member("wp-2", Digest::from_bytes([8; 32]), detail)],
         base: Digest::from_bytes([1; 32]),
         stage_catalog: StageCatalog::line_digest(),
         ..BloomDraft::default()
@@ -510,6 +509,7 @@ fn assert_single_above_auto_seal(http_port: u16) {
     let seal_path = format!("/drafts/{draft_id}/seal");
     let surface = ["crates/aether-data/src/lib.rs"];
     let revision = member_revision();
+    let subject = member("wp-1", revision, Digest::from_bytes([9; 32])).subject();
     let seal = |statement| seal_body(vec![projection_at("wp-1", revision, &surface, statement)]);
 
     // (b) No signed statement → fail closed before any signing dispatch.
@@ -526,7 +526,7 @@ fn assert_single_above_auto_seal(http_port: u16) {
     // empty signature) → passes the pre-check, dispatched to `aether.signing`,
     // refused there, failing the seal closed after the round trip.
     let mis_signed = Statement {
-        words: revision.as_bytes().to_vec(),
+        words: subject.as_bytes().to_vec(),
         provenance: Provenance::AuthorSignature(SignatureEnvelope {
             signer: KeyId("owner".to_owned()),
             signature: vec![],
@@ -538,7 +538,7 @@ fn assert_single_above_auto_seal(http_port: u16) {
 
     // (a) A valid owner-signed statement verifies and the seal admits with a
     // gate-formed approval the reducer accepts.
-    let body = serde_json::to_vec(&seal(Some(owner_signed_statement(revision)))).unwrap();
+    let body = serde_json::to_vec(&seal(Some(owner_signed_statement(subject)))).unwrap();
     let (status, body) = try_http(http_port, "POST", &seal_path, Some(&body)).unwrap();
     let sealed: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(status, 200, "above-auto seal admits: {sealed:?}");
@@ -585,8 +585,13 @@ fn assert_mixed_above_auto_seal(http_port: u16, wp1_revision: Digest) {
         "POST",
         &mixed_seal,
         Some(
-            &serde_json::to_vec(&seal_body(vec![wp1_auto, wp2_above(Some(owner_signed_statement(wp2_revision)))]))
-                .unwrap(),
+            &serde_json::to_vec(&seal_body(vec![
+                wp1_auto,
+                wp2_above(Some(owner_signed_statement(
+                    member("wp-2", wp2_revision, Digest::from_bytes([9; 32])).subject(),
+                ))),
+            ]))
+            .unwrap(),
         ),
     )
     .unwrap();
@@ -657,71 +662,6 @@ fn authoring_a_config_stores_it_under_a_stable_content_address() {
         // typo cannot reach the store as bytes that will not decode at dispatch.
         let (status, _) = send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": 7 })));
         assert_eq!(status, 400, "a value that does not match the schema is refused before any write");
-    });
-
-    let _ = child.kill();
-    let _ = child.wait();
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
-}
-
-// #4588 — `POST /scope-revisions` is the authoring half of a per-workpiece
-// harness / model choice, and it only means anything if the digest it hands back
-// addresses something durable. Before this, the route was pure content addressing
-// with nothing stored, so an operator could author a revision, seal a workpiece
-// naming its digest, and watch the fleet default run anyway.
-//
-// The test pins the contract the seal depends on: the route answers only once the
-// write lands (a `200` is a durability claim, not an arithmetic one), and the
-// digest is a pure function of the content — so re-authoring the same revision
-// re-addresses the same row, and a changed override addresses a different one.
-// The resolving end is covered by the executor drain's own tests; what this
-// catches is the two ends disagreeing about the address.
-#[test]
-fn authoring_a_scope_revision_stores_it_under_a_stable_content_address() {
-    let http_port = free_port();
-    let rpc_port = free_port();
-    let (_policy_dir, policy_path) = test_policy();
-    let mut child = spawn(http_port, rpc_port, &policy_path);
-
-    let result = std::panic::catch_unwind(|| {
-        wait_for_200(http_port, "/drafts");
-
-        let muse = serde_json::json!({
-            "model_override": {
-                "agent": { "harness": "Muse", "model": "muse-spark-1.2-contributor" },
-                "reasoning_effort": "Low",
-            }
-        });
-        let (status, authored) = send_json(http_port, "POST", "/scope-revisions", &muse);
-        assert_eq!(status, 200, "authoring answers only once the store write lands");
-        let digest = authored["digest"].clone();
-        assert!(digest.as_array().is_some_and(|bytes| bytes.len() == 32), "the reply names a 32-byte address");
-        assert_eq!(authored["scope_revision"], muse, "the revision is echoed as authored");
-
-        // Idempotent: identical content re-addresses the same row, so re-authoring
-        // is safe rather than a second revision the seal would have to choose
-        // between.
-        let (status, again) = send_json(http_port, "POST", "/scope-revisions", &muse);
-        assert_eq!(status, 200);
-        assert_eq!(again["digest"], digest, "the same content keeps its address");
-
-        // A changed override is a different revision, which is what makes the
-        // sealed digest an attestation of the choice rather than of the shape.
-        let claude = serde_json::json!({
-            "model_override": {
-                "agent": { "harness": "Claude", "model": "claude-opus-5" },
-                "reasoning_effort": "Low",
-            }
-        });
-        let (status, other) = send_json(http_port, "POST", "/scope-revisions", &claude);
-        assert_eq!(status, 200);
-        assert_ne!(other["digest"], digest, "a changed override changes the address");
-
-        // A malformed body is still refused inline, before any write.
-        let (status, _) = send_json(http_port, "POST", "/scope-revisions", &serde_json::json!({"nope": 1}));
-        assert_eq!(status, 400, "a body that is not a scope revision is refused");
     });
 
     let _ = child.kill();
