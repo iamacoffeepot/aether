@@ -37,6 +37,16 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 use crate::mail::KindId;
 
+/// Per-actor set of kinds that have already emitted the
+/// `actor dispatch missed` warning. Stored as `Local` so it
+/// lives in the slot's own `ActorSlots` — the state the slot
+/// already owns for that actor — with no global registry, lock,
+/// or shared synchronization on the hot path.
+#[derive(Default)]
+struct WarnedDispatchMisses(HashSet<u64>);
+
+impl Local for WarnedDispatchMisses {}
+
 /// Try the typed `#[handler]` dispatch; if no typed arm matches and
 /// the actor's `#[fallback]` also returns `false`, warn that the kind
 /// fell through. Called from `DispatcherSlot::run_cycle`'s pool path.
@@ -77,12 +87,15 @@ where
         return false;
     };
     if !A::dispatch_fallback(actor.as_mut(), ctx, &env) {
-        tracing::warn!(
-            target: "aether_substrate::dispatch",
-            actor = A::NAMESPACE,
-            kind = %env.kind,
-            "actor dispatch missed: kind not handled or decode failed"
-        );
+        let first = WarnedDispatchMisses::try_with_mut(|warned| warned.0.insert(env.kind.0)).unwrap_or(true);
+        if first {
+            tracing::warn!(
+                target: "aether_substrate::dispatch",
+                actor = A::NAMESPACE,
+                kind = %env.kind,
+                "actor dispatch missed: kind not handled or decode failed"
+            );
+        }
     }
     // A fallback is not a typed arm: a `#[fallback]`-only catch-all cap
     // (issue 576) declares no typed handlers by design and correctly owns no
@@ -376,5 +389,38 @@ mod cost_tests {
         assert_eq!(rows.len(), 1, "kind filter narrows the dump");
         assert_eq!(rows[0].kind_id, KindId(20));
         assert_eq!(rows[0].samples, 0, "neutral seed surfaces before any dispatch");
+    }
+
+    /// `actor dispatch missed` must fire once per `(actor, kind)` pair,
+    /// not once per delivery. A sender repeating an unhandled kind would
+    /// otherwise spam the hot dispatch path.
+    #[test]
+    fn dispatch_miss_warns_once_per_actor_and_kind() {
+        use crate::actor::native::local::with_stamped;
+        use aether_actor::local::ActorSlots;
+
+        let kind = KindId(0xBEEF_0001);
+        let other_kind = KindId(0xBEEF_0002);
+
+        let slots_a = ActorSlots::new();
+        let slots_b = ActorSlots::new();
+
+        // First sighting on actor A warns.
+        let first = with_stamped(&slots_a, || WarnedDispatchMisses::try_with_mut(|set| set.0.insert(kind.0)).unwrap());
+        assert!(first, "first sighting of kind on actor A must warn");
+
+        // Repeat on same actor stays silent.
+        let second = with_stamped(&slots_a, || WarnedDispatchMisses::try_with_mut(|set| set.0.insert(kind.0)).unwrap());
+        assert!(!second, "repeat of same kind on same actor stays silent");
+
+        // Different kind on same actor still warns.
+        let diff_kind =
+            with_stamped(&slots_a, || WarnedDispatchMisses::try_with_mut(|set| set.0.insert(other_kind.0)).unwrap());
+        assert!(diff_kind, "different kind on same actor warns");
+
+        // Same kind on different actor warns again — per-actor isolation.
+        let other_actor =
+            with_stamped(&slots_b, || WarnedDispatchMisses::try_with_mut(|set| set.0.insert(kind.0)).unwrap());
+        assert!(other_actor, "same kind on different actor warns");
     }
 }
