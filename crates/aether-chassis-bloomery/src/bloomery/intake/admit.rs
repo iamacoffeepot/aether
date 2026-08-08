@@ -6,10 +6,9 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    Admit, BloomId, CandidateRef, Digest, Event, Fact, IdempotencyKey, Nonce, ResolutionClaim, StageCatalog, StageId,
-    WorkpieceId,
+    Admit, BloomId, CandidateRef, Digest, Event, Fact, IdempotencyKey, InwardError, Nonce, ResolutionClaim,
+    StageCatalog, StageId, StageResult, StageVerdict, WorkpieceId, normalize_stage_result,
 };
-use aether_bloomery_github::{InwardError, StageResult, StageVerdict, normalize_stage_result};
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
 use super::dispatch::DispatchRecord;

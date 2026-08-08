@@ -57,6 +57,7 @@ extern crate alloc;
 pub mod control;
 pub mod digest;
 pub mod ids;
+pub mod inward;
 pub mod manifest;
 pub mod port;
 pub mod reduce;
@@ -73,6 +74,7 @@ pub use control::{
 };
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};
+pub use inward::{InwardError, StageResult, StageVerdict, StudyResult, normalize_stage_result, normalize_study_result};
 pub use manifest::{
     ClosureViolation, MANIFEST_CLOSURE_BUDGET, PromptManifest, ProvenanceIndex, Slot, SlotRole, assemble_manifest,
 };

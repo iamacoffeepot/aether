@@ -1,8 +1,7 @@
 //! The evidence-naming seam: turn a pulled reference into the attempt result a
 //! worker uploaded, decoding it from the artifact name alone.
 
-use aether_bloomery::{Digest, EvidenceRef, Nonce};
-use aether_bloomery_github::StageVerdict;
+use aether_bloomery::{Digest, EvidenceRef, Nonce, StageVerdict};
 
 use super::admit::UploadedEvidence;
 
