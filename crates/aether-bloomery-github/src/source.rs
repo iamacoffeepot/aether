@@ -58,7 +58,7 @@ use aether_bloomery::{
 };
 use serde::Serialize;
 
-use crate::client::{GitDataApi, GithubError, NewPullRequest, PullRequestApi, PullRequestState};
+use crate::client::{GitDataApi, GithubError, MergeResult, NewPullRequest, PullRequestApi, PullRequestState};
 use crate::correspondence::{Correspondence, CorrespondenceError, GitObjectId};
 use crate::short_hex;
 
@@ -400,6 +400,24 @@ impl<C: GitDataApi + PullRequestApi> GitSource<C> {
         self.resolve_object_digest(&commit.tree, "integration branch tree object")
     }
 
+    // The bloom digest naming real git tree object `sha`, minting and recording
+    // one when the tree is new. A tree-replace integrate never needs this — its
+    // result is the candidate's own already-recorded tree — but a bootstrapped
+    // branch and a merge both produce trees no digest has ever named, and an
+    // unnamed integration tree is unreachable: `snapshot` and the
+    // stale-checkpoint compare both reverse-resolve the branch through it.
+    fn integration_tree_digest(&self, sha: &str) -> Result<Digest, SourceError> {
+        let object = GitObjectId::from_hex(sha)
+            .ok_or_else(|| SourceError::Malformed(format!("integration tree sha `{sha}`")))?;
+        if let Some(known) = self.correspondence.resolve_digest(&object)? {
+            return Ok(known);
+        }
+
+        let minted = digest_of(&IntegrationTreeAddress { object: object.bytes() });
+        self.correspondence.record(&minted, &object)?;
+        Ok(minted)
+    }
+
     fn integration_ref(bloom: &BloomId) -> String {
         format!("heads/bloom/{}/integration", short_hex(&bloom.0))
     }
@@ -478,15 +496,7 @@ impl<C: GitDataApi + PullRequestApi> GitSource<C> {
         let integration = Self::integration_ref(bloom);
         let current = self.client.get_ref(&integration)?.ok_or(SourceError::MissingRef(integration))?;
         let commit = self.client.get_commit(&current.sha)?;
-        let tree_object = GitObjectId::from_hex(&commit.tree)
-            .ok_or_else(|| SourceError::Malformed(format!("integration tree sha `{}`", commit.tree)))?;
-        let tree = if let Some(tree) = self.correspondence.resolve_digest(&tree_object)? {
-            tree
-        } else {
-            let minted = digest_of(&IntegrationTreeAddress { object: tree_object.bytes() });
-            self.correspondence.record(&minted, &tree_object)?;
-            minted
-        };
+        let tree = self.integration_tree_digest(&commit.tree)?;
         let head = if current.sha == base_sha {
             // The un-advanced branch's commit is the base commit, whose
             // correspondence names the base digest — not a landable head.
@@ -797,6 +807,60 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
             }
             Err(error) => Err(SourceError::Github(error)),
         }
+    }
+
+    fn integrate_merge(
+        &self,
+        bloom: &BloomId,
+        candidate_ref: &str,
+        expected: &Checkpoint,
+    ) -> Result<IntegrateOutcome, Self::Error> {
+        let integration = Self::integration_ref(bloom);
+        let current = self.client.get_ref(&integration)?.ok_or_else(|| SourceError::MissingRef(integration.clone()))?;
+        let current_tree = self.integration_tree(&current.sha)?;
+
+        // Same single-writer CAS the tree-replace path runs. It is a pre-check
+        // rather than a swap here: the merge endpoint commits onto the branch
+        // itself and takes no expected-sha, so unlike `integrate`'s
+        // `update_ref` there is no 422 to catch a writer that raced in behind
+        // the read. The fold owning this branch alone is what makes that safe;
+        // the pre-check catches the case that actually happens, a restart
+        // resuming against a checkpoint the branch has already passed.
+        if current_tree != expected.tree {
+            return Ok(IntegrateOutcome::StaleCheckpoint { actual: current_tree });
+        }
+
+        let commit = match self.client.merge(&integration, candidate_ref, &format!("bloomery fold {candidate_ref}"))? {
+            MergeResult::Merged(commit) => commit,
+            // The branch already carries this candidate — a fold resuming after
+            // an interrupted run re-offering a member it already folded. Report
+            // where the branch stands so the fold advances past it instead of
+            // stalling. Reaching this at the *base* commit would resolve a base
+            // digest as a landable head, but that needs a candidate whose tree
+            // equals the base tree, and capture refuses an empty diff.
+            MergeResult::AlreadyUpToDate => {
+                let head = self.resolve_object_digest(&current.sha, "integration head commit")?;
+                return Ok(IntegrateOutcome::Integrated { tree: current_tree, head });
+            }
+            // A cross-member collision: an owner decision, not a fault to
+            // retry. GitHub's 409 body is a bare "Merge conflict" with no file
+            // list, so there is nothing to carry beyond the point it happened —
+            // the caller names the member from its own fold position.
+            MergeResult::Conflict { .. } => return Ok(IntegrateOutcome::Conflict { at: current_tree }),
+        };
+
+        // The merged tree is new to the correspondence — it is neither the
+        // candidate's tree nor the branch's previous one — so it has to be
+        // named here or the next snapshot could not reverse-resolve the branch.
+        // The head stays a distinct content-address over the tree, the same way
+        // the tree-replace path keeps `head ↔ commit` from clobbering
+        // `tree ↔ tree-object`.
+        let tree = self.integration_tree_digest(&commit.tree)?;
+        let head = digest_of(&IntegratedHead { bloom: *bloom, tree });
+        let commit_object = GitObjectId::from_hex(&commit.sha)
+            .ok_or_else(|| SourceError::Malformed(format!("merge commit sha `{}`", commit.sha)))?;
+        self.correspondence.record(&head, &commit_object)?;
+        Ok(IntegrateOutcome::Integrated { tree, head })
     }
 
     fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, Self::Error> {
@@ -1172,6 +1236,102 @@ mod tests {
         // Idempotent: re-recording the same tree does not add a second ref.
         source.checkpoint(&bloom, &base_tree).unwrap();
         assert_eq!(source.checkpoints(&bloom).unwrap().len(), 1);
+    }
+
+    // Seed a candidate branch at its own commit and return its `heads/…` ref —
+    // what a member's capture pushes (ADR-0152) and what a merge fold reads.
+    fn seed_candidate_ref(fake: &FakeGithub, workpiece: &str, tree: &str) -> String {
+        let commit = fake.create_commit(workpiece, tree, &[]).unwrap();
+        let name = format!("heads/bloom/cand/{workpiece}");
+        fake.seed_ref(&name, &commit.sha);
+        name
+    }
+
+    #[test]
+    fn a_merge_fold_keeps_what_the_branch_already_carried_and_names_the_result() {
+        // The whole reason this verb exists. `integrate` sets the branch to the
+        // candidate's tree, so folding a second member — or a candidate built
+        // before the branch moved — reverts the first one's work with a clean
+        // commit and no error. A merge's result must be neither input.
+        //
+        // And the result must be *nameable*: a merged tree is new to the
+        // correspondence (unlike a tree-replace, whose result is the
+        // candidate's own recorded tree), so failing to record it would leave
+        // the branch unreachable to the next snapshot.
+        let (fake, bloom, base) = seeded();
+        let source = git_source(&fake, false);
+        let base_tree = source.snapshot(&base).unwrap().tree;
+        let expected = source.checkpoint(&bloom, &base_tree).unwrap();
+
+        let first = seed_candidate_ref(&fake, "wp-a", "tree-a");
+        let IntegrateOutcome::Integrated { tree: after_first, head } =
+            source.integrate_merge(&bloom, &first, &expected).unwrap()
+        else {
+            panic!("the first member folds");
+        };
+        assert_ne!(after_first, base_tree, "the fold advanced the branch off the base");
+        assert!(
+            fake.resolve_git(&after_first).unwrap().is_some(),
+            "the merged tree is recorded, so the next snapshot can reverse-resolve the branch",
+        );
+        assert_ne!(head, after_first, "the landable head stays a distinct digest from the artifact tree");
+
+        // The second member folds onto the branch the first one left, and the
+        // result carries both. Under tree-replace this tree would equal the
+        // second candidate's and the first member's work would be gone.
+        let second = seed_candidate_ref(&fake, "wp-b", "tree-b");
+        let checkpoint = Checkpoint { bloom, tree: after_first };
+        let IntegrateOutcome::Integrated { tree: after_second, .. } =
+            source.integrate_merge(&bloom, &second, &checkpoint).unwrap()
+        else {
+            panic!("the second member folds onto the first");
+        };
+        assert_ne!(after_second, after_first, "the second fold advanced the branch again");
+        assert_ne!(after_second, base_tree, "and did not rewind it to the base");
+    }
+
+    #[test]
+    fn a_merge_fold_separates_a_conflict_a_replay_and_a_stale_checkpoint() {
+        // Three non-advancing answers a fold must tell apart: a collision is an
+        // owner decision, a member already folded must let the fold move past it
+        // rather than stall, and a branch that moved past the checkpoint is the
+        // single-writer refusal.
+        let (fake, bloom, base) = seeded();
+        let source = git_source(&fake, false);
+        let base_tree = source.snapshot(&base).unwrap().tree;
+        let expected = source.checkpoint(&bloom, &base_tree).unwrap();
+
+        let conflicting = seed_candidate_ref(&fake, "wp-clash", "tree-clash");
+        fake.seed_merge_conflict(&format!("bloom/{}/integration", short_hex(&bloom.0)), "bloom/cand/wp-clash");
+        assert!(
+            matches!(
+                source.integrate_merge(&bloom, &conflicting, &expected).unwrap(),
+                IntegrateOutcome::Conflict { .. }
+            ),
+            "a collision is a clean outcome, not a transport error to retry",
+        );
+
+        // A member already on the branch: the fold re-offers it after a restart
+        // and must be told where the branch stands, not that it failed.
+        let folded = seed_candidate_ref(&fake, "wp-done", "tree-done");
+        let IntegrateOutcome::Integrated { tree: advanced, head } =
+            source.integrate_merge(&bloom, &folded, &expected).unwrap()
+        else {
+            panic!("the member folds the first time");
+        };
+        let replayed = source.integrate_merge(&bloom, &folded, &Checkpoint { bloom, tree: advanced }).unwrap();
+        assert_eq!(
+            replayed,
+            IntegrateOutcome::Integrated { tree: advanced, head },
+            "re-folding a member the branch already carries reports its position unchanged",
+        );
+
+        // The original checkpoint is now stale — the branch advanced past it.
+        let IntegrateOutcome::StaleCheckpoint { actual } = source.integrate_merge(&bloom, &folded, &expected).unwrap()
+        else {
+            panic!("a checkpoint the branch has passed is refused");
+        };
+        assert_eq!(actual, advanced, "the refusal reports where the branch actually is");
     }
 
     #[test]

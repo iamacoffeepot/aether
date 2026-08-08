@@ -71,6 +71,9 @@ struct StoredRun {
 struct StoredCommit {
     tree: String,
     message: String,
+    // The commit graph, needed only so `merge` can answer "already contains"
+    // by ancestry rather than by tree equality.
+    parents: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -227,9 +230,10 @@ impl FakeGithub {
     #[must_use]
     pub fn seed_commit_with_message(&self, message: &str, tree_sha: &str) -> String {
         let sha = commit_sha(message, tree_sha, &[]);
-        self.lock()
-            .commits
-            .insert(sha.clone(), StoredCommit { tree: tree_sha.to_owned(), message: message.to_owned() });
+        self.lock().commits.insert(
+            sha.clone(),
+            StoredCommit { tree: tree_sha.to_owned(), message: message.to_owned(), parents: Vec::new() },
+        );
         sha
     }
 
@@ -328,17 +332,49 @@ impl FakeGithub {
         self.lock().merge_conflicts.insert((base.to_owned(), head.to_owned()));
     }
 
-    /// The tree sha `name` resolves to — a branch (bare name) through its ref,
+    /// The commit sha `name` resolves to — a branch (bare name) through its ref,
     /// or a commit sha directly, mirroring what the merge endpoint accepts as a
     /// head.
-    fn tree_at(&self, name: &str) -> Result<String, GithubError> {
+    fn commit_at(&self, name: &str) -> Result<String, GithubError> {
         let state = self.lock();
         let sha = state.refs.get(&format!("heads/{name}")).map_or(name, String::as_str);
-        state
+        if state.commits.contains_key(sha) {
+            return Ok(sha.to_owned());
+        }
+        Err(GithubError::Status { status: 404, body: format!("no commit or branch {name}") })
+    }
+
+    /// The tree sha at `name`.
+    fn tree_at(&self, name: &str) -> Result<String, GithubError> {
+        let sha = self.commit_at(name)?;
+        self.lock()
             .commits
-            .get(sha)
+            .get(&sha)
             .map(|stored| stored.tree.clone())
-            .ok_or_else(|| GithubError::Status { status: 404, body: format!("no commit or branch {name}") })
+            .ok_or_else(|| GithubError::Status { status: 404, body: format!("no commit {sha}") })
+    }
+
+    /// Whether commit `ancestor` is reachable from `commit` — the ancestry a
+    /// merge reads to answer "nothing to do". Iterative over an explicit stack:
+    /// a history is caller-shaped and a recursive walk would be bounded only by
+    /// how deep a test happens to build.
+    fn contains(&self, commit: &str, ancestor: &str) -> bool {
+        let state = self.lock();
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut pending = vec![commit];
+        while let Some(sha) = pending.pop() {
+            if sha == ancestor {
+                return true;
+            }
+            if !seen.insert(sha) {
+                continue;
+            }
+            if let Some((stored_sha, stored)) = state.commits.get_key_value(sha) {
+                debug_assert_eq!(stored_sha, sha);
+                pending.extend(stored.parents.iter().map(String::as_str));
+            }
+        }
+        false
     }
 
     /// The nonces of the dispatches recorded so far, in dispatch order — an
@@ -492,17 +528,23 @@ impl GitDataApi for FakeGithub {
 
     fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GithubError> {
         let sha = commit_sha(message, tree, parents);
-        self.lock().commits.insert(sha.clone(), StoredCommit { tree: tree.to_owned(), message: message.to_owned() });
+        self.lock().commits.insert(
+            sha.clone(),
+            StoredCommit { tree: tree.to_owned(), message: message.to_owned(), parents: parents.to_vec() },
+        );
         Ok(GitCommit { sha, tree: tree.to_owned(), message: message.to_owned() })
     }
 
     fn merge(&self, base: &str, head: &str, message: &str) -> Result<MergeResult, GithubError> {
         let (base, head) = (strip_heads(base), strip_heads(head));
-        let base_tree = self.tree_at(base)?;
-        let head_tree = self.tree_at(head)?;
+        let (base_sha, head_sha) = (self.commit_at(base)?, self.commit_at(head)?);
 
-        // Nothing to merge when the base already carries the head's content.
-        if base_tree == head_tree {
+        // "Already up to date" is an ancestry question, not a content one: the
+        // base has nothing to take from a head it already contains. Comparing
+        // trees instead would answer `false` for every re-merge, because a merge
+        // commit's tree equals neither side — so a fold resuming after a restart
+        // would re-merge every member it had already folded.
+        if self.contains(&base_sha, &head_sha) {
             return Ok(MergeResult::AlreadyUpToDate);
         }
         if self.lock().merge_conflicts.contains(&(base.to_owned(), head.to_owned())) {
@@ -515,10 +557,11 @@ impl GitDataApi for FakeGithub {
         // *both* sides. A fake that echoed the head's tree would let a caller
         // that actually tree-replaces pass — the precise bug merging exists to
         // prevent — so the combined tree must differ from either input.
-        let tree = merged_tree(&base_tree, &head_tree);
-        let sha = commit_sha(message, &tree, &[base.to_owned(), head.to_owned()]);
+        let tree = merged_tree(&self.tree_at(base)?, &self.tree_at(head)?);
+        let parents = vec![base_sha, head_sha];
+        let sha = commit_sha(message, &tree, &parents);
         let mut state = self.lock();
-        state.commits.insert(sha.clone(), StoredCommit { tree: tree.clone(), message: message.to_owned() });
+        state.commits.insert(sha.clone(), StoredCommit { tree: tree.clone(), message: message.to_owned(), parents });
         // A real merge commits onto the base branch, so the ref advances.
         if let Some(target) = state.refs.get_mut(&format!("heads/{base}")) {
             target.clone_from(&sha);
@@ -775,13 +818,23 @@ mod tests {
 
     #[test]
     fn an_already_contained_head_reports_nothing_to_do_and_an_armed_pair_conflicts() {
+        // "Already contained" is ancestry, not content. Two branches that happen
+        // to carry the same tree are divergent histories and do merge; a branch
+        // that has already merged the other genuinely has nothing left to take.
+        // Answering this by tree comparison says `false` for every re-merge —
+        // a merge commit's tree equals neither side — so a fold resuming after a
+        // restart would re-merge every member it had already folded.
         let fake = FakeGithub::new();
-        branch_at(&fake, "integration", "same-tree");
-        branch_at(&fake, "candidate", "same-tree");
+        branch_at(&fake, "integration", "base-tree");
+        branch_at(&fake, "candidate", "head-tree");
+        assert!(
+            matches!(fake.merge("heads/integration", "heads/candidate", "fold").unwrap(), MergeResult::Merged(_)),
+            "the first fold of a member is a real merge",
+        );
         assert_eq!(
             fake.merge("heads/integration", "heads/candidate", "fold").unwrap(),
             MergeResult::AlreadyUpToDate,
-            "a base already carrying the head's content has nothing to merge",
+            "re-folding a member the branch already contains has nothing to do",
         );
 
         let fake = FakeGithub::new();
