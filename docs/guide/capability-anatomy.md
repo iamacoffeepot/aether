@@ -38,8 +38,8 @@ ADR-0159.)
 
 ```text
 aether-example/src/
-  lib.rs                 identity, public re-exports, feature boundary
-  mod.rs                 identity, public re-exports, feature boundary
+  lib.rs                 crate root: identity, public re-exports, feature boundary
+  module/mod.rs          optional module root for a decomposed subsystem
   kinds.rs               caller-facing request/reply/value schemas
   config.rs              resolved native config when it is a distinct seam
   runtime.rs             light state + NativeActor handlers
@@ -137,7 +137,7 @@ derive/runtime requirements can vary for test-only actors.
 ## Kind ownership
 
 Caller-facing `aether.example.*` kinds belong in `example/kinds.rs` and are
-re-exported from `example/mod.rs`. The marker face remains wasm-safe: schema,
+re-exported from the crate root, `example/lib.rs`. The marker face remains wasm-safe: schema,
 serde, and lightweight data dependencies only.
 
 Keep a kind in `aether-kinds` only when a named upstream consumer cannot depend
@@ -262,7 +262,7 @@ Do not copy old paths such as a crate-root `test_echo.rs` or `test_chassis.rs`.
 - Light single-file runtime: `fs/`, `clipboard/`
 - Heavy runtime directory: `audio/`, `render/`, `component/`, `lifecycle/`
 - Neutral identity with desktop/headless/synthetic runtimes: `window/`
-- Multi-actor cluster: `engine/`, `http/`, `tcp/`
+- Multi-actor cluster: `fleet/`, `http/`, `tcp/`
 - Self-contained guest provider components: `anthropic/`, `gemini/`
 - Split test support: `rpc/server/test_echo.rs`
 

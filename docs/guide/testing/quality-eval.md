@@ -8,12 +8,11 @@ bugs, wrong edge-case behavior, silently dropped requirements — passes every
 mechanical gate. The quality eval is the standing signal for that class.
 
 It works by re-implementing recently-landed issues **blind** and scoring the
-result against what actually merged. A weekly workflow samples ~5 issues, runs a
-fresh agent against each one with no access to the merged solution, and a judge
-compares each blind candidate diff to the landed "ground truth" diff. The output
-is a verdict-rate table grouped by `size:*` and `model:*` — the axes a routing
-change moves — posted onto one rolling tracking issue so the trend is visible
-week over week. It runs off the merge critical path and never gates a PR.
+result against what actually merged. The local manual harness selects samples,
+runs a fresh agent against each one with no access to the merged solution, and
+judges each blind candidate diff against the landed "ground truth" diff. Its
+output is a verdict-rate table grouped by `size:*` and `model:*` — the axes a
+routing change moves. It runs off the merge critical path and never gates a PR.
 
 The probe arc this productizes (2026-07-13/14) already found that effort level
 barely moves correctness below `size:l`, that Opus-medium beats Sonnet-xhigh on
@@ -28,11 +27,12 @@ scored **against** it: not "does it match byte-for-byte" — a different but
 functionally equivalent implementation is *correct* — but "does it solve the
 issue with the same behavior, free of the checklist's semantic-defect classes".
 
-## The three stages
+## The manual harness
 
-The harness is three `scripts/` stages plus the weekly workflow. Each stage
-streams newline-delimited JSON to the next, so they compose in a pipe and each is
-independently runnable from a fixed input.
+The harness is four local `scripts/` files. The select, run, and judge stages
+stream newline-delimited JSON to the next, so they compose in a pipe and each is
+independently runnable from a fixed input; the fourth file unit-tests their pure
+logic.
 
 ### 1. Select — `scripts/quality-eval-select.mjs`
 
@@ -99,24 +99,10 @@ verdict parser and rate aggregation (with a tripwire on the aggregated rates).
 The git isolation and the `claude` invocations are I/O, verified by the
 contamination assert at runtime rather than by a test.
 
-## The weekly schedule
-
-`.github/workflows/quality-eval.yml` runs on a weekly `schedule` (Mondays, off the
-other nightlies' minutes) and posts the verdict-rate rollup onto a single rolling
-tracking issue titled **"quality-eval: weekly offline verdict rates"** — a comment
-each week on the same issue, so the trend reads top to bottom. The workflow's
-token is `contents: read` + `issues: write` (the latter only for that tracking
-issue); the blind agent runs with neither.
-
 ## Running it manually
 
-Dispatch the whole harness on demand, optionally overriding the sample size:
-
-```bash
-gh workflow run quality-eval.yml -f sample_size=3
-```
-
-Or run the stages locally (needs `git ≥2.49`, `node`, `jq`, and a
+Current `main` has no scheduled quality-eval workflow or manual workflow dispatch.
+Run the local harness instead (needs `git ≥2.49`, `node`, `jq`, and a
 `CLAUDE_CODE_OAUTH_TOKEN`):
 
 ```bash
@@ -133,5 +119,5 @@ and the defect rate over the scored samples, followed by a per-defect list namin
 the issue and its defect class. A defect rate that climbs after a routing / effort
 / model change — especially on `size:l`, where the probe arc found the model
 choice matters most — is the signal that the change degraded correctness in a way
-no other check would surface. A single week is noisy at five samples; the value is
-the trend across weeks on the rolling issue.
+no other check would surface. A single five-sample run is noisy; repeat runs using
+the same sampling method over time before treating movement as a trend.

@@ -139,8 +139,8 @@ or import it without explicit owner approval and local validation.
 ## Source routes
 
 - Harness/topologies: `crates/aether-harness-substrate/src/perf/harness/`
-- Versioned reports/comparison: `crates/aether-harness-substrate/src/perf/report.rs`
-- Binaries: `crates/aether-harness-perf/src/bin/perf-*.rs`
-- Automation: `scripts/perf-*.sh`, `.github/workflows/perf-compare.yml`
+- Versioned reports/comparison: `crates/aether-harness-substrate/src/perf/report/`
+- Binaries: `crates/aether-harness-perf/src/bin/`
+- Automation: `scripts/`, `.github/workflows/` (the current performance entry points)
 - Fuzz targets: `fuzz/`
 - Decision: accepted ADR-0085
