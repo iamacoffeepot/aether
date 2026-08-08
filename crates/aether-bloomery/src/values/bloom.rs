@@ -30,8 +30,46 @@ pub struct Membership {
     /// Empty is the ordinary case — a member configures only what it wants to
     /// differ from the bloom-wide choice.
     pub configs: ConfigRegistry,
-    /// The approval evidence, bound to `scope_revision`.
+    /// The approval evidence, bound to this member's [`subject`](Self::subject).
     pub approval: Evidence,
+}
+
+/// The exact content a member's approval binds to (ADR-0174): its workpiece, the
+/// scope revision it was approved at, and the configuration it will run under.
+///
+/// The binding covers configuration because a receipt that reads "approved" over
+/// a model nobody approved is the same divergence a sealed-but-ignored digest
+/// was. The override used to sit inside the scope revision, so a signature over
+/// the revision covered it by accident; sealing it in the member's registry
+/// instead makes that coverage something the subject has to state.
+///
+/// `approval` itself is excluded, since the subject is what the approval is
+/// *of* — including it would be circular.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct MemberSubject {
+    /// The workpiece under approval.
+    pub workpiece: WorkpieceId,
+    /// The scope revision the approval was granted at.
+    pub scope_revision: Digest,
+    /// The configuration the member will run under.
+    pub configs: ConfigRegistry,
+}
+
+impl ContentAddressed for MemberSubject {
+    const DOMAIN: &'static str = "aether.bloomery.member_subject";
+}
+
+impl Membership {
+    /// The digest this member's `approval` must bind — and, for an above-auto
+    /// member, the exact bytes an author signs.
+    #[must_use]
+    pub fn subject(&self) -> Digest {
+        digest_of(&MemberSubject {
+            workpiece: self.workpiece.clone(),
+            scope_revision: self.scope_revision,
+            configs: self.configs.clone(),
+        })
+    }
 }
 
 /// A mutable bloom in shaping: membership proposals, base, and forecast.

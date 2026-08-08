@@ -308,6 +308,7 @@ mod tests {
                 attempt,
                 Digest::from_bytes([0xC0; 32]),
             ),
+            configs: aether_bloomery::ConfigRegistry::default(),
         };
         record_dispatch(store, &record).unwrap();
     }

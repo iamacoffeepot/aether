@@ -1,22 +1,22 @@
-//! The typed scope-revision content and its per-workpiece model override
-//! (ADR-0149 §The value vocabulary / §The line, #3511).
+//! The per-workpiece model override (ADR-0149 §The line, #3511, ADR-0174).
 //!
-//! A workpiece's `scope_revision` is an opaque [`Digest`] everywhere it is
-//! *named* ([`Workpiece`](crate::values::Workpiece) /
-//! [`Membership`](crate::values::Membership)); [`ScopeRevision`] is the minimal
-//! typed content that digest *addresses*, so the value is decodable and the
-//! per-workpiece [`ModelOverride`] it carries is frozen at seal (a sealed bloom
-//! pins the exact digest) and therefore attestable. The runner lane and the
-//! coordinator both resolve the effective model + effort the same way — each
-//! field of the override falls through to the stage's
-//! [`AgentProfile`] default when unset — so "the
-//! model that ran is the model the bloom promised" holds by construction.
+//! [`ModelOverride`] is a configuration kind sealed into a member's
+//! [`ConfigRegistry`](crate::values::ConfigRegistry) — the bloom pins its
+//! address, so what it names is frozen at seal and therefore attestable. The
+//! runner lane and the coordinator both resolve the effective model + effort the
+//! same way: each field of the override falls through to the stage's
+//! [`AgentProfile`] default when unset, so "the model that ran is the model the
+//! bloom promised" holds by construction.
+//!
+//! A workpiece's `scope_revision` stays an opaque [`Digest`](crate::Digest) naming approved
+//! scope content. The override used to ride inside it for want of anywhere else
+//! attested to live; the registry is that place, and the two are separate
+//! concerns again.
 
 use alloc::string::String;
 
 use serde::{Deserialize, Serialize};
 
-use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::values::{AgentProfile, Harness, ReasoningEffort};
 
 /// A per-workpiece override of *how* the model lanes run for this workpiece
@@ -34,7 +34,8 @@ use crate::values::{AgentProfile, Harness, ReasoningEffort};
 /// that overrode the sealed profile would let a receipt attest a model that
 /// never ran. An override sealed into the scope revision is attestable — the
 /// bloom pins its digest — so choice and attestation are not in tension.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(aether_data::Kind, aether_data::Schema, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[kind(name = "aether.bloomery.model_override")]
 pub struct ModelOverride {
     /// The harness and model to run this workpiece's model lanes under,
     /// overriding the stage profile's. `None` → the profile default.
@@ -54,7 +55,7 @@ pub struct ModelOverride {
 
 /// A harness and the model it runs — the unit a [`ModelOverride`] selects,
 /// because neither half is meaningful against the other's provider.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AgentSelection {
     /// The harness to fork.
     pub harness: Harness,
@@ -91,31 +92,6 @@ pub struct ResolvedModel {
     pub effort: ReasoningEffort,
 }
 
-/// The typed content a workpiece's `scope_revision` digest addresses (ADR-0149
-/// §The value vocabulary, #3511). Until this slice the revision was an opaque
-/// digest over untyped bytes; this is the minimal typed carrier so the
-/// per-workpiece [`ModelOverride`] is decodable and, because a sealed bloom pins
-/// the exact [`digest`](Self::digest), frozen at seal.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub struct ScopeRevision {
-    /// The per-workpiece model/effort override for the construct lane.
-    pub model_override: ModelOverride,
-}
-
-impl ContentAddressed for ScopeRevision {
-    const DOMAIN: &'static str = "aether.bloomery.scope_revision";
-}
-
-impl ScopeRevision {
-    /// The scope revision's content-addressed digest — the value a
-    /// [`Workpiece`](crate::values::Workpiece) /
-    /// [`Membership`](crate::values::Membership) pins as its `scope_revision`.
-    #[must_use]
-    pub fn digest(&self) -> Digest {
-        digest_of(self)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,24 +99,6 @@ mod tests {
 
     fn profile(model: &str, effort: ReasoningEffort) -> AgentProfile {
         AgentProfile { harness: Harness::Claude, model: String::from(model), effort, tools: ToolPolicy::Full }
-    }
-
-    // A scope revision carrying an override round-trips through its content-
-    // addressed digest: the same content yields the same address, and a changed
-    // override changes it — so a sealed bloom that pins the digest pins the
-    // exact override.
-    #[test]
-    fn scope_revision_digest_is_content_addressed() {
-        let base = ScopeRevision::default();
-        assert_eq!(base.digest(), ScopeRevision::default().digest(), "same content, same address");
-
-        let overridden = ScopeRevision {
-            model_override: ModelOverride {
-                agent: Some(AgentSelection { harness: Harness::Claude, model: String::from("claude-opus-4-8") }),
-                reasoning_effort: None,
-            },
-        };
-        assert_ne!(base.digest(), overridden.digest(), "a changed override moves the address");
     }
 
     // An unset override field falls through to the stage profile default; a set

@@ -193,16 +193,18 @@ fn control_mailbox() -> MailboxId {
 /// ids over the same workpiece.
 fn seal_event(key: &str, base: u8, workpiece: &str) -> Event {
     let scope_revision = Digest::from_bytes([1; 32]);
-    let member = Membership {
+    let mut member = Membership {
         workpiece: WorkpieceId(workpiece.to_owned()),
         scope_revision,
         configs: ConfigRegistry::default(),
         approval: Evidence {
-            subject: scope_revision,
+            subject: Digest::default(),
             kind: EvidenceKind::Approval,
             detail: Digest::from_bytes([200; 32]),
         },
     };
+    // The approval binds the member's subject (ADR-0174).
+    member.approval.subject = member.subject();
     // The seal must freeze the one line the pipeline runs (#3506): the reducer
     // rejects a bloom whose stage-catalog digest is not `StageCatalog::line_digest`
     // (the zero default is inadmissible).

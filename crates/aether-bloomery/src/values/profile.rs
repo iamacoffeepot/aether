@@ -61,7 +61,7 @@ impl AgentProfile {
 /// process the runner spawns and the transcript shape the result record is
 /// derived from, while the model selects what that process runs. The mechanical
 /// lanes name no harness at all — they run a compiler.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Harness {
     /// The Claude Code CLI, headless.
     Claude,
@@ -104,7 +104,7 @@ impl Harness {
 
 /// The reasoning-effort tier the harness runs a model at — the harness effort
 /// levels. A stage pins its tier once at calibration.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum ReasoningEffort {
     /// Minimal reasoning — the cheapest tier.
     Low,

@@ -131,6 +131,20 @@ impl ConfigRegistry {
         self.entries.iter().map(|(kind, address)| (kind.as_str(), *address))
     }
 
+    /// The effective registry a member runs under: `self` layered over `outer`,
+    /// with `self`'s entry winning per kind.
+    ///
+    /// The flattened form of the [`ConfigScopes`] walk, for the one place that
+    /// cannot walk it — the dispatch payload the reducer hands the host names a
+    /// single member, so carrying the chain would carry the whole bloom's
+    /// registry to say what one layered lookup already says.
+    #[must_use]
+    pub fn layered_over(&self, outer: &Self) -> Self {
+        let mut effective = outer.clone();
+        effective.entries.extend(self.entries.iter().map(|(kind, address)| (kind.clone(), *address)));
+        effective
+    }
+
     /// Whether anything is sealed here.
     #[must_use]
     pub fn is_empty(&self) -> bool {

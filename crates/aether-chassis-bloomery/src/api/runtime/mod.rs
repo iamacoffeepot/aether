@@ -55,7 +55,6 @@ mod drafts;
 mod hex;
 mod reads;
 mod response;
-mod scope_revisions;
 mod seal;
 mod state;
 mod workpieces;
@@ -83,7 +82,7 @@ use super::dto::WorkpiecesView;
 use crate::artifacts::{ArtifactsCapability, Get, GetResult};
 use crate::bloomery::ApprovalPolicy;
 use crate::signing::VerifyResult;
-use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult, RecordScopeRevisionResult, StoreCapability};
+use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult, StoreCapability};
 
 /// Composer-supplied params for the REST control api cap (ADR-0156 §3 `Params`
 /// channel): the tier-policy file the pre-seal approve gate loads at init (issue
@@ -143,7 +142,6 @@ impl NativeActor for BloomeryApiCapability {
             verifying: HashMap::new(),
             seals: HashMap::new(),
             configs: HashMap::new(),
-            scope_revisions: HashMap::new(),
             next_seal: 1,
             seal_verifications: HashMap::new(),
         })
@@ -167,18 +165,6 @@ impl NativeActor for BloomeryApiCapability {
     #[http::route(Post, "/configs")]
     fn on_post_configs(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
         let routed = state.author_config(&ctx, &ctx.request().body);
-        finish(state, ctx, routed)
-    }
-
-    /// `POST /scope-revisions` — content-address a scope revision so a
-    /// workpiece can name it. The route that makes a per-workpiece harness /
-    /// model override settable at all.
-    #[http::route(Post, "/scope-revisions")]
-    fn on_post_scope_revisions(
-        state: &mut ApiCapabilityState,
-        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
-    ) -> http::Outcome {
-        let routed = state.author_scope_revision(&ctx, &ctx.request().body);
         finish(state, ctx, routed)
     }
 
@@ -351,23 +337,6 @@ impl NativeActor for BloomeryApiCapability {
         } else {
             state.resolve_verify(ctx, mail);
         }
-    }
-
-    /// The store's reply to an authored scope revision's write (#4588). The
-    /// authoring route deferred its caller on this, so the reply answers with the
-    /// digest on a durable write and a `500` on a failed one — a caller never
-    /// gets an address it could seal against a row that is not there.
-    #[handler::manual]
-    fn on_record_scope_revision_result(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Manual>,
-        mail: RecordScopeRevisionResult,
-    ) {
-        let error = match mail {
-            RecordScopeRevisionResult::Ok => None,
-            RecordScopeRevisionResult::Err { error } => Some(error),
-        };
-        state.resolve_scope_revision_write(ctx, error.as_deref());
     }
 
     /// The store's reply to an authored configuration's write (ADR-0174). The

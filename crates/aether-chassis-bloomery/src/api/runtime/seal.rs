@@ -280,7 +280,7 @@ fn resolve_seal_memberships(
             Err(error) => return Err(error_response(500, &format!("projection encode failed: {error}"))),
         };
         let admission = AdmissionRequest {
-            scope_revision: proposal.scope_revision,
+            subject: proposal.subject(),
             declared_surface: projection.declared_surface.clone(),
             completeness: projection.completeness,
             adr_touch: projection.adr_touch,
@@ -311,14 +311,14 @@ fn resolve_seal_memberships(
                         ),
                     ));
                 };
-                if let Err(rejected) = precheck_statement(proposal.scope_revision, statement) {
+                if let Err(rejected) = precheck_statement(proposal.subject(), statement) {
                     return Err(error_response(
                         422,
                         &format!("member {member} signed statement rejected: {rejected:?}; seal fails closed"),
                     ));
                 }
                 sealed_proposals.push(proposal.clone());
-                pending_verifications.push((index, proposal.scope_revision, statement.clone()));
+                pending_verifications.push((index, proposal.subject(), statement.clone()));
             }
         }
     }

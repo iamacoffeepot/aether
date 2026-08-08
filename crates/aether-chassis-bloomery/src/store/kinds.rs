@@ -282,28 +282,6 @@ pub enum RecordDispatchDescriptionResult {
     },
 }
 
-/// Persist an authored [`ScopeRevision`](aether_bloomery::ScopeRevision)'s
-/// content under its own digest (#4588), so the dispatch that reads a member's
-/// sealed `scope_revision` can resolve the override it addresses.
-///
-/// A membership pins the revision as an opaque digest, and the reducer holds no
-/// content — so without this row the sealed override is attestable but inert and
-/// every lane runs the stage's calibrated default. Written by the authoring
-/// route rather than at seal, because the seal request carries only the digest.
-/// Content-addressed, so the write is idempotent by construction: identical
-/// content addresses to the same digest and rewrites the same row.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.record_scope_revision")]
-pub struct RecordScopeRevision {
-    /// The revision's content address (its digest's raw bytes) — the value a
-    /// workpiece names it by.
-    #[serde(with = "aether_data::bytes")]
-    pub digest: Vec<u8>,
-    /// The revision itself, as its canonical `aether_data::wire` bytes.
-    #[serde(with = "aether_data::bytes")]
-    pub revision: Vec<u8>,
-}
-
 /// Store an authored configuration's canonical bytes under its address
 /// (ADR-0174), so a sealed registry entry resolves to content at the point of
 /// use.
@@ -328,21 +306,6 @@ pub struct RecordConfig {
 #[kind(name = "aether.store.record_config_result")]
 pub enum RecordConfigResult {
     /// The configuration is stored under its address.
-    Ok,
-    /// The write failed.
-    Err {
-        /// A human-readable failure reason.
-        error: String,
-    },
-}
-
-/// Reply to [`RecordScopeRevision`]. The authoring route answers its caller from
-/// this, so a `200` means the revision is durable and a later seal naming the
-/// digest will actually resolve it.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.record_scope_revision_result")]
-pub enum RecordScopeRevisionResult {
-    /// The revision is stored under its digest.
     Ok,
     /// The write failed.
     Err {

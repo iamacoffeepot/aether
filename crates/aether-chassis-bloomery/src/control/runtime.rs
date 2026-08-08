@@ -510,7 +510,15 @@ fn project(
                     RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer, words: words.clone() };
                 outbox.push(OutboxPayload::new(Topic::Redispatch, to_vec(&payload)?));
             }
-            Decision::DispatchAttempt { bloom, workpiece, stage, transformation, scope_revision, candidate } => {
+            Decision::DispatchAttempt {
+                bloom,
+                workpiece,
+                stage,
+                transformation,
+                scope_revision,
+                candidate,
+                configs,
+            } => {
                 let payload = DispatchPayload {
                     bloom: bloom.0,
                     workpiece: workpiece.clone(),
@@ -518,6 +526,7 @@ fn project(
                     transformation: transformation.clone(),
                     scope_revision: *scope_revision,
                     candidate: *candidate,
+                    configs: configs.clone(),
                 };
                 outbox.push(OutboxPayload::new(Topic::Dispatch, to_vec(&payload)?));
             }

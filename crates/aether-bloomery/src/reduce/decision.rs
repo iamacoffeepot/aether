@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::{FoldedIntegration, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{Evidence, LandingReceipt, ResolutionClaim, ResolvedBloom, Transformation};
+use crate::values::{ConfigRegistry, Evidence, LandingReceipt, ResolutionClaim, ResolvedBloom, Transformation};
 
 /// The ordered effects a decision applies to the projection (and, in
 /// production, the outbox/store).
@@ -135,6 +135,12 @@ pub enum Decision {
         /// bind to; `None` dispatches against the scope revision (Construct, or
         /// a member with no capture yet).
         candidate: Option<Digest>,
+        /// The configuration this attempt runs under (ADR-0174): the member's
+        /// registry layered over the bloom's, flattened here because a dispatch
+        /// names one member. The reducer resolves *addresses* — a lookup by kind
+        /// name, which `no_std` can do — and never their content; the host fetches
+        /// what each address names at the point of use.
+        configs: ConfigRegistry,
     },
     /// Advance a member's stage cursor to `progress` — the snapshot-folding
     /// counterpart to a [`Decision::DispatchAttempt`]. Overwrites the member's

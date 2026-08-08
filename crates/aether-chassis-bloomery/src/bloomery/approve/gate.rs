@@ -12,8 +12,10 @@ use super::policy::{ApprovalPolicy, Tier};
 /// migration transition); the gate itself is a pure decision over them.
 #[derive(Clone, Debug)]
 pub struct AdmissionRequest {
-    /// The exact scope-revision digest the formed `approval` binds to.
-    pub scope_revision: Digest,
+    /// The member subject the formed `approval` binds to — its workpiece, scope
+    /// revision, and sealed configuration together (ADR-0174,
+    /// [`Membership::subject`](aether_bloomery::Membership::subject)).
+    pub subject: Digest,
     /// The declared-surface globs (the `## Declared surface` block).
     pub declared_surface: Vec<String>,
     /// The completeness facts the gate fails closed on.
@@ -148,7 +150,7 @@ impl<'policy> Gate<'policy> {
             self.policy.resolve_surface(&request.declared_surface)
         };
         if tier == Tier::Auto {
-            Decision::AutoApproved(auto_approval(request.scope_revision, request.projection_digest))
+            Decision::AutoApproved(auto_approval(request.subject, request.projection_digest))
         } else {
             Decision::RequiresStatement(tier)
         }
@@ -195,22 +197,22 @@ const AUTO_APPROVAL_SOURCE: &str = "aether.bloomery.approve_gate:auto-tier";
 const AUTO_APPROVAL_WORDS: &[u8] = b"aether.bloomery.approve_gate: policy resolved auto tier";
 
 /// Form the `approval` [`Evidence`] for an `auto`-tier pass — bound to the exact
-/// `scope_revision` (so the seal-time `validate_member_admission` accepts it) and
+/// member `subject` (so the seal-time `validate_member_admission` accepts it) and
 /// detailing a content-addressed observation record of the grant. An auto
 /// approval is *context* (the gate observed the policy resolve `auto`), never
 /// instruction — so its supporting artifact is an
 /// [`Provenance::ObservationAttestation`], carrying no author signature.
 ///
-/// The supporting record's `parents` pin both the `scope_revision` the approval
-/// binds and the `projection_digest` of the exact facts the gate evaluated
+/// The supporting record's `parents` pin both the `subject` the approval binds
+/// and the `projection_digest` of the exact facts the gate evaluated
 /// (issue #3583, rider 3), so the approval's `detail` attests precisely which
 /// projection produced the `auto` grant — a swapped projection moves the digest,
 /// and the digest is folded into `detail`.
-fn auto_approval(scope_revision: Digest, projection_digest: Digest) -> Evidence {
+fn auto_approval(subject: Digest, projection_digest: Digest) -> Evidence {
     let record = Statement {
         words: AUTO_APPROVAL_WORDS.to_vec(),
         provenance: Provenance::ObservationAttestation(Observation { source: AUTO_APPROVAL_SOURCE.to_owned() }),
-        parents: vec![scope_revision, projection_digest],
+        parents: vec![subject, projection_digest],
     };
-    Evidence { subject: scope_revision, kind: EvidenceKind::Approval, detail: digest_of(&record) }
+    Evidence { subject, kind: EvidenceKind::Approval, detail: digest_of(&record) }
 }

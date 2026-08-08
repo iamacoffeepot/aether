@@ -30,13 +30,16 @@ fn digest(seed: u8) -> Digest {
 }
 
 fn membership(name: &str, revision: u8) -> Membership {
-    let scope_revision = digest(revision);
-    Membership {
+    // The approval binds the member's subject (ADR-0174), which is only
+    // computable once the rest of the member is built.
+    let mut member = Membership {
         workpiece: WorkpieceId(name.into()),
-        scope_revision,
+        scope_revision: digest(revision),
         configs: ConfigRegistry::default(),
-        approval: Evidence { subject: scope_revision, kind: EvidenceKind::Approval, detail: digest(200) },
-    }
+        approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
+    };
+    member.approval.subject = member.subject();
+    member
 }
 
 /// Seal a two-member synthetic bloom, journal the seal event, then replay the

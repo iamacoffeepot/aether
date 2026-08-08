@@ -1566,10 +1566,13 @@ fn the_completing_integrate_dispatches_the_integration_fold_in_member_order() {
 // real configuration; what matters is that the seal covers the registry at both
 // scopes, which is what makes a receipt's configuration claim mean anything.
 mod sealed_config {
-    use aether_bloomery::{BloomDraft, ConfigKind, ConfigRegistry, StageCatalog};
+    use aether_bloomery::{
+        BloomDraft, ConfigKind, ConfigRegistry, Event, Fact, IdempotencyKey, Membership, Outcome, SealError, Snapshot,
+        StageCatalog, reduce,
+    };
     use serde::{Deserialize, Serialize};
 
-    use crate::common::{digest, membership};
+    use crate::common::{approved, digest, membership};
 
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     #[kind(name = "aether.bloomery.test_seal_config")]
@@ -1581,6 +1584,46 @@ mod sealed_config {
         let mut registry = ConfigRegistry::default();
         registry.insert::<LaneConfig>(LaneConfig { lane: lane.to_owned() }.address());
         registry
+    }
+
+    fn sealed(member: Membership) -> Outcome {
+        reduce(
+            &Snapshot::new(digest(0)),
+            &Event {
+                idempotency_key: IdempotencyKey("seal".to_owned()),
+                fact: Fact::Seal(
+                    BloomDraft {
+                        proposals: vec![member],
+                        base: digest(1),
+                        stage_catalog: StageCatalog::line_digest(),
+                        ..BloomDraft::default()
+                    }
+                    .seal(),
+                ),
+            },
+        )
+        .outcome
+    }
+
+    // Tripwire: a member's approval binds its configuration, not just its scope
+    // revision (ADR-0174). Moving the model override out of the scope revision
+    // into the registry would otherwise drop model choice out from under the
+    // approval — an operator could swap the model on an approved member and the
+    // receipt would still read "approved". Re-configuring after approval must
+    // refuse the seal until the member is re-approved.
+    #[test]
+    fn re_configuring_an_approved_member_invalidates_its_approval() {
+        let member = membership("wp-a", 1);
+        assert!(matches!(sealed(member.clone()), Outcome::Sealed(_)), "the approved member seals");
+
+        let mut reconfigured = member;
+        reconfigured.configs = sealing("cheap");
+        assert!(
+            matches!(sealed(reconfigured.clone()), Outcome::SealRejected(SealError::UnapprovedMember(_))),
+            "configuring after approval refuses until re-approved",
+        );
+
+        assert!(matches!(sealed(approved(reconfigured)), Outcome::Sealed(_)), "re-approval admits it");
     }
 
     fn draft_with(bloom: ConfigRegistry, member: ConfigRegistry) -> BloomDraft {

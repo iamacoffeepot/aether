@@ -10,7 +10,7 @@ use super::{
 };
 use crate::digest::Digest;
 use crate::ids::BloomId;
-use crate::values::{BloomSpec, EvidenceKind, Membership, StageCatalog, Transformation};
+use crate::values::{BloomSpec, ConfigRegistry, EvidenceKind, Membership, StageCatalog, Transformation};
 
 /// Build the seal-time entry-stage dispatch effects for one member: seed its
 /// cursor at the entry stage (attempt 1) and dispatch the first attempt against
@@ -23,7 +23,12 @@ use crate::values::{BloomSpec, EvidenceKind, Membership, StageCatalog, Transform
 /// builds the candidate against the exact sealed source (ADR-0149 §Execution,
 /// #3572). It is distinct from the member's `scope_revision` subject, which is
 /// the aether content digest the returned evidence binds to.
-fn entry_dispatch_effects(bloom: BloomId, member: &Membership, checkout: Digest) -> [Decision; 2] {
+fn entry_dispatch_effects(
+    bloom: BloomId,
+    member: &Membership,
+    checkout: Digest,
+    bloom_configs: &ConfigRegistry,
+) -> [Decision; 2] {
     let stage = StageCatalog::entry_stage();
     [
         Decision::AdvanceStage {
@@ -38,6 +43,7 @@ fn entry_dispatch_effects(bloom: BloomId, member: &Membership, checkout: Digest)
             transformation: Transformation::for_member_stage(stage, member.scope_revision, checkout),
             scope_revision: member.scope_revision,
             candidate: None,
+            configs: member.configs.layered_over(bloom_configs),
         },
     ]
 }
@@ -82,14 +88,14 @@ pub(super) fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec) -> Decisions {
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom });
     }
     for member in spec.members() {
-        effects.extend(entry_dispatch_effects(bloom, member, spec.base()));
+        effects.extend(entry_dispatch_effects(bloom, member, spec.base(), spec.configs()));
     }
     Decisions { outcome: Outcome::Sealed(bloom), effects }
 }
 
 /// The per-member admission checks a bloom's membership must pass before it can
 /// claim anything — a non-empty set, no duplicate workpiece, and every approval
-/// binding its own scope revision as an [`EvidenceKind::Approval`] (ADR-0149
+/// binding its own [`subject`](Membership::subject) as an [`EvidenceKind::Approval`] (ADR-0149
 /// "verify every member's scope and approval lineage"). Both the first-door
 /// seal and the second-door supersession run it, so a successor is held to the
 /// same member validity a fresh seal is. The error is a [`SealError`] — seal's
@@ -106,7 +112,7 @@ fn validate_member_admission(members: &[Membership]) -> Result<(), SealError> {
         if !seen.insert(&member.workpiece) {
             return Err(SealError::DuplicateWorkpiece(member.workpiece.clone()));
         }
-        if member.approval.kind != EvidenceKind::Approval || !member.approval.validates(&member.scope_revision) {
+        if member.approval.kind != EvidenceKind::Approval || !member.approval.validates(&member.subject()) {
             return Err(SealError::UnapprovedMember(member.workpiece.clone()));
         }
     }
@@ -230,7 +236,7 @@ pub(super) fn reduce_supersede(snapshot: &Snapshot, predecessor: &BloomId, succe
         let inherited =
             record.claims.get(&member.workpiece).is_some_and(|claim| claim.scope_revision == member.scope_revision);
         if !inherited {
-            effects.extend(entry_dispatch_effects(successor_id, member, successor.base()));
+            effects.extend(entry_dispatch_effects(successor_id, member, successor.base(), successor.configs()));
         }
     }
     effects.push(Decision::MarkSuperseded { bloom: *predecessor, by: successor_id });
