@@ -7,6 +7,7 @@ use super::*;
 use crate::server::shard::HttpDispatchShard;
 use aether_actor::Single;
 use aether_substrate::Subname;
+use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 
 /// One socket retained by the supervisor while its dispatch shards are
@@ -120,6 +121,10 @@ pub struct HttpSupervisorState {
     /// `Drop` deregisters, so the map is both the dedup guard and the
     /// RAII anchor.
     pub monitors: HashMap<MailboxId, MonitorHandle>,
+    /// Mailboxes whose monitor attempt failed — remembered so the
+    /// `route holder is not monitorable` warn fires once per mailbox,
+    /// not once per route.
+    pub unmonitorable: HashSet<MailboxId>,
 }
 
 /// Dispatch-shard state (ADR-0135): today's whole per-connection machine —
@@ -231,6 +236,7 @@ impl HttpSupervisorState {
             shard_startup: ShardStartup::Idle,
             next_stream_id: Arc::new(AtomicU64::new(0)),
             monitors: HashMap::new(),
+            unmonitorable: HashSet::new(),
         }
     }
 
@@ -514,6 +520,9 @@ impl HttpSupervisorState {
     /// and without this line neither branch leaves any trace to tell them
     /// apart.
     pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, M>, mailbox: MailboxId) {
+        if self.monitors.contains_key(&mailbox) || self.unmonitorable.contains(&mailbox) {
+            return;
+        }
         let Entry::Vacant(slot) = self.monitors.entry(mailbox) else {
             return;
         };
@@ -521,12 +530,15 @@ impl HttpSupervisorState {
             Ok(handle) => {
                 slot.insert(handle);
             }
-            Err(error) => tracing::warn!(
-                target: "aether_http::server",
-                %mailbox,
-                ?error,
-                "route holder is not monitorable; its routes cannot be purged when it departs",
-            ),
+            Err(error) => {
+                self.unmonitorable.insert(mailbox);
+                tracing::warn!(
+                    target: "aether_http::server",
+                    %mailbox,
+                    ?error,
+                    "route holder is not monitorable; its routes cannot be purged when it departs",
+                );
+            }
         }
     }
 
