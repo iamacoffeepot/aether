@@ -46,7 +46,7 @@ commands come from checked-in workflows and repository guidance.
 
 `cargo xtask affected` narrows a PR's CI to the workspace graph's
 reverse-dependency closure plus hand-injected path rules for couplings the
-cargo graph cannot express (`PATH_RULES_TOML` in `xtask/src/affected.rs`). A
+cargo graph cannot express (`PATH_RULES_TOML` in `xtask/src/affected/rules.rs`). A
 path matching nothing already escalates to `run_all`, so the one gap left is
 mis-attribution: a changed path that matched some package but has an
 additional consumer outside the graph (a runtime-read data file, fixture,
