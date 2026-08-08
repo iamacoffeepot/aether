@@ -103,12 +103,30 @@ impl SourceShell {
     /// base and head and defeat `land`'s base-moved detection, so the genesis
     /// read is the authoritative seam.
     ///
+    /// The seed binds **once**. `GENESIS_MAINLINE` names mainline as it stood
+    /// when this journal opened, and every bloom sealed before the first land
+    /// carries that sentinel as its base — so re-seeding at a later boot
+    /// re-points what the sentinel *means* at whatever mainline has since become.
+    /// That equates base and head for exactly those blooms and defeats the
+    /// base-moved detection this eager read exists to preserve: the lazy-seed
+    /// failure above, reintroduced through the restart path. Mainline moves for
+    /// reasons that have nothing to do with blooms (any merged pull request), so
+    /// a restart after unrelated activity is the common case, not a corner.
+    ///
     /// # Errors
     /// The mainline ref is unreachable, no correspondence store is mounted (a
-    /// fake-backed shell), the head sha is malformed, or the store write faulted.
+    /// fake-backed shell), the head sha is malformed, or the store read or write
+    /// faulted.
     pub fn reconcile_genesis_mainline(&self) -> Result<(), SourceError> {
-        let head_sha = self.backend.mainline_head_sha()?;
-        self.seed_mainline(&Snapshot::GENESIS_MAINLINE, &head_sha)
+        let correspondence = self
+            .correspondence
+            .as_ref()
+            .ok_or_else(|| SourceError::Correspondence(CorrespondenceError::new("no correspondence store mounted")))?;
+        if correspondence.resolve_git(&Snapshot::GENESIS_MAINLINE)?.is_some() {
+            return Ok(());
+        }
+
+        self.seed_mainline(&Snapshot::GENESIS_MAINLINE, &self.backend.mainline_head_sha()?)
     }
 
     /// Snapshot the source at `base`.
@@ -285,6 +303,42 @@ mod tests {
         let resolved =
             correspondence.resolve_git(&base).unwrap().expect("the seeded base resolves to the mainline head");
         assert_eq!(resolved.to_hex(), head, "the resolved object is the real 40-hex sha1, not a hex-punned digest");
+    }
+
+    #[test]
+    fn a_later_boot_leaves_genesis_bound_to_the_head_the_journal_opened_against() {
+        // `GENESIS_MAINLINE` names mainline as it stood when this journal opened,
+        // and every bloom sealed before the first land carries that sentinel as
+        // its base. A boot that re-seeded would re-point what the sentinel means
+        // at whatever mainline has since become — equating base and head for
+        // exactly those blooms, so `land` reads an unmoved base and lands them on
+        // a mainline that moved underneath them. Mainline advances on any merged
+        // pull request, so a restart after unrelated activity is the ordinary
+        // case rather than a corner.
+        let fake = FakeGithub::new();
+        let correspondence: SharedCorrespondence = Arc::new(fake.clone());
+        let tree = Digest::from_bytes([10; 32]);
+        fake.seed_git_object(&tree);
+        let tree_sha = correspondence.resolve_git(&tree).unwrap().unwrap().to_hex();
+
+        let opening_head = fake.seed_commit_with_message("opening", &tree_sha);
+        fake.seed_ref("heads/main", &opening_head);
+        let backend = Arc::new(GitSource::new(fake.clone(), Arc::clone(&correspondence), true));
+        let shell = SourceShell { backend, correspondence: Some(Arc::clone(&correspondence)) };
+        shell.reconcile_genesis_mainline().unwrap();
+
+        // Mainline moves for a reason that has nothing to do with a bloom, then
+        // the coordinator restarts and runs its boot reconcile again.
+        let moved_head = fake.seed_commit_with_message("someone else's merge", &tree_sha);
+        fake.seed_ref("heads/main", &moved_head);
+        assert_ne!(moved_head, opening_head, "test: mainline genuinely moved");
+        shell.reconcile_genesis_mainline().unwrap();
+
+        assert_eq!(
+            correspondence.resolve_git(&Snapshot::GENESIS_MAINLINE).unwrap().unwrap().to_hex(),
+            opening_head,
+            "the later boot leaves genesis bound to the head the journal opened against",
+        );
     }
 
     #[test]
