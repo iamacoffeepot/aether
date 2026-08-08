@@ -217,6 +217,39 @@ pub trait SourceBackend {
     /// unreachable.
     fn mainline_head_sha(&self) -> Result<String, Self::Error>;
 
+    /// Fold the candidate at `candidate_ref` into `bloom`'s integration branch
+    /// by **merging** it, rather than by stating its tree the way
+    /// [`integrate`](Self::integrate) does.
+    ///
+    /// The two are not interchangeable. `integrate` sets the branch to the
+    /// candidate's tree, which is exact when the candidate was built against the
+    /// branch's own base and destructive the moment it was not: the resulting
+    /// commit carries the candidate's tree wholesale, so whatever the branch
+    /// gained in between is reverted — cleanly, with no conflict and no error.
+    /// That makes it unusable for the two folds that matter, both of which
+    /// combine work built against different points: several members folded onto
+    /// one branch, and a bloom caught up to a base that moved.
+    ///
+    /// Merging needs a ref rather than a tree digest because a tree is a
+    /// snapshot with no ancestry — there is no way to tell what the candidate
+    /// changed from what the branch changed without a common ancestor to read
+    /// through. The per-member candidate refs (ADR-0152) are commits and carry
+    /// one.
+    ///
+    /// Returns the same [`IntegrateOutcome`] as `integrate`, and is the first
+    /// producer of its [`Conflict`](IntegrateOutcome::Conflict) variant: a
+    /// tree-replace cannot collide, so nothing could reach it before.
+    ///
+    /// # Errors
+    /// Backend-defined — e.g. the integration branch or candidate ref is
+    /// missing, or the source is unreachable.
+    fn integrate_merge(
+        &self,
+        bloom: &BloomId,
+        candidate_ref: &str,
+        expected: &Checkpoint,
+    ) -> Result<IntegrateOutcome, Self::Error>;
+
     /// Record an integration checkpoint for `bloom` at `tree`.
     ///
     /// # Errors
