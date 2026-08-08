@@ -16,7 +16,10 @@ mod statement;
 mod study;
 
 pub use bloom::{BloomDraft, BloomSpec, LandingReceipt, MemberSubject, Membership, ResolutionClaim, ResolvedBloom};
-pub use config::{ConfigKind, ConfigRegistry, ConfigScopes, config_address};
+pub use config::{
+    ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, ResolvedConfigs, Unproducible, config_address,
+    decode_config,
+};
 pub use model_override::{AgentSelection, ModelOverride, ResolvedModel};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use question::Question;

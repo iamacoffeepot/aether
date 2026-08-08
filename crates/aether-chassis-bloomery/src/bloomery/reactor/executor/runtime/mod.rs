@@ -64,7 +64,7 @@ use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::control::ControlCore;
-use crate::store::{ConfigResolveError, SqliteStore, StoreBackend, resolve_config};
+use crate::store::{SqliteStore, StoreBackend, StoreConfigError, resolve_config};
 
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the dispatch topic and pulls matched results. Zero-field — the timer carries
@@ -252,7 +252,7 @@ impl AdmitSink for CollectingSink {
 /// blind dispatch.
 ///
 /// A sealed configuration that cannot be resolved is a
-/// [`ConfigResolveError`] rather than a fall-through to the calibrated default
+/// [`StoreConfigError`] rather than a fall-through to the calibrated default
 /// (ADR-0174): dispatching on the default while the receipt attests the sealed
 /// override is exactly the divergence the registry closes, so the caller parks
 /// the member instead. A member that sealed *no* override resolves to the
@@ -265,7 +265,7 @@ fn overlay_member_advisory(
     store: &mut dyn StoreBackend,
     record: &mut DispatchRecord,
     sequence: u64,
-) -> Result<(), ConfigResolveError> {
+) -> Result<(), StoreConfigError> {
     if record.transformation.command != CONSTRUCT_IMPLEMENT_COMMAND {
         return Ok(());
     }
@@ -371,7 +371,7 @@ fn drain_and_dispatch(
         };
 
         if let Err(error) = overlay_member_advisory(store, &mut record, entry.sequence) {
-            if let ConfigResolveError::Store(error) = error {
+            if let StoreConfigError::Store(error) = error {
                 return Err(error);
             }
             // A sealed configuration that will not resolve never resolves on
@@ -638,7 +638,7 @@ fn resolve_replay(
     // rather than a re-run of the spent one the park consumed.
     record.nonce = Nonce(format!("redispatch-{sequence}"));
     if let Err(error) = overlay_member_advisory(store, &mut record, sequence) {
-        if let ConfigResolveError::Store(error) = error {
+        if let StoreConfigError::Store(error) = error {
             return Err(error);
         }
         tracing::error!(

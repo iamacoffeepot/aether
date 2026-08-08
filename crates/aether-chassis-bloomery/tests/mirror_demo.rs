@@ -17,8 +17,8 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomDraft, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Snapshot,
-    StageCatalog, WorkpieceId, reduce, view_of,
+    BloomDraft, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
+    ResolvedConfigs, Snapshot, StageCatalog, WorkpieceId, reduce, view_of,
 };
 use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
 use aether_chassis_bloomery::bloomery::ProjectionShell;
@@ -66,7 +66,7 @@ fn synthetic_bloom_snapshot() -> Snapshot {
     let mut snapshot = Snapshot::new(base);
     for record in store.replay_journal().unwrap() {
         let replayed: Event = from_bytes(&record.event).unwrap();
-        snapshot = snapshot.apply(&replayed, &reduce(&snapshot, &replayed));
+        snapshot = snapshot.apply(&replayed, &reduce(&snapshot, &replayed, &ResolvedConfigs::default()));
     }
     snapshot
 }

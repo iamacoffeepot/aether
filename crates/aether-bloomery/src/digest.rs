@@ -40,6 +40,18 @@ impl Digest {
         Self(bytes)
     }
 
+    /// Wrap a slice of raw digest bytes, or `None` when it is not exactly 32
+    /// long.
+    ///
+    /// The store and the wire both carry a digest as an opaque byte string, so
+    /// every read back into the value vocabulary crosses this boundary. Fallible
+    /// rather than panicking: the length is a property of data that came from
+    /// outside, and a caller decides whether a bad one is a refusal or an abort.
+    #[must_use]
+    pub fn from_slice(bytes: &[u8]) -> Option<Self> {
+        <[u8; 32]>::try_from(bytes).ok().map(Self::from_bytes)
+    }
+
     /// The raw 32 digest bytes.
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {

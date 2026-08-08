@@ -2,7 +2,7 @@
 //! journal store (ADR-0149, third slice).
 //!
 //! The ADR-0149 control core ([`aether_bloomery`]) is a pure
-//! `reduce(snapshot, event) -> decisions` function; the journal plus the
+//! `reduce(snapshot, event, configs) -> decisions` function; the journal plus the
 //! content-addressed artifact bytes are its only truth. This crate gives that
 //! truth a durable single-writer home and a host to run it:
 //!

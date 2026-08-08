@@ -511,7 +511,9 @@ mod sealed_config {
     use serde::{Deserialize, Serialize};
 
     use super::memory;
-    use crate::store::{ConfigResolveError, StoreBackend, resolve_config};
+    use aether_bloomery::ConfigResolveError;
+
+    use crate::store::{StoreBackend, StoreConfigError, resolve_config};
 
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     #[kind(name = "aether.bloomery.test_lane_config")]
@@ -591,7 +593,7 @@ mod sealed_config {
         registry.insert::<LaneConfig>(LaneConfig { lane: "never authored".to_owned() }.address());
 
         let error = resolve_config::<LaneConfig>(&mut store, ConfigScopes::bloom_wide(&registry)).unwrap_err();
-        assert!(matches!(error, ConfigResolveError::Missing { .. }), "got {error:?}");
+        assert!(matches!(error, StoreConfigError::Content(ConfigResolveError::Missing { .. })), "got {error:?}");
     }
 
     // Tripwire: the stored row's kind is checked against the registry key. The
@@ -609,7 +611,7 @@ mod sealed_config {
         registry.insert::<LaneConfig>(address);
 
         let error = resolve_config::<LaneConfig>(&mut store, ConfigScopes::bloom_wide(&registry)).unwrap_err();
-        assert!(matches!(error, ConfigResolveError::KindMismatch { .. }), "got {error:?}");
+        assert!(matches!(error, StoreConfigError::Content(ConfigResolveError::KindMismatch { .. })), "got {error:?}");
     }
 
     // Tripwire: the address the typed path computes is the address the generic

@@ -18,7 +18,10 @@ pub use kinds::*;
 // `aether-bloomery` (cycle avoidance — issue #3497), but they are part of the
 // `aether.store.*` surface a store client uses, so re-export them here at the
 // same `aether_chassis_bloomery::store` path external consumers already reach.
-pub use aether_bloomery::{Commit, CommitResult, JournalRecord, ReplayJournal, ReplayJournalResult};
+pub use aether_bloomery::{
+    Commit, CommitResult, ConfigRecord, JournalRecord, LoadConfigs, LoadConfigsResult, ReplayJournal,
+    ReplayJournalResult,
+};
 
 #[cfg(feature = "runtime")]
 mod config;
@@ -30,7 +33,7 @@ pub use config::{StoreConfig, StoreOverlay};
 #[cfg(feature = "runtime")]
 mod resolve;
 #[cfg(feature = "runtime")]
-pub use resolve::{ConfigResolveError, resolve_config};
+pub use resolve::{StoreConfigError, resolve_config};
 
 use aether_actor::actor;
 

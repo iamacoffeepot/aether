@@ -10,6 +10,7 @@
 //! its own bytes; there is no API to mutate a sealed spec.
 
 use alloc::vec::Vec;
+use core::iter::once;
 
 use serde::{Deserialize, Serialize};
 
@@ -176,6 +177,16 @@ impl BloomSpec {
     #[must_use]
     pub const fn configs(&self) -> &ConfigRegistry {
         &self.configs
+    }
+
+    /// Every configuration registry this spec seals: the bloom-wide one, then
+    /// one per member in canonical order.
+    ///
+    /// The whole configuration surface a sealed bloom names, which is what a
+    /// caller walks to know what content it must be able to produce before the
+    /// spec can be admitted or run.
+    pub fn config_registries(&self) -> impl Iterator<Item = &ConfigRegistry> {
+        once(&self.configs).chain(self.members.iter().map(|member| &member.configs))
     }
 
     /// The scope chain a lookup on `member`'s behalf walks: that member's

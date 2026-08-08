@@ -29,13 +29,14 @@ pub use aether_substrate::chassis::error::BootError;
 
 use aether_bloomery::control::{
     Admit, AdmitResult, AggregateReviewPayload, ClaimResult, ClaimSeal, Commit, CommitResult, DispatchPayload,
-    EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload, LandPayload, MembershipMutation, OutboxPayload,
-    Query, QueryResult, ReconcileOp, RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, Topic,
-    TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail,
-    seal_claim_mail, transfer_seal_mail,
+    EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload, LandPayload, LoadConfigs, LoadConfigsResult,
+    MembershipMutation, OutboxPayload, Query, QueryResult, ReconcileOp, RedispatchPayload, ReplayJournal,
+    ReplayJournalResult, ReviewPass, Topic, TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals,
+    reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
-    BloomId, ClaimRefKind, ClaimRefState, Decision, Decisions, Event, Fact, Outcome, Snapshot, reduce, view_of,
+    BloomId, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event, Fact, Outcome, ResolvedConfigs, Snapshot,
+    Unproducible, reduce, view_of,
 };
 
 use super::ControlCore;
@@ -91,6 +92,15 @@ struct PendingClaim {
     kind: ClaimKind,
 }
 
+/// An admit held while the store is re-read for configuration it named but the
+/// control core did not hold. Keyed by the dispatch correlation id the
+/// [`LoadConfigsResult`] echoes; the raw bytes are what the resumed admit
+/// re-decodes, so the retry runs the identical path rather than a second one.
+struct PendingConfigs {
+    inbound: InboundMail,
+    raw: Vec<u8>,
+}
+
 /// The control-core state: the live [`Snapshot`] plus the in-flight admits
 /// awaiting their commit replies, queued per idempotency key.
 ///
@@ -107,8 +117,10 @@ struct PendingClaim {
 /// keyed by the dispatch correlation id `ClaimResult` echoes.
 pub struct ControlCoreState {
     snapshot: Snapshot,
+    configs: ResolvedConfigs,
     pending: BTreeMap<String, VecDeque<Pending>>,
     pending_claims: BTreeMap<u64, PendingClaim>,
+    pending_configs: BTreeMap<u64, PendingConfigs>,
 }
 
 #[runtime]
@@ -120,15 +132,21 @@ impl NativeActor for ControlCore {
     fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<ControlCoreState, BootError> {
         Ok(ControlCoreState {
             snapshot: Snapshot::default(),
+            configs: ResolvedConfigs::default(),
             pending: BTreeMap::new(),
             pending_claims: BTreeMap::new(),
+            pending_configs: BTreeMap::new(),
         })
     }
 
-    /// Boot replay: ask the store for the whole journal; [`on_replay_result`](Self::on_replay_result)
-    /// folds it back into the snapshot. Lives in `wire` (post-init, mail-allowed).
+    /// Boot: read the stored configuration first, then replay the journal from
+    /// [`on_load_configs_result`](Self::on_load_configs_result). Sequenced rather
+    /// than sent together because replay *reduces* — a seal it folds back may name
+    /// configuration the reducer has to produce, and a replay that ran first would
+    /// refuse an event the original admit accepted, rebuilding a snapshot that
+    /// never existed. Lives in `wire` (post-init, mail-allowed).
     fn wire(_state: &mut ControlCoreState, ctx: &mut NativeCtx<'_>) {
-        ctx.actor::<StoreCapability>().send_detached(&ReplayJournal);
+        ctx.actor::<StoreCapability>().send_detached(&LoadConfigs);
     }
 
     /// The `aether.bloomery.admit` ingress. Decode the event, reduce it against
@@ -158,48 +176,47 @@ impl NativeActor for ControlCore {
                 .reply(&AdmitResult::Err { error: "too many concurrent admits for this idempotency key".to_owned() });
             return;
         }
-        let decisions = reduce(&state.snapshot, &event);
+        // A seal naming configuration this core has not read yet is held, not
+        // refused: the api cap writes an authored config straight to the store, so
+        // the first seal after one is authored legitimately arrives ahead of the
+        // content (ADR-0174). One re-read closes that gap. A second miss on the
+        // same admit is a real absence and falls through to the reducer's refusal,
+        // so a bad address cannot loop the store.
+        if state.awaits_configs(&event) {
+            let mail_id = ctx.actor::<StoreCapability>().send_detached_tracked(&LoadConfigs);
+            state.pending_configs.insert(mail_id.correlation_id, PendingConfigs { inbound, raw });
+            return;
+        }
+        let decisions = reduce(&state.snapshot, &event, &state.configs);
         // A duplicate key is already applied (in this process's life or rebuilt by
         // replay), so it needs no durable commit — reply immediately.
         if matches!(decisions.outcome, Outcome::Duplicate) {
             inbound.reply(&admit_ok(&decisions.outcome));
             return;
         }
-        // A locally-accepted seal/supersession must first win the shared claim
-        // refs (ADR-0150 §The claim registry) before its durable commit: a seal
-        // acquires its member + admission refs, a supersession transfers the
-        // predecessor's carried + admission refs and fresh-acquires net-new. The
-        // reply gates the commit in `on_claim_result`. A locally-rejected seal (or
-        // any non-seal fact) carries no successful outcome, so it needs no ref op
-        // and commits straight through — a rejected event still journals (bare
-        // append) so its key is durably consumed and a replay stays a no-op.
-        let claim = match (&event.fact, &decisions.outcome) {
-            (Fact::Seal(spec), Outcome::Sealed(bloom)) => {
-                Some(seal_claim_mail(bloom, spec).map(|mail| (SourceClaim::Seal(mail), ClaimKind::Seal)))
+        state.gate_or_commit(ctx, inbound, raw, event, decisions);
+    }
+
+    /// Re-run a held admit now that the configuration set is refilled.
+    ///
+    /// The same path [`on_admit`](Self::on_admit) takes past its gate, minus the
+    /// gate: a second deferral would loop the store on an address the re-read
+    /// already declined to produce. The back-pressure check is not re-run either
+    /// — this admit was already counted when it arrived.
+    fn resume_admit(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, inbound: InboundMail, raw: Vec<u8>) {
+        let event: Event = match from_bytes(&raw) {
+            Ok(event) => event,
+            Err(error) => {
+                inbound.reply(&AdmitResult::Err { error: format!("admit decode failed: {error}") });
+                return;
             }
-            (Fact::Supersede { predecessor, successor }, Outcome::Superseded { .. }) => Some(
-                transfer_seal_mail(&state.snapshot, predecessor, successor)
-                    .map(|mail| (SourceClaim::Transfer(mail), ClaimKind::Supersede)),
-            ),
-            _ => None,
         };
-        match claim {
-            None => state.commit_admit(ctx, inbound, raw, event, decisions),
-            Some(Err(error)) => {
-                inbound.reply(&AdmitResult::Err { error: format!("admit claim encode failed: {error}") });
-            }
-            Some(Ok((claim, kind))) => {
-                // The dispatch mints a correlation id; the eventual `ClaimResult`
-                // echoes it, so `on_claim_result` recovers this exact pending admit.
-                let mail_id = match &claim {
-                    SourceClaim::Seal(mail) => ctx.actor::<SourceCapability>().send_detached_tracked(mail),
-                    SourceClaim::Transfer(mail) => ctx.actor::<SourceCapability>().send_detached_tracked(mail),
-                };
-                state
-                    .pending_claims
-                    .insert(mail_id.correlation_id, PendingClaim { inbound, raw, event, decisions, kind });
-            }
+        let decisions = reduce(&state.snapshot, &event, &state.configs);
+        if matches!(decisions.outcome, Outcome::Duplicate) {
+            inbound.reply(&admit_ok(&decisions.outcome));
+            return;
         }
+        state.gate_or_commit(ctx, inbound, raw, event, decisions);
     }
 
     /// The `aether.source` claim/transfer/release reply. Correlate on the echoed
@@ -299,6 +316,47 @@ impl NativeActor for ControlCore {
     }
 
     /// Boot journal replay reply: fold each record (decode the event, `reduce`,
+    /// The stored-configuration read (ADR-0174). Two arrivals reach here and they
+    /// resolve differently.
+    ///
+    /// The boot read (no held admit) fills the set and *then* sends
+    /// [`ReplayJournal`], which is the ordering that makes replay reduce against
+    /// the same content the original admits did. A read failure at boot is
+    /// unrecoverable for the same reason a failed replay is — the snapshot it
+    /// would rebuild is not the one that existed — so it fail-fasts (ADR-0063).
+    ///
+    /// A re-read for a held admit refills the set and re-enters
+    /// [`on_admit`](Self::on_admit) with the original bytes. The retry is not
+    /// gated again: `awaits_configs` is false once the content arrives, and if it
+    /// did not arrive the address is genuinely absent and the reducer's own
+    /// refusal names it. A failed re-read answers that admit rather than aborting
+    /// the process — one operator request fails, the core stays up.
+    #[handler::manual]
+    fn on_load_configs_result(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: LoadConfigsResult) {
+        let held = state.pending_configs.remove(&ctx.reply_target().correlation_id);
+        let records = match mail {
+            LoadConfigsResult::Ok { records } => records,
+            LoadConfigsResult::Err { error } => match held {
+                Some(PendingConfigs { inbound, .. }) => {
+                    inbound.reply(&AdmitResult::Err { error: format!("configuration read failed: {error}") });
+                    return;
+                }
+                None => ctx.fatal_abort(format!("boot configuration read failed: {error}")),
+            },
+        };
+        for record in records {
+            let Some(address) = Digest::from_slice(&record.digest) else {
+                ctx.fatal_abort(format!("stored configuration `{}` has a malformed address", record.kind));
+            };
+            state.configs.insert(address, record.kind, record.bytes);
+        }
+
+        match held {
+            Some(PendingConfigs { inbound, raw }) => Self::resume_admit(state, ctx, inbound, raw),
+            None => ctx.actor::<StoreCapability>().send_detached(&ReplayJournal),
+        }
+    }
+
     /// `apply`) to rebuild the snapshot. No outbox drain/ack — republish is
     /// #3499's. A read or a corrupt record at boot is unrecoverable, so it
     /// fail-fasts (ADR-0063) rather than coming up on a torn snapshot.
@@ -318,7 +376,7 @@ impl NativeActor for ControlCore {
                     record.sequence, record.idempotency_key
                 )),
             };
-            let decisions = reduce(&state.snapshot, &event);
+            let decisions = reduce(&state.snapshot, &event, &state.configs);
             state.snapshot = state.snapshot.apply(&event, &decisions);
         }
         state.reconcile_claim_refs(ctx);
@@ -397,6 +455,70 @@ impl ControlCoreState {
     /// the accepted seals/supersessions still awaiting their claim reply — so the
     /// [`MAX_INFLIGHT_PER_KEY`] back-pressure cannot be dodged by piling up
     /// pre-commit ref stages for one key.
+    /// Whether `event` names configuration content this core does not hold, and
+    /// so cannot yet be reduced (ADR-0174).
+    ///
+    /// Only [`Unproducible::Absent`] defers. Content that is present but filed
+    /// under another kind is not something a re-read can fix, so it falls to the
+    /// reducer's refusal rather than sending the core back to the store for a row
+    /// it already has.
+    fn awaits_configs(&self, event: &Event) -> bool {
+        event
+            .fact
+            .config_registries()
+            .flat_map(|registry| self.configs.unproducible_in(registry))
+            .any(|(_, _, reason)| reason == Unproducible::Absent)
+    }
+
+    /// Send an accepted event's decisions toward durability: through the shared
+    /// claim-ref gate when it is a seal or supersession, straight to the commit
+    /// otherwise.
+    ///
+    /// A locally-accepted seal/supersession must first win the shared claim refs
+    /// (ADR-0150 §The claim registry) before its durable commit: a seal acquires
+    /// its member + admission refs, a supersession transfers the predecessor's
+    /// carried + admission refs and fresh-acquires net-new. The reply gates the
+    /// commit in [`on_claim_result`](ControlCore::on_claim_result). A
+    /// locally-rejected seal (or any non-seal fact) carries no successful outcome,
+    /// so it needs no ref op and commits straight through — a rejected event still
+    /// journals (bare append) so its key is durably consumed and a replay stays a
+    /// no-op.
+    fn gate_or_commit(
+        &mut self,
+        ctx: &mut NativeCtx<'_, Manual>,
+        inbound: InboundMail,
+        raw: Vec<u8>,
+        event: Event,
+        decisions: Decisions,
+    ) {
+        let claim = match (&event.fact, &decisions.outcome) {
+            (Fact::Seal(spec), Outcome::Sealed(bloom)) => {
+                Some(seal_claim_mail(bloom, spec).map(|mail| (SourceClaim::Seal(mail), ClaimKind::Seal)))
+            }
+            (Fact::Supersede { predecessor, successor }, Outcome::Superseded { .. }) => Some(
+                transfer_seal_mail(&self.snapshot, predecessor, successor)
+                    .map(|mail| (SourceClaim::Transfer(mail), ClaimKind::Supersede)),
+            ),
+            _ => None,
+        };
+        match claim {
+            None => self.commit_admit(ctx, inbound, raw, event, decisions),
+            Some(Err(error)) => {
+                inbound.reply(&AdmitResult::Err { error: format!("admit claim encode failed: {error}") });
+            }
+            Some(Ok((claim, kind))) => {
+                // The dispatch mints a correlation id; the eventual `ClaimResult`
+                // echoes it, so `on_claim_result` recovers this exact pending admit.
+                let mail_id = match &claim {
+                    SourceClaim::Seal(mail) => ctx.actor::<SourceCapability>().send_detached_tracked(mail),
+                    SourceClaim::Transfer(mail) => ctx.actor::<SourceCapability>().send_detached_tracked(mail),
+                };
+                self.pending_claims
+                    .insert(mail_id.correlation_id, PendingClaim { inbound, raw, event, decisions, kind });
+            }
+        }
+    }
+
     fn inflight_for_key(&self, key: &str) -> usize {
         let queued = self.pending.get(key).map_or(0, VecDeque::len);
         let claiming = self.pending_claims.values().filter(|claim| claim.event.idempotency_key.0 == key).count();

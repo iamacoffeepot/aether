@@ -207,22 +207,16 @@ impl DispatchRecord {
     pub(crate) fn from_stored(order: &OutstandingOrder) -> Option<Self> {
         Some(Self {
             nonce: Nonce(order.nonce.clone()),
-            bloom: BloomId(digest_from_slice(&order.bloom)?),
+            bloom: BloomId(Digest::from_slice(&order.bloom)?),
             workpiece: WorkpieceId(order.workpiece.clone()),
-            scope_revision: digest_from_slice(&order.scope_revision)?,
-            candidate: digest_from_slice(&order.candidate)?,
-            displayed_digest: digest_from_slice(&order.displayed_digest)?,
+            scope_revision: Digest::from_slice(&order.scope_revision)?,
+            candidate: Digest::from_slice(&order.candidate)?,
+            displayed_digest: Digest::from_slice(&order.displayed_digest)?,
             stage: from_bytes(&order.stage).ok()?,
             transformation: from_bytes(&order.transformation).ok()?,
             configs: from_bytes(&order.configs).ok()?,
         })
     }
-}
-
-/// Reconstruct a [`Digest`] from stored bytes — `None` when the column is not
-/// exactly 32 bytes (a corrupt row, never a well-formed one).
-fn digest_from_slice(bytes: &[u8]) -> Option<Digest> {
-    <[u8; 32]>::try_from(bytes).ok().map(Digest::from_bytes)
 }
 
 /// The broker accept-gate + normalize → admit (#3502, the trust boundary).
