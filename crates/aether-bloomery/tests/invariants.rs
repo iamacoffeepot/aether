@@ -14,11 +14,12 @@
 mod common;
 
 use aether_bloomery::ConfigKind;
+use aether_bloomery::Decisions;
 use aether_bloomery::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, Artifact, AttemptCompletedError, BloomStatus,
     CandidateRef, CatalogError, Decision, Digest, Evidence, EvidenceKind, Fact, KeyId, LandError, Observation,
     ObserveMainlineError, Outcome, Provenance, Question, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope,
-    Snapshot, StageCatalog, StageId, Statement, SupersedeError, Unproducible, reduce,
+    Snapshot, StageCatalog, StageId, StageProgress, Statement, SupersedeError, Unproducible, reduce,
 };
 use aether_data::Kind;
 use aether_data::wire::to_vec;
@@ -1323,11 +1324,38 @@ fn a_failing_attempt_retries_within_budget_then_wedges() {
     assert_eq!(after1.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap().attempts, 2);
 
     // Attempt 2 fails: the budget is exhausted, so the member wedges — no dispatch.
-    let (_after2, d2) = step(&after1, &fail("c-fail-2"));
+    let (after2, d2) = step(&after1, &fail("c-fail-2"));
     assert!(matches!(d2.outcome, Outcome::AttemptWedged { stage: StageId::Construct, .. }));
     assert!(
         !d2.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. })),
         "a wedged member stops dispatching",
+    );
+
+    // Tripwire: the wedge has to survive into the record, not just the outcome
+    // this one call returns. Wedging is terminal — the member never dispatches
+    // again — so a reader arriving later has nothing else to go on, and the
+    // stage cursor cannot supply it: an exhausted member and one mid-flight on
+    // its last roll carry the same cursor.
+    let wedge = after2.blooms.get(&bloom).unwrap().wedged.get(&workpiece("wp")).expect("the wedge is recorded");
+    assert_eq!(wedge.stage, StageId::Construct, "the recorded wedge names the stage that exhausted");
+    assert_eq!(wedge.evidence, attempt_evidence().detail, "and the failure that spent the last of the budget");
+
+    // A member that dispatches again is no longer wedged, and `AdvanceStage` is
+    // the only route back into the line — so it is the only thing that clears
+    // the set. Without this a superseded-then-revived member would carry a
+    // stale wedge forever.
+    let advance = Decisions {
+        outcome: Outcome::AttemptRetried { bloom, workpiece: workpiece("wp"), stage: StageId::Construct, attempt: 1 },
+        effects: vec![Decision::AdvanceStage {
+            bloom,
+            workpiece: workpiece("wp"),
+            progress: StageProgress { stage: StageId::Construct, attempts: 1, candidate: None, repair_rolls: 0 },
+        }],
+    };
+    let revived = after2.apply(&event("revive", fail("ignored").fact), &advance, &ResolvedConfigs::default());
+    assert!(
+        !revived.blooms.get(&bloom).unwrap().wedged.contains_key(&workpiece("wp")),
+        "a cursor that moves clears the wedge",
     );
 }
 

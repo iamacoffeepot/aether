@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
-use crate::ids::WorkpieceId;
+use crate::ids::{StageId, WorkpieceId};
 
 /// The generic immutable node of the derivation DAG: opaque typed bytes plus
 /// the digests of the parents it derives from. Every durable value projects
@@ -102,6 +102,25 @@ impl Evidence {
     pub fn validates(&self, subject: &Digest) -> bool {
         self.subject == *subject
     }
+}
+
+/// Why a member stopped dispatching for good (ADR-0149 §The line).
+///
+/// A member that exhausts a stage's `retry_budget` wedges: the reducer stops
+/// dispatching it deliberately — never an extra roll, never a silent integrate —
+/// and a supersession is the only escape. Wedging is as terminal as landing, so
+/// it is recorded rather than merely decided: the stage cursor cannot express it
+/// (a member sitting at `Verify` one roll below the ceiling is mid-flight and
+/// looks identical), and without a record the outward view reports a wedged
+/// member exactly as it reports a working one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Wedge {
+    /// The stage whose retry budget the member exhausted.
+    pub stage: StageId,
+    /// The artifact of the failure that consumed the last of the budget — the
+    /// `detail` of the evidence the wedging attempt returned, so a reader can
+    /// go straight to what went wrong rather than replaying the line.
+    pub evidence: Digest,
 }
 
 /// The class of an [`Evidence`] artifact.

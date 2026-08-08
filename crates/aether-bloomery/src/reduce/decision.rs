@@ -11,7 +11,7 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
     AgentProfile, ConfigRegistry, Evidence, LandingReceipt, MemberCandidate, ResolutionClaim, ResolvedBloom,
-    Transformation,
+    Transformation, Wedge,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -276,5 +276,23 @@ pub enum Decision {
         bloom: BloomId,
         /// The parked question digest, or `None` to clear on adoption.
         question: Option<Digest>,
+    },
+    /// Record that a member wedged — exhausted a stage's `retry_budget` and
+    /// stopped dispatching (ADR-0149 §The line). Emitted alongside the
+    /// [`Outcome::AttemptWedged`](crate::Outcome::AttemptWedged) the same
+    /// reduction returns, because the outcome tells the caller of *this* fact
+    /// and the record is what every later reader sees.
+    ///
+    /// No matching clear decision: a member leaves the wedged set through
+    /// [`Decision::AdvanceStage`], since a cursor that moves is a member that is
+    /// dispatching again. Appended so the prior decisions' wire discriminants
+    /// are unchanged.
+    RecordWedge {
+        /// The bloom the wedged member belongs to.
+        bloom: BloomId,
+        /// The member that stopped.
+        workpiece: WorkpieceId,
+        /// Which stage exhausted, and the failure that spent the last of it.
+        wedge: Wedge,
     },
 }

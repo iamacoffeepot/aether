@@ -14,6 +14,7 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     BloomSpec, CandidateRef, ConfigScopes, Evidence, EvidenceKind, ResolutionClaim, ResolvedConfigs, StageCatalog,
+    Wedge,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -92,6 +93,18 @@ pub struct BloomRecord {
     /// in-flight line position. A member drops out of the map only implicitly (it
     /// never does in V1; the record is discarded whole on supersession).
     pub progress: BTreeMap<WorkpieceId, StageProgress>,
+    /// The members that have wedged, keyed by workpiece (ADR-0149 §The line).
+    /// A member lands here when it exhausts a stage's `retry_budget` and stops
+    /// dispatching; it leaves when its cursor moves again, since anything that
+    /// re-dispatches the member — an adopting answer's redispatch, a stage
+    /// advance — means it is no longer stuck. Journal-derived and
+    /// replay-rebuilt like the rest of the record.
+    ///
+    /// Recorded rather than derived from [`progress`](Self::progress): a member
+    /// sitting at `Verify` one roll below the ceiling has the same cursor
+    /// whether its next verdict is still pending or has already come back
+    /// failing, so the cursor cannot distinguish mid-flight from wedged.
+    pub wedged: BTreeMap<WorkpieceId, Wedge>,
     /// The integration fold's output held while the bloom's aggregate review
     /// runs (ADR-0153): set when [`Fact::Resolve`] verifies the claim set and
     /// dispatches the review, consumed by a passing
@@ -245,6 +258,16 @@ impl Snapshot {
             Decision::AdvanceStage { bloom, workpiece, progress } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.progress.insert(workpiece.clone(), *progress);
+                    // A moving cursor is a member that is dispatching again, so it
+                    // is by definition no longer wedged. This is the only way out
+                    // of the wedged set — there is no clearing decision, because
+                    // every route back into the line already writes a cursor.
+                    record.wedged.remove(workpiece);
+                }
+            }
+            Decision::RecordWedge { bloom, workpiece, wedge } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.wedged.insert(workpiece.clone(), *wedge);
                 }
             }
             // Snapshot-inert outbox effects the store projects and republishes,
@@ -327,6 +350,7 @@ impl BloomRecord {
             evidence: Vec::new(),
             holds: BTreeSet::new(),
             progress: BTreeMap::new(),
+            wedged: BTreeMap::new(),
             integration: None,
             aggregate_rolls: 0,
             review_park: None,

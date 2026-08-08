@@ -228,7 +228,12 @@ impl Topic {
             | Decision::RecordIntegration { .. }
             | Decision::RecordAggregateRoll { .. }
             | Decision::RevokeResolution { .. }
-            | Decision::RecordReviewPark { .. } => None,
+            | Decision::RecordReviewPark { .. }
+            // Snapshot-only: the wedge reaches the outward mirror through the
+            // member's `MemberView`, on the same reconcile the rest of the
+            // member's state rides. A topic of its own would need a reactor to
+            // drain it, and an undrained topic accumulates rows forever.
+            | Decision::RecordWedge { .. } => None,
         }
     }
 }
