@@ -343,6 +343,42 @@ fn resolved_bloom_is_supersedable() {
     assert_eq!(after.blooms.get(&successor).unwrap().status, BloomStatus::Sealed);
 }
 
+// A successor whose members all arrive already integrated has a complete claim
+// set the instant it seals and no member left to run, so nothing downstream
+// would ever dispatch its fold: `reduce_integrate` dispatches on the claim that
+// *completes* the set, and here every claim was inherited in the supersession
+// itself. Without an integration dispatch here the successor is claimed,
+// complete, and permanently unresolvable — the predecessor's work carried over
+// and then stranded. This is the re-base shape, so it is the path a bloom
+// catching up to a moved base takes.
+#[test]
+fn a_successor_inheriting_every_claim_dispatches_its_own_fold() {
+    let (snapshot, predecessor_spec) = sealed_and_resolved(1, vec![membership("wp", 10)], 40);
+    let predecessor = predecessor_spec.id();
+
+    // Same member at the same scope revision on a different base: every claim
+    // inherits, and no member enters the line fresh.
+    let successor_spec = draft(2, vec![membership("wp", 10)]).seal();
+    let successor = successor_spec.id();
+    let successor_base = successor_spec.base();
+    let (_, decided) = step(&snapshot, &event("sup", Fact::Supersede { predecessor, successor: successor_spec }));
+
+    assert!(
+        !decided.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. })),
+        "no member enters the line fresh — every one arrived integrated",
+    );
+    match decided.effects.iter().find(|e| matches!(e, Decision::DispatchIntegration { .. })) {
+        Some(Decision::DispatchIntegration { bloom, base, members }) => {
+            assert_eq!(*bloom, successor, "the fold is dispatched for the successor, not the predecessor");
+            assert_eq!(*base, successor_base, "and folds onto the successor's base — the point of the re-base");
+            let folded: Vec<(&str, Digest)> =
+                members.iter().map(|member| (member.workpiece.0.as_str(), member.candidate)).collect();
+            assert_eq!(folded, vec![("wp", digest(100))], "carrying the inherited claim's candidate");
+        }
+        other => panic!("expected a DispatchIntegration for the successor, got {other:?}"),
+    }
+}
+
 // C4 — a bloom cannot supersede itself into a bloom superseded by itself: an
 // identical successor spec (same id) is refused.
 #[test]
