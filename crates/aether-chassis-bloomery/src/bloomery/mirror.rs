@@ -154,6 +154,19 @@ pub struct GithubMirrorConfig {
     /// re-drive. `0` disables the warn.
     #[config(default = 1800)]
     pub stale_warn_after_secs: u64,
+    /// The author name a candidate capture commits under. Empty (the default)
+    /// inherits the host's ambient git identity, so a bloom is attributed to the
+    /// operator whose coordinator ran it (#4630) — a bloom is that person's work
+    /// delegated to a machine, not a separate contributor. Set alongside
+    /// [`capture_author_email`](Self::capture_author_email) for a deployment that
+    /// wants a distinct machine identity.
+    #[config(default = "")]
+    pub capture_author_name: String,
+    /// The author email a candidate capture commits under. Empty (the default)
+    /// inherits the host's ambient git identity; see
+    /// [`capture_author_name`](Self::capture_author_name).
+    #[config(default = "")]
+    pub capture_author_email: String,
 }
 
 impl Default for GithubMirrorConfig {
@@ -178,6 +191,8 @@ impl Default for GithubMirrorConfig {
             local_lane_commands: "construct.,review.".to_owned(),
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),
             stale_warn_after_secs: 1800,
+            capture_author_name: String::new(),
+            capture_author_email: String::new(),
         }
     }
 }

@@ -12,10 +12,73 @@ use aether_bloomery_github::GitObjectId;
 use super::error::LocalExecutorError;
 use super::runner::{CapturedObjects, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 
+/// The identity a candidate capture commits under (#4630).
+///
+/// Both fields empty — the default — means *inherit the host's ambient git
+/// identity*: a bloom is the operator's own work delegated to a machine, not a
+/// separate contributor, so the commit history reads that way with no
+/// configuration at all. A deployment that wants a distinct machine identity
+/// sets both knobs explicitly.
+#[derive(Debug, Clone, Default)]
+pub struct CaptureIdentity {
+    /// The configured author name, or empty to inherit the host's.
+    pub name: String,
+    /// The configured author email, or empty to inherit the host's.
+    pub email: String,
+}
+
+/// The identity a capture falls back to when neither the config nor the host
+/// supplies one — losing attribution is cosmetic, losing a candidate after a
+/// full model run is not.
+const FALLBACK_IDENTITY: (&str, &str) = ("aether-bloomery", "bloomery@iamateapot.dev");
+
+impl CaptureIdentity {
+    /// The `-c user.name=… -c user.email=…` arguments this identity contributes
+    /// to the capture commit, resolved against the host.
+    ///
+    /// Configured knobs win. Otherwise an empty list lets git resolve the host's
+    /// ambient identity — unless the host has none either, in which case the
+    /// capture would fail outright after the model has already run, so
+    /// [`FALLBACK_IDENTITY`] stands in.
+    ///
+    /// Both knobs are required together: a half-configured identity is a
+    /// misconfiguration rather than a request to mix a configured name with an
+    /// ambient email.
+    fn overrides(&self, worktree_dir: &Path) -> Vec<String> {
+        let (name, email) = match (self.name.as_str(), self.email.as_str()) {
+            ("", "") if host_identity_resolves(worktree_dir) => return Vec::new(),
+            ("", "") => FALLBACK_IDENTITY,
+            (name, email) => (name, email),
+        };
+        vec!["-c".to_owned(), format!("user.name={name}"), "-c".to_owned(), format!("user.email={email}")]
+    }
+}
+
+/// Whether the host resolves a committer identity for this worktree — `git
+/// config --get` exits non-zero when the key is unset, which [`git_in`] surfaces
+/// as an error.
+fn host_identity_resolves(worktree_dir: &Path) -> bool {
+    ["user.name", "user.email"]
+        .iter()
+        .all(|key| git_in(worktree_dir, &["config", "--get", key]).is_ok_and(|value| !value.trim().is_empty()))
+}
+
 /// The production spawn seam: `git worktree add` the checkout, then spawn
 /// `cargo xtask transform` in that worktree — the same two steps the wrapper
 /// workflow runs, performed natively on the operator's machine.
-pub struct ProcessTransformRunner;
+#[derive(Debug, Clone, Default)]
+pub struct ProcessTransformRunner {
+    /// Who candidate captures are authored as.
+    identity: CaptureIdentity,
+}
+
+impl ProcessTransformRunner {
+    /// Build the runner over the capture identity the host resolved.
+    #[must_use]
+    pub fn new(identity: CaptureIdentity) -> Self {
+        Self { identity }
+    }
+}
 
 impl TransformRunner for ProcessTransformRunner {
     fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
@@ -107,23 +170,13 @@ impl TransformRunner for ProcessTransformRunner {
         // captures and still faces the real gate, which is `Verify`'s job.
         format_worktree(worktree_dir);
         git_in(worktree_dir, &["add", "--all"])?;
-        // Commit under the bloomery's own fixed identity, in the host's trust
-        // domain (ADR-0152: the child never stages, commits, or holds
-        // credentials). `--no-verify` keeps repo hooks out of the capture path —
-        // the run's own gates already judged the work.
-        git_in(
-            worktree_dir,
-            &[
-                "-c",
-                "user.name=aether-bloomery",
-                "-c",
-                "user.email=bloomery@iamateapot.dev",
-                "commit",
-                "--no-verify",
-                "--message",
-                "bloomery: candidate capture",
-            ],
-        )?;
+        // Commit in the host's trust domain (ADR-0152: the child never stages,
+        // commits, or holds credentials), authored as the operator by default
+        // (#4630 — see `CaptureIdentity`). `--no-verify` keeps repo hooks out of
+        // the capture path; the run's own gates already judged the work.
+        let mut commit = self.identity.overrides(worktree_dir);
+        commit.extend(["commit", "--no-verify", "--message", "bloomery: candidate capture"].map(str::to_owned));
+        git_in(worktree_dir, &commit.iter().map(String::as_str).collect::<Vec<_>>())?;
         let commit_hex = git_in(worktree_dir, &["rev-parse", "HEAD"])?;
         #[allow(clippy::literal_string_with_formatting_args, reason = "git revision syntax, not a format string")]
         let tree_hex = git_in(worktree_dir, &["rev-parse", "HEAD^{tree}"])?;
@@ -281,8 +334,74 @@ fn neutralize_hooks(worktree_dir: &Path) -> Result<(), LocalExecutorError> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::fs;
+    use std::path::Path;
+    use std::process::Command;
 
-    use super::{reclaim_worktree_path, strip_hooks};
+    use tempfile::TempDir;
+
+    use super::{CaptureIdentity, FALLBACK_IDENTITY, reclaim_worktree_path, strip_hooks};
+
+    // A repo whose *local* identity is set to `identity` — local config outranks
+    // whatever the developer's global git config happens to hold, so these cases
+    // read the same on any machine. An empty local value is how a host with no
+    // committer identity presents: `git config --get` exits zero with no output.
+    fn repo_with_identity(identity: Option<(&str, &str)>) -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "--quiet"]);
+        let (name, email) = identity.unwrap_or(("", ""));
+        run_git(dir.path(), &["config", "--local", "user.name", name]);
+        run_git(dir.path(), &["config", "--local", "user.email", email]);
+        dir
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        assert!(Command::new("git").current_dir(dir).args(args).status().unwrap().success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn a_configured_identity_is_passed_through_verbatim() {
+        let repo = repo_with_identity(Some(("host", "host@example.test")));
+        let identity = CaptureIdentity { name: "fleet".to_owned(), email: "fleet@example.test".to_owned() };
+
+        assert_eq!(
+            identity.overrides(repo.path()),
+            ["-c", "user.name=fleet", "-c", "user.email=fleet@example.test"],
+            "explicit knobs win over the host's own identity",
+        );
+    }
+
+    #[test]
+    fn an_unset_identity_defers_to_the_host() {
+        // The #4630 default: no overrides at all, so git resolves the ambient
+        // identity and the bloom is attributed to whoever runs the coordinator.
+        let repo = repo_with_identity(Some(("operator", "operator@example.test")));
+
+        assert!(
+            CaptureIdentity::default().overrides(repo.path()).is_empty(),
+            "an unset identity must add no -c overrides, or the host's own is never consulted",
+        );
+    }
+
+    #[test]
+    fn an_unset_identity_falls_back_when_the_host_has_none() {
+        // Tripwire: without the fallback the capture commit fails outright on a
+        // host with no committer identity — after a full model run has already
+        // been paid for. Attribution is cosmetic; the candidate is not.
+        let repo = repo_with_identity(None);
+
+        let overrides = CaptureIdentity::default().overrides(repo.path());
+
+        assert_eq!(
+            overrides,
+            [
+                "-c".to_owned(),
+                format!("user.name={}", FALLBACK_IDENTITY.0),
+                "-c".to_owned(),
+                format!("user.email={}", FALLBACK_IDENTITY.1),
+            ],
+            "an identity-less host still commits, under the bloomery's own name",
+        );
+    }
 
     #[test]
     fn a_leftover_worktree_directory_is_reclaimed() {

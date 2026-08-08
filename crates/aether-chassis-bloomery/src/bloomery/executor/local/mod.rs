@@ -43,7 +43,7 @@ mod runner;
 
 pub use backend::LocalExecutor;
 pub use error::LocalExecutorError;
-pub use process_runner::ProcessTransformRunner;
+pub use process_runner::{CaptureIdentity, ProcessTransformRunner};
 pub use runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
 
 #[cfg(test)]

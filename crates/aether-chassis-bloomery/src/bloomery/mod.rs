@@ -26,8 +26,8 @@ pub use cli::BloomeryCli;
 pub use construct::{CONSTRUCT_IMPLEMENT_COMMAND, dispatch_model};
 pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
 pub use executor::{
-    ExecutorPortError, ExecutorShell, LocalExecutor, LocalExecutorError, ProcessTransformRunner, RoutingExecutor,
-    RunLifecycle, RunProcess, RunSpec, TransformRunner,
+    CaptureIdentity, ExecutorPortError, ExecutorShell, LocalExecutor, LocalExecutorError, ProcessTransformRunner,
+    RoutingExecutor, RunLifecycle, RunProcess, RunSpec, TransformRunner,
 };
 pub use intake::{
     Admission, AdmitDecision, AdmitSink, CycleError, CycleReport, DispatchError, DispatchRecord, EvidenceClaims,
