@@ -112,10 +112,21 @@ fn land_proposes_the_new_head_and_observes_the_acceptance_when_enabled() {
     assert_eq!(receipt.previous_base, base);
     assert_ne!(receipt.new_head, new_head, "the landed head is the merge commit");
 
-    // A stale expected base is the clean BaseMoved refusal, not an error — and
-    // it proposes nothing.
+    // Re-issuing this bloom's land adopts the proposal it already opened, even
+    // now that mainline has moved off the sealed base — moving is what accepting
+    // the proposal *did*, so refusing here would abandon the bloom at the moment
+    // it succeeded.
+    assert_eq!(
+        enabled.land(&bloom, &base, &new_head).unwrap(),
+        LandOutcome::Proposed { number },
+        "an open proposal is adopted rather than re-judged against the base",
+    );
+
+    // For a bloom with no proposal, though, a stale expected base is the clean
+    // BaseMoved refusal, not an error — and it proposes nothing.
     fake.seed_ref_at("heads/main", &new_head);
-    match enabled.land(&bloom, &base, &digest(91)).unwrap() {
+    let successor = BloomId(digest(77));
+    match enabled.land(&successor, &base, &digest(91)).unwrap() {
         LandOutcome::BaseMoved { expected, actual } => {
             assert_eq!(expected, base);
             assert_eq!(actual, new_head);
