@@ -765,3 +765,42 @@ mod wake_coalescing {
         assert_eq!(counter.0.load(Ordering::SeqCst), 2);
     }
 }
+
+mod monitor_collapse {
+    use super::super::{HttpServerConfig, HttpSupervisorState};
+    use aether_data::MailboxId;
+    use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::actor::native::ctx::NativeCtx;
+    use aether_substrate::mail::{MailId, Source};
+    use aether_substrate::testing::fresh_substrate;
+    use std::sync::Arc;
+
+    /// The `route holder is not monitorable` warn must fire once per
+    /// mailbox, not once per route. A mailbox that fails to monitor
+    /// leaves its slot remembered in `unmonitorable`, so a second
+    /// `watch` for the same mailbox is a no-op.
+    #[test]
+    fn watch_remembers_unmonitorable_mailbox() {
+        let (_registry, mailer) = fresh_substrate();
+        let mut state = HttpSupervisorState::disabled(HttpServerConfig::default(), Arc::clone(&mailer));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0xAA)));
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let target = MailboxId(0xBEEF);
+
+        assert!(!state.monitors.contains_key(&target));
+        assert!(!state.unmonitorable.contains(&target));
+
+        state.watch(&mut ctx, target);
+        assert!(state.unmonitorable.contains(&target), "first failed monitor inserts into unmonitorable");
+        assert!(!state.monitors.contains_key(&target));
+        let after_first = state.unmonitorable.len();
+
+        state.watch(&mut ctx, target);
+        assert_eq!(state.unmonitorable.len(), after_first, "second watch for same mailbox stays collapsed");
+
+        let other = MailboxId(0xCAFE);
+        state.watch(&mut ctx, other);
+        assert!(state.unmonitorable.contains(&other), "different mailbox still warns");
+        assert_eq!(state.unmonitorable.len(), after_first + 1);
+    }
+}

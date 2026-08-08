@@ -27,7 +27,7 @@
 use super::{HttpInboundReady, HttpServerCapability, HttpServerConfig, HttpServerHandle};
 use aether_actor::{Single, runtime};
 
-pub use std::collections::{HashMap, VecDeque};
+pub use std::collections::{HashMap, HashSet, VecDeque};
 pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 pub use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 pub use std::sync::{Arc, RwLock, mpsc};
@@ -204,6 +204,7 @@ impl NativeActor for HttpServerCapability {
             shard_startup: ShardStartup::Idle,
             next_stream_id: Arc::new(AtomicU64::new(0)),
             monitors: HashMap::new(),
+            unmonitorable: HashSet::new(),
         })
     }
 
