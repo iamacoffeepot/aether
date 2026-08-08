@@ -87,10 +87,6 @@ pub struct BloomDraft {
     pub configs: ConfigRegistry,
     /// The frozen stage-catalog digest.
     pub stage_catalog: Digest,
-    /// The frozen toolchain digest.
-    pub toolchain: Digest,
-    /// The frozen policy digest.
-    pub policy: Digest,
     /// The predetermined resource ceiling.
     pub budget: Budget,
     /// The sealed forecast study grades against.
@@ -129,8 +125,6 @@ impl BloomDraft {
             base: self.base,
             configs: self.configs.clone(),
             stage_catalog: self.stage_catalog,
-            toolchain: self.toolchain,
-            policy: self.policy,
             budget: self.budget,
             forecast: self.forecast,
         }
@@ -140,7 +134,7 @@ impl BloomDraft {
 /// An immutable, sealed bloom (ADR-0149 §The bloom).
 ///
 /// Fields are private and there is no mutation API: a sealed spec never
-/// amends. Changed membership, scope, base, or policy creates a *successor*
+/// amends. Changed membership, scope, base, or configuration creates a *successor*
 /// bloom (see [`crate::reduce()`]), never an edit. The only constructors are
 /// [`BloomDraft::seal`] and deserialization (journal replay).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -149,8 +143,6 @@ pub struct BloomSpec {
     base: Digest,
     configs: ConfigRegistry,
     stage_catalog: Digest,
-    toolchain: Digest,
-    policy: Digest,
     budget: Budget,
     forecast: Forecast,
 }
@@ -197,18 +189,6 @@ impl BloomSpec {
     #[must_use]
     pub const fn stage_catalog(&self) -> Digest {
         self.stage_catalog
-    }
-
-    /// The frozen toolchain digest.
-    #[must_use]
-    pub const fn toolchain(&self) -> Digest {
-        self.toolchain
-    }
-
-    /// The frozen policy digest.
-    #[must_use]
-    pub const fn policy(&self) -> Digest {
-        self.policy
     }
 
     /// The predetermined resource ceiling.
