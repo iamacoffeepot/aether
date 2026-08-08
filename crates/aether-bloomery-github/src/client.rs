@@ -308,6 +308,45 @@ pub trait GitDataApi {
     /// # Errors
     /// A transport fault or an error status.
     fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GithubError>;
+
+    /// Merge commit `head` into branch `base` server-side, both in the short
+    /// `heads/…` / branch-name form the merge endpoint takes.
+    ///
+    /// The composing counterpart to [`create_commit`](Self::create_commit): that
+    /// one *states* a tree, this one *combines* two histories. A candidate built
+    /// against one base and a branch that has moved past it have no common tree
+    /// to state, only a common ancestor to merge from — so folding several
+    /// members, or catching a bloom up to a mainline that advanced, has to go
+    /// through here. Stating the candidate's tree onto a moved branch would
+    /// produce a clean commit that silently reverts everything the branch gained
+    /// in between.
+    ///
+    /// A conflict is an [`Ok`] outcome, not an error: it is a fact about the two
+    /// histories that a caller parks on or routes back for repair, not a
+    /// transport fault to retry.
+    ///
+    /// # Errors
+    /// A transport fault, a missing base or head, or a non-conflict error status.
+    fn merge(&self, base: &str, head: &str, message: &str) -> Result<MergeResult, GithubError>;
+}
+
+/// What a server-side merge did.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum MergeResult {
+    /// The histories combined into a new merge commit.
+    Merged(GitCommit),
+    /// `base` already contained `head`, so there was nothing to merge. Distinct
+    /// from [`Merged`](Self::Merged) because no commit was created — a fold that
+    /// treated this as a failure would stall on an already-folded member, and
+    /// one that treated it as a merge would invent a head that does not exist.
+    AlreadyUpToDate,
+    /// The two histories touch the same lines and git cannot combine them
+    /// unattended. Carries the merge's own report of what collided; the caller
+    /// decides whether that is an owner decision or repair work.
+    Conflict {
+        /// The endpoint's description of the collision.
+        detail: String,
+    },
 }
 
 /// The pull-request surface the land path drives — Bloomery proposes a
@@ -662,6 +701,10 @@ impl<T: HttpTransport> ReqwestGithub<T> {
     fn pulls_url(&self, suffix: &str) -> String {
         format!("{}/repos/{}/pulls{suffix}", self.api_base, self.repo_path)
     }
+
+    fn merges_url(&self) -> String {
+        format!("{}/repos/{}/merges", self.api_base, self.repo_path)
+    }
 }
 
 impl ReqwestGithub<ReqwestTransport> {
@@ -804,6 +847,28 @@ struct GhCommit {
 impl GhCommit {
     fn into_git_commit(self) -> GitCommit {
         GitCommit { sha: self.sha, tree: self.tree.sha, message: self.message }
+    }
+}
+
+/// The merges endpoint's reply. It is a *repository* commit, which nests the
+/// message and tree under `commit` — not the flat Git Data commit [`GhCommit`]
+/// decodes. Same concept, different serialization, so it needs its own shape
+/// rather than a reuse that would fail to decode against real GitHub.
+#[derive(Deserialize)]
+struct GhMergeCommit {
+    sha: String,
+    commit: GhMergeCommitDetail,
+}
+
+#[derive(Deserialize)]
+struct GhMergeCommitDetail {
+    tree: GhTreeRef,
+    message: String,
+}
+
+impl GhMergeCommit {
+    fn into_git_commit(self) -> GitCommit {
+        GitCommit { sha: self.sha, tree: self.commit.tree.sha, message: self.commit.message }
     }
 }
 
@@ -1151,6 +1216,39 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         let gh: GhCommit = decode(&response)?;
         Ok(gh.into_git_commit())
     }
+
+    fn merge(&self, base: &str, head: &str, message: &str) -> Result<MergeResult, GithubError> {
+        // The merges endpoint speaks branch names, not refs — it is a repository
+        // operation rather than a Git Data one, so it takes neither the `refs/`
+        // form nor this trait's `heads/` shorthand. Normalizing here keeps every
+        // caller on one ref vocabulary, the way `create_ref` re-adds `refs/`.
+        let payload = serde_json::json!({
+            "base": strip_heads(base),
+            "head": strip_heads(head),
+            "commit_message": message,
+        })
+        .to_string();
+        let response = self.dispatch(Method::Post, self.merges_url(), Some(payload))?;
+
+        // 204 is "base already contains head" — a success with no body, so it
+        // must be read before any decode. 409 is a conflict, which is an answer
+        // about the two histories rather than a transport fault.
+        match response.status {
+            204 => Ok(MergeResult::AlreadyUpToDate),
+            409 => Ok(MergeResult::Conflict { detail: response.body }),
+            status if (200..300).contains(&status) => {
+                Ok(MergeResult::Merged(decode::<GhMergeCommit>(&response)?.into_git_commit()))
+            }
+            status => Err(GithubError::Status { status, body: response.body }),
+        }
+    }
+}
+
+/// Drop this trait's `heads/` shorthand, leaving the bare branch name the
+/// repository-level endpoints take. A name that never carried the prefix (a raw
+/// commit sha, which the merge endpoint also accepts as a head) passes through.
+pub fn strip_heads(name: &str) -> &str {
+    name.strip_prefix("heads/").unwrap_or(name)
 }
 
 impl<T: HttpTransport> PullRequestApi for ReqwestGithub<T> {
@@ -1409,7 +1507,58 @@ mod tests {
         }
     }
 
-    use super::GitDataApi;
+    use super::{GitDataApi, MergeResult};
+
+    #[test]
+    fn merge_reads_the_repository_commit_shape_not_the_git_data_one() {
+        // Tripwire: the merges endpoint answers with a *repository* commit,
+        // nesting message and tree under `commit`, while every other commit this
+        // client reads is the flat Git Data shape. Decoding the merge reply with
+        // the flat struct compiles and passes against any fake — it only fails
+        // against real GitHub, so the shape is pinned here.
+        let github =
+            client(201, r#"{"sha":"merge1","commit":{"message":"fold wp-a","tree":{"sha":"combined"}},"parents":[]}"#);
+        let MergeResult::Merged(commit) = github.merge("heads/bloom/x/integration", "heads/cand", "fold wp-a").unwrap()
+        else {
+            panic!("a 201 is a completed merge");
+        };
+        assert_eq!(commit.sha, "merge1");
+        assert_eq!(commit.tree, "combined", "the tree is read from under `commit`, not the top level");
+
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(request.method, Method::Post);
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/merges");
+        let body: serde_json::Value = serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["base"], "bloom/x/integration", "the endpoint takes bare branch names, not the heads/ form");
+        assert_eq!(body["head"], "cand");
+    }
+
+    #[test]
+    fn merge_separates_nothing_to_do_from_a_conflict_and_from_a_fault() {
+        // The three non-201 answers carry three different meanings, and folding
+        // any pair together breaks a fold: a 204 read as failure stalls on an
+        // already-folded member, a 409 read as a fault gets retried forever
+        // instead of parked, and a 404 read as a conflict parks an owner on a
+        // missing branch.
+        assert_eq!(
+            client(204, "").merge("heads/base", "heads/head", "m").unwrap(),
+            MergeResult::AlreadyUpToDate,
+            "204 is success with no body — it must not reach the decoder",
+        );
+        let MergeResult::Conflict { detail } =
+            client(409, r#"{"message":"Merge conflict"}"#).merge("heads/base", "heads/head", "m").unwrap()
+        else {
+            panic!("409 is a conflict outcome, not an error");
+        };
+        assert!(detail.contains("Merge conflict"), "the conflict carries the endpoint's own report: {detail}");
+        assert!(
+            matches!(
+                client(404, r#"{"message":"Not Found"}"#).merge("heads/base", "heads/gone", "m"),
+                Err(GithubError::Status { status: 404, .. })
+            ),
+            "a missing base or head is a fault, not a conflict",
+        );
+    }
 
     #[test]
     fn get_ref_maps_404_to_none() {
