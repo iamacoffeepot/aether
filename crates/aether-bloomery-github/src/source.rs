@@ -743,6 +743,15 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
         Ok(current.sha)
     }
 
+    fn observe_mainline_head(&self) -> Result<Digest, Self::Error> {
+        // `mainline_digest` is exactly the reverse-resolve-or-mint this needs,
+        // and is what `poll_land` already runs over a merge commit — an observed
+        // head and a landed head are the same object seen from two sides, so
+        // they must mint the same digest or the land following an observation
+        // would compare-and-swap against a base it had itself just renamed.
+        self.mainline_digest(&self.mainline_head_sha()?)
+    }
+
     fn checkpoint(&self, bloom: &BloomId, tree: &Digest) -> Result<Checkpoint, Self::Error> {
         let name = Self::checkpoint_ref(bloom, tree);
         // Idempotent: the checkpoint's identity is its tree, encoded in the ref
@@ -1469,6 +1478,44 @@ mod tests {
         assert!(
             fake.resolve_git(&head).unwrap().is_some(),
             "the retried head resolves — the state the fault left is recoverable",
+        );
+    }
+
+    #[test]
+    fn observing_a_head_bloomery_already_named_returns_that_same_digest() {
+        // Tripwire: the observation reverse-resolves before it mints (#4667).
+        // `seeded` records the base head ↔ commit correspondence and points
+        // mainline at that commit, so the live head is one a digest already
+        // names. Minting a *second* digest for it would make every observation
+        // report a head mainline is not at, so the reducer would "advance"
+        // mainline onto a fresh digest for the commit it was already sitting on —
+        // an endless false advance, once per boot.
+        let (fake, _, base) = seeded();
+
+        let observed = git_source(&fake, false).observe_mainline_head().unwrap();
+
+        assert_eq!(observed, base, "the observation returns the digest already naming the head, not a fresh mint");
+    }
+
+    #[test]
+    fn observing_a_foreign_head_mints_a_digest_and_records_it() {
+        // Tripwire: a head merged by anyone else has no digest, so one is minted
+        // *and recorded*. Without the record the observed head would be a digest
+        // nothing can forward-resolve, and the next snapshot against the advanced
+        // mainline would fault `UnresolvedCorrespondence` — the coordinator
+        // wedged on a base it named itself.
+        let (fake, _, base) = seeded();
+        let tree_sha = fake.resolve_git(&digest(10)).unwrap().unwrap().to_hex();
+        let foreign = fake.seed_commit_with_message("someone else's merge", &tree_sha);
+        fake.seed_ref("heads/main", &foreign);
+
+        let observed = git_source(&fake, false).observe_mainline_head().unwrap();
+
+        assert_ne!(observed, base, "a moved head is a different digest from the one mainline sat at");
+        assert_eq!(
+            fake.resolve_git(&observed).unwrap().expect("the minted digest was recorded").to_hex(),
+            foreign,
+            "and it forward-resolves to the commit that was actually observed",
         );
     }
 

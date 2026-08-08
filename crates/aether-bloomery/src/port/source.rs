@@ -217,6 +217,29 @@ pub trait SourceBackend {
     /// unreachable.
     fn mainline_head_sha(&self) -> Result<String, Self::Error>;
 
+    /// Read the repository's live mainline head as the *digest* naming it,
+    /// recording the correspondence when the head is one no digest names yet
+    /// (#4667).
+    ///
+    /// The observation half of [`mainline_head_sha`](Self::mainline_head_sha).
+    /// The reconcile above wants a raw sha because it is *binding* the genesis
+    /// sentinel to it; an observation instead needs the digest the control core
+    /// speaks, because what it feeds is `Fact::ObserveMainline` and the reducer
+    /// compares digests. Reverse-resolving is what makes re-observation cheap
+    /// and idempotent: a head Bloomery itself landed already has a digest, so
+    /// re-reading it yields the digest mainline is already at and the reducer
+    /// decides nothing. A head merged by anyone else has none, so one is minted
+    /// and recorded — the same treatment a foreign squash-merge commit gets at
+    /// land time, for the same reason. Without the record the observed head
+    /// would be a digest nothing could forward-resolve, and the next snapshot
+    /// against it would fault.
+    ///
+    /// # Errors
+    /// Backend-defined — the mainline ref is missing, the source is
+    /// unreachable, the head sha is malformed, or the correspondence store
+    /// faulted.
+    fn observe_mainline_head(&self) -> Result<Digest, Self::Error>;
+
     /// Fold the candidate at `candidate_ref` into `bloom`'s integration branch
     /// by **merging** it, rather than by stating its tree the way
     /// [`integrate`](Self::integrate) does.

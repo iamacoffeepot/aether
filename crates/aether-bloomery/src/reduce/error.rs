@@ -236,3 +236,14 @@ pub enum LandError {
     /// Mainline moved off the bloom's sealed base — supersession is forced.
     BaseMismatch(BaseMismatch),
 }
+
+/// Why a mainline observation was refused (#4667).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ObserveMainlineError {
+    /// A bloom is in flight. Its sealed base is the one head it may land on, so
+    /// advancing mainline under it would convert its land into a
+    /// [`LandError::BaseMismatch`] that only a hand-driven supersession clears.
+    /// The observation is held, not lost: the next one after the bloom leaves
+    /// flight advances to whatever mainline is by then.
+    BloomInFlight(BloomId),
+}

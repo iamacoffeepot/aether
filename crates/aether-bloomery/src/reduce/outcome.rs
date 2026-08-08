@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AttemptCompletedError, Decision, IntegrateError,
-    LandError, ResolveError, SealError, SupersedeError,
+    LandError, ObserveMainlineError, ResolveError, SealError, SupersedeError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -174,4 +174,17 @@ pub enum Outcome {
     },
     /// An aggregate-review completion was refused.
     AggregateReviewRejected(AggregateReviewError),
+    /// An observation moved mainline onto the repository's live head (#4667).
+    MainlineAdvanced {
+        /// The head mainline moved off.
+        from: Digest,
+        /// The observed head mainline moved onto.
+        to: Digest,
+    },
+    /// An observation named the head mainline already sits at. The steady state
+    /// of a host that re-observes on a cadence, so it is a plain no-op rather
+    /// than a refusal — nothing is wrong, there is simply nothing to move.
+    MainlineUnchanged(Digest),
+    /// A mainline observation was refused.
+    ObserveMainlineRejected(ObserveMainlineError),
 }
