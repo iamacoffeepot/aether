@@ -102,6 +102,40 @@ impl Evidence {
     }
 }
 
+/// What an observed stage result asserts — the outcome of running a stage.
+///
+/// Domain vocabulary (ADR-0149 §The value vocabulary). The verdict is the
+/// stage's outcome; only the GitHub-Actions normalization that parses Actions
+/// output into a verdict stays in `aether-bloomery-github`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum StageVerdict {
+    /// An owner (or policy) approval of a scope revision.
+    Approved,
+    /// A verification stage passed.
+    VerificationPassed,
+    /// A verification stage failed.
+    VerificationFailed,
+    /// A review finding was recorded.
+    ReviewFinding,
+    /// The attempt parked on a decision point (ADR-0151): its product is a
+    /// `Question` artifact, admitted as evidence *about* the attempt, never a
+    /// resolution and never a failure.
+    Parked,
+}
+
+impl StageVerdict {
+    /// The [`EvidenceKind`] this verdict normalizes to.
+    #[must_use]
+    pub fn evidence_kind(self) -> EvidenceKind {
+        match self {
+            Self::Approved => EvidenceKind::Approval,
+            Self::VerificationPassed | Self::VerificationFailed => EvidenceKind::VerificationResult,
+            Self::ReviewFinding => EvidenceKind::ReviewFinding,
+            Self::Parked => EvidenceKind::Question,
+        }
+    }
+}
+
 /// The class of an [`Evidence`] artifact.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum EvidenceKind {

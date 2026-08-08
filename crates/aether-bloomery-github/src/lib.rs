@@ -63,9 +63,10 @@ pub use client::{
 pub use config::GithubConfig;
 pub use correspondence::{Correspondence, CorrespondenceError, GitObjectFormat, GitObjectId};
 pub use executor::{ActionsExecutor, ExecutorError, LaneWorkflows};
+pub use aether_bloomery::StageVerdict;
 pub use inward::{
-    InwardError, StageResult, StageVerdict, StudyRecordError, StudyResult, normalize_stage_result,
-    normalize_study_result, parse_study_cost,
+    InwardError, StageResult, StudyRecordError, StudyResult, normalize_stage_result, normalize_study_result,
+    parse_study_cost,
 };
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
 pub use projection::GithubProjection;

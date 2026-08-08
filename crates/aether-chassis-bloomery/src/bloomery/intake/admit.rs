@@ -7,9 +7,9 @@ use std::fmt;
 
 use aether_bloomery::{
     Admit, BloomId, CandidateRef, Digest, Event, Fact, IdempotencyKey, Nonce, ResolutionClaim, StageCatalog, StageId,
-    WorkpieceId,
+    StageVerdict, WorkpieceId,
 };
-use aether_bloomery_github::{InwardError, StageResult, StageVerdict, normalize_stage_result};
+use aether_bloomery_github::{InwardError, StageResult, normalize_stage_result};
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
 use super::dispatch::DispatchRecord;

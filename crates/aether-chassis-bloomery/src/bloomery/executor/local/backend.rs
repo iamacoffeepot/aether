@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::digest::ContentAddressed;
 use aether_bloomery::{
-    CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, WorkHandle, WorkOrder,
-    digest_of, is_model_lane,
+    CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, StageVerdict,
+    WorkHandle, WorkOrder, digest_of, is_model_lane,
 };
-use aether_bloomery_github::{GitObjectId, SharedCorrespondence, StageVerdict};
+use aether_bloomery_github::{GitObjectId, SharedCorrespondence};
 use serde::Serialize;
 use std::fs;
 

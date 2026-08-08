@@ -18,36 +18,8 @@
 use core::fmt;
 use std::error::Error;
 
-use aether_bloomery::{Digest, Evidence, EvidenceKind, StudyCost};
+use aether_bloomery::{Digest, Evidence, StageVerdict, StudyCost};
 use serde::Deserialize;
-
-/// What an observed platform stage result asserts.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum StageVerdict {
-    /// An owner (or policy) approval of a scope revision.
-    Approved,
-    /// A verification stage passed.
-    VerificationPassed,
-    /// A verification stage failed.
-    VerificationFailed,
-    /// A review finding was recorded.
-    ReviewFinding,
-    /// The attempt parked on a decision point (ADR-0151): its product is a
-    /// `Question` artifact, admitted as evidence *about* the attempt, never a
-    /// resolution and never a failure.
-    Parked,
-}
-
-impl StageVerdict {
-    fn evidence_kind(self) -> EvidenceKind {
-        match self {
-            Self::Approved => EvidenceKind::Approval,
-            Self::VerificationPassed | Self::VerificationFailed => EvidenceKind::VerificationResult,
-            Self::ReviewFinding => EvidenceKind::ReviewFinding,
-            Self::Parked => EvidenceKind::Question,
-        }
-    }
-}
 
 /// A stage result as the inward channel observed it: the digest the platform
 /// object claimed to be about, the verdict, and the supporting artifact's
@@ -225,9 +197,9 @@ pub fn normalize_study_result(displayed: &Digest, result: &StudyResult) -> Resul
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use aether_bloomery::{Digest, EvidenceKind};
+    use aether_bloomery::{Digest, EvidenceKind, StageVerdict};
 
-    use super::{InwardError, StageResult, StageVerdict, normalize_stage_result};
+    use super::{InwardError, StageResult, normalize_stage_result};
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])

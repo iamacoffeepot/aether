@@ -10,9 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
     Conclusion, Digest, ExecutionStatus, ExecutorBackend, Harness, Nonce, ReasoningEffort, ResolvedModel, StageId,
-    Transformation, WorkHandle,
+    StageVerdict, Transformation, WorkHandle,
 };
-use aether_bloomery_github::StageVerdict;
 use tempfile::TempDir;
 
 use aether_bloomery_github::Correspondence as _;

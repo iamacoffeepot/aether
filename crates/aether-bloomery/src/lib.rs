@@ -95,6 +95,6 @@ pub use values::{
     CandidateRef, CatalogError, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, Evidence, EvidenceKind,
     Forecast, Harness, LandingReceipt, MemberSubject, Membership, ModelOverride, NetworkProfile, Observation,
     Provenance, Question, REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs,
-    ResolvedModel, StageBinding, StageCatalog, StageReceipt, Statement, StudyCost, StudyRecord, ToolPolicy,
-    Transformation, Unproducible, Workpiece, config_address, decode_config, is_model_lane,
+    ResolvedModel, StageBinding, StageCatalog, StageReceipt, StageVerdict, Statement, StudyCost, StudyRecord,
+    ToolPolicy, Transformation, Unproducible, Workpiece, config_address, decode_config, is_model_lane,
 };
