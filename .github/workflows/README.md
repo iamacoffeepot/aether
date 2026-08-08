@@ -43,10 +43,18 @@ each file opens with one.
 | --- | --- |
 | `issue-labels.yml` | Lints issue titles, auto-applies `type:*` / `crate:*` labels |
 
+**Lifecycle automation not present:** the Codex skills describe an intended
+post-Ready lifecycle with reconciliation, automated review, dogfood, and quality
+evaluation. This checkout does not contain `reconciler.yml`, `review.yml`,
+`dogfood.yml`, or `quality-eval.yml`, so none of those are hosted workflows on
+`main`. Repository scripts with related names are support code, not an Actions
+entry point by themselves.
+
 ## Rules
 
-1. **Two required checks, ever.** Branch protection requires exactly
-   `Lint title` and `CI pass`. A new merge-gating signal on the tree
+1. **Two required status checks, ever.** Branch protection currently requires
+   exactly `Lint title` and `CI pass`; it does not configure required pull-request
+   reviews. A new merge-gating signal on the tree
    becomes a job wired into `ci.yml`'s `ci-pass` aggregator — never a third
    required context. A required context that stops reporting holds every
    pull request at "Expected" forever, so the required set stays small and

@@ -79,27 +79,24 @@ choice for an agent to resolve by guessing.
 | Design | The approach, alternatives, affected surfaces, and ADR boundary are being established | `scope` |
 | Plan | An executable plan, declared surface, and routing labels exist | `approve`, the policy-routed Plan-to-Ready gate |
 | Ready | Approved and eligible for implementation | `implement` |
-| Building | A PR exists and its head is new or not CI-green; when the issue carries `## Declared surface`, an escaping diff also stays here | [Reconciler](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/reconciler.yml) |
-| QA | CI is green but review or dogfood still owes a verdict | Reconciler |
-| Findings | Actionable QA labels or unresolved review threads remain | `findings` changes facts; Reconciler recomputes |
+| Building | Contracted state: a PR exists and its head is new or not CI-green; a declared-surface escape also belongs here | Intended reconciler (hosted workflow unavailable) |
+| QA | Contracted state: CI is green but review or dogfood still owes a verdict | Intended reconciler (hosted workflow unavailable) |
+| Findings | Contracted state: actionable QA labels or unresolved review threads remain | `findings` changes facts; intended reconciler recomputes |
 | Held | CI and QA facts are clear; the draft is eligible to land | `land` after explicit authorization |
 | Done | The closing PR is merged and the issue is closed | `land` reconciles stale phase state |
 
-`phase:building`, `phase:qa`, `phase:findings`, and `phase:held` are
-computed resting states. The Reconciler is their sole writer. Skills open a PR,
-push a new head, reply to findings, resolve threads, or publish a verdict; they
-do not assert what those facts mean by writing one of the computed labels.
-Every relevant event causes the Reconciler to derive the target again, and a
-new push returns the issue to Building until the new head is proven. When an
-issue contains a fenced `## Declared surface` glob block, a diff that escapes it
-is also pinned at Building until the diff is trimmed or the repository owner
-widens/waives that boundary; green CI does not bypass the gate. An issue with no
-declared-surface section is currently un-gated by this check.
+`phase:building`, `phase:qa`, `phase:findings`, and `phase:held` are computed
+resting states in the Codex lifecycle contract. The contract reserves their
+writes for a reconciler: skills change observable facts rather than asserting a
+computed phase. It also treats a fresh head or a declared-surface escape as
+Building until the relevant facts are clear.
 
-`Approval gate` is nevertheless a required status on every PR. Where there is
-nothing to enforce—no closing issue, an out-of-domain phase, or no declaration—
-the reconciler posts an explicit passing no-op instead of leaving the required
-context waiting forever.
+That is intended lifecycle semantics, not a claim about current hosted
+automation. The checked-in Actions directory has no `reconciler.yml`,
+`review.yml`, `dogfood.yml`, or `quality-eval.yml`, so GitHub cannot currently
+perform those post-Ready transitions. There is likewise no hosted `Approval
+gate` check. Branch protection requires only `CI pass` and `Lint title`, with no
+required-pull-request-review rule configured.
 
 `phase:executing` and `phase:refine` are retired migration inputs. Current
 skills never write them.
@@ -113,8 +110,8 @@ skills never write them.
 | Turn a Backlog or bounced issue into grounded scope | `scope` | Plan |
 | File selected unrelated scope findings | `scope-spinoff` | Child Backlog issues |
 | Approve completed scope | `approve` | Ready |
-| Implement approved work | `implement` | CI-green draft PR; phase then computed by automation |
-| Resolve review or dogfood findings | `findings` | Facts cleared; Reconciler can compute Held |
+| Implement approved work | `implement` | Draft PR; CI is hosted, while contracted post-Ready automation is currently unavailable |
+| Resolve review or dogfood findings | `findings` | Facts cleared for the intended reconciler to evaluate |
 | Regress work because an earlier phase is wrong | `bounce` | Bounced with one target |
 | Land a reviewed draft | `land` | Merged PR and Done issue |
 | Audit existing code or a non-PR change | `review` | Read-only findings rollup |
@@ -125,9 +122,9 @@ skills never write them.
 
 Use the frontmatter description in the current `SKILL.md` to confirm a skill
 fits before invoking it. A workflow name is not blanket authority for adjacent
-steps. In particular, `implement` never lands and `review` is not an automatic
-tail step after implementation: PR-bound Rust changes receive the repository's
-hosted review after the first green CI head.
+steps. In particular, `implement` never lands. The `$review` skill is a local
+backfill audit, not an automatic tail step after implementation, and an absent
+hosted Review workflow must not be inferred from the skill contract.
 
 ## Planned implementation
 
@@ -141,9 +138,9 @@ For non-ADR work, `approve` resolves the declared paths against
 `approval-policy.yml` with most-restrictive-wins semantics over every
 path the declaration permits. A crate-wide subtree therefore includes its
 manifest tier even when the planned edit names only source today. `auto` work
-may advance without a new owner decision. `judge` work receives an independent
-verdict, but the judge is currently shadow-only, so the owner still confirms
-it. `human` work always waits for the owner. An explicit `ADR flag:` or a
+may advance without a new owner decision. The `$approve` `judge` tier is
+currently shadow-only, so the owner still confirms it. `human` work always
+waits for the owner. An explicit `ADR flag:` or a
 declared `docs/adr/**` edit makes the issue ADR-bearing, and the ADR hard gate
 is maturity-aware (ADR-0146 §6): a **new** ADR or an amendment to an
 **established** (non-`Proposed`) one takes the human route before policy lookup,
@@ -151,26 +148,11 @@ while a change whose every touched ADR is still `Status: Proposed` defers to the
 ordinary policy lookup (the `docs/adr/**` tier is `judge`). Ordinary citations
 to existing ADRs make an issue neither ADR-bearing nor human-routed.
 
-The hosted tick resolves Plan surfaces with the same canonical matcher and,
-when any issue resolves to exactly `auto`, dispatches one batched approval
-sweep per wave that walks every such issue through the full per-issue gates —
-approval is read-mostly, so the whole queue shares one runner. The headless
-gate resolves each tier again before writing Ready. `judge`, `human`,
-ADR-bearing, missing-surface, and unresolved-policy outcomes remain at Plan for
-their reader — and the sweep surfaces each on the issue it concerns rather than
-on one shared ticket: a reply-actionable candidate (a human/judge-tier wait, a
-directable gate failure, or a dependency only the owner can unblock) gets its
-own parked ask — the fixed `agent:awaiting-answer` marker comment plus label,
-the same per-issue ask-and-park the single-issue approve path writes — while a
-self-healing candidate (an ordinary open dependency) or an ADR-bearing one just
-rests at Plan, re-entering the pool when its blocker clears or when the owner
-runs `/approve` himself. Convergence is the label: a parked issue is excluded
-from the next sweep's enumeration, so an unchanged ask is never re-asked. The
-owner's reply — approve, direct a labels-only fix, or `/bounce` — clears the
-label and re-dispatches that one issue down the single-issue approve path; the
-reply waives who approves, never the scope gates. For the board-wide "what is
-waiting on me" view, `scripts/status-sweep.sh` lists every open parked ask on
-demand — the aggregation a central ticket once maintained, computed when asked.
+`$approve` is the checked-in Plan-to-Ready procedure. It re-reads the issue,
+resolves the policy tier, checks freshness, dependencies, scope, routing, and
+ADR requirements, and pauses for owner input when the contract requires it.
+The skill is the single source for its exact gates, sweep behavior, and label
+mutations. No checked-in hosted tick dispatches approvals automatically.
 
 The owner can pre-authorize one non-ADR issue at any earlier phase with
 `approval:pre-approved`. The approval gate verifies the actor of the latest
@@ -187,21 +169,16 @@ and remains ineligible for `implement`.
 `implement` accepts Ready work, creates or adopts the one issue worktree
 described on [Worktrees and safety](worktrees-and-safety.md), follows the
 approved plan, runs the required local checks, and opens a draft PR that closes
-the issue. The PR remains draft while CI and automated QA work.
+the issue. The PR remains draft while the required lifecycle facts are gathered.
 
-The [CI workflow](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/ci.yml) provides the build proof.
-On a same-repository green Rust-changing head, the
-[Review workflow](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/review.yml) produces the automated
-review verdict. When the closing issue contains a non-`N/A` Dogfood brief, the
-[Dogfood workflow](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/dogfood.yml) trials the public
-surface after Review is green. The Reconciler observes these results; it does
-not rely on an agent remembering to advance a flag.
-
-Fork heads do not receive repository secrets, so those automatic Review and
-Dogfood paths intentionally skip them. A maintainer must review the fork and,
-when appropriate, use the workflows' explicit manual-dispatch path from the
-trusted repository context. Never work around that boundary by exposing a
-secret to fork code.
+The checked-in [CI workflow](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/ci.yml)
+provides the build proof. The `$implement` contract also describes integrated
+Review, Dogfood, and reconciliation after a green head, but the corresponding
+hosted workflow files are absent from current `main`. Those steps are therefore
+unavailable; related repository scripts do not create workflow triggers by
+themselves. `$review` and `$dogfood` remain explicit local skills for the cases
+named in their own contracts, not substitutes for silently claiming that
+PR-bound hosted QA ran.
 
 ## Findings and the landing gate
 
@@ -214,9 +191,7 @@ so CI and QA must prove that head again.
 Held means land-eligible, not merged. A local Codex session still needs the
 user's explicit `land <PR>` request, or confirmation of an itemized land sweep,
 because clearing draft state makes reviewed code releasable and may merge it.
-Hosted automation may invoke its own checked-in headless wrapper only under its
-repository-configured governor and interaction protocol. Neither green CI nor
-the Held label authorizes an ad-hoc self-merge.
+Neither green CI nor the Held label authorizes an ad-hoc self-merge.
 
 Landing verifies the current head and required checks again, clears draft state,
 confirms the merge through GitHub, then reconciles the closing issue and only
