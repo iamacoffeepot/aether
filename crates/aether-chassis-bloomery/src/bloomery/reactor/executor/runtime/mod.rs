@@ -342,6 +342,29 @@ fn drain_and_dispatch(
             );
             break;
         };
+        // A retired plan's queued work is retired with it. The dispatch outbox is
+        // durable and drains on its own timer, so a bloom superseded between seal
+        // and drain leaves orders behind — and running one spends a full model
+        // dispatch on a plan the operator explicitly replaced, then returns a
+        // candidate for a bloom that can no longer admit it (#4640). A
+        // supersession releases every one of the predecessor's memberships in the
+        // decision set that marks it superseded, so holding none is the reducer's
+        // own statement that this bloom is no longer live. Acked rather than
+        // stopped: the entry is disposed of, not deferred, so the queue drains
+        // instead of accumulating dead work — and this self-heals a queue
+        // stranded by any path to the same state, not just supersession.
+        if !store.holds_active_membership(payload.bloom.as_bytes())? {
+            tracing::info!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                bloom = %short_hex(&payload.bloom),
+                workpiece = %payload.workpiece.0,
+                "dispatch belongs to a bloom that holds no active membership; retiring it undispatched",
+            );
+            ack_through = Some(entry.sequence);
+            continue;
+        }
+
         // The transformation pins the subject as its first input; a well-formed
         // per-member dispatch always carries one. The record's axes come from the
         // payload's explicit fields (ADR-0152), so the input is only checked for
@@ -531,6 +554,21 @@ fn drain_and_dispatch_aggregate(
             );
             break;
         }
+        // A retired plan's queued review is retired with it, on the same reading
+        // as the member lane above: a critic run is a full model dispatch, and
+        // one judging a superseded bloom's integrated diff is spent on a plan
+        // that no longer exists.
+        if !store.holds_active_membership(payload.bloom.as_bytes())? {
+            tracing::info!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                bloom = %short_hex(&payload.bloom),
+                "aggregate review belongs to a bloom that holds no active membership; retiring it undispatched",
+            );
+            ack_through = Some(entry.sequence);
+            continue;
+        }
+
         // A full-pass dispatch opens a fresh review cycle — the first ever, or an
         // owner re-arm after a park (ADR-0153). Clear any stale frozen row so
         // the new cycle's first failure freezes cleanly instead of appending
