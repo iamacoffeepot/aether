@@ -63,7 +63,6 @@ pub use client::{
 pub use config::GithubConfig;
 pub use correspondence::{Correspondence, CorrespondenceError, GitObjectFormat, GitObjectId};
 pub use executor::{ActionsExecutor, ExecutorError, LaneWorkflows};
-pub use aether_bloomery::StageVerdict;
 pub use inward::{
     InwardError, StageResult, StudyRecordError, StudyResult, normalize_stage_result, normalize_study_result,
     parse_study_cost,
