@@ -30,14 +30,15 @@ pub use aether_substrate::chassis::error::BootError;
 use aether_bloomery::control::{
     Admit, AdmitResult, AggregateReviewPayload, ClaimResult, ClaimSeal, Commit, CommitResult, DispatchPayload,
     EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload, LandPayload, LoadConfigs, LoadConfigsResult,
-    MembershipMutation, OutboxPayload, Query, QueryResult, ReconcileOp, RedispatchPayload, ReplayJournal,
-    ReplayJournalResult, ReviewPass, Topic, TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals,
-    reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
+    MembershipMutation, ObserveMainline, ObserveMainlineResult, OutboxPayload, Query, QueryResult, ReconcileOp,
+    RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, Topic, TransferSeal, held_to_seal_error,
+    held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
-    BloomId, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event, Fact, Outcome, ResolvedConfigs, Snapshot,
-    Unproducible, reduce, view_of,
+    BloomId, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event, Fact, IdempotencyKey, Outcome,
+    ResolvedConfigs, Snapshot, Unproducible, reduce, view_of,
 };
+use aether_bloomery_github::to_hex;
 
 use super::ControlCore;
 use crate::source::SourceCapability;
@@ -380,6 +381,72 @@ impl NativeActor for ControlCore {
             state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
         }
         state.reconcile_claim_refs(ctx);
+        // Only now is the snapshot the one the journal describes, so only now can
+        // an observation be decided against it (#4677). Asked here rather than
+        // from the source cap's own `wire` because that fires the moment the cap
+        // mounts, which is *concurrent* with this replay: an observation decided
+        // then reads an empty bloom map, finds nothing in flight, and advances
+        // mainline out from under the very land the fold above is about to apply
+        // — which then refuses as `BaseMismatch` and leaves a landed bloom
+        // reading unlanded for the whole boot.
+        ctx.actor::<SourceCapability>().send_detached(&ObserveMainline);
+    }
+
+    /// Admit the observed mainline head (#4667). The reply to the
+    /// [`ObserveMainline`] the boot replay sends once its fold is complete
+    /// (#4677), so the reducer decides it against the snapshot the journal
+    /// describes rather than a partial one.
+    ///
+    /// A failed observation logs and continues rather than aborting boot: the
+    /// coordinator is fully functional on a stale mainline — every bloom already
+    /// sealed keeps its base, and the pointer catches up on the next restart —
+    /// so an unreachable source is not the unrecoverable class the replay and
+    /// claim-ref reconcile fail-fast on.
+    ///
+    /// The admit goes through the ordinary [`Admit`] door rather than an internal
+    /// shortcut, so this fact is journaled, deduped, and committed exactly like
+    /// one arriving over the wire.
+    #[handler::manual]
+    fn on_observe_mainline_result(
+        _state: &mut ControlCoreState,
+        ctx: &mut NativeCtx<'_, Manual>,
+        mail: ObserveMainlineResult,
+    ) {
+        let head = match mail {
+            ObserveMainlineResult::Ok { head } => head,
+            ObserveMainlineResult::Err { error } => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::control",
+                    %error,
+                    "boot mainline observation failed; mainline stays where the last land left it until a restart re-observes"
+                );
+                return;
+            }
+        };
+        let head: Digest = match from_bytes(&head) {
+            Ok(head) => head,
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::control",
+                    %error,
+                    "boot mainline observation did not decode"
+                );
+                return;
+            }
+        };
+
+        let event = Event {
+            idempotency_key: IdempotencyKey(format!("observe-mainline-{}", to_hex(&head))),
+            fact: Fact::ObserveMainline { head },
+        };
+        match to_vec(&event) {
+            Ok(bytes) => ctx.actor::<ControlCore>().send_detached(&Admit { event: bytes }),
+            Err(error) => tracing::warn!(
+                target: "aether_chassis_bloomery::control",
+                %error,
+                "boot mainline observation did not encode"
+            ),
+        }
     }
 
     /// Fold the enumerated claim refs into the boot-reconcile deep heals (ADR-0150

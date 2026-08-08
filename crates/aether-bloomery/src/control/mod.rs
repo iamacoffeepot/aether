@@ -643,8 +643,8 @@ pub enum QueryResult {
 /// [`Commit`] family) so the host can re-export them inward, cycle-free.
 mod source_mail;
 pub use source_mail::{
-    ClaimResult, ClaimSeal, CompleteRelease, CompleteTransfer, EnumerateClaims, EnumerateClaimsResult, ReleaseSeal,
-    TransferSeal,
+    ClaimResult, ClaimSeal, CompleteRelease, CompleteTransfer, EnumerateClaims, EnumerateClaimsResult, ObserveMainline,
+    ObserveMainlineResult, ReleaseSeal, TransferSeal,
 };
 
 mod claim_plan;

@@ -236,8 +236,8 @@ pub enum PollLandResult {
 // `aether.source::{…}` unchanged. The `#[kind(name = "…")]` wire identity rides
 // the move; only the definition site changed.
 pub use aether_bloomery::{
-    ClaimResult, ClaimSeal, CompleteRelease, CompleteTransfer, EnumerateClaims, EnumerateClaimsResult, ReleaseSeal,
-    TransferSeal,
+    ClaimResult, ClaimSeal, CompleteRelease, CompleteTransfer, EnumerateClaims, EnumerateClaimsResult, ObserveMainline,
+    ObserveMainlineResult, ReleaseSeal, TransferSeal,
 };
 
 #[cfg(test)]

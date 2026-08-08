@@ -32,7 +32,8 @@ use aether_actor::actor;
 // each of the cap's handlers folds. Imported here (like the store / api caps) so
 // the always-on identity markers resolve without the `runtime` runtime module.
 use aether_bloomery::control::{
-    Admit, ClaimResult, CommitResult, EnumerateClaimsResult, LoadConfigsResult, Query, ReplayJournalResult,
+    Admit, ClaimResult, CommitResult, EnumerateClaimsResult, LoadConfigsResult, ObserveMainlineResult, Query,
+    ReplayJournalResult,
 };
 
 /// Addressing identity for the `aether.bloomery.control` capability (ADR-0122).
