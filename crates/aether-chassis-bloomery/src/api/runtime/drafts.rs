@@ -51,12 +51,6 @@ impl ApiCapabilityState {
         if let Some(stage_catalog) = patch.stage_catalog {
             draft.stage_catalog = stage_catalog;
         }
-        if let Some(toolchain) = patch.toolchain {
-            draft.toolchain = toolchain;
-        }
-        if let Some(policy) = patch.policy {
-            draft.policy = policy;
-        }
         if let Some(budget) = patch.budget {
             draft.budget = budget;
         }

@@ -100,8 +100,6 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
         base: Digest::default(),
         configs: ConfigRegistry::default(),
         stage_catalog: Digest::default(),
-        toolchain: Digest::default(),
-        policy: Digest::default(),
         budget: Budget::default(),
         forecast: Forecast::default(),
     }

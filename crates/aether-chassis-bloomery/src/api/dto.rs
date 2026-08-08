@@ -57,12 +57,6 @@ pub struct DraftPatch {
     /// Replace the stage-catalog digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_catalog: Option<Digest>,
-    /// Replace the toolchain digest.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub toolchain: Option<Digest>,
-    /// Replace the policy digest.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy: Option<Digest>,
     /// Replace the budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<Budget>,
