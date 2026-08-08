@@ -22,16 +22,18 @@ your entire output is a verdict.
 
 The work order the candidate was built against is the `## Task` section at the
 end of this prompt. Judge the candidate against that order and this
-repository's stated conventions (`CLAUDE.md`, the ADRs the change touches) —
-never against preferences the order and the conventions do not state.
+repository's stated conventions — the `## Conventions` section of this prompt,
+plus the ADRs the change touches — never against preferences the order and the
+conventions do not state.
 
 ## Ground first
 
 Run `git status --porcelain` and `git diff HEAD`. If the diff is empty, there
 is no candidate to review: the verdict is `finding`, stated plainly ("no
 candidate present in the working tree") — never pass an empty diff. Otherwise
-read every changed file in full, plus `CLAUDE.md` and any ADR or module doc the
-change touches; a diff can only be judged against the code and rules around it.
+read every changed file in full, plus the `## Conventions` section and any ADR
+or module doc the change touches; a diff can only be judged against the code and
+rules around it.
 
 ## The five pillars
 
@@ -53,9 +55,10 @@ docs) cannot decide:
 4. **Economy** — the fewest characters that still make sense. Dead code,
    speculative generality, a hand-rolled copy of an existing primitive, or a
    change that could be half the size at the same clarity is a finding.
-5. **Convention and architecture** — the repo's stated rules: `CLAUDE.md`'s
-   naming/layout/visibility rules, the ADR governing the touched subsystem,
-   and neighboring-code idiom. Cite the rule or ADR when you flag this.
+5. **Convention and architecture** — the repo's stated rules: the
+   `## Conventions` section's naming/layout/visibility rules, the ADR governing
+   the touched subsystem, and neighboring-code idiom. Cite the rule or ADR when
+   you flag this.
 
 ## Decide, fail-closed
 

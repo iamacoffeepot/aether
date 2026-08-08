@@ -21,6 +21,7 @@
 mod claude;
 mod codex;
 mod construct;
+mod conventions;
 mod lane;
 mod muse;
 mod review;
