@@ -126,6 +126,18 @@ pub struct SupersedeRequest {
     /// Override the admit idempotency key; defaults to the successor bloom id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// The successor's per-member work-order descriptions, keyed by workpiece id
+    /// — the same advisory model context [`SealRequest::descriptions`] carries,
+    /// and required here for the same reason (#4631).
+    ///
+    /// Descriptions are stored per `(bloom, workpiece)`, and a successor is a new
+    /// bloom id by construction, so the predecessor's rows do not resolve for it —
+    /// not even for the members the supersession carries unchanged. Omitting them
+    /// dispatches every member of the successor on a subject-only prompt, which
+    /// warns and continues rather than failing, so the run looks normal and only
+    /// its quality collapses.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub descriptions: BTreeMap<String, String>,
 }
 
 /// The reply to a write route: the reducer outcome the admitted event resolved
