@@ -13,6 +13,13 @@
 //! first drain pass, and the mirror's idempotent reconcile absorbs the
 //! re-delivery (at-least-once with idempotent reconcile).
 //!
+//! That idempotency is find-then-create against a remote, which converges only
+//! when the writes are **serial**: two workers racing over one entry both read
+//! "absent" and both create. So a drain cycle runs alone — a tick that arrives
+//! while drains are still owed a reply, or while a projection is still out on
+//! the network, is skipped rather than re-driving the same undelivered entry.
+//! The poll interval means "at most one cycle in flight", not "start a cycle".
+//!
 //! Ownership (ADR-0149 §Outbox consumption): this capability is the **sole
 //! reactor of the projection topics** `view_document` and `landing_receipt` —
 //! it alone drains and acks them, scoped by topic so a future executor-dispatch
@@ -29,6 +36,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use aether_actor::{MailSender, runtime};
@@ -66,6 +74,29 @@ pub struct MirrorReactorState {
     // The poll timer sidecar; `None` when disabled. Held for its `Drop`, which
     // stops + joins the thread on teardown.
     _timer: Option<TimerHandle>,
+    // Drain replies still owed by the drains the current cycle sent.
+    awaited_drains: usize,
+    // Projection workers still out. Shared with the detached workers, which
+    // release their slot on completion.
+    outstanding: Arc<AtomicUsize>,
+}
+
+/// A detached worker's claim on the drain cycle, released on drop so a worker
+/// that panics mid-projection still frees the cycle rather than wedging the
+/// reactor at "permanently busy".
+struct WorkerSlot(Arc<AtomicUsize>);
+
+impl WorkerSlot {
+    fn claim(outstanding: &Arc<AtomicUsize>) -> Self {
+        outstanding.fetch_add(1, Ordering::Release);
+        Self(Arc::clone(outstanding))
+    }
+}
+
+impl Drop for WorkerSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
 }
 
 impl MirrorReactorState {
@@ -80,7 +111,21 @@ impl MirrorReactorState {
         mailer: Arc<Mailer>,
         self_mailbox: MailboxId,
     ) -> Self {
-        Self { projection, _source: source, mailer, self_mailbox, _timer: None }
+        Self {
+            projection,
+            _source: source,
+            mailer,
+            self_mailbox,
+            _timer: None,
+            awaited_drains: 0,
+            outstanding: Arc::default(),
+        }
+    }
+
+    /// Whether a drain cycle is still running: drains whose replies have not
+    /// arrived, or projections still out on the network.
+    fn cycle_in_flight(&self) -> bool {
+        self.awaited_drains > 0 || self.outstanding.load(Ordering::Acquire) > 0
     }
 }
 
@@ -151,7 +196,15 @@ impl NativeActor for MirrorReactorCapability {
                 target: "aether_chassis_bloomery::mirror",
                 "mirror reactor mounted disabled (unconfigured token/owner/repo); outbox will accumulate",
             );
-            return Ok(MirrorReactorState { projection: None, _source: None, mailer, self_mailbox, _timer: None });
+            return Ok(MirrorReactorState {
+                projection: None,
+                _source: None,
+                mailer,
+                self_mailbox,
+                _timer: None,
+                awaited_drains: 0,
+                outstanding: Arc::default(),
+            });
         }
 
         let projection = ProjectionShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
@@ -178,6 +231,8 @@ impl NativeActor for MirrorReactorCapability {
             mailer,
             self_mailbox,
             _timer: Some(timer),
+            awaited_drains: 0,
+            outstanding: Arc::default(),
         })
     }
 
@@ -203,7 +258,17 @@ impl NativeActor for MirrorReactorCapability {
         if state.projection.is_none() {
             return;
         }
+        // One cycle at a time. The drain is non-destructive — an entry stays
+        // undelivered until its projection acks — so a tick that fired while
+        // the previous cycle was still out would re-drain the same entry into a
+        // second worker. The mirror's idempotency is find-then-create against a
+        // remote, which converges only when the writes are serial: two workers
+        // racing over one entry both read "absent" and both create.
+        if state.cycle_in_flight() {
+            return;
+        }
         let drains = [DrainOutbox::scoped(Topic::ViewDocument), DrainOutbox::scoped(Topic::LandingReceipt)];
+        state.awaited_drains = drains.len();
         for drain in drains {
             ctx.send::<StoreCapability, DrainOutbox>(&drain);
         }
@@ -216,6 +281,11 @@ impl NativeActor for MirrorReactorCapability {
     /// undecodable entry re-delivers on the next drain.
     #[handler::single]
     fn on_drain_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrainOutboxResult) {
+        // This reply settles one of the drains the cycle sent, whatever it
+        // carries — so the count comes down before any early return, or a topic
+        // that drains empty would leave the cycle owed a reply forever.
+        state.awaited_drains = state.awaited_drains.saturating_sub(1);
+
         let Some(projection) = state.projection.clone() else {
             return;
         };
@@ -227,7 +297,10 @@ impl NativeActor for MirrorReactorCapability {
                 return;
             }
         };
+
+        let slot = WorkerSlot::claim(&state.outstanding);
         ctx.spawn_detached::<MirrorReactorCapability, _>(move |mut root| {
+            let _slot = slot; // released here, so the next tick can drain again.
             for ack in project_batch(&projection, &entries) {
                 root.send::<StoreCapability, AckOutbox>(&ack);
             }
@@ -463,5 +536,68 @@ mod tests {
             "the ack covers the view-document topic",
         );
         assert_eq!(acks[0].through_sequence, 7, "the ack covers the delivered entry's sequence");
+    }
+
+    #[test]
+    fn a_tick_during_a_running_cycle_does_not_re_drain_the_same_entry() {
+        // The incident this guards: one landing receipt opened seven umbrella
+        // issues. A projection slower than the poll interval left its entry
+        // undelivered, every tick in that window re-drained it, and the
+        // overlapping workers each read "absent" from find-then-create and each
+        // created its own copy. A cycle must run alone — and must release, or
+        // the reactor wedges at permanently-busy and nothing ever mirrors.
+        let (mailer, rx) = test_mailer_and_rx();
+        let self_mailbox = MailboxId(0);
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), self_mailbox));
+        let shell = ProjectionShell::new(Arc::new(GithubProjection::new(FakeGithub::new())));
+        let mut state = MirrorReactorState::with_shells(Some(shell), None, Arc::clone(&mailer), self_mailbox);
+
+        let tick = |state: &mut MirrorReactorState| {
+            let mut ctx = NativeCtx::new_dispatching(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            MirrorReactorCapability::on_drain_tick(state, ctx.as_single(), DrainTick::default());
+            binding.flush_outbound();
+        };
+        let settle_one_drain = |state: &mut MirrorReactorState| {
+            let mut ctx = NativeCtx::new_dispatching(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            MirrorReactorCapability::on_drain_result(
+                state,
+                ctx.as_single(),
+                DrainOutboxResult::Ok { entries: Vec::new() },
+            );
+        };
+        // Read as "nothing was sent": the channel is drained to empty by the
+        // preceding assertions, so a leaked send is the only thing that could
+        // arrive. Asserting emptiness is what makes the skip observable — a
+        // later `collect_sends` would happily consume a leaked pair and pass.
+        let assert_silent = |what: &str| {
+            assert!(
+                rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "test: {what} must send nothing while a cycle is in flight",
+            );
+        };
+
+        // The opening tick drains both owned topics.
+        tick(&mut state);
+        assert_eq!(collect_sends::<DrainOutbox>(&rx, 2).len(), 2, "the opening tick drains both projection topics");
+
+        // A tick arriving while those drains are still owed replies must send
+        // nothing — this is the window that re-drove the undelivered receipt.
+        tick(&mut state);
+        assert_silent("a tick with both drains still owed replies");
+
+        settle_one_drain(&mut state);
+        tick(&mut state);
+        assert_silent("a tick with one drain still owed a reply");
+
+        // Both drains have now settled, so the cycle is complete and released.
+        settle_one_drain(&mut state);
+        tick(&mut state);
+        let mut topics: Vec<Option<String>> =
+            collect_sends::<DrainOutbox>(&rx, 2).into_iter().map(|d| d.topic).collect();
+        topics.sort();
+        let mut expected =
+            vec![DrainOutbox::scoped(Topic::LandingReceipt).topic, DrainOutbox::scoped(Topic::ViewDocument).topic];
+        expected.sort();
+        assert_eq!(topics, expected, "a completed cycle releases, so the next tick drains both topics afresh");
     }
 }
