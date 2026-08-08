@@ -10,7 +10,7 @@ use std::sync::Arc;
 use aether_bloomery::{BloomId, Digest, Event, Fact, LandPayload, Topic};
 use aether_bloomery_github::Correspondence;
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GitSource, PullRequestApi, to_hex};
+use aether_bloomery_github::{GitSource, PullRequestApi, short_hex};
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::drain_and_land;
@@ -82,7 +82,7 @@ fn an_accepted_proposal_admits_a_fact_land_carrying_the_merge_commit() {
     // the proposed head nor anything Bloomery created.
     let squashed = "5c".repeat(20);
     let number = fake
-        .find_pull_request_for_head(&format!("bloom/{}/landing", to_hex(&bloom.0)))
+        .find_pull_request_for_head(&format!("bloom/{}/landing", short_hex(&bloom.0)))
         .unwrap()
         .expect("the first pass proposed one")
         .number;
@@ -122,7 +122,7 @@ fn a_declined_proposal_admits_nothing_and_acks_the_definitive_refusal() {
 
     drain_and_land(&mut store, &source).unwrap();
     let number = fake
-        .find_pull_request_for_head(&format!("bloom/{}/landing", to_hex(&bloom.0)))
+        .find_pull_request_for_head(&format!("bloom/{}/landing", short_hex(&bloom.0)))
         .unwrap()
         .expect("proposed")
         .number;

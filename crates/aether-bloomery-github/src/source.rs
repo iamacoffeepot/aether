@@ -60,6 +60,7 @@ use serde::Serialize;
 
 use crate::client::{GitDataApi, GithubError, NewPullRequest, PullRequestApi, PullRequestState};
 use crate::correspondence::{Correspondence, CorrespondenceError, GitObjectId};
+use crate::short_hex;
 
 /// The persisted correspondence the source port resolves real git shas through,
 /// held behind a shared handle so a `SourceBackend`'s `&self` methods can drive
@@ -377,15 +378,15 @@ impl<C: GitDataApi + PullRequestApi> GitSource<C> {
     }
 
     fn integration_ref(bloom: &BloomId) -> String {
-        format!("heads/bloom/{}/integration", to_hex(&bloom.0))
+        format!("heads/bloom/{}/integration", short_hex(&bloom.0))
     }
 
     fn attempt_ref(bloom: &BloomId, attempt: u32) -> String {
-        format!("heads/bloom/{}/attempt/{attempt}", to_hex(&bloom.0))
+        format!("heads/bloom/{}/attempt/{attempt}", short_hex(&bloom.0))
     }
 
     fn checkpoint_prefix(bloom: &BloomId) -> String {
-        format!("heads/bloom/{}/checkpoint/", to_hex(&bloom.0))
+        format!("heads/bloom/{}/checkpoint/", short_hex(&bloom.0))
     }
 
     fn checkpoint_ref(bloom: &BloomId, tree: &Digest) -> String {
@@ -401,7 +402,7 @@ impl<C: GitDataApi + PullRequestApi> GitSource<C> {
     ///
     /// [`landing_ref`]: Self::landing_ref
     fn landing_branch(bloom: &BloomId) -> String {
-        format!("bloom/{}/landing", to_hex(&bloom.0))
+        format!("bloom/{}/landing", short_hex(&bloom.0))
     }
 
     fn landing_ref(bloom: &BloomId) -> String {
@@ -802,7 +803,7 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
         // bloom's landing branch at it, and propose that branch onto mainline.
         self.point_landing_branch(bloom, &self.resolve_git_sha(new_head, "land new head digest")?)?;
         let proposal = NewPullRequest {
-            title: format!("bloomery: land {}", to_hex(&bloom.0)),
+            title: format!("chore(meta): land bloom {}", short_hex(&bloom.0)),
             body: render_landing_body(bloom, expected_base, new_head),
             head: branch.clone(),
             base: mainline_branch().to_owned(),
@@ -1035,6 +1036,7 @@ mod tests {
     };
     use crate::client::{GitDataApi, PullRequestApi};
     use crate::correspondence::Correspondence;
+    use crate::short_hex;
     use crate::testing::FakeGithub;
 
     fn digest(seed: u8) -> Digest {
@@ -1270,7 +1272,7 @@ mod tests {
             other @ LandOutcome::BaseMoved { .. } => panic!("expected Proposed, got {other:?}"),
         };
         assert_eq!(
-            fake.ref_target(&format!("heads/bloom/{}/landing", to_hex(&bloom.0))),
+            fake.ref_target(&format!("heads/bloom/{}/landing", short_hex(&bloom.0))),
             Some(to_hex(&new_head)),
             "the landing branch points at the resolved head",
         );
@@ -1321,7 +1323,7 @@ mod tests {
             other @ LandOutcome::Proposed { .. } => panic!("expected BaseMoved, got {other:?}"),
         }
         assert_eq!(
-            fake.find_pull_request_for_head(&format!("bloom/{}/landing", to_hex(&bloom.0))).unwrap(),
+            fake.find_pull_request_for_head(&format!("bloom/{}/landing", short_hex(&bloom.0))).unwrap(),
             None,
             "a moved base proposes nothing",
         );

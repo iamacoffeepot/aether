@@ -38,6 +38,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::client::{GithubApi, GithubError, NewComment, NewIssue};
 use crate::marker::{Marker, render_marker};
+use crate::short_hex;
 
 /// The outward projection mirror over a [`GithubApi`] client.
 pub struct GithubProjection<C: GithubApi> {
@@ -187,16 +188,6 @@ fn content_digest<T: Serialize>(domain: &str, value: &T) -> Digest {
     let bytes = serde_json::to_vec(value).expect("view values serialize to json");
     hasher.update(&bytes);
     Digest::from_bytes(hasher.finalize().into())
-}
-
-fn short_hex(digest: &Digest) -> String {
-    let bytes = digest.as_bytes();
-    let mut out = String::with_capacity(12);
-    for byte in &bytes[..6] {
-        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-    }
-    out
 }
 
 fn render_bloom_body(bloom: &BloomView) -> String {

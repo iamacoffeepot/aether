@@ -42,6 +42,29 @@
 //! [#3459]: https://github.com/iamacoffeepot/aether/issues/3459
 //! [#3460]: https://github.com/iamacoffeepot/aether/issues/3460
 
+use aether_bloomery::Digest;
+
+/// A digest's first six bytes as hex — the short form every human-facing
+/// surface names a bloom by: projection issue titles, the branch namespace, and
+/// a landing proposal's subject.
+///
+/// Twelve hex characters is git's own short-sha convention and reads at a
+/// glance where sixty-four does not. It is a *name*, never an identity: the
+/// authoritative full digest rides the projection body and the sealed spec, so
+/// a reader who needs to verify has it. Collision would need on the order of
+/// 2^24 blooms against one mainline before it were likelier than not, and the
+/// namespace is addressed by construction rather than parsed back.
+#[must_use]
+pub fn short_hex(digest: &Digest) -> String {
+    let bytes = digest.as_bytes();
+    let mut out = String::with_capacity(12);
+    for byte in &bytes[..6] {
+        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
+    }
+    out
+}
+
 mod client;
 mod config;
 mod correspondence;
