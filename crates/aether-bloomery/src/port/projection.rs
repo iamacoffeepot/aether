@@ -22,7 +22,7 @@ use alloc::string::String;
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::BloomStatus;
-use crate::values::{Evidence, LandingReceipt, ResolutionClaim};
+use crate::values::{Evidence, LandingReceipt, ResolutionClaim, Wedge};
 
 /// The self-contained render input a reconcile pushes outward: the current
 /// mainline and every projectable bloom, each carrying its full membership.
@@ -72,6 +72,11 @@ pub struct MemberView {
     /// self-contained document so the outward adapter renders the question with
     /// no query-back into the store.
     pub pending_decision: Option<PendingDecisionView>,
+    /// Why the member stopped, once it has wedged; `None` while it is still
+    /// working. A wedge is terminal — the member never dispatches again and the
+    /// bloom can never resolve — so it has to be readable here, or a stopped
+    /// member and a working one render identically.
+    pub wedge: Option<Wedge>,
 }
 
 /// A member's pending-decision hold, rendered for the outward mirror: the held

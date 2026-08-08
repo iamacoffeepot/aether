@@ -1,10 +1,12 @@
 //! The per-member line: evaluating one attempt's completion gate and deciding
 //! advance / retry / repair-re-entry / wedge (ADR-0149 §The line, ADR-0153).
 
+use alloc::vec::Vec;
+
 use super::{AttemptCompletedError, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{AgentProfile, CandidateRef, ConfigRegistry, Evidence, StageCatalog, Transformation};
+use crate::values::{AgentProfile, CandidateRef, ConfigRegistry, Evidence, StageCatalog, Transformation, Wedge};
 
 /// The move-and-dispatch effect pair every cursor move of
 /// [`reduce_attempt_completed`] emits — an advance, a Refine re-entry, and a
@@ -212,10 +214,7 @@ pub(super) fn reduce_attempt_completed(
                 effects,
             };
         }
-        return Decisions {
-            outcome: Outcome::AttemptWedged { bloom: *bloom, workpiece: workpiece.clone(), stage },
-            effects,
-        };
+        return wedged(*bloom, workpiece, stage, evidence, effects);
     }
     // A failing gate re-dispatches the same stage while its retry budget allows;
     // an exhausted budget wedges the member — it stops dispatching rather than
@@ -237,5 +236,28 @@ pub(super) fn reduce_attempt_completed(
             effects,
         };
     }
-    Decisions { outcome: Outcome::AttemptWedged { bloom: *bloom, workpiece: workpiece.clone(), stage }, effects }
+    wedged(*bloom, workpiece, stage, evidence, effects)
+}
+
+/// The terminal answer for a member that has spent `stage`'s retry budget: stop
+/// dispatching, and record why.
+///
+/// The outcome alone reaches only the caller of the fact that wedged it. The
+/// record is what every later reader sees — the outward view, an operator, the
+/// next person asking why a bloom stopped — and the stage cursor cannot stand in
+/// for it, since a member exhausted at `Verify` and one mid-flight on its last
+/// roll carry the same cursor.
+fn wedged(
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    stage: StageId,
+    evidence: &Evidence,
+    mut effects: Vec<Decision>,
+) -> Decisions {
+    effects.push(Decision::RecordWedge {
+        bloom,
+        workpiece: workpiece.clone(),
+        wedge: Wedge { stage, evidence: evidence.detail },
+    });
+    Decisions { outcome: Outcome::AttemptWedged { bloom, workpiece: workpiece.clone(), stage }, effects }
 }

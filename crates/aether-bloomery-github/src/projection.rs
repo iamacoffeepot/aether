@@ -196,12 +196,20 @@ fn render_bloom_body(bloom: &BloomView) -> String {
     if let Some(successor) = &bloom.superseded_by {
         let _ = writeln!(body, "- Superseded by: `{}`", short_hex(&successor.0));
     }
+    // A wedged member is terminal for the whole bloom, so it is called out at
+    // bloom scope too: "one member pending" and "one member that will never
+    // move again" are the same line otherwise.
+    let wedged = bloom.members.iter().filter(|member| member.wedge.is_some()).count();
+    if wedged > 0 {
+        let _ = writeln!(body, "- **Wedged members: {wedged}** — this bloom cannot resolve without a supersession.");
+    }
+
     let _ = writeln!(body, "- Members: {}", bloom.members.len());
     for member in &bloom.members {
-        let resolved = if member.resolution.is_some() {
-            "integrated"
-        } else {
-            "pending"
+        let resolved = match (&member.resolution, &member.wedge) {
+            (_, Some(wedge)) => format!("WEDGED at {:?}", wedge.stage),
+            (Some(_), None) => "integrated".to_owned(),
+            (None, None) => "pending".to_owned(),
         };
         let _ = writeln!(body, "  - `{}` ({resolved})", member.workpiece.0);
     }
@@ -218,6 +226,18 @@ fn render_member_body(bloom: BloomId, member: &MemberView) -> String {
     let _ = writeln!(body, "- Scope revision: `{}`", short_hex(&member.scope_revision));
     let _ = writeln!(body, "- Approval: {:?}", member.approval.kind);
     let _ = writeln!(body, "- Resolution: {resolution}");
+    // A wedge is terminal, so it is stated rather than left to be inferred from
+    // a member that simply stops changing.
+    if let Some(wedge) = &member.wedge {
+        let _ = writeln!(
+            body,
+            "- **Wedged** at {:?}: the stage's retry budget is spent, so this member has stopped \
+             dispatching and the bloom cannot resolve. Superseding the bloom is the escape. \
+             Failing evidence: `{}`.",
+            wedge.stage,
+            short_hex(&wedge.evidence)
+        );
+    }
     body
 }
 

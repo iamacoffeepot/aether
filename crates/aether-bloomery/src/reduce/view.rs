@@ -18,9 +18,10 @@ use crate::values::Question;
 /// and successor), and each sealed [`crate::Membership`] a [`MemberView`]
 /// carrying the member's scope revision, approval evidence, — matched by
 /// workpiece from the record's accumulated claims — its resolution claim once
-/// integrated (`None` until then), and — matched by workpiece from the
+/// integrated (`None` until then), — matched by workpiece from the
 /// [`Question`] each open hold resolves to — its pending-decision hold (`None`
-/// when the member is not held).
+/// when the member is not held), and its wedge if it has stopped dispatching
+/// for good (`None` while it is still working).
 ///
 /// `resolve_question` resolves an open hold's question digest to its
 /// [`Question`] bytes, the same injected read-only resolver
@@ -71,6 +72,7 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                         .iter()
                         .find(|(workpiece, _)| *workpiece == member.workpiece)
                         .map(|(_, view)| view.clone()),
+                    wedge: record.wedged.get(&member.workpiece).copied(),
                 })
                 .collect();
             BloomView { id: record.spec.id(), status: record.status, superseded_by: record.superseded_by, members }

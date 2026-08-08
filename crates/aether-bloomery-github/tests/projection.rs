@@ -27,6 +27,7 @@ fn view(resolve_second: bool) -> ViewDocument {
         approval: approval(digest(10)),
         resolution: None,
         pending_decision: None,
+        wedge: None,
     };
     let mut member_b = MemberView {
         workpiece: WorkpieceId("coolant-loop".into()),
@@ -34,6 +35,7 @@ fn view(resolve_second: bool) -> ViewDocument {
         approval: approval(digest(20)),
         resolution: None,
         pending_decision: None,
+        wedge: None,
     };
     if resolve_second {
         member_b.resolution = Some(ResolutionClaim {

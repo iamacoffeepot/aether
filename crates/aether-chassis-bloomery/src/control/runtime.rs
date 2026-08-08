@@ -753,6 +753,7 @@ fn project(
             | Decision::RecordIntegration { .. }
             | Decision::RecordAggregateRoll { .. }
             | Decision::RecordReviewPark { .. }
+            | Decision::RecordWedge { .. }
             | Decision::RevokeResolution { .. }
             | Decision::AdvanceMainline { .. } => {}
         }
