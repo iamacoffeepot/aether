@@ -42,6 +42,8 @@ pub use seal::is_active_unlanded;
 pub use snapshot::{BloomRecord, BloomStatus, FoldedIntegration, Snapshot, StageProgress};
 pub use view::view_of;
 
+use crate::values::ResolvedConfigs;
+
 use attempt::reduce_attempt_completed;
 use evidence::{reduce_admit_evidence, reduce_adopt_answer};
 use integrate::{reduce_integrate, reduce_resolve};
@@ -51,14 +53,26 @@ use seal::{reduce_seal, reduce_supersede};
 
 /// Reduce one event against a snapshot into decisions. Pure: reads the
 /// snapshot, returns decisions, mutates nothing (ADR-0149 §The control core).
+///
+/// `configs` is the sealed configuration content the caller resolved before
+/// reducing (ADR-0174). The reducer seals a registry of addresses on its own but
+/// cannot fetch what one names, so a configuration it must *read* arrives as an
+/// argument — see [`ResolvedConfigs`]. A caller that supplies less than the event
+/// needs gets a refusal naming the kind, never a silent fall-through to a
+/// default, so an under-filled set is a loud caller bug rather than a bloom
+/// quietly running an unattested configuration.
+///
+/// Only [`reduce`] takes it, not [`Snapshot::apply`]: the fold evolves the
+/// snapshot from decisions the reducer already made, and nothing in it reads
+/// configuration.
 #[must_use]
-pub fn reduce(snapshot: &Snapshot, event: &Event) -> Decisions {
+pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> Decisions {
     if snapshot.seen.contains(&event.idempotency_key) {
         return Decisions::rejected(Outcome::Duplicate);
     }
     match &event.fact {
-        Fact::Seal(spec) => reduce_seal(snapshot, spec),
-        Fact::Supersede { predecessor, successor } => reduce_supersede(snapshot, predecessor, successor),
+        Fact::Seal(spec) => reduce_seal(snapshot, spec, configs),
+        Fact::Supersede { predecessor, successor } => reduce_supersede(snapshot, predecessor, successor, configs),
         Fact::Integrate { bloom, claim } => reduce_integrate(snapshot, bloom, claim),
         Fact::AdmitEvidence { bloom, evidence } => reduce_admit_evidence(snapshot, bloom, evidence),
         Fact::AdoptAnswer { bloom, answer } => reduce_adopt_answer(snapshot, bloom, answer),

@@ -259,7 +259,7 @@ mod tests {
 
     use aether_bloomery::{
         BloomDraft, BloomId, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey,
-        LandingReceipt, Membership, Snapshot, StageCatalog, Topic, WorkpieceId, reduce, view_of,
+        LandingReceipt, Membership, ResolvedConfigs, Snapshot, StageCatalog, Topic, WorkpieceId, reduce, view_of,
     };
     use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
     use aether_data::wire::{from_bytes, to_vec};
@@ -328,7 +328,7 @@ mod tests {
         let event = Event { idempotency_key: IdempotencyKey("seal-1".into()), fact: Fact::Seal(spec) };
 
         let mut snapshot = Snapshot::new(base);
-        snapshot = snapshot.apply(&event, &reduce(&snapshot, &event));
+        snapshot = snapshot.apply(&event, &reduce(&snapshot, &event, &ResolvedConfigs::default()));
         to_vec(&view_of(&snapshot, |_| None)).unwrap()
     }
 

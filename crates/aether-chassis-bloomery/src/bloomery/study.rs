@@ -177,7 +177,7 @@ pub fn admit_study(
         return Ok(StudyAdmitDecision::Refused(StudyRefusal::UnknownNonce(upload.nonce.clone())));
     };
     let (Some(bloom), Some(displayed)) =
-        (digest_from_slice(&stored.bloom).map(BloomId), digest_from_slice(&stored.displayed_digest))
+        (Digest::from_slice(&stored.bloom).map(BloomId), Digest::from_slice(&stored.displayed_digest))
     else {
         return Ok(StudyAdmitDecision::Refused(StudyRefusal::CorruptOrder(upload.nonce.clone())));
     };
@@ -236,12 +236,6 @@ pub fn rebuild_study_index(
         rebuilt += 1;
     }
     Ok(rebuilt)
-}
-
-/// Reconstruct a [`Digest`] from stored bytes — `None` when the column is not
-/// exactly 32 bytes (a corrupt row, never a well-formed one).
-fn digest_from_slice(bytes: &[u8]) -> Option<Digest> {
-    <[u8; 32]>::try_from(bytes).ok().map(Digest::from_bytes)
 }
 
 /// Render a digest as the lowercase-hex parent string the artifact store records

@@ -1,10 +1,13 @@
 //! Why the reducer refused — one error enum per admission door, each naming
 //! the violated rule rather than a bare failure.
 
+use alloc::string::String;
+
 use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
+use crate::values::Unproducible;
 
 /// Why an aggregate-review completion was refused (ADR-0153).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -63,6 +66,22 @@ pub enum SealError {
     UnknownStageCatalog {
         /// The unrecognized catalog digest the spec sealed.
         found: Digest,
+    },
+    /// The sealing spec's configuration registry names content the reducer could
+    /// not be given (ADR-0174). Either the caller did not fetch it, or what it
+    /// fetched is filed under a different kind than the registry key claims.
+    ///
+    /// Refused at the door rather than at the point of use, because a sealed
+    /// address is immutable: content that cannot be produced now will not appear
+    /// later, so admitting the bloom would only move the failure to a dispatch
+    /// that parks — after the bloom has claimed its members.
+    UnproducibleConfig {
+        /// The kind the registry key named.
+        kind: String,
+        /// The address sealed for it.
+        address: Digest,
+        /// Whether the content is absent, or present under another kind.
+        reason: Unproducible,
     },
 }
 

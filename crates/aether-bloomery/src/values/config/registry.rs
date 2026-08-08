@@ -1,12 +1,13 @@
-//! The sealed configuration registry (ADR-0174).
+//! The sealed half of the configuration registry: addressing, the per-kind
+//! table, and the scope chain a lookup walks (ADR-0174).
 //!
-//! A bloom's configuration is a table of kind name to [`Digest`] the host
-//! resolves *by type* at the point of use, rather than a field per
-//! configuration on the sealed value types. One entry per kind is what makes
-//! the lookup typed: [`ConfigRegistry::address`] takes no key argument because
-//! the kind's [`Kind::NAME`](aether_data::Kind::NAME) is the key. A caller
-//! wanting two configurations of the same shape declares a newtype kind for the
-//! second, so the registry never needs a name-plus-type composite key.
+//! A bloom's configuration is a table of kind name to [`Digest`] resolved *by
+//! type* at the point of use, rather than a field per configuration on the
+//! sealed value types. One entry per kind is what makes the lookup typed:
+//! [`ConfigRegistry::address`] takes no key argument because the kind's
+//! [`Kind::NAME`](aether_data::Kind::NAME) is the key. A caller wanting two
+//! configurations of the same shape declares a newtype kind for the second, so
+//! the registry never needs a name-plus-type composite key.
 //!
 //! The key is the kind *name* rather than its [`KindId`](aether_data::KindId),
 //! and the reason is durability. A `KindId` folds the kind's schema into its
@@ -17,11 +18,13 @@
 //! has to do. The name also makes sealed bytes legible to anyone reading them
 //! without the binaries that produced them.
 //!
-//! Nothing here resolves content. The reducer is `no_std` and has no descriptor
-//! inventory on wasm, so it could not decode a configuration even in principle;
-//! it seals the registry, orders it canonically, and hands it on, exactly as it
-//! treats every other digest it carries. The host fetches the bytes an address
-//! names and decodes them at the point of use.
+//! Nothing here resolves content — an address is fetched through
+//! [`ResolvedConfigs`](super::ResolvedConfigs), which takes the bytes as an
+//! argument rather than going to find them. The split is about *fetching*, not
+//! decoding: decoding a config kind is a plain
+//! [`from_bytes`](aether_data::wire::from_bytes) against a type this crate
+//! already defines, which `no_std` does perfectly well. What this crate cannot
+//! do is reach a store.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;

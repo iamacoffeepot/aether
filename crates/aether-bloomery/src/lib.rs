@@ -66,9 +66,10 @@ pub mod values;
 
 pub use control::{
     Admit, AdmitResult, AggregateReviewPayload, CONTROL_CORE_NAMESPACE, ClaimResult, ClaimSeal, Commit, CommitResult,
-    CompleteRelease, CompleteTransfer, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, IntegratePayload,
-    JournalRecord, LandPayload, MembershipMutation, OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal,
-    ReplayJournal, ReplayJournalResult, ReviewPass, Topic, TransferSeal,
+    CompleteRelease, CompleteTransfer, ConfigRecord, DispatchPayload, EnumerateClaims, EnumerateClaimsResult,
+    IntegratePayload, JournalRecord, LandPayload, LoadConfigs, LoadConfigsResult, MembershipMutation, OutboxPayload,
+    Query, QueryResult, RedispatchPayload, ReleaseSeal, ReplayJournal, ReplayJournalResult, ReviewPass, Topic,
+    TransferSeal,
 };
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};
@@ -91,8 +92,9 @@ pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
 pub use study_report::{BloomGrade, StudyReport, grade};
 pub use values::{
     AgentProfile, AgentSelection, Artifact, Attempt, BloomDraft, BloomSpec, Budget, CONSTRUCT_IMPLEMENT_COMMAND,
-    CandidateRef, ConfigKind, ConfigRegistry, ConfigScopes, Evidence, EvidenceKind, Forecast, Harness, LandingReceipt,
-    MemberSubject, Membership, ModelOverride, NetworkProfile, Observation, Provenance, Question, REVIEW_CRITIC_COMMAND,
-    ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedModel, StageBinding, StageCatalog, StageReceipt,
-    Statement, StudyCost, StudyRecord, ToolPolicy, Transformation, Workpiece, config_address, is_model_lane,
+    CandidateRef, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, Evidence, EvidenceKind, Forecast,
+    Harness, LandingReceipt, MemberSubject, Membership, ModelOverride, NetworkProfile, Observation, Provenance,
+    Question, REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel,
+    StageBinding, StageCatalog, StageReceipt, Statement, StudyCost, StudyRecord, ToolPolicy, Transformation,
+    Unproducible, Workpiece, config_address, decode_config, is_model_lane,
 };

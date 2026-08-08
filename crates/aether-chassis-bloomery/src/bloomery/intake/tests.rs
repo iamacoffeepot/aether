@@ -8,7 +8,7 @@ use std::sync::Arc;
 use aether_bloomery::{
     BloomDraft, BloomId, BloomRecord, BloomStatus, Budget, ConfigRegistry, Decision, Digest, Event, Evidence,
     EvidenceKind, EvidenceRef, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce,
-    Outcome, Snapshot, StageCatalog, StageId, Transformation, WorkHandle, WorkpieceId, reduce,
+    Outcome, ResolvedConfigs, Snapshot, StageCatalog, StageId, Transformation, WorkHandle, WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -336,7 +336,7 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
     assert_eq!(sink.0.len(), 1);
 
     // The reducer oracle: the admitted event integrates its member.
-    match reduce(&snapshot, &sink.0[0].event).outcome {
+    match reduce(&snapshot, &sink.0[0].event, &ResolvedConfigs::default()).outcome {
         Outcome::Integrated { bloom: integrated, workpiece: member } => {
             assert_eq!(integrated, bloom);
             assert_eq!(member, workpiece);
@@ -439,7 +439,7 @@ fn sealed_via_reducer(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snaps
     let bloom = spec.id();
     let snapshot = Snapshot::new(Digest::default());
     let seal = Event { idempotency_key: IdempotencyKey("seal".to_owned()), fact: Fact::Seal(spec) };
-    let decisions = reduce(&snapshot, &seal);
+    let decisions = reduce(&snapshot, &seal, &ResolvedConfigs::default());
     let snapshot = snapshot.apply(&seal, &decisions);
     (snapshot, bloom)
 }
@@ -486,7 +486,7 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
     assert!(*passed, "a VerificationPassed verdict passes the gate");
 
     // Fold it through the reducer: the member advances to Verify and dispatches it.
-    let decisions = reduce(&snapshot, &admission.event);
+    let decisions = reduce(&snapshot, &admission.event, &ResolvedConfigs::default());
     assert!(matches!(
         decisions.outcome,
         Outcome::AttemptAdvanced { from: StageId::Construct, to: StageId::Verify, .. }

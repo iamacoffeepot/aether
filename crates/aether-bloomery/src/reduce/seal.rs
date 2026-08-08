@@ -3,6 +3,7 @@
 //! (ADR-0149 §The bloom). Both run the same per-member admission.
 
 use alloc::collections::BTreeSet;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::{
@@ -10,7 +11,9 @@ use super::{
 };
 use crate::digest::Digest;
 use crate::ids::BloomId;
-use crate::values::{BloomSpec, ConfigRegistry, EvidenceKind, Membership, StageCatalog, Transformation};
+use crate::values::{
+    BloomSpec, ConfigRegistry, EvidenceKind, Membership, ResolvedConfigs, StageCatalog, Transformation,
+};
 
 /// Build the seal-time entry-stage dispatch effects for one member: seed its
 /// cursor at the entry stage (attempt 1) and dispatch the first attempt against
@@ -48,7 +51,7 @@ fn entry_dispatch_effects(
     ]
 }
 
-pub(super) fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec) -> Decisions {
+pub(super) fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec, configs: &ResolvedConfigs) -> Decisions {
     let bloom = spec.id();
     // A known id would resurrect and overwrite the existing record — a sealed
     // spec never amends (ADR-0149 §The bloom).
@@ -65,6 +68,12 @@ pub(super) fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec) -> Decisions {
     // against the exact catalog it promised (ADR-0149 §The line), so an unknown
     // catalog (including the zero default) is inadmissible.
     if let Err(error) = validate_stage_catalog(spec) {
+        return Decisions::rejected(Outcome::SealRejected(error));
+    }
+    // Every sealed configuration address must be one the reducer was given
+    // content for (ADR-0174) — refused at the door rather than at the dispatch
+    // that would park on it.
+    if let Err(error) = validate_configs(spec, configs) {
         return Decisions::rejected(Outcome::SealRejected(error));
     }
     // All-or-nothing admission: any member already in a foreign active bloom
@@ -135,6 +144,27 @@ fn validate_stage_catalog(spec: &BloomSpec) -> Result<(), SealError> {
     Ok(())
 }
 
+/// The seal-time configuration admission (ADR-0174): every address the spec's
+/// registries seal — bloom-wide and per member — must be one the caller could
+/// produce content for.
+///
+/// Checked at the door because a sealed address is immutable. Content that
+/// cannot be produced now will not appear later, so admitting the bloom would
+/// only move the failure to a dispatch that parks, after the bloom has claimed
+/// its members and blocked the mainline. Refusing here costs the operator one
+/// legible rejection instead.
+///
+/// Both admission doors run it, so a successor promises configuration the
+/// reducer can read exactly as a fresh seal does.
+fn validate_configs(spec: &BloomSpec, configs: &ResolvedConfigs) -> Result<(), SealError> {
+    for registry in spec.config_registries() {
+        if let Some((kind, address, reason)) = configs.unproducible_in(registry).next() {
+            return Err(SealError::UnproducibleConfig { kind: String::from(kind), address, reason });
+        }
+    }
+    Ok(())
+}
+
 /// The first member already held by an active bloom other than `exempt`, if
 /// any. `exempt` names a predecessor whose holds are being released in the same
 /// decision set (supersession) and so are not conflicts.
@@ -162,7 +192,12 @@ fn active_unlanded_bloom(snapshot: &Snapshot) -> Option<BloomId> {
     snapshot.blooms.iter().find(|(_, record)| is_active_unlanded(record.status)).map(|(id, _)| *id)
 }
 
-pub(super) fn reduce_supersede(snapshot: &Snapshot, predecessor: &BloomId, successor: &BloomSpec) -> Decisions {
+pub(super) fn reduce_supersede(
+    snapshot: &Snapshot,
+    predecessor: &BloomId,
+    successor: &BloomSpec,
+    configs: &ResolvedConfigs,
+) -> Decisions {
     let Some(record) = snapshot.blooms.get(predecessor) else {
         return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::UnknownOrInactivePredecessor));
     };
@@ -193,6 +228,11 @@ pub(super) fn reduce_supersede(snapshot: &Snapshot, predecessor: &BloomId, succe
     // A superseding spec is held to seal's catalog admission too — it must
     // promise the same known line (ADR-0149 §The line).
     if let Err(error) = validate_stage_catalog(successor) {
+        return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
+    }
+    // And to seal's configuration admission, so a successor cannot introduce a
+    // registry entry the reducer has no content for.
+    if let Err(error) = validate_configs(successor, configs) {
         return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
     }
     // Supersession is a second door into `active`, so it runs the same

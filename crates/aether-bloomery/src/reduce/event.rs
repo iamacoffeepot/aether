@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
-use crate::values::{BloomSpec, CandidateRef, Evidence, ResolutionClaim, Statement};
+use crate::values::{BloomSpec, CandidateRef, ConfigRegistry, Evidence, ResolutionClaim, Statement};
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -164,4 +164,21 @@ pub enum Fact {
         /// is parsed.
         implicated: Vec<WorkpieceId>,
     },
+}
+
+impl Fact {
+    /// Every configuration registry this fact seals — the bloom-wide one and one
+    /// per member, for the two facts that seal a spec, and nothing for the rest.
+    ///
+    /// What a caller consults to know which configuration content the reducer
+    /// will need before it can decide this fact. Only the admission doors seal a
+    /// registry; every other fact acts on a bloom already admitted, whose
+    /// configuration was produced when it sealed.
+    pub fn config_registries(&self) -> impl Iterator<Item = &ConfigRegistry> {
+        let spec = match self {
+            Self::Seal(spec) | Self::Supersede { successor: spec, .. } => Some(spec),
+            _ => None,
+        };
+        spec.into_iter().flat_map(BloomSpec::config_registries)
+    }
 }

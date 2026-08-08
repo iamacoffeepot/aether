@@ -505,6 +505,49 @@ pub enum ReplayJournalResult {
     },
 }
 
+/// Read every stored configuration — the content behind the addresses sealed
+/// registries name (ADR-0174). The control actor sends this at boot before it
+/// replays, and again when an admit names an address it does not hold.
+///
+/// Whole-table rather than a requested address list, for the same reason
+/// [`ReplayJournal`] is: the set is small (one row per distinct authored value),
+/// and a request carrying addresses would have to be assembled from the very
+/// registries the caller is trying to resolve. A miss is driven by an operator
+/// authoring a new configuration, so re-reading on one is bounded by how fast a
+/// person can write them.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.store.load_configs")]
+pub struct LoadConfigs;
+
+/// One stored configuration, in the [`LoadConfigsResult`] stream.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ConfigRecord {
+    /// The content address (the digest's raw bytes) a registry entry names it by.
+    #[serde(with = "aether_data::bytes")]
+    pub digest: Vec<u8>,
+    /// The kind name the bytes decode as, which is also the registry key.
+    pub kind: String,
+    /// The configuration's canonical `aether_data::wire` bytes.
+    #[serde(with = "aether_data::bytes")]
+    pub bytes: Vec<u8>,
+}
+
+/// Reply to [`LoadConfigs`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.store.load_configs_result")]
+pub enum LoadConfigsResult {
+    /// Every stored configuration.
+    Ok {
+        /// The records, in address order.
+        records: Vec<ConfigRecord>,
+    },
+    /// The read failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
 /// Admit one event to the control loop (ADR-0149 §The control core). The
 /// `aether.bloomery.admit` ingress carries an [`Event`](crate::reduce::Event)
 /// as canonical `aether_data::wire` bytes (the opaque-bytes convention the

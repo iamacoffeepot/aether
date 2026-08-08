@@ -1,71 +1,56 @@
-//! Resolving a sealed configuration back to its content (ADR-0174).
+//! Resolving a sealed configuration back to its content out of the store
+//! (ADR-0174).
 //!
-//! The reducer seals a [`ConfigRegistry`](aether_bloomery::ConfigRegistry) of
-//! addresses and resolves nothing; the host walks the scope chain, fetches the
-//! address the innermost scope sealed, and decodes it. This is that walk.
+//! The scope-chain walk and the decode belong to `aether-bloomery` — the reducer
+//! resolves the same way against content handed to it, and one semantic with two
+//! callers is what stops the two sides drifting on what counts as resolvable.
+//! What lives here is the half that crate cannot do: reaching a store for the
+//! bytes an address names.
 //!
-//! The distinction the error type carries is the load-bearing one. A kind *no*
-//! scope sealed is [`None`] — absence is a valid state and the caller takes its
-//! default. A kind some scope *did* seal but whose content cannot be produced is
-//! an error, never a fall-through: defaulting past a sealed entry would run one
-//! configuration while the receipt attests another, which is the divergence the
-//! registry exists to close.
+//! So the error is `aether-bloomery`'s, wrapped with the one failure a store
+//! adds. "The store broke" is a transient the caller retries; every
+//! [`ConfigResolveError`] under it is a permanent statement about the content,
+//! and conflating them would turn a lost connection into a bloom refused for
+//! attesting a configuration that is, in fact, right where it should be.
 
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery::{ConfigKind, ConfigScopes};
-use aether_data::wire::from_bytes;
+use aether_bloomery::{ConfigKind, ConfigResolveError, ConfigScopes, decode_config};
 use serde::de::DeserializeOwned;
 
 use super::StoreBackend;
 
-/// Why a sealed configuration could not be produced.
+/// Why a sealed configuration could not be produced from the store.
 #[derive(Debug)]
-pub enum ConfigResolveError {
-    /// The registry sealed an address with no stored content. Either the
-    /// authoring write never landed or the row was lost — both mean the bloom
-    /// cannot run the configuration it attests.
-    Missing {
-        /// The kind the registry key named.
-        kind: &'static str,
-    },
-    /// The stored row is a different kind than the registry key claims. The
-    /// address is domain-separated by kind name, so reaching this means some
-    /// path wrote a row without computing the address that way.
-    KindMismatch {
-        /// The kind the registry key named.
-        expected: &'static str,
-        /// The kind the stored row declares.
-        stored: String,
-    },
-    /// The stored bytes do not decode as the kind they are filed under.
-    Decode {
-        /// The kind the registry key named.
-        kind: &'static str,
-    },
-    /// The store itself failed.
+pub enum StoreConfigError {
+    /// The content itself is unproducible — absent, mis-filed, or undecodable.
+    /// Permanent: the address is immutable, so a retry resolves identically.
+    Content(ConfigResolveError),
+    /// The store failed. Transient, and the only variant a caller should retry.
     Store(rusqlite::Error),
 }
 
-impl fmt::Display for ConfigResolveError {
+impl fmt::Display for StoreConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Missing { kind } => write!(f, "sealed config `{kind}` has no stored content"),
-            Self::KindMismatch { expected, stored } => {
-                write!(f, "sealed config `{expected}` is stored as `{stored}`")
-            }
-            Self::Decode { kind } => write!(f, "sealed config `{kind}` does not decode as its kind"),
+            Self::Content(error) => error.fmt(f),
             Self::Store(error) => write!(f, "config store failed: {error}"),
         }
     }
 }
 
-impl Error for ConfigResolveError {}
+impl Error for StoreConfigError {}
 
-impl From<rusqlite::Error> for ConfigResolveError {
+impl From<rusqlite::Error> for StoreConfigError {
     fn from(error: rusqlite::Error) -> Self {
         Self::Store(error)
+    }
+}
+
+impl From<ConfigResolveError> for StoreConfigError {
+    fn from(error: ConfigResolveError) -> Self {
+        Self::Content(error)
     }
 }
 
@@ -74,24 +59,21 @@ impl From<rusqlite::Error> for ConfigResolveError {
 ///
 /// # Errors
 ///
-/// Returns [`ConfigResolveError`] when a scope *did* seal a `K` whose content
+/// [`StoreConfigError::Content`] when a scope *did* seal a `K` whose content
 /// cannot be produced — a missing row, a row filed under another kind, or bytes
 /// that do not decode. Each is a refusal rather than a fall-through to the
-/// caller's default.
+/// caller's default. [`StoreConfigError::Store`] when the store itself failed,
+/// which says nothing about the content.
 pub fn resolve_config<K: ConfigKind + DeserializeOwned>(
     store: &mut dyn StoreBackend,
     scopes: ConfigScopes<'_>,
-) -> Result<Option<K>, ConfigResolveError> {
+) -> Result<Option<K>, StoreConfigError> {
     let Some(address) = scopes.address::<K>() else {
         return Ok(None);
     };
-
     let Some((stored_kind, bytes)) = store.lookup_config(address.as_bytes())? else {
-        return Err(ConfigResolveError::Missing { kind: K::NAME });
+        return Err(ConfigResolveError::Missing { kind: K::NAME }.into());
     };
-    if stored_kind != K::NAME {
-        return Err(ConfigResolveError::KindMismatch { expected: K::NAME, stored: stored_kind });
-    }
 
-    from_bytes::<K>(&bytes).map(Some).map_err(|_| ConfigResolveError::Decode { kind: K::NAME })
+    Ok(Some(decode_config::<K>(&stored_kind, &bytes)?))
 }

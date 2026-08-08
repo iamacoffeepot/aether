@@ -9,7 +9,9 @@
 
 mod common;
 
-use aether_bloomery::{Evidence, EvidenceKind, Fact, Question, Snapshot, StageId, WorkpieceId, reduce, view_of};
+use aether_bloomery::{
+    Evidence, EvidenceKind, Fact, Question, ResolvedConfigs, Snapshot, StageId, WorkpieceId, reduce, view_of,
+};
 use common::{digest, draft, event, membership, sealed_and_resolved};
 use proptest::collection::btree_set;
 use proptest::prelude::*;
@@ -29,7 +31,7 @@ fn sealed(members: Vec<aether_bloomery::Membership>) -> Snapshot {
     let spec = draft(0, members).seal();
     let snapshot = Snapshot::new(digest(0));
     let seal = event("seal", Fact::Seal(spec));
-    snapshot.apply(&seal, &reduce(&snapshot, &seal))
+    snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()))
 }
 
 // A parked question on one member of a two-member bloom: `view_of` resolves the
@@ -43,7 +45,7 @@ fn a_held_member_surfaces_its_pending_decision_only_when_resolvable() {
     let bloom = spec.id();
     let mut snapshot = Snapshot::new(digest(0));
     let seal = event("seal", Fact::Seal(spec));
-    snapshot = snapshot.apply(&seal, &reduce(&snapshot, &seal));
+    snapshot = snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()));
 
     let question = Question {
         stage: StageId::Construct,
@@ -56,7 +58,7 @@ fn a_held_member_surfaces_its_pending_decision_only_when_resolvable() {
     let question_digest = question.id();
     let evidence = Evidence { subject: digest(50), kind: EvidenceKind::Question, detail: question_digest };
     let admit = event("park-1", Fact::AdmitEvidence { bloom, evidence });
-    snapshot = snapshot.apply(&admit, &reduce(&snapshot, &admit));
+    snapshot = snapshot.apply(&admit, &reduce(&snapshot, &admit, &ResolvedConfigs::default()));
 
     // With a resolver that returns the question bytes, the held member carries
     // its pending decision, its sibling does not.

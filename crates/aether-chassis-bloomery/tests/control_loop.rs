@@ -11,6 +11,13 @@
 //! drives the admit/query mail and reply outcomes only — never the store
 //! directly — so it exercises the whole control loop: admit → reduce → combined
 //! commit → snapshot apply, and boot replay → rebuild.
+//!
+//! The one exception is `aether.store.record_config`, which the configuration
+//! test below sends deliberately: it is standing in for the api cap, which
+//! authors a configuration straight to the store without the control core
+//! hearing about it (ADR-0174). Reaching the store is the *point* of that test —
+//! it is how the core's resolved set is made stale, which is the condition the
+//! deferred re-read exists to survive.
 
 #![allow(clippy::unwrap_used)]
 // The test addresses the native control cap by its lineage path
@@ -24,9 +31,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    Admit, AdmitResult, BloomDraft, CONTROL_CORE_NAMESPACE, ConfigRegistry, Digest, Event, Evidence, EvidenceKind,
-    Fact, IdempotencyKey, Membership, Outcome, Query, QueryResult, StageCatalog, ViewDocument, WorkpieceId,
+    Admit, AdmitResult, BloomDraft, CONTROL_CORE_NAMESPACE, ConfigKind, ConfigRegistry, Digest, Event, Evidence,
+    EvidenceKind, Fact, IdempotencyKey, Membership, ModelOverride, Outcome, Query, QueryResult, SealError,
+    StageCatalog, Unproducible, ViewDocument, WorkpieceId,
 };
+use aether_chassis_bloomery::store::{RecordConfig, RecordConfigResult};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
@@ -192,11 +201,16 @@ fn control_mailbox() -> MailboxId {
 /// the reducer's admission requires). Distinct `base` seeds yield distinct bloom
 /// ids over the same workpiece.
 fn seal_event(key: &str, base: u8, workpiece: &str) -> Event {
+    seal_event_configured(key, base, workpiece, ConfigRegistry::default())
+}
+
+/// [`seal_event`], with the member sealing `configs` (ADR-0174).
+fn seal_event_configured(key: &str, base: u8, workpiece: &str, configs: ConfigRegistry) -> Event {
     let scope_revision = Digest::from_bytes([1; 32]);
     let mut member = Membership {
         workpiece: WorkpieceId(workpiece.to_owned()),
         scope_revision,
-        configs: ConfigRegistry::default(),
+        configs,
         approval: Evidence {
             subject: Digest::default(),
             kind: EvidenceKind::Approval,
@@ -336,6 +350,70 @@ fn concurrent_same_key_admits_each_get_a_coherent_ok() {
     // second admit opened no second commit and forced no double-apply.
     let document = query_until_blooms(&mut stream, 10, control, 1);
     assert_eq!(document.blooms.len(), 1, "one bloom from the deduped same-key admit pair: {:?}", document.blooms);
+
+    drop(stream);
+    kill9(child);
+}
+
+/// Author a configuration straight to the store, exactly as the api cap's
+/// `POST /configs` does — behind the control core's back.
+fn author_config<K: ConfigKind>(stream: &mut TcpStream, cid: u64, value: &K) -> Digest {
+    let address = value.address();
+    let record =
+        RecordConfig { digest: address.as_bytes().to_vec(), kind: K::NAME.to_owned(), bytes: to_vec(value).unwrap() };
+    let store = mailbox_id_from_path("aether.store");
+    match call::<_, RecordConfigResult>(stream, cid, store, &record) {
+        RecordConfigResult::Ok => address,
+        RecordConfigResult::Err { error } => panic!("config write failed: {error}"),
+    }
+}
+
+// Tripwire: a seal naming a configuration authored *after* the control core
+// booted still admits (ADR-0174). The api cap writes an authored config straight
+// to the store, so the core's resolved set is stale by construction the first
+// time any new configuration is sealed — without the deferred re-read the core
+// would refuse a perfectly good seal, and every operator would have to restart
+// the coordinator between authoring a config and using it.
+//
+// The second half is the other side of the same gate: an address nothing ever
+// authored is refused, and named. A re-read cannot conjure it, so the refusal has
+// to arrive rather than the core re-reading forever.
+#[test]
+fn a_seal_naming_a_configuration_authored_after_boot_still_admits() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let db = db.to_str().unwrap();
+
+    let port = free_port();
+    let child = spawn(port, db);
+    let mut stream = connect(port);
+    handshake(&mut stream);
+    let control = control_mailbox();
+
+    let override_config = ModelOverride::default();
+    let address = author_config(&mut stream, 2, &override_config);
+    let mut configs = ConfigRegistry::default();
+    configs.insert::<ModelOverride>(address);
+
+    let sealed = admit(&mut stream, 3, control, &seal_event_configured("cfg-seal", 0, "wp-a", configs));
+    assert!(
+        matches!(sealed, Outcome::Sealed(_)),
+        "a seal naming a config authored after boot admits on the re-read: {sealed:?}",
+    );
+
+    // An address nothing authored: the re-read runs, finds nothing, and the
+    // reducer's own refusal answers — naming the kind that went missing.
+    let mut dangling = ConfigRegistry::default();
+    dangling.insert::<ModelOverride>(Digest::from_bytes([0xAB; 32]));
+    let refused = admit(&mut stream, 4, control, &seal_event_configured("cfg-dangling", 1, "wp-b", dangling));
+    assert!(
+        matches!(
+            refused,
+            Outcome::SealRejected(SealError::UnproducibleConfig { ref kind, reason: Unproducible::Absent, .. })
+                if kind == ModelOverride::NAME
+        ),
+        "an address nothing authored is refused, naming its kind: {refused:?}",
+    );
 
     drop(stream);
     kill9(child);

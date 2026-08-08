@@ -21,7 +21,8 @@ use aether_actor::runtime;
 // package cycle (the actor lives there; host depends on it). Host imports them
 // inward for its `StoreCapability` handlers (issue #3497).
 use aether_bloomery::{
-    Commit, CommitResult, JournalRecord, MembershipMutation, OutboxPayload, ReplayJournal, ReplayJournalResult,
+    Commit, CommitResult, ConfigRecord, JournalRecord, LoadConfigs, LoadConfigsResult, MembershipMutation,
+    OutboxPayload, ReplayJournal, ReplayJournalResult,
 };
 use std::time::Duration;
 
@@ -218,6 +219,14 @@ pub trait StoreBackend: Send {
     /// must refuse rather than default past — unlike an unsealed kind, which
     /// never reaches this call at all.
     fn lookup_config(&mut self, digest: &[u8]) -> rusqlite::Result<Option<(String, Vec<u8>)>>;
+
+    /// Every stored configuration, in address order — the whole-table read the
+    /// control core fills its resolved set from (ADR-0174).
+    ///
+    /// Whole-table because the reducer needs content for addresses it has not
+    /// seen yet: a registry names them, and the registry is what the read exists
+    /// to let it resolve. The set is one row per distinct authored value.
+    fn load_configs(&mut self) -> rusqlite::Result<Vec<ConfigRecord>>;
 
     /// Record a member's advisory work-order description (#3595), keyed by
     /// (`bloom`, `workpiece`). The coordinator persists it at seal so it survives
@@ -516,6 +525,14 @@ impl StoreBackend for SqliteStore {
             rusqlite::params![digest, kind, bytes],
         )?;
         Ok(())
+    }
+
+    fn load_configs(&mut self) -> rusqlite::Result<Vec<ConfigRecord>> {
+        let mut stmt = self.conn.prepare("SELECT digest, kind, bytes FROM config ORDER BY digest")?;
+        let rows =
+            stmt.query_map([], |row| Ok(ConfigRecord { digest: row.get(0)?, kind: row.get(1)?, bytes: row.get(2)? }))?;
+
+        rows.collect()
     }
 
     fn lookup_config(&mut self, digest: &[u8]) -> rusqlite::Result<Option<(String, Vec<u8>)>> {
@@ -900,6 +917,14 @@ impl NativeActor for StoreCapability {
         match state.backend.ack_outbox(mail.topic.as_deref(), mail.through_sequence) {
             Ok(acked) => AckOutboxResult::Ok { acked },
             Err(error) => AckOutboxResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_load_configs(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: LoadConfigs) -> LoadConfigsResult {
+        match state.backend.load_configs() {
+            Ok(records) => LoadConfigsResult::Ok { records },
+            Err(error) => LoadConfigsResult::Err { error: error.to_string() },
         }
     }
 

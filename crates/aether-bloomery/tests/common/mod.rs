@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use aether_bloomery::{
     BloomDraft, BloomRecord, BloomSpec, BloomStatus, ConfigRegistry, Decisions, Digest, Event, Evidence, EvidenceKind,
-    Fact, IdempotencyKey, Membership, ResolutionClaim, Snapshot, StageCatalog, WorkpieceId, reduce,
+    Fact, IdempotencyKey, Membership, ResolutionClaim, ResolvedConfigs, Snapshot, StageCatalog, WorkpieceId, reduce,
 };
 
 /// A distinct digest named by one seed byte.
@@ -72,7 +72,7 @@ pub fn event(key: &str, fact: Fact) -> Event {
 
 /// Reduce and evolve in one step — the journal-replay unit.
 pub fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
-    let decisions = reduce(snapshot, event);
+    let decisions = reduce(snapshot, event, &ResolvedConfigs::default());
     let next = snapshot.apply(event, &decisions);
     (next, decisions)
 }
@@ -85,7 +85,7 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
     let bloom = spec.id();
     let mut snapshot = Snapshot::new(digest(mainline));
     let seal = event("seal", Fact::Seal(spec.clone()));
-    snapshot = snapshot.apply(&seal, &reduce(&snapshot, &seal));
+    snapshot = snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()));
     let mut seed = 100u8;
     for member in spec.members() {
         let candidate = digest(seed);
@@ -96,7 +96,7 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
             evidence: Evidence { subject: candidate, kind: EvidenceKind::ResolutionClaim, detail: digest(202) },
         };
         let ev = event(&format!("integrate-{seed}"), Fact::Integrate { bloom, claim: member_claim });
-        snapshot = snapshot.apply(&ev, &reduce(&snapshot, &ev));
+        snapshot = snapshot.apply(&ev, &reduce(&snapshot, &ev, &ResolvedConfigs::default()));
         seed = seed.wrapping_add(1);
     }
     // A distinct integrated head digest from the artifact tree (#3615) — this
@@ -105,7 +105,7 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
         "resolve",
         Fact::Resolve { bloom, tree: digest(tree), head: digest(tree.wrapping_add(1)), lineage: vec![] },
     );
-    snapshot = snapshot.apply(&resolve, &reduce(&snapshot, &resolve));
+    snapshot = snapshot.apply(&resolve, &reduce(&snapshot, &resolve, &ResolvedConfigs::default()));
     // The fold dispatches the whole-bloom aggregate review (ADR-0153); a
     // passing verdict bound to the integrated tree is what resolves the bloom.
     let verdict = event(
@@ -117,7 +117,7 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
             implicated: vec![],
         },
     );
-    snapshot = snapshot.apply(&verdict, &reduce(&snapshot, &verdict));
+    snapshot = snapshot.apply(&verdict, &reduce(&snapshot, &verdict, &ResolvedConfigs::default()));
     (snapshot, spec)
 }
 
