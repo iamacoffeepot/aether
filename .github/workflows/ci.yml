@@ -68,9 +68,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        with:
-          components: rustfmt
+      # The toolchain comes from `rust-toolchain.toml`, never from a channel
+      # named here. A Bloomery lane's `verify.check` runs the pinned toolchain
+      # (rustup resolves the file), so a gate on `stable` judges the candidate
+      # with a different compiler than the one that verified it — and the two
+      # drift apart on their own every six weeks. `rustup toolchain install`
+      # with no argument reads the file, including its `components` and
+      # `targets`, so each job's needs are declared once, in the repo.
+      - run: rustup toolchain install
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -88,10 +93,7 @@ jobs:
       - uses: runs-on/action@4e5f72399b6b17f2e79c511c1b38a315a64d22dc # v2
         if: github.event_name == 'pull_request'
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        with:
-          components: clippy
-          targets: wasm32-unknown-unknown
+      - run: rustup toolchain install
       - name: Install ALSA dev headers (cpal Linux backend)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -106,9 +108,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        with:
-          targets: wasm32-unknown-unknown
+      - run: rustup toolchain install
       - name: Install ALSA dev headers (cpal Linux backend)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -217,9 +217,7 @@ jobs:
           large-packages: 'false'
           docker-images: 'false'
           swap-storage: 'false'
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        with:
-          targets: wasm32-unknown-unknown
+      - run: rustup toolchain install
       - name: Install Linux deps (ALSA for cpal, Mesa lavapipe for wgpu, mold linker)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
           mesa-vulkan-drivers mold
@@ -431,7 +429,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo install cargo-machete --locked
       - run: cargo machete crates
@@ -449,7 +447,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - run: rustup toolchain install
       - name: Resolve the dependency graph against the committed lock
         run: |
           if ! cargo metadata --format-version 1 --locked > /dev/null; then

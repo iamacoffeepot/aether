@@ -74,7 +74,7 @@ jobs:
           # Invariant 1: the checkout target is the order's subject, NOT the
           # pinned ref this workflow was dispatched at — the tree the work runs on.
           ref: ${{ inputs.subject }}
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - run: rustup toolchain install
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
