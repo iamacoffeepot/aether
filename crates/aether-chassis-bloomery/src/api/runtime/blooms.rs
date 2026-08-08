@@ -35,17 +35,18 @@ impl ApiCapabilityState {
             Ok(found) => found,
             Err(response) => return Routed::Reply(response),
         };
-        let successor = draft.seal();
-        // The successor is a new bloom id, and descriptions are keyed by
-        // (bloom, workpiece) — so the predecessor's rows resolve for none of its
-        // members, carried ones included. Persist the successor's own before the
-        // admit, exactly as the seal route does (#4631).
-        Self::persist_descriptions(ctx, &successor, &request.descriptions);
-
-        let key = request.idempotency_key.unwrap_or_else(|| hex_encode(successor.id().0.as_bytes()));
-        self.admit(
+        // Run the same approve gate the seal route runs, then admit through the
+        // supersede door (#4638). Sealing the draft directly here could never
+        // work: a proposal's `approval` is a placeholder the gate is expected to
+        // overwrite, so an ungated seal admits a member the reducer refuses as
+        // unapproved — which it did, for every draft an operator could build.
+        self.gate_and_admit(
             ctx,
-            &Event { idempotency_key: IdempotencyKey(key), fact: Fact::Supersede { predecessor, successor } },
+            draft,
+            Some(predecessor),
+            &request.projections,
+            request.descriptions,
+            request.idempotency_key,
         )
     }
 

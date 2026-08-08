@@ -14,7 +14,9 @@ use std::collections::{BTreeMap, HashMap};
 use serde::de::DeserializeOwned;
 
 use aether_actor::Manual;
-use aether_bloomery::{Admit, Digest, Event, Fact, IdempotencyKey, Membership, Statement};
+use aether_bloomery::{
+    Admit, BloomDraft, BloomId, BloomSpec, Digest, Event, Fact, IdempotencyKey, Membership, Statement,
+};
 use aether_data::wire::to_vec;
 use aether_http::HttpServerResponse;
 use aether_substrate::actor::native::NativeCtx;
@@ -30,6 +32,17 @@ use crate::bloomery::{AdmissionRequest, Decision, Gate, precheck_statement, veri
 use crate::control::ControlCore;
 use crate::signing::{SigningCapability, Verify, VerifyResult};
 use crate::store::{RecordDispatchDescription, StoreCapability};
+
+/// Which door a completed seal admits through (#4638): a first seal, or a
+/// supersession of `predecessor`. Both carry the identical [`BloomSpec`] — the
+/// gate, the descriptions, and the deferred-verify path are the same for each,
+/// so the door is the only thing that varies.
+fn admission_fact(predecessor: Option<BloomId>, spec: BloomSpec) -> Fact {
+    match predecessor {
+        None => Fact::Seal(spec),
+        Some(predecessor) => Fact::Supersede { predecessor, successor: spec },
+    }
+}
 
 impl ApiCapabilityState {
     /// `POST /drafts/{id}/seal` — run the pre-seal approve gate over every
@@ -66,6 +79,33 @@ impl ApiCapabilityState {
             Ok(request) => request,
             Err(response) => return Routed::Reply(response),
         };
+
+        self.gate_and_admit(ctx, draft, None, &request.projections, request.descriptions, request.idempotency_key)
+    }
+
+    /// The gate-then-admit core both doors share (#4638): resolve every
+    /// membership through [`Gate::evaluate`], then seal — synchronously when
+    /// every member resolves `auto`, or deferred behind one `Verify` per
+    /// above-`auto` member.
+    ///
+    /// `predecessor` selects the door. `None` admits [`Fact::Seal`]; `Some(id)`
+    /// admits [`Fact::Supersede`] against that predecessor. A supersession is a
+    /// second door into `active` claiming a fresh membership set, so it faces the
+    /// same tier evaluation a first seal does — and, just as importantly, takes
+    /// its approval from the gate rather than from the draft. A draft's own
+    /// `approval` is a placeholder on both paths (the operator cannot compute
+    /// [`Membership::subject`](aether_bloomery::Membership::subject)), so a route
+    /// that sealed a draft ungated could never admit at all.
+    #[allow(clippy::too_many_arguments, reason = "one request's parts, threaded from two differently-shaped bodies")]
+    pub(super) fn gate_and_admit(
+        &self,
+        ctx: &NativeCtx<'_, Manual>,
+        draft: BloomDraft,
+        predecessor: Option<BloomId>,
+        projections: &[MemberProjection],
+        descriptions: BTreeMap<String, String>,
+        idempotency_key: Option<String>,
+    ) -> Routed {
         // Cap the seal's membership before any gate work or signing dispatch: each
         // above-auto member fans out one `Verify` and one held `SealVerify`
         // correlation, so an oversized draft would amplify one request into an
@@ -85,7 +125,7 @@ impl ApiCapabilityState {
         // Pass 1: resolve every membership synchronously (fail-closed 422 on any
         // shortfall, before any signing dispatch).
         let (sealed_proposals, pending_verifications) =
-            match resolve_seal_memberships(&gate, &draft.proposals, &request.projections) {
+            match resolve_seal_memberships(&gate, &draft.proposals, projections) {
                 Ok(resolved) => resolved,
                 Err(response) => return Routed::Reply(response),
             };
@@ -102,9 +142,10 @@ impl ApiCapabilityState {
             // cap is mail-only, so it rides a store write rather than the sealed spec.
             // Best-effort and fire-and-forget: a description write never gates the
             // seal, and a member with none simply dispatches subject-only.
-            Self::persist_descriptions(ctx, &spec, &request.descriptions);
-            let key = request.idempotency_key.unwrap_or_else(|| hex_encode(spec.id().0.as_bytes()));
-            return self.admit(ctx, &Event { idempotency_key: IdempotencyKey(key), fact: Fact::Seal(spec) });
+            Self::persist_descriptions(ctx, &spec, &descriptions);
+            let key = idempotency_key.unwrap_or_else(|| hex_encode(spec.id().0.as_bytes()));
+            return self
+                .admit(ctx, &Event { idempotency_key: IdempotencyKey(key), fact: admission_fact(predecessor, spec) });
         }
         // Deferred path only: cap the outstanding `seals` map before dispatching any
         // `Verify`, so a flood of above-auto seals cannot grow the in-flight seal /
@@ -136,8 +177,9 @@ impl ApiCapabilityState {
         }
         Routed::DeferredSeal(Box::new(PendingSealSetup {
             gated,
-            descriptions: request.descriptions,
-            idempotency_key: request.idempotency_key,
+            predecessor,
+            descriptions,
+            idempotency_key,
             verifications,
         }))
     }
@@ -154,7 +196,7 @@ impl ApiCapabilityState {
     /// and so needs its own rows (#4631).
     pub(super) fn persist_descriptions(
         ctx: &NativeCtx<'_, Manual>,
-        spec: &aether_bloomery::BloomSpec,
+        spec: &BloomSpec,
         descriptions: &BTreeMap<String, String>,
     ) {
         let bloom = spec.id().0.as_bytes().to_vec();
@@ -199,12 +241,12 @@ impl ApiCapabilityState {
                 }
                 // Last verification: seal the fully-approved draft and admit,
                 // deferring on the reducer reply exactly as the synchronous path.
-                let PendingSeal { inbound, gated, descriptions, idempotency_key, .. } =
+                let PendingSeal { inbound, predecessor, gated, descriptions, idempotency_key, .. } =
                     self.seals.remove(&seal).expect("seal present; just mutated it");
                 let spec = gated.seal();
                 Self::persist_descriptions(ctx, &spec, &descriptions);
                 let key = idempotency_key.unwrap_or_else(|| hex_encode(spec.id().0.as_bytes()));
-                match to_vec(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::Seal(spec) }) {
+                match to_vec(&Event { idempotency_key: IdempotencyKey(key), fact: admission_fact(predecessor, spec) }) {
                     Ok(bytes) => {
                         let correlation = self.send_tracked(ctx.actor::<ControlCore>(), &Admit { event: bytes });
                         self.pending.insert(correlation, inbound);
@@ -339,7 +381,34 @@ fn parse_optional_body<T: DeserializeOwned + Default>(body: &[u8]) -> Result<T, 
 
 #[cfg(test)]
 mod tests {
-    use super::{SealRequest, parse_optional_body};
+    use aether_bloomery::{BloomDraft, BloomId, Digest, Fact};
+
+    use super::{SealRequest, admission_fact, parse_optional_body};
+
+    #[test]
+    fn no_predecessor_admits_through_the_seal_door() {
+        // Tripwire on the door selection (#4638). Both doors carry an identical
+        // spec through an identical gate, so nothing downstream would notice a
+        // swap — but a first seal admitted as a supersession names a predecessor
+        // that does not exist, and a supersession admitted as a seal is refused
+        // for the very active bloom it was meant to replace.
+        let spec = BloomDraft::default().seal();
+
+        assert!(matches!(admission_fact(None, spec), Fact::Seal(_)), "an unset predecessor is a first seal");
+    }
+
+    #[test]
+    fn a_predecessor_admits_through_the_supersede_door() {
+        let predecessor = BloomId(Digest::from_bytes([3; 32]));
+        let spec = BloomDraft::default().seal();
+
+        match admission_fact(Some(predecessor), spec) {
+            Fact::Supersede { predecessor: named, .. } => {
+                assert_eq!(named, predecessor, "the supersession must name the predecessor it was given");
+            }
+            other => panic!("a predecessor must admit a supersession, got {other:?}"),
+        }
+    }
 
     #[test]
     fn optional_body_defaults_when_empty() {
