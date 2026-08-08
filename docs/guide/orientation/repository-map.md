@@ -5,12 +5,14 @@ as their responsibility requires.
 
 ```text
 product actors and reusable UI/gameplay pieces       aether-kit-*
+first-party development control plane                 aether-bloomery*
 native services and their public mail contracts      aether-<capability> crates
 guest actor and behavior authoring SDKs               aether-actor, aether-behavior
 process profiles, binaries, packaging     aether-chassis, aether-chassis-*
 mail runtime, wasm host, scheduler, chassis traits    aether-substrate
 wire/schema/identity/math foundations                 aether-data, aether-codec, aether-math
 operator bridge                                       aether-mcp
+test harnesses and context-budget canary              aether-harness-*, aether-context-canary
 procedural macros                                     *-derive crates
 ```
 
@@ -50,11 +52,15 @@ compares these with native capabilities.
 | `aether-render`, `aether-text`, `aether-audio` | draw queues and the wgpu pipeline, font layout and the glyph atlas, the synth and instrument banks |
 | `aether-fs`, `aether-clipboard`, `aether-window` | namespaced file I/O, text clipboard, multi-window lifecycle/control, and selector-aware window-event subscriptions |
 | `aether-http`, `aether-http-derive`, `aether-tcp`, `aether-rpc` | HTTP egress and ingress with its typed route macros, TCP listeners and sessions, framed process RPC |
+| `aether-process` | deny-by-default, allowlisted one-shot subprocess execution and captured typed replies (Accepted ADR-0157) |
 | `aether-component`, `aether-lifecycle`, `aether-inventory`, `aether-trace` | wasm component hosting and the trampoline, frame stages, live name/kind lookup, causal-tree evidence |
 | `aether-fleet`, `aether-game` | hub fleet supervision and the content-addressed artifact store, the trusted player gateway |
 | `aether-anthropic`, `aether-gemini` | the two content-gen provider components (loaded on demand, not chassis fixtures), each a self-contained guest carrying its own pure DTO/string helpers |
 | `aether-chassis` | shared chassis composition: boot fragments, config registry, CLI roots, autoload, boot-manifest and package-depot formats |
-| `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-harness` | one crate per chassis binary |
+| `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-harness` / `aether-chassis-bloomery` | the five checked-in chassis binaries; Bloomery is the dedicated application profile and can run standalone or through the hub launch path |
+| `aether-harness-substrate` | composable in-process substrate harness with deterministic mail, lifecycle, and settlement control |
+| `aether-harness-substrate-capture` | opt-in render/GPU capture and visual comparison support layered onto the core substrate harness |
+| `aether-harness-fleet` | real-process hub/RPC/headless fleet scenarios over raw framed calls |
 | `aether-harness-perf` | performance trial / compare / plot binaries |
 | `aether-mcp` | MCP tools, JSON/schema adaptation, hub RPC session, live-name caches |
 
@@ -62,6 +68,22 @@ The substrate is mechanism. A capability is policy and I/O represented as an
 actor. A chassis chooses which capabilities and drivers form a process. The hub
 supervises engine processes; it is not the engine runtime folded into a tool
 server.
+
+## Bloomery application crates
+
+| Crate | Owns |
+|---|---|
+| `aether-bloomery` | canonical Bloomery values, immutable work/bloom identities, the pure reducer, and control/source contracts |
+| `aether-bloomery-github` | GitHub source and outward-projection adapter; GitHub objects shadow Bloomery identities rather than defining them |
+| `aether-chassis-bloomery` | the dedicated Bloomery process, native control/store/artifacts/session/source/signing services, REST API, and reactors |
+
+Bloomery is a first-party development control-plane application hosted on
+Aether. Its dedicated binary can run standalone or be uploaded, selected, and
+forked through the hub's binary/fleet path, while `FleetServer` remains owned by
+the hub and generic hub/headless chassis do not become build servers. ADR-0149
+still has **Proposed** status despite the substantial implementation in these
+crates, so code realization must not be mistaken for an accepted architecture
+decision.
 
 ## Product and geometry crates
 
@@ -73,6 +95,7 @@ server.
 | `aether-kit-sim` | reference game-loop pair: the `TurnSim` authority and `PlayerClient` presentation actor |
 | `aether-kit-workbench` | terrain-annotation workbench assembly composing the widget / terrain / console layers |
 | `aether-mesh` | mesh DSL, parsing/serialization, cleanup, polygon tessellation, surface nets |
+| `aether-puppet` | the wasm-hosted mascot actor: mesh-derived pen-plotter line art, authored face controls, rigging, and render mail |
 
 These crates are valuable examples, but “in tree” does not mean “native.” The
 `aether-kit-*` crates are actor code hosted by the same component machinery
@@ -85,12 +108,17 @@ code generation shared across the workspace. When a source annotation appears
 to do more than its local file explains, inspect its derive implementation and
 expanded tests.
 
-`aether-test-fixtures-*` crates are deliberately small wasm/native artifacts
-for integration contracts: typed and reshaped replacement, split capability
-surfaces, defaultless multi-actor modules, and behaviors. They are often a
-better executable example than an old prose snippet.
+Test-only packages are grouped by role rather than maintained here as an
+exhaustive crate ledger. `aether-test-fixtures-*` packages provide deliberately
+small wasm/native artifacts for replacement, capability-split, boot,
+multi-actor, and behavior contracts. `aether-component-ui-tests` is the narrow
+trybuild host for component route compile contracts. Derive crates also keep
+their compile-pass/fail fixtures beside the macro they exercise. These are
+often better executable examples than an old prose snippet.
 
 `xtask` owns repository automation such as distribution and bundle assembly.
+`aether-context-canary` runs the deterministic live MCP bring-up scenario and
+checks tool-response byte budgets.
 The standalone `fuzz/` crate is excluded from the stable workspace because it
 uses the nightly fuzzing toolchain.
 
@@ -113,6 +141,9 @@ uses the nightly fuzzing toolchain.
 | Add a message to a native capability | that capability's own crate, `aether-<cap>/src/kinds.rs` | runtime handler, descriptors, wasm-facing feature gates |
 | Change delivery or settlement | `aether-substrate/src/mail` or `scheduler` | actor contexts, trace/lifecycle tests, ADRs |
 | Add an MCP operation | `aether-mcp/src/tools` and `args.rs` | underlying capability kinds and hub RPC behavior |
+| Change one-shot subprocess execution | `aether-process` | chassis installation, allowlist/confinement config, settlement behavior |
+| Change Bloomery control behavior or projection | `aether-bloomery` or `aether-bloomery-github` | `aether-chassis-bloomery`, Proposed ADR-0149, durable journal/artifact boundaries |
+| Change in-process or real-process test support | `aether-harness-substrate`, `aether-harness-substrate-capture`, or `aether-harness-fleet` | the consuming scenario's chassis and artifact requirements |
 | Add a reusable guest actor | an `aether-kit-*` crate or a new component crate | `aether-actor`, export/cardinality rules |
 | Change a process profile | `aether-chassis-<chassis>` | config layers, linked capabilities, packaging |
 | Change a wire shape | owning kind plus `aether-data`/`aether-codec` | compatibility fixtures and any RPC framing |

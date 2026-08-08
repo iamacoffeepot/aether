@@ -21,6 +21,7 @@ fallback or omits the runtime.
 | `aether.http.server` | inbound HTTP, routes, streams, websocket | `aether-http/src/server` | [HTTP server](../systems/http-server.md) |
 | `aether.tcp` | listener/connect control and session actors | `aether-tcp/src` | [TCP](../systems/tcp.md) |
 | `aether.rpc.server` | framed internal process RPC | `aether-rpc/src` | [RPC](../systems/rpc.md) |
+| `aether.process` | allowlisted one-shot subprocess execution with captured output, timeout, and reap discipline | `aether-process/src` | [Content generation](../systems/content-generation.md) |
 | `aether.inventory` | live names, kinds, handlers, transforms | `aether-inventory/src` | [Inventory](../systems/inventory-and-transforms.md) |
 | `aether.trace` | causal-tree and settlement evidence | `aether-trace/src` | [Tracing](../systems/tracing-and-settlement.md) |
 | `aether.fleet` | hub fleet and artifact control | `aether-fleet/src` | [Engine fleet](../operating/engine-fleet.md) |
@@ -31,6 +32,34 @@ Instanced families such as `aether.tcp.listener`, `aether.tcp.session`,
 `aether.fleet.proxy`, `aether.http.server.shard`, and guest trampolines gain
 lineage suffixes. Resolve them from results/inventory rather than constructing
 ids by hand.
+
+`aether.process` is grounded in Accepted ADR-0157. Its marker and kinds can be
+linked without the native runtime, and a configured runtime is deny-by-default;
+neither source presence nor this index proves that a selected chassis permits a
+requested binary.
+
+## Bloomery-chassis services
+
+These application-specific native services are assembled by
+`aether-chassis-bloomery`; they are not a universal capability manifest. The
+dedicated process can run standalone or be selected and forked through the hub
+binary/fleet path.
+
+| Mailbox | Responsibility | Public source |
+|---|---|---|
+| `aether.bloomery.control` | own the live snapshot, run the pure reducer, and commit admitted decisions through the journal store | `aether-chassis-bloomery/src/control` |
+| `aether.bloomery.api` | expose the localhost REST control ingress over the HTTP-server capability | `aether-chassis-bloomery/src/api` |
+| `aether.store` | persist the SQLite journal, inbox deduplication, transactional outbox, and active memberships | `aether-chassis-bloomery/src/store` |
+| `aether.artifacts` | retain canonical digest-addressed artifact bytes and derivation parents without eviction | `aether-chassis-bloomery/src/artifacts` |
+| `aether.session` | lease and reuse bounded executor sessions while artifact storage retains transcript bytes | `aether-chassis-bloomery/src/session` |
+| `aether.source` | snapshot, checkpoint, enumerate, integrate, and compare-and-swap land through the configured source adapter | `aether-chassis-bloomery/src/source` |
+| `aether.signing` | verify statements against host-local authorized signer keys | `aether-chassis-bloomery/src/signing` |
+
+ADR-0149 remains **Proposed** despite substantial checked-in Bloomery
+implementation. The table routes readers to realized code; it does not promote
+the proposal to an accepted decision. As everywhere in this index, inspect the
+running profile with live inventory before assuming that a mailbox or handler
+is installed.
 
 ## Loadable provider components
 
