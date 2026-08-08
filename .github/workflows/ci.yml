@@ -97,7 +97,11 @@ jobs:
       - name: Install ALSA dev headers (cpal Linux backend)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # --keep-going so one run reports every crate's diagnostics rather than
+      # stopping at the first failing one — the push-early loop pays a full
+      # round trip per hidden error, and the verify lane pays a repair roll
+      # (#4690). It must stay in step with xtask's `verify_command` argv.
+      - run: cargo clippy --workspace --all-targets --keep-going -- -D warnings
 
   # Not the guide: docs.yml builds the mdBook. This job denies the
   # tracked rustdoc lints over the API docs.
@@ -128,7 +132,7 @@ jobs:
             -D rustdoc::redundant_explicit_links
             -D rustdoc::broken_intra_doc_links
             -D rustdoc::private_intra_doc_links
-        run: cargo doc --workspace --no-deps --document-private-items
+        run: cargo doc --workspace --no-deps --document-private-items --keep-going
 
   # Workspace-wide tests run on linux only. Non-chassis crates
   # (aether-kinds, aether-data, aether-actor, aether-actor-derive,

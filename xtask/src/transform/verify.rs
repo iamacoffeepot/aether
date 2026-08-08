@@ -26,6 +26,22 @@ impl VerifyInvocation {
 /// Maps a typed `verify.*` command id to the exact cargo invocation
 /// `ci.yml`'s `fmt` / `clippy` / `docs` jobs run.
 ///
+/// `--document-private-items` is what the `Rustdoc` job passes, and rustdoc
+/// does not descend into a private module without it (#4694). A doc comment
+/// inside `mod inward;` is invisible to a lane that omits the flag and linted
+/// by the gate that does not — the lane's docs check ends up strictly weaker
+/// than the check it exists to predict, which is the direction that costs the
+/// most: a false green integrates, resolves, and opens a landing pull request
+/// before anything disagrees.
+///
+/// `--keep-going` is load-bearing rather than cosmetic (#4690). Without it
+/// cargo stops scheduling at the first failing crate, so one run reports one
+/// crate's diagnostics and hides the rest — and a hidden error costs a whole
+/// repair roll, because a failing terminal `Verify` re-enters `Refine` against
+/// a findings block that could only name what the run got far enough to see. A
+/// candidate broken in three crates can then burn its entire retry budget
+/// while genuinely converging on every roll.
+///
 /// Tripwire: these argv + env pins are CI-parity invariants — a drift
 /// here means this entrypoint no longer proves the laptop/Actions
 /// invocation symmetry ADR-0149 §Execution requires. `verify.test` is
@@ -36,12 +52,12 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
         "verify.fmt" => Some(VerifyInvocation { program: "cargo", args: &["fmt", "--all", "--", "--check"], env: &[] }),
         "verify.clippy" => Some(VerifyInvocation {
             program: "cargo",
-            args: &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
+            args: &["clippy", "--workspace", "--all-targets", "--keep-going", "--", "-D", "warnings"],
             env: &[],
         }),
         "verify.docs" => Some(VerifyInvocation {
             program: "cargo",
-            args: &["doc", "--workspace", "--no-deps"],
+            args: &["doc", "--workspace", "--no-deps", "--document-private-items", "--keep-going"],
             env: &[(
                 "RUSTDOCFLAGS",
                 "-D rustdoc::redundant_explicit_links -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links",
@@ -257,10 +273,10 @@ mod tests {
         assert_eq!(fmt.args, &["fmt", "--all", "--", "--check"]);
 
         let clippy = verify_command("verify.clippy").expect("verify.clippy mapped");
-        assert_eq!(clippy.args, &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]);
+        assert_eq!(clippy.args, &["clippy", "--workspace", "--all-targets", "--keep-going", "--", "-D", "warnings"]);
 
         let docs = verify_command("verify.docs").expect("verify.docs mapped");
-        assert_eq!(docs.args, &["doc", "--workspace", "--no-deps"]);
+        assert_eq!(docs.args, &["doc", "--workspace", "--no-deps", "--document-private-items", "--keep-going"]);
         assert_eq!(docs.env.len(), 1);
         assert_eq!(docs.env[0].0, "RUSTDOCFLAGS");
     }
