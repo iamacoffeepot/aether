@@ -20,10 +20,12 @@
 //!    actor as an [`Admit`] — where the reducer advances the member's cursor and
 //!    (via the dispatch topic) dispatches its next stage.
 //!
-//! Config-gated exactly like the mirror reactor: unconfigured (empty
-//! token/owner/repo) mounts disabled — no shell, no store, no timer — so a
-//! zero-secret dev boot neither errors nor spins; the outbox accumulates until a
-//! token is supplied.
+//! Config-gated: mounts whenever either backend is usable — fully configured
+//! (GitHub + local) mounts a `RoutingExecutor` over both, unconfigured + local
+//! enabled mounts the local backend only (Actions lanes fail fast naming the
+//! missing knobs), and unconfigured + local disabled mounts disabled — no shell,
+//! no store, no timer — so a zero-secret dev boot with no local lane neither
+//! errors nor spins.
 //!
 //! Store ownership: this reactor opens its **own** [`SqliteStore`] on the shared
 //! `AETHER_STORE_PATH` because the intake helpers ([`dispatch_and_record`] /
@@ -974,6 +976,13 @@ fn missing_connection_knobs(config: &GithubMirrorConfig) -> Vec<&'static str> {
         .collect()
 }
 
+/// Whether the reactor would mount disabled for `config` — unconfigured GitHub
+/// *and* local lanes disabled. Pure so the four mount combinations are
+/// unit-testable without a `NativeInitCtx`.
+fn is_disabled_mount(config: &GithubMirrorConfig) -> bool {
+    !missing_connection_knobs(config).is_empty() && !config.local_lane_enabled
+}
+
 #[runtime]
 impl NativeActor for ExecutorReactorCapability {
     type State = ExecutorReactorState;
@@ -986,10 +995,11 @@ impl NativeActor for ExecutorReactorCapability {
         let mailer = ctx.mailer();
         let control_mailbox = <ControlCore as Addressable>::resolve(0, ());
 
-        // Unconfigured → disabled: no shell, no store, no timer. The dispatch
-        // outbox accumulates and drains once a token/owner/repo is supplied.
-        let missing = missing_connection_knobs(&config);
-        if !missing.is_empty() {
+        // Mount whenever either backend is usable: fully configured (GitHub +
+        // local) → RoutingExecutor, unconfigured + local enabled → local-only
+        // (local lanes still dispatch; Actions lanes fail fast with the missing-
+        // knob reason), neither usable → disabled with no shell/store/timer.
+        if is_disabled_mount(&config) {
             // A `warn`, not an `info` (#4625): declining to mount is the one
             // condition that makes every later seal look healthy and never
             // dispatch, so it must not sit below the boot chatter. Naming the
@@ -999,7 +1009,7 @@ impl NativeActor for ExecutorReactorCapability {
             // silently does nothing.
             tracing::warn!(
                 target: "aether_chassis_bloomery::executor",
-                missing = %missing.join(", "),
+                missing = %missing_connection_knobs(&config).join(", "),
                 "executor dispatch reactor mounted disabled (unconfigured); dispatch outbox will accumulate and no sealed bloom will dispatch",
             );
             return Ok(ExecutorReactorState {
