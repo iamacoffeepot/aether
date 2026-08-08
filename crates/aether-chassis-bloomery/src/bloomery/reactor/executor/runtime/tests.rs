@@ -24,13 +24,16 @@ use aether_data::wire::{from_bytes, to_vec};
 use super::{
     BACKOFF_CAP, CandidatePush, GithubMirrorConfig, NameEvidenceClaims, TrackedHandle, backoff_delay,
     candidate_ref_name, drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount,
-    is_stale, missing_connection_knobs, next_backoff, pull_and_admit, push_admitted_candidates, seed_tracked,
-    select_stale_handles,
+    is_stale, next_backoff, pull_and_admit, push_admitted_candidates, seed_tracked, select_stale_handles,
 };
 use crate::bloomery::executor::local::testing::FixedRunner;
-use crate::bloomery::intake::{Admission, AdmitDecision, UploadedEvidence, admit_uploaded, attempt_artifact_name};
+use crate::bloomery::intake::{
+    Admission, AdmitDecision, DispatchError, UploadedEvidence, admit_uploaded, attempt_artifact_name,
+};
 use crate::bloomery::outbox::TopicOutbox;
-use crate::bloomery::{ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle};
+use crate::bloomery::{
+    ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
+};
 use crate::store::{SqliteStore, StoreBackend};
 
 // A capturing executor backend: it records every submitted `WorkOrder` so a test
@@ -1160,7 +1163,7 @@ fn the_disabled_mount_names_every_empty_connection_knob() {
     // line (#4625). A predicate that collapsed to a bool — or listed only the
     // first empty knob — sends the operator back to reading `init` to find out
     // which of the three is missing, which is the cost this replaces.
-    let missing = missing_connection_knobs(&GithubMirrorConfig::default());
+    let missing = GithubMirrorConfig::default().missing_connection_knobs();
 
     assert_eq!(missing, ["GITHUB_TOKEN", "AETHER_GITHUB_OWNER", "AETHER_GITHUB_REPO"]);
 }
@@ -1174,7 +1177,7 @@ fn a_fully_configured_connection_reports_nothing_missing() {
         ..GithubMirrorConfig::default()
     };
 
-    assert!(missing_connection_knobs(&config).is_empty(), "all three present must mount the reactor enabled");
+    assert!(config.missing_connection_knobs().is_empty(), "all three present must mount the reactor enabled");
 }
 
 #[test]
@@ -1184,183 +1187,50 @@ fn an_empty_token_is_named_even_when_owner_and_repo_are_set() {
     // correct owner/repo leaves it empty and the reactor silently declines.
     let config = GithubMirrorConfig { owner: "o".to_owned(), repo: "r".to_owned(), ..GithubMirrorConfig::default() };
 
-    assert_eq!(missing_connection_knobs(&config), ["GITHUB_TOKEN"]);
-}
-
-// The four mount combinations the gate must cover: the reactor mounts
-// whenever either backend is usable — fully configured (GitHub + local)
-// mounts routing, unconfigured + local enabled mounts local-only, and only
-// unconfigured + local disabled mounts disabled. The `local_lane_commands`
-// default itself is not under test here; only the disabled predicate.
-#[test]
-fn fully_configured_with_local_enabled_is_not_a_disabled_mount() {
-    let config = GithubMirrorConfig {
-        token: "t".to_owned(),
-        owner: "o".to_owned(),
-        repo: "r".to_owned(),
-        local_lane_enabled: true,
-        ..GithubMirrorConfig::default()
-    };
-    assert!(!is_disabled_mount(&config), "fully configured + local enabled must mount (routing)");
+    assert_eq!(config.missing_connection_knobs(), ["GITHUB_TOKEN"]);
 }
 
 #[test]
-fn fully_configured_with_local_disabled_is_not_a_disabled_mount() {
-    let config = GithubMirrorConfig {
-        token: "t".to_owned(),
-        owner: "o".to_owned(),
-        repo: "r".to_owned(),
-        local_lane_enabled: false,
-        ..GithubMirrorConfig::default()
-    };
-    assert!(!is_disabled_mount(&config), "fully configured + local disabled must mount (bare Actions)");
-}
-
-#[test]
-fn unconfigured_with_local_enabled_is_not_a_disabled_mount() {
+fn a_local_only_boot_mounts_and_says_why_an_actions_lane_cannot_run() {
+    // Tripwire: #4626. Unconfigured GitHub used to mean no mount at all, so a
+    // bloom whose lanes all route local — which needs no credential, only
+    // `git worktree add` and a subprocess — sealed, queued, and never
+    // dispatched. Re-tightening the gate to "unconfigured → disabled" restores
+    // exactly that silence, and nothing else here would notice.
     let config = GithubMirrorConfig { local_lane_enabled: true, ..GithubMirrorConfig::default() };
-    assert!(!is_disabled_mount(&config), "unconfigured + local enabled must mount local-only, not disabled");
+    assert!(!is_disabled_mount(&config), "an unconfigured boot with the local lane must still mount");
+
+    // The local lane is on by default (ADR-0150), so declining to mount now takes
+    // an operator turning it off as well — the one combination with no backend.
+    let neither = GithubMirrorConfig { local_lane_enabled: false, ..GithubMirrorConfig::default() };
+    assert!(is_disabled_mount(&neither), "with no local lane either there is nothing to mount");
+
+    // What the mount costs an Actions-routed lane: a refusal that names the
+    // knobs, rather than a dispatch into a backend with no credential.
+    let shell = ExecutorShell::connect(&config).expect("a local-only shell connects without GitHub");
+    let order = WorkOrder {
+        transformation: Transformation::for_member_stage(StageId::Verify, digest(0xC0), digest(0xC0)),
+        nonce: Nonce("probe".to_owned()),
+    };
+    let refusal = shell.submit(&order).expect_err("a verify lane routes to Actions, which is unconfigured");
+    let rendered = refusal.to_string();
+    for knob in ["GITHUB_TOKEN", "AETHER_GITHUB_OWNER", "AETHER_GITHUB_REPO"] {
+        assert!(rendered.contains(knob), "the refusal must name {knob} — got: {rendered}");
+    }
 }
 
 #[test]
-fn unconfigured_with_local_disabled_is_a_disabled_mount() {
-    let config = GithubMirrorConfig { local_lane_enabled: false, ..GithubMirrorConfig::default() };
-    assert!(is_disabled_mount(&config), "unconfigured + local disabled must mount disabled");
-    // The warning that guards this path still names every empty knob.
-    assert_eq!(missing_connection_knobs(&config), ["GITHUB_TOKEN", "AETHER_GITHUB_OWNER", "AETHER_GITHUB_REPO"]);
-}
+fn an_unconfigured_actions_refusal_is_permanent_so_the_drain_parks_it() {
+    // Tripwire: the stub's `400` is load-bearing. Missing config cannot resolve
+    // by waiting, so a status the classifier reads as transient (a 5xx, a 429, or
+    // a transport fault) would re-drive the same order forever — a log that
+    // implies progress while guaranteeing none.
+    let refusal = UnconfiguredActionsBackend::new("GITHUB_TOKEN".to_owned())
+        .submit(&WorkOrder {
+            transformation: Transformation::for_member_stage(StageId::Verify, digest(0xC0), digest(0xC0)),
+            nonce: Nonce("probe".to_owned()),
+        })
+        .expect_err("the stub refuses every submit");
 
-// Requirement 2: an order that routes to the Actions backend when GitHub is
-// unconfigured fails at submit with a reason naming the missing knobs — a
-// permanent refusal the drain parks (acks past) rather than silently
-// accumulating in the outbox. The local lane still succeeds through the same
-// shell.
-#[test]
-fn unconfigured_local_only_shell_fails_actions_lanes_with_missing_knobs_and_routes_local_lanes() {
-    use crate::bloomery::executor::UnconfiguredActionsBackend;
-
-    let base = tempfile::TempDir::new().unwrap();
-    let correspondence: aether_bloomery_github::SharedCorrespondence = {
-        let fake = FakeGithub::new();
-        fake.seed_git_object(&digest(0xC0));
-        Arc::new(fake)
-    };
-    let actions =
-        Arc::new(UnconfiguredActionsBackend::new("GITHUB_TOKEN, AETHER_GITHUB_OWNER, AETHER_GITHUB_REPO".to_owned()));
-    let runner = FixedRunner {
-        evidence: r#"{"command":"construct.implement","nonce":"x","produced_candidate":true,"result_record":{"schema":1,"is_error":false,"result":{"num_turns":3}}}"#.to_owned(),
-        lifecycle: RunLifecycle::Exited { success: true },
-        captures: true,
-    };
-    let local = Arc::new(LocalExecutor::new(Arc::new(runner), Arc::clone(&correspondence), base.path()));
-    // Default prefixes: construct. and review. go local, verify. goes to Actions.
-    let routing = RoutingExecutor::new(actions, local, GithubMirrorConfig::default().local_lane_prefixes());
-    let shell = ExecutorShell::new(Arc::new(routing));
-    let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-
-    // A verify lane routes to Actions by default — with GitHub unconfigured it
-    // must fail with the missing-knob body, as a permanent refusal the drain
-    // parks rather than re-driving.
-    let payload = DispatchPayload {
-        profile: StageCatalog::profile_of(StageId::Verify),
-        bloom: bloom.0,
-        workpiece: WorkpieceId("wp-verify".to_owned()),
-        stage: StageId::Verify,
-        transformation: Transformation::for_member_stage(StageId::Verify, digest(0xC0), digest(0xC0)),
-        scope_revision: digest(5),
-        candidate: None,
-        configs: ConfigRegistry::default(),
-    };
-    let sequence = store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
-    let (handles, ack_through, transient) = drain_and_dispatch(&mut store, &shell).unwrap();
-    assert!(handles.is_empty(), "an Actions-routed order must not dispatch when GitHub is unconfigured");
-    assert_eq!(ack_through, Some(sequence), "a permanent refusal parks (acks past) rather than accumulating");
-    assert_eq!(transient, None, "a permanent refusal is not a transient backoff");
-    // The shell itself surfaces the missing-knob reason.
-    let direct_err = shell
-        .submit(&WorkOrder { transformation: payload.transformation, nonce: Nonce("probe".to_owned()) })
-        .unwrap_err();
-    let msg = direct_err.to_string();
-    assert!(msg.contains("GITHUB_TOKEN"), "the submit error must name the missing knobs, got: {msg}");
-    assert!(msg.contains("AETHER_GITHUB_OWNER"));
-    assert!(msg.contains("AETHER_GITHUB_REPO"));
-    // And `is_permanent` treats it as a park, not a re-drive.
-    let fake_shell = UnconfiguredActionsBackend::new("GITHUB_TOKEN".to_owned());
-    let fake_routing = RoutingExecutor::new(
-        Arc::new(fake_shell),
-        Arc::new(LocalExecutor::new(
-            Arc::new(FixedRunner {
-                evidence: r#"{"command":"construct.implement","nonce":"x","produced_candidate":true,"result_record":{"schema":1,"is_error":false,"result":{}}}"#.to_owned(),
-                lifecycle: RunLifecycle::Exited { success: true },
-                captures: true,
-            }),
-            Arc::clone(&correspondence),
-            base.path(),
-        )),
-        vec!["construct.".to_owned()],
-    );
-    let probe_shell = ExecutorShell::new(Arc::new(fake_routing));
-    let mut probe_store = SqliteStore::open(":memory:").unwrap();
-    let p = DispatchPayload {
-        profile: StageCatalog::profile_of(StageId::Verify),
-        bloom: bloom.0,
-        workpiece: WorkpieceId("wp-verify".to_owned()),
-        stage: StageId::Verify,
-        transformation: Transformation::for_member_stage(StageId::Verify, digest(0xC0), digest(0xC0)),
-        scope_revision: digest(5),
-        candidate: None,
-        configs: ConfigRegistry::default(),
-    };
-    probe_store.enqueue_topic(Topic::Dispatch, &to_vec(&p).unwrap()).unwrap();
-    let (h, ack, tr) = drain_and_dispatch(&mut probe_store, &probe_shell).unwrap();
-    assert!(h.is_empty() && ack.is_some() && tr.is_none(), "must be a permanent park");
-
-    // A construct lane routes local and still succeeds through the same shell.
-    let mut store2 = SqliteStore::open(":memory:").unwrap();
-    let (seq2, _) = enqueue_construct_dispatch(&mut store2, bloom, "wp-local", 5);
-    let (handles2, ack2, _) = drain_and_dispatch(&mut store2, &shell).unwrap();
-    assert_eq!(handles2.len(), 1, "a local-routed order must dispatch even when GitHub is unconfigured");
-    assert_eq!(ack2, Some(seq2));
-}
-
-// With `local_lane_commands` expanded to cover `verify.`, a bloom whose every
-// lane routes local can reach a verified candidate without GitHub existing —
-// the same local-only shell with a broader prefix set.
-#[test]
-fn expanded_local_prefixes_route_verify_locally_even_when_github_unconfigured() {
-    use crate::bloomery::executor::UnconfiguredActionsBackend;
-
-    let base = tempfile::TempDir::new().unwrap();
-    let correspondence: aether_bloomery_github::SharedCorrespondence = {
-        let fake = FakeGithub::new();
-        fake.seed_git_object(&digest(0xC0));
-        Arc::new(fake)
-    };
-    let actions = Arc::new(UnconfiguredActionsBackend::new("GITHUB_TOKEN".to_owned()));
-    let runner = FixedRunner {
-        evidence: r#"{"status":"pass"}"#.to_owned(),
-        lifecycle: RunLifecycle::Exited { success: true },
-        captures: true,
-    };
-    let local = Arc::new(LocalExecutor::new(Arc::new(runner), Arc::clone(&correspondence), base.path()));
-    let routing =
-        RoutingExecutor::new(actions, local, vec!["construct.".to_owned(), "review.".to_owned(), "verify.".to_owned()]);
-    let shell = ExecutorShell::new(Arc::new(routing));
-    let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    let payload = DispatchPayload {
-        profile: StageCatalog::profile_of(StageId::Verify),
-        bloom: bloom.0,
-        workpiece: WorkpieceId("wp-verify".to_owned()),
-        stage: StageId::Verify,
-        transformation: Transformation::for_member_stage(StageId::Verify, digest(0xC0), digest(0xC0)),
-        scope_revision: digest(5),
-        candidate: None,
-        configs: ConfigRegistry::default(),
-    };
-    store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
-    let (handles, ack, _) = drain_and_dispatch(&mut store, &shell).unwrap();
-    assert_eq!(handles.len(), 1, "verify routes local when the prefix set covers it");
-    assert!(ack.is_some());
+    assert!(DispatchError::Submit(ExecutorPortError::from(refusal)).is_permanent(), "a park, not a re-drive");
 }

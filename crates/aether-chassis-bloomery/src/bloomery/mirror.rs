@@ -218,6 +218,22 @@ impl GithubMirrorConfig {
         }
     }
 
+    /// The connection knobs this config leaves empty, in the order an operator
+    /// would set them. Empty when GitHub is reachable.
+    ///
+    /// Names rather than a bare bool so a caller can say *which* knob is missing
+    /// (#4625) — the disabled-mount warning and the local-only shell's submit
+    /// refusal both do. `token` reads the conventional unprefixed `GITHUB_TOKEN`,
+    /// unlike its `AETHER_GITHUB_`-prefixed siblings, so it is the one most often
+    /// left empty by accident.
+    #[must_use]
+    pub fn missing_connection_knobs(&self) -> Vec<&'static str> {
+        [("GITHUB_TOKEN", &self.token), ("AETHER_GITHUB_OWNER", &self.owner), ("AETHER_GITHUB_REPO", &self.repo)]
+            .into_iter()
+            .filter_map(|(name, value)| value.is_empty().then_some(name))
+            .collect()
+    }
+
     /// The local-lane command-id prefixes, parsed from the comma-separated
     /// [`local_lane_commands`](Self::local_lane_commands) knob: split on commas,
     /// trimmed, empties dropped. An order whose command starts with any of these

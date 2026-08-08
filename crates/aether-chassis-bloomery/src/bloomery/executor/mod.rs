@@ -187,32 +187,23 @@ impl ExecutorShell {
     /// the bare Actions backend dispatching the configured wrapper workflow at
     /// the protected pinned ref.
     ///
-    fn missing_knobs_string(config: &GithubMirrorConfig) -> String {
-        let mut knobs = Vec::new();
-        if config.token.is_empty() {
-            knobs.push("GITHUB_TOKEN");
-        }
-        if config.owner.is_empty() {
-            knobs.push("AETHER_GITHUB_OWNER");
-        }
-        if config.repo.is_empty() {
-            knobs.push("AETHER_GITHUB_REPO");
-        }
-        knobs.join(", ")
-    }
-
+    /// With GitHub unconfigured the Actions half is an
+    /// [`UnconfiguredActionsBackend`] rather than an absent mount (#4626): the
+    /// local lane needs no credential, so a bloom whose lanes all route local
+    /// still dispatches, and an order that would have gone to Actions is refused
+    /// at submit naming the empty knobs.
+    ///
     /// # Errors
     /// The underlying `reqwest` client could not be constructed.
     pub fn connect(config: &GithubMirrorConfig) -> Result<Self, GithubError> {
-        let github_configured = !config.token.is_empty() && !config.owner.is_empty() && !config.repo.is_empty();
-        if github_configured {
-            let client = config.connect_client()?;
+        let missing = config.missing_connection_knobs();
+        if missing.is_empty() {
+            let correspondence = config.connect_correspondence()?;
             // Both backends resolve the order's checkout digest to a real git object
             // through the same persisted correspondence (ADR-0150) — one store over
             // the shared `store_path`, mirroring the source shell.
-            let correspondence = config.connect_correspondence()?;
             let actions = Arc::new(ActionsExecutor::new(
-                client,
+                config.connect_client()?,
                 Arc::clone(&correspondence),
                 LaneWorkflows {
                     mechanical: config.executor_workflow_file.clone(),
@@ -220,32 +211,25 @@ impl ExecutorShell {
                 },
                 config.executor_dispatch_ref.clone(),
             ));
-            if config.local_lane_enabled {
-                let local = Arc::new(LocalExecutor::from_config(config, Arc::clone(&correspondence)));
-                Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, config.local_lane_prefixes()))))
-            } else {
-                Ok(Self::new(actions))
+
+            if !config.local_lane_enabled {
+                return Ok(Self::new(actions));
             }
-        } else if config.local_lane_enabled {
-            // GitHub not configured but the local lane is usable — mount
-            // local-only. Local lanes route to the `LocalExecutor`; anything that
-            // would have gone to Actions fails fast with a permanent error that
-            // names the missing knobs rather than accumulating silently.
-            let correspondence = config.connect_correspondence()?;
-            let local = Arc::new(LocalExecutor::from_config(config, Arc::clone(&correspondence)));
-            let missing = Self::missing_knobs_string(config);
-            let failing = Arc::new(UnconfiguredActionsBackend::new(missing));
-            let routing = RoutingExecutor::new(failing, local, config.local_lane_prefixes());
-            Ok(Self::new(Arc::new(routing)))
-        } else {
-            // No backend usable — the reactor's `init` treats this as a disabled
-            // mount and never calls `connect`, but a direct caller still gets a
-            // shell that fails every submit with the missing-knob reason. This
-            // keeps the contract explicit even off the reactor path.
-            let missing = Self::missing_knobs_string(config);
-            let failing = Arc::new(UnconfiguredActionsBackend::new(missing));
-            Ok(Self::new(failing))
+            let local = Arc::new(LocalExecutor::from_config(config, correspondence));
+            return Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, config.local_lane_prefixes()))));
         }
+
+        // Unconfigured. The stub stands in for Actions either way; what the local
+        // lane being enabled changes is whether anything routes past it. With it
+        // disabled nothing does, and the shell refuses every submit — the reactor
+        // reads that combination as a disabled mount and never calls `connect`,
+        // but a direct caller still gets the reason rather than a panic.
+        let actions = Arc::new(UnconfiguredActionsBackend::new(missing.join(", ")));
+        if !config.local_lane_enabled {
+            return Ok(Self::new(actions));
+        }
+        let local = Arc::new(LocalExecutor::from_config(config, config.connect_correspondence()?));
+        Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, config.local_lane_prefixes()))))
     }
 
     /// Submit a fully-resolved work order, returning the nonce-carrying handle.

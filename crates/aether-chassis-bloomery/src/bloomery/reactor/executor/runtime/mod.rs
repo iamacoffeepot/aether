@@ -962,25 +962,13 @@ fn pull_and_admit(
     sink.0.into_iter().map(|admission| admission.admit).collect()
 }
 
-/// The GitHub connection knobs that are empty, in the order an operator would
-/// set them — the executor reactor mounts disabled unless all three are present.
-///
-/// Returned as names rather than a bare bool so the disabled-mount warning can
-/// say *which* knob is missing (#4625). `token` reads the conventional
-/// unprefixed `GITHUB_TOKEN`, unlike its `AETHER_GITHUB_`-prefixed siblings, so
-/// it is the one most often left empty by accident.
-fn missing_connection_knobs(config: &GithubMirrorConfig) -> Vec<&'static str> {
-    [("GITHUB_TOKEN", &config.token), ("AETHER_GITHUB_OWNER", &config.owner), ("AETHER_GITHUB_REPO", &config.repo)]
-        .into_iter()
-        .filter_map(|(name, value)| value.is_empty().then_some(name))
-        .collect()
-}
-
-/// Whether the reactor would mount disabled for `config` — unconfigured GitHub
-/// *and* local lanes disabled. Pure so the four mount combinations are
-/// unit-testable without a `NativeInitCtx`.
+/// Whether the reactor has no backend to mount for `config` — GitHub
+/// unconfigured *and* the local lane disabled (#4626). Unconfigured alone is not
+/// enough: the local backend needs no credential, so it still dispatches every
+/// lane routed to it. Pure so the mount decision is testable without a
+/// `NativeInitCtx`.
 fn is_disabled_mount(config: &GithubMirrorConfig) -> bool {
-    !missing_connection_knobs(config).is_empty() && !config.local_lane_enabled
+    !config.missing_connection_knobs().is_empty() && !config.local_lane_enabled
 }
 
 #[runtime]
@@ -1009,7 +997,7 @@ impl NativeActor for ExecutorReactorCapability {
             // silently does nothing.
             tracing::warn!(
                 target: "aether_chassis_bloomery::executor",
-                missing = %missing_connection_knobs(&config).join(", "),
+                missing = %config.missing_connection_knobs().join(", "),
                 "executor dispatch reactor mounted disabled (unconfigured); dispatch outbox will accumulate and no sealed bloom will dispatch",
             );
             return Ok(ExecutorReactorState {
