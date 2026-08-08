@@ -1279,14 +1279,14 @@ fn unconfigured_local_only_shell_fails_actions_lanes_with_missing_knobs_and_rout
     assert_eq!(transient, None, "a permanent refusal is not a transient backoff");
     // The shell itself surfaces the missing-knob reason.
     let direct_err = shell
-        .submit(&WorkOrder { transformation: payload.transformation.clone(), nonce: Nonce("probe".to_owned()) })
+        .submit(&WorkOrder { transformation: payload.transformation, nonce: Nonce("probe".to_owned()) })
         .unwrap_err();
     let msg = direct_err.to_string();
     assert!(msg.contains("GITHUB_TOKEN"), "the submit error must name the missing knobs, got: {msg}");
     assert!(msg.contains("AETHER_GITHUB_OWNER"));
     assert!(msg.contains("AETHER_GITHUB_REPO"));
     // And `is_permanent` treats it as a park, not a re-drive.
-    let fake_shell = crate::bloomery::executor::UnconfiguredActionsBackend::new("GITHUB_TOKEN".to_owned());
+    let fake_shell = UnconfiguredActionsBackend::new("GITHUB_TOKEN".to_owned());
     let fake_routing = RoutingExecutor::new(
         Arc::new(fake_shell),
         Arc::new(LocalExecutor::new(

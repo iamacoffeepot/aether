@@ -999,10 +999,7 @@ impl NativeActor for ExecutorReactorCapability {
         // local) → RoutingExecutor, unconfigured + local enabled → local-only
         // (local lanes still dispatch; Actions lanes fail fast with the missing-
         // knob reason), neither usable → disabled with no shell/store/timer.
-        let missing = missing_connection_knobs(&config);
-        let github_configured = missing.is_empty();
-        let local_usable = config.local_lane_enabled;
-        if !github_configured && !local_usable {
+        if is_disabled_mount(&config) {
             // A `warn`, not an `info` (#4625): declining to mount is the one
             // condition that makes every later seal look healthy and never
             // dispatch, so it must not sit below the boot chatter. Naming the
@@ -1012,7 +1009,7 @@ impl NativeActor for ExecutorReactorCapability {
             // silently does nothing.
             tracing::warn!(
                 target: "aether_chassis_bloomery::executor",
-                missing = %missing.join(", "),
+                missing = %missing_connection_knobs(&config).join(", "),
                 "executor dispatch reactor mounted disabled (unconfigured); dispatch outbox will accumulate and no sealed bloom will dispatch",
             );
             return Ok(ExecutorReactorState {

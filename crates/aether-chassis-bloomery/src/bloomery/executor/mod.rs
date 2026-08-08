@@ -76,12 +76,12 @@ impl ExecutorBackend for UnconfiguredActionsBackend {
         Ok(ExecutionStatus::Unknown)
     }
 
-    fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
-        Err(ExecutorError::NoRunForNonce(_handle.nonce.clone()))
+    fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
+        Err(ExecutorError::NoRunForNonce(handle.nonce.clone()))
     }
 
-    fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
-        Err(ExecutorError::NoRunForNonce(_handle.nonce.clone()))
+    fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+        Err(ExecutorError::NoRunForNonce(handle.nonce.clone()))
     }
 }
 
