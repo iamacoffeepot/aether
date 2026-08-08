@@ -372,7 +372,13 @@ pub(super) fn reduce_supersede(
                     .map(|claim| MemberCandidate { workpiece: member.workpiece.clone(), candidate: claim.candidate })
             })
             .collect();
-        effects.push(Decision::DispatchIntegration { bloom: successor_id, base: successor.base(), members });
+        effects.push(Decision::DispatchIntegration {
+            bloom: successor_id,
+            base: successor.base(),
+            members,
+            // Every candidate was produced under the predecessor's id.
+            adopt_from: Some(*predecessor),
+        });
     }
     effects.push(Decision::MarkSuperseded { bloom: *predecessor, by: successor_id });
     Decisions { outcome: Outcome::Superseded { predecessor: *predecessor, successor: successor_id }, effects }

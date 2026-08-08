@@ -46,7 +46,7 @@ use aether_bloomery::{
     Admit, AggregateReviewPayload, BloomId, ConfigRegistry, ConfigScopes, DispatchPayload, ExecutionStatus, Fact,
     ModelOverride, Nonce, RedispatchPayload, ReviewPass, StageId, Topic, WorkHandle, WorkpieceId,
 };
-use aether_bloomery_github::{SharedCorrespondence, short_hex};
+use aether_bloomery_github::{SharedCorrespondence, candidate_ref_name, short_hex};
 use aether_data::wire::from_bytes;
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
@@ -65,7 +65,6 @@ use crate::bloomery::intake::{
 use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
-use crate::bloomery::refs::candidate_ref_name;
 use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend, StoreConfigError, resolve_config};
 

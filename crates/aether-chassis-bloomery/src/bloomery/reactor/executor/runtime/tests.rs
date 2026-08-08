@@ -31,11 +31,11 @@ use crate::bloomery::intake::{
     Admission, AdmitDecision, DispatchError, UploadedEvidence, admit_uploaded, attempt_artifact_name,
 };
 use crate::bloomery::outbox::TopicOutbox;
-use crate::bloomery::refs::candidate_ref_name;
 use crate::bloomery::{
     ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
 };
 use crate::store::{SqliteStore, StoreBackend};
+use aether_bloomery_github::candidate_ref_name;
 
 // A capturing executor backend: it records every submitted `WorkOrder` so a test
 // can assert exactly what `drain_and_dispatch` built — the advisory description it

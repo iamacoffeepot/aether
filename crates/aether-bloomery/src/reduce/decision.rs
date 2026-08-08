@@ -203,6 +203,16 @@ pub enum Decision {
         /// merges each member's candidate ref, which is addressed by workpiece;
         /// the tree alone cannot be merged.
         members: Vec<MemberCandidate>,
+        /// The predecessor whose candidate refs this fold adopts before it
+        /// runs, when the bloom inherited its whole claim set from one.
+        ///
+        /// A candidate ref is addressed under the bloom that produced it, and a
+        /// successor is a different bloom — its id is a content address over a
+        /// spec that includes the base. So a successor folding inherited work
+        /// has claims but no refs of its own to merge. Adopting copies them into
+        /// its namespace first, leaving the successor self-contained rather than
+        /// reaching back into a retired bloom's refs every time it folds.
+        adopt_from: Option<BloomId>,
     },
     /// Record (or clear) the folded integration held on the bloom while its
     /// aggregate review runs (ADR-0153): a verified [`Fact::Resolve`](crate::Fact::Resolve) sets it,
