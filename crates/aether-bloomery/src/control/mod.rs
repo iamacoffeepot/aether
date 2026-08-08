@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::reduce::Decision;
-use crate::values::{ConfigRegistry, Transformation};
+use crate::values::{AgentProfile, ConfigRegistry, Transformation};
 
 /// One active-membership mutation the store applies inside the combined
 /// [`Commit`] transaction: a workpiece claimed (or released) for a bloom. The
@@ -313,6 +313,10 @@ pub struct DispatchPayload {
     /// (ADR-0152). The reactor displays it as the evidence-binding digest;
     /// `None` displays the scope revision.
     pub candidate: Option<Digest>,
+    /// The [`AgentProfile`] the bloom's sealed stage catalog calibrates this stage
+    /// at (ADR-0174) — carried because only the reducer holds the catalog, and the
+    /// reactor must not fall back to the compiled line for a bloom that sealed one.
+    pub profile: AgentProfile,
     /// The configuration the attempt runs under (ADR-0174) — the member's
     /// registry layered over the bloom's. The reactor resolves each address it
     /// needs against the store.
@@ -352,6 +356,9 @@ pub struct AggregateReviewPayload {
     pub transformation: Transformation,
     /// Which pass of the two-pass review this dispatches (ADR-0153).
     pub pass: ReviewPass,
+    /// The [`AgentProfile`] the bloom's sealed stage catalog calibrates
+    /// `AggregateReview` at (ADR-0174).
+    pub profile: AgentProfile,
 }
 
 /// Which pass of the two-pass whole-bloom aggregate review (ADR-0153) a dispatch

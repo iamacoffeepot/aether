@@ -2,9 +2,11 @@
 //! evidence, and the adopting answer that releases a parked question
 //! (ADR-0151).
 
+use super::attempt::stage_profile;
 use super::{AdmitEvidenceError, AdoptAnswerError, BloomStatus, Decision, Decisions, Outcome, Snapshot};
 use crate::digest::digest_of;
 use crate::ids::BloomId;
+use crate::ids::StageId;
 use crate::values::{Evidence, EvidenceKind, Statement, Transformation};
 
 /// Admit non-integrating evidence into a bloom's evidence log (ADR-0151). Runs
@@ -110,6 +112,7 @@ pub(super) fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: 
                 bloom: *bloom,
                 transformation: Transformation::for_aggregate_review(integration.tree, integration.head),
                 roll: 1,
+                profile: stage_profile(&record.stage_catalog, StageId::AggregateReview),
             });
         }
         return Decisions { outcome: Outcome::AnswerAdopted { bloom: *bloom, question }, effects };

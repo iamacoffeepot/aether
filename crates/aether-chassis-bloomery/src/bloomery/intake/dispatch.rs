@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    BloomId, ConfigRegistry, Digest, Nonce, StageId, Transformation, WorkHandle, WorkOrder, WorkpieceId,
+    AgentProfile, BloomId, ConfigRegistry, Digest, Nonce, StageId, Transformation, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::{ExecutorError, GithubError};
 use aether_data::wire::to_vec;
@@ -51,6 +51,12 @@ pub struct DispatchRecord {
     /// attempt re-dispatches by replaying the stored order (#3664), and nothing
     /// else host-side carries it.
     pub configs: ConfigRegistry,
+    /// The [`AgentProfile`] the bloom's sealed stage catalog calibrates this
+    /// stage at (ADR-0174), resolved by the reducer and carried here for the same
+    /// reason `configs` is — a replay cannot reconstruct it, and falling back to
+    /// the compiled line would re-dispatch the fleet default for a bloom that
+    /// sealed something else.
+    pub profile: AgentProfile,
 }
 
 impl DispatchRecord {
@@ -78,6 +84,9 @@ impl DispatchRecord {
             // Same convention again for the sealed configuration the lane runs
             // under, so a replay resolves the same overrides the parked attempt did.
             configs: to_vec(&self.configs).unwrap_or_default(),
+            // And again for the sealed profile, so a replayed lane dispatches the
+            // agent the bloom's catalog named rather than the compiled line's.
+            profile: to_vec(&self.profile).unwrap_or_default(),
         }
     }
 }

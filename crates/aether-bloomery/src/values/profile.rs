@@ -25,7 +25,7 @@ use crate::digest::{ContentAddressed, Digest, digest_of};
 /// vocabulary) — its [`digest`](Self::digest) *is* its version, so a changed
 /// calibration is a new profile and a distinct configuration is a distinct
 /// artifact.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct AgentProfile {
     /// The harness that runs the model — which CLI the model lane forks.
     pub harness: Harness,
@@ -138,7 +138,7 @@ impl ReasoningEffort {
 /// a named bounding tier today, a finer [`Allow`](Self::Allow) list when
 /// neither tier fits. A new variant is a new digest, never a silent
 /// reinterpretation of a stored profile.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ToolPolicy {
     /// No tools — a pure reasoning stage.
     None,

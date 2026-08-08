@@ -48,9 +48,6 @@ impl ApiCapabilityState {
         if let Some(base) = patch.base {
             draft.base = base;
         }
-        if let Some(stage_catalog) = patch.stage_catalog {
-            draft.stage_catalog = stage_catalog;
-        }
         if let Some(budget) = patch.budget {
             draft.budget = budget;
         }

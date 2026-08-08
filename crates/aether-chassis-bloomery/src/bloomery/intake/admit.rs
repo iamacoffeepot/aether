@@ -213,6 +213,7 @@ impl DispatchRecord {
             candidate: Digest::from_slice(&order.candidate)?,
             displayed_digest: Digest::from_slice(&order.displayed_digest)?,
             stage: from_bytes(&order.stage).ok()?,
+            profile: from_bytes(&order.profile).ok()?,
             transformation: from_bytes(&order.transformation).ok()?,
             configs: from_bytes(&order.configs).ok()?,
         })

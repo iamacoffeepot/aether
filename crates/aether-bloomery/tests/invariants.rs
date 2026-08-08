@@ -15,12 +15,14 @@ mod common;
 
 use aether_bloomery::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, Artifact, AttemptCompletedError, BloomStatus,
-    CandidateRef, Decision, Digest, Evidence, EvidenceKind, Fact, KeyId, LandError, Observation, Outcome, Provenance,
-    Question, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId, Statement,
-    SupersedeError, reduce,
+    CandidateRef, CatalogError, Decision, Digest, Evidence, EvidenceKind, Fact, KeyId, LandError, Observation, Outcome,
+    Provenance, Question, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId,
+    Statement, SupersedeError, reduce,
 };
 use aether_data::wire::to_vec;
-use common::{claim, digest, draft, event, membership, sealed_and_resolved, splice_bloom, step, workpiece};
+use common::{
+    claim, digest, draft, draft_with_catalog, event, membership, sealed_and_resolved, splice_bloom, step, workpiece,
+};
 use proptest::collection::btree_set;
 use proptest::prelude::*;
 use std::collections::BTreeSet;
@@ -246,33 +248,47 @@ fn seal_rejects_a_known_bloom_id() {
     }
 }
 
-// Seal catalog admission — the frozen stage_catalog must be the line the
-// pipeline runs (ADR-0149 §The line): a spec promising a foreign catalog is
-// inadmissible, since a bloom is graded against the catalog it promised. The
-// default `draft` stamps the line digest, so every other seal test covers the
-// positive case; this pins the rejection and names the found digest.
+// Seal catalog admission — an authored catalog is admitted on structural
+// validity, not on matching the compiled line (ADR-0174): differing is the point.
+// A stage left unbound is refused, because the member holding it would wedge with
+// no attempt ever made, long after the operator who wrote the catalog moved on.
 #[test]
-fn seal_rejects_an_unknown_stage_catalog() {
-    let base = Snapshot::new(digest(1));
-    let mut foreign = draft(1, vec![membership("wp", 10)]);
-    foreign.stage_catalog = digest(99);
-    let decided = reduce(&base, &event("foreign", Fact::Seal(foreign.seal())), &ResolvedConfigs::default());
+fn seal_rejects_a_catalog_the_line_cannot_run() {
+    let mut catalog = StageCatalog::line();
+    catalog.bindings.retain(|binding| binding.stage != StageId::Verify);
+
+    let (unrunnable, configs) = draft_with_catalog(1, vec![membership("wp", 10)], &catalog);
+    let decided = reduce(&Snapshot::new(digest(1)), &event("unrunnable", Fact::Seal(unrunnable.seal())), &configs);
     match decided.outcome {
-        Outcome::SealRejected(SealError::UnknownStageCatalog { found }) => assert_eq!(found, digest(99)),
-        other => panic!("expected UnknownStageCatalog, got {other:?}"),
+        Outcome::SealRejected(SealError::UnrunnableStageCatalog(error)) => {
+            assert_eq!(error, CatalogError::UnboundStage(StageId::Verify));
+        }
+        other => panic!("expected UnrunnableStageCatalog, got {other:?}"),
     }
 }
 
-// The zero-default catalog is the specific case the invariant closes: before
-// this slice a draft could seal against `Digest::default()` and be graded
-// against no catalog at all.
+// Tripwire: sealing *no* catalog and sealing an *empty* one are different. Absent
+// means "run the compiled line" and is the ordinary case every unconfigured bloom
+// takes; empty binds nothing, so every member would wedge immediately. Collapsing
+// the two either refuses every unconfigured bloom or admits a line that cannot
+// run.
 #[test]
-fn seal_rejects_the_default_stage_catalog() {
-    let base = Snapshot::new(digest(1));
-    let mut zero = draft(1, vec![membership("wp", 10)]);
-    zero.stage_catalog = Digest::default();
-    let decided = reduce(&base, &event("zero", Fact::Seal(zero.seal())), &ResolvedConfigs::default());
-    assert!(matches!(decided.outcome, Outcome::SealRejected(SealError::UnknownStageCatalog { .. })));
+fn an_absent_catalog_runs_the_line_but_an_empty_one_is_refused() {
+    let unconfigured = draft(1, vec![membership("wp", 10)]);
+    let admitted = reduce(
+        &Snapshot::new(digest(1)),
+        &event("absent", Fact::Seal(unconfigured.seal())),
+        &ResolvedConfigs::default(),
+    );
+    assert!(matches!(admitted.outcome, Outcome::Sealed(_)), "sealing no catalog runs the line: {:?}", admitted.outcome);
+
+    let (empty, configs) = draft_with_catalog(1, vec![membership("wp", 10)], &StageCatalog::default());
+    let decided = reduce(&Snapshot::new(digest(1)), &event("empty", Fact::Seal(empty.seal())), &configs);
+    assert!(
+        matches!(decided.outcome, Outcome::SealRejected(SealError::UnrunnableStageCatalog(_))),
+        "an empty catalog binds nothing and is refused: {:?}",
+        decided.outcome,
+    );
 }
 
 // C3 — a Resolved bloom is supersedable: the ADR's primary supersession trigger
@@ -407,19 +423,22 @@ fn supersede_rejects_an_unknown_stage_catalog() {
     let predecessor = predecessor_spec.id();
     splice_bloom(&mut snapshot, &predecessor_spec, BloomStatus::Sealed);
 
-    // A valid membership (so member admission passes) but a foreign catalog.
-    let mut foreign = draft(2, vec![membership("own", 10)]);
-    foreign.stage_catalog = digest(99);
+    // A valid membership (so member admission passes) but a catalog that cannot
+    // run — a successor is held to the same catalog admission a fresh seal is, or
+    // supersession becomes the way around the door.
+    let mut catalog = StageCatalog::line();
+    catalog.bindings.retain(|binding| binding.stage != StageId::Verify);
+    let (unrunnable, configs) = draft_with_catalog(2, vec![membership("own", 10)], &catalog);
     let decided = reduce(
         &snapshot,
-        &event("foreign", Fact::Supersede { predecessor, successor: foreign.seal() }),
-        &ResolvedConfigs::default(),
+        &event("unrunnable", Fact::Supersede { predecessor, successor: unrunnable.seal() }),
+        &configs,
     );
     match decided.outcome {
-        Outcome::SupersedeRejected(SupersedeError::InvalidMember(SealError::UnknownStageCatalog { found })) => {
-            assert_eq!(found, digest(99));
+        Outcome::SupersedeRejected(SupersedeError::InvalidMember(SealError::UnrunnableStageCatalog(error))) => {
+            assert_eq!(error, CatalogError::UnboundStage(StageId::Verify));
         }
-        other => panic!("expected InvalidMember(UnknownStageCatalog), got {other:?}"),
+        other => panic!("expected InvalidMember(UnrunnableStageCatalog), got {other:?}"),
     }
 }
 
@@ -1612,7 +1631,7 @@ fn the_completing_integrate_dispatches_the_integration_fold_in_member_order() {
 mod sealed_config {
     use aether_bloomery::{
         BloomDraft, ConfigKind, ConfigRegistry, Event, Fact, IdempotencyKey, Membership, Outcome, ResolvedConfigs,
-        SealError, Snapshot, StageCatalog, Unproducible, reduce,
+        SealError, Snapshot, Unproducible, reduce,
     };
     use aether_data::Kind;
     use aether_data::wire::to_vec;
@@ -1653,13 +1672,7 @@ mod sealed_config {
             &Event {
                 idempotency_key: IdempotencyKey("seal".to_owned()),
                 fact: Fact::Seal(
-                    BloomDraft {
-                        proposals: vec![member],
-                        base: digest(1),
-                        stage_catalog: StageCatalog::line_digest(),
-                        ..BloomDraft::default()
-                    }
-                    .seal(),
+                    BloomDraft { proposals: vec![member], base: digest(1), ..BloomDraft::default() }.seal(),
                 ),
             },
             configs,
@@ -1719,13 +1732,7 @@ mod sealed_config {
     fn draft_with(bloom: ConfigRegistry, member: ConfigRegistry) -> BloomDraft {
         let mut proposal = membership("wp-a", 1);
         proposal.configs = member;
-        BloomDraft {
-            proposals: vec![proposal],
-            base: digest(1),
-            configs: bloom,
-            stage_catalog: StageCatalog::line_digest(),
-            ..BloomDraft::default()
-        }
+        BloomDraft { proposals: vec![proposal], base: digest(1), configs: bloom, ..BloomDraft::default() }
     }
 
     // Tripwire: the bloom id covers the configuration sealed at both scopes. A
@@ -1746,5 +1753,108 @@ mod sealed_config {
 
         let other_value = draft_with(sealing("expensive"), ConfigRegistry::default()).seal().id();
         assert_ne!(bloom_scoped, other_value, "changing the sealed content moves the id");
+    }
+}
+
+/// The sealed stage catalog is what the bloom runs — the point of #4587.
+mod sealed_catalog {
+    use aether_bloomery::{
+        Decision, Evidence, EvidenceKind, Fact, Harness, Outcome, ReasoningEffort, StageCatalog, StageId, ToolPolicy,
+        reduce,
+    };
+
+    use crate::common::{approved, digest, draft_with_catalog, event, membership, workpiece};
+    use aether_bloomery::Snapshot;
+
+    /// The compiled line with `Construct` recalibrated onto a distinct agent — the
+    /// "cheap harness for construct, expensive for review" the issue names.
+    fn recalibrated_construct() -> StageCatalog {
+        let mut catalog = StageCatalog::line();
+        for binding in &mut catalog.bindings {
+            if binding.stage == StageId::Construct {
+                binding.profile.harness = Harness::Claude;
+                binding.profile.model = String::from("claude-opus-5");
+                binding.profile.effort = ReasoningEffort::Low;
+                binding.profile.tools = ToolPolicy::ReadOnly;
+            }
+        }
+        catalog
+    }
+
+    // Tripwire: the entry dispatch carries the profile the *sealed* catalog names,
+    // not the compiled line's. Without this the operator authors a catalog, the
+    // receipt attests it, and the lane runs whatever the fleet was calibrated to —
+    // the divergence #4324 and #4327 closed for the model and the harness, one
+    // layer down. Asserted against the authored values directly, because pinning
+    // it against `profile_of` would pass even if the sealed catalog were ignored.
+    #[test]
+    fn the_dispatched_profile_comes_from_the_sealed_catalog() {
+        let catalog = recalibrated_construct();
+        let (draft, configs) = draft_with_catalog(1, vec![approved(membership("wp", 10))], &catalog);
+
+        let decided = reduce(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(draft.seal())), &configs);
+        assert!(matches!(decided.outcome, Outcome::Sealed(_)), "the authored catalog seals: {:?}", decided.outcome);
+
+        let dispatched = decided
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                Decision::DispatchAttempt { profile, stage: StageId::Construct, .. } => Some(profile),
+                _ => None,
+            })
+            .expect("sealing dispatches the entry stage");
+
+        let authored = catalog.profile_for(StageId::Construct).expect("the catalog binds Construct");
+        assert_eq!(dispatched, authored, "the dispatch runs the agent the sealed catalog names");
+        assert_ne!(
+            dispatched,
+            &StageCatalog::profile_of(StageId::Construct),
+            "and that is not the compiled line's calibration, or the assertion above proves nothing",
+        );
+    }
+
+    // Tripwire: the reducer counts to the *sealed* catalog's retry budget. This is
+    // the read that cannot live behind a host-side resolve — it decides re-dispatch
+    // versus wedge, inside `reduce`. A bloom sealing a budget of 1 must wedge on
+    // its first failure even though the compiled line allows 2, or the receipt
+    // attests a retry policy the reducer never applied.
+    #[test]
+    fn the_reducer_counts_to_the_sealed_catalogs_retry_budget() {
+        let mut catalog = StageCatalog::line();
+        for binding in &mut catalog.bindings {
+            if binding.stage == StageId::Construct {
+                binding.retry_budget = 1;
+            }
+        }
+        assert_eq!(
+            StageCatalog::line().retry_budget_of(StageId::Construct),
+            Some(2),
+            "the compiled line allows a second attempt, so wedging on the first is the sealed budget's doing",
+        );
+
+        let (draft, configs) = draft_with_catalog(1, vec![approved(membership("wp", 10))], &catalog);
+        let spec = draft.seal();
+        let bloom = spec.id();
+        let seal = event("seal", Fact::Seal(spec));
+        let snapshot =
+            Snapshot::new(digest(1)).apply(&seal, &reduce(&Snapshot::new(digest(1)), &seal, &configs), &configs);
+
+        let failed = event(
+            "fail-1",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: false,
+                evidence: Evidence { subject: digest(70), kind: EvidenceKind::VerificationResult, detail: digest(80) },
+                candidate: None,
+            },
+        );
+        let decided = reduce(&snapshot, &failed, &configs);
+        assert!(
+            matches!(decided.outcome, Outcome::AttemptWedged { stage: StageId::Construct, .. }),
+            "the sealed budget of 1 wedges on the first failure: {:?}",
+            decided.outcome,
+        );
     }
 }

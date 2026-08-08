@@ -251,7 +251,7 @@ fn digest_to_parent(digest: &Digest) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use aether_bloomery::{BloomId, Digest, Nonce, StudyCost, StudyRecord, WorkpieceId};
+    use aether_bloomery::{BloomId, Digest, Nonce, StageCatalog, StageId, StudyCost, StudyRecord, WorkpieceId};
     use aether_bloomery_github::parse_study_cost;
     use aether_data::wire::from_bytes;
 
@@ -290,15 +290,16 @@ mod tests {
     // #3502 dispatch-record write side, driven directly (as #3502's own tests do).
     fn seed_order(store: &mut dyn StoreBackend, nonce: &str, bloom: BloomId, attempt: Digest) {
         let record = DispatchRecord {
+            profile: StageCatalog::profile_of(StageId::Construct),
             nonce: Nonce(nonce.to_owned()),
             bloom,
             workpiece: WorkpieceId("wp-study".to_owned()),
             scope_revision: Digest::from_bytes([2; 32]),
             candidate: attempt,
             displayed_digest: attempt,
-            stage: aether_bloomery::StageId::Verify,
+            stage: StageId::Verify,
             transformation: aether_bloomery::Transformation::for_member_stage(
-                aether_bloomery::StageId::Verify,
+                StageId::Verify,
                 attempt,
                 Digest::from_bytes([0xC0; 32]),
             ),

@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use super::{FoldedIntegration, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{ConfigRegistry, Evidence, LandingReceipt, ResolutionClaim, ResolvedBloom, Transformation};
+use crate::values::{
+    AgentProfile, ConfigRegistry, Evidence, LandingReceipt, ResolutionClaim, ResolvedBloom, Transformation,
+};
 
 /// The ordered effects a decision applies to the projection (and, in
 /// production, the outbox/store).
@@ -135,11 +137,17 @@ pub enum Decision {
         /// bind to; `None` dispatches against the scope revision (Construct, or
         /// a member with no capture yet).
         candidate: Option<Digest>,
+        /// The [`AgentProfile`] the bloom's sealed stage catalog calibrates this
+        /// stage at (ADR-0174). Resolved by the reducer because the reducer is
+        /// what holds the catalog; the host applies the member's
+        /// [`ModelOverride`](crate::ModelOverride) over *this* rather than over
+        /// the compiled line, so a bloom that sealed a catalog runs the agents
+        /// that catalog names.
+        profile: AgentProfile,
         /// The configuration this attempt runs under (ADR-0174): the member's
         /// registry layered over the bloom's, flattened here because a dispatch
-        /// names one member. The reducer resolves *addresses* — a lookup by kind
-        /// name, which `no_std` can do — and never their content; the host fetches
-        /// what each address names at the point of use.
+        /// names one member. The host fetches what each remaining address names at
+        /// the point of use.
         configs: ConfigRegistry,
     },
     /// Advance a member's stage cursor to `progress` — the snapshot-folding
@@ -235,6 +243,11 @@ pub enum Decision {
         /// Which review pass this dispatches (`1` the full review, `2` the
         /// delta-confirm against the frozen finding set).
         roll: u32,
+        /// The [`AgentProfile`] the bloom's sealed stage catalog calibrates
+        /// `AggregateReview` at (ADR-0174). The critic is a model lane, so it
+        /// takes its profile off the sealed catalog for the same reason a member
+        /// lane does.
+        profile: AgentProfile,
     },
     /// Record (or clear) the bloom-scope park (ADR-0153): raised when the
     /// delta-confirm still fails at the two-pass ceiling, holding the failing

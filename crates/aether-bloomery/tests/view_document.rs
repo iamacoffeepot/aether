@@ -31,7 +31,7 @@ fn sealed(members: Vec<aether_bloomery::Membership>) -> Snapshot {
     let spec = draft(0, members).seal();
     let snapshot = Snapshot::new(digest(0));
     let seal = event("seal", Fact::Seal(spec));
-    snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()))
+    snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()), &ResolvedConfigs::default())
 }
 
 // A parked question on one member of a two-member bloom: `view_of` resolves the
@@ -45,7 +45,8 @@ fn a_held_member_surfaces_its_pending_decision_only_when_resolvable() {
     let bloom = spec.id();
     let mut snapshot = Snapshot::new(digest(0));
     let seal = event("seal", Fact::Seal(spec));
-    snapshot = snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()));
+    snapshot =
+        snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()), &ResolvedConfigs::default());
 
     let question = Question {
         stage: StageId::Construct,
@@ -58,7 +59,8 @@ fn a_held_member_surfaces_its_pending_decision_only_when_resolvable() {
     let question_digest = question.id();
     let evidence = Evidence { subject: digest(50), kind: EvidenceKind::Question, detail: question_digest };
     let admit = event("park-1", Fact::AdmitEvidence { bloom, evidence });
-    snapshot = snapshot.apply(&admit, &reduce(&snapshot, &admit, &ResolvedConfigs::default()));
+    snapshot =
+        snapshot.apply(&admit, &reduce(&snapshot, &admit, &ResolvedConfigs::default()), &ResolvedConfigs::default());
 
     // With a resolver that returns the question bytes, the held member carries
     // its pending decision, its sibling does not.

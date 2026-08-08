@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use super::{Decision, Decisions, Event, Fact, Outcome};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
-use crate::values::{BloomSpec, CandidateRef, Evidence, EvidenceKind, ResolutionClaim};
+use crate::values::{
+    BloomSpec, CandidateRef, ConfigScopes, Evidence, EvidenceKind, ResolutionClaim, ResolvedConfigs, StageCatalog,
+};
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
 /// core). Holds nothing that is not derivable from the journal.
@@ -46,6 +48,19 @@ impl Snapshot {
 pub struct BloomRecord {
     /// The sealed, immutable spec.
     pub spec: BloomSpec,
+    /// The stage catalog this bloom runs, resolved once at seal (ADR-0174).
+    ///
+    /// Derived state, not sealed content: the spec names the catalog by address
+    /// in its [`configs`](BloomSpec::configs) registry, and this is what that
+    /// address resolved to. Held rather than re-resolved per fact because the
+    /// reducer reads it to decide re-dispatch versus wedge, and that decision has
+    /// to be total — the seal door already refused a bloom whose catalog could not
+    /// be produced, so by the time any later fact arrives the answer exists.
+    ///
+    /// A bloom sealing no catalog holds [`StageCatalog::line`], the compiled
+    /// calibration, which is what makes an unconfigured bloom behave exactly as
+    /// it did before catalogs were sealable.
+    pub stage_catalog: StageCatalog,
     /// The bloom's lifecycle status.
     pub status: BloomStatus,
     /// The resolution claims accumulated by integration (and inherited from a
@@ -171,17 +186,17 @@ impl Snapshot {
     /// still records the key (so a replay stays a no-op) but changes nothing
     /// else.
     #[must_use]
-    pub fn apply(&self, event: &Event, decisions: &Decisions) -> Self {
+    pub fn apply(&self, event: &Event, decisions: &Decisions, configs: &ResolvedConfigs) -> Self {
         let mut next = self.clone();
         next.seen.insert(event.idempotency_key.clone());
         // Register the bloom the fact seals, before its membership claims
         // land, so the claim/inherit effects have a record to attach to.
         match (&event.fact, &decisions.outcome) {
             (Fact::Seal(spec), Outcome::Sealed(id)) => {
-                next.blooms.insert(*id, BloomRecord::sealed(spec.clone()));
+                next.blooms.insert(*id, BloomRecord::sealed(spec.clone(), configs));
             }
             (Fact::Supersede { successor, .. }, Outcome::Superseded { successor: id, .. }) => {
-                next.blooms.insert(*id, BloomRecord::sealed(successor.clone()));
+                next.blooms.insert(*id, BloomRecord::sealed(successor.clone(), configs));
             }
             _ => {}
         }
@@ -293,9 +308,20 @@ impl Snapshot {
 }
 
 impl BloomRecord {
-    fn sealed(spec: BloomSpec) -> Self {
+    /// The record a sealed spec opens with, its stage catalog resolved.
+    ///
+    /// The resolution cannot fail here: `reduce` refused any spec whose registry
+    /// named content it was not given, and a resolved set only grows, so an
+    /// address producible at the seal door is producible at the fold. An
+    /// unresolvable catalog therefore means the two ran against different sets,
+    /// which is a broken caller rather than a state to represent — it falls back
+    /// to the compiled line and the bloom runs the calibration it would have run
+    /// with no catalog sealed at all.
+    fn sealed(spec: BloomSpec, configs: &ResolvedConfigs) -> Self {
+        let stage_catalog = StageCatalog::sealed_in(ConfigScopes::bloom_wide(spec.configs()), configs);
         Self {
             spec,
+            stage_catalog,
             status: BloomStatus::Sealed,
             claims: BTreeMap::new(),
             evidence: Vec::new(),

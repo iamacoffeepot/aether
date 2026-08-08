@@ -1,11 +1,12 @@
 //! Integration and resolution: recording one member's resolution claim, and
 //! folding a complete claim set into the bloom's one artifact (ADR-0152).
 
+use super::attempt::stage_profile;
 use super::{BloomStatus, Decision, Decisions, FoldedIntegration, IntegrateError, Outcome, ResolveError, Snapshot};
 use crate::digest::Digest;
 use crate::ids::BloomId;
 use crate::ids::StageId;
-use crate::values::{ResolutionClaim, StageCatalog, Transformation};
+use crate::values::{ResolutionClaim, Transformation};
 
 pub(super) fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &ResolutionClaim) -> Decisions {
     let Some(record) = snapshot.blooms.get(bloom) else {
@@ -89,7 +90,7 @@ pub(super) fn reduce_resolve(
     // closed, so no re-fold dispatches — but a buggy reactor must not buy a
     // roll the vocabulary forbids).
     let roll = record.aggregate_rolls + 1;
-    if roll > StageCatalog::retry_budget_of(StageId::AggregateReview).unwrap_or(1) {
+    if roll > record.stage_catalog.retry_budget_of(StageId::AggregateReview).unwrap_or(1) {
         return Decisions::rejected(Outcome::ResolveRejected(ResolveError::ReviewCeiling {
             rolls: record.aggregate_rolls,
         }));
@@ -103,6 +104,7 @@ pub(super) fn reduce_resolve(
                 bloom: *bloom,
                 transformation: Transformation::for_aggregate_review(*tree, *head),
                 roll,
+                profile: stage_profile(&record.stage_catalog, StageId::AggregateReview),
             },
         ],
     }

@@ -6,9 +6,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use aether_data::Kind;
+use aether_data::wire::to_vec;
+
 use aether_bloomery::{
-    BloomDraft, BloomRecord, BloomSpec, BloomStatus, ConfigRegistry, Decisions, Digest, Event, Evidence, EvidenceKind,
-    Fact, IdempotencyKey, Membership, ResolutionClaim, ResolvedConfigs, Snapshot, StageCatalog, WorkpieceId, reduce,
+    BloomDraft, BloomRecord, BloomSpec, BloomStatus, ConfigKind, ConfigRegistry, Decisions, Digest, Event, Evidence,
+    EvidenceKind, Fact, IdempotencyKey, Membership, ResolutionClaim, ResolvedConfigs, Snapshot, StageCatalog,
+    WorkpieceId, reduce,
 };
 
 /// A distinct digest named by one seed byte.
@@ -40,16 +44,22 @@ pub fn approved(mut member: Membership) -> Membership {
     member
 }
 
-/// A draft sealing on `base` with the given memberships. Stamps the line
-/// catalog digest so the draft seals admissibly through `reduce` (the reducer
-/// rejects the zero-default catalog).
+/// A draft sealing on `base` with the given memberships, configuring nothing —
+/// so it runs the compiled line (ADR-0174).
 pub fn draft(base: u8, members: Vec<Membership>) -> BloomDraft {
-    BloomDraft {
-        proposals: members,
-        base: digest(base),
-        stage_catalog: StageCatalog::line_digest(),
-        ..BloomDraft::default()
-    }
+    BloomDraft { proposals: members, base: digest(base), ..BloomDraft::default() }
+}
+
+/// A draft sealing `catalog` bloom-wide, with the [`ResolvedConfigs`] that
+/// produce it — the pair a reducer call needs to admit an authored line.
+pub fn draft_with_catalog(base: u8, members: Vec<Membership>, catalog: &StageCatalog) -> (BloomDraft, ResolvedConfigs) {
+    let mut configs = ConfigRegistry::default();
+    configs.insert::<StageCatalog>(catalog.address());
+
+    let mut resolved = ResolvedConfigs::default();
+    resolved.insert(catalog.address(), StageCatalog::NAME, to_vec(catalog).expect("catalog encodes"));
+
+    (BloomDraft { proposals: members, base: digest(base), configs, ..BloomDraft::default() }, resolved)
 }
 
 /// A resolution claim integrated at `revision`, whose evidence binds to its
@@ -73,7 +83,7 @@ pub fn event(key: &str, fact: Fact) -> Event {
 /// Reduce and evolve in one step — the journal-replay unit.
 pub fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
     let decisions = reduce(snapshot, event, &ResolvedConfigs::default());
-    let next = snapshot.apply(event, &decisions);
+    let next = snapshot.apply(event, &decisions, &ResolvedConfigs::default());
     (next, decisions)
 }
 
@@ -85,7 +95,8 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
     let bloom = spec.id();
     let mut snapshot = Snapshot::new(digest(mainline));
     let seal = event("seal", Fact::Seal(spec.clone()));
-    snapshot = snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()));
+    snapshot =
+        snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()), &ResolvedConfigs::default());
     let mut seed = 100u8;
     for member in spec.members() {
         let candidate = digest(seed);
@@ -96,7 +107,8 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
             evidence: Evidence { subject: candidate, kind: EvidenceKind::ResolutionClaim, detail: digest(202) },
         };
         let ev = event(&format!("integrate-{seed}"), Fact::Integrate { bloom, claim: member_claim });
-        snapshot = snapshot.apply(&ev, &reduce(&snapshot, &ev, &ResolvedConfigs::default()));
+        snapshot =
+            snapshot.apply(&ev, &reduce(&snapshot, &ev, &ResolvedConfigs::default()), &ResolvedConfigs::default());
         seed = seed.wrapping_add(1);
     }
     // A distinct integrated head digest from the artifact tree (#3615) — this
@@ -105,7 +117,11 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
         "resolve",
         Fact::Resolve { bloom, tree: digest(tree), head: digest(tree.wrapping_add(1)), lineage: vec![] },
     );
-    snapshot = snapshot.apply(&resolve, &reduce(&snapshot, &resolve, &ResolvedConfigs::default()));
+    snapshot = snapshot.apply(
+        &resolve,
+        &reduce(&snapshot, &resolve, &ResolvedConfigs::default()),
+        &ResolvedConfigs::default(),
+    );
     // The fold dispatches the whole-bloom aggregate review (ADR-0153); a
     // passing verdict bound to the integrated tree is what resolves the bloom.
     let verdict = event(
@@ -117,7 +133,11 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
             implicated: vec![],
         },
     );
-    snapshot = snapshot.apply(&verdict, &reduce(&snapshot, &verdict, &ResolvedConfigs::default()));
+    snapshot = snapshot.apply(
+        &verdict,
+        &reduce(&snapshot, &verdict, &ResolvedConfigs::default()),
+        &ResolvedConfigs::default(),
+    );
     (snapshot, spec)
 }
 
@@ -135,6 +155,7 @@ pub fn splice_bloom(snapshot: &mut Snapshot, spec: &BloomSpec, status: BloomStat
     snapshot.blooms.insert(
         bloom,
         BloomRecord {
+            stage_catalog: StageCatalog::line(),
             spec: spec.clone(),
             status,
             claims: BTreeMap::new(),

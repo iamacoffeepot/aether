@@ -290,7 +290,7 @@ impl NativeActor for ControlCore {
         }
         let result = match mail {
             CommitResult::Applied { .. } => {
-                state.snapshot = state.snapshot.apply(&event, &decisions);
+                state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
                 // A durably-landed bloom frees its member + admission claim refs
                 // (ADR-0150) — release with the local release, fire-and-forget: the
                 // boot reconcile re-releases any ref an interrupted release stranded.
@@ -377,7 +377,7 @@ impl NativeActor for ControlCore {
                 )),
             };
             let decisions = reduce(&state.snapshot, &event, &state.configs);
-            state.snapshot = state.snapshot.apply(&event, &decisions);
+            state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
         }
         state.reconcile_claim_refs(ctx);
     }
@@ -639,6 +639,7 @@ fn project(
                 transformation,
                 scope_revision,
                 candidate,
+                profile,
                 configs,
             } => {
                 let payload = DispatchPayload {
@@ -648,6 +649,7 @@ fn project(
                     transformation: transformation.clone(),
                     scope_revision: *scope_revision,
                     candidate: *candidate,
+                    profile: profile.clone(),
                     configs: configs.clone(),
                 };
                 outbox.push(OutboxPayload::new(Topic::Dispatch, to_vec(&payload)?));
@@ -660,8 +662,9 @@ fn project(
                 let payload = IntegratePayload { bloom: bloom.0, base: *base, candidates: candidates.clone() };
                 outbox.push(OutboxPayload::new(Topic::Integrate, to_vec(&payload)?));
             }
-            Decision::DispatchAggregateReview { bloom, transformation, roll } => {
+            Decision::DispatchAggregateReview { bloom, transformation, roll, profile } => {
                 let payload = AggregateReviewPayload {
+                    profile: profile.clone(),
                     bloom: bloom.0,
                     transformation: transformation.clone(),
                     pass: ReviewPass::from_roll(*roll),

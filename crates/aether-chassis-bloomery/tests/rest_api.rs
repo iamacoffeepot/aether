@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use aether_bloomery::{
     BloomDraft, ConfigRegistry, Digest, Evidence, EvidenceKind, KeyId, Membership, Provenance, SignatureEnvelope,
-    StageCatalog, Statement, Workpiece, WorkpieceId,
+    Statement, Workpiece, WorkpieceId,
 };
 use aether_chassis_bloomery::api::{MemberProjection, SealRequest};
 use aether_chassis_bloomery::bloomery::{AdrTouch, Completeness};
@@ -262,7 +262,6 @@ fn valid_draft(workpiece: &str) -> BloomDraft {
     BloomDraft {
         proposals: vec![member(workpiece, scope_revision, Digest::from_bytes([9; 32]))],
         base: Digest::from_bytes([1; 32]),
-        stage_catalog: StageCatalog::line_digest(),
         ..BloomDraft::default()
     }
 }
@@ -276,7 +275,6 @@ fn two_member_draft() -> BloomDraft {
     BloomDraft {
         proposals: vec![member("wp-1", member_revision(), detail), member("wp-2", Digest::from_bytes([8; 32]), detail)],
         base: Digest::from_bytes([1; 32]),
-        stage_catalog: StageCatalog::line_digest(),
         ..BloomDraft::default()
     }
 }

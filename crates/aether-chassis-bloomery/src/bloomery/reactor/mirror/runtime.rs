@@ -259,7 +259,7 @@ mod tests {
 
     use aether_bloomery::{
         BloomDraft, BloomId, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey,
-        LandingReceipt, Membership, ResolvedConfigs, Snapshot, StageCatalog, Topic, WorkpieceId, reduce, view_of,
+        LandingReceipt, Membership, ResolvedConfigs, Snapshot, Topic, WorkpieceId, reduce, view_of,
     };
     use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
     use aether_data::wire::{from_bytes, to_vec};
@@ -318,17 +318,15 @@ mod tests {
         let base = digest(0);
         // The seal-time catalog admission (ADR-0149 §The line) rejects the zero
         // default, so the draft must promise the one line the pipeline runs.
-        let spec = BloomDraft {
-            proposals: vec![member],
-            base,
-            stage_catalog: StageCatalog::line_digest(),
-            ..BloomDraft::default()
-        }
-        .seal();
+        let spec = BloomDraft { proposals: vec![member], base, ..BloomDraft::default() }.seal();
         let event = Event { idempotency_key: IdempotencyKey("seal-1".into()), fact: Fact::Seal(spec) };
 
         let mut snapshot = Snapshot::new(base);
-        snapshot = snapshot.apply(&event, &reduce(&snapshot, &event, &ResolvedConfigs::default()));
+        snapshot = snapshot.apply(
+            &event,
+            &reduce(&snapshot, &event, &ResolvedConfigs::default()),
+            &ResolvedConfigs::default(),
+        );
         to_vec(&view_of(&snapshot, |_| None)).unwrap()
     }
 

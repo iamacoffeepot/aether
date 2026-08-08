@@ -4,10 +4,10 @@
 
 use alloc::vec::Vec;
 
-use super::attempt::move_effects;
+use super::attempt::{DispatchTargets, SealedLine, move_effects};
 use super::{AggregateReviewError, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{ConfigRegistry, Evidence, ResolvedBloom, StageCatalog};
+use crate::values::{ConfigRegistry, Evidence, ResolvedBloom};
 
 /// Reduce a whole-bloom aggregate-review verdict (ADR-0153). A passing verdict
 /// resolves the bloom from its held fold — [`Decision::SetResolved`] plus the
@@ -91,7 +91,7 @@ pub(super) fn reduce_aggregate_review_completed(
     } else {
         implicated.to_vec()
     };
-    if rolls >= StageCatalog::retry_budget_of(StageId::AggregateReview).unwrap_or(1) {
+    if rolls >= record.stage_catalog.retry_budget_of(StageId::AggregateReview).unwrap_or(1) {
         // The delta-confirm still failed: the two-pass ceiling parks the bloom
         // to the owner (ADR-0151's hold vocabulary at bloom scope). The fold
         // stays held (the owner's decision context), no member re-opens, no
@@ -134,9 +134,11 @@ pub(super) fn reduce_aggregate_review_completed(
             workpiece,
             member.map_or(integration.tree, |m| m.scope_revision),
             progress,
-            subject,
-            checkout,
-            member.map_or_else(ConfigRegistry::default, |m| m.configs.layered_over(record.spec.configs())),
+            DispatchTargets { subject, checkout },
+            SealedLine {
+                configs: member.map_or_else(ConfigRegistry::default, |m| m.configs.layered_over(record.spec.configs())),
+                catalog: &record.stage_catalog,
+            },
         ));
     }
     Decisions { outcome: Outcome::AggregateReviewReentered { bloom: *bloom, members: implicated, rolls }, effects }

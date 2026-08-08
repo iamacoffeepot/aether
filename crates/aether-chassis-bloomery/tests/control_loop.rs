@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, CONTROL_CORE_NAMESPACE, ConfigKind, ConfigRegistry, Digest, Event, Evidence,
     EvidenceKind, Fact, IdempotencyKey, Membership, ModelOverride, Outcome, Query, QueryResult, SealError,
-    StageCatalog, Unproducible, ViewDocument, WorkpieceId,
+    Unproducible, ViewDocument, WorkpieceId,
 };
 use aether_chassis_bloomery::store::{RecordConfig, RecordConfigResult};
 use aether_codec::frame::{read_frame, write_frame};
@@ -222,13 +222,8 @@ fn seal_event_configured(key: &str, base: u8, workpiece: &str, configs: ConfigRe
     // The seal must freeze the one line the pipeline runs (#3506): the reducer
     // rejects a bloom whose stage-catalog digest is not `StageCatalog::line_digest`
     // (the zero default is inadmissible).
-    let spec = BloomDraft {
-        proposals: vec![member],
-        base: Digest::from_bytes([base; 32]),
-        stage_catalog: StageCatalog::line_digest(),
-        ..BloomDraft::default()
-    }
-    .seal();
+    let spec =
+        BloomDraft { proposals: vec![member], base: Digest::from_bytes([base; 32]), ..BloomDraft::default() }.seal();
     Event { idempotency_key: IdempotencyKey(key.to_owned()), fact: Fact::Seal(spec) }
 }
 
