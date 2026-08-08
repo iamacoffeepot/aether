@@ -149,7 +149,10 @@ impl ApiCapabilityState {
     /// the seal's own outcome is unaffected. A description for a member that later
     /// fails to seal is an orphan row keyed by a bloom id that never dispatches —
     /// harmless and never read.
-    fn persist_descriptions(
+    ///
+    /// Shared with the supersede route next door, which mints a second bloom id
+    /// and so needs its own rows (#4631).
+    pub(super) fn persist_descriptions(
         ctx: &NativeCtx<'_, Manual>,
         spec: &aether_bloomery::BloomSpec,
         descriptions: &BTreeMap<String, String>,

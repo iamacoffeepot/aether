@@ -36,6 +36,12 @@ impl ApiCapabilityState {
             Err(response) => return Routed::Reply(response),
         };
         let successor = draft.seal();
+        // The successor is a new bloom id, and descriptions are keyed by
+        // (bloom, workpiece) — so the predecessor's rows resolve for none of its
+        // members, carried ones included. Persist the successor's own before the
+        // admit, exactly as the seal route does (#4631).
+        Self::persist_descriptions(ctx, &successor, &request.descriptions);
+
         let key = request.idempotency_key.unwrap_or_else(|| hex_encode(successor.id().0.as_bytes()));
         self.admit(
             ctx,
@@ -145,5 +151,34 @@ pub(super) fn query_response(result: QueryResult) -> HttpServerResponse {
         },
         QueryResult::NotFound => error_response(404, "no bloom with that id"),
         QueryResult::Err { error } => error_response(500, &error),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::SupersedeRequest;
+
+    #[test]
+    fn a_supersede_body_without_descriptions_still_parses() {
+        // Tripwire on the operator contract (#4631): descriptions were added to
+        // this body after the route shipped, so every existing caller omits
+        // them. Making the field required would turn each of those into a `400`
+        // on the one route an operator reaches for when a bloom has already
+        // failed to land.
+        let body = br#"{"successor_draft":"1"}"#;
+
+        let parsed: SupersedeRequest = serde_json::from_slice(body).expect("a body predating descriptions parses");
+
+        assert!(parsed.descriptions.is_empty(), "an absent map defaults empty rather than erroring");
+    }
+
+    #[test]
+    fn a_supersede_body_carries_descriptions_per_workpiece() {
+        let body = br#"{"successor_draft":"1","descriptions":{"wp-a":"build the thing"}}"#;
+
+        let parsed: SupersedeRequest = serde_json::from_slice(body).unwrap();
+
+        assert_eq!(parsed.descriptions.get("wp-a").map(String::as_str), Some("build the thing"));
     }
 }
