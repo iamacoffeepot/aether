@@ -198,6 +198,12 @@ fn enqueue_dispatch_with_configs(
         candidate: None,
         configs,
     };
+    // A queued dispatch belongs to a live bloom: seal claims the member's
+    // membership before enqueuing its order, and the drain reads that claim to
+    // tell a live plan from a retired one (#4640). A repeat claim for a member
+    // this bloom already holds answers with a conflict outcome rather than an
+    // error — the fixture stages several stages' orders for one member.
+    store.claim_seal(bloom.0.as_bytes(), &[workpiece.to_owned()]).unwrap();
     store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap()
 }
 
@@ -221,6 +227,9 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
         transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
         pass: ReviewPass::Full,
     };
+    // A queued review belongs to a live bloom; the drain reads its membership to
+    // tell a live plan from a retired one (#4640).
+    store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
 
     let (handles, ack_through, _transient) = drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
@@ -266,6 +275,7 @@ fn the_second_aggregate_roll_frames_a_delta_confirm_against_the_frozen_findings(
         transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
         pass: ReviewPass::DeltaConfirm,
     };
+    store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
 
     let (handles, _ack, _transient) = drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
@@ -304,6 +314,7 @@ fn a_fresh_roll_one_aggregate_dispatch_clears_the_stale_frozen_row() {
         transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
         pass: ReviewPass::Full,
     };
+    store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
 
     drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
@@ -317,6 +328,42 @@ fn a_fresh_roll_one_aggregate_dispatch_clears_the_stale_frozen_row() {
     let description = orders[0].transformation.description.as_deref().unwrap();
     assert!(!description.contains("## Frozen findings"), "the fresh cycle frames a full review");
     assert!(description.contains("Attribute each finding"), "with the attribution instruction");
+}
+
+// A superseded bloom's queued orders must not run. The dispatch outbox is
+// durable and drains on its own timer, so a bloom retired between seal and drain
+// leaves work behind — and running it spends a full model dispatch on a plan the
+// operator explicitly replaced, then returns a candidate the retired bloom cannot
+// admit. Observed live: a predecessor on `issue-4625` and its successor on
+// `issue-4626` both dispatched once a wedged executor recovered.
+#[test]
+fn a_superseded_blooms_queued_dispatch_is_retired_rather_than_run() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let fake = FakeGithub::new();
+    let shell = shell(fake.clone());
+    let predecessor = BloomId(digest(1));
+    let successor = BloomId(digest(2));
+    let (retired, _subject) = enqueue_construct_dispatch(&mut store, predecessor, "wp-line", 5);
+    let (live, _subject) = enqueue_construct_dispatch(&mut store, successor, "wp-other", 6);
+
+    // The supersession the operator ran: the predecessor's memberships move to
+    // the successor, which is what retires its queued order.
+    store.supersede(predecessor.0.as_bytes(), successor.0.as_bytes(), &["wp-line".to_owned()]).unwrap();
+
+    let (handles, ack_through, _transient) = drain_and_dispatch(&mut store, &shell).unwrap();
+
+    assert_eq!(handles.len(), 1, "only the live bloom's order is submitted");
+    assert_eq!(
+        fake.dispatched_nonces(),
+        vec![format!("dispatch-{live}")],
+        "the retired plan's order never reaches the executor",
+    );
+    // Acked, not stopped: the retired entry is disposed of rather than deferred,
+    // so the queue drains instead of accumulating dead work behind it.
+    assert_eq!(ack_through, Some(live), "the ack prefix covers the retired entry and the live one past it");
+    store.ack_topic(Topic::Dispatch, live).unwrap();
+    assert!(store.drain_topic(Topic::Dispatch).unwrap().is_empty(), "neither entry re-drains");
+    assert!(store.lookup_order(&format!("dispatch-{retired}")).unwrap().is_none(), "no order recorded for it");
 }
 
 #[test]
@@ -394,6 +441,7 @@ fn drain_dispatches_the_review_lane_under_its_own_calibrated_profile() {
         transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
         pass: ReviewPass::Full,
     };
+    store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
 
     drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
@@ -782,6 +830,7 @@ fn drain_stamps_the_record_axes_from_the_payload() {
         candidate: Some(candidate_tree),
         configs: ConfigRegistry::default(),
     };
+    store.claim_seal(bloom.0.as_bytes(), &["wp-cand".to_owned()]).unwrap();
     let sequence = store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
 
     drain_and_dispatch(&mut store, &shell).unwrap();

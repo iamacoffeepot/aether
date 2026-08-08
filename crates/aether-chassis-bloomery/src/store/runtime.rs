@@ -248,6 +248,12 @@ pub trait StoreBackend: Send {
     /// [`Transformation::description`](aether_bloomery::Transformation) `None` and
     /// warns rather than dispatching blind.
     fn lookup_dispatch_description(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
+    /// Whether `bloom` still holds any active membership — the reducer's own
+    /// answer to "is this still the live plan". A supersession releases every one
+    /// of the predecessor's memberships in the same decision set that marks it
+    /// superseded, so a bloom with none left is retired, and the executor reactor
+    /// reads this to retire its already-queued dispatches with it (#4640).
+    fn holds_active_membership(&mut self, bloom: &[u8]) -> rusqlite::Result<bool>;
     /// Every persisted work-order description for one bloom as
     /// (`workpiece`, `description`) pairs in workpiece order — the aggregate
     /// review composes its task context from the whole membership's orders
@@ -573,6 +579,11 @@ impl StoreBackend for SqliteStore {
         let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| row.get::<_, String>(0))?;
         // The (bloom, workpiece) pair is the primary key, so at most one row.
         rows.next().transpose()
+    }
+
+    fn holds_active_membership(&mut self, bloom: &[u8]) -> rusqlite::Result<bool> {
+        let mut stmt = self.conn.prepare("SELECT 1 FROM active_membership WHERE bloom = ?1 LIMIT 1")?;
+        Ok(stmt.query_map(rusqlite::params![bloom], |_| Ok(()))?.next().transpose()?.is_some())
     }
 
     fn list_dispatch_descriptions(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<(String, String)>> {
