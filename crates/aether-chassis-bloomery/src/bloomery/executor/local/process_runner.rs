@@ -87,6 +87,7 @@ impl TransformRunner for ProcessTransformRunner {
         // Materialize the sealed checkout into a detached scratch worktree, clearing
         // any leftover directory at the nonce's path first (see `reclaim_worktree_path`).
         reclaim_worktree_path(spec.worktree_dir)?;
+        fetch_subject_if_absent(Path::new("."), spec.checkout_hex)?;
         let checkout = Command::new("git")
             .args(["worktree", "add", "--force", "--detach"])
             .arg(spec.worktree_dir)
@@ -188,6 +189,38 @@ impl TransformRunner for ProcessTransformRunner {
             .ok_or_else(|| LocalExecutorError::Worktree(format!("malformed capture tree sha `{}`", tree_hex.trim())))?;
         Ok(Some(CapturedObjects { commit, tree }))
     }
+}
+
+/// Fetch an order's subject when the coordinator does not already hold it (#4643).
+///
+/// `git worktree add` resolves its commit-ish against the **local** object
+/// database only. `Construct` and `Verify` check out the sealed base — a
+/// mainline commit this clone already has — so the resolution succeeds and the
+/// omission is invisible. `AggregateReview` is the first stage whose subject the
+/// coordinator neither produced nor already held: the integration commit is
+/// assembled remotely and published as a ref, and without this the checkout
+/// fails on an object that is genuinely absent, wedging the bloom one stage
+/// short of a landing proposal.
+///
+/// The fetch names the exact sha rather than a ref namespace — it is precisely
+/// what the checkout needs, and the bloom ref namespace grows without bound
+/// across runs.
+///
+/// Unconditional, because `git fetch <remote> <sha>` is already a no-op when the
+/// object is present: git satisfies the want locally and never opens a
+/// connection. A `cat-file -e` guard in front of it would be unobservable — the
+/// same outcome either way — so the common case costs one git process, not a
+/// round trip.
+fn fetch_subject_if_absent(repo_dir: &Path, checkout_hex: &str) -> Result<(), LocalExecutorError> {
+    git_in(repo_dir, &["fetch", "--no-tags", "--quiet", "origin", checkout_hex]).map_err(|error| match error {
+        // Name the subject in the failure: a bare "couldn't find remote ref" says
+        // nothing about which order could not be materialized.
+        LocalExecutorError::Worktree(detail) => {
+            LocalExecutorError::Worktree(format!("fetching order subject {checkout_hex}: {detail}"))
+        }
+        other => other,
+    })?;
+    Ok(())
 }
 
 /// Clear a leftover scratch worktree directory so `git worktree add` cannot
@@ -340,7 +373,9 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{CaptureIdentity, FALLBACK_IDENTITY, reclaim_worktree_path, strip_hooks};
+    use super::{
+        CaptureIdentity, FALLBACK_IDENTITY, fetch_subject_if_absent, git_in, reclaim_worktree_path, strip_hooks,
+    };
 
     // A repo whose *local* identity is set to `identity` — local config outranks
     // whatever the developer's global git config happens to hold, so these cases
@@ -402,6 +437,31 @@ mod tests {
             ],
             "an identity-less host still commits, under the bloomery's own name",
         );
+    }
+
+    // A repo with one real commit and **no** `origin` remote, so a fetch that
+    // must reach the network fails predictably.
+    fn repo_with_one_commit() -> (TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "--quiet"]);
+        run_git(dir.path(), &["config", "--local", "user.name", "test"]);
+        run_git(dir.path(), &["config", "--local", "user.email", "test@example.test"]);
+        run_git(dir.path(), &["commit", "--quiet", "--allow-empty", "--message", "root"]);
+        let head = git_in(dir.path(), &["rev-parse", "HEAD"]).unwrap().trim().to_owned();
+        (dir, head)
+    }
+
+    #[test]
+    fn an_absent_subject_names_itself_in_the_failure() {
+        // The bare git error is "couldn't find remote ref …", which says nothing
+        // about which order could not be materialized. The dispatch that reports
+        // this is one line in a busy log, so it has to carry the subject.
+        let (repo, _) = repo_with_one_commit();
+        let missing = "0".repeat(40);
+
+        let error = fetch_subject_if_absent(repo.path(), &missing).expect_err("an absent subject cannot be fetched");
+
+        assert!(format!("{error:?}").contains(&missing), "the failure names the subject it could not fetch");
     }
 
     #[test]
