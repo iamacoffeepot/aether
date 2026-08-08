@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d8ac31a0e0808bcf2812e27d7f66cc2821f282ecd919d8376638b92ad49be9f3 # shrinks to (schema, value) = (Map { key: Owned(Enum { variants: [Unit { name: "Alpha", discriminant: 0 }, Unit { name: "Beta", discriminant: 1 }, Unit { name: "Gamma", discriminant: 2 }] }), value: Owned(Struct { fields: [NamedField { name: "f0", ty: Scalar(F32) }], repr_c: false }) }, Object {"Beta": Object {"f0": Number(0.0)}})

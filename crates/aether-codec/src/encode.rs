@@ -321,10 +321,11 @@ fn decode_type_id_value(value: &Value, type_id: u64, path: &str) -> Result<u64, 
 /// `serde_json::Value` shaped for `encode_wire_value` so the actual
 /// wire bytes flow through the existing scalar/string/bool encoders.
 /// Proto3 stringify rule — integer keys arrive as JSON-string digits,
-/// bool keys as `"true"` / `"false"`, string keys identity. Any other
-/// key shape is `UnsupportedSchema`; the `BTreeMap<K: Ord, V>` bound at
-/// the Rust layer makes most of these unreachable, but the codec rejects
-/// them defensively. The caller sorts by the encoded key bytes (the
+/// bool keys as `"true"` / `"false"`, string keys identity, and a
+/// fieldless enum key as its variant name. Any other key shape is
+/// `UnsupportedSchema`; the `BTreeMap<K: Ord, V>` bound at the Rust layer
+/// makes most of these unreachable, but the codec rejects them
+/// defensively. The caller sorts by the encoded key bytes (the
 /// `wire` canonical map order), so no separate sortable form is needed.
 fn parse_map_key(k_str: &str, schema: &SchemaType, path: &str) -> Result<Value, EncodeError> {
     match schema {
@@ -357,7 +358,18 @@ fn parse_map_key(k_str: &str, schema: &SchemaType, path: &str) -> Result<Value, 
             }
             Primitive::F32 | Primitive::F64 => Err(EncodeError::UnsupportedSchema("float as Map key (no Ord)")),
         },
-        _ => Err(EncodeError::UnsupportedSchema("Map key must be String, integer scalar, or Bool")),
+        // A fieldless enum is a legitimate key in the encoding it already has:
+        // its JSON form is the bare variant name and its wire form is the same
+        // fixed-width `u32` discriminant the enum arm writes, so the canonical
+        // ascending-encoded-key order sorts it with no rule of its own. A variant
+        // carrying a body is not — its wire key would be variable-length and its
+        // JSON form an object, neither of which a key can be.
+        SchemaType::Enum { variants } => match variants.iter().find(|variant| variant.name() == k_str) {
+            Some(EnumVariant::Unit { .. }) => Ok(Value::String(k_str.to_owned())),
+            Some(_) => Err(EncodeError::UnsupportedSchema("enum Map key must name a fieldless variant")),
+            None => Err(EncodeError::TypeMismatch { field: path.to_owned(), expected: "enum variant matching schema" }),
+        },
+        _ => Err(EncodeError::UnsupportedSchema("Map key must be String, integer scalar, Bool, or fieldless enum")),
     }
 }
 
@@ -1159,6 +1171,79 @@ mod tests {
         let bytes =
             encode_schema(&json!({"true": 1, "false": 0}), &schema).expect("test setup: encode map<bool,u32> field");
         assert_eq!(bytes, expected);
+    }
+
+    /// A three-variant fieldless enum, the shape a closed vocabulary keying a
+    /// configuration table has (`StageId` and friends).
+    fn unit_enum_schema() -> SchemaType {
+        SchemaType::Enum {
+            variants: vec![
+                EnumVariant::Unit { name: "Alpha".into(), discriminant: 0 },
+                EnumVariant::Unit { name: "Beta".into(), discriminant: 1 },
+            ]
+            .into(),
+        }
+    }
+
+    // Tripwire: a fieldless-enum key encodes to the same bytes the enum arm
+    // writes for that variant as a value, so a keyed table costs nothing a
+    // list of `{variant, ..}` structs would not. Sorting is by the encoded
+    // discriminant, which is what makes two objects written in opposite key
+    // order seal identically — the property a content-addressed configuration
+    // depends on.
+    #[test]
+    fn map_unit_enum_keys_sort_by_discriminant() {
+        let schema = map_schema(unit_enum_schema(), SchemaType::Scalar(Primitive::U8));
+        let bytes = encode_schema(&json!({"Beta": 20, "Alpha": 10}), &schema)
+            .expect("test setup: encode map<unit enum,u8> field");
+
+        let mut hand: Vec<u8> = Vec::new();
+        hand.extend_from_slice(&2u32.to_le_bytes()); // count
+        hand.extend_from_slice(&0u32.to_le_bytes()); // key Alpha
+        hand.push(10);
+        hand.extend_from_slice(&1u32.to_le_bytes()); // key Beta
+        hand.push(20);
+        assert_eq!(bytes, hand, "keys sort by discriminant regardless of authoring order");
+
+        assert_eq!(
+            encode_schema(&json!({"Alpha": 10, "Beta": 20}), &schema).expect("test setup: re-encode reordered"),
+            bytes,
+            "and the object's key order cannot reach the sealed bytes"
+        );
+    }
+
+    // An unknown variant as a key is refused. Two owners enforce this by design
+    // — the key arm resolves the name so it can fail at the key with the key's
+    // own path, and the enum encoder the key value flows into resolves it again
+    // — so this pins the outcome rather than either guard, and holds if the
+    // eager check is ever collapsed into the encoder's.
+    #[test]
+    fn map_rejects_an_unknown_enum_key() {
+        let schema = map_schema(unit_enum_schema(), SchemaType::Scalar(Primitive::U8));
+        let err = encode_schema(&json!({"Gamma": 1}), &schema).expect_err("unknown variant as key must error");
+        assert!(matches!(err, EncodeError::TypeMismatch { .. }));
+    }
+
+    // Tripwire: only *fieldless* variants are keys. A variant with a body
+    // encodes a variable-length payload after its discriminant and renders as a
+    // JSON object, so admitting one would break both the fixed-width key
+    // ordering and the string-keyed JSON form.
+    #[test]
+    fn map_rejects_an_enum_key_variant_carrying_a_body() {
+        let schema = map_schema(
+            SchemaType::Enum {
+                variants: vec![EnumVariant::Tuple {
+                    name: "Carrying".into(),
+                    discriminant: 0,
+                    fields: vec![SchemaType::Scalar(Primitive::U8)].into(),
+                }]
+                .into(),
+            },
+            SchemaType::Scalar(Primitive::U8),
+        );
+
+        let err = encode_schema(&json!({"Carrying": 1}), &schema).expect_err("a body-carrying variant is not a key");
+        assert!(matches!(err, EncodeError::UnsupportedSchema(_)));
     }
 
     #[test]
