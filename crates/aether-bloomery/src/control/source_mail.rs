@@ -170,3 +170,35 @@ pub enum ClaimResult {
         error: String,
     },
 }
+
+/// Read the repository's live mainline head (#4677), replying with the digest
+/// naming it.
+///
+/// Defined alongside the claim ops for the same cycle-avoiding reason: the
+/// native `ControlCore` cap must construct and send it. It is sent once, after
+/// boot journal replay has folded every record — the seam
+/// [`EnumerateClaims`]'s deep-heal reconcile already runs at. An observation
+/// admitted before then is decided against a partial snapshot: it reads an
+/// empty bloom map, finds nothing in flight, and advances mainline out from
+/// under the very land the replay is about to fold.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.source.observe_mainline")]
+pub struct ObserveMainline;
+
+/// Reply to [`ObserveMainline`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.source.observe_mainline_result")]
+pub enum ObserveMainlineResult {
+    /// The observation succeeded.
+    Ok {
+        /// The `aether_data::wire`-encoded observed head [`Digest`](crate::digest::Digest),
+        /// correspondence-bound to the real commit.
+        #[serde(with = "aether_data::bytes")]
+        head: Vec<u8>,
+    },
+    /// The observation failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
