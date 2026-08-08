@@ -37,7 +37,7 @@ MCP sessions should use distinct track `lane` strings when sharing a path.
 `audio` feature. Native state, cpal, WAV decode, and the worker thread require
 `audio-runtime`. A wasm guest can therefore name the capability and its kinds
 without linking the native stack. See
-[`audio/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/mod.rs) and the
+[`audio/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/src/lib.rs) and the
 feature declarations in
 [`aether-audio/Cargo.toml`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-audio/Cargo.toml).
 

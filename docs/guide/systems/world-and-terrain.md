@@ -63,7 +63,7 @@ Material bytes are `0 Void`, `1 Grass`, `2 Dirt`, `3 Stone`, `4 Sand`, and
 truncate to their plane sizes, and region/water ids narrow to `u16`. These are
 format contracts, not schema enums. The complete model and versioned binary
 codec are in
-[`world/data.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-terrain/src/world/data.rs).
+[`world/data/`](https://github.com/iamacoffeepot/aether/tree/main/crates/aether-kit-terrain/src/world/data).
 
 `WorldView` meshes each resident chunk to flat-color `DrawTriangle`s and keeps
 them in a sorted cache. Meshing reads a bounded neighbor apron, so a write
@@ -209,10 +209,10 @@ points. The public external observability kind is
 intents are child-internal, so agents that do not drive input should use the
 mark/terra/world kinds directly.
 
-See [`src/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-workbench/src/kinds.rs),
+See [`src/workbench/kinds.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-workbench/src/workbench/kinds.rs),
 [`src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-workbench/src/lib.rs),
-[`src/panel.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-workbench/src/panel.rs), and
-[`src/viewport.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-workbench/src/viewport.rs).
+[`src/workbench/panel.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-workbench/src/workbench/panel.rs), and
+[`src/workbench/viewport.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-workbench/src/workbench/viewport.rs).
 
 ## Chassis caveats and extension routes
 

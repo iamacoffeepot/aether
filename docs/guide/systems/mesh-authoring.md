@@ -115,8 +115,8 @@ point, merge coplanar same-color boundaries, and remove short-edge slivers.
 The public polygon path groups boundary loops deterministically into outers and
 holes. The triangle path runs cleanup followed by CDT. The implementation is in
 [`mesh.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-mesh/src/mesh.rs),
-[`cleanup.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-mesh/src/cleanup.rs), and
-[`tessellate.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-mesh/src/tessellate.rs).
+[`cleanup/`](https://github.com/iamacoffeepot/aether/tree/main/crates/aether-mesh/src/cleanup), and
+[`tessellate/`](https://github.com/iamacoffeepot/aether/tree/main/crates/aether-mesh/src/tessellate).
 
 Convex faces without holes use a fan fast path. Concave faces or faces with
 holes use integer constrained Delaunay triangulation. If CDT fails, the public
