@@ -368,6 +368,29 @@ impl<C: GitDataApi + PullRequestApi> GitSource<C> {
         self.correspondence.resolve_digest(&git)?.ok_or_else(|| SourceError::UnresolvedCorrespondence(what.to_owned()))
     }
 
+    // The digest naming mainline's current head, minting and recording one when
+    // the head is a commit Bloomery did not produce.
+    //
+    // Anything merged outside a bloom moves mainline to an object with no
+    // recorded correspondence, so demanding one here refuses to name the ordinary
+    // state of a shared repository — and refuses it as a *fault*, which the land
+    // reactor re-drives, so the coordinator spins on a condition no retry can
+    // resolve: nothing will ever record a correspondence for a commit made
+    // outside Bloomery. Minting the address is what [`poll_land`] already does
+    // for a squash-merge commit, for the same reason; doing it here lets an
+    // unrecognized head be reported as the moved base it is.
+    fn mainline_digest(&self, sha: &str) -> Result<Digest, SourceError> {
+        let object =
+            GitObjectId::from_hex(sha).ok_or_else(|| SourceError::Malformed(format!("git object sha `{sha}`")))?;
+        if let Some(known) = self.correspondence.resolve_digest(&object)? {
+            return Ok(known);
+        }
+
+        let minted = digest_of(&LandedHeadAddress { object: object.bytes() });
+        self.correspondence.record(&minted, &object)?;
+        Ok(minted)
+    }
+
     // The tree digest at real commit `sha`: read the commit for its real tree
     // object sha, then reverse-resolve that object to its tree digest. The
     // integration-branch path reads a real git tree this way; the claim path
@@ -780,23 +803,30 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
         if !self.cas_land_enabled {
             return Err(SourceError::LandingDisabled);
         }
+        // Adopt before anything else: a re-drained land entry (or a crash-and-
+        // replay) must find the proposal it already opened rather than opening a
+        // second one. This is what makes issuing a land idempotent, and it runs
+        // before any write so a redrive touches nothing.
+        //
+        // Ahead of the base check, deliberately. The base check decides whether to
+        // *open* a landing; once one is open its fate belongs to the proposal, and
+        // re-deciding it here would abandon the bloom the moment mainline moved —
+        // including when it moved *because this very proposal merged*, which is
+        // the one outcome the watch exists to observe.
+        let branch = Self::landing_branch(bloom);
+        if let Some(existing) = self.client.find_pull_request_for_head(&branch)? {
+            return Ok(LandOutcome::Proposed { number: existing.number });
+        }
+
         let current =
             self.client.get_ref(MAINLINE_REF)?.ok_or_else(|| SourceError::MissingRef(MAINLINE_REF.to_owned()))?;
         // Reverse-resolve the real mainline object (a sha1/40-hex on a real repo,
         // which the old fixed-64-hex gate rejected as `Malformed` before any swap)
         // to the base digest, then compare against the sealed base.
-        let actual = self.resolve_object_digest(&current.sha, "mainline head object")?;
+        let actual = self.mainline_digest(&current.sha)?;
 
         if actual != *expected_base {
             return Ok(LandOutcome::BaseMoved { expected: *expected_base, actual });
-        }
-        // Adopt before proposing: a re-drained land entry (or a crash-and-replay)
-        // must find the proposal it already opened rather than opening a second
-        // one. This is what makes issuing a land idempotent, and it runs before
-        // any write so a redrive touches nothing.
-        let branch = Self::landing_branch(bloom);
-        if let Some(existing) = self.client.find_pull_request_for_head(&branch)? {
-            return Ok(LandOutcome::Proposed { number: existing.number });
         }
 
         // Forward-resolve the new head digest to its real git object, point the
@@ -1329,17 +1359,65 @@ mod tests {
         );
     }
 
+    // Tripwire: an unrecognized mainline head is a *moved base*, not a fault.
+    // Anything merged outside a bloom leaves mainline on an object with no
+    // recorded correspondence, and the land reactor re-drives a fault — so
+    // raising one here spun the coordinator every tick on a condition no retry
+    // could resolve, since nothing ever records a correspondence for a commit
+    // made outside Bloomery. Minting the head's address is what `poll_land`
+    // already does for a squash commit; it is what lets the refusal be clean.
     #[test]
-    fn land_errors_cleanly_when_the_mainline_correspondence_is_unrecorded() {
-        // A real sha1 mainline with no recorded correspondence is the clean
-        // `UnresolvedCorrespondence`, never the old `Malformed`-before-swap.
+    fn an_unrecognized_mainline_head_is_a_moved_base_not_a_fault() {
         let fake = FakeGithub::new();
-        fake.seed_ref("heads/main", &"c3".repeat(20));
+        let foreign = "c3".repeat(20);
+        fake.seed_ref("heads/main", &foreign);
         let enabled = git_source(&fake, true);
-        match enabled.land(&bloom(), &digest(10), &digest(90)) {
-            Err(SourceError::UnresolvedCorrespondence(_)) => {}
-            other => panic!("expected UnresolvedCorrespondence, got {other:?}"),
+
+        let expected_base = digest(10);
+        match enabled.land(&bloom(), &expected_base, &digest(90)).expect("an unknown head refuses, it does not fault") {
+            LandOutcome::BaseMoved { expected, actual } => {
+                assert_eq!(expected, expected_base);
+                // The head is now nameable, so the refusal reports what mainline
+                // actually is rather than declining to say.
+                assert_eq!(
+                    enabled.correspondence.resolve_digest(&GitObjectId::from_hex(&foreign).unwrap()).unwrap(),
+                    Some(actual),
+                    "the minted address is recorded, so the next check resolves it",
+                );
+            }
+            other @ LandOutcome::Proposed { .. } => panic!("expected BaseMoved, got {other:?}"),
         }
+    }
+
+    // Tripwire: the adopt runs ahead of the base check. Mainline moving is the
+    // *expected* consequence of a landing proposal being merged, so re-deciding
+    // the base on a re-drive abandoned the bloom at precisely the moment its
+    // landing succeeded — the watch could never observe the merge it was waiting
+    // for, because observing it is what moved the base.
+    #[test]
+    fn an_open_proposal_is_adopted_even_after_mainline_moved_off_the_sealed_base() {
+        let fake = FakeGithub::new();
+        let bloom = bloom();
+        let base = digest(10);
+        let mainline_sha1 = "a1".repeat(20);
+        fake.seed_ref("heads/main", &mainline_sha1);
+        fake.seed_correspondence(&base, &mainline_sha1);
+        let new_head = digest(90);
+        fake.seed_git_object(&new_head);
+        let enabled = git_source(&fake, true);
+
+        let LandOutcome::Proposed { number } = enabled.land(&bloom, &base, &new_head).unwrap() else {
+            panic!("the first land opens the proposal");
+        };
+
+        // Mainline moves on — the merge of this very proposal is one way it does.
+        fake.seed_ref("heads/main", &"d4".repeat(20));
+
+        assert_eq!(
+            enabled.land(&bloom, &base, &new_head).unwrap(),
+            LandOutcome::Proposed { number },
+            "the same proposal is re-adopted so the watch can still reach its terminal",
+        );
     }
 
     // Tripwire: the receipt attests the commit mainline *became*, and records a
