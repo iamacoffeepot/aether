@@ -43,10 +43,10 @@ use std::time::{Duration, Instant};
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, AggregateReviewPayload, BloomId, ConfigRegistry, ConfigScopes, Digest, DispatchPayload, ExecutionStatus,
-    Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, StageId, Topic, WorkHandle, WorkpieceId,
+    Admit, AggregateReviewPayload, BloomId, ConfigRegistry, ConfigScopes, DispatchPayload, ExecutionStatus, Fact,
+    ModelOverride, Nonce, RedispatchPayload, ReviewPass, StageId, Topic, WorkHandle, WorkpieceId,
 };
-use aether_bloomery_github::SharedCorrespondence;
+use aether_bloomery_github::{SharedCorrespondence, short_hex};
 use aether_data::wire::from_bytes;
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
@@ -801,9 +801,14 @@ impl CandidatePush for GitCandidatePush {
 }
 
 /// The bloom-namespace ref an admitted candidate is pushed to —
-/// `refs/heads/bloom/<bloom hex>/candidate/<workpiece>` (ADR-0152), force-updated
-/// because refinement supersedes. The workpiece segment is sanitized to git-safe
-/// ref characters; ids are machine-authored, so this is a tripwire, not a codec.
+/// `refs/heads/bloom/<short bloom hex>/candidate/<workpiece>` (ADR-0152),
+/// force-updated because refinement supersedes. The workpiece segment is
+/// sanitized to git-safe ref characters; ids are machine-authored, so this is a
+/// tripwire, not a codec.
+///
+/// The bloom segment is [`short_hex`] — the same rendering the source port's
+/// integration / attempt / checkpoint / landing refs use, so one bloom's whole
+/// ref namespace reads as one namespace.
 fn candidate_ref_name(bloom: &BloomId, workpiece: &str) -> String {
     let safe: String = workpiece
         .chars()
@@ -815,18 +820,7 @@ fn candidate_ref_name(bloom: &BloomId, workpiece: &str) -> String {
             }
         })
         .collect();
-    format!("refs/heads/bloom/{}/candidate/{safe}", digest_hex(&bloom.0))
-}
-
-/// Lowercase-hex a digest's 32 bytes (the bloom-namespace rendering the source
-/// port's refs use).
-fn digest_hex(digest: &Digest) -> String {
-    let mut hex = String::with_capacity(64);
-    for byte in digest.as_bytes() {
-        hex.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        hex.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-    }
-    hex
+    format!("refs/heads/bloom/{}/candidate/{safe}", short_hex(&bloom.0))
 }
 
 /// Push each admitted passing capture to its bloom candidate ref (ADR-0152).
