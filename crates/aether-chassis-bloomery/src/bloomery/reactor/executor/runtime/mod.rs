@@ -65,6 +65,7 @@ use crate::bloomery::intake::{
 use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
+use crate::bloomery::refs::candidate_ref_name;
 use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend, StoreConfigError, resolve_config};
 
@@ -836,29 +837,6 @@ impl CandidatePush for GitCandidatePush {
             Err(String::from_utf8_lossy(&output.stderr).into_owned())
         }
     }
-}
-
-/// The bloom-namespace ref an admitted candidate is pushed to —
-/// `refs/heads/bloom/<short bloom hex>/candidate/<workpiece>` (ADR-0152),
-/// force-updated because refinement supersedes. The workpiece segment is
-/// sanitized to git-safe ref characters; ids are machine-authored, so this is a
-/// tripwire, not a codec.
-///
-/// The bloom segment is [`short_hex`] — the same rendering the source port's
-/// integration / attempt / checkpoint / landing refs use, so one bloom's whole
-/// ref namespace reads as one namespace.
-fn candidate_ref_name(bloom: &BloomId, workpiece: &str) -> String {
-    let safe: String = workpiece
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    format!("refs/heads/bloom/{}/candidate/{safe}", short_hex(&bloom.0))
 }
 
 /// Push each admitted passing capture to its bloom candidate ref (ADR-0152).

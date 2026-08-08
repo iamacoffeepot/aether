@@ -7,14 +7,15 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{BloomId, Digest, Event, Fact, IntegratePayload, Topic};
-use aether_bloomery_github::GitSource;
+use aether_bloomery::{BloomId, Digest, Event, Fact, IntegratePayload, MemberCandidate, Topic, WorkpieceId};
 use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::{GitDataApi, GitSource, short_hex};
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::drain_and_integrate;
 use crate::bloomery::SourceShell;
 use crate::bloomery::outbox::TopicOutbox;
+use crate::bloomery::refs::candidate_ref_name;
 use crate::store::SqliteStore;
 
 fn digest(seed: u8) -> Digest {
@@ -36,7 +37,12 @@ fn seeded(candidate: &Digest) -> (FakeGithub, Digest) {
 }
 
 fn enqueue_integration(store: &mut SqliteStore, bloom: BloomId, base: Digest, candidates: Vec<Digest>) -> u64 {
-    let payload = IntegratePayload { bloom: bloom.0, base, candidates };
+    let members = candidates
+        .into_iter()
+        .enumerate()
+        .map(|(index, candidate)| MemberCandidate { workpiece: WorkpieceId(format!("wp-{index}")), candidate })
+        .collect();
+    let payload = IntegratePayload { bloom: bloom.0, base, members };
     store.enqueue_topic(Topic::Integrate, &to_vec(&payload).unwrap()).unwrap()
 }
 
@@ -73,21 +79,63 @@ fn a_completed_claim_set_folds_and_admits_a_resolve() {
     assert_eq!(lineage, vec![candidate], "the lineage is the candidate fold sequence");
 }
 
-// ADR-0152 / #3653 — a multi-member fold refuses (acked, no admit): the port's
-// tree-replace `integrate` would keep only the last member's work, so failing
-// closed beats a resolve whose head silently dropped members' changes.
+// Seed the candidate branch a member's capture would have pushed, at its own
+// commit — what a combining fold merges. Keyed off `candidate_ref_name` so the
+// test addresses it exactly as the fold does; a hand-spelled name here would
+// pass while the fold read an empty branch.
+fn seed_candidate_branch(fake: &FakeGithub, bloom: &BloomId, workpiece: &str, tree: &str) {
+    let commit = fake.create_commit(workpiece, tree, &[]).unwrap();
+    fake.seed_ref(candidate_ref_name(bloom, workpiece).trim_start_matches("refs/"), &commit.sha);
+}
+
+// ADR-0152 / #3653 — a multi-member fold merges every member's candidate ref
+// instead of refusing. The refusal this replaces existed because tree-replace
+// would keep only the last member's work; the decisive assertion is that the
+// folded tree is *not* the last candidate, which is exactly what a tree-replace
+// would have produced.
 #[test]
-fn a_multi_member_fold_refuses_and_acks_instead_of_dropping_work() {
-    let candidate = digest(0xAB);
-    let (fake, base) = seeded(&candidate);
-    fake.seed_git_object(&digest(0xAC));
+fn a_multi_member_fold_merges_every_members_candidate() {
+    let (first, second) = (digest(0xAB), digest(0xAC));
+    let (fake, base) = seeded(&first);
+    fake.seed_git_object(&second);
+    let bloom = BloomId(digest(1));
+    seed_candidate_branch(&fake, &bloom, "wp-0", "tree-a");
+    seed_candidate_branch(&fake, &bloom, "wp-1", "tree-b");
     let source = shell(fake);
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let sequence = enqueue_integration(&mut store, BloomId(digest(1)), base, vec![candidate, digest(0xAC)]);
+    let sequence = enqueue_integration(&mut store, bloom, base, vec![first, second]);
 
     let (admits, ack_through) = drain_and_integrate(&mut store, &source).unwrap();
 
-    assert!(admits.is_empty(), "no resolve is admitted for a fold that would drop work");
+    assert_eq!(admits.len(), 1, "a multi-member fold resolves rather than failing closed");
+    assert_eq!(ack_through, Some(sequence), "the folded entry is acked");
+    let (_, tree, head, lineage) = decoded_resolve(&admits[0]);
+    assert_ne!(tree, second, "a tree-replace would have produced exactly the last member's candidate");
+    assert_ne!(tree, first, "nor the first member's — the fold combined them");
+    assert_ne!(head, tree, "the landable head stays a distinct commit digest");
+    assert_eq!(lineage, vec![first, second], "the lineage records every member's candidate, in member order");
+}
+
+// A cross-member collision is refused, not re-driven: the two candidates
+// conflict until something changes one of them, which is a decision above this
+// reactor. Re-driving on a timer would spin forever on an unchanging fact.
+#[test]
+fn a_conflicting_member_refuses_the_fold_rather_than_re_driving_it() {
+    let (first, second) = (digest(0xAB), digest(0xAC));
+    let (fake, base) = seeded(&first);
+    fake.seed_git_object(&second);
+    let bloom = BloomId(digest(1));
+    seed_candidate_branch(&fake, &bloom, "wp-0", "tree-a");
+    seed_candidate_branch(&fake, &bloom, "wp-1", "tree-b");
+    let integration = format!("bloom/{}/integration", short_hex(&bloom.0));
+    fake.seed_merge_conflict(&integration, &format!("bloom/{}/candidate/wp-1", short_hex(&bloom.0)));
+    let source = shell(fake);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let sequence = enqueue_integration(&mut store, bloom, base, vec![first, second]);
+
+    let (admits, ack_through) = drain_and_integrate(&mut store, &source).unwrap();
+
+    assert!(admits.is_empty(), "a collision admits no resolve");
     assert_eq!(ack_through, Some(sequence), "the refusal is definitive — acked, never re-driven");
 }
 

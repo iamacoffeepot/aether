@@ -1244,11 +1244,15 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
     }
 }
 
-/// Drop this trait's `heads/` shorthand, leaving the bare branch name the
-/// repository-level endpoints take. A name that never carried the prefix (a raw
-/// commit sha, which the merge endpoint also accepts as a head) passes through.
+/// Drop a ref prefix, leaving the bare branch name the repository-level
+/// endpoints take. Accepts both the fully-qualified `refs/heads/…` a push
+/// target carries and this trait's `heads/…` shorthand, because callers hold
+/// one or the other depending on which side of the port they came from — and a
+/// prefix left on does not fail loudly, it addresses a branch that does not
+/// exist. A name carrying neither (a raw commit sha, which the merge endpoint
+/// also accepts as a head) passes through.
 pub fn strip_heads(name: &str) -> &str {
-    name.strip_prefix("heads/").unwrap_or(name)
+    name.strip_prefix("refs/heads/").or_else(|| name.strip_prefix("heads/")).unwrap_or(name)
 }
 
 impl<T: HttpTransport> PullRequestApi for ReqwestGithub<T> {

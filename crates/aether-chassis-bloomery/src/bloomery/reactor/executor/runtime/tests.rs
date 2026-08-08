@@ -23,14 +23,15 @@ use aether_data::wire::{from_bytes, to_vec};
 
 use super::{
     BACKOFF_CAP, CandidatePush, GithubMirrorConfig, NameEvidenceClaims, TrackedHandle, backoff_delay,
-    candidate_ref_name, drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount,
-    is_stale, next_backoff, pull_and_admit, push_admitted_candidates, seed_tracked, select_stale_handles,
+    drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_stale, next_backoff,
+    pull_and_admit, push_admitted_candidates, seed_tracked, select_stale_handles,
 };
 use crate::bloomery::executor::local::testing::FixedRunner;
 use crate::bloomery::intake::{
     Admission, AdmitDecision, DispatchError, UploadedEvidence, admit_uploaded, attempt_artifact_name,
 };
 use crate::bloomery::outbox::TopicOutbox;
+use crate::bloomery::refs::candidate_ref_name;
 use crate::bloomery::{
     ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
 };

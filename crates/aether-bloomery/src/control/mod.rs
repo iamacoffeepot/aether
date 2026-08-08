@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::reduce::Decision;
-use crate::values::{AgentProfile, ConfigRegistry, Transformation};
+use crate::values::{AgentProfile, ConfigRegistry, MemberCandidate, Transformation};
 
 /// One active-membership mutation the store applies inside the combined
 /// [`Commit`] transaction: a workpiece claimed (or released) for a bloom. The
@@ -336,8 +336,8 @@ pub struct IntegratePayload {
     pub bloom: Digest,
     /// The sealed base the integration branch bootstraps at.
     pub base: Digest,
-    /// Every member's claimed candidate tree, in member order.
-    pub candidates: Vec<Digest>,
+    /// Every member's workpiece and claimed candidate tree, in member order.
+    pub members: Vec<MemberCandidate>,
 }
 
 /// The whole-bloom aggregate-review dispatch outbox payload (ADR-0153): the

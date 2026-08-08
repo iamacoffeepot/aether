@@ -49,6 +49,7 @@ use crate::bloomery::SourceShell;
 use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
+use crate::bloomery::refs::candidate_ref_name;
 use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend};
 
@@ -132,40 +133,60 @@ enum FoldOutcome {
 /// it; anywhere else → refuse (a foreign advance on the single-writer branch).
 fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOutcome {
     let bloom = BloomId(payload.bloom);
-    if payload.candidates.is_empty() {
+    if payload.members.is_empty() {
         return FoldOutcome::Refused("integration dispatched with zero candidates".to_owned());
     }
-    // Fail-closed on multi-member folds (#3653): the port's `integrate` sets the
-    // branch tree to the candidate's tree (a replace, not a merge), so folding
-    // independent per-member candidates sequentially would keep only the last
-    // member's work. Refusing loudly beats admitting a resolve whose head
-    // silently dropped members' changes; merge-based integration lifts this.
-    if payload.candidates.len() > 1 {
-        return FoldOutcome::Refused(format!(
-            "integration of {} members needs the merge-based fold (#3653); tree-replace integrate would drop all but the last member's work",
-            payload.candidates.len()
-        ));
-    }
+    // How to fold. One member's candidate was built against the bloom's own
+    // base, which is where the branch starts, so stating its tree is exact —
+    // and cheaper, since it needs no ancestry read. More than one has to be
+    // *combined*: the second candidate knows nothing of the first, so replacing
+    // the tree would keep only the last member's work (#3653). Merging reads
+    // each member's candidate ref, whose commit carries the ancestry a tree
+    // cannot.
+    let combining = payload.members.len() > 1;
     let position = match source.integration_checkpoint(&bloom, &payload.base) {
         Ok(position) => position,
         Err(error) => return FoldOutcome::Stopped(format!("integration bootstrap failed: {error}")),
     };
-    // Resume position: a branch already at candidate k continues after it. The
-    // freshly-bootstrapped branch's minted base tree matches no candidate
-    // (capture refuses empty diffs, so no candidate tree equals the base tree)
-    // and starts the fold at the first candidate.
-    let start =
-        payload.candidates.iter().position(|candidate| *candidate == position.checkpoint.tree).map_or(0, |i| i + 1);
-    // The landable head of the last integrate: seeded from the branch position
-    // (recovering a fold interrupted after its final integrate), overwritten by
-    // every fold below.
+    // Resume position for the stating fold: a branch already at candidate k
+    // continues after it. The freshly-bootstrapped branch's minted base tree
+    // matches no candidate (capture refuses empty diffs, so no candidate tree
+    // equals the base tree) and starts at the first. A combining fold cannot
+    // resume this way — its branch carries a *merged* tree, which equals no
+    // member's candidate — so it re-offers every member from the start and lets
+    // the merge answer: one the branch already contains reports "nothing to do"
+    // and the fold moves past it. Ancestry is the record of what is folded, and
+    // the branch already holds it.
+    let start = if combining {
+        0
+    } else {
+        payload.members.iter().position(|member| member.candidate == position.checkpoint.tree).map_or(0, |i| i + 1)
+    };
+    // The landable head of the last fold: seeded from the branch position
+    // (recovering a fold interrupted after its final write), overwritten below.
     let mut expected = position.checkpoint;
     let mut head = position.head;
-    for candidate in &payload.candidates[start.min(payload.candidates.len())..] {
-        match source.integrate(&bloom, candidate, &expected) {
+    for member in &payload.members[start.min(payload.members.len())..] {
+        let folded = if combining {
+            source.integrate_merge(&bloom, &candidate_ref_name(&bloom, &member.workpiece.0), &expected)
+        } else {
+            source.integrate(&bloom, &member.candidate, &expected)
+        };
+        match folded {
             Ok(IntegrateOutcome::Integrated { tree, head: new_head }) => {
                 expected = Checkpoint { bloom, tree };
                 head = Some(new_head);
+            }
+            // A cross-member collision. Refused rather than stopped: re-driving
+            // on a timer cannot resolve it — the two candidates conflict until
+            // something changes one of them, which is a decision above this
+            // reactor, not a retry.
+            Ok(IntegrateOutcome::Conflict { .. }) => {
+                return FoldOutcome::Refused(format!(
+                    "member `{}` conflicts with the members already folded; the collision needs a decision, \
+                     not a re-drive",
+                    member.workpiece.0
+                ));
             }
             Ok(other) => {
                 return FoldOutcome::Stopped(format!(
@@ -189,7 +210,12 @@ fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOut
     let tree = expected.tree;
     let event = Event {
         idempotency_key: resolve_key(&payload.bloom),
-        fact: Fact::Resolve { bloom, tree, head, lineage: payload.candidates.clone() },
+        fact: Fact::Resolve {
+            bloom,
+            tree,
+            head,
+            lineage: payload.members.iter().map(|member| member.candidate).collect(),
+        },
     };
     FoldOutcome::Resolved(Box::new(event))
 }

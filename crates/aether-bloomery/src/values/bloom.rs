@@ -207,6 +207,23 @@ impl BloomSpec {
     }
 }
 
+/// One member's contribution to an integration fold: which workpiece, and the
+/// candidate tree it claimed.
+///
+/// The fold needs both. The tree is what a same-base single-member fold states
+/// directly; the workpiece is what addresses that member's candidate *ref*,
+/// which is what a fold has to merge when it combines work built against
+/// different points — several members onto one branch, or a bloom caught up to
+/// a moved base. A tree carries no ancestry, so it cannot be merged; only the
+/// commit its ref points at can.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct MemberCandidate {
+    /// The member whose candidate this is — the ref address's workpiece segment.
+    pub workpiece: WorkpieceId,
+    /// The claimed candidate tree.
+    pub candidate: Digest,
+}
+
 /// A per-member claim that a candidate resolves its workpiece on the final
 /// tree, with evidence bound to the candidate digest (ADR-0149 §The bloom).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
