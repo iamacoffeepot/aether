@@ -101,6 +101,40 @@ impl ContentAddressed for IntegrationTreeAddress<'_> {
     const DOMAIN: &'static str = "aether.bloomery.github.integration-tree";
 }
 
+/// The bloom-namespace ref an admitted candidate is pushed to —
+/// `refs/heads/bloom/<short bloom hex>/candidate/<workpiece>` (ADR-0152),
+/// force-updated because refinement supersedes.
+///
+/// Public because both ends of that ref live outside this module: the executor
+/// pushes an admitted capture to it, and a fold merges it. One spelling, so the
+/// two ends cannot drift — a mismatch here does not fail loudly, it addresses a
+/// branch that is not there.
+#[must_use]
+pub fn candidate_ref_name(bloom: &BloomId, workpiece: &str) -> String {
+    format!("refs/{}", candidate_ref(bloom, workpiece))
+}
+
+/// The same ref in the `heads/…` short form the Git Data surface takes. The
+/// workpiece segment is sanitized to git-safe ref characters; ids are
+/// machine-authored, so this is a tripwire, not a codec.
+///
+/// The bloom segment is [`short_hex`] — the same rendering the integration /
+/// attempt / checkpoint / landing refs use, so one bloom's whole ref namespace
+/// reads as one namespace.
+fn candidate_ref(bloom: &BloomId, workpiece: &str) -> String {
+    let safe: String = workpiece
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("heads/bloom/{}/candidate/{safe}", short_hex(&bloom.0))
+}
+
 /// A source-port fault, distinct from the clean [`IntegrateOutcome`] /
 /// [`LandOutcome`] refusals (which are not errors). Its own type because the
 /// port needs a variant the value vocabulary does not carry — the gated-land
@@ -861,6 +895,28 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
             .ok_or_else(|| SourceError::Malformed(format!("merge commit sha `{}`", commit.sha)))?;
         self.correspondence.record(&head, &commit_object)?;
         Ok(IntegrateOutcome::Integrated { tree, head })
+    }
+
+    fn adopt_candidate(
+        &self,
+        predecessor: &BloomId,
+        successor: &BloomId,
+        workpiece: &str,
+    ) -> Result<bool, Self::Error> {
+        let Some(source) = self.client.get_ref(&candidate_ref(predecessor, workpiece))? else {
+            return Ok(false);
+        };
+        let target = candidate_ref(successor, workpiece);
+
+        // Force the update: a re-drained fold re-adopts, and the second write
+        // must land on the same sha rather than refuse as a non-fast-forward.
+        // The successor's own namespace is written by nothing else, so there is
+        // no concurrent advance a force could clobber.
+        match self.client.get_ref(&target)? {
+            Some(existing) if existing.sha == source.sha => Ok(true),
+            Some(_) => self.client.update_ref(&target, &source.sha, true).map(|_| true).map_err(SourceError::Github),
+            None => self.client.create_ref(&target, &source.sha).map(|_| true).map_err(SourceError::Github),
+        }
     }
 
     fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, Self::Error> {

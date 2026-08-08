@@ -658,8 +658,13 @@ fn project(
                 let payload = LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head };
                 outbox.push(OutboxPayload::new(Topic::Land, to_vec(&payload)?));
             }
-            Decision::DispatchIntegration { bloom, base, members } => {
-                let payload = IntegratePayload { bloom: bloom.0, base: *base, members: members.clone() };
+            Decision::DispatchIntegration { bloom, base, members, adopt_from } => {
+                let payload = IntegratePayload {
+                    bloom: bloom.0,
+                    base: *base,
+                    members: members.clone(),
+                    adopt_from: adopt_from.map(|predecessor| predecessor.0),
+                };
                 outbox.push(OutboxPayload::new(Topic::Integrate, to_vec(&payload)?));
             }
             Decision::DispatchAggregateReview { bloom, transformation, roll, profile } => {

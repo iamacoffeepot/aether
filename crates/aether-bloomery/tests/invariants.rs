@@ -368,9 +368,15 @@ fn a_successor_inheriting_every_claim_dispatches_its_own_fold() {
         "no member enters the line fresh — every one arrived integrated",
     );
     match decided.effects.iter().find(|e| matches!(e, Decision::DispatchIntegration { .. })) {
-        Some(Decision::DispatchIntegration { bloom, base, members }) => {
+        Some(Decision::DispatchIntegration { bloom, base, members, adopt_from }) => {
             assert_eq!(*bloom, successor, "the fold is dispatched for the successor, not the predecessor");
             assert_eq!(*base, successor_base, "and folds onto the successor's base — the point of the re-base");
+            assert_eq!(
+                *adopt_from,
+                Some(predecessor),
+                "the candidates were produced under the predecessor's id, so the successor adopts its refs \
+                 rather than folding refs it does not have",
+            );
             let folded: Vec<(&str, Digest)> =
                 members.iter().map(|member| (member.workpiece.0.as_str(), member.candidate)).collect();
             assert_eq!(folded, vec![("wp", digest(100))], "carrying the inherited claim's candidate");

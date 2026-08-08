@@ -338,6 +338,9 @@ pub struct IntegratePayload {
     pub base: Digest,
     /// Every member's workpiece and claimed candidate tree, in member order.
     pub members: Vec<MemberCandidate>,
+    /// The predecessor whose candidate refs this fold adopts first, when the
+    /// bloom inherited its whole claim set from one.
+    pub adopt_from: Option<Digest>,
 }
 
 /// The whole-bloom aggregate-review dispatch outbox payload (ADR-0153): the

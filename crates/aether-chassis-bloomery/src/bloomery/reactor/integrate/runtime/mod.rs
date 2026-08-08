@@ -49,9 +49,9 @@ use crate::bloomery::SourceShell;
 use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
-use crate::bloomery::refs::candidate_ref_name;
 use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend};
+use aether_bloomery_github::candidate_ref_name;
 
 // The autoloaded control-core component's lineage mailbox — where an admitted
 // `Fact::Resolve` is sent. Resolved from the lineage path, mirroring the land
@@ -143,7 +143,34 @@ fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOut
     // the tree would keep only the last member's work (#3653). Merging reads
     // each member's candidate ref, whose commit carries the ancestry a tree
     // cannot.
-    let combining = payload.members.len() > 1;
+    let combining = payload.members.len() > 1 || payload.adopt_from.is_some();
+
+    // An inherited claim set arrives with no refs of its own: a candidate ref is
+    // addressed under the bloom that produced it, and a successor is a different
+    // bloom. Adopt them into this bloom's namespace before folding, so the fold
+    // reads only its own refs and a retired predecessor's namespace is never
+    // load-bearing for a live bloom. Idempotent, so a re-drained fold re-adopts
+    // harmlessly.
+    if let Some(predecessor) = payload.adopt_from {
+        let predecessor = BloomId(predecessor);
+        for member in &payload.members {
+            match source.adopt_candidate(&predecessor, &bloom, &member.workpiece.0) {
+                // A member whose predecessor ref is gone has no work to fold.
+                // Refuse rather than fold a partial set: the resolve would claim
+                // an artifact that never carried that member's changes.
+                Ok(false) => {
+                    return FoldOutcome::Refused(format!(
+                        "member `{}` inherited a claim but its predecessor's candidate ref is absent; \
+                         refusing to fold a set missing a member's work",
+                        member.workpiece.0
+                    ));
+                }
+                Ok(true) => {}
+                Err(error) => return FoldOutcome::Stopped(format!("adopting a candidate ref failed: {error}")),
+            }
+        }
+    }
+
     let position = match source.integration_checkpoint(&bloom, &payload.base) {
         Ok(position) => position,
         Err(error) => return FoldOutcome::Stopped(format!("integration bootstrap failed: {error}")),

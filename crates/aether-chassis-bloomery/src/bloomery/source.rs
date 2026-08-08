@@ -195,6 +195,21 @@ impl SourceShell {
         self.backend.integrate_merge(bloom, candidate_ref, expected)
     }
 
+    /// Adopt `predecessor`'s candidate ref for `workpiece` into `successor`'s
+    /// namespace, so a bloom that inherited the claim can fold the work behind
+    /// it. `false` when the predecessor has no such ref.
+    ///
+    /// # Errors
+    /// The ref could not be read or written.
+    pub fn adopt_candidate(
+        &self,
+        predecessor: &BloomId,
+        successor: &BloomId,
+        workpiece: &str,
+    ) -> Result<bool, SourceError> {
+        self.backend.adopt_candidate(predecessor, successor, workpiece)
+    }
+
     /// Propose landing `new_head` onto mainline, guarded by `expected_base`.
     ///
     /// # Errors

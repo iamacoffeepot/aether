@@ -49,7 +49,13 @@ pub(super) fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &Res
                 candidate.map(|candidate| MemberCandidate { workpiece: member.workpiece.clone(), candidate })
             })
             .collect();
-        effects.push(Decision::DispatchIntegration { bloom: *bloom, base: record.spec.base(), members });
+        effects.push(Decision::DispatchIntegration {
+            bloom: *bloom,
+            base: record.spec.base(),
+            members,
+            // Its own members produced these refs under its own id.
+            adopt_from: None,
+        });
     }
     Decisions { outcome: Outcome::Integrated { bloom: *bloom, workpiece: claim.workpiece.clone() }, effects }
 }

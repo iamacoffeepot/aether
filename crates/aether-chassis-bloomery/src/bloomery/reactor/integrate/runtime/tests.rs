@@ -15,8 +15,8 @@ use aether_data::wire::{from_bytes, to_vec};
 use super::drain_and_integrate;
 use crate::bloomery::SourceShell;
 use crate::bloomery::outbox::TopicOutbox;
-use crate::bloomery::refs::candidate_ref_name;
 use crate::store::SqliteStore;
+use aether_bloomery_github::candidate_ref_name;
 
 fn digest(seed: u8) -> Digest {
     Digest::from_bytes([seed; 32])
@@ -37,12 +37,24 @@ fn seeded(candidate: &Digest) -> (FakeGithub, Digest) {
 }
 
 fn enqueue_integration(store: &mut SqliteStore, bloom: BloomId, base: Digest, candidates: Vec<Digest>) -> u64 {
+    enqueue_integration_adopting(store, bloom, base, candidates, None)
+}
+
+// The same enqueue for a bloom that inherited its claim set: the fold adopts the
+// predecessor's candidate refs into its own namespace before merging them.
+fn enqueue_integration_adopting(
+    store: &mut SqliteStore,
+    bloom: BloomId,
+    base: Digest,
+    candidates: Vec<Digest>,
+    adopt_from: Option<Digest>,
+) -> u64 {
     let members = candidates
         .into_iter()
         .enumerate()
         .map(|(index, candidate)| MemberCandidate { workpiece: WorkpieceId(format!("wp-{index}")), candidate })
         .collect();
-    let payload = IntegratePayload { bloom: bloom.0, base, members };
+    let payload = IntegratePayload { bloom: bloom.0, base, members, adopt_from };
     store.enqueue_topic(Topic::Integrate, &to_vec(&payload).unwrap()).unwrap()
 }
 
@@ -114,6 +126,50 @@ fn a_multi_member_fold_merges_every_members_candidate() {
     assert_ne!(tree, first, "nor the first member's — the fold combined them");
     assert_ne!(head, tree, "the landable head stays a distinct commit digest");
     assert_eq!(lineage, vec![first, second], "the lineage records every member's candidate, in member order");
+}
+
+// A successor that inherited its claims has no candidate refs of its own — a
+// ref is addressed under the bloom that produced it, and a successor is a
+// different bloom (its id content-addresses a spec that includes the base, so
+// re-basing mints a new one). The fold adopts the predecessor's refs into its
+// own namespace first; without that it would merge branches that are not there.
+#[test]
+fn an_inheriting_successor_adopts_the_predecessors_candidate_refs_before_folding() {
+    let candidate = digest(0xAB);
+    let (fake, base) = seeded(&candidate);
+    let predecessor = BloomId(digest(1));
+    let successor = BloomId(digest(2));
+    seed_candidate_branch(&fake, &predecessor, "wp-0", "tree-a");
+    let source = shell(fake.clone());
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let sequence = enqueue_integration_adopting(&mut store, successor, base, vec![candidate], Some(predecessor.0));
+
+    let (admits, ack_through) = drain_and_integrate(&mut store, &source).unwrap();
+
+    assert_eq!(admits.len(), 1, "the inherited work folds under the successor");
+    assert_eq!(ack_through, Some(sequence));
+    assert!(
+        fake.ref_exists(candidate_ref_name(&successor, "wp-0").trim_start_matches("refs/")),
+        "the candidate ref now lives in the successor's namespace, so its fold reads only its own refs",
+    );
+}
+
+// A member whose predecessor ref is gone has no work to fold, and folding the
+// rest would resolve an artifact that never carried that member's changes.
+#[test]
+fn an_inherited_member_with_no_predecessor_ref_refuses_rather_than_folding_a_partial_set() {
+    let candidate = digest(0xAB);
+    let (fake, base) = seeded(&candidate);
+    let (predecessor, successor) = (BloomId(digest(1)), BloomId(digest(2)));
+    // Deliberately seed no candidate branch for the member.
+    let source = shell(fake);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let sequence = enqueue_integration_adopting(&mut store, successor, base, vec![candidate], Some(predecessor.0));
+
+    let (admits, ack_through) = drain_and_integrate(&mut store, &source).unwrap();
+
+    assert!(admits.is_empty(), "a set missing a member's work resolves nothing");
+    assert_eq!(ack_through, Some(sequence), "the refusal is definitive — acked, never re-driven");
 }
 
 // A cross-member collision is refused, not re-driven: the two candidates

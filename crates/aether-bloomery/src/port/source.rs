@@ -250,6 +250,28 @@ pub trait SourceBackend {
         expected: &Checkpoint,
     ) -> Result<IntegrateOutcome, Self::Error>;
 
+    /// Point `successor`'s candidate ref for `workpiece` at whatever
+    /// `predecessor`'s names, so a bloom that inherited a claim can fold the
+    /// work behind it.
+    ///
+    /// A candidate ref is addressed under the bloom that produced it, and a
+    /// successor is a different bloom — its id is a content address over a spec
+    /// that includes the base, so re-basing mints a new one. A successor that
+    /// inherits claims therefore has candidates it cannot address. Adopting
+    /// copies the refs into its own namespace, which leaves it self-contained:
+    /// its fold reads only its own refs, and a retired predecessor's namespace
+    /// is never load-bearing for a live bloom.
+    ///
+    /// Idempotent — adopting a ref the successor already carries is a no-op, so
+    /// a re-drained fold re-adopts harmlessly. A predecessor ref that is absent
+    /// is `Ok(false)`: the member has no captured candidate to adopt, which the
+    /// caller reads rather than treating as a fault.
+    ///
+    /// # Errors
+    /// Backend-defined — e.g. the ref could not be read or written.
+    fn adopt_candidate(&self, predecessor: &BloomId, successor: &BloomId, workpiece: &str)
+    -> Result<bool, Self::Error>;
+
     /// Record an integration checkpoint for `bloom` at `tree`.
     ///
     /// # Errors
