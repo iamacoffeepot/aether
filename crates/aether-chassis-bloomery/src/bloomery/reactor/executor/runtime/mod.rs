@@ -20,10 +20,13 @@
 //!    actor as an [`Admit`] — where the reducer advances the member's cursor and
 //!    (via the dispatch topic) dispatches its next stage.
 //!
-//! Config-gated exactly like the mirror reactor: unconfigured (empty
-//! token/owner/repo) mounts disabled — no shell, no store, no timer — so a
-//! zero-secret dev boot neither errors nor spins; the outbox accumulates until a
-//! token is supplied.
+//! Config-gated like the mirror reactor but with the local-lane escape: the
+//! reactor mounts disabled — no shell, no store, no timer — only when GitHub is
+//! unconfigured (empty token/owner/repo) *and* `local_lane_enabled` is false.
+//! Unconfigured GitHub plus a local lane still mounts with the local backend
+//! only; a zero-secret dev boot that routes every lane local dispatches and
+//! captures without GitHub existing, while an Actions-routed lane fails at submit
+//! naming the missing knobs rather than silently accumulating.
 //!
 //! Store ownership: this reactor opens its **own** [`SqliteStore`] on the shared
 //! `AETHER_STORE_PATH` because the intake helpers ([`dispatch_and_record`] /
@@ -41,10 +44,11 @@ use std::time::{Duration, Instant};
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, AggregateReviewPayload, BloomId, ConfigRegistry, ConfigScopes, Digest, DispatchPayload, ExecutionStatus,
-    Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, StageId, Topic, WorkHandle, WorkpieceId,
+    Admit, AggregateReviewPayload, BloomId, ConfigRegistry, ConfigScopes, Digest, DispatchPayload, EvidenceRef,
+    ExecutionStatus, ExecutorBackend, Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, StageId, Topic,
+    WorkHandle, WorkOrder, WorkpieceId,
 };
-use aether_bloomery_github::SharedCorrespondence;
+use aether_bloomery_github::{ExecutorError, GithubError, SharedCorrespondence};
 use aether_data::wire::from_bytes;
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
@@ -55,7 +59,6 @@ use serde::{Deserialize, Serialize};
 
 use super::ExecutorReactorCapability;
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
-use crate::bloomery::ExecutorShell;
 use crate::bloomery::dispatch_model;
 use crate::bloomery::intake::{
     Admission, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims, dispatch_and_record, run_intake_cycle,
@@ -63,6 +66,7 @@ use crate::bloomery::intake::{
 use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
+use crate::bloomery::{ExecutorShell, LocalExecutor, RoutingExecutor};
 use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend, StoreConfigError, resolve_config};
 
@@ -974,6 +978,54 @@ fn missing_connection_knobs(config: &GithubMirrorConfig) -> Vec<&'static str> {
         .collect()
 }
 
+/// Whether the executor reactor mounts disabled given the resolved config.
+/// Disabled only when GitHub is unconfigured *and* no local lane is enabled —
+/// the one condition that makes every later seal look healthy and never dispatch.
+/// When either backend is usable the reactor mounts.
+pub(crate) fn is_executor_disabled(config: &GithubMirrorConfig) -> bool {
+    !missing_connection_knobs(config).is_empty() && !config.local_lane_enabled
+}
+
+/// The Actions backend when GitHub is unconfigured but a local lane is enabled:
+/// every submit fails permanently naming the missing connection knobs, so an
+/// order that routes to Actions does not silently accumulate in the outbox but
+/// parks with a visible reason. A local-routed order never reaches this backend.
+pub(crate) struct UnconfiguredActionsBackend {
+    pub(crate) missing: String,
+}
+
+impl ExecutorBackend for UnconfiguredActionsBackend {
+    type Error = ExecutorError;
+
+    fn submit(&self, _order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        Err(ExecutorError::Github(GithubError::Status {
+            status: 400,
+            body: format!("github not configured: missing {}", self.missing),
+        }))
+    }
+
+    fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+        Err(ExecutorError::Github(GithubError::Status {
+            status: 400,
+            body: format!("github not configured: missing {}", self.missing),
+        }))
+    }
+
+    fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
+        Err(ExecutorError::Github(GithubError::Status {
+            status: 400,
+            body: format!("github not configured: missing {}", self.missing),
+        }))
+    }
+
+    fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+        Err(ExecutorError::Github(GithubError::Status {
+            status: 400,
+            body: format!("github not configured: missing {}", self.missing),
+        }))
+    }
+}
+
 #[runtime]
 impl NativeActor for ExecutorReactorCapability {
     type State = ExecutorReactorState;
@@ -986,10 +1038,11 @@ impl NativeActor for ExecutorReactorCapability {
         let mailer = ctx.mailer();
         let control_mailbox = <ControlCore as Addressable>::resolve(0, ());
 
-        // Unconfigured → disabled: no shell, no store, no timer. The dispatch
-        // outbox accumulates and drains once a token/owner/repo is supplied.
+        // Disabled only when *both* backends are unusable: GitHub missing and no
+        // local lane. Any usable backend mounts — a local-only bloom reaches a
+        // captured, verified candidate without GitHub existing (ADR-0152).
         let missing = missing_connection_knobs(&config);
-        if !missing.is_empty() {
+        if is_executor_disabled(&config) {
             // A `warn`, not an `info` (#4625): declining to mount is the one
             // condition that makes every later seal look healthy and never
             // dispatch, so it must not sit below the boot chatter. Naming the
@@ -1018,7 +1071,29 @@ impl NativeActor for ExecutorReactorCapability {
             });
         }
 
-        let executor = ExecutorShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
+        // Either GitHub is configured, or a local lane is enabled (or both) — mount
+        // enabled. Fully configured stays exactly as today: a `RoutingExecutor`
+        // over both backends. Unconfigured plus local enabled mounts with the local
+        // backend only; an Actions-routed order fails at submit naming the missing
+        // knobs rather than silently accumulating.
+        let (executor, correspondence) = if missing.is_empty() {
+            let executor = ExecutorShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
+            let correspondence = config.connect_correspondence().map_err(|e| BootError::Other(Box::new(e)))?;
+            (executor, correspondence)
+        } else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                missing = %missing.join(", "),
+                "executor dispatch reactor mounted with local backend only (github unconfigured); actions lanes will fail at submit",
+            );
+            let correspondence = config.connect_correspondence().map_err(|e| BootError::Other(Box::new(e)))?;
+            let local = Arc::new(LocalExecutor::from_config(&config, Arc::clone(&correspondence)));
+            let actions = Arc::new(UnconfiguredActionsBackend { missing: missing.join(", ") });
+            let routing = RoutingExecutor::new(actions, local, config.local_lane_prefixes());
+            let executor = ExecutorShell::new(Arc::new(routing));
+            (executor, correspondence)
+        };
+
         let mut store = SqliteStore::open(&config.store_path).map_err(|e| BootError::Other(Box::new(e)))?;
         // Restart recovery (#3641): a reactor that cannot read its recovery set
         // must not silently start with an empty one — that is the bug this
@@ -1047,9 +1122,6 @@ impl NativeActor for ExecutorReactorCapability {
             retracked = tracked.len(),
             "executor dispatch reactor mounted; polling the store for dispatch decisions",
         );
-        // The push side resolves an admitted capture's commit through its own
-        // correspondence handle on the shared store (ADR-0152).
-        let correspondence = config.connect_correspondence().map_err(|e| BootError::Other(Box::new(e)))?;
         Ok(ExecutorReactorState {
             executor: Some(executor),
             store: Some(store),

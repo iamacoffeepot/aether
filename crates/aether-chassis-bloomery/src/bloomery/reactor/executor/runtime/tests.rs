@@ -22,10 +22,10 @@ use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::{
-    BACKOFF_CAP, CandidatePush, GithubMirrorConfig, NameEvidenceClaims, TrackedHandle, backoff_delay,
-    candidate_ref_name, drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_stale,
-    missing_connection_knobs, next_backoff, pull_and_admit, push_admitted_candidates, seed_tracked,
-    select_stale_handles,
+    BACKOFF_CAP, CandidatePush, GithubMirrorConfig, NameEvidenceClaims, TrackedHandle, UnconfiguredActionsBackend,
+    backoff_delay, candidate_ref_name, drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch,
+    is_executor_disabled, is_stale, missing_connection_knobs, next_backoff, pull_and_admit, push_admitted_candidates,
+    seed_tracked, select_stale_handles,
 };
 use crate::bloomery::executor::local::testing::FixedRunner;
 use crate::bloomery::intake::{Admission, AdmitDecision, UploadedEvidence, admit_uploaded, attempt_artifact_name};
@@ -1185,4 +1185,156 @@ fn an_empty_token_is_named_even_when_owner_and_repo_are_set() {
     let config = GithubMirrorConfig { owner: "o".to_owned(), repo: "r".to_owned(), ..GithubMirrorConfig::default() };
 
     assert_eq!(missing_connection_knobs(&config), ["GITHUB_TOKEN"]);
+}
+
+// Four mount-decision combinations (task #3572): the reactor mounts whenever
+// either backend is usable — GitHub configured *or* a local lane enabled — and
+// stays disabled only when both are unusable. These tripwires pin that gate
+// without booting the timer/store harness.
+
+#[test]
+fn fully_configured_with_local_enabled_mounts_enabled() {
+    let config = GithubMirrorConfig {
+        token: "t".to_owned(),
+        owner: "o".to_owned(),
+        repo: "r".to_owned(),
+        local_lane_enabled: true,
+        ..GithubMirrorConfig::default()
+    };
+
+    assert!(!is_executor_disabled(&config), "fully configured + local enabled must mount (routing over both backends)");
+}
+
+#[test]
+fn fully_configured_with_local_disabled_mounts_enabled() {
+    let config = GithubMirrorConfig {
+        token: "t".to_owned(),
+        owner: "o".to_owned(),
+        repo: "r".to_owned(),
+        local_lane_enabled: false,
+        ..GithubMirrorConfig::default()
+    };
+
+    assert!(!is_executor_disabled(&config), "fully configured + local disabled must still mount (bare actions)");
+}
+
+#[test]
+fn unconfigured_with_local_enabled_mounts_local_only() {
+    let config = GithubMirrorConfig { local_lane_enabled: true, ..GithubMirrorConfig::default() };
+
+    assert!(missing_connection_knobs(&config).len() == 3, "github is unconfigured");
+    assert!(!is_executor_disabled(&config), "unconfigured github + local enabled must mount with local backend only");
+}
+
+#[test]
+fn unconfigured_with_local_disabled_mounts_disabled() {
+    let config = GithubMirrorConfig { local_lane_enabled: false, ..GithubMirrorConfig::default() };
+
+    assert!(!missing_connection_knobs(&config).is_empty(), "github is unconfigured");
+    assert!(is_executor_disabled(&config), "unconfigured github + local disabled must stay disabled");
+    // Keep the warning's content: it must name every empty knob.
+    assert_eq!(missing_connection_knobs(&config), ["GITHUB_TOKEN", "AETHER_GITHUB_OWNER", "AETHER_GITHUB_REPO"]);
+}
+
+// When GitHub is unconfigured but a local lane is enabled, an Actions-routed
+// order must fail at submit naming the missing knobs (permanent, so parked)
+// rather than silently accumulating. A local-routed order in the same mounted
+// state must still submit.
+#[test]
+fn local_only_mount_fails_actions_routed_orders_naming_missing_knobs() {
+    // Build exactly the executor `init` would mount for the local-only case: a
+    // routing shell whose actions arm is the unconfigured backend and whose local
+    // arm is a capturing stub.
+    let missing = missing_connection_knobs(&GithubMirrorConfig::default()).join(", ");
+    let actions = Arc::new(UnconfiguredActionsBackend { missing: missing.clone() });
+    let local_backend = Arc::new(CapturingBackend::default());
+    let routing = RoutingExecutor::new(actions, Arc::clone(&local_backend), vec!["construct.".to_owned()]);
+    let shell = ExecutorShell::new(Arc::new(routing));
+
+    let bloom = BloomId(digest(1));
+
+    // A verify lane routes to Actions by the default `local_lane_prefixes` ("construct.,review.")
+    // and must fail with the missing-knob reason.
+    let verify_order = WorkOrder {
+        nonce: Nonce("n-verify".to_owned()),
+        transformation: Transformation {
+            command: "verify.check".to_owned(),
+            inputs: vec![digest(0xC0)],
+            checkout: digest(0xC0),
+            model: None,
+            description: None,
+        },
+    };
+    let verify_err = shell.submit(&verify_order).unwrap_err();
+    let msg = verify_err.to_string();
+    assert!(msg.contains("missing"), "actions failure must name the missing knobs: {msg}");
+    assert!(msg.contains("GITHUB_TOKEN"), "must include GITHUB_TOKEN: {msg}");
+    assert!(msg.contains("AETHER_GITHUB_OWNER"), "must include owner knob: {msg}");
+
+    // DispatchError::is_permanent must be true so `drain_and_dispatch` parks it.
+    let permanent = crate::bloomery::DispatchError::Submit(verify_err).is_permanent();
+    assert!(permanent, "unconfigured-github submit must be permanent, not transient");
+
+    // A construct lane routes local and must still submit.
+    let construct_order = WorkOrder {
+        nonce: Nonce("n-construct".to_owned()),
+        transformation: Transformation {
+            command: "construct.implement".to_owned(),
+            inputs: vec![digest(0xC0)],
+            checkout: digest(0xC0),
+            model: None,
+            description: None,
+        },
+    };
+    let handle = shell.submit(&construct_order).expect("construct lane must route local and succeed");
+    assert_eq!(handle.nonce.0, "n-construct");
+
+    // The same routing via the outbox drain: an unconfigured-github but
+    // local-enabled mount drains the construct entry and parks the verify entry
+    // rather than leaving either to silently accumulate.
+    let mut store2 = SqliteStore::open(":memory:").unwrap();
+    let actions2 = Arc::new(UnconfiguredActionsBackend { missing });
+    let local2 = Arc::new(CapturingBackend::default());
+    let routing2 = RoutingExecutor::new(actions2, local2, vec!["construct.".to_owned()]);
+    let shell2 = ExecutorShell::new(Arc::new(routing2));
+
+    let payload_construct = DispatchPayload {
+        profile: StageCatalog::profile_of(StageId::Construct),
+        bloom: bloom.0,
+        workpiece: WorkpieceId("wp-local".to_owned()),
+        stage: StageId::Construct,
+        transformation: Transformation::for_member_stage(StageId::Construct, digest(5), digest(0xC0)),
+        scope_revision: digest(5),
+        candidate: None,
+        configs: ConfigRegistry::default(),
+    };
+    let seq_local = store2.enqueue_topic(Topic::Dispatch, &to_vec(&payload_construct).unwrap()).unwrap();
+
+    let payload_verify = DispatchPayload {
+        profile: StageCatalog::profile_of(StageId::Verify),
+        bloom: bloom.0,
+        workpiece: WorkpieceId("wp-verify".to_owned()),
+        stage: StageId::Verify,
+        transformation: Transformation {
+            command: "verify.check".to_owned(),
+            inputs: vec![digest(9)],
+            checkout: digest(0xC0),
+            model: None,
+            description: None,
+        },
+        scope_revision: digest(9),
+        candidate: None,
+        configs: ConfigRegistry::default(),
+    };
+    let seq_verify = store2.enqueue_topic(Topic::Dispatch, &to_vec(&payload_verify).unwrap()).unwrap();
+
+    let (handles, ack_through, transient) = drain_and_dispatch(&mut store2, &shell2).unwrap();
+    // Only the local-routed entry submitted; the verify entry stopped the drain as a permanent park.
+    assert_eq!(handles.len(), 1, "only the local-routed entry dispatches");
+    assert_eq!(ack_through, Some(seq_verify), "permanent verify failure is acked past, not left to accumulate");
+    assert_eq!(transient, None, "permanent refusal is not a transient backoff");
+    // Acking parks it; the store no longer re-drains the verify entry.
+    store2.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
+    assert!(store2.drain_topic(Topic::Dispatch).unwrap().is_empty(), "parked entry does not re-drain");
+    let _ = seq_local;
 }
