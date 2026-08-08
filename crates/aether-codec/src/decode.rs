@@ -432,7 +432,8 @@ fn decode_enum_body(cur: &mut Cursor<'_>, variant: &EnumVariant, path: &str) -> 
 
 /// Stringify a decoded map key into its proto3-JSON form (issue #232).
 /// Mirrors the encoder's `parse_map_key`: string identity, integer
-/// scalars to decimal digits, bool to `"true"`/`"false"`. Anything else
+/// scalars to decimal digits, bool to `"true"`/`"false"`, a fieldless
+/// enum to its variant name. Anything else
 /// is `UnsupportedSchema` — the `BTreeMap`<K: Ord, V> bound at the Rust
 /// layer makes those unreachable, but the codec rejects them defensively
 /// in case a descriptor lands here from an external source.
@@ -455,9 +456,14 @@ fn render_map_key(key_value: &Value, key_schema: &SchemaType, path: &str) -> Res
                 .to_string()),
             Primitive::F32 | Primitive::F64 => Err(DecodeError::UnsupportedSchema("float as Map key (no Ord)")),
         },
+        // The decode already resolved the discriminant to a variant, so a key
+        // that arrives here as a string names a known fieldless one — the body
+        // check is what rejects a variant whose decode would have produced an
+        // object instead.
+        (SchemaType::Enum { .. }, Value::String(name)) => Ok(name.clone()),
         _ => {
             let _ = path;
-            Err(DecodeError::UnsupportedSchema("Map key must be String, integer scalar, or Bool"))
+            Err(DecodeError::UnsupportedSchema("Map key must be String, integer scalar, Bool, or fieldless enum"))
         }
     }
 }

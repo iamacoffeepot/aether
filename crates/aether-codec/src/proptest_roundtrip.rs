@@ -74,11 +74,13 @@ fn arb_primitive() -> impl Strategy<Value = Primitive> {
 }
 
 /// The proto3-style map-key restriction: keys are `String`, an integer
-/// `Scalar`, or `Bool` — never a float or a composite.
+/// `Scalar`, `Bool`, or a fieldless enum — never a float, and never a
+/// composite (a variant with a body included).
 fn arb_map_key_schema() -> impl Strategy<Value = SchemaType> {
     prop_oneof![
         Just(SchemaType::String),
         Just(SchemaType::Bool),
+        Just(unit_enum_key_schema()),
         prop_oneof![
             Just(Primitive::U8),
             Just(Primitive::U16),
@@ -92,6 +94,27 @@ fn arb_map_key_schema() -> impl Strategy<Value = SchemaType> {
         .prop_map(SchemaType::Scalar),
     ]
 }
+
+/// A fixed fieldless-enum key schema. Named variants rather than generated
+/// ones so the key generator below can enumerate them, and three of them so a
+/// map can hold more than one key without exhausting the vocabulary.
+fn unit_enum_key_schema() -> SchemaType {
+    SchemaType::Enum {
+        variants: UNIT_ENUM_KEYS
+            .iter()
+            .enumerate()
+            .map(|(index, name)| EnumVariant::Unit {
+                name: (*name).into(),
+                discriminant: u32::try_from(index).expect("three variants fit a u32"),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    }
+}
+
+/// The variant names `unit_enum_key_schema` declares, in discriminant order —
+/// which is also the encoded-key order the canonical map sorts on.
+const UNIT_ENUM_KEYS: [&str; 3] = ["Alpha", "Beta", "Gamma"];
 
 /// One generated enum variant before it is assigned a name + discriminant.
 #[derive(Debug, Clone)]
@@ -270,6 +293,7 @@ fn value_for_variant(variant: &EnumVariant) -> BoxedStrategy<Value> {
 /// decoder emits.
 fn value_for_map(key_schema: &SchemaType, value_schema: &SchemaType) -> BoxedStrategy<Value> {
     let value_strat = value_for_schema(value_schema);
+    let value_owned = value_schema.clone();
     match key_schema {
         SchemaType::String => prop::collection::btree_map(
             prop::string::string_regex("[a-zA-Z0-9_-]{0,8}").expect("static regex"),
@@ -284,6 +308,17 @@ fn value_for_map(key_schema: &SchemaType, value_schema: &SchemaType) -> BoxedStr
         SchemaType::Scalar(p) => {
             prop::collection::btree_map(arb_int_key(*p), value_strat, 0..=MAX_WIDTH).prop_map(stringify_keys).boxed()
         }
+        SchemaType::Enum { .. } => prop::collection::btree_set(0..UNIT_ENUM_KEYS.len(), 0..=UNIT_ENUM_KEYS.len())
+            .prop_flat_map(move |keys| {
+                let values = prop::collection::vec(value_for_schema(&value_owned), keys.len());
+                (Just(keys), values)
+            })
+            .prop_map(|(keys, values)| {
+                Value::Object(
+                    keys.into_iter().map(|key| String::from(UNIT_ENUM_KEYS[key])).zip(values).collect::<Map<_, _>>(),
+                )
+            })
+            .boxed(),
         other => unreachable!("arb_map_key_schema never yields {:?} as a map key", other),
     }
 }
