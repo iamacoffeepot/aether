@@ -1,6 +1,6 @@
 # ADR-0174: Bloom Configuration Is a Kind-Keyed Registry
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-07
 
 ## Context
@@ -47,12 +47,14 @@ Five properties define it.
 **Resolution walks a scope chain, and registries layer rather than nest.** A lookup starts at the member's registry, falls through to the bloom's, and ends at the caller-supplied default:
 
 ```rust
-let toolchain = configs.resolve::<Toolchain>(store, member, bloom)?.unwrap_or_default();
+let toolchain = resolve_config::<Toolchain>(store, ConfigScopes::member_of(member, bloom))?.unwrap_or_default();
 ```
 
 This is the fall-through `ModelOverride::resolve` already performs across the fields of one value, lifted one level to operate across scopes. Nesting a per-member map inside the bloom's registry would express the same thing while making every sealed value type know about the scope hierarchy; layering keeps each registry flat and puts the hierarchy in the resolver.
 
-**The reducer carries the registry opaquely; the host resolves it.** The reducer is `no_std` and has no descriptor inventory on wasm, so it cannot decode a config even in principle — which is correct, and is exactly how it treats every digest field today. It seals the registry, orders it canonically, and hands it on. The host resolves an entry at the point of use, through the same store the scope revision resolves through. The ADR-0149 boundary is unchanged.
+**Whoever resolves an entry must already hold its content.** The reducer seals the registry, orders it canonically, and hands it on; the host resolves an entry at the point of use, through the same store the scope revision resolves through. The ADR-0149 boundary is unchanged.
+
+The reducer resolves too, when a configuration is one *it* has to read — a retry budget decides re-dispatch versus wedge, and that decision happens inside `reduce`. It cannot fetch, so its content arrives as an argument (`ResolvedConfigs`), filled by the caller before it reduces. Decoding was never the obstacle: a config kind is a type `aether-bloomery` declares, so `from_bytes::<K>` is all a resolution needs once the bytes are in hand. Reaching a store is the obstacle, and it is a property of *where the code runs*, not of what it can decode.
 
 **Authoring is generic.** One route replaces the per-config routes:
 
@@ -68,7 +70,7 @@ The host resolves the kind name to its schema through the descriptor inventory, 
 
 `base` stays a field. It is not configuration injected into a process — it is the bloom's subject, the source revision the land compare-and-swaps against.
 
-`Membership.scope_revision` also stays a field, and this is the sharper call. Two distinct things are fused in it today: the identity of the workpiece's approved scope, which the member's `approval` evidence is bound to, and a carrier for the per-workpiece `ModelOverride`, which was retrofitted onto that identity because it needed somewhere attested to live. Only the second is configuration. The override moves into the member's registry as a `ModelOverride` entry, and `ScopeRevision` returns to naming approved scope content.
+`Membership.scope_revision` also stays a field, and this is the sharper call. Two distinct things are fused in it today: the identity of the workpiece's approved scope, which the member's `approval` evidence is bound to, and a carrier for the per-workpiece `ModelOverride`, which was retrofitted onto that identity because it needed somewhere attested to live. Only the second is configuration. The override moves into the member's registry as a `ModelOverride` entry, and `Membership.scope_revision` goes back to being a bare digest naming approved scope content — the `ScopeRevision` *type* is deleted outright, since removing the override left nothing in it.
 
 That split moves model choice out from under the approval binding, which today covers it by accident — changing the override changes the revision digest and invalidates the approval. Losing that would be a real regression, so the approval's binding widens from `scope_revision` alone to the member's configuration set as well. An operator still cannot change which model runs for an approved workpiece without re-approval.
 
@@ -86,7 +88,9 @@ The wrapper-kind route is available if that map ever proves awkward — `Constru
 - The canonical member order in `BloomDraft::seal` re-keys. Sorting currently leads on `scope_revision`; with configuration alongside it the sort leads on `workpiece` and carries the registry and approval as tiebreakers, which stays a total order over the member set and so keeps the bloom id a stable function of that set rather than of its input order.
 - This re-digests every spec and every membership. The migration is free today because no bloom has sealed a configuration the registry would have to carry forward, and it will not stay free — which is the argument for deciding now rather than after three more bespoke fields.
 - A string key costs more bytes per entry than a fixed-width id would, and it is the one string in a structure whose other identities are typed. Sealed registry bytes are legible to anyone reading them without the binaries that produced them, which is the compensating property.
-- Follow-on work, each its own change: the registry types and their sealing; the generic `POST /configs` route; migrating the scope revision's override into the member registry and widening the approval binding; resolving or deleting each of the three inert fields.
+- Follow-on work, each its own change: the registry types and their sealing (#4602); the generic `POST /configs` route (#4602); migrating the scope revision's override into the member registry and widening the approval binding (#4606); resolving or deleting each of the three inert fields (#4607 deleted `toolchain` and `policy`, #4587 resolved `stage_catalog`).
+- One follow-on this record did not anticipate: **a configuration the reducer must read needs the content handed to it** (#4618). The retry budgets in the stage catalog are read inside `reduce`, which has no store handle, so `reduce` takes a `ResolvedConfigs` the caller fills — at boot from a bulk read, at runtime from a deferred re-read when an admit names an address the control core has not seen. The seal door refuses a spec naming content it was not given, since a sealed address is immutable and would otherwise fail later at a dispatch that parks.
+- `policy` was deleted rather than resolved, and reinstating it as a registry entry the pre-seal gate resolves is #4616. It is a design change, not a wiring one: the gate is synchronous over in-memory state and runs pre-seal, and whether a member may seal the policy that admits it is an open question.
 
 ## Alternatives considered
 
