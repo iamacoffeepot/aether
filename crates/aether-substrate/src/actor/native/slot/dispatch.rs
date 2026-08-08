@@ -117,15 +117,14 @@ where
         );
         return false;
     };
-    if !A::dispatch_fallback(actor.as_mut(), ctx, &env) {
-        if is_first_dispatch_miss(env.kind) {
-            tracing::warn!(
-                target: "aether_substrate::dispatch",
-                actor = A::NAMESPACE,
-                kind = %env.kind,
-                "actor dispatch missed: kind not handled or decode failed"
-            );
-        }
+    // Short-circuits, so the dedup set is touched only on the miss path.
+    if !A::dispatch_fallback(actor.as_mut(), ctx, &env) && is_first_dispatch_miss(env.kind) {
+        tracing::warn!(
+            target: "aether_substrate::dispatch",
+            actor = A::NAMESPACE,
+            kind = %env.kind,
+            "actor dispatch missed: kind not handled or decode failed"
+        );
     }
     // A fallback is not a typed arm: a `#[fallback]`-only catch-all cap
     // (issue 576) declares no typed handlers by design and correctly owns no
