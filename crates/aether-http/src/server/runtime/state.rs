@@ -520,7 +520,10 @@ impl HttpSupervisorState {
     /// and without this line neither branch leaves any trace to tell them
     /// apart.
     pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, M>, mailbox: MailboxId) {
-        if self.monitors.contains_key(&mailbox) || self.unmonitorable.contains(&mailbox) {
+        // A monitor that already failed for this mailbox will fail again — the
+        // condition is a property of the target, not of the attempt — so the
+        // second route it registers must not re-report it.
+        if self.unmonitorable.contains(&mailbox) {
             return;
         }
         let Entry::Vacant(slot) = self.monitors.entry(mailbox) else {

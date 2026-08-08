@@ -37,15 +37,46 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
 use crate::mail::KindId;
 
-/// Per-actor set of kinds that have already emitted the
-/// `actor dispatch missed` warning. Stored as `Local` so it
-/// lives in the slot's own `ActorSlots` — the state the slot
-/// already owns for that actor — with no global registry, lock,
-/// or shared synchronization on the hot path.
+/// Kinds this actor has already warned a dispatch miss for. `Local`, so it
+/// lives in the slot's own `ActorSlots` rather than a process-wide table —
+/// unlike [`warn_undeclared_handler_once`], which is keyed by a `&'static str`
+/// namespace and can afford a global behind a lock because it is reached only
+/// off a defect path. This one sits on the dispatch path proper, so it stays
+/// unsynchronized per-actor state.
 #[derive(Default)]
 struct WarnedDispatchMisses(HashSet<u64>);
 
 impl Local for WarnedDispatchMisses {}
+
+/// How many distinct missed kinds one actor remembers. The set exists to
+/// suppress a repeat, and `KindId` arrives off the wire, so an unbounded set
+/// would let a sender that varies its kind grow this actor's memory without
+/// limit. Past the cap the actor stops recording — and so stops warning — which
+/// is the right trade for a diagnostic: the condition has already been reported
+/// a hundred distinct ways, and none of them was silenced.
+const WARNED_DISPATCH_MISS_CAP: usize = 128;
+
+/// Whether this is the first time `kind` has missed dispatch on the calling
+/// actor — the deduplication behind the `actor dispatch missed` warning.
+///
+/// Repeats are silent because the condition is a property of the sender's
+/// addressing rather than of the delivery: one peer mailing an unhandled kind
+/// every tick would otherwise print a line every tick, forever, on the hot
+/// path. The first sighting always reports.
+///
+/// Fails open: with no slots stamped (a bare unit-test call, a dispatch outside
+/// an actor's scope) there is nowhere to remember, so it answers `true` and the
+/// caller warns. An extra warning is a far cheaper wrong answer than a silenced
+/// one.
+fn is_first_dispatch_miss(kind: KindId) -> bool {
+    WarnedDispatchMisses::try_with_mut(|warned| {
+        if warned.0.len() >= WARNED_DISPATCH_MISS_CAP {
+            return false;
+        }
+        warned.0.insert(kind.0)
+    })
+    .unwrap_or(true)
+}
 
 /// Try the typed `#[handler]` dispatch; if no typed arm matches and
 /// the actor's `#[fallback]` also returns `false`, warn that the kind
@@ -87,8 +118,7 @@ where
         return false;
     };
     if !A::dispatch_fallback(actor.as_mut(), ctx, &env) {
-        let first = WarnedDispatchMisses::try_with_mut(|warned| warned.0.insert(env.kind.0)).unwrap_or(true);
-        if first {
+        if is_first_dispatch_miss(env.kind) {
             tracing::warn!(
                 target: "aether_substrate::dispatch",
                 actor = A::NAMESPACE,
@@ -391,36 +421,45 @@ mod cost_tests {
         assert_eq!(rows[0].samples, 0, "neutral seed surfaces before any dispatch");
     }
 
-    /// `actor dispatch missed` must fire once per `(actor, kind)` pair,
-    /// not once per delivery. A sender repeating an unhandled kind would
-    /// otherwise spam the hot dispatch path.
+    /// Tripwire: the dispatch-miss warning fires once per `(actor, kind)`, not
+    /// once per delivery. One peer addressing an unhandled kind every tick
+    /// printed a line every tick, on the dispatch path, for the life of the
+    /// process — a boot burst buried the `INFO` explaining why the executor
+    /// reactor would never dispatch (iamacoffeepot/aether#4628).
+    ///
+    /// Per *actor*, not globally: two actors missing the same kind are two
+    /// separate facts, and collapsing them would hide the second one forever.
     #[test]
     fn dispatch_miss_warns_once_per_actor_and_kind() {
         use crate::actor::native::local::with_stamped;
         use aether_actor::local::ActorSlots;
 
-        let kind = KindId(0xBEEF_0001);
-        let other_kind = KindId(0xBEEF_0002);
+        let (kind, other_kind) = (KindId(0xBEEF_0001), KindId(0xBEEF_0002));
+        let (actor, sibling) = (ActorSlots::new(), ActorSlots::new());
 
-        let slots_a = ActorSlots::new();
-        let slots_b = ActorSlots::new();
+        assert!(with_stamped(&actor, || is_first_dispatch_miss(kind)), "the first sighting warns");
+        assert!(!with_stamped(&actor, || is_first_dispatch_miss(kind)), "a repeat of the same pair stays silent");
+        assert!(with_stamped(&actor, || is_first_dispatch_miss(other_kind)), "a different kind on the actor warns");
+        assert!(with_stamped(&sibling, || is_first_dispatch_miss(kind)), "the same kind on another actor warns");
+    }
 
-        // First sighting on actor A warns.
-        let first = with_stamped(&slots_a, || WarnedDispatchMisses::try_with_mut(|set| set.0.insert(kind.0)).unwrap());
-        assert!(first, "first sighting of kind on actor A must warn");
+    /// Tripwire: `KindId` arrives off the wire, so the suppression set is
+    /// attacker-influenceable. Without the cap, a sender varying its kind grows
+    /// one actor's memory without limit — a leak reachable by anything that can
+    /// address a mailbox.
+    #[test]
+    fn the_remembered_set_stops_growing_at_its_cap() {
+        use crate::actor::native::local::with_stamped;
+        use aether_actor::local::ActorSlots;
 
-        // Repeat on same actor stays silent.
-        let second = with_stamped(&slots_a, || WarnedDispatchMisses::try_with_mut(|set| set.0.insert(kind.0)).unwrap());
-        assert!(!second, "repeat of same kind on same actor stays silent");
-
-        // Different kind on same actor still warns.
-        let diff_kind =
-            with_stamped(&slots_a, || WarnedDispatchMisses::try_with_mut(|set| set.0.insert(other_kind.0)).unwrap());
-        assert!(diff_kind, "different kind on same actor warns");
-
-        // Same kind on different actor warns again — per-actor isolation.
-        let other_actor =
-            with_stamped(&slots_b, || WarnedDispatchMisses::try_with_mut(|set| set.0.insert(kind.0)).unwrap());
-        assert!(other_actor, "same kind on different actor warns");
+        let actor = ActorSlots::new();
+        with_stamped(&actor, || {
+            for kind in 0..WARNED_DISPATCH_MISS_CAP as u64 {
+                assert!(is_first_dispatch_miss(KindId(kind)), "each distinct kind warns up to the cap");
+            }
+            assert!(!is_first_dispatch_miss(KindId(9999)), "past the cap nothing further is recorded");
+            let retained = WarnedDispatchMisses::try_with_mut(|warned| warned.0.len()).unwrap();
+            assert_eq!(retained, WARNED_DISPATCH_MISS_CAP, "and the set is bounded by it");
+        });
     }
 }
