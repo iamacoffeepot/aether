@@ -20,8 +20,9 @@ pub struct ProcessTransformRunner;
 impl TransformRunner for ProcessTransformRunner {
     fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
         fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
-        // Materialize the sealed checkout into a detached scratch worktree. `--force`
-        // reclaims a stale worktree dir left by a prior aborted run at the same nonce.
+        // Materialize the sealed checkout into a detached scratch worktree, clearing
+        // any leftover directory at the nonce's path first (see `reclaim_worktree_path`).
+        reclaim_worktree_path(spec.worktree_dir)?;
         let checkout = Command::new("git")
             .args(["worktree", "add", "--force", "--detach"])
             .arg(spec.worktree_dir)
@@ -132,6 +133,33 @@ impl TransformRunner for ProcessTransformRunner {
         let tree = GitObjectId::from_hex(tree_hex.trim())
             .ok_or_else(|| LocalExecutorError::Worktree(format!("malformed capture tree sha `{}`", tree_hex.trim())))?;
         Ok(Some(CapturedObjects { commit, tree }))
+    }
+}
+
+/// Clear a leftover scratch worktree directory so `git worktree add` cannot
+/// refuse the path (#4633).
+///
+/// `add --force` relaxes exactly two refusals: a `<commit-ish>` already checked
+/// out by another worktree, and a path *assigned* to a worktree but missing from
+/// disk. A path that exists on disk is refused either way — `fatal: '<path>'
+/// already exists`. A run killed before [`release`] never reaches its teardown
+/// and leaves precisely that, and because the path is keyed by the dispatch
+/// nonce, every retry of that dispatch collides with the same directory: without
+/// this the dispatch can never succeed, however long it re-drives.
+///
+/// Removing the directory leaves behind the stale admin entry, which is the half
+/// `--force` does handle — so the two together reclaim the path whichever half
+/// survived the abort. The path is nonce-keyed and owned by this executor, so
+/// clearing it races nothing.
+///
+/// [`release`]: TransformRunner::release
+fn reclaim_worktree_path(worktree_dir: &Path) -> Result<(), LocalExecutorError> {
+    match fs::remove_dir_all(worktree_dir) {
+        // A first dispatch at this nonce has no directory to reclaim, which is
+        // the common case rather than an error.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(LocalExecutorError::Io(error)),
+        Ok(()) => Ok(()),
     }
 }
 
@@ -252,7 +280,36 @@ fn neutralize_hooks(worktree_dir: &Path) -> Result<(), LocalExecutorError> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::strip_hooks;
+    use std::fs;
+
+    use super::{reclaim_worktree_path, strip_hooks};
+
+    #[test]
+    fn a_leftover_worktree_directory_is_reclaimed() {
+        // The #4633 collision: a run killed before teardown leaves a populated
+        // directory at the nonce's path, and `git worktree add` refuses it
+        // outright — `--force` does not clear a path that exists. Reclaiming has
+        // to remove the directory *and its contents*, since the leftover is a
+        // full checkout rather than an empty dir.
+        let base = tempfile::tempdir().unwrap();
+        let worktree = base.path().join("dispatch-1");
+        fs::create_dir_all(worktree.join("crates")).unwrap();
+        fs::write(worktree.join("crates/leftover.rs"), "// a prior run's checkout").unwrap();
+
+        reclaim_worktree_path(&worktree).unwrap();
+
+        assert!(!worktree.exists(), "a populated leftover worktree must be cleared, not left to collide again");
+    }
+
+    #[test]
+    fn reclaiming_an_absent_path_is_not_an_error() {
+        // Tripwire: the common case is a *first* dispatch at a nonce, where
+        // there is nothing to reclaim. Treating `NotFound` as a failure would
+        // invert the fix and break every clean dispatch instead of the stale one.
+        let base = tempfile::tempdir().unwrap();
+
+        reclaim_worktree_path(&base.path().join("never-created")).unwrap();
+    }
 
     #[test]
     fn strip_hooks_removes_the_hooks_key() {
