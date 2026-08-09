@@ -34,17 +34,22 @@
 //!
 //! The module splits along those seams: the [`error`] type, the [`runner`] spawn
 //! contract, its production [`process_runner`] implementation, the [`lane_env`]
-//! policy for what that spawn may hand down, and the [`backend`] registry +
+//! policy for what that spawn may hand down, the [`lane_program`] policy for
+//! which program it spawns, the [`mock_lane`] stand-in a lane-boundary scenario
+//! points that policy at, and the [`backend`] registry +
 //! [`ExecutorBackend`](aether_bloomery::ExecutorBackend) impl over them.
 
 mod backend;
 mod error;
 mod lane_env;
+mod lane_program;
+pub mod mock_lane;
 mod process_runner;
 mod runner;
 
 pub use backend::LocalExecutor;
 pub use error::LocalExecutorError;
+pub use lane_program::{DEFAULT_LANE_PROGRAM, LaneProgram};
 pub use process_runner::{CaptureIdentity, ProcessTransformRunner};
 pub use runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
 

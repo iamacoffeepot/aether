@@ -11,6 +11,7 @@ use aether_bloomery_github::GitObjectId;
 
 use super::error::LocalExecutorError;
 use super::lane_env::{inherited_keys, scrub_coordinator_env};
+use super::lane_program::LaneProgram;
 use super::runner::{CapturedObjects, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 
 /// The operator a candidate capture is authored as (#4630), resolved from the
@@ -72,13 +73,16 @@ fn host_identity_resolves(worktree_dir: &Path) -> bool {
 pub struct ProcessTransformRunner {
     /// Who candidate captures are authored as.
     identity: CaptureIdentity,
+    /// Which program a dispatch spawns in the scratch worktree (#4727).
+    lane_program: LaneProgram,
 }
 
 impl ProcessTransformRunner {
-    /// Build the runner over the capture identity the host resolved.
+    /// Build the runner over the capture identity and lane invocation the host
+    /// resolved.
     #[must_use]
-    pub fn new(identity: CaptureIdentity) -> Self {
-        Self { identity }
+    pub fn new(identity: CaptureIdentity, lane_program: LaneProgram) -> Self {
+        Self { identity, lane_program }
     }
 }
 
@@ -112,32 +116,31 @@ impl TransformRunner for ProcessTransformRunner {
         // the wrapper's environment rather than the coordinator's, which the
         // child would otherwise inherit wholesale and come up configured as a
         // second coordinator (#4714; see `lane_env`).
-        let mut cargo = Command::new("cargo");
-        scrub_coordinator_env(&mut cargo, inherited_keys());
-        cargo
-            .current_dir(spec.worktree_dir)
-            .args(["xtask", "transform", spec.command, "--out"])
+        let mut lane = self.lane_program.command();
+        scrub_coordinator_env(&mut lane, inherited_keys());
+        lane.current_dir(spec.worktree_dir)
+            .args([spec.command, "--out"])
             .arg(spec.evidence_dir)
             .args(["--nonce", spec.nonce]);
         if is_model_lane(spec.command) {
-            cargo.args(["--subject", spec.checkout_hex]);
+            lane.args(["--subject", spec.checkout_hex]);
             if let Some(diff_base) = spec.diff_base_hex {
-                cargo.args(["--diff-base", diff_base]);
+                lane.args(["--diff-base", diff_base]);
             }
             if let Some(harness) = spec.harness {
-                cargo.args(["--harness", harness]);
+                lane.args(["--harness", harness]);
             }
             if let Some(model) = spec.model {
-                cargo.args(["--model", model]);
+                lane.args(["--model", model]);
             }
             if let Some(effort) = spec.effort {
-                cargo.args(["--effort", effort]);
+                lane.args(["--effort", effort]);
             }
             if let Some(task) = spec.task {
-                cargo.args(["--task", task]);
+                lane.args(["--task", task]);
             }
         }
-        let child = cargo.spawn().map_err(LocalExecutorError::Spawn)?;
+        let child = lane.spawn().map_err(LocalExecutorError::Spawn)?;
         Ok(Box::new(ChildProcess { child }))
     }
 

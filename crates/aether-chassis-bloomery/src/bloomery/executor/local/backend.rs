@@ -15,6 +15,7 @@ use serde::Serialize;
 use std::fs;
 
 use super::error::LocalExecutorError;
+use super::lane_program::LaneProgram;
 use super::process_runner::{CaptureIdentity, ProcessTransformRunner};
 use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
@@ -77,7 +78,11 @@ impl LocalExecutor {
     pub fn from_config(config: &GithubMirrorConfig, correspondence: SharedCorrespondence) -> Self {
         let identity = CaptureIdentity { name: config.operator_name.clone(), email: config.operator_email.clone() };
 
-        Self::new(Arc::new(ProcessTransformRunner::new(identity)), correspondence, config.local_worktree_base.clone())
+        Self::new(
+            Arc::new(ProcessTransformRunner::new(identity, LaneProgram::parse(&config.local_lane_program))),
+            correspondence,
+            config.local_worktree_base.clone(),
+        )
     }
 
     // Lock the registry, recovering the guard on a poisoned mutex rather than
