@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::digest::ContentAddressed;
 use aether_bloomery::{
-    CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, StageVerdict, WorkHandle,
-    WorkOrder, digest_of, is_model_lane,
+    CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, StageVerdict, StudyCost,
+    WorkHandle, WorkOrder, digest_of, is_model_lane,
 };
-use aether_bloomery_github::{GitObjectId, SharedCorrespondence};
+use aether_bloomery_github::{GitObjectId, SharedCorrespondence, parse_study_cost};
 use serde::Serialize;
 use std::fs;
 
@@ -329,6 +329,9 @@ impl ExecutorBackend for LocalExecutor {
                         size_bytes: 0,
                         candidate: None,
                         findings: None,
+                        // Synthesized, not reported: there are no evidence bytes
+                        // to read a cost out of, so the attempt is unmeasured.
+                        cost: None,
                     }]);
                 }
                 return Err(LocalExecutorError::Evidence(format!("{}: {read_error}", evidence_path.display())));
@@ -384,6 +387,7 @@ impl ExecutorBackend for LocalExecutor {
             size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
             candidate,
             findings: parse_findings(&bytes),
+            cost: parse_cost(&bytes),
         }])
     }
 }
@@ -407,6 +411,21 @@ fn parse_status(bytes: &[u8]) -> Option<bool> {
 fn parse_findings(bytes: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     value.get("findings").and_then(serde_json::Value::as_str).map(str::to_owned)
+}
+
+/// What the attempt cost, from the `result_record` the lane nested in its
+/// `evidence.json` (#4679) — the same object `construct_conclusion` reads
+/// `is_error` out of, parsed for its token and price columns instead.
+///
+/// Presence-driven like [`parse_findings`], and `None` at every shortfall: a
+/// lane that nests no record, bytes that do not decode, or a record whose
+/// columns do not parse. `None` means *unmeasured* and writes no study row —
+/// the alternative, a row of zeroes, would make an unmeasured attempt
+/// indistinguishable from a free one and quietly corrupt every average taken
+/// over the ledger.
+fn parse_cost(bytes: &[u8]) -> Option<StudyCost> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    parse_study_cost(&serde_json::to_vec(value.get("result_record")?).ok()?).ok()
 }
 
 /// Whether a construct lane's `evidence.json` byte string shows a **substantive

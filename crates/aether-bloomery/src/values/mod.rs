@@ -9,6 +9,7 @@
 mod bloom;
 mod config;
 mod model_override;
+mod price;
 mod profile;
 mod question;
 mod stage;
@@ -23,6 +24,7 @@ pub use config::{
     decode_config,
 };
 pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedModel, StageOverride};
+pub use price::{PriceRow, PriceTable};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use question::Question;
 pub use stage::{

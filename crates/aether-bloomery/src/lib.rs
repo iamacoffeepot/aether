@@ -98,8 +98,8 @@ pub use values::{
     AgentProfile, AgentSelection, Artifact, Attempt, BloomDraft, BloomSpec, Budget, CONSTRUCT_IMPLEMENT_COMMAND,
     CandidateRef, CatalogError, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, Evidence, EvidenceKind,
     Forecast, Harness, LandingReceipt, MemberCandidate, MemberSubject, Membership, ModelOverride, NetworkProfile,
-    Observation, OverrideError, Provenance, Question, REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolutionClaim,
-    ResolvedBloom, ResolvedConfigs, ResolvedModel, StageBinding, StageCatalog, StageOverride, StageReceipt, Statement,
-    StudyCost, StudyRecord, ToolPolicy, Transformation, Unproducible, Wedge, Workpiece, config_address, decode_config,
-    is_model_lane,
+    Observation, OverrideError, PriceRow, PriceTable, Provenance, Question, REVIEW_CRITIC_COMMAND, ReasoningEffort,
+    ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel, StageBinding, StageCatalog, StageOverride,
+    StageReceipt, Statement, StudyCost, StudyRecord, ToolPolicy, Transformation, Unproducible, Wedge, Workpiece,
+    config_address, decode_config, is_model_lane,
 };

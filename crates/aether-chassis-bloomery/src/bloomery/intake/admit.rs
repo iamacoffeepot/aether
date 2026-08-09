@@ -7,7 +7,7 @@ use std::fmt;
 
 use aether_bloomery::{
     Admit, BloomId, CandidateRef, Digest, Event, Evidence, Fact, IdempotencyKey, InwardError, Nonce, ResolutionClaim,
-    StageCatalog, StageId, StageResult, StageVerdict, WorkpieceId, normalize_stage_result,
+    StageCatalog, StageId, StageResult, StageVerdict, StudyCost, WorkpieceId, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
@@ -36,6 +36,12 @@ pub struct UploadedEvidence {
     /// reference like the candidate. Persisted keyed by the order's member on a
     /// failing review so a Refine re-entry is directed by it.
     pub findings: Option<String>,
+    /// What the attempt cost (#4679), authoritative from the port reference like
+    /// the candidate. The study lane admits it against the same order — but
+    /// *without* consuming, before the verdict admit below consumes — so an
+    /// attempt's price is recorded whatever its verdict was. `None` is an
+    /// unmeasured attempt, which writes no row rather than a zero one.
+    pub cost: Option<StudyCost>,
 }
 
 /// Why the broker refused an upload without touching the reducer.

@@ -22,7 +22,7 @@ use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::{
-    BACKOFF_CAP, CandidatePush, GithubMirrorConfig, NameEvidenceClaims, TrackedHandle, backoff_delay,
+    BACKOFF_CAP, CandidatePush, GithubMirrorConfig, NameEvidenceClaims, Stores, TrackedHandle, backoff_delay,
     drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_stale, next_backoff,
     pull_and_admit, push_admitted_candidates, seed_tracked, select_stale_handles,
 };
@@ -574,7 +574,15 @@ fn pull_and_admit_admits_a_matching_construct_result_as_attempt_completed() {
     let name = attempt_artifact_name(&Nonce(nonce), &digest(subject), StageVerdict::VerificationPassed, &digest(9));
     fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name, size_bytes: 20 }]);
 
-    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked, None, None, &NopPush);
+    let admits = pull_and_admit(
+        Stores { store: &mut store, artifacts: None },
+        &shell,
+        NameEvidenceClaims,
+        &mut tracked,
+        None,
+        None,
+        &NopPush,
+    );
 
     assert_eq!(admits.len(), 1, "the matching result admits");
     assert!(tracked.is_empty(), "the admitted order was consumed, so its handle is pruned");
@@ -636,7 +644,15 @@ fn seed_tracked_recovers_a_dispatched_order_across_a_restart() {
     let name = attempt_artifact_name(&Nonce(nonce), &digest(5), StageVerdict::VerificationPassed, &digest(9));
     fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name, size_bytes: 20 }]);
 
-    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked, None, None, &NopPush);
+    let admits = pull_and_admit(
+        Stores { store: &mut store, artifacts: None },
+        &shell,
+        NameEvidenceClaims,
+        &mut tracked,
+        None,
+        None,
+        &NopPush,
+    );
     assert_eq!(admits.len(), 1, "the restart-seeded handle is inspected and its result admitted, not stranded");
     assert!(tracked.is_empty(), "the order is consumed on admit and no longer tracked");
 }
@@ -677,7 +693,15 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
     assert_eq!(handles[0].nonce.0, format!("dispatch-{sequence}"), "the handle carries the dispatch nonce");
     let mut tracked = track(handles);
 
-    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked, None, None, &NopPush);
+    let admits = pull_and_admit(
+        Stores { store: &mut store, artifacts: None },
+        &shell,
+        NameEvidenceClaims,
+        &mut tracked,
+        None,
+        None,
+        &NopPush,
+    );
     assert_eq!(admits.len(), 1, "the completed local run's result admits to the control core");
     assert!(tracked.is_empty(), "the admitted order was consumed");
     let event: aether_bloomery::Event = from_bytes(&admits[0].event).unwrap();
@@ -951,6 +975,7 @@ fn park_and_answer(
         detail: question,
         candidate: None,
         findings: None,
+        cost: None,
     };
     assert!(matches!(admit_uploaded(store, &upload).unwrap(), AdmitDecision::Admitted(_)), "the parked upload admits");
 

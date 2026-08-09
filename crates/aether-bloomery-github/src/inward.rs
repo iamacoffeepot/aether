@@ -48,40 +48,29 @@ impl Error for StudyRecordError {}
 #[derive(Deserialize)]
 struct ResultRecordJson {
     #[serde(default)]
-    cost_usd: Option<f64>,
-    #[serde(default)]
     num_turns: Option<u64>,
     #[serde(default)]
     duration_ms: Option<u64>,
+    // Every token column is `Option`, not a `#[serde(default)] u64`, because
+    // the xtask lanes render an unreported column as an explicit JSON `null`
+    // rather than omitting the key — they keep the same key set whichever
+    // harness arm ran. `#[serde(default)]` fills a *missing* field and does
+    // nothing for a present `null`, so a non-optional column here fails the
+    // whole parse on the record shape the lanes actually emit; `cache_write_1h`
+    // and `cache_write_5m` are unconditionally null outside the Claude arm, so
+    // that failure would be total rather than occasional.
     #[serde(default)]
-    input: u64,
+    input: Option<u64>,
     #[serde(default)]
-    cache_write: u64,
+    cache_write: Option<u64>,
     #[serde(default)]
-    cache_write_1h: u64,
+    cache_write_1h: Option<u64>,
     #[serde(default)]
-    cache_write_5m: u64,
+    cache_write_5m: Option<u64>,
     #[serde(default)]
-    cache_read: u64,
+    cache_read: Option<u64>,
     #[serde(default)]
-    output: u64,
-}
-
-/// The dollar cost in micro-USD. A float dollar amount is not `Eq` and so not a
-/// stable content address, so the study record carries `total_cost_usd` scaled
-/// to integral micro-USD. A non-finite or non-positive cost (a null / absent /
-/// negative field) reads as zero; the `f64 as u64` cast saturates by language
-/// rule, so an absurd cost can never wrap.
-fn micro_usd(cost_usd: Option<f64>) -> u64 {
-    match cost_usd {
-        // The guard admits only a finite, positive cost, and the `f64 as u64`
-        // cast saturates by language rule, so neither truncation-to-wrap nor
-        // sign-loss can occur — an absurd cost clamps to `u64::MAX`, a stable
-        // (if useless) address, never a wrapped one.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        Some(cost) if cost.is_finite() && cost > 0.0 => (cost * 1_000_000.0).round() as u64,
-        _ => 0,
-    }
+    output: Option<u64>,
 }
 
 /// Parse a runner result record's JSON bytes into the gradeable [`StudyCost`]
@@ -94,15 +83,18 @@ pub fn parse_study_cost(json: &[u8]) -> Result<StudyCost, StudyRecordError> {
     let raw: ResultRecordJson =
         serde_json::from_slice(json).map_err(|error| StudyRecordError::Parse(error.to_string()))?;
     Ok(StudyCost {
-        cost_micro_usd: micro_usd(raw.cost_usd),
+        // Never parsed: the price is computed from the token columns against a
+        // sealed `PriceTable` (#4679), because a harness's self-reported bottom
+        // line is its own cost model and two of them are not comparable.
+        cost_micro_usd: 0,
         turns: raw.num_turns.unwrap_or(0),
         duration_millis: raw.duration_ms.unwrap_or(0),
-        input_tokens: raw.input,
-        cache_write_tokens: raw.cache_write,
-        cache_write_1h_tokens: raw.cache_write_1h,
-        cache_write_5m_tokens: raw.cache_write_5m,
-        cache_read_tokens: raw.cache_read,
-        output_tokens: raw.output,
+        input_tokens: raw.input.unwrap_or(0),
+        cache_write_tokens: raw.cache_write.unwrap_or(0),
+        cache_write_1h_tokens: raw.cache_write_1h.unwrap_or(0),
+        cache_write_5m_tokens: raw.cache_write_5m.unwrap_or(0),
+        cache_read_tokens: raw.cache_read.unwrap_or(0),
+        output_tokens: raw.output.unwrap_or(0),
     })
 }
 
@@ -126,7 +118,9 @@ mod tests {
         let cost = parse_study_cost(WELL_FORMED).expect("a well-formed record parses");
         // The dollar cost is carried as integral micro-USD, and every token
         // column round-trips off the object.
-        assert_eq!(cost.cost_micro_usd, 420_000);
+        // The record's own `cost_usd` is deliberately ignored — pricing is the
+        // `PriceTable`'s job, applied to these token columns.
+        assert_eq!(cost.cost_micro_usd, 0, "a self-reported bottom line is never trusted");
         assert_eq!(cost.turns, 7);
         assert_eq!(cost.duration_millis, 123_456);
         assert_eq!(cost.input_tokens, 1_000);
@@ -143,6 +137,27 @@ mod tests {
         let dead = br#"{"schema": 1, "task": "implement", "ref": "3523", "no_result": true}"#;
         let cost = parse_study_cost(dead).expect("an envelope-only record still parses");
         assert_eq!(cost, aether_bloomery::StudyCost::default());
+    }
+
+    #[test]
+    fn an_unreported_column_is_null_rather_than_absent_and_still_parses() {
+        // Tripwire: the shape `xtask`'s non-Claude lanes actually emit. They
+        // keep one key set whichever harness arm ran, so an unreported column
+        // is present-and-null, not missing — and `cache_write_1h` / `_5m` are
+        // null unconditionally outside the Claude arm. A `#[serde(default)]`
+        // over a non-`Option` column fills only a *missing* field, so pinning
+        // this shape is what keeps the study lane from failing every parse on
+        // every muse and codex attempt (the two arms it exists to measure).
+        let nulled = br#"{
+            "schema": 1, "num_turns": null, "cost_usd": null, "duration_ms": null,
+            "is_error": false, "input": 1000, "cache_write": null, "cache_write_1h": null,
+            "cache_write_5m": null, "cache_read": 8000, "output": 900
+        }"#;
+        let cost = parse_study_cost(nulled).expect("a null-column record parses");
+
+        assert_eq!(cost.input_tokens, 1_000, "a reported column survives its null siblings");
+        assert_eq!(cost.output_tokens, 900);
+        assert_eq!(cost.cache_write_1h_tokens, 0, "an unreported split reads as zero, not a parse failure");
     }
 
     #[test]
