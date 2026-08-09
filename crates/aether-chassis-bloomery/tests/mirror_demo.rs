@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomDraft, BloomId, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
+    BloomDraft, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
     ResolvedConfigs, Snapshot, WorkpieceId, reduce, view_of,
 };
 use aether_bloomery_github::client::{NewPullRequest, PullRequestApi};

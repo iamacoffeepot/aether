@@ -334,7 +334,7 @@ mod tests {
         BloomDraft, BloomId, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey,
         LandingReceipt, Membership, ResolvedConfigs, Snapshot, Topic, WorkpieceId, reduce, view_of,
     };
-    use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
+    use aether_bloomery_github::{GithubProjection, PullRequestApi as _, testing::FakeGithub};
     use aether_data::wire::{from_bytes, to_vec};
     use aether_data::{MailId, MailboxId, Source};
     use aether_substrate::actor::native::binding::NativeBinding;
