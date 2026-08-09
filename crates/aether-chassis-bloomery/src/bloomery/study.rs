@@ -43,12 +43,13 @@ use std::error::Error;
 use std::fmt;
 use std::fmt::Write as _;
 
-use aether_bloomery::{BloomId, Digest, Nonce, StudyCost, StudyRecord};
+use aether_bloomery::{BloomId, ConfigScopes, Digest, Nonce, PriceTable, StudyCost, StudyRecord};
 use aether_bloomery_github::{InwardError, StudyResult, normalize_study_result};
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
 use crate::artifacts::{ArtifactsCapabilityState, ArtifactsError, PutResult};
-use crate::store::StoreBackend;
+use crate::bloomery::intake::DispatchRecord;
+use crate::store::{StoreBackend, resolve_config};
 
 /// A runner result record a worker uploaded for a `construct.implement` attempt:
 /// the nonce it answers, the attempt digest its cost is about, and the parsed
@@ -176,11 +177,10 @@ pub fn admit_study(
     let Some(stored) = store.lookup_order(&upload.nonce.0)? else {
         return Ok(StudyAdmitDecision::Refused(StudyRefusal::UnknownNonce(upload.nonce.clone())));
     };
-    let (Some(bloom), Some(displayed)) =
-        (Digest::from_slice(&stored.bloom).map(BloomId), Digest::from_slice(&stored.displayed_digest))
-    else {
+    let Some(record) = DispatchRecord::from_stored(&stored) else {
         return Ok(StudyAdmitDecision::Refused(StudyRefusal::CorruptOrder(upload.nonce.clone())));
     };
+    let (bloom, displayed) = (record.bloom, record.displayed_digest);
     // The binding check — the value-vocabulary invariant reused for study
     // records: a record grades only the digest the order displayed.
     let cost = match normalize_study_result(&displayed, &StudyResult { subject: upload.subject, cost: upload.cost }) {
@@ -189,6 +189,12 @@ pub fn admit_study(
             return Ok(StudyAdmitDecision::Refused(StudyRefusal::DigestMismatch { displayed, claimed }));
         }
     };
+    // Price the measured tokens here, against the table this bloom sealed —
+    // never the bottom line the harness reported (#4679). The rates are
+    // resolved from the order's own config registry, so a bloom is graded at
+    // the prices it sealed and a later rate change re-prices nothing that
+    // already ran.
+    let cost = StudyCost { cost_micro_usd: price_of(store, &record, &cost), ..cost };
     // Normalize to the durable, content-addressed study artifact. Its bytes are
     // the truth; the index row below is a projection over them.
     let record = StudyRecord { bloom, subject: displayed, cost };
@@ -199,6 +205,42 @@ pub fn admit_study(
     };
     store.record_study(bloom.0.as_bytes(), displayed.as_bytes(), &study_artifact)?;
     Ok(StudyAdmitDecision::Admitted(StudyAdmission { bloom, subject: displayed, study_artifact }))
+}
+
+/// What the attempt's measured tokens are worth, in micro-USD, under the
+/// [`PriceTable`] its bloom sealed (#4679).
+///
+/// Zero when the order named no model (a mechanical lane runs a compiler, not a
+/// model, and has no per-token price) or when the sealed table prices no such
+/// model — including the empty default table, which prices nothing until an
+/// operator authors rates. Unpriced records still land: the token columns are
+/// the measured fact and stay legible whether or not anyone has stated what
+/// they cost, and pricing them later is a re-read of the same artifacts rather
+/// than a re-run of the attempt.
+///
+/// Infallible on purpose. A price is a policy applied *after* the fact; the
+/// tokens are the fact. A store fault or an undecodable sealed table must
+/// therefore cost the record its dollar column and nothing else — failing here
+/// would discard a measurement that cannot be taken again, to protect a number
+/// that can be recomputed from the artifact whenever the rates are known.
+fn price_of(store: &mut dyn StoreBackend, record: &DispatchRecord, cost: &StudyCost) -> u64 {
+    let Some(model) = record.transformation.model.as_ref() else {
+        return 0;
+    };
+    let unpriced = |reason: &str| {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::study",
+            model = %model.model,
+            reason,
+            "attempt recorded unpriced; its tokens are still on the ledger",
+        );
+        0
+    };
+
+    match resolve_config::<PriceTable>(store, ConfigScopes::bloom_wide(&record.configs)) {
+        Ok(table) => table.unwrap_or_default().price(&model.model, cost).unwrap_or_else(|| unpriced("no price row")),
+        Err(error) => unpriced(&format!("price table unresolvable: {error}")),
+    }
 }
 
 /// Rebuild the per-bloom study index from the artifact store alone (issue
@@ -274,7 +316,11 @@ mod tests {
 
     fn cost() -> StudyCost {
         StudyCost {
-            cost_micro_usd: 420_000,
+            // Zero, and not because the attempt was free: these orders name no
+            // model, so no `PriceTable` row applies and the record lands with
+            // its tokens measured and its price unstated (#4679). A runner's own
+            // `cost_usd` is never the source of this column.
+            cost_micro_usd: 0,
             turns: 7,
             duration_millis: 123_456,
             input_tokens: 1_000,
@@ -465,8 +511,11 @@ mod tests {
         // The artifact grades exactly that attempt with the parsed cost.
         let decoded: StudyRecord = from_bytes(&artifact_bytes(&mut artifacts, &admission.study_artifact)).unwrap();
         assert!(decoded.grades(&attempt));
-        assert_eq!(decoded.cost.cost_micro_usd, 420_000);
-        assert_eq!(decoded.cost.output_tokens, 900);
+        assert_eq!(decoded.cost.output_tokens, 900, "the measured tokens land");
+        assert_eq!(
+            decoded.cost.cost_micro_usd, 0,
+            "and the record's own reported price is ignored — pricing is the sealed table's job",
+        );
 
         // A mismatched upload → refused, store untouched.
         let bad = UploadedStudyRecord { nonce: Nonce("n-e2e".to_owned()), subject: Digest::from_bytes([9; 32]), cost };

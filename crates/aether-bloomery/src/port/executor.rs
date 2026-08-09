@@ -17,7 +17,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::ids::Nonce;
-use crate::values::{CandidateRef, Transformation};
+use crate::values::{CandidateRef, StudyCost, Transformation};
 
 /// A fully-resolved unit of work to dispatch. The [`Transformation`] already
 /// carries the typed command id, digest-pinned inputs, declared outputs,
@@ -110,6 +110,17 @@ pub struct EvidenceRef {
     /// and from every lane that stamps none. Host-recorded state riding the
     /// reference, like `candidate` — never part of the artifact-name contract.
     pub findings: Option<String>,
+    /// What the attempt cost (#4679) — reported by a backend that reads the
+    /// run's evidence bytes itself (the local executor, from the result
+    /// record's token/cost columns); `None` from the name-only Actions lane,
+    /// whose artifacts are opaque zips, and from any harness that reported no
+    /// usage. Host-recorded state riding the reference, like `candidate` and
+    /// `findings` — never part of the artifact-name contract, because the cost
+    /// columns are nine integers and a name is not a data channel.
+    ///
+    /// `None` means *unmeasured*, never *free*: the study lane writes no row
+    /// rather than a row of zeroes, so a ledger gap stays legible as a gap.
+    pub cost: Option<StudyCost>,
 }
 
 /// The disposable-worker boundary (ADR-0149 §The boundary). Exactly the four

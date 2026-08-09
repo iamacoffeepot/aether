@@ -57,6 +57,7 @@ use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
 use super::ExecutorReactorCapability;
+use crate::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, resolve_root};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::ExecutorShell;
 use crate::bloomery::dispatch_model;
@@ -184,6 +185,10 @@ fn select_stale_handles(
 pub struct ExecutorReactorState {
     executor: Option<ExecutorShell>,
     store: Option<SqliteStore>,
+    // Where an admitted attempt's study record is put (#4679); `None` when the
+    // content store would not open, which disables the study lane without
+    // disabling the reactor.
+    artifacts: Option<ArtifactsCapabilityState>,
     claims: NameEvidenceClaims,
     tracked: Vec<TrackedHandle>,
     control_mailbox: MailboxId,
@@ -219,6 +224,7 @@ impl ExecutorReactorState {
         Self {
             executor,
             store,
+            artifacts: None,
             claims: NameEvidenceClaims,
             tracked: Vec::new(),
             control_mailbox: <ControlCore as Addressable>::resolve(0, ()),
@@ -1008,6 +1014,44 @@ fn seed_tracked(store: &mut dyn StoreBackend) -> rusqlite::Result<Vec<WorkHandle
     Ok(store.list_outstanding_nonces()?.into_iter().map(|nonce| WorkHandle::new(Nonce(nonce))).collect())
 }
 
+/// This reactor's own handle on the artifacts content store, where an admitted
+/// attempt's study record is put (#4679).
+///
+/// Its own, opened at the configured root — the same shape as the `SqliteStore`
+/// above, which this reactor also opens rather than sharing. Both are durable
+/// stores addressed by path, and the artifacts store is content-addressed, so a
+/// second writer stores identical bytes under an identical digest; there is no
+/// state to reconcile between handles.
+///
+/// A store that will not open yields `None` and disables the study lane for this
+/// process, logged once at boot. Deliberately not a `BootError`: the ledger is a
+/// grading surface, and a coordinator that cannot record costs must still run
+/// blooms.
+fn open_artifacts() -> Option<ArtifactsCapabilityState> {
+    let root = resolve_root(ArtifactsConfig::default().root.as_deref());
+    match ArtifactsCapabilityState::open(&root) {
+        Ok(artifacts) => Some(artifacts),
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                root = %root.display(),
+                %error,
+                "artifacts store did not open; attempt costs will not be recorded this session",
+            );
+            None
+        }
+    }
+}
+
+/// The two durable stores one pull cycle writes through: the journal registry
+/// that holds the outstanding-order table, and the content store the study lane
+/// puts an attempt's cost record into. Bundled because they are one concept —
+/// where this cycle's writes land — and travel together to every caller.
+struct Stores<'a> {
+    store: &'a mut dyn StoreBackend,
+    artifacts: Option<&'a mut ArtifactsCapabilityState>,
+}
+
 /// Pull matched attempt results for the tracked handles and return the [`Admit`]s
 /// to forward to the control core, pruning the handles whose order the broker
 /// consumed (a completed + admitted run). Also runs the staleness sweep
@@ -1015,7 +1059,7 @@ fn seed_tracked(store: &mut dyn StoreBackend) -> rusqlite::Result<Vec<WorkHandle
 /// its nonce, age, and last observed status — `stale_warn_after: None` disables
 /// it. The factored-out network side, unit-testable like [`drain_and_dispatch`].
 fn pull_and_admit(
-    store: &mut dyn StoreBackend,
+    stores: Stores<'_>,
     executor: &ExecutorShell,
     claims: NameEvidenceClaims,
     tracked: &mut Vec<TrackedHandle>,
@@ -1023,9 +1067,10 @@ fn pull_and_admit(
     correspondence: Option<&SharedCorrespondence>,
     pusher: &dyn CandidatePush,
 ) -> Vec<Admit> {
+    let Stores { store, artifacts } = stores;
     let mut sink = CollectingSink::default();
     let handles: Vec<WorkHandle> = tracked.iter().map(|tracked_handle| tracked_handle.handle.clone()).collect();
-    let report = match run_intake_cycle(store, executor, &handles, &claims, &mut sink) {
+    let report = match run_intake_cycle(store, executor, &handles, &claims, artifacts, &mut sink) {
         Ok(report) => report,
         Err(error) => {
             tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "intake cycle failed; results re-drive next tick");
@@ -1117,6 +1162,7 @@ impl NativeActor for ExecutorReactorCapability {
                 control_mailbox,
                 mailer,
                 self_mailbox,
+                artifacts: None,
                 _timer: None,
                 backoff: None,
                 stale_warn_after: stale_warn_after(config.stale_warn_after_secs),
@@ -1160,6 +1206,7 @@ impl NativeActor for ExecutorReactorCapability {
         Ok(ExecutorReactorState {
             executor: Some(executor),
             store: Some(store),
+            artifacts: open_artifacts(),
             claims: NameEvidenceClaims,
             tracked,
             control_mailbox,
@@ -1285,7 +1332,7 @@ impl NativeActor for ExecutorReactorCapability {
         let correspondence = state.correspondence.clone();
         let pusher = Arc::clone(&state.pusher);
         for admit in pull_and_admit(
-            store,
+            Stores { store, artifacts: state.artifacts.as_mut() },
             &executor,
             claims,
             &mut state.tracked,

@@ -6,9 +6,11 @@ use std::fmt;
 
 use aether_bloomery::{ExecutionStatus, Nonce, WorkHandle};
 
-use super::admit::{Admission, AdmitDecision, IntakeError, admit_uploaded};
+use super::admit::{Admission, AdmitDecision, IntakeError, UploadedEvidence, admit_uploaded};
 use super::claims::EvidenceClaims;
+use crate::artifacts::ArtifactsCapabilityState;
 use crate::bloomery::executor::{ExecutorPortError, ExecutorShell};
+use crate::bloomery::study::{StudyAdmitDecision, UploadedStudyRecord, admit_study};
 use crate::store::StoreBackend;
 
 /// Where an admitted attempt result goes — #3497's `aether.bloomery.admit`
@@ -28,6 +30,10 @@ pub struct CycleReport {
     pub admitted: u32,
     /// Uploads refused by the broker.
     pub refused: u32,
+    /// Study rows written this cycle (#4679) — one per admitted attempt that
+    /// reported a cost. Always at most `completed`, and below it whenever a
+    /// harness reported no usage or no artifacts store was configured.
+    pub studied: u32,
     /// Handles inspected this cycle that were not yet `Completed`, paired with
     /// their observed status (#3635) — feeds the executor reactor's staleness
     /// sweep so a wedged dispatch's last status is visible in its warn without a
@@ -79,9 +85,11 @@ pub fn run_intake_cycle(
     shell: &ExecutorShell,
     handles: &[WorkHandle],
     claims: &dyn EvidenceClaims,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
     sink: &mut dyn AdmitSink,
 ) -> Result<CycleReport, CycleError> {
     let mut report = CycleReport::default();
+    let mut artifacts = artifacts;
     for handle in handles {
         let status = shell.inspect(handle).map_err(CycleError::Inspect)?;
         if !matches!(status, ExecutionStatus::Completed { .. }) {
@@ -93,6 +101,12 @@ pub fn run_intake_cycle(
             let Some(upload) = claims.claim_for(&reference) else {
                 continue;
             };
+            // Study first, and deliberately: `admit_study` matches the order
+            // *without* consuming it, while `admit_uploaded` below consumes.
+            // Reversed, every study upload would look up an already-spent nonce
+            // and refuse as `UnknownNonce` — the lane would be wired and still
+            // record nothing, which is the failure this issue exists to end.
+            report.studied += u32::from(record_cost(store, artifacts.as_deref_mut(), &upload));
             match admit_uploaded(store, &upload).map_err(CycleError::Intake)? {
                 AdmitDecision::Admitted(admission) => {
                     report.admitted += 1;
@@ -103,4 +117,50 @@ pub fn run_intake_cycle(
         }
     }
     Ok(report)
+}
+
+/// Record what one attempt cost, returning whether a study row was written
+/// (#4679).
+///
+/// Three shapes yield no row and are not failures: an upload carrying no cost
+/// (the harness reported no usage, or the name-only Actions lane produced the
+/// reference), a host with no artifacts store configured, and a broker refusal.
+///
+/// A store or artifact **fault** is also swallowed — logged, never returned. The
+/// study lane grades attempts; it does not gate them. Propagating here would let
+/// a full disk or a faulted content store abort the intake cycle and strand the
+/// verdict admit that follows, trading a missing ledger row for a stalled bloom.
+/// That trade is never worth taking, so the ledger is the thing allowed to have
+/// a hole, and the hole is loud in the log.
+fn record_cost(
+    store: &mut dyn StoreBackend,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
+    upload: &UploadedEvidence,
+) -> bool {
+    let (Some(cost), Some(artifacts)) = (upload.cost, artifacts) else {
+        return false;
+    };
+    let record = UploadedStudyRecord { nonce: upload.nonce.clone(), subject: upload.subject, cost };
+
+    match admit_study(store, artifacts, &record) {
+        Ok(StudyAdmitDecision::Admitted(_)) => true,
+        Ok(StudyAdmitDecision::Refused(refusal)) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::intake",
+                nonce = %upload.nonce.0,
+                ?refusal,
+                "study record refused; the attempt admits normally but its cost is unrecorded",
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::intake",
+                nonce = %upload.nonce.0,
+                %error,
+                "study record could not be stored; the attempt admits normally but its cost is unrecorded",
+            );
+            false
+        }
+    }
 }

@@ -54,8 +54,9 @@ impl EvidenceClaims for NameEvidenceClaims {
         let verdict = verdict_from_token(fields.next()?)?;
         let subject = digest_from_hex(fields.next()?)?;
         let detail = digest_from_hex(fields.next()?)?;
-        // The nonce and candidate are authoritative from the reference (what the
-        // port matched the run by / what the backend captured), not the name.
+        // The nonce, candidate, findings, and cost are authoritative from the
+        // reference (what the port matched the run by / what the backend read
+        // out of the run's own evidence), not the name.
         Some(UploadedEvidence {
             nonce: reference.nonce.clone(),
             subject,
@@ -63,6 +64,7 @@ impl EvidenceClaims for NameEvidenceClaims {
             detail,
             candidate: reference.candidate,
             findings: reference.findings.clone(),
+            cost: reference.cost,
         })
     }
 }

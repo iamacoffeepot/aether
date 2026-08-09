@@ -167,6 +167,7 @@ fn a_matching_upload_admits_a_bound_integrate_fact() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: None,
+        cost: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching upload is admitted");
@@ -207,6 +208,7 @@ fn a_parked_upload_admits_a_question_evidence_fact_and_consumes_the_order() {
         detail: Digest::from_bytes([8; 32]),
         candidate: None,
         findings: None,
+        cost: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching parked upload is admitted");
@@ -237,6 +239,7 @@ fn an_unknown_nonce_is_refused() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: None,
+        cost: None,
     };
     assert!(matches!(
         admit_uploaded(&mut store, &upload).unwrap(),
@@ -263,6 +266,7 @@ fn a_right_nonce_with_the_wrong_digest_is_refused_and_the_order_stays_live() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: None,
+        cost: None,
     };
     match admit_uploaded(&mut store, &lying).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::DigestMismatch { displayed, claimed }) => {
@@ -332,12 +336,13 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
             detail: Digest::from_bytes([7; 32]),
             candidate: None,
             findings: None,
+            cost: None,
         },
     );
     let claims = SeededClaims(claims);
     let mut sink = Collector::default();
 
-    let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, &mut sink).unwrap();
+    let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, None, &mut sink).unwrap();
     assert_eq!((report.completed, report.admitted, report.refused), (1, 1, 0));
     assert_eq!(sink.0.len(), 1);
 
@@ -380,12 +385,13 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
             detail: Digest::from_bytes([7; 32]),
             candidate: None,
             findings: None,
+            cost: None,
         },
     );
     let claims = SeededClaims(claims);
     let mut sink = Collector::default();
 
-    let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, &mut sink).unwrap();
+    let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, None, &mut sink).unwrap();
     assert_eq!((report.completed, report.admitted, report.refused), (1, 0, 1));
     assert!(sink.0.is_empty(), "a refused upload never reaches the reducer");
     // The order stayed live — the mismatch did not consume it.
@@ -413,7 +419,7 @@ fn a_pending_handle_is_reported_and_neither_completed_nor_admitted() {
     let claims = SeededClaims(HashMap::new());
     let mut sink = Collector::default();
 
-    let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, &mut sink).unwrap();
+    let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, None, &mut sink).unwrap();
     assert_eq!((report.completed, report.admitted, report.refused), (0, 0, 0));
     assert_eq!(report.pending, vec![(Nonce("n-pending".to_owned()), ExecutionStatus::Running)]);
     assert!(sink.0.is_empty());
@@ -475,6 +481,7 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: None,
+        cost: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching Construct upload is admitted");
@@ -529,6 +536,7 @@ fn a_failing_terminal_verify_admits_attempt_completed_not_integrate() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: None,
+        cost: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching failing-verify upload is admitted (the gate decides its fate, not the broker)");
@@ -567,6 +575,7 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: Some("pillar 2: the members disagree about the tick order".to_owned()),
+        cost: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &failing).unwrap() else {
         panic!("a matching aggregate verdict is admitted");
@@ -594,6 +603,7 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
         detail: Digest::from_bytes([8; 32]),
         candidate: None,
         findings: None,
+        cost: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &passing).unwrap() else {
         panic!("the passing aggregate verdict is admitted");
@@ -627,6 +637,7 @@ fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: Some(findings.to_owned()),
+        cost: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &failing).unwrap() else {
         panic!("a matching aggregate verdict is admitted");
@@ -661,6 +672,7 @@ fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
         detail: Digest::from_bytes([8; 32]),
         candidate: None,
         findings: Some("[wp-a] Still leaking.".to_owned()),
+        cost: None,
     };
     assert!(matches!(admit_uploaded(&mut store, &delta_fail).unwrap(), AdmitDecision::Admitted(_)));
     assert_eq!(
@@ -694,6 +706,7 @@ fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: None,
+        cost: None,
     };
     match admit_uploaded(&mut store, &upload).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(stage)) => {
@@ -731,8 +744,15 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         let subject = Digest::from_bytes([subject_seed; 32]);
         let detail = Digest::from_bytes([detail_seed; 32]);
         let name = attempt_artifact_name(&nonce, &subject, verdict, &detail);
-        let reference =
-            EvidenceRef { name, nonce: nonce.clone(), artifact_id: 1, size_bytes: 10, candidate: None, findings: None };
+        let reference = EvidenceRef {
+            name,
+            nonce: nonce.clone(),
+            artifact_id: 1,
+            size_bytes: 10,
+            candidate: None,
+            findings: None,
+            cost: None,
+        };
 
         let decoded = claims.claim_for(&reference).expect("a well-formed attempt name decodes");
         assert_eq!(decoded.nonce, nonce);
@@ -750,6 +770,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         size_bytes: 3,
         candidate: None,
         findings: None,
+        cost: None,
     };
     assert!(claims.claim_for(&stray).is_none(), "a non-attempt name yields no claim");
 }
@@ -816,6 +837,7 @@ fn verify_findings_persist_on_a_failing_verify_and_clear_on_a_pass() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: findings.map(str::to_owned),
+        cost: None,
     };
 
     record_dispatch(&mut store, &dispatch_record("n-f1", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate))
@@ -845,4 +867,178 @@ fn verify_findings_persist_on_a_failing_verify_and_clear_on_a_pass() {
         None,
         "a passing verify clears the stale findings",
     );
+}
+
+/// The study lane, end to end (#4679): a completed attempt that reported usage
+/// writes exactly one priced `study_index` row bound to the digest its order
+/// displayed.
+///
+/// The three shapes below are the ones that decide whether the ledger can be
+/// trusted, so they are asserted together against one live cycle rather than in
+/// isolation: what a measured attempt records, what an unmeasured one records,
+/// and what a record that names the wrong digest records.
+#[test]
+fn a_measured_attempt_writes_one_priced_study_row_and_an_unmeasured_one_writes_none() {
+    use aether_bloomery::ConfigKind as _;
+    use aether_bloomery::{Harness, PriceRow, PriceTable, ReasoningEffort, ResolvedModel, StudyCost, StudyRecord};
+    use aether_data::Kind as _;
+    use aether_data::wire::{from_bytes, to_vec};
+
+    use crate::artifacts::{ArtifactsCapabilityState, GetResult};
+
+    let workpiece = WorkpieceId("wp-study".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+    let (_snapshot, bloom) = sealed_snapshot(&workpiece, scope_revision);
+    let candidate = Digest::from_bytes([5; 32]);
+
+    let fake = FakeGithub::new();
+    let shell = shell(fake.clone());
+    let mut store = store();
+    let artifacts_dir = tempfile::tempdir().unwrap();
+    let mut artifacts = ArtifactsCapabilityState::open(artifacts_dir.path()).unwrap();
+
+    // Seal a table pricing exactly the model this order runs, the way `POST
+    // /configs` would author it.
+    let table = PriceTable {
+        rows: vec![PriceRow {
+            model: "muse-spark-1.2-contributor".to_owned(),
+            input: 1_000_000,
+            cache_read: 100_000,
+            cache_write: 0,
+            output: 4_000_000,
+        }],
+    };
+    let bytes = to_vec(&table).unwrap();
+    store.record_config(table.address().as_bytes(), PriceTable::NAME, &bytes).unwrap();
+    let mut configs = ConfigRegistry::default();
+    configs.insert::<PriceTable>(table.address());
+
+    let mut record = dispatch_record("n-study", bloom, &workpiece, scope_revision, candidate);
+    record.configs = configs;
+    record.transformation.model = Some(ResolvedModel {
+        harness: Harness::Muse,
+        model: "muse-spark-1.2-contributor".to_owned(),
+        effort: ReasoningEffort::Medium,
+    });
+    let handle = dispatch_and_record(&shell, &mut store, &record).unwrap();
+
+    let run_id = fake.seed_run("n-study", RunStatus::Completed, Some(RunConclusion::Success));
+    fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name: "evidence-n-study".to_owned(), size_bytes: 10 }]);
+
+    // 2M input, 10M cache-read, 500k output → 2.00 + 1.00 + 2.00 = $5.00.
+    let cost = StudyCost {
+        input_tokens: 2_000_000,
+        cache_read_tokens: 10_000_000,
+        output_tokens: 500_000,
+        ..StudyCost::default()
+    };
+    let mut claims = HashMap::new();
+    claims.insert(
+        "n-study".to_owned(),
+        UploadedEvidence {
+            nonce: Nonce("n-study".to_owned()),
+            subject: candidate,
+            verdict: StageVerdict::VerificationPassed,
+            detail: Digest::from_bytes([7; 32]),
+            candidate: None,
+            findings: None,
+            cost: Some(cost),
+        },
+    );
+    let claims = SeededClaims(claims);
+    let mut sink = Collector::default();
+
+    let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, Some(&mut artifacts), &mut sink).unwrap();
+
+    assert_eq!(report.studied, 1, "the measured attempt recorded its cost");
+    assert_eq!(report.admitted, 1, "and the verdict admitted on the same pass");
+
+    // The row is keyed by the digest the order *displayed*, not by anything the
+    // upload claimed for itself.
+    let indexed = store
+        .lookup_study(bloom.0.as_bytes(), candidate.as_bytes())
+        .unwrap()
+        .expect("one study row bound to the displayed digest");
+
+    // The dollar column is ours, computed from the sealed table — the record the
+    // harness uploaded carried no price at all.
+    let GetResult::Ok { bytes, .. } = artifacts.get(indexed) else {
+        panic!("the study artifact the index points at is retrievable");
+    };
+    let stored: StudyRecord = from_bytes(&bytes).unwrap();
+    assert_eq!(stored.cost.cost_micro_usd, 5_000_000, "priced from the sealed table, not from the runner");
+    assert_eq!(stored.cost.input_tokens, 2_000_000, "and the measured tokens survive alongside it");
+
+    // An unmeasured attempt — the Actions lane, or a harness that reported no
+    // usage. It must record *nothing* rather than a row of zeroes, which would
+    // be indistinguishable from a free attempt and would deflate every average
+    // taken over the ledger.
+    let unmeasured = second_attempt(&fake, &shell, &mut store, bloom, &workpiece, scope_revision, "n-bare", None);
+    let report =
+        run_intake_cycle(&mut store, &shell, &[unmeasured.0], &unmeasured.1, Some(&mut artifacts), &mut sink).unwrap();
+
+    assert_eq!(report.studied, 0, "an unmeasured attempt writes no study row");
+    assert_eq!(report.admitted, 1, "but it still admits normally — the study lane grades, it does not gate");
+
+    // A record naming a digest its order never displayed. The binding check is
+    // the whole trust boundary: a worker that could grade an arbitrary digest
+    // could attribute its costs to any attempt in the journal.
+    let lying = second_attempt(
+        &fake,
+        &shell,
+        &mut store,
+        bloom,
+        &workpiece,
+        scope_revision,
+        "n-liar",
+        Some((Digest::from_bytes([0xEE; 32]), cost)),
+    );
+    let before = store.lookup_study(bloom.0.as_bytes(), Digest::from_bytes([0xEE; 32]).as_bytes()).unwrap();
+    let report = run_intake_cycle(&mut store, &shell, &[lying.0], &lying.1, Some(&mut artifacts), &mut sink).unwrap();
+
+    assert_eq!(report.studied, 0, "a record grading a digest the order never displayed is refused");
+    assert_eq!(before, None);
+    assert_eq!(
+        store.lookup_study(bloom.0.as_bytes(), Digest::from_bytes([0xEE; 32]).as_bytes()).unwrap(),
+        None,
+        "and nothing was written under the digest it claimed",
+    );
+}
+
+/// Dispatch one more attempt on the same bloom and seed its completed run,
+/// returning the handle plus the claims that upload `cost` for it. `subject`
+/// defaults to the order's own displayed digest; passing an explicit one is how
+/// the mis-binding case is built.
+#[expect(clippy::too_many_arguments, reason = "a test fixture threading one dispatch's full context")]
+fn second_attempt(
+    fake: &FakeGithub,
+    shell: &ExecutorShell,
+    store: &mut dyn StoreBackend,
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    scope_revision: Digest,
+    nonce: &str,
+    claimed: Option<(Digest, aether_bloomery::StudyCost)>,
+) -> (WorkHandle, SeededClaims) {
+    let candidate = Digest::from_bytes([5; 32]);
+    let record = dispatch_record(nonce, bloom, workpiece, scope_revision, candidate);
+    let handle = dispatch_and_record(shell, store, &record).unwrap();
+    let run_id = fake.seed_run(nonce, RunStatus::Completed, Some(RunConclusion::Success));
+    fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name: format!("evidence-{nonce}"), size_bytes: 10 }]);
+
+    let (subject, cost) = claimed.map_or((candidate, None), |(subject, cost)| (subject, Some(cost)));
+    let mut claims = HashMap::new();
+    claims.insert(
+        nonce.to_owned(),
+        UploadedEvidence {
+            nonce: Nonce(nonce.to_owned()),
+            subject,
+            verdict: StageVerdict::VerificationPassed,
+            detail: Digest::from_bytes([7; 32]),
+            candidate: None,
+            findings: None,
+            cost,
+        },
+    );
+    (handle, SeededClaims(claims))
 }

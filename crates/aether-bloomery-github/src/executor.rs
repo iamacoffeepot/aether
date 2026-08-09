@@ -392,9 +392,12 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
                 size_bytes: a.size_bytes,
                 // The Actions lane is zero-secret and name-only (ADR-0150): its
                 // runner pushes nothing and its artifact bytes are never fetched,
-                // so it reports neither a capture nor findings.
+                // so it reports neither a capture, findings, nor a cost — an
+                // attempt run here is unmeasured and writes no study row, rather
+                // than writing a row of zeroes that would read as free.
                 candidate: None,
                 findings: None,
+                cost: None,
             })
             .collect())
     }
