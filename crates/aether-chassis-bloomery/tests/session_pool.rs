@@ -18,8 +18,9 @@
     reason = "cross-process wire fixtures address root caps by their rendered runtime name — the RPC Call surface under test"
 )]
 
-use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
+mod common;
+
+use std::net::TcpStream;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -27,34 +28,20 @@ use aether_chassis_bloomery::session::{Acquire, AcquireResult, Release, ReleaseR
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{Kind, mailbox_id_from_path};
 use aether_rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
+use common::{Coordinator, free_port};
 use serde::Serialize;
 
-/// Reserve a free localhost port by binding `:0`, then release it for the bin to
-/// claim. A small race window, tolerated by the connect retry loop.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
-
 /// Fork the `bloomery` bin on `port` with an in-memory pool and a zero lease TTL
-/// (immediate lazy-expiry reclaim, so re-acquire is deterministic).
+/// (immediate lazy-expiry reclaim, so re-acquire is deterministic), reaped when
+/// the returned guard drops.
 ///
 /// `AETHER_STORE_PATH` is pinned rather than left to its `":memory:"` default:
 /// the default only holds when nothing in the ambient environment names a store,
 /// and a run under a coordinator's environment inherits one — which is the live
 /// journal, opened read-write by a test that assumes it owns an empty pool
 /// (#4714).
-fn spawn(port: u16) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_bloomery"))
-        .env("AETHER_RPC_PORT", port.to_string())
-        .env("AETHER_HTTP_PORT", free_port().to_string())
-        .env("AETHER_STORE_PATH", ":memory:")
-        .env("AETHER_SESSION_LEASE_TTL_MINS", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap()
+fn spawn(port: u16) -> Coordinator {
+    Coordinator::spawn(port, &[("AETHER_STORE_PATH", ":memory:"), ("AETHER_SESSION_LEASE_TTL_MINS", "0")])
 }
 
 /// Connect to the bin, retrying until it has bound its RPC port.
@@ -123,12 +110,6 @@ where
     }
 }
 
-/// Terminate a child with SIGKILL (`Child::kill` is SIGKILL on unix) and reap it.
-fn kill9(mut child: Child) {
-    child.kill().unwrap();
-    child.wait().unwrap();
-}
-
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
@@ -140,7 +121,7 @@ fn key() -> SessionKey {
 #[test]
 fn acquire_release_resume_over_rpc() {
     let port = free_port();
-    let child = spawn(port);
+    let _coordinator = spawn(port);
     let mut stream = connect(port);
     handshake(&mut stream);
 
@@ -215,7 +196,4 @@ fn acquire_release_resume_over_rpc() {
     let mismatch: AcquireResult =
         call(&mut stream, 6, &Acquire { key: other_effort, current_head_hash: "HEAD-A".to_owned() });
     assert_eq!(mismatch, AcquireResult::None, "a mismatched effort must miss");
-
-    drop(stream);
-    kill9(child);
 }
