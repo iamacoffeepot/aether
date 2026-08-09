@@ -10,6 +10,7 @@ use aether_bloomery::is_model_lane;
 use aether_bloomery_github::GitObjectId;
 
 use super::error::LocalExecutorError;
+use super::lane_env::{inherited_keys, scrub_coordinator_env};
 use super::runner::{CapturedObjects, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 
 /// The operator a candidate capture is authored as (#4630), resolved from the
@@ -107,8 +108,12 @@ impl TransformRunner for ProcessTransformRunner {
         // can be committed.
         neutralize_hooks(spec.worktree_dir)?;
         // Spawn the same portable entrypoint the wrappers run, in the checked-out
-        // worktree, under the ambient local `claude` auth (ADR-0150).
+        // worktree, under the ambient local `claude` auth (ADR-0150) — and under
+        // the wrapper's environment rather than the coordinator's, which the
+        // child would otherwise inherit wholesale and come up configured as a
+        // second coordinator (#4714; see `lane_env`).
         let mut cargo = Command::new("cargo");
+        scrub_coordinator_env(&mut cargo, inherited_keys());
         cargo
             .current_dir(spec.worktree_dir)
             .args(["xtask", "transform", spec.command, "--out"])

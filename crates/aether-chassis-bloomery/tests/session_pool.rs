@@ -36,12 +36,19 @@ fn free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Fork the `bloomery` bin on `port` with the default `:memory:` pool and a
-/// zero lease TTL (immediate lazy-expiry reclaim, so re-acquire is deterministic).
+/// Fork the `bloomery` bin on `port` with an in-memory pool and a zero lease TTL
+/// (immediate lazy-expiry reclaim, so re-acquire is deterministic).
+///
+/// `AETHER_STORE_PATH` is pinned rather than left to its `":memory:"` default:
+/// the default only holds when nothing in the ambient environment names a store,
+/// and a run under a coordinator's environment inherits one — which is the live
+/// journal, opened read-write by a test that assumes it owns an empty pool
+/// (#4714).
 fn spawn(port: u16) -> Child {
     Command::new(env!("CARGO_BIN_EXE_bloomery"))
         .env("AETHER_RPC_PORT", port.to_string())
         .env("AETHER_HTTP_PORT", free_port().to_string())
+        .env("AETHER_STORE_PATH", ":memory:")
         .env("AETHER_SESSION_LEASE_TTL_MINS", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
