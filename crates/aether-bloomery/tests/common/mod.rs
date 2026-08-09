@@ -105,6 +105,13 @@ pub fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
     (next, decisions)
 }
 
+/// Record `head` as the source's live mainline — the step a rebasing
+/// supersession must be preceded by, since a successor may take only the base
+/// mainline is already at or the one the source last reported (#4709).
+pub fn observing(snapshot: &Snapshot, head: u8) -> Snapshot {
+    step(snapshot, &event(&format!("observe-{head}"), Fact::ObserveMainline { head: digest(head) })).0
+}
+
 /// Seal, integrate every member, and resolve a bloom on `mainline`. Returns
 /// the evolved snapshot and the bloom's spec — the common setup for the
 /// land- and supersede-facing invariants.

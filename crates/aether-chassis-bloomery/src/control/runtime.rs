@@ -767,7 +767,8 @@ fn project(
             | Decision::RecordReviewPark { .. }
             | Decision::RecordWedge { .. }
             | Decision::RevokeResolution { .. }
-            | Decision::AdvanceMainline { .. } => {}
+            | Decision::AdvanceMainline { .. }
+            | Decision::RecordObservation { .. } => {}
         }
     }
     Ok((releases, claims, outbox))

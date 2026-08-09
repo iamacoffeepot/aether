@@ -87,8 +87,8 @@ pub use port::{
 pub use reduce::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError,
     BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, FoldedIntegration, IntegrateError,
-    LandError, LandingRejectedError, ObserveMainlineError, Outcome, ResolveError, SealConflict, SealError, Snapshot,
-    StageProgress, SupersedeError, is_active_unlanded, reduce, view_of,
+    LandError, LandingRejectedError, Outcome, ResolveError, SealConflict, SealError, Snapshot, StageProgress,
+    SupersedeError, is_active_unlanded, reduce, view_of,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;

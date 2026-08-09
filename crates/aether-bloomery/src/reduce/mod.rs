@@ -37,8 +37,8 @@ mod view;
 pub use decision::Decision;
 pub use error::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError,
-    BaseMismatch, IntegrateError, LandError, LandingRejectedError, ObserveMainlineError, ResolveError, SealConflict,
-    SealError, SupersedeError,
+    BaseMismatch, IntegrateError, LandError, LandingRejectedError, ResolveError, SealConflict, SealError,
+    SupersedeError,
 };
 pub use event::{Event, Fact};
 pub use outcome::{Decisions, Outcome};

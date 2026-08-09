@@ -157,6 +157,19 @@ pub enum SupersedeError {
     /// runs — empty, a duplicate workpiece, or an approval that does not bind
     /// its scope revision. A superseding spec is held to seal's member validity.
     InvalidMember(SealError),
+    /// The successor rebases onto a head the source never observed (#4709).
+    ///
+    /// A supersession may move mainline, so the bases it accepts are exactly
+    /// two: the current one, and the head the source last reported. Anything
+    /// else would let a caller name the compare-and-swap anchor whatever it
+    /// likes, and a bloom would land against a head nobody ever saw.
+    UnobservedBase {
+        /// The base the successor sealed.
+        base: Digest,
+        /// The head the source last reported — the only base other than current
+        /// mainline a successor may take.
+        observed: Digest,
+    },
 }
 
 /// Why an integration was refused.
@@ -274,15 +287,4 @@ pub enum LandError {
     NotResolved(BloomId),
     /// Mainline moved off the bloom's sealed base — supersession is forced.
     BaseMismatch(BaseMismatch),
-}
-
-/// Why a mainline observation was refused (#4667).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum ObserveMainlineError {
-    /// A bloom is in flight. Its sealed base is the one head it may land on, so
-    /// advancing mainline under it would convert its land into a
-    /// [`LandError::BaseMismatch`] that only a hand-driven supersession clears.
-    /// The observation is held, not lost: the next one after the bloom leaves
-    /// flight advances to whatever mainline is by then.
-    BloomInFlight(BloomId),
 }

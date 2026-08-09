@@ -18,14 +18,15 @@ use aether_bloomery::Decisions;
 use aether_bloomery::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, Artifact, AttemptCompletedError,
     BloomId, BloomStatus, CandidateRef, CatalogError, Decision, Digest, Event, Evidence, EvidenceKind, Fact, KeyId,
-    LandError, LandingRejectedError, Observation, ObserveMainlineError, Outcome, Provenance, Question, ResolveError,
-    ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId, StageProgress, Statement,
-    SupersedeError, Unproducible, reduce,
+    LandError, LandingRejectedError, Observation, Outcome, Provenance, Question, ResolveError, ResolvedConfigs,
+    SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId, StageProgress, Statement, SupersedeError,
+    Unproducible, reduce,
 };
 use aether_data::Kind;
 use aether_data::wire::to_vec;
 use common::{
-    claim, digest, draft, draft_with_catalog, event, membership, sealed_and_resolved, splice_bloom, step, workpiece,
+    claim, digest, draft, draft_with_catalog, event, membership, observing, sealed_and_resolved, splice_bloom, step,
+    workpiece,
 };
 use proptest::collection::btree_set;
 use proptest::prelude::*;
@@ -336,7 +337,9 @@ fn resolved_bloom_is_supersedable() {
     assert_eq!(snapshot.blooms.get(&predecessor).unwrap().status, BloomStatus::Resolved);
 
     // A successor differing in base — a distinct id, same member (exempt from
-    // conflict via the predecessor's release).
+    // conflict via the predecessor's release). The base it rebases onto has to
+    // be one the source reported (#4709).
+    let snapshot = observing(&snapshot, 2);
     let successor_spec = draft(2, vec![membership("wp", 10)]).seal();
     let successor = successor_spec.id();
     let (after, decided) = step(&snapshot, &event("sup", Fact::Supersede { predecessor, successor: successor_spec }));
@@ -360,6 +363,7 @@ fn a_successor_inheriting_every_claim_dispatches_its_own_fold() {
 
     // Same member at the same scope revision on a different base: every claim
     // inherits, and no member enters the line fresh.
+    let snapshot = observing(&snapshot, 2);
     let successor_spec = draft(2, vec![membership("wp", 10)]).seal();
     let successor = successor_spec.id();
     let successor_base = successor_spec.base();
@@ -542,6 +546,7 @@ fn successor_inherits_only_still_valid_claims() {
 
     // Successor keeps "kept" at rev 10, drops "ejected", and re-admits "changed"
     // at a *new* revision 13 — so only "kept"'s claim is still valid to inherit.
+    let snapshot = observing(&snapshot, 2);
     let successor_spec = draft(2, vec![membership("kept", 10), membership("changed", 13)]).seal();
     let successor = successor_spec.id();
     let (after, decided) = step(&snapshot, &event("sup", Fact::Supersede { predecessor, successor: successor_spec }));
@@ -575,6 +580,7 @@ fn supersession_dispatches_every_non_inherited_successor_member() {
 
     // The successor re-admits "kept" at the same revision (inherits), "wedged"
     // at a fresh revision, and a net-new "grown".
+    let snapshot = observing(&snapshot, 2);
     let successor_spec =
         draft(2, vec![membership("kept", 10), membership("wedged", 12), membership("grown", 13)]).seal();
     let successor = successor_spec.id();
@@ -2251,44 +2257,144 @@ mod observed_mainline {
         assert_eq!(next.mainline, digest(9), "and the fold moves the pointer the decision named");
     }
 
-    // Tripwire: re-observing the head mainline already sits at decides nothing.
-    // A host that observes on a cadence submits this fact constantly, so the
-    // steady state must be a no-op with no effects — an `AdvanceMainline` here
+    // Tripwire: re-observing the head mainline already sits at moves nothing. A
+    // host that observes on a cadence submits this fact constantly, so the
+    // steady state must decide no mainline move — an `AdvanceMainline` here
     // would churn the outbox on every poll.
     #[test]
-    fn re_observing_the_current_head_decides_nothing() {
+    fn re_observing_the_current_head_moves_nothing() {
         let snapshot = Snapshot::new(digest(1));
         let observed = event("observe", Fact::ObserveMainline { head: digest(1) });
 
-        let decided = reduce(&snapshot, &observed, &ResolvedConfigs::default());
+        let (next, decided) = step(&snapshot, &observed);
 
         assert!(
             matches!(decided.outcome, Outcome::MainlineUnchanged(head) if head == digest(1)),
             "observing the current head is a no-op: {:?}",
             decided.outcome,
         );
-        assert!(decided.effects.is_empty(), "and it decides no effects: {:?}", decided.effects);
+        assert!(
+            !decided.effects.iter().any(|e| matches!(e, Decision::AdvanceMainline { .. })),
+            "and moves mainline nowhere: {:?}",
+            decided.effects,
+        );
+        assert_eq!(next.mainline, digest(1), "mainline stays put");
     }
 
-    // Tripwire: an observation is held while a bloom is in flight. The bloom's
-    // sealed base is the one head it may land on, so advancing under it converts
-    // its land into a `BaseMismatch` only a hand-driven supersession clears. The
-    // hold is what keeps an unrelated merge from stranding work in progress.
+    // Tripwire: an observation the advance cannot follow is still recorded
+    // (#4709). The recorded head is the only base a supersession may rebase
+    // onto, so dropping it is what leaves a wedged bloom pinning mainline with
+    // no way back — a wedge never leaves flight on its own, so "the next
+    // observation will advance it" is false for exactly the case that needs it.
     #[test]
-    fn an_observation_is_held_while_a_bloom_is_in_flight() {
+    fn an_observation_held_by_a_bloom_in_flight_is_still_recorded() {
         let (snapshot, spec) = sealed_and_resolved(1, vec![membership("wp", 10)], 30);
         let observed = event("observe", Fact::ObserveMainline { head: digest(9) });
 
         let (next, decided) = step(&snapshot, &observed);
 
         assert!(
-            matches!(
-                decided.outcome,
-                Outcome::ObserveMainlineRejected(ObserveMainlineError::BloomInFlight(bloom)) if bloom == spec.id()
-            ),
+            matches!(decided.outcome, Outcome::MainlineHeld { head, by } if head == digest(9) && by == spec.id()),
             "the in-flight bloom holds the advance: {:?}",
             decided.outcome,
         );
-        assert_eq!(next.mainline, digest(1), "and mainline stays where the in-flight bloom sealed against");
+        assert_eq!(next.mainline, digest(1), "mainline stays where the in-flight bloom sealed against");
+        assert_eq!(next.observed, digest(9), "but the repository's head is recorded for a supersession to rebase onto");
+    }
+
+    // Tripwire: a land leaves the observed head no staler than mainline. A land
+    // authors a head the source has not reported yet, so recording only
+    // observations would leave `observed` pointing behind mainline — and a
+    // supersession rebasing onto it would walk the compare-and-swap anchor
+    // backwards onto a head the repository has already left.
+    #[test]
+    fn a_land_carries_the_observed_head_forward_with_mainline() {
+        let (snapshot, spec) = sealed_and_resolved(1, vec![membership("wp", 10)], 30);
+        let landed = event("land", Fact::Land { bloom: spec.id(), new_head: digest(9) });
+
+        let (next, _) = step(&snapshot, &landed);
+
+        assert_eq!(next.mainline, digest(9), "the land advanced mainline onto the head it authored");
+        assert_eq!(next.observed, digest(9), "and the observed head followed it rather than trailing behind");
+    }
+}
+
+/// The mainline-resync rule (#4709): a supersession that rebases onto the
+/// observed head takes mainline with it, which is the only way a wedged bloom
+/// ever stops pinning it.
+mod mainline_resync {
+    use super::*;
+
+    // Tripwire: superseding onto the observed head advances mainline. Mainline
+    // may not move while a bloom is in flight and a wedged bloom never leaves
+    // flight, so without this the coordinator can never catch up to a repository
+    // that moved — every successor inherits a base whose land is refused by both
+    // the reducer's `BaseMismatch` and the git compare-and-swap.
+    #[test]
+    fn superseding_onto_the_observed_head_advances_mainline() {
+        let (snapshot, predecessor_spec) = sealed_and_resolved(1, vec![membership("wp", 10)], 30);
+        let (snapshot, _) = step(&snapshot, &event("observe", Fact::ObserveMainline { head: digest(2) }));
+
+        let successor_spec = draft(2, vec![membership("wp", 10)]).seal();
+        let superseded =
+            event("sup", Fact::Supersede { predecessor: predecessor_spec.id(), successor: successor_spec.clone() });
+        let (next, decided) = step(&snapshot, &superseded);
+
+        assert!(
+            matches!(decided.outcome, Outcome::Superseded { successor, .. } if successor == successor_spec.id()),
+            "the supersession is admitted: {:?}",
+            decided.outcome,
+        );
+        assert_eq!(next.mainline, digest(2), "and mainline followed the successor onto the observed head");
+    }
+
+    // Tripwire: a successor may not name a base nobody observed. A supersession
+    // moves mainline, and mainline is the compare-and-swap anchor a land is
+    // judged against — so accepting an arbitrary caller-supplied base would let
+    // the route write that anchor directly and land a bloom onto a head that was
+    // never in the repository.
+    #[test]
+    fn superseding_onto_an_unobserved_base_is_refused() {
+        let (snapshot, predecessor_spec) = sealed_and_resolved(1, vec![membership("wp", 10)], 30);
+        let (snapshot, _) = step(&snapshot, &event("observe", Fact::ObserveMainline { head: digest(2) }));
+
+        // Base 7 is neither current mainline (1) nor the observed head (2).
+        let successor_spec = draft(7, vec![membership("wp", 10)]).seal();
+        let superseded =
+            event("sup", Fact::Supersede { predecessor: predecessor_spec.id(), successor: successor_spec });
+        let (next, decided) = step(&snapshot, &superseded);
+
+        assert!(
+            matches!(
+                decided.outcome,
+                Outcome::SupersedeRejected(SupersedeError::UnobservedBase { base, observed })
+                    if base == digest(7) && observed == digest(2)
+            ),
+            "an unobserved base is refused, naming both: {:?}",
+            decided.outcome,
+        );
+        assert_eq!(next.mainline, digest(1), "and mainline is untouched by the refusal");
+    }
+
+    // Tripwire: a supersession that keeps the base leaves mainline alone. The
+    // ordinary re-run — same base, fresh attempt — must not be a mainline event,
+    // or every wedge repair would churn the pointer a land compare-and-swaps
+    // against.
+    #[test]
+    fn superseding_on_the_same_base_leaves_mainline_alone() {
+        let (snapshot, predecessor_spec) = sealed_and_resolved(1, vec![membership("wp", 10)], 30);
+        let (snapshot, _) = step(&snapshot, &event("observe", Fact::ObserveMainline { head: digest(2) }));
+
+        let successor_spec = draft(1, vec![membership("wp", 11)]).seal();
+        let superseded =
+            event("sup", Fact::Supersede { predecessor: predecessor_spec.id(), successor: successor_spec });
+        let (next, decided) = step(&snapshot, &superseded);
+
+        assert!(
+            !decided.effects.iter().any(|e| matches!(e, Decision::AdvanceMainline { .. })),
+            "a same-base supersession decides no mainline move: {:?}",
+            decided.effects,
+        );
+        assert_eq!(next.mainline, digest(1), "and mainline stays where it was");
     }
 }
