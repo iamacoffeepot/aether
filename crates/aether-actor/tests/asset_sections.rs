@@ -49,12 +49,13 @@ use wasmparser::{Parser, Payload};
 /// into aether-actor's test build).
 fn locate_fixture_wasm() -> Option<PathBuf> {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent()?.parent()?.to_path_buf();
+    // Test-only: CARGO_TARGET_DIR is the standard cargo build-output override, not
+    // cap config — honor it so wasm built into an out-of-tree target dir is found.
+    #[allow(clippy::disallowed_methods)]
+    let target_root = env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
     for profile in ["debug", "release"] {
-        let candidate = workspace
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join(profile)
-            .join("aether_test_fixtures_bundle.wasm");
+        let candidate =
+            target_root.join("wasm32-unknown-unknown").join(profile).join("aether_test_fixtures_bundle.wasm");
         if candidate.exists() {
             return Some(candidate);
         }

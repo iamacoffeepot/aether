@@ -78,10 +78,10 @@ mod source;
 pub mod testing;
 
 pub use client::{
-    ActionsApi, Artifact, CheckConclusion, CheckRun, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError,
-    HttpRequest, HttpResponse, HttpTransport, InstallationToken, Issue, MergeResult, Method, NewCheckRun, NewComment,
-    NewIssue, NewPullRequest, PullRequest, PullRequestApi, PullRequestState, ReqwestGithub, ReqwestTransport,
-    RunConclusion, RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
+    ActionsApi, Artifact, CheckConclusion, CheckRun, ChecksState, Comment, GitCommit, GitDataApi, GitRef, GithubApi,
+    GithubError, HttpRequest, HttpResponse, HttpTransport, InstallationToken, Issue, MergeResult, Method, NewCheckRun,
+    NewComment, NewIssue, NewPullRequest, PullRequest, PullRequestApi, PullRequestState, ReqwestGithub,
+    ReqwestTransport, RunConclusion, RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
 };
 pub use config::GithubConfig;
 pub use correspondence::{Correspondence, CorrespondenceError, GitObjectFormat, GitObjectId};
