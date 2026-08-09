@@ -334,7 +334,7 @@ mod tests {
         BloomDraft, BloomId, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey,
         LandingReceipt, Membership, ResolvedConfigs, Snapshot, Topic, WorkpieceId, reduce, view_of,
     };
-    use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
+    use aether_bloomery_github::{GithubProjection, PullRequestApi, testing::FakeGithub};
     use aether_data::wire::{from_bytes, to_vec};
     use aether_data::{MailId, MailboxId, Source};
     use aether_substrate::actor::native::binding::NativeBinding;
@@ -411,6 +411,7 @@ mod tests {
 
         let fake = FakeGithub::new();
         let shell = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
+        let mut comments_first = 0usize;
 
         // Phase 1 — steady projection: enqueue a view document, drain its topic,
         // project it, and ack the delivered prefix.
@@ -424,7 +425,7 @@ mod tests {
             let acks = project_batch(&shell, &entries);
             assert_eq!(fake.issue_count(), 0, "no shadow issue is opened");
             assert!(fake.comment_count() >= 1, "member evidence projects as comment on source issue");
-            let comments_first = fake.comment_count();
+            comments_first = fake.comment_count();
             assert_eq!(acks.len(), 1);
             assert!(
                 acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::ViewDocument),

@@ -66,7 +66,7 @@ impl<C> GithubProjection<C> {
     }
 
     fn remember_members(&self, bloom: BloomId, members: &[MemberView]) {
-        let mut guard = self.known_members.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut guard = self.known_members.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.insert(bloom, members.iter().map(|member| member.workpiece.0.clone()).collect());
     }
 
@@ -149,7 +149,7 @@ where
         }
 
         let members: Vec<String> = {
-            let guard = self.known_members.lock().unwrap_or_else(|poison| poison.into_inner());
+            let guard = self.known_members.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.get(&receipt.bloom).cloned().unwrap_or_default()
         };
         for workpiece in members {
