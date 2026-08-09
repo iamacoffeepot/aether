@@ -94,8 +94,16 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // hard failure instead of a silent skip — without it the lane runs
             // strictly fewer tests than the gate it predicts, which is the
             // false-green direction.
+            //
+            // `AETHER_STORE_PATH` pins what a CI runner gets for free: nothing
+            // there names a store, so the suite's bins fall to the `":memory:"`
+            // default. Off Actions the gate can be reached from a shell — or
+            // from a coordinator whose environment names the live journal — and
+            // the store-backed tests would open it read-write (#4714). Stating
+            // the value is what makes the two environments the same one, not a
+            // divergence from CI.
             args: &["nextest", "run", "--all-features", "--profile", "ci", "--no-fail-fast"],
-            env: &[("AETHER_REQUIRE_RUNTIME", "1")],
+            env: &[("AETHER_REQUIRE_RUNTIME", "1"), ("AETHER_STORE_PATH", ":memory:")],
             requires: &["cargo", "cargo-nextest"],
             prepare: Some(&["xtask", "dist"]),
         }),
@@ -452,7 +460,11 @@ mod tests {
         let test = verify_command("verify.test").expect("verify.test mapped");
         assert_eq!(test.args, &["nextest", "run", "--all-features", "--profile", "ci", "--no-fail-fast"]);
         assert_eq!(test.prepare, Some(&["xtask", "dist"][..]), "scenario tests need the component wasm built");
-        assert_eq!(test.env, &[("AETHER_REQUIRE_RUNTIME", "1")], "a missing wasm must fail, not skip");
+        assert_eq!(
+            test.env,
+            &[("AETHER_REQUIRE_RUNTIME", "1"), ("AETHER_STORE_PATH", ":memory:")],
+            "a missing wasm must fail rather than skip, and the suite must never inherit a store to open",
+        );
 
         // Tripwire: `crates` is the path, and it is not optional — cargo-machete
         // reads its own subcommand name as the directory to walk without it and

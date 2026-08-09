@@ -33,11 +33,13 @@
 //! git repo or a Claude credential. Production mounts [`ProcessTransformRunner`].
 //!
 //! The module splits along those seams: the [`error`] type, the [`runner`] spawn
-//! contract, its production [`process_runner`] implementation, and the [`backend`]
-//! registry + [`ExecutorBackend`](aether_bloomery::ExecutorBackend) impl over them.
+//! contract, its production [`process_runner`] implementation, the [`lane_env`]
+//! policy for what that spawn may hand down, and the [`backend`] registry +
+//! [`ExecutorBackend`](aether_bloomery::ExecutorBackend) impl over them.
 
 mod backend;
 mod error;
+mod lane_env;
 mod process_runner;
 mod runner;
 
