@@ -106,6 +106,8 @@ struct State {
     next_comment: u64,
     issues: Vec<StoredIssue>,
     comments: Vec<StoredComment>,
+    find_issue_calls: usize,
+    create_issue_calls: usize,
     // The git object store the source port drives: ref name (`heads/…`) → sha,
     // and commit sha → tree sha. Trees themselves are opaque shas the port
     // treats as digest-addressed handles, so they need no separate store.
@@ -170,6 +172,19 @@ impl FakeGithub {
         self.lock().comments.len()
     }
 
+    /// How many times `find_issue` (the repository-wide list walk) was called.
+    #[must_use]
+    pub fn find_issue_calls(&self) -> usize {
+        self.lock().find_issue_calls
+    }
+
+    /// How many times `create_issue` was called — the shadow-issue path the
+    /// projection must not take.
+    #[must_use]
+    pub fn create_issue_calls(&self) -> usize {
+        self.lock().create_issue_calls
+    }
+
     /// The current issue numbers, ascending.
     #[must_use]
     pub fn issue_numbers(&self) -> Vec<u64> {
@@ -182,6 +197,18 @@ impl FakeGithub {
     #[must_use]
     pub fn issue_body(&self, number: u64) -> Option<String> {
         self.lock().issues.iter().find(|issue| issue.number == number).map(|issue| issue.body.clone())
+    }
+
+    /// Seed an existing source issue at `number` — the projection's direct-lookup
+    /// home for a `issue-<number>` workpiece. Creates a plain issue body so
+    /// `get_issue(number)` finds it and comments can be upserted against it.
+    pub fn seed_issue(&self, number: u64, title: &str) {
+        let mut state = self.lock();
+        if state.issues.iter().any(|issue| issue.number == number) {
+            return;
+        }
+        state.next_issue = state.next_issue.max(number);
+        state.issues.push(StoredIssue { number, title: title.to_owned(), body: String::new() });
     }
 
     /// Delete issue `number` and its comments — an operator removing a
@@ -741,7 +768,8 @@ impl PullRequestApi for FakeGithub {
 
 impl GithubApi for FakeGithub {
     fn find_issue(&self, key: &str) -> Result<Option<Issue>, GithubError> {
-        let state = self.lock();
+        let mut state = self.lock();
+        state.find_issue_calls += 1;
         Ok(state.issues.iter().find_map(|issue| {
             let marker = parse_marker(&issue.body);
             match &marker {
@@ -755,6 +783,7 @@ impl GithubApi for FakeGithub {
 
     fn create_issue(&self, new: &NewIssue) -> Result<Issue, GithubError> {
         let mut state = self.lock();
+        state.create_issue_calls += 1;
         state.next_issue += 1;
         let number = state.next_issue;
         state.issues.push(StoredIssue { number, title: new.title.clone(), body: new.body.clone() });
@@ -769,6 +798,16 @@ impl GithubApi for FakeGithub {
         title.clone_into(&mut issue.title);
         body.clone_into(&mut issue.body);
         Ok(())
+    }
+
+    fn get_issue(&self, number: u64) -> Result<Option<Issue>, GithubError> {
+        let state = self.lock();
+        Ok(state.issues.iter().find(|issue| issue.number == number).map(|issue| Issue {
+            number: issue.number,
+            title: issue.title.clone(),
+            body: issue.body.clone(),
+            marker: parse_marker(&issue.body),
+        }))
     }
 
     fn find_comment(&self, issue_number: u64, key: &str) -> Result<Option<Comment>, GithubError> {

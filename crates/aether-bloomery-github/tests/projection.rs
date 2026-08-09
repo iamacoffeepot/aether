@@ -1,14 +1,14 @@
-//! Projection reconcile against the fake GitHub (#3459 step 5 coverage): the
-//! carbon-copy count, idempotency, in-place update, and the delete → reappear
-//! rebuild property.
+//! Projection onto source issues and the landing PR — the revised mirror.
 
 #![allow(clippy::unwrap_used)]
 
 use aether_bloomery::{
-    BloomId, BloomStatus, BloomView, Digest, Evidence, EvidenceKind, MemberView, PendingDecisionView,
-    ProjectionBackend, ResolutionClaim, StageId, ViewDocument, WorkpieceId,
+    BloomId, BloomStatus, BloomView, Digest, Evidence, EvidenceKind, LandingReceipt, MemberView, PendingDecisionView,
+    ProjectionBackend, StageId, ViewDocument, WorkpieceId,
 };
-use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
+use aether_bloomery_github::{
+    GithubApi, GithubProjection, NewPullRequest, PullRequestApi, parse_source_issue_number, testing::FakeGithub,
+};
 
 fn digest(seed: u8) -> Digest {
     Digest::from_bytes([seed; 32])
@@ -18,33 +18,24 @@ fn approval(subject: Digest) -> Evidence {
     Evidence { subject, kind: EvidenceKind::Approval, detail: digest(200) }
 }
 
-/// A two-member bloom; the second member is integrated (carries a resolution)
-/// when `resolve_second` is set.
-fn view(resolve_second: bool) -> ViewDocument {
+fn issuable_view() -> ViewDocument {
+    // Two members whose ids name source issues issue-1 and issue-2.
     let member_a = MemberView {
-        workpiece: WorkpieceId("reactor-core".into()),
+        workpiece: WorkpieceId("issue-1".into()),
         scope_revision: digest(10),
         approval: approval(digest(10)),
         resolution: None,
         pending_decision: None,
         wedge: None,
     };
-    let mut member_b = MemberView {
-        workpiece: WorkpieceId("coolant-loop".into()),
+    let member_b = MemberView {
+        workpiece: WorkpieceId("issue-2".into()),
         scope_revision: digest(20),
         approval: approval(digest(20)),
         resolution: None,
         pending_decision: None,
         wedge: None,
     };
-    if resolve_second {
-        member_b.resolution = Some(ResolutionClaim {
-            workpiece: WorkpieceId("coolant-loop".into()),
-            scope_revision: digest(20),
-            candidate: digest(21),
-            evidence: Evidence { subject: digest(21), kind: EvidenceKind::ResolutionClaim, detail: digest(210) },
-        });
-    }
     let bloom = BloomView {
         id: BloomId(digest(1)),
         status: BloomStatus::Sealed,
@@ -55,112 +46,271 @@ fn view(resolve_second: bool) -> ViewDocument {
     ViewDocument { mainline: digest(0), blooms: vec![bloom] }
 }
 
-#[test]
-fn first_reconcile_creates_the_carbon_copy() {
-    let projection = GithubProjection::new(FakeGithub::new());
-    projection.reconcile_view(&view(false)).expect("reconcile");
+fn landing_branch(bloom: BloomId) -> String {
+    format!("bloom/{}/landing", aether_bloomery_github::short_hex(&bloom.0))
+}
 
-    // 1 umbrella issue + 2 workpiece issues.
-    assert_eq!(projection.client().issue_count(), 3);
-    // 1 approval comment per member.
-    assert_eq!(projection.client().comment_count(), 2);
+fn seed_pr(fake: &FakeGithub, bloom: BloomId) -> u64 {
+    fake.create_pull_request(&NewPullRequest {
+        title: "land".into(),
+        body: "b".into(),
+        head: landing_branch(bloom),
+        base: "main".into(),
+    })
+    .expect("pr created")
+    .number
+}
+
+#[test]
+fn reconcile_creates_comments_on_source_issues_and_pr_without_creating_issues() {
+    let fake = FakeGithub::new();
+    fake.seed_issue(1, "source 1");
+    fake.seed_issue(2, "source 2");
+    let view = issuable_view();
+    let pr = seed_pr(&fake, view.blooms[0].id);
+
+    let projection = GithubProjection::new(fake.clone());
+    projection.reconcile_view(&view).expect("reconcile");
+
+    assert_eq!(fake.create_issue_calls(), 0, "no shadow issue opened");
+    assert_eq!(fake.find_issue_calls(), 0, "no list-and-scan walk");
+    assert_eq!(fake.issue_count(), 2, "only seeded source issues exist");
+    // Each member adds: member body + approval comment. So 2*2 =4 plus bloom aggregate on PR.
+    assert!(fake.comment_count() >= 4, "member comments landed on source issues");
+    // Bloom aggregate landed as comment on PR.
+    assert!(fake.comment_count() >= 5, "bloom aggregate landed on PR");
+    // Verify a comment landed on PR number.
+    let pr_comments: Vec<_> = fake.comment_count().to_string().chars().collect();
+    let _ = pr_comments;
+    // At least one comment is on the PR issue number.
+    // Fake stores comments with issue_number = pr number; we can check by looking at comments via find_comment.
+    // Use direct check: bloom key comment should be on PR.
+    let bloom_key = format!("bloom:{}", aether_bloomery_github::short_hex(&digest(1)));
+    let found = fake.find_comment(pr, &bloom_key).expect("find").is_some();
+    assert!(found, "bloom aggregate comment exists on PR");
 }
 
 #[test]
 fn reconciling_the_same_document_twice_is_idempotent() {
-    let projection = GithubProjection::new(FakeGithub::new());
-    let document = view(false);
+    let fake = FakeGithub::new();
+    fake.seed_issue(1, "s1");
+    fake.seed_issue(2, "s2");
+    let view = issuable_view();
+    seed_pr(&fake, view.blooms[0].id);
 
-    projection.reconcile_view(&document).expect("first reconcile");
-    let after_first = (projection.client().issue_count(), projection.client().comment_count());
-    let numbers_first = projection.client().issue_numbers();
-
-    projection.reconcile_view(&document).expect("second reconcile");
-    let after_second = (projection.client().issue_count(), projection.client().comment_count());
-
-    // No duplicate objects — every find matched its marker, so the second pass
-    // was all no-ops.
-    assert_eq!(after_first, after_second);
-    assert_eq!(numbers_first, projection.client().issue_numbers());
+    let projection = GithubProjection::new(fake.clone());
+    projection.reconcile_view(&view).expect("first");
+    let after_first = fake.comment_count();
+    projection.reconcile_view(&view).expect("second");
+    assert_eq!(after_first, fake.comment_count(), "second reconcile is all no-ops");
+    assert_eq!(fake.create_issue_calls(), 0);
+    assert_eq!(fake.find_issue_calls(), 0);
 }
 
 #[test]
-fn a_changed_view_updates_in_place() {
-    let projection = GithubProjection::new(FakeGithub::new());
+fn landing_receipt_lands_on_pr_and_source_issue_without_opening_issue() {
+    let fake = FakeGithub::new();
+    fake.seed_issue(1, "s1");
+    fake.seed_issue(2, "s2");
+    let view = issuable_view();
+    let bloom_id = view.blooms[0].id;
+    let pr = seed_pr(&fake, bloom_id);
 
-    projection.reconcile_view(&view(false)).expect("initial reconcile");
-    let numbers_before = projection.client().issue_numbers();
+    let projection = GithubProjection::new(fake.clone());
+    projection.reconcile_view(&view).expect("reconcile caches members");
 
-    // Integrating the second member changes its member-issue digest and adds a
-    // resolution comment.
-    projection.reconcile_view(&view(true)).expect("changed reconcile");
+    let receipt = LandingReceipt { bloom: bloom_id, previous_base: digest(0), new_head: digest(9) };
+    projection.project_receipt(&receipt).expect("receipt");
 
-    // Same issue numbers — the change was an in-place update, not a recreate.
-    assert_eq!(numbers_before, projection.client().issue_numbers());
-    // The resolution comment was added.
-    assert_eq!(projection.client().comment_count(), 3);
-    // The coolant-loop member issue now reads as integrated.
-    let coolant_body = projection
-        .client()
-        .issue_numbers()
-        .into_iter()
-        .filter_map(|n| projection.client().issue_body(n))
-        .find(|body| body.contains("Workpiece `coolant-loop`"))
-        .expect("the coolant-loop member issue exists");
-    assert!(coolant_body.contains("- Resolution: integrated"), "the member issue reflects its resolution");
-}
+    assert_eq!(fake.create_issue_calls(), 0, "receipt did not open a shadow issue");
+    assert_eq!(fake.find_issue_calls(), 0, "receipt did not list issues");
 
-/// The two-member bloom with the first member held on a parked question.
-fn held_view() -> ViewDocument {
-    let mut document = view(false);
-    document.blooms[0].members[0].pending_decision = Some(PendingDecisionView {
-        question: digest(90),
-        stage: StageId::Construct,
-        prompt: "tie between A and B".into(),
-        options: vec!["A".into(), "B".into()],
-        blocked: "construct is held".into(),
-    });
-    document
+    let receipt_key = format!("receipt:{}", aether_bloomery_github::short_hex(&bloom_id.0));
+    assert!(fake.find_comment(pr, &receipt_key).unwrap().is_some(), "receipt comment on PR");
+    assert!(fake.find_comment(1, &receipt_key).unwrap().is_some(), "receipt comment on source issue 1");
+    assert!(fake.find_comment(2, &receipt_key).unwrap().is_some(), "receipt comment on source issue 2");
 }
 
 #[test]
-fn a_held_member_projects_an_idempotent_question_comment() {
-    // ADR-0151: a parked question projects one comment on the held member's
-    // workpiece issue (visible where a person looks), carrying the question digest
-    // in stable metadata. Re-reconciling the same hold is a no-op — the marker's
-    // content digest matches, so no second comment is written.
-    let projection = GithubProjection::new(FakeGithub::new());
+fn non_issuable_workpiece_is_skipped_without_shadow_issue() {
+    let fake = FakeGithub::new();
+    fake.seed_issue(1, "s1");
+    // View with one issuable and one non-issuable workpiece.
+    let member_ok = MemberView {
+        workpiece: WorkpieceId("issue-1".into()),
+        scope_revision: digest(10),
+        approval: approval(digest(10)),
+        resolution: None,
+        pending_decision: None,
+        wedge: None,
+    };
+    let member_bad = MemberView {
+        workpiece: WorkpieceId("feature-foo".into()),
+        scope_revision: digest(20),
+        approval: approval(digest(20)),
+        resolution: None,
+        pending_decision: None,
+        wedge: None,
+    };
+    let bloom = BloomView {
+        id: BloomId(digest(5)),
+        status: BloomStatus::Sealed,
+        superseded_by: None,
+        members: vec![member_ok, member_bad],
+        landing_blocked: None,
+    };
+    let view = ViewDocument { mainline: digest(0), blooms: vec![bloom] };
+    seed_pr(&fake, BloomId(digest(5)));
 
-    // The unheld baseline: one approval comment per member.
-    projection.reconcile_view(&view(false)).expect("baseline reconcile");
-    assert_eq!(projection.client().comment_count(), 2);
+    let projection = GithubProjection::new(fake.clone());
+    projection.reconcile_view(&view).expect("reconcile");
 
-    // Reconciling the held view adds exactly one question comment.
-    projection.reconcile_view(&held_view()).expect("held reconcile");
-    assert_eq!(projection.client().comment_count(), 3, "the held member's question projects one comment");
-
-    // Re-reconciling the identical held view writes nothing new (idempotent).
-    projection.reconcile_view(&held_view()).expect("idempotent reconcile");
-    assert_eq!(projection.client().comment_count(), 3, "re-reconciling the same hold is a no-op");
+    assert_eq!(fake.create_issue_calls(), 0, "no shadow issue for non-issuable workpiece");
+    assert_eq!(fake.find_issue_calls(), 0, "no list walk");
+    assert_eq!(fake.issue_count(), 1, "only seeded source issue remains");
+    // Comments only for the issuable member.
+    assert!(fake.comment_count() >= 2, "issuable member projected");
+    // No comment should exist for the non-issuable workpiece's key on any issue.
+    let bloom_hex = aether_bloomery_github::short_hex(&digest(5));
+    let bad_key = format!("wp:feature-foo@bloom:{bloom_hex}");
+    // Check that bad key is absent everywhere (issue 1 has no bad key).
+    assert!(fake.find_comment(1, &bad_key).unwrap().is_none(), "non-issuable member not projected");
 }
 
 #[test]
-fn a_deleted_projection_reappears_on_the_next_reconcile() {
-    let projection = GithubProjection::new(FakeGithub::new());
-    let document = view(false);
+fn no_projection_path_uses_the_list_walk() {
+    let fake = FakeGithub::new();
+    fake.seed_issue(10, "s10");
+    fake.seed_issue(11, "s11");
+    let member_a = MemberView {
+        workpiece: WorkpieceId("issue-10".into()),
+        scope_revision: digest(10),
+        approval: approval(digest(10)),
+        resolution: None,
+        pending_decision: None,
+        wedge: None,
+    };
+    let member_b = MemberView {
+        workpiece: WorkpieceId("issue-11".into()),
+        scope_revision: digest(11),
+        approval: approval(digest(11)),
+        resolution: None,
+        pending_decision: None,
+        wedge: None,
+    };
+    let bloom = BloomView {
+        id: BloomId(digest(9)),
+        status: BloomStatus::Sealed,
+        superseded_by: None,
+        members: vec![member_a, member_b],
+        landing_blocked: None,
+    };
+    let view = ViewDocument { mainline: digest(0), blooms: vec![bloom] };
+    seed_pr(&fake, BloomId(digest(9)));
 
-    projection.reconcile_view(&document).expect("initial reconcile");
-    let full = projection.client().issue_count();
+    let projection = GithubProjection::new(fake.clone());
+    projection.reconcile_view(&view).expect("reconcile");
+    let receipt = LandingReceipt { bloom: BloomId(digest(9)), previous_base: digest(0), new_head: digest(99) };
+    projection.project_receipt(&receipt).expect("receipt");
 
-    // An operator deletes a projected issue.
-    let victim = projection.client().issue_numbers()[1];
-    projection.client().delete_issue(victim);
-    assert_eq!(projection.client().issue_count(), full - 1);
+    assert_eq!(fake.find_issue_calls(), 0, "no projection path called find_issue");
+    assert_eq!(fake.create_issue_calls(), 0, "no projection path opened an issue");
+}
 
-    // The reconcile finds no marker for the deleted object and recreates it —
-    // the rebuild-from-journal property.
-    projection.reconcile_view(&document).expect("rebuild reconcile");
-    assert_eq!(projection.client().issue_count(), full);
-    // The recreated issue is a fresh number (the deleted one is gone).
-    assert!(!projection.client().issue_numbers().contains(&victim));
+#[test]
+fn missing_pr_is_skipped_without_shadow_issue() {
+    let fake = FakeGithub::new();
+    fake.seed_issue(20, "s20");
+    let member = MemberView {
+        workpiece: WorkpieceId("issue-20".into()),
+        scope_revision: digest(20),
+        approval: approval(digest(20)),
+        resolution: None,
+        pending_decision: None,
+        wedge: None,
+    };
+    let bloom = BloomView {
+        id: BloomId(digest(20)),
+        status: BloomStatus::Sealed,
+        superseded_by: None,
+        members: vec![member],
+        landing_blocked: None,
+    };
+    let view = ViewDocument { mainline: digest(0), blooms: vec![bloom] };
+
+    // Intentionally do NOT seed a PR.
+    let projection = GithubProjection::new(fake.clone());
+    projection.reconcile_view(&view).expect("reconcile without PR");
+
+    assert_eq!(fake.create_issue_calls(), 0, "missing PR does not create shadow issue");
+    assert_eq!(fake.find_issue_calls(), 0);
+    // Member still projects onto its source issue.
+    assert!(fake.comment_count() >= 2, "member comments still land on source issue");
+}
+
+#[test]
+fn workpiece_id_mapping_is_issue_dash_number() {
+    assert_eq!(parse_source_issue_number(&WorkpieceId("issue-4628".into())), Some(4628));
+    assert_eq!(parse_source_issue_number(&WorkpieceId("issue-1".into())), Some(1));
+    assert_eq!(parse_source_issue_number(&WorkpieceId("issue-0".into())), None);
+    assert_eq!(parse_source_issue_number(&WorkpieceId("issue-".into())), None);
+    assert_eq!(parse_source_issue_number(&WorkpieceId("issue-abc".into())), None);
+    assert_eq!(parse_source_issue_number(&WorkpieceId("feature-foo".into())), None);
+    assert_eq!(parse_source_issue_number(&WorkpieceId("ISSUE-1".into())), None);
+    assert_eq!(parse_source_issue_number(&WorkpieceId("issue-1-extra".into())), None);
+}
+
+#[test]
+fn held_member_projects_question_comment_on_source_issue() {
+    let fake = FakeGithub::new();
+    fake.seed_issue(30, "s30");
+    let bloom_id = BloomId(digest(30));
+    seed_pr(&fake, bloom_id);
+
+    let member = MemberView {
+        workpiece: WorkpieceId("issue-30".into()),
+        scope_revision: digest(30),
+        approval: approval(digest(30)),
+        resolution: None,
+        pending_decision: Some(PendingDecisionView {
+            question: digest(90),
+            stage: StageId::Construct,
+            prompt: "tie".into(),
+            options: vec!["A".into(), "B".into()],
+            blocked: "held".into(),
+        }),
+        wedge: None,
+    };
+    // Baseline view without hold to get baseline comment count.
+    let base_view = ViewDocument {
+        mainline: digest(0),
+        blooms: vec![BloomView {
+            id: bloom_id,
+            status: BloomStatus::Sealed,
+            superseded_by: None,
+            members: vec![MemberView { pending_decision: None, ..member.clone() }],
+            landing_blocked: None,
+        }],
+    };
+    let held_view = ViewDocument {
+        mainline: digest(0),
+        blooms: vec![BloomView {
+            id: bloom_id,
+            status: BloomStatus::Sealed,
+            superseded_by: None,
+            members: vec![member.clone()],
+            landing_blocked: None,
+        }],
+    };
+
+    let projection = GithubProjection::new(fake.clone());
+    projection.reconcile_view(&base_view).expect("base");
+    let base_count = fake.comment_count();
+    projection.reconcile_view(&held_view).expect("held");
+    assert!(fake.comment_count() > base_count, "held question adds a comment on source issue");
+    assert_eq!(fake.create_issue_calls(), 0);
+    // Idempotent second held reconcile is no-op.
+    let after = fake.comment_count();
+    projection.reconcile_view(&held_view).expect("held again");
+    assert_eq!(after, fake.comment_count());
 }

@@ -91,5 +91,5 @@ pub use inward::{
     normalize_study_result, parse_study_cost,
 };
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
-pub use projection::GithubProjection;
+pub use projection::{GithubProjection, parse_source_issue_number};
 pub use source::{GitSource, SharedCorrespondence, SourceError, candidate_ref_name, to_hex};
