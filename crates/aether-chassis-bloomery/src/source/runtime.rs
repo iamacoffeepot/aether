@@ -412,13 +412,7 @@ fn source_claims_enabled(config: &super::SourceConfig) -> bool {
 fn connect_source_shell(config: &super::SourceConfig) -> Result<SourceShell, BootError> {
     #[cfg(any(test, feature = "testing"))]
     if config.uses_fixture() {
-        use aether_bloomery_github::{GitSource, SharedCorrespondence};
-        use std::sync::Arc;
-        let fake = config.shared_fixture();
-        let fake_for_git = fake.clone();
-        let correspondence: SharedCorrespondence = Arc::new(fake);
-        let git_source = GitSource::new(fake_for_git, Arc::clone(&correspondence), config.cas_land_enabled);
-        return Ok(SourceShell::new_with_correspondence(Arc::new(git_source), correspondence));
+        return Ok(config.fixture_source());
     }
     SourceShell::connect(config).map_err(|error| BootError::Other(Box::new(error)))
 }

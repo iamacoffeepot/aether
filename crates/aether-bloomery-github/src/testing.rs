@@ -614,20 +614,7 @@ fn merged_tree(base: &str, head: &str) -> String {
 
 impl Correspondence for FakeGithub {
     fn record(&self, digest: &Digest, git: &GitObjectId) -> Result<(), CorrespondenceError> {
-        let mut state = self.lock();
-        state.correspondence.insert(*digest.as_bytes(), git.clone());
-        // Fixture candidate capture (#4732): `LocalExecutor` records the
-        // candidate checkout digest → commit sha via this `Correspondence`
-        // store, but `integrate` later looks up the *commit object* itself
-        // (`GitDataApi::get_commit`) which consults `commits`, not
-        // `correspondence`. Seed a stub commit so the object exists.
-        let sha = git.to_hex();
-        #[allow(clippy::redundant_clone)]
-        if !state.commits.contains_key(&sha) {
-            state
-                .commits
-                .insert(sha.clone(), StoredCommit { tree: sha.clone(), message: String::new(), parents: Vec::new() });
-        }
+        self.lock().correspondence.insert(*digest.as_bytes(), git.clone());
         Ok(())
     }
 

@@ -216,6 +216,13 @@ pub struct GithubMirrorConfig {
     #[cfg(any(test, feature = "testing"))]
     #[config(env = "AETHER_GITHUB_BACKEND", default = "github")]
     pub github_backend: String,
+    /// The real git sha that the `0xB0` digest corresponds to in the scratch
+    /// repo — the harness records the scratch HEAD in `SQLite` and the forked
+    /// coordinator's fixture must resolve the same digest so `git fetch` finds
+    /// it. Only available in `cfg(test)` so prod never links `FakeGithub`.
+    #[cfg(any(test, feature = "testing"))]
+    #[config(env = "AETHER_GITHUB_FIXTURE_BASE_SHA", default = "")]
+    pub fixture_base_sha: String,
 }
 
 impl Default for GithubMirrorConfig {
@@ -246,6 +253,8 @@ impl Default for GithubMirrorConfig {
             operator_email: String::new(),
             #[cfg(any(test, feature = "testing"))]
             github_backend: "github".to_owned(),
+            #[cfg(any(test, feature = "testing"))]
+            fixture_base_sha: String::new(),
         }
     }
 }
@@ -270,12 +279,6 @@ impl GithubMirrorConfig {
     pub fn uses_fixture(&self) -> bool {
         self.github_backend == "fixture" || self.github_backend == "fake"
     }
-    #[cfg(any(test, feature = "testing"))]
-    #[must_use]
-    #[deprecated(note = "use uses_fixture")]
-    pub fn is_fake(&self) -> bool {
-        self.uses_fixture()
-    }
     #[cfg(not(any(test, feature = "testing")))]
     #[must_use]
     pub fn uses_fixture(&self) -> bool {
@@ -284,22 +287,39 @@ impl GithubMirrorConfig {
 
     /// Shared in-memory GitHub double for `fixture` backends (#4732). Only
     /// available in `cfg(any(test, feature = "testing"))` so prod never links `FakeGithub`.
+    /// The `OnceLock` is per-process, which is correct for the forked
+    /// `bloomery` coordinator (one process per lane test). Unit tests that run
+    /// in the same `cargo test` process and call this with different base shas
+    /// would see the first one's base; they don't use this helper — they
+    /// construct `FakeGithub::new()` directly.
     #[cfg(any(test, feature = "testing"))]
     #[allow(clippy::absolute_paths)]
     #[must_use]
     pub fn shared_fixture(&self) -> FakeGithub {
         static FAKE: OnceLock<FakeGithub> = OnceLock::new();
+        // For `cargo test` unit tests (cfg(test)), don't use the global
+        // OnceLock — each test should get a fresh fixture. For the
+        // `bloomery` binary (feature="testing" but not cfg(test)), use the
+        // process-global shared instance so all four reactors see the same
+        // world.
+        if cfg!(test) {
+            let fake = FakeGithub::new();
+            let base = Digest::from_bytes([0xB0; 32]);
+            if !self.fixture_base_sha.is_empty() {
+                fake.seed_correspondence(&base, &self.fixture_base_sha);
+                fake.seed_ref("heads/main", &self.fixture_base_sha);
+                return fake;
+            }
+            let base_commit = fake.seed_base_commit(&base);
+            fake.seed_ref_at("heads/main", &base_commit);
+            return fake;
+        }
         FAKE.get_or_init(|| {
             let fake = FakeGithub::new();
             let base = Digest::from_bytes([0xB0; 32]);
-            // Lane harness runs over a real scratch repo whose HEAD the harness
-            // records in SQLite; the forked coordinator's in-memory fixture must
-            // resolve the same 0xB0 digest to that real object so `git fetch`
-            // finds it. The harness passes the sha via env.
-            #[allow(clippy::disallowed_methods)]
-            if let Ok(sha) = std::env::var("AETHER_GITHUB_FIXTURE_BASE_SHA") {
-                fake.seed_correspondence(&base, &sha);
-                fake.seed_ref("heads/main", &sha);
+            if !self.fixture_base_sha.is_empty() {
+                fake.seed_correspondence(&base, &self.fixture_base_sha);
+                fake.seed_ref("heads/main", &self.fixture_base_sha);
                 return fake;
             }
             let base_commit = fake.seed_base_commit(&base);
@@ -308,12 +328,20 @@ impl GithubMirrorConfig {
         })
         .clone()
     }
+
+    /// Build a `SourceShell` backed by the shared fixture — the single place
+    /// the `GitSource::new` + `SourceShell::new_with_correspondence` dance
+    /// lives, collapsing the four duplicated blocks in `mirror`, `integrate`,
+    /// `land`, and `source`.
     #[cfg(any(test, feature = "testing"))]
-    #[allow(clippy::absolute_paths)]
-    #[deprecated(note = "use shared_fixture")]
     #[must_use]
-    pub fn shared_fake(&self) -> FakeGithub {
-        self.shared_fixture()
+    pub fn fixture_source(&self) -> crate::bloomery::SourceShell {
+        use aether_bloomery_github::{GitSource, SharedCorrespondence};
+        let fake = self.shared_fixture();
+        let fake_for_git = fake.clone();
+        let correspondence: SharedCorrespondence = Arc::new(fake);
+        let git_source = GitSource::new(fake_for_git, Arc::clone(&correspondence), self.cas_land_enabled);
+        crate::bloomery::SourceShell::new_with_correspondence(Arc::new(git_source), Arc::clone(&correspondence))
     }
 
     /// The connection knobs this config leaves empty, in the order an operator

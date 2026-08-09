@@ -141,6 +141,9 @@ inventory = { workspace = true }
 # The mirror demo (#3459 step 7) drives the projection against the adapter's
 # in-process `FakeGithub` double, so it needs no token or network.
 aether-bloomery-github = { path = "../aether-bloomery-github", features = ["testing"] }
+# The `bloomery` binary's `AETHER_GITHUB_BACKEND=fixture` path needs the
+# `testing` feature at runtime (not just `cfg(test)`), so the `cargo test`
+# harness's `CARGO_BIN_EXE_bloomery` is built with it via this self-dependency.
 aether-chassis-bloomery = { path = ".", features = ["testing"] }
 # The mirror-driver actor-path test drives the capability's handlers through the
 # substrate cap-test fixture (`aether_substrate::testing`), gated behind the

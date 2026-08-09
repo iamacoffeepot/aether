@@ -322,12 +322,7 @@ fn drain_and_integrate(
 fn connect_source(config: &GithubMirrorConfig) -> Result<SourceShell, BootError> {
     #[cfg(any(test, feature = "testing"))]
     if config.uses_fixture() {
-        use aether_bloomery_github::{GitSource, SharedCorrespondence};
-        let fake = config.shared_fixture();
-        let fake_for_git = fake.clone();
-        let correspondence: SharedCorrespondence = Arc::new(fake);
-        let git_source = GitSource::new(fake_for_git, Arc::clone(&correspondence), config.cas_land_enabled);
-        return Ok(SourceShell::new_with_correspondence(Arc::new(git_source), Arc::clone(&correspondence)));
+        return Ok(config.fixture_source());
     }
     SourceShell::connect(config).map_err(|e| BootError::Other(Box::new(e)))
 }

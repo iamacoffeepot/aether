@@ -121,6 +121,11 @@ impl LaneHarness {
         script.write_to(runs.path()).unwrap();
 
         let store_path = state.path().join("bloomery.db").to_string_lossy().into_owned();
+        // The sealed base is a bloom-domain digest; the dispatch resolves it to a
+        // real git object through the coordinator's own correspondence table,
+        // which lives in this same database. Seeding it here is what makes the
+        // scratch repository's commit the tree every lane checks out — without
+        // it the very first submit refuses with an unresolved checkout.
         let base = Digest::from_bytes([0xB0; 32]);
         SqliteCorrespondence::open(&store_path)
             .unwrap()
@@ -150,8 +155,7 @@ impl LaneHarness {
                 // AggregateReview→Land do. `fake` mounts every reactor with an
                 // in-memory double and needs no token/owner/repo.
                 ("AETHER_GITHUB_BACKEND", "fixture"),
-                #[allow(clippy::needless_borrow)]
-                ("AETHER_GITHUB_FIXTURE_BASE_SHA", &repo.head()),
+                ("AETHER_GITHUB_FIXTURE_BASE_SHA", repo.head()),
                 // A fixed capture identity, so a candidate commit never depends
                 // on whatever git identity the host running the suite has.
                 ("AETHER_BLOOMERY_OPERATOR_NAME", "lane harness"),
