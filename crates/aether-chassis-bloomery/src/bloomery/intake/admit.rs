@@ -6,7 +6,7 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    Admit, BloomId, CandidateRef, Digest, Event, Fact, IdempotencyKey, InwardError, Nonce, ResolutionClaim,
+    Admit, BloomId, CandidateRef, Digest, Event, Evidence, Fact, IdempotencyKey, InwardError, Nonce, ResolutionClaim,
     StageCatalog, StageId, StageResult, StageVerdict, WorkpieceId, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
@@ -225,7 +225,7 @@ impl DispatchRecord {
 /// the nonce names a live order **and** the evidence's bound digest is the one
 /// the order displayed. On accept the order is consumed (so a replayed nonce
 /// refuses) and the stage result normalizes — through the shape-only
-/// [`normalize_stage_result`] — into an [`Evidence`](aether_bloomery::Evidence)
+/// [`normalize_stage_result`] — into an [`Evidence`]
 /// bound to the displayed digest, wrapped in a [`ResolutionClaim`] built from the
 /// matched row, and carried as a [`Fact::Integrate`]. A mismatch on either axis
 /// refuses without touching the reducer.
@@ -233,6 +233,37 @@ impl DispatchRecord {
 /// # Errors
 /// [`IntakeError::Store`] if the registry read/consume faulted, or
 /// [`IntakeError::Encode`] if the admitted event failed to wire-encode.
+/// The admission event for a whole-bloom aggregate-review verdict (ADR-0153) —
+/// a bloom-level order, no member axis — paired with the findings decomposition
+/// the caller persists after the consume.
+///
+/// A failing verdict's findings decompose against the ids the critic's own
+/// prompt showed (the persisted work-order roster); a *complete* attribution
+/// narrows the implication to the owning members, anything less leaves it empty
+/// and the reducer expands the empty implication to every member (fail-closed
+/// over-routing).
+fn aggregate_review_event(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    upload: &UploadedEvidence,
+    evidence: Evidence,
+) -> Result<(Event, Option<FindingsDecomposition>), IntakeError> {
+    let passed = verdict_passed(upload.verdict);
+    let decomposition = aggregate_decomposition(store, record, upload, passed)?;
+    let implicated = match &decomposition {
+        Some(decomposition) if decomposition.is_complete() => {
+            decomposition.owners().into_iter().map(WorkpieceId).collect()
+        }
+        _ => Vec::new(),
+    };
+
+    let event = Event {
+        idempotency_key: IdempotencyKey(format!("aether.bloomery.aggregate_review:{}", record.nonce.0)),
+        fact: Fact::AggregateReviewCompleted { bloom: record.bloom, passed, evidence, implicated },
+    };
+    Ok((event, decomposition))
+}
+
 pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -> Result<AdmitDecision, IntakeError> {
     let Some(stored) = store.lookup_order(&upload.nonce.0)? else {
         // Fabricated, or the order was already consumed (a replay).
@@ -328,24 +359,20 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             },
         }
     } else if record.stage == StageId::AggregateReview {
-        // The whole-bloom aggregate verdict (ADR-0153) — a bloom-level order, no
-        // member axis. A failing verdict's findings decompose against the ids
-        // the critic's own prompt showed (the persisted work-order roster); a
-        // *complete* attribution narrows the implication to the owning members,
-        // anything less leaves it empty and the reducer expands the empty
-        // implication to every member (fail-closed over-routing).
-        let passed = verdict_passed(upload.verdict);
-        let decomposition = aggregate_decomposition(store, &record, upload, passed)?;
-        let implicated = match &decomposition {
-            Some(decomposition) if decomposition.is_complete() => {
-                decomposition.owners().into_iter().map(WorkpieceId).collect()
-            }
-            _ => Vec::new(),
-        };
+        let (event, decomposition) = aggregate_review_event(store, &record, upload, evidence)?;
         aggregate_findings = decomposition;
+        event
+    } else if record.stage == StageId::AggregateVerify {
+        // The whole-bloom mechanical verdict — a bloom-level order, no member
+        // axis and no implication: a compiler names no owners, so the reducer
+        // re-opens every member on a failure.
         Event {
-            idempotency_key: IdempotencyKey(format!("aether.bloomery.aggregate_review:{}", record.nonce.0)),
-            fact: Fact::AggregateReviewCompleted { bloom: record.bloom, passed, evidence, implicated },
+            idempotency_key: IdempotencyKey(format!("aether.bloomery.aggregate_verify:{}", record.nonce.0)),
+            fact: Fact::AggregateVerifyCompleted {
+                bloom: record.bloom,
+                passed: verdict_passed(upload.verdict),
+                evidence,
+            },
         }
     } else {
         // An out-of-line stage never comes from a well-formed dispatch; refuse it

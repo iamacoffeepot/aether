@@ -87,31 +87,34 @@ pub(super) fn reduce_resolve(
             workpiece: member.workpiece.clone(),
         }));
     }
-    // The claim set checked out, so the fold's head is judged before the bloom
+    // The claim set checked out, so the fold's head is gated before the bloom
     // may resolve (ADR-0153): hold the fold on the record and dispatch the
-    // whole-bloom aggregate review against it — the claim scan above stays the
-    // integrity gate, the review is the judgment gate. The
-    // ceiling is AggregateReview's catalog retry budget over the record's
+    // whole-bloom aggregate *verify* against it — the claim scan above stays
+    // the integrity gate, the compiler is the mechanical gate, and the critic
+    // the judgment gate that a passing verify hands off to. Verify runs first
+    // because it is the cheaper and more decisive of the two, and there is
+    // nothing for a critic to judge in a fold that does not build. The ceiling
+    // is AggregateVerify's catalog retry budget over the record's
     // consumed-verdict count; a fold arriving past it is refused fail-closed
     // (unreachable through this reducer — a wedged bloom's members stay
     // closed, so no re-fold dispatches — but a buggy reactor must not buy a
     // roll the vocabulary forbids).
-    let roll = record.aggregate_rolls + 1;
-    if roll > record.stage_catalog.retry_budget_of(StageId::AggregateReview).unwrap_or(1) {
+    let roll = record.aggregate_verify_rolls + 1;
+    if roll > record.stage_catalog.retry_budget_of(StageId::AggregateVerify).unwrap_or(1) {
         return Decisions::rejected(Outcome::ResolveRejected(ResolveError::ReviewCeiling {
-            rolls: record.aggregate_rolls,
+            rolls: record.aggregate_verify_rolls,
         }));
     }
     let integration = FoldedIntegration { tree: *tree, head: *head, lineage: lineage.to_vec() };
     Decisions {
-        outcome: Outcome::AggregateReviewDispatched { bloom: *bloom, roll },
+        outcome: Outcome::AggregateVerifyDispatched { bloom: *bloom, roll },
         effects: alloc::vec![
             Decision::RecordIntegration { bloom: *bloom, integration: Some(integration) },
-            Decision::DispatchAggregateReview {
+            Decision::DispatchAggregateVerify {
                 bloom: *bloom,
-                transformation: Transformation::for_aggregate_review(*tree, *head),
+                transformation: Transformation::for_aggregate_verify(*tree, *head),
                 roll,
-                profile: stage_profile(&record.stage_catalog, StageId::AggregateReview),
+                profile: stage_profile(&record.stage_catalog, StageId::AggregateVerify),
             },
         ],
     }

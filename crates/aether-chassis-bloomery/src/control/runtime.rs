@@ -28,11 +28,12 @@ pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx}
 pub use aether_substrate::chassis::error::BootError;
 
 use aether_bloomery::control::{
-    Admit, AdmitResult, AggregateReviewPayload, ClaimResult, ClaimSeal, Commit, CommitResult, DispatchPayload,
-    EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload, LandPayload, LoadConfigs, LoadConfigsResult,
-    MembershipMutation, ObserveMainline, ObserveMainlineResult, OutboxPayload, Query, QueryResult, ReconcileOp,
-    RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, Topic, TransferSeal, held_to_seal_error,
-    held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
+    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, ClaimResult, ClaimSeal, Commit, CommitResult,
+    DispatchPayload, EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload, LandPayload, LoadConfigs,
+    LoadConfigsResult, MembershipMutation, ObserveMainline, ObserveMainlineResult, OutboxPayload, Query, QueryResult,
+    ReconcileOp, RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, Topic, TransferSeal,
+    held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail, seal_claim_mail,
+    transfer_seal_mail,
 };
 use aether_bloomery::{
     BloomId, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event, Fact, IdempotencyKey, Outcome,
@@ -743,6 +744,14 @@ fn project(
                 };
                 outbox.push(OutboxPayload::new(Topic::AggregateReview, to_vec(&payload)?));
             }
+            Decision::DispatchAggregateVerify { bloom, transformation, profile, roll: _ } => {
+                let payload = AggregateVerifyPayload {
+                    profile: profile.clone(),
+                    bloom: bloom.0,
+                    transformation: transformation.clone(),
+                };
+                outbox.push(OutboxPayload::new(Topic::AggregateVerify, to_vec(&payload)?));
+            }
             Decision::InheritClaim { .. }
             | Decision::RecordResolution { .. }
             | Decision::RecordEvidence { .. }
@@ -752,6 +761,7 @@ fn project(
             | Decision::SetResolved { .. }
             | Decision::RecordIntegration { .. }
             | Decision::RecordAggregateRoll { .. }
+            | Decision::RecordAggregateVerifyRoll { .. }
             | Decision::RecordReviewPark { .. }
             | Decision::RecordWedge { .. }
             | Decision::RevokeResolution { .. }

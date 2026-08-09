@@ -16,10 +16,11 @@ mod common;
 use aether_bloomery::ConfigKind;
 use aether_bloomery::Decisions;
 use aether_bloomery::{
-    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, Artifact, AttemptCompletedError, BloomStatus,
-    CandidateRef, CatalogError, Decision, Digest, Evidence, EvidenceKind, Fact, KeyId, LandError, Observation,
-    ObserveMainlineError, Outcome, Provenance, Question, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope,
-    Snapshot, StageCatalog, StageId, StageProgress, Statement, SupersedeError, Unproducible, reduce,
+    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, Artifact, AttemptCompletedError,
+    BloomId, BloomStatus, CandidateRef, CatalogError, Decision, Digest, Event, Evidence, EvidenceKind, Fact, KeyId,
+    LandError, Observation, ObserveMainlineError, Outcome, Provenance, Question, ResolveError, ResolvedConfigs,
+    SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId, StageProgress, Statement, SupersedeError,
+    Unproducible, reduce,
 };
 use aether_data::Kind;
 use aether_data::wire::to_vec;
@@ -678,6 +679,93 @@ fn re_integration_overwrites_the_stale_claim() {
     }
 }
 
+/// The passing aggregate-verify verdict a held fold takes before its critic
+/// dispatches (#4696) — the mechanical gate now sits between the fold and the
+/// review, so a test that drives the review path threads this hop first.
+fn verify_passed(bloom: BloomId, key: &str, tree: u8) -> Event {
+    event(
+        key,
+        Fact::AggregateVerifyCompleted {
+            bloom,
+            passed: true,
+            evidence: Evidence { subject: digest(tree), kind: EvidenceKind::VerificationResult, detail: digest(51) },
+        },
+    )
+}
+
+// #4696 — a fold that does not build re-opens every member, not just an
+// implicated one: each member's own Verify passed on its own candidate, so a
+// failure that appears only in the fold belongs to the combination, and a
+// compiler names no owners to narrow it to. The stale fold clears so the
+// re-integration produces a fresh one, and the stage's own budget bounds the
+// retries — the second failure parks the bloom rather than re-folding a
+// combination that has not built yet.
+//
+// Tripwire for the over-routing above all: narrowing this to a subset would
+// strand a fold whose failure belongs to a member the narrowing left closed.
+#[test]
+fn a_failing_aggregate_verify_reopens_every_member_then_parks_at_the_ceiling() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: claim("alpha", 10, 100) }));
+    let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+
+    let failed = |key: &str, subject: u8| {
+        event(
+            key,
+            Fact::AggregateVerifyCompleted {
+                bloom,
+                passed: false,
+                evidence: Evidence {
+                    subject: digest(subject),
+                    kind: EvidenceKind::VerificationResult,
+                    detail: digest(52),
+                },
+            },
+        )
+    };
+
+    // A verdict bound to a tree other than the held fold's is stale — refused,
+    // so a superseded fold's failure cannot re-open members under a newer one.
+    assert!(matches!(
+        reduce(&snapshot, &failed("stale", 99), &ResolvedConfigs::default()).outcome,
+        Outcome::AggregateVerifyRejected(AggregateVerifyError::SubjectMismatch { .. }),
+    ));
+
+    let (after1, d1) = step(&snapshot, &failed("fail-1", 40));
+    assert!(matches!(&d1.outcome, Outcome::AggregateVerifyReentered { members, rolls: 1, .. }
+        if *members == vec![workpiece("alpha"), workpiece("beta")]));
+    let record = after1.blooms.get(&bloom).unwrap();
+    assert!(record.claims.is_empty(), "every member's claim is revoked, not just one");
+    assert!(record.integration.is_none(), "the stale fold is cleared");
+    assert_eq!(record.aggregate_verify_rolls, 1);
+    assert_eq!(record.aggregate_rolls, 0, "a spent verify roll does not spend the critic's budget");
+    for member in ["alpha", "beta"] {
+        assert_eq!(record.progress.get(&workpiece(member)).unwrap().stage, StageId::Refine);
+    }
+
+    // Both members repair and re-integrate; the re-fold re-dispatches the verify.
+    let (after2, _) = step(&after1, &event("i-a2", Fact::Integrate { bloom, claim: claim("alpha", 10, 102) }));
+    let (after3, _) = step(&after2, &event("i-b2", Fact::Integrate { bloom, claim: claim("beta", 11, 103) }));
+    let (after4, d2) =
+        step(&after3, &event("r2", Fact::Resolve { bloom, tree: digest(44), head: digest(45), lineage: vec![] }));
+    assert!(matches!(d2.outcome, Outcome::AggregateVerifyDispatched { roll: 2, .. }));
+
+    // The second failure spends the budget: the bloom parks, re-opens nothing,
+    // and dispatches nothing further.
+    let (after5, d3) = step(&after4, &failed("fail-2", 44));
+    assert!(matches!(d3.outcome, Outcome::AggregateVerifyParked { rolls: 2, question, .. } if question == digest(52)));
+    assert!(
+        !d3.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. } | Decision::RevokeResolution { .. })),
+        "a parked bloom re-opens nothing and dispatches nothing",
+    );
+    assert_eq!(after5.blooms.get(&bloom).unwrap().review_park, Some(digest(52)));
+}
+
 // ADR-0153 — a failing aggregate review freezes into member routing: every
 // implicated member's claim is revoked and its cursor re-enters the
 // repair-only Refine (the bloom cannot resolve while any member is re-open),
@@ -694,6 +782,7 @@ fn a_failing_aggregate_review_reopens_members_then_parks_at_the_ceiling() {
     let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
     let (snapshot, _) =
         step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
 
     let verdict = |key: &str, passed: bool, subject: u8, implicated: Vec<&str>| {
         event(
@@ -757,9 +846,14 @@ fn a_failing_aggregate_review_reopens_members_then_parks_at_the_ceiling() {
     // The repaired member re-integrates; the re-fold dispatches the
     // delta-confirm (roll 2).
     let (after2, _) = step(&after1, &event("i-a2", Fact::Integrate { bloom, claim: claim("alpha", 10, 102) }));
-    let (after3, d2) =
+    let (after3, _) =
         step(&after2, &event("r2", Fact::Resolve { bloom, tree: digest(44), head: digest(45), lineage: vec![] }));
-    assert!(matches!(d2.outcome, Outcome::AggregateReviewDispatched { roll: 2, .. }));
+    let (after3, d2) = step(&after3, &verify_passed(bloom, "v2", 44));
+    assert!(matches!(d2.outcome, Outcome::AggregateVerifyPassed { .. }));
+    assert!(
+        d2.effects.iter().any(|e| matches!(e, Decision::DispatchAggregateReview { roll: 2, .. })),
+        "the passing re-verify dispatches the delta-confirm",
+    );
 
     // The failing delta-confirm hits the ceiling: the bloom parks to the owner
     // (ADR-0151's hold vocabulary at bloom scope) — no member re-opens,
@@ -1060,7 +1154,7 @@ fn an_adopted_answer_releases_the_hold_and_redispatches() {
         &ResolvedConfigs::default(),
     );
     assert!(
-        matches!(resolved.outcome, Outcome::AggregateReviewDispatched { .. }),
+        matches!(resolved.outcome, Outcome::AggregateVerifyDispatched { .. }),
         "resolve proceeds once the hold clears",
     );
 }
@@ -1131,16 +1225,23 @@ fn landing_releases_memberships() {
     assert!(!after.active.contains_key(&workpiece("wp")), "landing frees the workpiece");
 }
 
-// ADR-0153 — the fold is judged before the bloom resolves, and resolution is
-// land-readiness: a verified `Fact::Resolve` holds the fold and dispatches the
-// whole-bloom aggregate review (the review-lane transformation binding the
-// integrated tree, checking out the integrated head), and only the passing
-// verdict emits SetResolved plus the DispatchLand naming the sealed base and
-// the resolved integrated *head* commit (distinct from the artifact tree,
-// #3615). Tripwire: a resolve that lands without the review pass, a review
-// dispatch mis-binding tree/head, or the land regressing to the artifact tree.
+// ADR-0153 + #4696 — the fold passes two gates before the bloom resolves, in
+// order, and resolution is land-readiness. A verified `Fact::Resolve` holds the
+// fold and dispatches the whole-bloom aggregate *verify* — the compiler, not the
+// critic; only its passing verdict dispatches the aggregate review, and only the
+// review's passing verdict emits SetResolved plus the DispatchLand naming the
+// sealed base and the resolved integrated *head* commit (distinct from the
+// artifact tree, #3615). Both lane transformations bind the integrated tree and
+// check out the integrated head.
+//
+// Tripwire for the ordering above all: a fold reaching the model critic before
+// the compiler has passed is the failure this whole change exists to prevent —
+// it spends a model lane on a tree that may not build, and lets a broken fold
+// reach the landing CI, where #4689 says there is no route back. Also catches a
+// resolve that lands without either pass, a dispatch mis-binding tree/head, and
+// the land regressing to the artifact tree.
 #[test]
-fn resolve_dispatches_the_aggregate_review_and_the_passing_verdict_lands() {
+fn the_fold_passes_verify_then_review_before_the_bloom_resolves() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let mut snapshot = Snapshot::new(digest(1));
@@ -1152,21 +1253,41 @@ fn resolve_dispatches_the_aggregate_review_and_the_passing_verdict_lands() {
     let tree = digest(40);
     let head = digest(41);
     let (after, dispatched) = step(&snapshot, &event("resolve", Fact::Resolve { bloom, tree, head, lineage: vec![] }));
-    assert!(matches!(dispatched.outcome, Outcome::AggregateReviewDispatched { roll: 1, .. }));
+    assert!(matches!(dispatched.outcome, Outcome::AggregateVerifyDispatched { roll: 1, .. }));
     assert!(
         !dispatched.effects.iter().any(|effect| matches!(effect, Decision::DispatchLand { .. })),
-        "no land dispatches before the review verdict",
+        "no land dispatches before either verdict",
     );
-    match dispatched.effects.iter().find(|e| matches!(e, Decision::DispatchAggregateReview { .. })) {
+    assert!(
+        !dispatched.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
+        "the fold reaches the compiler before the critic, never the other way round",
+    );
+    match dispatched.effects.iter().find(|e| matches!(e, Decision::DispatchAggregateVerify { .. })) {
+        Some(Decision::DispatchAggregateVerify { transformation, roll, .. }) => {
+            assert_eq!(transformation.inputs[0], tree, "the verify evidence binds the integrated tree");
+            assert_eq!(transformation.checkout, head, "the compiler builds the integrated head");
+            assert_eq!(*roll, 1);
+        }
+        other => panic!("expected a DispatchAggregateVerify, got {other:?}"),
+    }
+    let folded = after.blooms.get(&bloom).unwrap().integration.as_ref().expect("the fold is held on the record");
+    assert_eq!((folded.tree, folded.head), (tree, head));
+
+    // The passing verify hands the same fold to the critic, still holding it.
+    let (after, verified) = step(&after, &verify_passed(bloom, "verify", 40));
+    assert!(matches!(verified.outcome, Outcome::AggregateVerifyPassed { rolls: 1, .. }));
+    match verified.effects.iter().find(|e| matches!(e, Decision::DispatchAggregateReview { .. })) {
         Some(Decision::DispatchAggregateReview { transformation, roll, .. }) => {
-            assert_eq!(transformation.inputs[0], tree, "the review evidence binds the integrated tree");
+            assert_eq!(transformation.inputs[0], tree, "the review judges the tree the verify built");
             assert_eq!(transformation.checkout, head, "the critic checks out the integrated head");
             assert_eq!(*roll, 1);
         }
         other => panic!("expected a DispatchAggregateReview, got {other:?}"),
     }
-    let folded = after.blooms.get(&bloom).unwrap().integration.as_ref().expect("the fold is held on the record");
-    assert_eq!((folded.tree, folded.head), (tree, head));
+    assert!(
+        !verified.effects.iter().any(|effect| matches!(effect, Decision::DispatchLand { .. })),
+        "a passing verify is not land-readiness; the critic has not judged it yet",
+    );
 
     let verdict = event(
         "verdict",

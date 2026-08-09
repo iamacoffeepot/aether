@@ -35,6 +35,12 @@ pub const CONSTRUCT_IMPLEMENT_COMMAND: &str = "construct.implement";
 /// [`CONSTRUCT_IMPLEMENT_COMMAND`] (#3668).
 pub const REVIEW_CRITIC_COMMAND: &str = "review.critic";
 
+/// The mechanical verify lane's typed command — the fan-out that runs fmt,
+/// clippy and docs in CI-parity order. Named once because two stages dispatch
+/// it: the member `Verify` over one candidate, and `AggregateVerify` over the
+/// fold (ADR-0149 §The line).
+pub const VERIFY_CHECK_COMMAND: &str = "verify.check";
+
 /// Whether a typed command names a **model lane** — a lane whose worker runs a
 /// model and therefore needs a credential, a resolved model, and a reasoning
 /// effort, as opposed to the mechanical lanes that run a compiler and nothing
@@ -542,7 +548,7 @@ impl Transformation {
             // (Construct / Refine, and the non-member stages that fall through to
             // the construct lane here) reaches the model API under restricted
             // egress. Review is its own model lane.
-            StageId::Verify => ("verify.check", "iama/verify:1", NetworkProfile::None),
+            StageId::Verify => (VERIFY_CHECK_COMMAND, "iama/verify:1", NetworkProfile::None),
             StageId::Review => (REVIEW_CRITIC_COMMAND, "iama/review-claude:1", NetworkProfile::Restricted),
             StageId::Scope => unreachable!(
                 "Scope is a pre-seal operator-harness process staged via the REST control API, never a dispatched member transformation"
@@ -576,6 +582,32 @@ impl Transformation {
         }
     }
 
+    /// The whole-bloom aggregate-verify transformation: the same mechanical
+    /// `verify.check` fan-out the member `Verify` runs, dispatched once per
+    /// bloom against the folded head.
+    ///
+    /// A member's verdict only ever judged its own candidate in isolation; the
+    /// fold is the first tree that carries every member at once, so it is the
+    /// first thing that can fail on their interaction. Running the compiler
+    /// here is what stops that failure from being discovered by the landing
+    /// CI, downstream of the point where the bloom can still route it back to
+    /// an owner. Zero-egress like the member lane — it runs a compiler and
+    /// nothing else.
+    #[must_use]
+    pub fn for_aggregate_verify(subject: Digest, checkout: Digest) -> Self {
+        Self {
+            command: String::from(VERIFY_CHECK_COMMAND),
+            inputs: alloc::vec![subject],
+            checkout,
+            outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
+            image: String::from("iama/verify:1"),
+            limits: Budget::default(),
+            network: NetworkProfile::None,
+            description: None,
+            model: None,
+        }
+    }
+
     /// The whole-bloom aggregate-review transformation (ADR-0153): the
     /// `review.critic` lane dispatched once per bloom against the integrated
     /// head — `subject` is the integrated tree digest the returned evidence
@@ -583,6 +615,11 @@ impl Transformation {
     /// same lane shape as the member `Review` egress it replaces (restricted
     /// egress to the model API); the sealed intent the critic judges against
     /// rides the advisory description the host threads on at dispatch.
+    ///
+    /// Dispatched only once [`for_aggregate_verify`](Self::for_aggregate_verify)
+    /// has passed over the same fold: the compiler is the cheaper and more
+    /// decisive gate, and there is nothing to judge in a fold that does not
+    /// build.
     #[must_use]
     pub fn for_aggregate_review(subject: Digest, checkout: Digest) -> Self {
         Self {

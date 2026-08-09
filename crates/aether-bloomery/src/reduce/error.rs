@@ -28,6 +28,29 @@ pub enum AggregateReviewError {
     /// A failing verdict implicated a workpiece that is not a member.
     NotAMember(WorkpieceId),
 }
+
+/// Why an aggregate-verify completion was refused.
+///
+/// The same three refusals the review gate makes about the same held fold,
+/// minus an implication check: a compile failure over the fold is a property of
+/// the combination, not attributable to one member, so a failing verify carries
+/// no implication to validate and re-opens every member.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum AggregateVerifyError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The bloom holds no folded integration — nothing was dispatched against,
+    /// or a failing verdict already cleared the stale fold.
+    NoPendingIntegration,
+    /// The verdict's evidence binds a tree other than the held fold's — a
+    /// stale verdict from a superseded fold, never acted on.
+    SubjectMismatch {
+        /// The held fold's integrated tree.
+        expected: Digest,
+        /// The tree the verdict's evidence binds.
+        got: Digest,
+    },
+}
 /// One member already claimed by a foreign active bloom — the conflict that
 /// aborts an all-or-nothing seal or supersession.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]

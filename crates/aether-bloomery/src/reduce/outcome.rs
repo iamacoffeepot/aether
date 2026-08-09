@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AttemptCompletedError, Decision, IntegrateError,
-    LandError, ObserveMainlineError, ResolveError, SealError, SupersedeError,
+    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError, Decision,
+    IntegrateError, LandError, ObserveMainlineError, ResolveError, SealError, SupersedeError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -187,4 +187,44 @@ pub enum Outcome {
     MainlineUnchanged(Digest),
     /// A mainline observation was refused.
     ObserveMainlineRejected(ObserveMainlineError),
+    /// A complete claim set folded and dispatched the whole-bloom aggregate
+    /// verify — the mechanical gate over the fold, ahead of the critic.
+    AggregateVerifyDispatched {
+        /// The bloom under verification.
+        bloom: BloomId,
+        /// Which verify pass was dispatched.
+        roll: u32,
+    },
+    /// A passing aggregate verify handed the same fold to the aggregate review:
+    /// the fold builds, so it is now worth judging.
+    AggregateVerifyPassed {
+        /// The verified bloom.
+        bloom: BloomId,
+        /// The verify verdicts consumed, this one included.
+        rolls: u32,
+    },
+    /// A failing aggregate verify re-opened every member into Refine: the fold
+    /// does not build, and the failure belongs to the combination rather than
+    /// to any one member that passed on its own.
+    AggregateVerifyReentered {
+        /// The verified bloom.
+        bloom: BloomId,
+        /// The re-opened members, in sealed membership order.
+        members: Vec<WorkpieceId>,
+        /// The verify verdicts consumed, this one included.
+        rolls: u32,
+    },
+    /// A failing aggregate verify spent the stage's budget: the bloom parks to
+    /// the owner rather than re-folding a combination that has not built yet.
+    AggregateVerifyParked {
+        /// The parked bloom.
+        bloom: BloomId,
+        /// The verdicts consumed, this one included.
+        rolls: u32,
+        /// The parked question's digest — the failing verify's record
+        /// artifact, held open until an adopting answer names it.
+        question: Digest,
+    },
+    /// An aggregate-verify completion was refused.
+    AggregateVerifyRejected(AggregateVerifyError),
 }
