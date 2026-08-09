@@ -1,6 +1,8 @@
 //! The Muse harness arm: fork `muse exec` headless and derive the shared
 //! result-record envelope from its JSONL transcript.
 
+mod usage;
+
 use std::process::{Command, Stdio};
 
 use anyhow::Result;
@@ -56,9 +58,11 @@ fn muse_argv(prompt_file: &str, model: Option<&str>, effort: Option<&str>) -> Ve
 /// ```
 ///
 /// `None` for a transcript with no terminal record — the caller renders that as
-/// the fail-closed `no_result` row. Muse reports no token counts (not in
-/// `--json`, not in `muse trace`; they are only on the provider's billing side),
-/// so the usage is always `None`.
+/// the fail-closed `no_result` row.
+///
+/// The terminal carries no `usage`: Muse keeps its token counts out of `--json`
+/// entirely and writes them to its session log instead, so `run` fills them in
+/// from there (`usage`) rather than from the transcript.
 pub(super) fn derive_terminal(transcript: &str) -> Option<Terminal> {
     let mut terminal = None;
     for line in transcript.lines() {
@@ -84,6 +88,10 @@ pub(super) fn derive_terminal(transcript: &str) -> Option<Terminal> {
 }
 
 /// Run a model lane under Muse and return the shared result record.
+///
+/// The token counts are joined on afterwards from the session log, keyed by the
+/// id the transcript carries. A run whose log cannot be read still records its
+/// attempt, with the columns null rather than zero.
 pub(super) fn run(prompt: &str, args: &TransformArgs) -> Result<serde_json::Value> {
     let prompt_file = write_prompt(&args.out, prompt)?;
     let mut command = Command::new(MUSE);
@@ -92,7 +100,12 @@ pub(super) fn run(prompt: &str, args: &TransformArgs) -> Result<serde_json::Valu
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    Ok(record(derive_terminal(&capture(command, &args.out, MUSE)?)))
+
+    let transcript = capture(command, &args.out, MUSE)?;
+    Ok(record(derive_terminal(&transcript).map(|terminal| Terminal {
+        usage: usage::session_id(&transcript).and_then(|session| usage::from_session_log(&session)),
+        ..terminal
+    })))
 }
 
 #[cfg(test)]
@@ -142,7 +155,6 @@ mod tests {
         let terminal = derive_terminal(completed).expect("a terminal record is present");
         assert!(!terminal.is_error);
         assert_eq!(terminal.text, "VERDICT: pass");
-        assert!(terminal.usage.is_none(), "muse reports no token counts anywhere");
 
         // Any terminal that is not `completed` is an error — the ~8% server-side
         // flake exits fast and clean having changed nothing, and must not read
