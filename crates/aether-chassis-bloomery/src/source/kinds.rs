@@ -219,6 +219,12 @@ pub enum PollLandResult {
     },
     /// Terminated without landing — the proposal was declined.
     Declined,
+    /// The proposal's own checks failed, so it cannot merge (#4689). Appended
+    /// so the prior variants' wire discriminants are unchanged.
+    ChecksFailed {
+        /// The failing check names, in listing order.
+        failing: Vec<String>,
+    },
     /// The poll failed.
     Err {
         /// A human-readable failure reason.

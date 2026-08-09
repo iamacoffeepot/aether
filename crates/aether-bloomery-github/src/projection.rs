@@ -204,6 +204,23 @@ fn render_bloom_body(bloom: &BloomView) -> String {
         let _ = writeln!(body, "- **Wedged members: {wedged}** — this bloom cannot resolve without a supersession.");
     }
 
+    // A refused landing is the one blocked state that is invisible from member
+    // rows alone: every member reads integrated while the bloom sits on a gate
+    // it cannot pass.
+    if let Some(landing) = &bloom.landing_blocked {
+        let _ = writeln!(
+            body,
+            "- **Landing CI refused this bloom** ({} of {} attempts spent){}",
+            landing.rolls,
+            landing.budget,
+            if landing.rolls >= landing.budget {
+                " — parked for the owner; the machine will not re-propose it."
+            } else {
+                " — its members re-opened for repair against current mainline."
+            },
+        );
+    }
+
     let _ = writeln!(body, "- Members: {}", bloom.members.len());
     for member in &bloom.members {
         let resolved = match (&member.resolution, &member.wedge) {

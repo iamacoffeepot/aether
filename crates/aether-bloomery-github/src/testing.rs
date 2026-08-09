@@ -26,9 +26,9 @@ use aether_bloomery::{BloomId, Digest};
 use sha2::{Digest as _, Sha256};
 
 use crate::client::{
-    ActionsApi, Artifact, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, Issue, MergeResult,
-    NewComment, NewIssue, NewPullRequest, PullRequest, PullRequestApi, PullRequestState, RunConclusion, RunStatus,
-    WorkflowRun, strip_heads,
+    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, Issue,
+    MergeResult, NewComment, NewIssue, NewPullRequest, PullRequest, PullRequestApi, PullRequestState, RunConclusion,
+    RunStatus, WorkflowRun, strip_heads,
 };
 use crate::correspondence::{Correspondence, CorrespondenceError, GitObjectId};
 use crate::executor::INPUT_NONCE;
@@ -122,6 +122,10 @@ struct State {
     next_run: u64,
     dispatches: Vec<StoredDispatch>,
     runs: Vec<StoredRun>,
+    // The checks a landing watch reads, keyed by head sha. Unseeded means no
+    // check reported, which the fold reads as `Absent` — the same thing the
+    // real listing returns for a commit no workflow has picked up yet.
+    checks: HashMap<String, ChecksState>,
     // The pull-request surface the land path drives: opened proposals, keyed
     // for lookup by head branch the way the real list endpoint filters.
     next_pull_request: u64,
@@ -240,6 +244,19 @@ impl FakeGithub {
     /// Seed a ref (`heads/…` form) pointing at `sha`.
     pub fn seed_ref(&self, name: &str, sha: &str) {
         self.lock().refs.insert(name.to_owned(), sha.to_owned());
+    }
+
+    /// The head sha of pull request `number` — what a landing watch reads its
+    /// checks against.
+    #[must_use]
+    pub fn pull_request_head_sha(&self, number: u64) -> Option<String> {
+        self.lock().pull_requests.iter().find(|pull| pull.number == number).map(|pull| pull.head_sha.clone())
+    }
+
+    /// Seed how the checks on commit `sha` stand — what a landing watch reads
+    /// to tell a proposal that is still running from one that cannot merge.
+    pub fn seed_checks(&self, sha: &str, checks: ChecksState) {
+        self.lock().checks.insert(sha.to_owned(), checks);
     }
 
     /// Whether ref `name` (`heads/…` form) currently exists.
@@ -715,6 +732,10 @@ impl PullRequestApi for FakeGithub {
         // a land watch observe the landing instead of proposing again.
         let state = self.lock();
         Ok(state.pull_requests.iter().rev().find(|pull| pull.head == head).map(StoredPullRequest::project))
+    }
+
+    fn checks_for_ref(&self, sha: &str) -> Result<ChecksState, GithubError> {
+        Ok(self.lock().checks.get(sha).cloned().unwrap_or(ChecksState::Absent))
     }
 }
 

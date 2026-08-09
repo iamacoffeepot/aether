@@ -123,6 +123,20 @@ pub enum LandProposal {
     /// cause is an operator decision rather than a moved base, and an operator
     /// reading the log needs to tell those apart.
     Declined,
+    /// The proposal's own checks failed, so it cannot merge and will not
+    /// without a repair.
+    ///
+    /// Distinct from [`Open`](Self::Open), which is what this used to read as:
+    /// a watch cannot tell "still running" from "already failed" without asking,
+    /// and reading a red gate as open is what leaves a bloom polling a proposal
+    /// nothing will ever accept. Distinct from [`Declined`](Self::Declined) too
+    /// — that is an operator's decision and terminal, whereas this is a
+    /// mechanical verdict the bloom may still be able to answer.
+    ChecksFailed {
+        /// The failing check names, in listing order — the findings the repair
+        /// dispatch is directed by.
+        failing: Vec<String>,
+    },
 }
 
 /// Which claim ref a [`ClaimOutcome::Held`] conflict is on (ADR-0150 §The claim

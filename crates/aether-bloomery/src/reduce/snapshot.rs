@@ -127,6 +127,23 @@ pub struct BloomRecord {
     /// fold that burned the compiler's rolls has not touched the critic's, and
     /// one shared counter would let either gate spend the other's.
     pub aggregate_verify_rolls: u32,
+    /// How many landing attempts this bloom has consumed (#4689), against the
+    /// `Land` binding's catalog retry budget.
+    ///
+    /// `0` until a landing is refused. Each rejection spends one; below the
+    /// budget the bloom un-resolves and its members repair, at the budget it
+    /// parks to the owner. This is what keeps a persistently red landing branch
+    /// from becoming an unbounded dispatch loop.
+    pub landing_rolls: u32,
+    /// The head the bloom is landing, held while it is `Resolved` (#4689).
+    ///
+    /// A landing rejection has to bind the head it judged, and the fold that
+    /// produced it is cleared on resolve — so without this the reducer would
+    /// have nothing to check a rejection's subject against, and a stale
+    /// rejection from a superseded landing could re-open members under a newer
+    /// one. Set by [`Decision::SetResolved`], cleared when the bloom leaves the
+    /// resolved state.
+    pub resolved_head: Option<Digest>,
     /// The bloom-scope park (ADR-0153): the pending-decision question raised
     /// when the delta-confirm still failed at the two-pass ceiling — the
     /// failing review's record artifact digest, held in
@@ -327,10 +344,8 @@ impl Snapshot {
                     record.superseded_by = Some(*by);
                 }
             }
-            Decision::SetResolved { bloom, .. } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.status = BloomStatus::Resolved;
-                }
+            Decision::SetResolved { .. } | Decision::SetUnresolved { .. } | Decision::RecordLandingRoll { .. } => {
+                self.apply_landing_effect(effect);
             }
             Decision::AdvanceMainline { to, .. } => {
                 self.mainline = *to;
@@ -340,6 +355,37 @@ impl Snapshot {
                     record.status = BloomStatus::Landed;
                 }
             }
+        }
+    }
+
+    /// Fold the three decisions that move a bloom across the land boundary
+    /// (#4689) — resolving onto a head, returning off one when its landing was
+    /// refused, and the attempt counter that bounds the round trip.
+    ///
+    /// Split out of [`apply_effect`](Self::apply_effect) because they are the
+    /// only arms that read as a group: the same field pair moves in all three,
+    /// and the resolve/un-resolve symmetry is only visible when they sit
+    /// together. Any other decision is a no-op here.
+    fn apply_landing_effect(&mut self, effect: &Decision) {
+        match effect {
+            Decision::SetResolved { bloom, resolved } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.status = BloomStatus::Resolved;
+                    record.resolved_head = Some(resolved.head);
+                }
+            }
+            Decision::SetUnresolved { bloom } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.status = BloomStatus::Sealed;
+                    record.resolved_head = None;
+                }
+            }
+            Decision::RecordLandingRoll { bloom, rolls } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.landing_rolls = *rolls;
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -368,6 +414,8 @@ impl BloomRecord {
             integration: None,
             aggregate_rolls: 0,
             aggregate_verify_rolls: 0,
+            landing_rolls: 0,
+            resolved_head: None,
             review_park: None,
             superseded_by: None,
         }

@@ -330,4 +330,24 @@ pub enum Decision {
         /// The verdicts consumed so far, this one included.
         rolls: u32,
     },
+    /// Record the bloom's consumed landing-attempt count (#4689) — the cursor
+    /// bounding how many times a red landing CI may re-open the line.
+    RecordLandingRoll {
+        /// The landing bloom.
+        bloom: BloomId,
+        /// The landing attempts consumed so far, this one included.
+        rolls: u32,
+    },
+    /// Return a resolved bloom to `Sealed` after its landing was refused
+    /// (#4689) — the one transition that walks the lifecycle backwards.
+    ///
+    /// A resolved bloom is land-ready by definition, and a rejected landing is
+    /// exactly the statement that it is not. Leaving it `Resolved` while its
+    /// members repair would let the land reactor re-propose the head that just
+    /// failed. `Sealed` is still active-unlanded, so the one-bloom-per-mainline
+    /// guard is unaffected.
+    SetUnresolved {
+        /// The bloom returning to the working state.
+        bloom: BloomId,
+    },
 }

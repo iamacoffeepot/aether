@@ -354,12 +354,18 @@ impl StageCatalog {
                     "aggregate-review-approved",
                     2,
                 ),
+                // Two landing attempts, not one (#4689): the landing branch's
+                // CI is the only gate that judges the fold against current
+                // mainline, so its first red is often a conflict with work that
+                // merged while this bloom ran — answerable by re-opening the
+                // line once. A second red is not something re-proposing can
+                // fix, so the budget stops there and the bloom parks.
                 StageId::Land => (
                     &["bloom.aggregate_verify", "bloom.aggregate_review"],
                     &["bloom.receipt"],
                     "source.cas_land",
                     "landed",
-                    1,
+                    2,
                 ),
                 StageId::Study => (&["bloom.receipt"], &["bloom.study"], "retrospect", "study-recorded", 1),
             };
@@ -778,9 +784,14 @@ mod tests {
     // Repinned again for #4685: Refine recalibrates from medium to high effort,
     // joining Construct on the tier it repairs against. A recalibration is an
     // intended catalog edit — see `profile_of`.
+    // Repinned again for #4689: `Land`'s retry budget goes 1 → 2, buying a bloom
+    // one repair cycle when the landing branch's CI refuses it. That gate is the
+    // only one judging the fold against current mainline, so its first red is
+    // often a conflict with work that merged mid-bloom — answerable by
+    // re-opening the line once, and terminal on the second.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x9e, 0x4a, 0x07, 0x68, 0x6e, 0x88, 0xb2, 0x54, 0x5c, 0x1a, 0x7e, 0xfd, 0xb8, 0xaf, 0x1a, 0xca, 0x12, 0x15,
-        0xdf, 0xe6, 0xb2, 0xb1, 0xc5, 0x6d, 0x39, 0x41, 0x6a, 0x55, 0xe8, 0xd2, 0xce, 0xc1,
+        0x23, 0x50, 0x3b, 0x84, 0xae, 0x7d, 0xe1, 0x8b, 0x15, 0x1f, 0x76, 0x28, 0xa6, 0xa6, 0x09, 0xea, 0x85, 0xbd,
+        0x54, 0xc7, 0x18, 0xd4, 0xb2, 0x41, 0xcd, 0xa5, 0x97, 0xd3, 0xb7, 0xec, 0x0e, 0x18,
     ];
 
     // Tripwire: the compiled line passes the same validation an authored catalog
