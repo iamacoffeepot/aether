@@ -1029,6 +1029,7 @@ pub struct Artifact {
 /// bounding each occurrence is the delimiter-safe form. The one nonce-matching
 /// predicate both the run resolution (`find_run`) and the artifact filter
 /// (`stream_evidence`) share, so the two sides cannot drift (#3662).
+#[must_use]
 pub fn name_carries_nonce(name: &str, nonce: &str) -> bool {
     if nonce.is_empty() {
         return false;
@@ -1323,6 +1324,7 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
 /// prefix left on does not fail loudly, it addresses a branch that does not
 /// exist. A name carrying neither (a raw commit sha, which the merge endpoint
 /// also accepts as a head) passes through.
+#[must_use]
 pub fn strip_heads(name: &str) -> &str {
     name.strip_prefix("refs/heads/").or_else(|| name.strip_prefix("heads/")).unwrap_or(name)
 }
