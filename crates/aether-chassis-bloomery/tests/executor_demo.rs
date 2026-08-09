@@ -37,6 +37,7 @@ fn work_order(nonce: &str) -> WorkOrder {
             command: "construct.implement".to_owned(),
             inputs: Vec::new(),
             checkout: Digest::from_bytes([0xC0; 32]),
+            diff_base: None,
             outputs: vec!["patch".to_owned()],
             image: "iama/construct:1".to_owned(),
             limits: Budget::default(),

@@ -225,7 +225,7 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
     let payload = AggregateReviewPayload {
         profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: bloom.0,
-        transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
+        transformation: Transformation::for_aggregate_review(digest(30), digest(40), digest(50)),
         pass: ReviewPass::Full,
     };
     // A queued review belongs to a live bloom; the drain reads its membership to
@@ -273,7 +273,7 @@ fn the_second_aggregate_roll_frames_a_delta_confirm_against_the_frozen_findings(
     let payload = AggregateReviewPayload {
         profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: bloom.0,
-        transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
+        transformation: Transformation::for_aggregate_review(digest(30), digest(40), digest(50)),
         pass: ReviewPass::DeltaConfirm,
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
@@ -312,7 +312,7 @@ fn a_fresh_roll_one_aggregate_dispatch_clears_the_stale_frozen_row() {
     let payload = AggregateReviewPayload {
         profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: bloom.0,
-        transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
+        transformation: Transformation::for_aggregate_review(digest(30), digest(40), digest(50)),
         pass: ReviewPass::Full,
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
@@ -446,7 +446,7 @@ fn drain_dispatches_the_review_lane_under_its_own_calibrated_profile() {
     let payload = AggregateReviewPayload {
         profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: digest(1),
-        transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
+        transformation: Transformation::for_aggregate_review(digest(30), digest(40), digest(50)),
         pass: ReviewPass::Full,
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();

@@ -60,6 +60,7 @@ fn order(command: &str, nonce: &str) -> WorkOrder {
             command: command.to_owned(),
             inputs: vec![Digest::from_bytes([5; 32])],
             checkout: Digest::from_bytes([0xC0; 32]),
+            diff_base: None,
             outputs: Vec::new(),
             image: "iama/x:1".to_owned(),
             limits: Budget::default(),

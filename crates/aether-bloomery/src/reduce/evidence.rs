@@ -110,7 +110,11 @@ pub(super) fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: 
         if let Some(integration) = &record.integration {
             effects.push(Decision::DispatchAggregateReview {
                 bloom: *bloom,
-                transformation: Transformation::for_aggregate_review(integration.tree, integration.head),
+                transformation: Transformation::for_aggregate_review(
+                    integration.tree,
+                    integration.head,
+                    record.spec.base(),
+                ),
                 roll: 1,
                 profile: stage_profile(&record.stage_catalog, StageId::AggregateReview),
             });

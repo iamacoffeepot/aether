@@ -20,6 +20,11 @@ pub struct RunSpec<'a> {
     /// The order's checkout target rendered to hex — the exact git commit the
     /// worktree is materialized at (the sealed source, ADR-0149 §Execution).
     pub checkout_hex: &'a str,
+    /// The order's diff base rendered to hex (`--diff-base`, #4723) — the commit
+    /// the candidate is judged *against*, when the order names one. `None` is the
+    /// working-tree contract every member lane runs under; `Some` is the
+    /// committed range an aggregate review judges.
+    pub diff_base_hex: Option<&'a str>,
     /// Absolute path the scratch worktree is created at (keyed by nonce).
     pub worktree_dir: &'a Path,
     /// Absolute path the run writes its `evidence.json` to (`--out`).

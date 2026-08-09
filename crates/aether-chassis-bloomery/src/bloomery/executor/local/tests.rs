@@ -285,6 +285,7 @@ struct SeenSpec {
     harness: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    diff_base: Option<String>,
 }
 
 // A spawn seam that records the `RunSpec` it was handed, so a test can assert what
@@ -301,6 +302,7 @@ impl TransformRunner for CapturingRunner {
             harness: spec.harness.map(str::to_owned),
             model: spec.model.map(str::to_owned),
             effort: spec.effort.map(str::to_owned),
+            diff_base: spec.diff_base_hex.map(str::to_owned),
         };
         Ok(Box::new(RecordingProcess { lifecycle: RunLifecycle::Running }))
     }
@@ -383,6 +385,63 @@ fn submit_names_no_model_when_the_order_carries_no_profile() {
     assert_eq!(model, None, "no resolved profile means no model is named");
     assert_eq!(effort, None, "no resolved profile means no effort is named");
     assert_eq!(harness, None, "no resolved profile means no harness is named either");
+}
+
+// Tripwire: the aggregate review's candidate is committed — its worker checks out
+// the integration head and finds a clean tree — so the spawn must hand the lane
+// the range to judge. Without it the critic reads an empty working-tree diff,
+// which its own instructions make a mandatory finding, and no bloom can ever pass
+// its aggregate review (#4723). The member lane is asserted alongside it: naming a
+// range there would judge the sealed base's own history instead of the candidate.
+#[test]
+fn an_aggregate_review_spawn_names_the_range_a_member_spawn_does_not() {
+    let seen = Arc::new(Mutex::new(SeenSpec::default()));
+    let store = FakeGithub::new();
+    store.seed_git_object(&digest(0xC0));
+    store.seed_git_object(&digest(0xBA));
+    let store = Arc::new(store);
+    let base = TempDir::new().unwrap();
+    let exec =
+        LocalExecutor::new(Arc::new(CapturingRunner { seen: Arc::clone(&seen) }), Arc::clone(&store) as _, base.path());
+
+    let review = aether_bloomery::WorkOrder {
+        transformation: Transformation::for_aggregate_review(digest(5), digest(0xC0), digest(0xBA)),
+        nonce: Nonce(test_nonce("aggregate")),
+    };
+    exec.submit(&review).unwrap();
+
+    let sealed_base = store.resolve_git(&digest(0xBA)).unwrap().expect("the sealed base resolves").to_hex();
+    assert_eq!(
+        seen.lock().unwrap().diff_base.as_deref(),
+        Some(sealed_base.as_str()),
+        "the spawn names the sealed base as the range the integration is judged over",
+    );
+
+    exec.submit(&construct_order(digest(5), &test_nonce("member"))).unwrap();
+    assert_eq!(seen.lock().unwrap().diff_base, None, "a member candidate is the working tree, not a range");
+}
+
+// The complement, fail-closed: a diff base that resolves to no git object must
+// refuse the submit rather than spawn without it. A dropped base is invisible at
+// the lane — it falls back to the working-tree contract and reports the empty
+// diff as "no candidate", which reads as the bloom's fault rather than the host's.
+#[test]
+fn an_unresolvable_diff_base_refuses_the_submit() {
+    let seen = Arc::new(Mutex::new(SeenSpec::default()));
+    let store = FakeGithub::new();
+    store.seed_git_object(&digest(0xC0));
+    let base = TempDir::new().unwrap();
+    let exec = LocalExecutor::new(Arc::new(CapturingRunner { seen }), Arc::new(store), base.path());
+
+    let review = aether_bloomery::WorkOrder {
+        transformation: Transformation::for_aggregate_review(digest(5), digest(0xC0), digest(0xBA)),
+        nonce: Nonce(test_nonce("unseeded")),
+    };
+
+    match exec.submit(&review) {
+        Err(LocalExecutorError::UnresolvedDiffBase(nonce)) => assert_eq!(nonce.0, test_nonce("unseeded")),
+        other => panic!("expected UnresolvedDiffBase, got {other:?}"),
+    }
 }
 
 #[test]

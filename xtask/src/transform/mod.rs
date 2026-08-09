@@ -61,6 +61,13 @@ pub struct TransformArgs {
     /// lane.
     #[arg(long)]
     subject: Option<String>,
+    /// The commit the reviewed candidate's diff is taken against (#4723) — the
+    /// `review.critic` lane's diff source, threaded from the work order's
+    /// `diff_base`. Absent names the working-tree contract every member lane
+    /// runs under; present names the committed range `<diff-base>..HEAD` an
+    /// aggregate review judges. Ignored by every other lane.
+    #[arg(long)]
+    diff_base: Option<String>,
     /// Which agent CLI the model lanes fork — the harness the coordinator
     /// resolved from the stage's sealed `AgentProfile` (#4578). Ignored by the
     /// verify lane, which runs a compiler. Absent when the coordinator resolved

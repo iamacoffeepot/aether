@@ -437,6 +437,7 @@ mod tests {
                 command: "verify.clippy".to_owned(),
                 inputs: Vec::new(),
                 checkout: Digest::from_bytes(CHECKOUT),
+                diff_base: None,
                 outputs: Vec::new(),
                 image: "iama/verify:1".to_owned(),
                 limits: Budget::default(),
