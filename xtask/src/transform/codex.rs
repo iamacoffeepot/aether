@@ -7,6 +7,7 @@ use anyhow::Result;
 
 use crate::transform::TransformArgs;
 use crate::transform::lane::{Terminal, Usage, capture, record, write_prompt};
+use crate::transform::scratch::Scratch;
 
 /// The harness's runner-facing name, for the binary and for error text.
 const CODEX: &str = "codex";
@@ -99,7 +100,7 @@ pub(super) fn derive_terminal(transcript: &str) -> Option<Terminal> {
 }
 
 /// Run a model lane under Codex and return the shared result record.
-pub(super) fn run(prompt: &str, args: &TransformArgs) -> Result<serde_json::Value> {
+pub(super) fn run(prompt: &str, args: &TransformArgs, scratch: &Scratch) -> Result<serde_json::Value> {
     write_prompt(&args.out, prompt)?;
     let mut command = Command::new(CODEX);
     command
@@ -107,6 +108,7 @@ pub(super) fn run(prompt: &str, args: &TransformArgs) -> Result<serde_json::Valu
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    scratch.export(&mut command);
     Ok(record(derive_terminal(&capture(command, &args.out, CODEX)?)))
 }
 

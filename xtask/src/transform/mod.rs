@@ -25,6 +25,7 @@ mod conventions;
 mod lane;
 mod muse;
 mod review;
+mod scratch;
 mod verify;
 
 use std::path::{Path, PathBuf};
@@ -38,6 +39,7 @@ use serde::Serialize;
 use crate::cargo::write_json_pretty;
 use crate::transform::construct::CONSTRUCT_IMPLEMENT;
 use crate::transform::review::REVIEW_CRITIC;
+use crate::transform::scratch::Scratch;
 use crate::transform::verify::VERIFY_CHECK;
 
 #[derive(Args)]
@@ -178,11 +180,18 @@ fn resolve_harness(harness: Option<&str>) -> Result<Harness> {
 /// stay harness-agnostic: `construct.rs` reads `result_record.is_error` and
 /// `review.rs` reads `result.result` for the critic's verdict text, neither
 /// knowing which CLI produced them.
+///
+/// The run's [`Scratch`] directory is prepared here and dropped when the lane
+/// returns, so every arm hands its child the same place to build throwaway
+/// target directories and every run reaps its own.
 fn run_model_lane(prompt: &str, args: &TransformArgs) -> Result<serde_json::Value> {
-    match resolve_harness(args.harness.as_deref())? {
-        Harness::Claude => claude::run_headless_claude(prompt, args),
-        Harness::Codex => codex::run(prompt, args),
-        Harness::Muse => muse::run(prompt, args),
+    let harness = resolve_harness(args.harness.as_deref())?;
+    let scratch = Scratch::prepare(&args.out, args.nonce.as_deref())?;
+
+    match harness {
+        Harness::Claude => claude::run_headless_claude(prompt, args, &scratch),
+        Harness::Codex => codex::run(prompt, args, &scratch),
+        Harness::Muse => muse::run(prompt, args, &scratch),
     }
 }
 
