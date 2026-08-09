@@ -298,7 +298,7 @@ fn held_member_projects_question_comment_on_source_issue() {
             id: bloom_id,
             status: BloomStatus::Sealed,
             superseded_by: None,
-            members: vec![member.clone()],
+            members: vec![member],
             landing_blocked: None,
         }],
     };
