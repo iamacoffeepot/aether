@@ -154,6 +154,19 @@ pub struct GithubMirrorConfig {
     /// re-drive. `0` disables the warn.
     #[config(default = 1800)]
     pub stale_warn_after_secs: u64,
+    /// Where the executor reactor puts an admitted attempt's study record
+    /// (#4679) — the artifacts content store's root.
+    ///
+    /// Named by the **same** environment variable the artifacts capability
+    /// resolves its own root from, rather than a second knob of its own. The
+    /// reactor opens its own handle on that store the way it opens its own
+    /// `SqliteStore` on the shared journal, and two handles are only the same
+    /// store if they resolve the same path — a private knob would let a
+    /// deployment configure one and not the other, and the failure is silent:
+    /// study records land in a directory nothing else reads while the index
+    /// rows point at them from the journal.
+    #[config(env = "AETHER_ARTIFACTS_ROOT")]
+    pub artifacts_root: Option<String>,
     /// Who this coordinator runs on behalf of — the name a candidate capture is
     /// authored under (#4630). A bloom is that person's work delegated to a
     /// machine, not a separate contributor, so the history should read that way.
@@ -199,6 +212,7 @@ impl Default for GithubMirrorConfig {
             local_lane_commands: "construct.,review.".to_owned(),
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),
             stale_warn_after_secs: 1800,
+            artifacts_root: None,
             operator_name: String::new(),
             operator_email: String::new(),
         }

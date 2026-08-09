@@ -57,7 +57,7 @@ use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
 use super::ExecutorReactorCapability;
-use crate::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, resolve_root};
+use crate::artifacts::{ArtifactsCapabilityState, resolve_root};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::ExecutorShell;
 use crate::bloomery::dispatch_model;
@@ -1027,8 +1027,8 @@ fn seed_tracked(store: &mut dyn StoreBackend) -> rusqlite::Result<Vec<WorkHandle
 /// process, logged once at boot. Deliberately not a `BootError`: the ledger is a
 /// grading surface, and a coordinator that cannot record costs must still run
 /// blooms.
-fn open_artifacts() -> Option<ArtifactsCapabilityState> {
-    let root = resolve_root(ArtifactsConfig::default().root.as_deref());
+fn open_artifacts(configured: Option<&str>) -> Option<ArtifactsCapabilityState> {
+    let root = resolve_root(configured);
     match ArtifactsCapabilityState::open(&root) {
         Ok(artifacts) => Some(artifacts),
         Err(error) => {
@@ -1206,7 +1206,7 @@ impl NativeActor for ExecutorReactorCapability {
         Ok(ExecutorReactorState {
             executor: Some(executor),
             store: Some(store),
-            artifacts: open_artifacts(),
+            artifacts: open_artifacts(config.artifacts_root.as_deref()),
             claims: NameEvidenceClaims,
             tracked,
             control_mailbox,
