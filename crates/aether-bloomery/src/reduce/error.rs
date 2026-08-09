@@ -269,6 +269,43 @@ pub enum AttemptCompletedError {
     NotDispatched(WorkpieceId),
 }
 
+/// Why an attempt grant was refused (#4708).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum GrantAttemptsError {
+    /// The bloom is not known or not active — only a `Sealed` bloom runs a line,
+    /// so only one can hold a member to resume.
+    UnknownOrInactiveBloom,
+    /// The grant names a workpiece that is not a member of the bloom.
+    NotAMember(WorkpieceId),
+    /// The member is not wedged, so there is nothing to hand back. A running
+    /// member already holds attempts — re-dispatching it would put two workers on
+    /// one workpiece — and a member that never entered the line (an inherited
+    /// claim, which holds no cursor) has no position to resume from.
+    NotWedged(WorkpieceId),
+    /// The grant names a stage other than the one the member wedged at — an
+    /// operator acting on a stale read of the projection.
+    StageMismatch {
+        /// The stage the member is actually wedged at.
+        wedged_at: StageId,
+        /// The stage the grant named.
+        got: StageId,
+    },
+    /// The grant asks for no attempts, or for more than the member could spend.
+    ///
+    /// The counters a grant writes are read against the stage's own retry budget,
+    /// so a larger request could not be spent even if it were admitted; the
+    /// bloom's sealed [`Budget::retry_cap`](crate::Budget::retry_cap) narrows the
+    /// ceiling further when the bloom states one. Zero is refused for the
+    /// opposite reason: it would move the cursor and dispatch an attempt while
+    /// granting nothing, so the member would wedge again on the same verdict.
+    BeyondCap {
+        /// The attempts asked for.
+        requested: u32,
+        /// The most this grant may hand back.
+        cap: u32,
+    },
+}
+
 /// A land refused because mainline had moved off the bloom's sealed base.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BaseMismatch {

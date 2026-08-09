@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use aether_bloomery::{Budget, Digest, Event, Forecast, Membership, Statement, Workpiece, WorkpieceId};
+use aether_bloomery::{Budget, Digest, Event, Forecast, Membership, StageId, Statement, Workpiece, WorkpieceId};
 
 use crate::bloomery::{AdrTouch, Completeness};
 
@@ -145,6 +145,28 @@ pub struct SupersedeRequest {
     /// its quality collapses.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub descriptions: BTreeMap<String, String>,
+}
+
+/// `POST /blooms/{id}/grant` body — hand a wedged member more attempts on the
+/// bloom it already belongs to (#4708), instead of superseding an unchanged one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrantRequest {
+    /// The wedged member to resume.
+    pub workpiece: WorkpieceId,
+    /// The stage the grant believes the member is wedged at — the reducer
+    /// refuses a grant naming any other, so a stale read cannot act.
+    pub stage: StageId,
+    /// How many more dispatched attempts the member may spend before it wedges
+    /// again.
+    pub attempts: u32,
+    /// Override the admit idempotency key.
+    ///
+    /// The default is derived from the grant's own content, so re-POSTing the
+    /// same request is a no-op duplicate rather than a second grant. That also
+    /// means a *deliberate* second grant of the same shape — the member wedged
+    /// again and the operator is buying another round — has to name its own key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 /// The reply to a write route: the reducer outcome the admitted event resolved

@@ -45,6 +45,7 @@ closed`.
 | `PATCH /drafts/{id}` | Replace the present fields of a draft (membership, base, stage catalog, toolchain, policy, budget, forecast). |
 | `POST /drafts/{id}/seal` | Run the approve gate over every proposal (the body carries one scope projection per member), freeze the draft to a `BloomSpec`, and admit `Fact::Seal`; returns the reducer outcome. |
 | `POST /blooms/{id}/supersede` | Seal the named successor draft and admit `Fact::Supersede` against the `{id}` predecessor. |
+| `POST /blooms/{id}/grant` | Hand a wedged member more attempts and resume it on the `{id}` bloom, without sealing anything. |
 | `POST /blooms/{id}/answer` | Adopt an owner-signed answer statement to a parked question, releasing the hold it took. |
 | `GET /blooms` · `GET /view` | The whole live view document. |
 | `GET /blooms/{id}` | One bloom's live view (`{id}` is the bloom's hex digest). |
@@ -210,6 +211,30 @@ curl -s -X POST localhost:8910/blooms/<predecessor-hex>/supersede \
 
 Supersession seals the successor from the draft as it stands, on the approval
 evidence that draft already carries, so its body takes no projections.
+
+A member that wedged because its *environment* broke — a sandbox that could run
+nothing, a disk that filled — has nothing wrong with its sealed work, so
+superseding it would mean altering a field of the spec to say so and discarding
+the candidate it had already built. Grant it attempts on the bloom it already
+belongs to instead:
+
+```bash
+curl -s -X POST localhost:8910/blooms/<bloom-hex>/grant \
+  -H 'content-type: application/json' \
+  -d '{"workpiece":"4708","stage":"Verify","attempts":2}'
+                                               # → {"outcome":{"AttemptsGranted":{…}}}
+```
+
+`attempts` is how many more dispatched attempts the member may spend before it
+wedges again, bounded by the stage's own retry budget (and by the bloom's sealed
+`retry_cap` when it states one). A `Verify` grant resumes the member at `Refine`,
+since re-running the mechanical gate on an unchanged candidate cannot change its
+verdict.
+
+The sealed `base` is what divides the two verbs. A base that has not moved, with
+scope, membership, and configuration unchanged, is an execution decision — a
+grant. A moved base, or changed scope, membership, or configuration, is a
+successor doing real work — a supersession.
 
 ## How it works
 

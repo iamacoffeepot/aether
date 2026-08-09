@@ -15,7 +15,7 @@ use aether_substrate::actor::native::NativeCtx;
 use super::hex::{digest_from_hex, hex_encode};
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed, VerifyPending};
-use crate::api::dto::{OutcomeView, SupersedeRequest};
+use crate::api::dto::{GrantRequest, OutcomeView, SupersedeRequest};
 use crate::control::ControlCore;
 use crate::signing::{SigningCapability, Verify, VerifyResult};
 
@@ -47,6 +47,38 @@ impl ApiCapabilityState {
             &request.projections,
             request.descriptions,
             request.idempotency_key,
+        )
+    }
+
+    /// `POST /blooms/{id}/grant` — hand a wedged member more attempts on the
+    /// `{id}` bloom and resume it (#4708).
+    ///
+    /// The counterpart to supersession, along the line the sealed `base` draws:
+    /// a base that has not moved, with scope, membership, and configuration
+    /// unchanged, is an execution decision and belongs here; anything else is a
+    /// successor doing real work. Admitting it needs no approve gate — a grant
+    /// seals nothing, claims nothing, and alters no field the members' approvals
+    /// bind — so unlike the supersede route it admits straight through.
+    pub(super) fn grant(&self, ctx: &NativeCtx<'_, Manual>, id: &str, body: &[u8]) -> Routed {
+        let bloom = match digest_from_hex(id) {
+            Some(digest) => BloomId(digest),
+            None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
+        };
+        let request: GrantRequest = match serde_json::from_slice(body) {
+            Ok(request) => request,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid grant body: {error}"))),
+        };
+        let GrantRequest { workpiece, stage, attempts, idempotency_key } = request;
+        let key = idempotency_key.unwrap_or_else(|| {
+            format!("aether.bloomery.grant:{}:{}:{stage:?}:{attempts}", hex_encode(bloom.0.as_bytes()), workpiece.0)
+        });
+
+        self.admit(
+            ctx,
+            &Event {
+                idempotency_key: IdempotencyKey(key),
+                fact: Fact::GrantAttempts { bloom, workpiece, stage, attempts },
+            },
         )
     }
 
