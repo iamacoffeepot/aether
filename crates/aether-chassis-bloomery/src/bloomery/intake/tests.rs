@@ -904,6 +904,8 @@ fn a_measured_attempt_writes_one_priced_study_row_and_an_unmeasured_one_writes_n
             model: "muse-spark-1.2-contributor".to_owned(),
             input: 1_000_000,
             cache_read: 100_000,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
             cache_write: 0,
             output: 4_000_000,
         }],
