@@ -45,8 +45,8 @@ fn component_manifest(namespace: &str) -> StoredManifest {
 fn upload_dedups_identical_bytes_to_one_hash() {
     let root = temp_root("dedup");
     let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
-    let h1 = store.upload(b"the-binary-bytes", ArtifactKind::Binary, manifest("headless"), None);
-    let h2 = store.upload(b"the-binary-bytes", ArtifactKind::Binary, manifest("headless"), None);
+    let h1 = store.upload(b"the-binary-bytes", ArtifactKind::Binary, manifest("headless"), None).expect("upload lands");
+    let h2 = store.upload(b"the-binary-bytes", ArtifactKind::Binary, manifest("headless"), None).expect("upload lands");
     assert_eq!(h1, h2, "identical bytes dedup to the same content hash");
     assert_eq!(store.entry_count(), 1, "dedup stores one entry");
     let _ = fs::remove_dir_all(&root);
@@ -60,14 +60,18 @@ fn component_store_uploads_dedups_and_resolves_by_attribute() {
     let root = temp_root("component");
     let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
 
-    let h1 = store.upload(
-        b"probe-wasm-bytes",
-        ArtifactKind::Component,
-        component_manifest("test_fixture_probe"),
-        Some("probe".to_owned()),
-    );
+    let h1 = store
+        .upload(
+            b"probe-wasm-bytes",
+            ArtifactKind::Component,
+            component_manifest("test_fixture_probe"),
+            Some("probe".to_owned()),
+        )
+        .expect("upload lands");
     // An identical re-upload dedups to the same hash.
-    let h2 = store.upload(b"probe-wasm-bytes", ArtifactKind::Component, component_manifest("test_fixture_probe"), None);
+    let h2 = store
+        .upload(b"probe-wasm-bytes", ArtifactKind::Component, component_manifest("test_fixture_probe"), None)
+        .expect("upload lands");
     assert_eq!(h1, h2, "identical component bytes dedup to one hash");
     assert_eq!(store.entry_count(), 1, "dedup stores one component entry");
 
@@ -79,7 +83,7 @@ fn component_store_uploads_dedups_and_resolves_by_attribute() {
     assert_eq!(by_name.hash, h1, "the name points at the component hash");
 
     // A component is not listed as a binary, and vice versa.
-    store.upload(b"a-binary", ArtifactKind::Binary, manifest("headless"), None);
+    store.upload(b"a-binary", ArtifactKind::Binary, manifest("headless"), None).expect("upload lands");
     assert_eq!(store.matching_binaries(&ListEngineBinaries::default()).len(), 1, "only the binary lists as a binary");
     let components = store.matching_components(&ListComponentBinaries::default());
     assert_eq!(components.len(), 1, "only the component lists as a component");
@@ -116,8 +120,12 @@ fn component_store_uploads_dedups_and_resolves_by_attribute() {
 fn name_repoints_to_the_latest_uploaded_hash() {
     let root = temp_root("repoint");
     let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
-    let h_old = store.upload(b"v1", ArtifactKind::Binary, manifest("headless"), Some("engine".to_owned()));
-    let h_new = store.upload(b"v2", ArtifactKind::Binary, manifest("headless"), Some("engine".to_owned()));
+    let h_old = store
+        .upload(b"v1", ArtifactKind::Binary, manifest("headless"), Some("engine".to_owned()))
+        .expect("upload lands");
+    let h_new = store
+        .upload(b"v2", ArtifactKind::Binary, manifest("headless"), Some("engine".to_owned()))
+        .expect("upload lands");
     assert_ne!(h_old, h_new);
     let resolved = store.get(&Selector::Name("engine".to_owned())).expect("the name resolves");
     assert_eq!(resolved.hash, h_new, "the name points at the latest upload");
@@ -129,7 +137,9 @@ fn entries_persist_across_a_reopen() {
     let root = temp_root("persist");
     let hash = {
         let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
-        store.upload(b"persisted-bytes", ArtifactKind::Binary, manifest("headless"), Some("svc".to_owned()))
+        store
+            .upload(b"persisted-bytes", ArtifactKind::Binary, manifest("headless"), Some("svc".to_owned()))
+            .expect("upload lands")
         // store drops here — LockGuard releases lock.pid
     };
     let mut reopened = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
@@ -149,14 +159,17 @@ fn eviction_skips_pinned_and_named_entries() {
     // of the only unnamed, unpinned candidate.
     let mut store = ArtifactStore::open(&root, 40).expect("open store");
     // Unnamed, unpinned — the eviction candidate.
-    let h_plain = store.upload(b"plain-aaaa", ArtifactKind::Binary, manifest("headless"), None);
+    let h_plain = store.upload(b"plain-aaaa", ArtifactKind::Binary, manifest("headless"), None).expect("upload lands");
     // Named — protected.
-    let h_named = store.upload(b"named-bbbb", ArtifactKind::Binary, manifest("headless"), Some("keep".to_owned()));
+    let h_named = store
+        .upload(b"named-bbbb", ArtifactKind::Binary, manifest("headless"), Some("keep".to_owned()))
+        .expect("upload lands");
     // Pinned — protected.
-    let h_pinned = store.upload(b"pinned-cccc", ArtifactKind::Binary, manifest("headless"), None);
+    let h_pinned =
+        store.upload(b"pinned-cccc", ArtifactKind::Binary, manifest("headless"), None).expect("upload lands");
     assert!(store.pin(&h_pinned), "pin targets a stored entry");
     // Force eviction by re-running it through another over-budget upload.
-    let _ = store.upload(b"trigger-dddd", ArtifactKind::Binary, manifest("headless"), None);
+    let _ = store.upload(b"trigger-dddd", ArtifactKind::Binary, manifest("headless"), None).expect("upload lands");
 
     assert!(store.contains(&h_named), "a named entry is never evicted");
     assert!(store.contains(&h_pinned), "a pinned entry is never evicted");
@@ -168,7 +181,7 @@ fn eviction_skips_pinned_and_named_entries() {
 fn list_applies_chassis_and_caps_filters() {
     let root = temp_root("filter");
     let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
-    store.upload(b"headless-bin", ArtifactKind::Binary, manifest("headless"), None);
+    store.upload(b"headless-bin", ArtifactKind::Binary, manifest("headless"), None).expect("upload lands");
     let desktop = match manifest("desktop") {
         StoredManifest::Binary(mut m) => {
             m.caps = vec!["aether.fs".to_owned(), "aether.render".to_owned()];
@@ -176,7 +189,7 @@ fn list_applies_chassis_and_caps_filters() {
         }
         StoredManifest::Component(_) => unreachable!("manifest() returns a binary manifest"),
     };
-    store.upload(b"desktop-bin", ArtifactKind::Binary, desktop, None);
+    store.upload(b"desktop-bin", ArtifactKind::Binary, desktop, None).expect("upload lands");
 
     let headless_only = store.matching_binaries(&ListEngineBinaries {
         chassis: Some("headless".to_owned()),
@@ -213,12 +226,16 @@ fn listing_pages_apply_limits_after_counting_and_keep_raw_matches_uncapped() {
     let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
     let mut hashes = Vec::new();
     for index in 0..25 {
-        hashes.push(store.upload(
-            format!("binary-{index}").as_bytes(),
-            ArtifactKind::Binary,
-            manifest("headless"),
-            Some(format!("engine-{index}")),
-        ));
+        hashes.push(
+            store
+                .upload(
+                    format!("binary-{index}").as_bytes(),
+                    ArtifactKind::Binary,
+                    manifest("headless"),
+                    Some(format!("engine-{index}")),
+                )
+                .expect("upload lands"),
+        );
     }
 
     let default_page = store.list_binaries_page(&binary_page_filter(None, false));
@@ -247,8 +264,10 @@ fn listing_pages_apply_limits_after_counting_and_keep_raw_matches_uncapped() {
 fn listing_pages_exclude_unnamed_history_unless_requested() {
     let root = temp_root("listing-history");
     let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
-    let named = store.upload(b"named", ArtifactKind::Binary, manifest("headless"), Some("live".to_owned()));
-    let unnamed = store.upload(b"unnamed", ArtifactKind::Binary, manifest("headless"), None);
+    let named = store
+        .upload(b"named", ArtifactKind::Binary, manifest("headless"), Some("live".to_owned()))
+        .expect("upload lands");
+    let unnamed = store.upload(b"unnamed", ArtifactKind::Binary, manifest("headless"), None).expect("upload lands");
 
     let live = store.list_binaries_page(&binary_page_filter(None, false));
     assert_eq!(live.total_matched, 1);
@@ -268,13 +287,12 @@ fn listing_pages_exclude_unnamed_history_unless_requested() {
 fn component_listing_pages_apply_the_same_history_count_and_limit_contract() {
     let root = temp_root("component-listing-page");
     let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
-    let named = store.upload(
-        b"named-component",
-        ArtifactKind::Component,
-        component_manifest("test.named"),
-        Some("named".to_owned()),
-    );
-    let unnamed = store.upload(b"unnamed-component", ArtifactKind::Component, component_manifest("test.unnamed"), None);
+    let named = store
+        .upload(b"named-component", ArtifactKind::Component, component_manifest("test.named"), Some("named".to_owned()))
+        .expect("upload lands");
+    let unnamed = store
+        .upload(b"unnamed-component", ArtifactKind::Component, component_manifest("test.unnamed"), None)
+        .expect("upload lands");
 
     let live = store.list_components_page(&ListComponentBinaries::default());
     assert_eq!(live.total_matched, 1);
@@ -306,10 +324,15 @@ fn first_ingest_order_survives_dedup_and_reopen() {
     let root = temp_root("listing-persisted-order");
     let (older, newer) = {
         let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
-        let older = store.upload(b"older", ArtifactKind::Binary, manifest("headless"), Some("older".to_owned()));
-        let newer = store.upload(b"newer", ArtifactKind::Binary, manifest("headless"), Some("newer".to_owned()));
-        let duplicate =
-            store.upload(b"older", ArtifactKind::Binary, manifest("headless"), Some("older-again".to_owned()));
+        let older = store
+            .upload(b"older", ArtifactKind::Binary, manifest("headless"), Some("older".to_owned()))
+            .expect("upload lands");
+        let newer = store
+            .upload(b"newer", ArtifactKind::Binary, manifest("headless"), Some("newer".to_owned()))
+            .expect("upload lands");
+        let duplicate = store
+            .upload(b"older", ArtifactKind::Binary, manifest("headless"), Some("older-again".to_owned()))
+            .expect("upload lands");
         assert_eq!(duplicate, older);
         let page = store.list_binaries_page(&binary_page_filter(None, false));
         assert_eq!(page.binaries.iter().map(|entry| &entry.hash).collect::<Vec<_>>(), vec![&newer, &older]);
@@ -331,8 +354,12 @@ fn legacy_sidecars_restore_at_zero_with_deterministic_hash_ties() {
     let root = temp_root("listing-legacy-order");
     let (left, right) = {
         let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
-        let left = store.upload(b"legacy-left", ArtifactKind::Binary, manifest("headless"), Some("left".to_owned()));
-        let right = store.upload(b"legacy-right", ArtifactKind::Binary, manifest("headless"), Some("right".to_owned()));
+        let left = store
+            .upload(b"legacy-left", ArtifactKind::Binary, manifest("headless"), Some("left".to_owned()))
+            .expect("upload lands");
+        let right = store
+            .upload(b"legacy-right", ArtifactKind::Binary, manifest("headless"), Some("right".to_owned()))
+            .expect("upload lands");
         (left, right)
     };
     for hash in [&left, &right] {
@@ -353,7 +380,9 @@ fn legacy_sidecars_restore_at_zero_with_deterministic_hash_ties() {
         "legacy sequence-zero ties sort by hash"
     );
 
-    let fresh = store.upload(b"fresh", ArtifactKind::Binary, manifest("headless"), Some("fresh".to_owned()));
+    let fresh = store
+        .upload(b"fresh", ArtifactKind::Binary, manifest("headless"), Some("fresh".to_owned()))
+        .expect("upload lands");
     let page = store.list_binaries_page(&binary_page_filter(None, false));
     assert_eq!(page.binaries[0].hash, fresh, "a post-restore ingest receives the next sequence");
     assert_eq!(page.binaries[1..].iter().map(|entry| entry.hash.clone()).collect::<Vec<_>>(), legacy_hashes);
@@ -364,8 +393,15 @@ fn legacy_sidecars_restore_at_zero_with_deterministic_hash_ties() {
 fn multiple_names_share_one_row_with_the_smallest_representative() {
     let root = temp_root("listing-multi-name");
     let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
-    let hash = store.upload(b"same", ArtifactKind::Binary, manifest("headless"), Some("zeta".to_owned()));
-    assert_eq!(store.upload(b"same", ArtifactKind::Binary, manifest("headless"), Some("alpha".to_owned())), hash);
+    let hash = store
+        .upload(b"same", ArtifactKind::Binary, manifest("headless"), Some("zeta".to_owned()))
+        .expect("upload lands");
+    assert_eq!(
+        store
+            .upload(b"same", ArtifactKind::Binary, manifest("headless"), Some("alpha".to_owned()))
+            .expect("upload lands"),
+        hash
+    );
 
     let page = store.list_binaries_page(&binary_page_filter(None, false));
     assert_eq!(page.total_matched, 1, "one content hash remains one listing row");

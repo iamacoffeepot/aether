@@ -135,13 +135,15 @@ fn validate_manifest(manifest: &BinaryManifest, raw: &serde_json::Value) -> Resu
 /// capturing its manifest via a one-time `<path> --describe` fork
 /// (ADR-0115, issue 1953). Shared by the `on_upload_binary` handler and
 /// the [`bootstrap_ingest`] boot path. Returns the stored content hash,
-/// or a human-readable error for an unreadable path or a `--describe`
-/// that failed / yielded no parseable manifest. Idempotent — identical
-/// bytes dedup to the same hash.
+/// or a human-readable error for an unreadable path, a `--describe`
+/// that failed / yielded no parseable manifest, or a store write that
+/// didn't land. Idempotent — identical bytes dedup to the same hash.
 pub fn ingest_binary(store: &mut ArtifactStore, path: &str, name: Option<String>) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("reading binary path {path:?}: {e}"))?;
     let manifest = describe_binary(path)?;
-    Ok(store.upload(&bytes, ArtifactKind::Binary, StoredManifest::Binary(manifest), name))
+    store
+        .upload(&bytes, ArtifactKind::Binary, StoredManifest::Binary(manifest), name)
+        .map_err(|e| format!("storing binary {path:?} in the artifact store: {e}"))
 }
 
 /// Bootstrap-ingest each chassis bin in `paths` into `store`, naming
@@ -174,12 +176,15 @@ pub fn bootstrap_ingest(store: &mut ArtifactStore, paths: &HashSet<String>) {
 /// Ingest the component wasm at `path` into `store` content-addressed,
 /// reading its manifest straight from the wasm (ADR-0116, issue 1956) —
 /// no execution step. Returns the stored content hash, or a
-/// human-readable error for an unreadable path or an unparseable wasm.
-/// Idempotent — identical bytes dedup to the same hash.
+/// human-readable error for an unreadable path, an unparseable wasm, or
+/// a store write that didn't land. Idempotent — identical bytes dedup to
+/// the same hash.
 pub fn ingest_component(store: &mut ArtifactStore, path: &str, name: Option<String>) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("reading component path {path:?}: {e}"))?;
     let manifest = component_manifest(&bytes).map_err(|e| format!("reading component manifest from {path:?}: {e}"))?;
-    Ok(store.upload(&bytes, ArtifactKind::Component, StoredManifest::Component(manifest), name))
+    store
+        .upload(&bytes, ArtifactKind::Component, StoredManifest::Component(manifest), name)
+        .map_err(|e| format!("storing component {path:?} in the artifact store: {e}"))
 }
 
 /// Resolve a [`ComponentSelector`] against `store` to its wasm bytes +

@@ -187,48 +187,65 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
     /// hash comes back, but a fresh `name` still repoints. Returns the
     /// sha256 hex the bytes stored under. Runs the eviction policy
     /// afterward.
-    pub fn upload(&mut self, bytes: &[u8], metadata: M, name: Option<String>) -> String {
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] when new content can't be
+    /// persisted — the bytes or the sidecar failed to write. A returned
+    /// error means nothing was indexed and no name was repointed, so the
+    /// caller must not treat the upload as stored: there is no hash to
+    /// hand out, and a later [`get`](Self::get) of one would miss.
+    pub fn upload(&mut self, bytes: &[u8], metadata: M, name: Option<String>) -> io::Result<String> {
         let hash = hash_hex(bytes);
         let clock = self.next_clock();
 
-        if let Some(entry) = self.entries.get_mut(&hash) {
+        let stored = match self.entries.get_mut(&hash) {
             // Dedup: bump recency so a re-uploaded entry isn't the first
             // eviction target.
-            entry.last_access = clock;
-        } else {
-            // New content: write the bytes + the sidecar, then index it. A
-            // write failure leaves the entry out of the index, so the store
-            // stays consistent — the next upload of the same bytes retries.
-            let (bytes_path, manifest_path) = self.entry_paths(&hash);
-            let uploaded_seq = self.next_seq;
-            let sidecar = SidecarRecord { metadata: metadata.clone(), uploaded_seq };
-            if let Err(e) = atomic_write(&bytes_path, bytes) {
-                tracing::warn!(target: TARGET, hash = %hash, error = %e, "content store: writing entry bytes failed");
-            } else if let Err(e) = write_sidecar(&manifest_path, &sidecar) {
-                tracing::warn!(target: TARGET, hash = %hash, error = %e, "content store: writing entry manifest failed");
-                if let Err(cleanup_e) = fs::remove_file(&bytes_path) {
-                    tracing::warn!(target: TARGET, hash = %hash, error = %cleanup_e, "content store: cleaning up orphaned entry bytes after failed sidecar write");
-                }
-            } else {
-                let bytes_len = bytes.len() as u64;
-                self.entries.insert(
-                    hash.clone(),
-                    Entry { metadata, bytes_len, pinned: false, last_access: clock, uploaded_seq },
-                );
-                self.total_bytes = self.total_bytes.saturating_add(bytes_len);
-                self.next_seq = self.next_seq.saturating_add(1);
+            Some(entry) => {
+                entry.last_access = clock;
+                Ok(())
             }
-        }
+            None => self.persist_new(&hash, bytes, metadata, clock),
+        };
 
-        if let Some(name) = name
-            && self.entries.contains_key(&hash)
+        if stored.is_ok()
+            && let Some(name) = name
         {
             self.names.insert(name, hash.clone());
             self.persist_names();
         }
 
+        // Run the policy either way: a failed write is exactly when disk
+        // pressure is most likely the cause, so reclaiming is worthwhile.
         self.evict_if_needed();
-        hash
+        stored.map(|()| hash)
+    }
+
+    /// Write new content's bytes + sidecar and index it. A failure indexes
+    /// nothing and leaves no partial entry on disk, so the store stays
+    /// consistent — the next upload of the same bytes retries.
+    fn persist_new(&mut self, hash: &str, bytes: &[u8], metadata: M, clock: u64) -> io::Result<()> {
+        let (bytes_path, manifest_path) = self.entry_paths(hash);
+        let uploaded_seq = self.next_seq;
+        let sidecar = SidecarRecord { metadata: metadata.clone(), uploaded_seq };
+
+        atomic_write(&bytes_path, bytes)?;
+        if let Err(e) = write_sidecar(&manifest_path, &sidecar) {
+            // The cleanup failure is swallowed — it has no channel of its
+            // own, and the sidecar error is the one the caller needs.
+            if let Err(cleanup_e) = fs::remove_file(&bytes_path) {
+                tracing::warn!(target: TARGET, hash = %hash, error = %cleanup_e, "content store: cleaning up orphaned entry bytes after failed sidecar write");
+            }
+            return Err(e);
+        }
+
+        let bytes_len = bytes.len() as u64;
+        self.entries
+            .insert(hash.to_owned(), Entry { metadata, bytes_len, pinned: false, last_access: clock, uploaded_seq });
+        self.total_bytes = self.total_bytes.saturating_add(bytes_len);
+        self.next_seq = self.next_seq.saturating_add(1);
+        Ok(())
     }
 
     /// Pin (or unpin) an entry by hash, protecting it from eviction

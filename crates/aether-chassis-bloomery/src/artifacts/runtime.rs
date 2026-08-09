@@ -84,18 +84,18 @@ impl ArtifactsCapabilityState {
     }
 
     /// Store `bytes` content-addressed with their declared `parents`, replying
-    /// the digest. The `on_put` handler is a thin wrapper over this; it carries
-    /// the durability check.
+    /// the digest, or the store's own write failure as an `AdapterError`. The
+    /// `on_put` handler is a thin wrapper over this.
     pub fn put(&mut self, bytes: &[u8], parents: &[String]) -> PutResult {
-        let digest = self.store.upload(bytes, ArtifactMeta { parents: parents.to_vec() }, None);
-        // `upload` swallows a write failure (logs a warn, leaves the entry
-        // unindexed) and still returns the hash, so `contains` is the honest
-        // durability check: an unindexed digest means the bytes never landed.
-        if !self.store.contains(&digest) {
-            return PutResult::Err {
-                error: ArtifactsError::AdapterError("artifact bytes were not persisted".to_owned()),
-            };
-        }
+        let digest = match self.store.upload(bytes, ArtifactMeta { parents: parents.to_vec() }, None) {
+            Ok(digest) => digest,
+            Err(error) => {
+                return PutResult::Err {
+                    error: ArtifactsError::AdapterError(format!("artifact bytes were not persisted: {error}")),
+                };
+            }
+        };
+
         // Content-addressed dedup keeps the *original* sidecar metadata: a
         // re-upload of identical bytes under fresh `parents` bumps recency but
         // never rewrites the recorded parents (`ContentStore::upload`). Surface

@@ -149,13 +149,19 @@ impl ArtifactStore {
     /// hash comes back, but a fresh `name` still repoints. Returns the
     /// sha256 hex the bytes stored under. Runs LRU eviction afterward to
     /// hold the disk budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] when the artifact can't be
+    /// persisted. Nothing is indexed and no name is repointed, so a
+    /// selector built from the would-be hash would never resolve.
     pub fn upload(
         &mut self,
         bytes: &[u8],
         kind: ArtifactKind,
         manifest: StoredManifest,
         name: Option<String>,
-    ) -> String {
+    ) -> io::Result<String> {
         self.inner.upload(bytes, StoredEntry { kind, manifest }, name)
     }
 
