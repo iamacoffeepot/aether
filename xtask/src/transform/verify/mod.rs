@@ -1,3 +1,5 @@
+mod tools;
+
 use std::fs;
 use std::process::{self, Command};
 
@@ -6,11 +8,23 @@ use anyhow::{Context, Result, bail};
 use crate::cargo::{run_captured, write_json_pretty};
 use crate::transform::{Evidence, TransformArgs, build_evidence};
 
-/// One CI-mirroring cargo invocation for a `verify.*` command id.
+/// One CI-mirroring invocation for a `verify.*` command id, plus the tools it
+/// needs present to run at all (#4706).
 struct VerifyInvocation {
     program: &'static str,
     args: &'static [&'static str],
     env: &'static [(&'static str, &'static str)],
+    /// The programs [`tools::preflight`] resolves through the dependency graph
+    /// before anything is dispatched against this host.
+    requires: &'static [&'static str],
+    /// A cargo step this member needs run first, or `None` when it stands
+    /// alone.
+    ///
+    /// The one genuine ordering edge in the lane: `verify.test`'s scenario
+    /// tests load component wasm that `cargo xtask dist` builds, and CI
+    /// pre-builds it for the same reason. Everything else here is independent
+    /// and always runs, so a failure in one never suppresses another.
+    prepare: Option<&'static [&'static str]>,
 }
 
 impl VerifyInvocation {
@@ -23,37 +37,44 @@ impl VerifyInvocation {
     }
 }
 
-/// Maps a typed `verify.*` command id to the exact cargo invocation
-/// `ci.yml`'s `fmt` / `clippy` / `docs` jobs run.
+/// Maps a typed `verify.*` command id to the invocation that answers it, in
+/// CI-parity terms.
 ///
 /// `--document-private-items` is what the `Rustdoc` job passes, and rustdoc
-/// does not descend into a private module without it (#4694). A doc comment
-/// inside `mod inward;` is invisible to a lane that omits the flag and linted
-/// by the gate that does not — the lane's docs check ends up strictly weaker
-/// than the check it exists to predict, which is the direction that costs the
-/// most: a false green integrates, resolves, and opens a landing pull request
-/// before anything disagrees.
+/// does not descend into a private module without it (#4694). `--keep-going`
+/// keeps cargo scheduling past the first failing crate (#4690), so one run
+/// reports every *independent* unit rather than stopping at one.
 ///
-/// `--keep-going` is load-bearing rather than cosmetic (#4690). Without it
-/// cargo stops scheduling at the first failing crate, so one run reports one
-/// crate's diagnostics and hides the rest — and a hidden error costs a whole
-/// repair roll, because a failing terminal `Verify` re-enters `Refine` against
-/// a findings block that could only name what the run got far enough to see. A
-/// candidate broken in three crates can then burn its entire retry budget
-/// while genuinely converging on every roll.
+/// **`verify.clippy` does not deny warnings, and that is the point** (#4706).
+/// `-D warnings` makes a lint a compile error, so a lib that trips one is never
+/// built and nothing depending on it is ever linted — its diagnostics do not
+/// exist to be reported. `--keep-going` cannot recover that: a dependent target
+/// has no artifact to link against. So the run stays non-denying, every unit
+/// compiles, every lint in the workspace is emitted, and
+/// [`clippy_verdict`] applies the *same* predicate `-D warnings` encodes —
+/// fail if any warning appeared — over a complete list instead of a truncated
+/// one. Keeping one flag shape also keeps cargo's fingerprint stable across
+/// dispatches, which is what lets a repair round recompile nine crates instead
+/// of ninety-six.
 ///
-/// Tripwire: these argv + env pins are CI-parity invariants — a drift
-/// here means this entrypoint no longer proves the laptop/Actions
-/// invocation symmetry ADR-0149 §Execution requires. `verify.test` is
-/// deliberately absent, not merely unrecognized: it names the one
-/// command this slice explicitly declines to cover.
+/// Tripwire: these argv + env pins are CI-parity invariants — a drift here
+/// means this entrypoint no longer proves the laptop/Actions invocation
+/// symmetry ADR-0149 §Execution requires.
 fn verify_command(id: &str) -> Option<VerifyInvocation> {
     match id {
-        "verify.fmt" => Some(VerifyInvocation { program: "cargo", args: &["fmt", "--all", "--", "--check"], env: &[] }),
+        "verify.fmt" => Some(VerifyInvocation {
+            program: "cargo",
+            args: &["fmt", "--all", "--", "--check"],
+            env: &[],
+            requires: &["cargo", "rustfmt"],
+            prepare: None,
+        }),
         "verify.clippy" => Some(VerifyInvocation {
             program: "cargo",
-            args: &["clippy", "--workspace", "--all-targets", "--keep-going", "--", "-D", "warnings"],
+            args: &["clippy", "--workspace", "--all-targets", "--keep-going", "--message-format=json"],
             env: &[],
+            requires: &["cargo", "cargo-clippy"],
+            prepare: None,
         }),
         "verify.docs" => Some(VerifyInvocation {
             program: "cargo",
@@ -62,9 +83,83 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
                 "RUSTDOCFLAGS",
                 "-D rustdoc::redundant_explicit_links -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links",
             )],
+            requires: &["cargo"],
+            prepare: None,
+        }),
+        "verify.test" => Some(VerifyInvocation {
+            program: "cargo",
+            // `--all-features` and `--profile ci` are CI's, and
+            // `AETHER_REQUIRE_RUNTIME` turns a missing component wasm into a
+            // hard failure instead of a silent skip — without it the lane runs
+            // strictly fewer tests than the gate it predicts, which is the
+            // false-green direction.
+            args: &["nextest", "run", "--all-features", "--profile", "ci", "--no-fail-fast"],
+            env: &[("AETHER_REQUIRE_RUNTIME", "1")],
+            requires: &["cargo", "cargo-nextest"],
+            prepare: Some(&["xtask", "dist"]),
+        }),
+        "verify.dup" => Some(VerifyInvocation {
+            program: "npx",
+            args: &["--yes", "jscpd@5.0.12", "crates"],
+            env: &[],
+            requires: &["npx"],
+            prepare: None,
+        }),
+        "verify.deps" => Some(VerifyInvocation {
+            // Invoked as the binary rather than through `cargo machete`, which
+            // hands the subcommand its own name as argv[1]. cargo-machete reads
+            // every positional as a directory to walk, so the CI spelling
+            // scans a nonexistent `machete/` alongside `crates/` and fails on
+            // every candidate for a reason unrelated to the candidate. Caught
+            // by running the umbrella for real (#4706); `crates` is still
+            // exactly the path CI scans.
+            program: "cargo-machete",
+            args: &["crates"],
+            env: &[],
+            requires: &["cargo", "cargo-machete"],
+            prepare: None,
         }),
         _ => None,
     }
+}
+
+/// Whether a clippy run that was *not* asked to deny warnings should count as a
+/// failure: it should exactly when it emitted a warning or an error, which is
+/// what `-D warnings` means (#4706).
+///
+/// Reads cargo's JSON diagnostic stream rather than scanning rendered text, so
+/// the verdict turns on a structured `level` rather than on the word "warning"
+/// appearing in someone's identifier or doc comment.
+fn clippy_verdict(stdout: &str) -> bool {
+    !stdout.lines().any(|line| diagnostic_level(line).is_some_and(|level| level == "warning" || level == "error"))
+}
+
+/// The diagnostic level one `--message-format=json` line reports, or `None`
+/// when the line is not a compiler message (cargo interleaves build progress on
+/// the same stream).
+fn diagnostic_level(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    if value.get("reason")?.as_str()? != "compiler-message" {
+        return None;
+    }
+    Some(value.get("message")?.get("level")?.as_str()?.to_owned())
+}
+
+/// The human-readable rendering of every diagnostic in a JSON stream, which is
+/// what a `Refine` re-entry is handed. cargo puts the same text rustc would
+/// have printed in each message's `rendered` field, so nothing is lost by
+/// asking for JSON.
+fn render_diagnostics(stdout: &str) -> String {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            (value.get("reason")?.as_str()? == "compiler-message")
+                .then(|| value.get("message")?.get("rendered")?.as_str().map(str::to_owned))
+                .flatten()
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
 }
 
 /// The typed id of the verify umbrella (#3626) the reducer dispatches for the
@@ -77,7 +172,7 @@ pub(super) const VERIFY_CHECK: &str = "verify.check";
 /// this list (e.g. a future `verify.test`) needs no change to the reducer's
 /// dispatched stage command.
 fn verify_check_members() -> &'static [&'static str] {
-    &["verify.fmt", "verify.clippy", "verify.docs"]
+    &["verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps"]
 }
 
 /// Aggregate `verify.check`'s member results: pass iff every member passed.
@@ -212,6 +307,28 @@ fn verify_findings(members: &[(&str, bool, String)]) -> Option<String> {
 pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
+    // Preflight before anything runs. A host missing a tool cannot compute what
+    // the member would have said, and reporting that as a pass would let a
+    // candidate integrate on the strength of a check that never happened.
+    let required: Vec<&str> = verify_check_members()
+        .iter()
+        .filter_map(|id| verify_command(id))
+        .flat_map(|invocation| invocation.requires.iter().copied())
+        .collect();
+    let missing = tools::preflight(&required);
+    if !missing.is_empty() {
+        let evidence = Evidence {
+            findings: Some(tools::missing_findings(&missing)),
+            command: VERIFY_CHECK.to_owned(),
+            nonce: args.nonce.clone(),
+            status: "fail",
+            exit_code: Some(1),
+            log: String::new(),
+        };
+        write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
+        process::exit(1);
+    }
+
     let mut log_names = Vec::with_capacity(verify_check_members().len());
     let mut passed = Vec::with_capacity(verify_check_members().len());
     let mut outcomes = Vec::with_capacity(verify_check_members().len());
@@ -219,21 +336,47 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
 
     for &id in verify_check_members() {
         let invocation = verify_command(id).expect("verify_check_members ids all resolve via verify_command");
+        // The member's own prerequisite, run immediately before it rather than
+        // once up front: it belongs to this member, and a member that is one day
+        // removed should take its prepare step with it.
+        if let Some(prepare) = invocation.prepare {
+            let mut step = Command::new("cargo");
+            step.args(prepare);
+            if let Ok(prepared) = run_captured(step)
+                && !prepared.status.success()
+            {
+                eprintln!(
+                    "{id}: `cargo {}` failed; the member runs anyway and reports what it finds",
+                    prepare.join(" ")
+                );
+            }
+        }
+
         let output = run_captured(invocation.command())
             .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
 
+        // A JSON-format member's verdict is ours to derive: its exit status is
+        // success even with lints present, because the run was not asked to deny
+        // them. Everything else mirrors its own exit.
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let (member_passed, rendered) = if id == "verify.clippy" {
+            (output.status.success() && clippy_verdict(&stdout), render_diagnostics(&stdout))
+        } else {
+            (output.status.success(), stdout)
+        };
+
         let log_name = format!("{id}.log");
         let log_path = args.out.join(&log_name);
-        let mut log_bytes = output.stdout.clone();
+        let mut log_bytes = rendered.clone().into_bytes();
         log_bytes.extend_from_slice(&output.stderr);
         fs::write(&log_path, &log_bytes).with_context(|| format!("write {}", log_path.display()))?;
 
-        if !output.status.success() && first_failure_code.is_none() {
+        if !member_passed && first_failure_code.is_none() {
             first_failure_code = Some(output.status.code().unwrap_or(1));
         }
-        outcomes.push((id, output.status.success(), String::from_utf8_lossy(&log_bytes).into_owned()));
+        outcomes.push((id, member_passed, String::from_utf8_lossy(&log_bytes).into_owned()));
         log_names.push(log_name);
-        passed.push(output.status.success());
+        passed.push(member_passed);
     }
 
     let all_pass = all_passed(&passed);
@@ -261,8 +404,8 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_FINDING_LINES, VERIFY_CHECK, all_passed, distil_diagnostics, verify_check_members, verify_command,
-        verify_findings,
+        MAX_FINDING_LINES, VERIFY_CHECK, all_passed, clippy_verdict, distil_diagnostics, render_diagnostics,
+        verify_check_members, verify_command, verify_findings,
     };
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
     use crate::transform::review::REVIEW_CRITIC;
@@ -272,13 +415,111 @@ mod tests {
         let fmt = verify_command("verify.fmt").expect("verify.fmt mapped");
         assert_eq!(fmt.args, &["fmt", "--all", "--", "--check"]);
 
+        // Tripwire: clippy must NOT deny (#4706). Denying makes a lint a
+        // compile error, so a lib that trips one is never built and nothing
+        // depending on it is ever linted — the repair loop then gets one layer
+        // per round and wedges on a budget of three while genuinely converging.
+        // `clippy_verdict` applies the same fail-on-any-warning predicate over
+        // the complete list this run produces.
         let clippy = verify_command("verify.clippy").expect("verify.clippy mapped");
-        assert_eq!(clippy.args, &["clippy", "--workspace", "--all-targets", "--keep-going", "--", "-D", "warnings"]);
+        assert_eq!(clippy.args, &["clippy", "--workspace", "--all-targets", "--keep-going", "--message-format=json"],);
+        assert!(!clippy.args.contains(&"-D"), "denying re-creates the cascade the verdict change removed");
+
+        // Tripwire: the test member must match CI's own invocation, including
+        // the wasm pre-build its scenario tests load and the env that makes a
+        // missing one loud. A lane running fewer tests than the gate it
+        // predicts is a false green that surfaces at the landing pull request.
+        let test = verify_command("verify.test").expect("verify.test mapped");
+        assert_eq!(test.args, &["nextest", "run", "--all-features", "--profile", "ci", "--no-fail-fast"]);
+        assert_eq!(test.prepare, Some(&["xtask", "dist"][..]), "scenario tests need the component wasm built");
+        assert_eq!(test.env, &[("AETHER_REQUIRE_RUNTIME", "1")], "a missing wasm must fail, not skip");
+
+        // Tripwire: `crates` is the path, and it is not optional — cargo-machete
+        // reads its own subcommand name as the directory to walk without it and
+        // fails on every candidate for a reason that has nothing to do with the
+        // candidate. Caught by running the umbrella for real (#4706).
+        let deps = verify_command("verify.deps").expect("verify.deps mapped");
+        assert_eq!(deps.program, "cargo-machete", "going through `cargo machete` re-adds the bogus path");
+        assert_eq!(deps.args, &["crates"]);
 
         let docs = verify_command("verify.docs").expect("verify.docs mapped");
         assert_eq!(docs.args, &["doc", "--workspace", "--no-deps", "--document-private-items", "--keep-going"]);
         assert_eq!(docs.env.len(), 1);
         assert_eq!(docs.env[0].0, "RUSTDOCFLAGS");
+    }
+
+    // One cargo JSON line per diagnostic level, plus the build-progress noise
+    // cargo interleaves on the same stream.
+    fn json_line(level: &str, rendered: &str) -> String {
+        format!(r#"{{"reason":"compiler-message","message":{{"level":"{level}","rendered":"{rendered}"}}}}"#)
+    }
+
+    #[test]
+    fn a_clippy_run_that_emitted_a_warning_fails_even_though_cargo_exited_zero() {
+        // Tripwire: the whole verdict change (#4706). The run is not asked to
+        // deny warnings — that is what stops the compile cascade and keeps every
+        // dependent target linted — so cargo exits 0 with lints present. If this
+        // predicate regressed to trusting the exit status, every lint in the
+        // workspace would pass verify silently, which is strictly worse than the
+        // truncated reporting it replaced.
+        let stream = [
+            r#"{"reason":"compiler-artifact","target":{"name":"aether-bloomery"}}"#.to_owned(),
+            json_line("warning", "warning: unnecessary qualification"),
+        ]
+        .join("\n");
+
+        assert!(!clippy_verdict(&stream), "a warning is a failure exactly as `-D warnings` would make it");
+        assert!(clippy_verdict(r#"{"reason":"compiler-artifact","target":{"name":"x"}}"#), "progress alone passes");
+        assert!(clippy_verdict(""), "a silent run is a clean run");
+    }
+
+    #[test]
+    fn a_note_level_message_is_not_a_failure() {
+        // rustc emits `note` and `help` alongside real diagnostics. Counting
+        // them would fail every candidate that has any diagnostic context at
+        // all, including passing ones.
+        assert!(clippy_verdict(&json_line("note", "note: required by a bound")));
+    }
+
+    #[test]
+    fn the_rendered_text_survives_the_json_round_trip() {
+        // The JSON format is for the verdict; the model still has to read the
+        // diagnostics. cargo carries rustc's own rendering in `rendered`, so
+        // asking for JSON must not cost the human-readable text.
+        let stream = [
+            json_line("warning", "warning: unused import"),
+            r#"{"reason":"build-finished","success":true}"#.to_owned(),
+            json_line("error", "error: could not compile"),
+        ]
+        .join("\n");
+
+        let rendered = render_diagnostics(&stream);
+        assert!(rendered.contains("unused import"));
+        assert!(rendered.contains("could not compile"));
+        assert!(!rendered.contains("build-finished"), "progress must not reach the findings");
+    }
+
+    #[test]
+    fn every_member_declares_the_tools_it_needs() {
+        // Tripwire: preflight resolves the union of these. A member added
+        // without them preflights as needing nothing, so a host missing its
+        // tool discovers that by failing the check rather than by refusing —
+        // which reports a candidate defect for a host fault.
+        for id in verify_check_members() {
+            let invocation = verify_command(id).expect("every umbrella member resolves");
+            assert!(!invocation.requires.is_empty(), "{id} declares no tools");
+        }
+    }
+
+    #[test]
+    fn the_umbrella_covers_every_required_ci_job() {
+        // Tripwire: a member missing here is a gate CI enforces and the lane
+        // does not, and the lane exists to predict CI. The gap costs a whole
+        // bloom re-entry, because the disagreement surfaces at the landing pull
+        // request after integrate, aggregate verify, and review have all run.
+        for id in ["verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps"] {
+            assert!(verify_check_members().contains(&id), "{id} is a required CI job the lane must run");
+        }
     }
 
     #[test]
@@ -358,11 +599,16 @@ mod tests {
     }
 
     #[test]
-    fn verify_check_members_are_the_three_ci_parity_ids_in_order() {
+    fn verify_check_members_are_the_ci_parity_ids_in_order() {
         // Tripwire: every id verify.check fans out to must resolve via
-        // verify_command, and the order must match ci.yml's fmt/clippy/docs
-        // jobs — a drift here breaks the umbrella-membership invariant.
-        assert_eq!(verify_check_members(), &["verify.fmt", "verify.clippy", "verify.docs"]);
+        // verify_command, and the order must match ci.yml's job order — a drift
+        // here breaks the umbrella-membership invariant. All six of CI's
+        // required gates, because a member CI enforces and the lane skips is a
+        // false green that surfaces at the landing pull request (#4706).
+        assert_eq!(
+            verify_check_members(),
+            &["verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps"],
+        );
         for &id in verify_check_members() {
             assert!(verify_command(id).is_some(), "{id} must resolve via verify_command");
         }
@@ -388,8 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_verify_test_ids_are_unmapped() {
-        assert!(verify_command("verify.test").is_none());
+    fn an_unknown_id_is_unmapped() {
         assert!(verify_command("verify.bogus").is_none());
         // construct.implement and review.critic are the model lanes' ids, not
         // verify ids — neither must resolve a verify invocation.
