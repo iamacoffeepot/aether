@@ -1,3 +1,4 @@
+#![allow(clippy::print_stderr)]
 //! Lane-boundary scenarios (#4727): a real coordinator driven through a real
 //! `git worktree add` and a real lane subprocess, with the mock lane binary as
 //! the only substitution.
@@ -18,7 +19,7 @@ mod lane;
 
 use std::path::Path;
 
-use aether_bloomery::{BloomView, CONSTRUCT_IMPLEMENT_COMMAND, VERIFY_CHECK_COMMAND};
+use aether_bloomery::{BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND};
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneScript};
 use lane::LaneHarness;
 
@@ -183,6 +184,52 @@ fn a_lane_that_exits_non_zero_without_evidence_fails_its_attempt() {
     let (mut harness, bloom) = rest_under(LaneMode::ExitsNonZero);
 
     assert!(bloom.members[0].wedge.is_some(), "a lane that died must reach the wedge counter");
+    harness.assert_live();
+}
+
+#[test]
+fn a_failing_aggregate_review_drives_a_repair_lap_that_resolves() {
+    // The mode #4730 called "review-finds-on-clean-tree" — today's death:
+    // an aggregate-review finding drives a repair lap whose second
+    // integration must resolve. Needs the fake-GitHub seam (#4732) because
+    // the aggregate line is behind Integrate→AggregateVerify→AggregateReview.
+    let mut harness = LaneHarness::start(&LaneScript::all_passing().then(REVIEW_CRITIC_COMMAND, LaneMode::Fail));
+
+    // First wait for at_rest to see the member line.
+    let bloom = harness.settle("aggregate repair at_rest", |bloom| {
+        bloom.members.first().is_some_and(|m| m.resolution.is_some() || m.wedge.is_some())
+    });
+    eprintln!("bloom status after at_rest: {:?}", bloom.status);
+    eprintln!("member wedge: {:?}", bloom.members[0].wedge);
+    let ledger = harness.ledger();
+    eprintln!("ledger: {:?}", ledger.iter().map(|r| (r.command.clone(), r.mode, r.nonce.clone())).collect::<Vec<_>>());
+    eprintln!("view: {:?}", harness.view());
+    // Dump outbox for debugging
+    {
+        let store_path = harness.store_path();
+        let conn =
+            rusqlite::Connection::open_with_flags(&store_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let mut stmt = conn.prepare("SELECT topic, sequence, hex(payload) FROM outbox ORDER BY sequence").unwrap();
+        let rows: Vec<(String, i64, String)> = stmt
+            .query_map([], |row| Ok((row.get(0).unwrap(), row.get(1).unwrap(), row.get(2).unwrap())))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        eprintln!("outbox rows: {:?}", rows.iter().map(|(t, s, _)| (t.clone(), *s)).collect::<Vec<_>>());
+        let mut stmt2 = conn.prepare("SELECT nonce, hex(bloom), workpiece FROM outstanding_orders").unwrap();
+        let outstanding: Vec<(String, String, String)> = stmt2
+            .query_map([], |row| Ok((row.get(0).unwrap(), row.get(1).unwrap(), row.get(2).unwrap())))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        eprintln!("outstanding_orders: {outstanding:?}");
+    }
+    // Now wait for the aggregate line to finish
+    let bloom2 = harness.settle("the bloom resolves after aggregate repair", |bloom| {
+        matches!(bloom.status, aether_bloomery::BloomStatus::Resolved | aether_bloomery::BloomStatus::Landed)
+    });
+    eprintln!("bloom2 status: {:?}", bloom2.status);
+    assert!(bloom2.members[0].wedge.is_none(), "aggregate finding within budget must not wedge");
     harness.assert_live();
 }
 

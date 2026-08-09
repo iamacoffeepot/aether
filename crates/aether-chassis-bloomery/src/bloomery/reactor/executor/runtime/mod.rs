@@ -1201,7 +1201,17 @@ impl NativeActor for ExecutorReactorCapability {
             "executor dispatch reactor mounted; polling the store for dispatch decisions",
         );
         // The push side resolves an admitted capture's commit through its own
-        // correspondence handle on the shared store (ADR-0152).
+        // correspondence handle on the shared store (ADR-0152). Fixture (#4732)
+        // uses the in-memory FakeGithub correspondence so the candidate push
+        // resolves without a SQLite store.
+        #[cfg(any(test, feature = "testing"))]
+        let correspondence = if config.uses_fixture() {
+            let fake = config.shared_fixture();
+            Arc::new(fake) as SharedCorrespondence
+        } else {
+            config.connect_correspondence().map_err(|e| BootError::Other(Box::new(e)))?
+        };
+        #[cfg(not(any(test, feature = "testing")))]
         let correspondence = config.connect_correspondence().map_err(|e| BootError::Other(Box::new(e)))?;
         Ok(ExecutorReactorState {
             executor: Some(executor),

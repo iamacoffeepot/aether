@@ -196,6 +196,7 @@ dependencies = [
  "aether-actor",
  "aether-bloomery",
  "aether-bloomery-github",
+ "aether-chassis-bloomery",
  "aether-codec",
  "aether-component",
  "aether-data",

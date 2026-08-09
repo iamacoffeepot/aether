@@ -17,9 +17,11 @@
 //! boot as an outbox-driven capability lands with the migration step 2
 //! executor/review bridge, when the outbox republish that feeds it exists.
 
-use std::sync::Arc;
+#[cfg(any(test, feature = "testing"))]
+use aether_bloomery_github::testing::FakeGithub;
+use std::sync::{Arc, OnceLock};
 
-use aether_bloomery::{LandingReceipt, ProjectionBackend, ViewDocument};
+use aether_bloomery::{Digest, LandingReceipt, ProjectionBackend, ViewDocument};
 use aether_bloomery_github::{GithubConfig, GithubError, GithubProjection, ReqwestGithub, SharedCorrespondence};
 
 use super::executor::DEFAULT_LANE_PROGRAM;
@@ -206,6 +208,13 @@ pub struct GithubMirrorConfig {
     /// misconfiguration, not a request to blend the two.
     #[config(env = "AETHER_BLOOMERY_OPERATOR_EMAIL", default = "")]
     pub operator_email: String,
+    /// Which GitHub implementation to use — `github` (default, real network) or
+    /// `fake` (in-memory double for the lane-boundary harness, #4732). Only
+    /// compiled in `cfg(test)` so prod's `config_manifest()` never advertises
+    /// `AETHER_GITHUB_BACKEND` and a prod binary never links `FakeGithub`.
+    #[cfg(any(test, feature = "testing"))]
+    #[config(env = "AETHER_GITHUB_BACKEND", default = "github")]
+    pub github_backend: String,
 }
 
 impl Default for GithubMirrorConfig {
@@ -234,6 +243,8 @@ impl Default for GithubMirrorConfig {
             artifacts_root: None,
             operator_name: String::new(),
             operator_email: String::new(),
+            #[cfg(any(test, feature = "testing"))]
+            github_backend: "github".to_owned(),
         }
     }
 }
@@ -249,6 +260,59 @@ impl GithubMirrorConfig {
             api_base: self.api_base.clone(),
             cas_land_enabled: self.cas_land_enabled,
         }
+    }
+
+    /// Whether this config selects the in-memory fixture — `AETHER_GITHUB_BACKEND=fixture` (alias `fake`).
+    /// Always false in prod so prod never links `FakeGithub`.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn uses_fixture(&self) -> bool {
+        self.github_backend == "fixture" || self.github_backend == "fake"
+    }
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    #[deprecated(note = "use uses_fixture")]
+    pub fn is_fake(&self) -> bool {
+        self.uses_fixture()
+    }
+    #[cfg(not(any(test, feature = "testing")))]
+    #[must_use]
+    pub fn uses_fixture(&self) -> bool {
+        false
+    }
+
+    /// Shared in-memory GitHub double for `fixture` backends (#4732). Only
+    /// available in `cfg(any(test, feature = "testing"))` so prod never links `FakeGithub`.
+    #[cfg(any(test, feature = "testing"))]
+    #[allow(clippy::absolute_paths)]
+    #[must_use]
+    pub fn shared_fixture(&self) -> FakeGithub {
+        static FAKE: OnceLock<FakeGithub> = OnceLock::new();
+        FAKE.get_or_init(|| {
+            let fake = FakeGithub::new();
+            let base = Digest::from_bytes([0xB0; 32]);
+            // Lane harness runs over a real scratch repo whose HEAD the harness
+            // records in SQLite; the forked coordinator's in-memory fixture must
+            // resolve the same 0xB0 digest to that real object so `git fetch`
+            // finds it. The harness passes the sha via env.
+            #[allow(clippy::disallowed_methods)]
+            if let Ok(sha) = std::env::var("AETHER_GITHUB_FIXTURE_BASE_SHA") {
+                fake.seed_correspondence(&base, &sha);
+                fake.seed_ref("heads/main", &sha);
+                return fake;
+            }
+            let base_commit = fake.seed_base_commit(&base);
+            fake.seed_ref_at("heads/main", &base_commit);
+            fake
+        })
+        .clone()
+    }
+    #[cfg(any(test, feature = "testing"))]
+    #[allow(clippy::absolute_paths)]
+    #[deprecated(note = "use shared_fixture")]
+    #[must_use]
+    pub fn shared_fake(&self) -> FakeGithub {
+        self.shared_fixture()
     }
 
     /// The connection knobs this config leaves empty, in the order an operator

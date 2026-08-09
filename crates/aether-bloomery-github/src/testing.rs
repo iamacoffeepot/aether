@@ -241,6 +241,14 @@ impl FakeGithub {
         sha
     }
 
+    /// Seed a commit at an explicit `sha` (for `b0b0…` base bootstrapping, #4732).
+    pub fn seed_commit_at(&self, sha: &str, tree_hex: &str) {
+        self.lock().commits.insert(
+            sha.to_owned(),
+            StoredCommit { tree: tree_hex.to_owned(), message: "seed".to_owned(), parents: Vec::new() },
+        );
+    }
+
     /// Seed a ref (`heads/…` form) pointing at `sha`.
     pub fn seed_ref(&self, name: &str, sha: &str) {
         self.lock().refs.insert(name.to_owned(), sha.to_owned());
@@ -606,7 +614,20 @@ fn merged_tree(base: &str, head: &str) -> String {
 
 impl Correspondence for FakeGithub {
     fn record(&self, digest: &Digest, git: &GitObjectId) -> Result<(), CorrespondenceError> {
-        self.lock().correspondence.insert(*digest.as_bytes(), git.clone());
+        let mut state = self.lock();
+        state.correspondence.insert(*digest.as_bytes(), git.clone());
+        // Fixture candidate capture (#4732): `LocalExecutor` records the
+        // candidate checkout digest → commit sha via this `Correspondence`
+        // store, but `integrate` later looks up the *commit object* itself
+        // (`GitDataApi::get_commit`) which consults `commits`, not
+        // `correspondence`. Seed a stub commit so the object exists.
+        let sha = git.to_hex();
+        #[allow(clippy::redundant_clone)]
+        if !state.commits.contains_key(&sha) {
+            state
+                .commits
+                .insert(sha.clone(), StoredCommit { tree: sha.clone(), message: String::new(), parents: Vec::new() });
+        }
         Ok(())
     }
 

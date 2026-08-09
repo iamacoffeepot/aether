@@ -414,8 +414,29 @@ impl NativeActor for SourceCapability {
         // there is no shared repository to hold claim refs in, so the claim
         // registry is off and the seal path leans on the store backstop. The
         // shell is still connected (it opens no network until driven) so a
-        // later-configured bin needs no re-mount.
+        // later-configured bin needs no re-mount. Fixture backend (#4732) needs
+        // no token and keeps claims enabled.
+        #[cfg(any(test, feature = "testing"))]
+        let claims_enabled =
+            config.uses_fixture() || !(config.token.is_empty() || config.owner.is_empty() || config.repo.is_empty());
+        #[cfg(not(any(test, feature = "testing")))]
         let claims_enabled = !(config.token.is_empty() || config.owner.is_empty() || config.repo.is_empty());
+        #[cfg(any(test, feature = "testing"))]
+        let shell = if config.uses_fixture() {
+            use aether_bloomery_github::{GitSource, SharedCorrespondence};
+            use std::sync::Arc;
+            let fake = config.shared_fixture();
+            let fake_for_git = fake.clone();
+            let correspondence: SharedCorrespondence = Arc::new(fake);
+            let git_source = GitSource::new(fake_for_git, Arc::clone(&correspondence), config.cas_land_enabled);
+            // Allow env var in fixture bootstrap (cargo-deny disallows std::env::var in lib)
+            #[allow(clippy::disallowed_methods, clippy::absolute_paths)]
+            let _ = std::env::var("AETHER_GITHUB_FIXTURE_BASE_SHA");
+            SourceShell::new_with_correspondence(Arc::new(git_source), correspondence)
+        } else {
+            SourceShell::connect(&config).map_err(|error| BootError::Other(Box::new(error)))?
+        };
+        #[cfg(not(any(test, feature = "testing")))]
         let shell = SourceShell::connect(&config).map_err(|error| BootError::Other(Box::new(error)))?;
         tracing::info!(
             target: "aether_chassis_bloomery::source",

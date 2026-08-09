@@ -31,7 +31,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
-use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, LaneWorkflows};
+use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, LaneWorkflows, SharedCorrespondence};
 
 use super::mirror::GithubMirrorConfig;
 
@@ -195,7 +195,29 @@ impl ExecutorShell {
     ///
     /// # Errors
     /// The underlying `reqwest` client could not be constructed.
+    #[allow(clippy::redundant_clone)]
     pub fn connect(config: &GithubMirrorConfig) -> Result<Self, GithubError> {
+        #[cfg(any(test, feature = "testing"))]
+        #[allow(clippy::redundant_clone)]
+        if config.uses_fixture() {
+            let fake = config.shared_fixture();
+            let actions = Arc::new(ActionsExecutor::new(
+                fake.clone(),
+                Arc::new(fake.clone()) as SharedCorrespondence,
+                LaneWorkflows {
+                    mechanical: config.executor_workflow_file.clone(),
+                    model: config.executor_model_workflow_file.clone(),
+                },
+                config.executor_dispatch_ref.clone(),
+            ));
+            if !config.local_lane_enabled {
+                return Ok(Self::new(actions));
+            }
+            #[allow(clippy::redundant_clone)]
+            let correspondence: SharedCorrespondence = Arc::new(fake.clone());
+            let local = Arc::new(LocalExecutor::from_config(config, correspondence));
+            return Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, config.local_lane_prefixes()))));
+        }
         let missing = config.missing_connection_knobs();
         if missing.is_empty() {
             let correspondence = config.connect_correspondence()?;
