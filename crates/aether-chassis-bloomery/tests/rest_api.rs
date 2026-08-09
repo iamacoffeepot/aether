@@ -16,9 +16,10 @@
 #![allow(clippy::format_collect)]
 #![allow(clippy::manual_assert)]
 
+mod common;
+
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
+use std::net::TcpStream;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,7 @@ use aether_bloomery::{
 };
 use aether_chassis_bloomery::api::{MemberProjection, SealRequest};
 use aether_chassis_bloomery::bloomery::{AdrTouch, Completeness};
+use common::{Coordinator, free_port};
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::Value;
 
@@ -152,27 +154,19 @@ fn owner_allowlist() -> String {
     format!("owner:{hex}")
 }
 
-/// Reserve a free localhost port by binding `:0`, then release it for the bin to
-/// claim (a small race the connect-retry loop tolerates).
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
-
 /// Fork the `bloomery` bin with the HTTP ingress and control core autoloaded,
-/// pointing the pre-seal approve gate at `policy_path` (#3583).
-fn spawn(http_port: u16, rpc_port: u16, policy_path: &str) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_bloomery"))
-        .env("AETHER_HTTP_PORT", http_port.to_string())
-        .env("AETHER_RPC_PORT", rpc_port.to_string())
-        .env("AETHER_STORE_PATH", ":memory:")
-        .env("AETHER_SIGNING_ALLOWLIST", owner_allowlist())
-        .env("AETHER_APPROVAL_POLICY_FILE", policy_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap()
+/// pointing the pre-seal approve gate at `policy_path` (#3583). Reaped when the
+/// returned guard drops.
+fn spawn(http_port: u16, rpc_port: u16, policy_path: &str) -> Coordinator {
+    Coordinator::spawn(
+        rpc_port,
+        &[
+            ("AETHER_HTTP_PORT", &http_port.to_string()),
+            ("AETHER_STORE_PATH", ":memory:"),
+            ("AETHER_SIGNING_ALLOWLIST", &owner_allowlist()),
+            ("AETHER_APPROVAL_POLICY_FILE", policy_path),
+        ],
+    )
 }
 
 /// One HTTP request over a fresh `Connection: close` socket; returns the status
@@ -309,139 +303,122 @@ fn assert_gate_fails_closed(http_port: u16, seal_path: &str) {
 fn rest_api_drives_a_bloom_end_to_end() {
     let http_port = free_port();
     let rpc_port = free_port();
-    // The gate loads this policy at init; kept alive for the child's lifetime.
+    // The gate loads this policy at init; kept alive for the coordinator's lifetime.
     let (_policy_dir, policy_path) = test_policy();
-    let mut child = spawn(http_port, rpc_port, &policy_path);
+    let _coordinator = spawn(http_port, rpc_port, &policy_path);
 
-    // Run the whole flow in a closure so a panic still reaps the child.
-    let result = std::panic::catch_unwind(|| {
-        // Routes register asynchronously; `/drafts` (an in-memory route) is the
-        // http-readiness signal.
-        wait_for_200(http_port, "/drafts");
+    // Routes register asynchronously; `/drafts` (an in-memory route) is the
+    // http-readiness signal.
+    wait_for_200(http_port, "/drafts");
 
-        // In-memory shaping: stage a workpiece and read it back.
-        let staged = Workpiece {
-            id: WorkpieceId("wp-1".to_owned()),
-            intent: Digest::from_bytes([2; 32]),
-            scope_revision: Digest::from_bytes([3; 32]),
-        };
-        let (status, workpiece) = send_json(http_port, "POST", "/workpieces", &serde_json::to_value(&staged).unwrap());
-        assert_eq!(status, 201, "stage workpiece");
-        assert_eq!(workpiece["id"], "wp-1");
-        let (_, listed) = get_json(http_port, "/workpieces");
-        assert_eq!(listed["workpieces"].as_array().unwrap().len(), 1);
+    // In-memory shaping: stage a workpiece and read it back.
+    let staged = Workpiece {
+        id: WorkpieceId("wp-1".to_owned()),
+        intent: Digest::from_bytes([2; 32]),
+        scope_revision: Digest::from_bytes([3; 32]),
+    };
+    let (status, workpiece) = send_json(http_port, "POST", "/workpieces", &serde_json::to_value(&staged).unwrap());
+    assert_eq!(status, 201, "stage workpiece");
+    assert_eq!(workpiece["id"], "wp-1");
+    let (_, listed) = get_json(http_port, "/workpieces");
+    assert_eq!(listed["workpieces"].as_array().unwrap().len(), 1);
 
-        // Open a draft, shape it into an admissible bloom, and read it back.
-        let (status, opened) = send_json(http_port, "POST", "/drafts", &Value::Null);
-        assert_eq!(status, 201, "open draft");
-        let draft_id = opened["draft_id"].as_str().unwrap().to_owned();
-        let patch = serde_json::to_value(valid_draft("wp-1")).unwrap();
-        let (status, patched) = send_json(http_port, "PATCH", &format!("/drafts/{draft_id}"), &patch);
-        assert_eq!(status, 200, "patch draft");
-        assert_eq!(patched["draft"]["proposals"].as_array().unwrap().len(), 1);
-        let (status, _) = get_json(http_port, &format!("/drafts/{draft_id}"));
-        assert_eq!(status, 200, "read draft");
+    // Open a draft, shape it into an admissible bloom, and read it back.
+    let (status, opened) = send_json(http_port, "POST", "/drafts", &Value::Null);
+    assert_eq!(status, 201, "open draft");
+    let draft_id = opened["draft_id"].as_str().unwrap().to_owned();
+    let patch = serde_json::to_value(valid_draft("wp-1")).unwrap();
+    let (status, patched) = send_json(http_port, "PATCH", &format!("/drafts/{draft_id}"), &patch);
+    assert_eq!(status, 200, "patch draft");
+    assert_eq!(patched["draft"]["proposals"].as_array().unwrap().len(), 1);
+    let (status, _) = get_json(http_port, &format!("/drafts/{draft_id}"));
+    assert_eq!(status, 200, "read draft");
 
-        // The control core answers queries once loaded + replayed — the write /
-        // live-read readiness signal.
-        wait_for_200(http_port, "/view");
+    // The control core answers queries once loaded + replayed — the write /
+    // live-read readiness signal.
+    wait_for_200(http_port, "/view");
 
-        // The pre-seal approve gate (#3583) fails closed at every branch — a
-        // missing projection, an incomplete one, and an above-auto surface each
-        // refuse the seal (422) before admit, so the draft is unchanged.
-        let seal_path = format!("/drafts/{draft_id}/seal");
-        assert_gate_fails_closed(http_port, &seal_path);
+    // The pre-seal approve gate (#3583) fails closed at every branch — a
+    // missing projection, an incomplete one, and an above-auto surface each
+    // refuse the seal (422) before admit, so the draft is unchanged.
+    let seal_path = format!("/drafts/{draft_id}/seal");
+    assert_gate_fails_closed(http_port, &seal_path);
 
-        // Auto surface + complete projection: the gate forms the approval and the
-        // seal admits. The outcome names the sealed bloom id (rendered as the
-        // BloomId digest's serde byte array; hex-encode it for the `{id}` route).
-        let (status, body) = try_http(
-            http_port,
-            "POST",
-            &seal_path,
-            Some(&serde_json::to_vec(&seal_body(vec![projection(&["docs/guide/x.md"], complete())])).unwrap()),
-        )
-        .unwrap();
-        let sealed: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(status, 200, "auto-tier seal admits: {sealed:?}");
-        let bloom_id = bloom_hex(&sealed["outcome"]["Sealed"]);
-        assert_eq!(bloom_id.len(), 64, "sealed bloom id is a 32-byte digest");
+    // Auto surface + complete projection: the gate forms the approval and the
+    // seal admits. The outcome names the sealed bloom id (rendered as the
+    // BloomId digest's serde byte array; hex-encode it for the `{id}` route).
+    let (status, body) = try_http(
+        http_port,
+        "POST",
+        &seal_path,
+        Some(&serde_json::to_vec(&seal_body(vec![projection(&["docs/guide/x.md"], complete())])).unwrap()),
+    )
+    .unwrap();
+    let sealed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, 200, "auto-tier seal admits: {sealed:?}");
+    let bloom_id = bloom_hex(&sealed["outcome"]["Sealed"]);
+    assert_eq!(bloom_id.len(), 64, "sealed bloom id is a 32-byte digest");
 
-        // The sealed bloom is live in the view document and its own view.
-        let (status, view) = get_json(http_port, "/view");
-        assert_eq!(status, 200, "view document");
-        assert_eq!(view["blooms"].as_array().unwrap().len(), 1, "one sealed bloom");
-        let (status, _) = get_json(http_port, &format!("/blooms/{bloom_id}"));
-        assert_eq!(status, 200, "single bloom view");
+    // The sealed bloom is live in the view document and its own view.
+    let (status, view) = get_json(http_port, "/view");
+    assert_eq!(status, 200, "view document");
+    assert_eq!(view["blooms"].as_array().unwrap().len(), 1, "one sealed bloom");
+    let (status, _) = get_json(http_port, &format!("/blooms/{bloom_id}"));
+    assert_eq!(status, 200, "single bloom view");
 
-        // The seal was journaled.
-        let (status, journal) = get_json(http_port, "/journal");
-        assert_eq!(status, 200, "journal");
-        assert_eq!(journal["records"].as_array().unwrap().len(), 1, "one journaled event");
+    // The seal was journaled.
+    let (status, journal) = get_json(http_port, "/journal");
+    assert_eq!(status, 200, "journal");
+    assert_eq!(journal["records"].as_array().unwrap().len(), 1, "one journaled event");
 
-        // A missing artifact is a clean 404, not a hang.
-        let (status, _) = try_http(http_port, "GET", &format!("/artifacts/{}", "0".repeat(64)), None).unwrap();
-        assert_eq!(status, 404, "missing artifact");
+    // A missing artifact is a clean 404, not a hang.
+    let (status, _) = try_http(http_port, "GET", &format!("/artifacts/{}", "0".repeat(64)), None).unwrap();
+    assert_eq!(status, 404, "missing artifact");
 
-        // The answer route (ADR-0151). A malformed statement body is a clean 400,
-        // not a panic; a malformed bloom id is a 400.
-        let (status, _) =
-            try_http(http_port, "POST", &format!("/blooms/{bloom_id}/answer"), Some(b"not a statement")).unwrap();
-        assert_eq!(status, 400, "malformed answer body");
-        let (status, _) = try_http(http_port, "POST", "/blooms/xyz/answer", Some(b"{}")).unwrap();
-        assert_eq!(status, 400, "malformed bloom id");
+    // The answer route (ADR-0151). A malformed statement body is a clean 400,
+    // not a panic; a malformed bloom id is a 400.
+    let (status, _) =
+        try_http(http_port, "POST", &format!("/blooms/{bloom_id}/answer"), Some(b"not a statement")).unwrap();
+    assert_eq!(status, 400, "malformed answer body");
+    let (status, _) = try_http(http_port, "POST", "/blooms/xyz/answer", Some(b"{}")).unwrap();
+    assert_eq!(status, 400, "malformed bloom id");
 
-        // An author-signed answer whose signature does NOT verify against the
-        // configured allowlist is rejected at the gate — a 400, never admitted.
-        // The signature is empty (not a 64-byte ed25519 signature), so the real
-        // provider refuses it where the fake always-valid provider would have
-        // admitted it.
-        let words = b"answer: choose A".to_vec();
-        let unsigned = Statement {
-            words: words.clone(),
-            provenance: Provenance::AuthorSignature(SignatureEnvelope {
-                signer: KeyId("owner".to_owned()),
-                signature: vec![],
-            }),
-            parents: vec![Digest::from_bytes([222; 32])],
-        };
-        let (status, _) = send_json(
-            http_port,
-            "POST",
-            &format!("/blooms/{bloom_id}/answer"),
-            &serde_json::to_value(&unsigned).unwrap(),
-        );
-        assert_eq!(status, 400, "an answer with an unverifiable signature is rejected at the gate");
+    // An author-signed answer whose signature does NOT verify against the
+    // configured allowlist is rejected at the gate — a 400, never admitted.
+    // The signature is empty (not a 64-byte ed25519 signature), so the real
+    // provider refuses it where the fake always-valid provider would have
+    // admitted it.
+    let words = b"answer: choose A".to_vec();
+    let unsigned = Statement {
+        words: words.clone(),
+        provenance: Provenance::AuthorSignature(SignatureEnvelope {
+            signer: KeyId("owner".to_owned()),
+            signature: vec![],
+        }),
+        parents: vec![Digest::from_bytes([222; 32])],
+    };
+    let (status, _) =
+        send_json(http_port, "POST", &format!("/blooms/{bloom_id}/answer"), &serde_json::to_value(&unsigned).unwrap());
+    assert_eq!(status, 400, "an answer with an unverifiable signature is rejected at the gate");
 
-        // A genuine author signature by the allowlisted `owner` verifies and
-        // admits; adopting no held question reduces to a clean rejection outcome
-        // — the sealed bloom carries no parked hold — 200 carrying the reducer's
-        // refusal, mirroring how seal rejections surface. This is the real
-        // custody path: the answer verified against the host-local allowlist, not
-        // the retired always-valid stub.
-        let answer = Statement {
-            words: words.clone(),
-            provenance: Provenance::AuthorSignature(SignatureEnvelope {
-                signer: KeyId("owner".to_owned()),
-                signature: owner_signing_key().sign(&words).to_bytes().to_vec(),
-            }),
-            parents: vec![Digest::from_bytes([222; 32])],
-        };
-        let (status, answered) = send_json(
-            http_port,
-            "POST",
-            &format!("/blooms/{bloom_id}/answer"),
-            &serde_json::to_value(&answer).unwrap(),
-        );
-        assert_eq!(status, 200, "answer admitted: {answered:?}");
-        assert_eq!(answered["outcome"]["AdoptAnswerRejected"], "NoMatchingHold", "no parked hold to adopt");
-    });
-
-    let _ = child.kill();
-    let _ = child.wait();
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
+    // A genuine author signature by the allowlisted `owner` verifies and
+    // admits; adopting no held question reduces to a clean rejection outcome
+    // — the sealed bloom carries no parked hold — 200 carrying the reducer's
+    // refusal, mirroring how seal rejections surface. This is the real
+    // custody path: the answer verified against the host-local allowlist, not
+    // the retired always-valid stub.
+    let answer = Statement {
+        words: words.clone(),
+        provenance: Provenance::AuthorSignature(SignatureEnvelope {
+            signer: KeyId("owner".to_owned()),
+            signature: owner_signing_key().sign(&words).to_bytes().to_vec(),
+        }),
+        parents: vec![Digest::from_bytes([222; 32])],
+    };
+    let (status, answered) =
+        send_json(http_port, "POST", &format!("/blooms/{bloom_id}/answer"), &serde_json::to_value(&answer).unwrap());
+    assert_eq!(status, 200, "answer admitted: {answered:?}");
+    assert_eq!(answered["outcome"]["AdoptAnswerRejected"], "NoMatchingHold", "no parked hold to adopt");
 }
 
 /// The above-auto deferred-verify seal path (#3599): an above-auto member whose
@@ -467,25 +444,17 @@ fn mixed_auto_and_above_auto_seal_admits_when_verified() {
 }
 
 /// Boot the `bloomery` bin, wait for both readiness signals (`/drafts` for the
-/// HTTP router, `/view` for the live control core), run `body` against its HTTP
-/// port inside a panic guard, then reap the child.
-fn run_with_bloomery(_label: &str, body: impl FnOnce(u16) + std::panic::UnwindSafe) {
+/// HTTP router, `/view` for the live control core), then run `body` against its
+/// HTTP port. The coordinator is reaped when this returns, panic or not.
+fn run_with_bloomery(_label: &str, body: impl FnOnce(u16)) {
     let http_port = free_port();
     let rpc_port = free_port();
     let (_policy_dir, policy_path) = test_policy();
-    let mut child = spawn(http_port, rpc_port, &policy_path);
+    let _coordinator = spawn(http_port, rpc_port, &policy_path);
 
-    let result = std::panic::catch_unwind(|| {
-        wait_for_200(http_port, "/drafts");
-        wait_for_200(http_port, "/view");
-        body(http_port);
-    });
-
-    let _ = child.kill();
-    let _ = child.wait();
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
+    wait_for_200(http_port, "/drafts");
+    wait_for_200(http_port, "/view");
+    body(http_port);
 }
 
 /// Cases (a/b/c) of the deferred-verify seal on a single above-auto member
@@ -616,55 +585,43 @@ fn authoring_a_config_stores_it_under_a_stable_content_address() {
     let http_port = free_port();
     let rpc_port = free_port();
     let (_policy_dir, policy_path) = test_policy();
-    let mut child = spawn(http_port, rpc_port, &policy_path);
+    let _coordinator = spawn(http_port, rpc_port, &policy_path);
 
-    let result = std::panic::catch_unwind(|| {
-        wait_for_200(http_port, "/drafts");
+    wait_for_200(http_port, "/drafts");
 
-        let request = |value: Value| serde_json::json!({ "kind": "aether.store.drain_outbox", "value": value });
+    let request = |value: Value| serde_json::json!({ "kind": "aether.store.drain_outbox", "value": value });
 
-        let (status, authored) =
-            send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": "construct" })));
-        assert_eq!(status, 200, "authoring answers only once the store write lands");
-        assert!(
-            authored["digest"].as_array().is_some_and(|bytes| bytes.len() == 32),
-            "the reply names a 32-byte address"
-        );
-        assert_eq!(authored["kind"], "aether.store.drain_outbox", "the reply names the key a registry seals under");
-        let digest = authored["digest"].clone();
+    let (status, authored) =
+        send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": "construct" })));
+    assert_eq!(status, 200, "authoring answers only once the store write lands");
+    assert!(authored["digest"].as_array().is_some_and(|bytes| bytes.len() == 32), "the reply names a 32-byte address");
+    assert_eq!(authored["kind"], "aether.store.drain_outbox", "the reply names the key a registry seals under");
+    let digest = authored["digest"].clone();
 
-        // Idempotent by content addressing: re-authoring rewrites the same row
-        // rather than creating a second address a seal would have to choose
-        // between.
-        let (status, again) =
-            send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": "construct" })));
-        assert_eq!(status, 200);
-        assert_eq!(again["digest"], digest, "the same content under the same kind keeps its address");
+    // Idempotent by content addressing: re-authoring rewrites the same row
+    // rather than creating a second address a seal would have to choose
+    // between.
+    let (status, again) =
+        send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": "construct" })));
+    assert_eq!(status, 200);
+    assert_eq!(again["digest"], digest, "the same content under the same kind keeps its address");
 
-        let (status, other) =
-            send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": "refine" })));
-        assert_eq!(status, 200);
-        assert_ne!(other["digest"], digest, "changed content changes the address");
+    let (status, other) = send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": "refine" })));
+    assert_eq!(status, 200);
+    assert_ne!(other["digest"], digest, "changed content changes the address");
 
-        // A kind this binary does not carry is a client error, not a server one:
-        // the vocabulary is fixed at build time, so no retry helps.
-        let (status, _) = send_json(
-            http_port,
-            "POST",
-            "/configs",
-            &serde_json::json!({ "kind": "aether.bloomery.no_such_config", "value": {} }),
-        );
-        assert_eq!(status, 400, "an unknown kind is refused before any write");
+    // A kind this binary does not carry is a client error, not a server one:
+    // the vocabulary is fixed at build time, so no retry helps.
+    let (status, _) = send_json(
+        http_port,
+        "POST",
+        "/configs",
+        &serde_json::json!({ "kind": "aether.bloomery.no_such_config", "value": {} }),
+    );
+    assert_eq!(status, 400, "an unknown kind is refused before any write");
 
-        // A value that does not fit the kind's schema is refused inline too, so a
-        // typo cannot reach the store as bytes that will not decode at dispatch.
-        let (status, _) = send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": 7 })));
-        assert_eq!(status, 400, "a value that does not match the schema is refused before any write");
-    });
-
-    let _ = child.kill();
-    let _ = child.wait();
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
+    // A value that does not fit the kind's schema is refused inline too, so a
+    // typo cannot reach the store as bytes that will not decode at dispatch.
+    let (status, _) = send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": 7 })));
+    assert_eq!(status, 400, "a value that does not match the schema is refused before any write");
 }

@@ -25,8 +25,9 @@
 // permitted here per the clippy.toml test carve-out.
 #![allow(clippy::disallowed_methods)]
 
-use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
+mod common;
+
+use std::net::TcpStream;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,28 +41,13 @@ use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 use aether_rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
+use common::{Coordinator, free_port};
 use serde::Serialize;
 
-/// Reserve a free localhost port by binding `:0`, then release it for the bin to
-/// claim. A small race window, tolerated by the connect retry loop.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
-
-/// Fork the `bloomery` bin against `db` on `port`. The bin now also binds a
-/// default REST control-API port (#3498), so hand it a free HTTP port too — a
-/// fixed default would collide across the suite's concurrently-spawned bins.
-fn spawn(port: u16, db: &str) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_bloomery"))
-        .env("AETHER_RPC_PORT", port.to_string())
-        .env("AETHER_HTTP_PORT", free_port().to_string())
-        .env("AETHER_STORE_PATH", db)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap()
+/// Fork the `bloomery` bin against `db` on `port`, reaped when the returned
+/// guard drops.
+fn spawn(port: u16, db: &str) -> Coordinator {
+    Coordinator::spawn(port, &[("AETHER_STORE_PATH", db)])
 }
 
 /// Connect to the bin, retrying until it has bound its RPC port.
@@ -255,12 +241,6 @@ fn query_until_blooms(stream: &mut TcpStream, cid_base: u64, control: MailboxId,
     }
 }
 
-/// Terminate a child with SIGKILL (`Child::kill` is SIGKILL on unix) and reap it.
-fn kill9(mut child: Child) {
-    child.kill().unwrap();
-    child.wait().unwrap();
-}
-
 #[test]
 fn control_loop_converges_through_the_reducer_across_a_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -270,7 +250,7 @@ fn control_loop_converges_through_the_reducer_across_a_restart() {
     // First boot: load the control core and seal a synthetic bloom through the
     // admit ingress — the reducer decides, the combined commit persists.
     let port = free_port();
-    let child = spawn(port, db);
+    let coordinator = spawn(port, db);
     let mut stream = connect(port);
     handshake(&mut stream);
 
@@ -280,12 +260,12 @@ fn control_loop_converges_through_the_reducer_across_a_restart() {
 
     // Crash: SIGKILL after the committed admit.
     drop(stream);
-    kill9(child);
+    coordinator.kill9();
 
     // Restart against the same database and reload the control core; its `wire`
     // replays the journal to rebuild the snapshot.
     let port = free_port();
-    let child = spawn(port, db);
+    let _coordinator = spawn(port, db);
     let mut stream = connect(port);
     handshake(&mut stream);
     let control = control_mailbox();
@@ -302,9 +282,6 @@ fn control_loop_converges_through_the_reducer_across_a_restart() {
     // just the raw store.
     let second = admit(&mut stream, 20, control, &seal_event("seal-2", 5, "wp"));
     assert!(matches!(second, Outcome::SealRejected(_)), "the overlapping seal is refused: {second:?}");
-
-    drop(stream);
-    kill9(child);
 }
 
 #[test]
@@ -314,7 +291,7 @@ fn concurrent_same_key_admits_each_get_a_coherent_ok() {
     let db = db.to_str().unwrap();
 
     let port = free_port();
-    let child = spawn(port, db);
+    let _coordinator = spawn(port, db);
     let mut stream = connect(port);
     handshake(&mut stream);
     let control = control_mailbox();
@@ -345,9 +322,6 @@ fn concurrent_same_key_admits_each_get_a_coherent_ok() {
     // second admit opened no second commit and forced no double-apply.
     let document = query_until_blooms(&mut stream, 10, control, 1);
     assert_eq!(document.blooms.len(), 1, "one bloom from the deduped same-key admit pair: {:?}", document.blooms);
-
-    drop(stream);
-    kill9(child);
 }
 
 /// Author a configuration straight to the store, exactly as the api cap's
@@ -380,7 +354,7 @@ fn a_seal_naming_a_configuration_authored_after_boot_still_admits() {
     let db = db.to_str().unwrap();
 
     let port = free_port();
-    let child = spawn(port, db);
+    let _coordinator = spawn(port, db);
     let mut stream = connect(port);
     handshake(&mut stream);
     let control = control_mailbox();
@@ -409,7 +383,4 @@ fn a_seal_naming_a_configuration_authored_after_boot_still_admits() {
         ),
         "an address nothing authored is refused, naming its kind: {refused:?}",
     );
-
-    drop(stream);
-    kill9(child);
 }
