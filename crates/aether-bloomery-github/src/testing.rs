@@ -106,6 +106,11 @@ struct State {
     next_comment: u64,
     issues: Vec<StoredIssue>,
     comments: Vec<StoredComment>,
+    /// How many times the repository-wide `find_issue` list-and-scan was
+    /// invoked. The projection's new design never calls it, so a test can
+    /// assert this stays zero — the latency that let a 5-second poll lap a
+    /// single projection.
+    find_issue_calls: usize,
     // The git object store the source port drives: ref name (`heads/…`) → sha,
     // and commit sha → tree sha. Trees themselves are opaque shas the port
     // treats as digest-addressed handles, so they need no separate store.
@@ -182,6 +187,33 @@ impl FakeGithub {
     #[must_use]
     pub fn issue_body(&self, number: u64) -> Option<String> {
         self.lock().issues.iter().find(|issue| issue.number == number).map(|issue| issue.body.clone())
+    }
+
+    /// How many times `find_issue` has been called.
+    #[must_use]
+    pub fn find_issue_calls(&self) -> usize {
+        self.lock().find_issue_calls
+    }
+
+    /// Seed an issue with the given `number` and `body`. The fake's direct
+    /// seeding path the projection's source-issue home uses: the issue already
+    /// exists in the repository, so the projection comments on it rather than
+    /// opening a shadow issue.
+    pub fn seed_issue(&self, number: u64, body: &str) {
+        let mut state = self.lock();
+        if state.issues.iter().any(|issue| issue.number == number) {
+            return;
+        }
+        state.issues.push(StoredIssue { number, title: format!("Issue {number}"), body: body.to_owned() });
+        if number > state.next_issue {
+            state.next_issue = number;
+        }
+    }
+
+    /// The comments on issue `number`, in creation order.
+    #[must_use]
+    pub fn comments_for(&self, issue_number: u64) -> Vec<String> {
+        self.lock().comments.iter().filter(|c| c.issue_number == issue_number).map(|c| c.body.clone()).collect()
     }
 
     /// Delete issue `number` and its comments — an operator removing a
@@ -740,8 +772,20 @@ impl PullRequestApi for FakeGithub {
 }
 
 impl GithubApi for FakeGithub {
-    fn find_issue(&self, key: &str) -> Result<Option<Issue>, GithubError> {
+    fn get_issue(&self, number: u64) -> Result<Option<Issue>, GithubError> {
         let state = self.lock();
+        Ok(state.issues.iter().find(|issue| issue.number == number).map(|issue| Issue {
+            number: issue.number,
+            title: issue.title.clone(),
+            body: issue.body.clone(),
+            marker: parse_marker(&issue.body),
+        }))
+    }
+
+    fn find_issue(&self, key: &str) -> Result<Option<Issue>, GithubError> {
+        let mut state = self.lock();
+        state.find_issue_calls += 1;
+        // Hold the count while searching; the guard stays live for the scan.
         Ok(state.issues.iter().find_map(|issue| {
             let marker = parse_marker(&issue.body);
             match &marker {

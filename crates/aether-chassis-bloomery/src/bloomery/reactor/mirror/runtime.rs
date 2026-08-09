@@ -331,8 +331,8 @@ mod tests {
     use std::time::Duration;
 
     use aether_bloomery::{
-        BloomDraft, BloomId, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey,
-        LandingReceipt, Membership, ResolvedConfigs, Snapshot, Topic, WorkpieceId, reduce, view_of,
+        BloomDraft, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandingReceipt,
+        Membership, ResolvedConfigs, Snapshot, Topic, WorkpieceId, reduce, view_of,
     };
     use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
     use aether_data::wire::{from_bytes, to_vec};
@@ -375,12 +375,12 @@ mod tests {
 
     /// A sealed single-member bloom's view document, encoded as the outbox
     /// payload the producer enqueues (the real journal-then-reduce-then-view
-    /// path, not a hand-built value). One member → one umbrella issue plus one
-    /// workpiece issue when reconciled.
+    /// path, not a hand-built value). One member → comments on its source
+    /// issue and the landing PR when reconciled, no new issue.
     fn encoded_view() -> Vec<u8> {
         let scope_revision = digest(10);
         let mut member = Membership {
-            workpiece: WorkpieceId("reactor-core".into()),
+            workpiece: WorkpieceId("issue-1".into()),
             scope_revision,
             configs: ConfigRegistry::default(),
             approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
@@ -403,6 +403,24 @@ mod tests {
         to_vec(&view_of(&snapshot, |_| None)).unwrap()
     }
 
+    fn seed_source_and_pr_for_view(fake: &FakeGithub, view_bytes: &[u8]) {
+        use aether_bloomery::ViewDocument;
+        use aether_bloomery_github::{NewPullRequest, PullRequestApi, short_hex};
+        let view: ViewDocument = from_bytes(view_bytes).unwrap();
+        if let Some(bloom) = view.blooms.first() {
+            fake.seed_issue(1, "source issue 1");
+            let branch = format!("bloom/{}/landing", short_hex(&bloom.id.0));
+            let sha = fake.seed_commit("tree");
+            fake.seed_ref(&format!("heads/{branch}"), &sha);
+            let _ = fake.create_pull_request(&NewPullRequest {
+                title: format!("land {}", short_hex(&bloom.id.0)),
+                body: String::new(),
+                head: branch,
+                base: "main".into(),
+            });
+        }
+    }
+
     #[test]
     fn drains_projects_and_acks_its_topic_then_republishes_on_restart() {
         let dir = tempfile::tempdir().unwrap();
@@ -411,6 +429,8 @@ mod tests {
 
         let fake = FakeGithub::new();
         let shell = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
+        // Seed the source issue and landing PR the view will comment on
+        seed_source_and_pr_for_view(&fake, &encoded_view());
 
         // Phase 1 — steady projection: enqueue a view document, drain its topic,
         // project it, and ack the delivered prefix.
@@ -422,7 +442,8 @@ mod tests {
             assert_eq!(entries.len(), 1, "the enqueued view is drainable on its topic");
 
             let acks = project_batch(&shell, &entries);
-            assert_eq!(fake.issue_count(), 2, "the carbon copy: one umbrella issue plus one workpiece issue");
+            assert_eq!(fake.issue_count(), 1, "no new issue — projection lands on existing source issue + PR");
+            assert!(fake.comment_count() >= 2, "approval on source issue + bloom aggregate on PR");
             assert_eq!(acks.len(), 1);
             assert!(
                 acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::ViewDocument),
@@ -451,7 +472,7 @@ mod tests {
             assert_eq!(republished.len(), 1, "the unacked entry survived the restart and re-drains");
 
             let acks = project_batch(&shell, &republished);
-            assert_eq!(fake.issue_count(), 2, "idempotent reconcile converges to the same carbon copy");
+            assert_eq!(fake.issue_count(), 1, "idempotent reconcile converges to same source issue + PR");
             assert_eq!(acks.len(), 1);
 
             restarted.ack_outbox(acks[0].topic.as_deref(), acks[0].through_sequence).unwrap();
@@ -462,22 +483,30 @@ mod tests {
     fn a_landing_receipt_projects_a_comment_on_its_topic() {
         // ADR-0149 migration step 3: a gate-enabled land emits a `LandingReceipt`
         // the control actor enqueues under the receipt topic, which the mirror
-        // reactor drains and projects as a comment on the bloom's umbrella issue.
-        // This pins the receipt path — and that the reactor topic matches the
-        // producer's, the mismatch step 3 reconciled (a stranded receipt would
-        // drain nothing and project no comment).
+        // reactor drains and projects as a comment on the bloom's landing PR
+        // (and its source issues). This pins the receipt path — and that the
+        // reactor topic matches the producer's, the mismatch step 3 reconciled
+        // (a stranded receipt would drain nothing and project no comment).
         let fake = FakeGithub::new();
+        let view_bytes = encoded_view();
+        let view: aether_bloomery::ViewDocument = from_bytes(&view_bytes).unwrap();
+        let bloom_id = view.blooms[0].id;
+        // Seed source issue and landing PR so the projection has homes for its comments.
+        seed_source_and_pr_for_view(&fake, &view_bytes);
         let shell = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
+        // Populate the receipt cache so the later receipt fan-out knows the source issue.
+        shell.reconcile_view(&view).unwrap();
         let mut store = SqliteStore::open(":memory:").unwrap();
 
-        let receipt = LandingReceipt { bloom: BloomId(digest(1)), previous_base: digest(10), new_head: digest(20) };
+        let receipt = LandingReceipt { bloom: bloom_id, previous_base: digest(10), new_head: digest(20) };
         store.enqueue_topic(Topic::LandingReceipt, &to_vec(&receipt).unwrap()).unwrap();
 
         let entries = store.drain_topic(Topic::LandingReceipt).unwrap();
         assert_eq!(entries.len(), 1, "the enqueued receipt is drainable on the receipt topic");
 
+        let before = fake.comment_count();
         let acks = project_batch(&shell, &entries);
-        assert_eq!(fake.comment_count(), 1, "the receipt projects one landing comment on the umbrella issue");
+        assert!(fake.comment_count() > before, "the receipt projects landing comments on PR and source issues");
         assert_eq!(acks.len(), 1);
         assert!(
             acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::LandingReceipt),
@@ -516,6 +545,23 @@ mod tests {
         expected.sort();
         assert_eq!(drained_topics, expected, "each owned projection topic is drained, scoped by topic");
 
+        // Seed source issue and landing PR before the worker projects.
+        {
+            use aether_bloomery_github::{NewPullRequest, PullRequestApi};
+            let view_bytes = encoded_view();
+            let view: aether_bloomery::ViewDocument = from_bytes(&view_bytes).unwrap();
+            let bloom_id = view.blooms[0].id;
+            fake.seed_issue(1, "source");
+            let branch = format!("bloom/{}/landing", aether_bloomery_github::short_hex(&bloom_id.0));
+            let sha = fake.seed_commit("tree");
+            fake.seed_ref(&format!("heads/{branch}"), &sha);
+            let _ = fake.create_pull_request(&NewPullRequest {
+                title: format!("land {}", aether_bloomery_github::short_hex(&bloom_id.0)),
+                body: String::new(),
+                head: branch,
+                base: "main".into(),
+            });
+        }
         // on_drain_result projects the entry and — on success — the detached
         // worker acks the delivered prefix. The ack landing on egress proves the
         // worker ran (it sends the ack only after the reconcile returns Ok).
@@ -530,7 +576,7 @@ mod tests {
             );
         }
         let acks = collect_sends::<AckOutbox>(&rx, 1);
-        assert_eq!(fake.issue_count(), 2, "the worker reconciled the carbon copy before acking");
+        assert_eq!(fake.issue_count(), 1, "worker reconciled on existing issue + PR, no new issue");
         assert!(
             acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::ViewDocument),
             "the ack covers the view-document topic",

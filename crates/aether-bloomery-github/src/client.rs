@@ -237,6 +237,15 @@ pub trait GithubApi {
     /// The projection surface is unreachable or returned an error status.
     fn find_issue(&self, key: &str) -> Result<Option<Issue>, GithubError>;
 
+    /// Fetch issue `number`, or `None` if it does not exist — a clean 404 is
+    /// `Ok(None)`, not an error, matching [`GitDataApi::get_ref`]. The direct
+    /// lookup the projection uses to verify a source issue exists without
+    /// scanning the repository issue list.
+    ///
+    /// # Errors
+    /// A transport fault or a non-404 error status.
+    fn get_issue(&self, number: u64) -> Result<Option<Issue>, GithubError>;
+
     /// Open a new issue.
     ///
     /// # Errors
@@ -604,6 +613,7 @@ impl ReqwestTransport {
             .user_agent("aether-bloomery-github")
             .connect_timeout(connect)
             .timeout(total)
+            .no_proxy()
             .build()
             .map_err(|error| GithubError::Transport(error.to_string()))?;
         Ok(Self { client })
@@ -1139,6 +1149,20 @@ fn decode<D: for<'de> Deserialize<'de>>(response: &HttpResponse) -> Result<D, Gi
 }
 
 impl<T: HttpTransport> GithubApi for ReqwestGithub<T> {
+    fn get_issue(&self, number: u64) -> Result<Option<Issue>, GithubError> {
+        let Some(response) = self.request_opt(Method::Get, format!("{}/{number}", self.issues_url()))? else {
+            return Ok(None);
+        };
+        let gh: GhIssue = decode(&response)?;
+        // The issues endpoint also returns pull requests; a direct fetch of a
+        // PR number would decode a `pull_request` field, but the projection's
+        // source-issue lookup treats any object at that number as its home —
+        // a PR number is still the same underlying issue number space.
+        let body = gh.body.unwrap_or_default();
+        let marker = parse_marker(&body);
+        Ok(Some(Issue { number: gh.number, title: gh.title, body, marker }))
+    }
+
     fn find_issue(&self, key: &str) -> Result<Option<Issue>, GithubError> {
         // No search-by-external-metadata endpoint exists, so list-and-scan.
         // The shadow repo's issue set is small; the page cap bounds the walk.
