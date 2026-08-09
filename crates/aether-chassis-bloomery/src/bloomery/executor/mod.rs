@@ -31,7 +31,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
-use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, LaneWorkflows, SharedCorrespondence};
+#[cfg(any(test, feature = "testing"))]
+use aether_bloomery_github::SharedCorrespondence;
+use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, LaneWorkflows};
 
 use super::mirror::GithubMirrorConfig;
 

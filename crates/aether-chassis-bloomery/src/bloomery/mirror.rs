@@ -1,4 +1,3 @@
-#![allow(clippy::absolute_paths)]
 //! The outward-mirror cap shell (#3459 step 7).
 //!
 //! The host mounts the `aether-bloomery-github` projection backend behind a
@@ -18,14 +17,22 @@
 //! boot as an outbox-driven capability lands with the migration step 2
 //! executor/review bridge, when the outbox republish that feeds it exists.
 
+use std::sync::Arc;
+#[cfg(any(test, feature = "testing"))]
+use std::sync::OnceLock;
+
+#[cfg(any(test, feature = "testing"))]
+use aether_bloomery::Digest;
+use aether_bloomery::{LandingReceipt, ProjectionBackend, ViewDocument};
+#[cfg(any(test, feature = "testing"))]
+use aether_bloomery_github::GitSource;
 #[cfg(any(test, feature = "testing"))]
 use aether_bloomery_github::testing::FakeGithub;
-use std::sync::{Arc, OnceLock};
-
-use aether_bloomery::{Digest, LandingReceipt, ProjectionBackend, ViewDocument};
 use aether_bloomery_github::{GithubConfig, GithubError, GithubProjection, ReqwestGithub, SharedCorrespondence};
 
 use super::executor::DEFAULT_LANE_PROGRAM;
+#[cfg(any(test, feature = "testing"))]
+use super::source::SourceShell;
 use crate::app_auth::AppTokenSource;
 use crate::store::SqliteCorrespondence;
 
@@ -209,21 +216,41 @@ pub struct GithubMirrorConfig {
     /// misconfiguration, not a request to blend the two.
     #[config(env = "AETHER_BLOOMERY_OPERATOR_EMAIL", default = "")]
     pub operator_email: String,
-    /// Which GitHub implementation to use — `github` (default, real network) or
-    /// `fake` (in-memory double for the lane-boundary harness, #4732). Only
-    /// compiled in `cfg(test)` so prod's `config_manifest()` never advertises
-    /// `AETHER_GITHUB_BACKEND` and a prod binary never links `FakeGithub`.
+    /// Which GitHub implementation to mount — `github` (the default, the real
+    /// network) or `fixture` (the in-memory double the lane-boundary harness
+    /// drives, #4732). Compiled only under `cfg(any(test, feature =
+    /// "testing"))`, so a production `config_manifest()` never advertises
+    /// `AETHER_GITHUB_BACKEND` and a production binary never links
+    /// `FakeGithub`.
     #[cfg(any(test, feature = "testing"))]
     #[config(env = "AETHER_GITHUB_BACKEND", default = "github")]
     pub github_backend: String,
-    /// The real git sha that the `0xB0` digest corresponds to in the scratch
-    /// repo — the harness records the scratch HEAD in `SQLite` and the forked
-    /// coordinator's fixture must resolve the same digest so `git fetch` finds
-    /// it. Only available in `cfg(test)` so prod never links `FakeGithub`.
+    /// The commit the fixture's base digest names, as a git sha.
+    ///
+    /// The harness seals against a repository the coordinator can actually
+    /// check out, and records that correspondence in the store it hands over;
+    /// the fixture has to agree, or the first dispatch resolves its checkout to
+    /// an object no `git worktree add` can find. Set it and the fixture also
+    /// mints its own commits in that repository — see
+    /// [`shared_fixture`](Self::shared_fixture).
+    ///
+    /// Cfg-gated beside [`github_backend`](Self::github_backend), for the same
+    /// reason.
     #[cfg(any(test, feature = "testing"))]
     #[config(env = "AETHER_GITHUB_FIXTURE_BASE_SHA", default = "")]
     pub fixture_base_sha: String,
 }
+
+/// The repository a fixture-backed coordinator mints its git objects in: its
+/// own working directory.
+///
+/// Not a knob, because it is not a choice. The dispatch path shells git with no
+/// `-C` — `git worktree add` and the subject fetch both resolve against the
+/// coordinator's process working directory — so that directory *is* the
+/// repository the coordinator works in, and a fixture minting anywhere else
+/// would produce folds its own lanes could not check out.
+#[cfg(any(test, feature = "testing"))]
+const COORDINATOR_REPO: &str = ".";
 
 impl Default for GithubMirrorConfig {
     fn default() -> Self {
@@ -285,63 +312,49 @@ impl GithubMirrorConfig {
         false
     }
 
-    /// Shared in-memory GitHub double for `fixture` backends (#4732). Only
-    /// available in `cfg(any(test, feature = "testing"))` so prod never links `FakeGithub`.
-    /// The `OnceLock` is per-process, which is correct for the forked
-    /// `bloomery` coordinator (one process per lane test). Unit tests that run
-    /// in the same `cargo test` process and call this with different base shas
-    /// would see the first one's base; they don't use this helper — they
-    /// construct `FakeGithub::new()` directly.
+    /// The one in-memory GitHub every reactor in this process mounts against,
+    /// for `fixture` backends (#4732).
+    ///
+    /// Process-global on purpose: mirror, integrate, land, source and the
+    /// executor each resolve their own config, and a fixture per reactor would
+    /// give each its own refs — a fold nothing else can see. One process is one
+    /// world, and the boot that selects the fixture is the boot that owns the
+    /// process.
+    ///
+    /// A configured [`fixture_base_sha`](Self::fixture_base_sha) names a commit
+    /// in a real repository — the coordinator's own working directory, which is
+    /// where its `git worktree add` and subject fetch already resolve — so the
+    /// fixture mints its commits there too. Without one there is no repository
+    /// to speak of and the fake stays wholly in memory.
     #[cfg(any(test, feature = "testing"))]
-    #[allow(clippy::absolute_paths)]
     #[must_use]
     pub fn shared_fixture(&self) -> FakeGithub {
         static FAKE: OnceLock<FakeGithub> = OnceLock::new();
-        // For `cargo test` unit tests (cfg(test)), don't use the global
-        // OnceLock — each test should get a fresh fixture. For the
-        // `bloomery` binary (feature="testing" but not cfg(test)), use the
-        // process-global shared instance so all four reactors see the same
-        // world.
-        if cfg!(test) {
-            let fake = FakeGithub::new();
-            let base = Digest::from_bytes([0xB0; 32]);
-            if !self.fixture_base_sha.is_empty() {
-                fake.seed_correspondence(&base, &self.fixture_base_sha);
-                fake.seed_ref("heads/main", &self.fixture_base_sha);
-                return fake;
-            }
-            let base_commit = fake.seed_base_commit(&base);
-            fake.seed_ref_at("heads/main", &base_commit);
-            return fake;
-        }
         FAKE.get_or_init(|| {
-            let fake = FakeGithub::new();
             let base = Digest::from_bytes([0xB0; 32]);
-            if !self.fixture_base_sha.is_empty() {
-                fake.seed_correspondence(&base, &self.fixture_base_sha);
-                fake.seed_ref("heads/main", &self.fixture_base_sha);
+            if self.fixture_base_sha.is_empty() {
+                let fake = FakeGithub::new();
+                let base_commit = fake.seed_base_commit(&base);
+                fake.seed_ref_at("heads/main", &base_commit);
                 return fake;
             }
-            let base_commit = fake.seed_base_commit(&base);
-            fake.seed_ref_at("heads/main", &base_commit);
+            let fake = FakeGithub::new().with_object_repo(COORDINATOR_REPO);
+            fake.seed_correspondence(&base, &self.fixture_base_sha);
+            fake.seed_ref("heads/main", &self.fixture_base_sha);
             fake
         })
         .clone()
     }
 
-    /// Build a `SourceShell` backed by the shared fixture — the single place
-    /// the `GitSource::new` + `SourceShell::new_with_correspondence` dance
-    /// lives, collapsing the four duplicated blocks in `mirror`, `integrate`,
-    /// `land`, and `source`.
+    /// A source port over the shared fixture — the one place the `GitSource` +
+    /// `SourceShell` assembly lives, for the four reactors that each need it.
     #[cfg(any(test, feature = "testing"))]
     #[must_use]
-    pub fn fixture_source(&self) -> crate::bloomery::SourceShell {
-        use aether_bloomery_github::{GitSource, SharedCorrespondence};
+    pub fn fixture_source(&self) -> SourceShell {
         let fake = self.shared_fixture();
-        let fake_for_git = fake.clone();
-        let correspondence: SharedCorrespondence = Arc::new(fake);
-        let git_source = GitSource::new(fake_for_git, Arc::clone(&correspondence), self.cas_land_enabled);
-        crate::bloomery::SourceShell::new_with_correspondence(Arc::new(git_source), Arc::clone(&correspondence))
+        let correspondence: SharedCorrespondence = Arc::new(fake.clone());
+        let source = GitSource::new(fake, Arc::clone(&correspondence), self.cas_land_enabled);
+        SourceShell::new_with_correspondence(Arc::new(source), correspondence)
     }
 
     /// The connection knobs this config leaves empty, in the order an operator

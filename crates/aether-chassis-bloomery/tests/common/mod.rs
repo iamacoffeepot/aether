@@ -1,5 +1,3 @@
-#![allow(clippy::print_stderr)]
-#![allow(clippy::absolute_paths)]
 //! Shared fixtures for the cross-process tests that fork the `bloomery`
 //! coordinator bin: a free localhost port, and a guard that owns a forked
 //! coordinator for the life of a binding.

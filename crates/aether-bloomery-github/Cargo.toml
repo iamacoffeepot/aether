@@ -40,6 +40,9 @@ testing = []
 # an integration test links the lib without the `test` cfg, so the feature is
 # the only way to reach a test-only module from `tests/`.
 aether-bloomery-github = { path = ".", features = ["testing"] }
+# The object-repo mode mints real git objects, so the tests that pin it need a
+# real repository to mint them in.
+tempfile = "3"
 
 [lints]
 workspace = true

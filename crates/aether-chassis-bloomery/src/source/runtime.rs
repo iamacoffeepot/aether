@@ -1,4 +1,3 @@
-#![allow(clippy::needless_pass_by_value)]
 //! The `SourceShell`-backed runtime for [`SourceCapability`] (ADR-0149 §The
 //! boundary).
 //!
@@ -478,11 +477,13 @@ impl NativeActor for SourceCapability {
     // The `#[handler::single]` contract requires the mail by value; every
     // handler here only borrows its fields to decode, so clippy sees a
     // by-ref opportunity the macro signature cannot take.
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_snapshot(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Snapshot) -> SnapshotResult {
         state.snapshot(&mail.base)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_observe_mainline(
         state: &mut Self::State,
@@ -492,6 +493,7 @@ impl NativeActor for SourceCapability {
         state.observe_mainline_head()
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_record_checkpoint(
         state: &mut Self::State,
@@ -501,6 +503,7 @@ impl NativeActor for SourceCapability {
         state.record_checkpoint(&mail.bloom, &mail.tree)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_list_checkpoints(
         state: &mut Self::State,
@@ -510,36 +513,43 @@ impl NativeActor for SourceCapability {
         state.list_checkpoints(&mail.bloom)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_integrate(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Integrate) -> IntegrateResult {
         state.integrate(&mail.bloom, &mail.candidate, &mail.expected)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_land(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Land) -> LandResult {
         state.land(&mail.bloom, &mail.expected_base, &mail.new_head)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_poll_land(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: PollLand) -> PollLandResult {
         state.poll_land(&mail.bloom, &mail.expected_base, mail.number)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_claim_seal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ClaimSeal) -> ClaimResult {
         state.claim_seal(&mail.bloom, &mail.workpieces)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_transfer_seal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: TransferSeal) -> ClaimResult {
         state.transfer_seal(&mail.predecessor, &mail.successor, &mail.carried, &mail.net_new, &mail.dropped)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_release_seal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ReleaseSeal) -> ClaimResult {
         state.release_seal(&mail.bloom, &mail.workpieces)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_enumerate_claims(
         state: &mut Self::State,
@@ -549,11 +559,13 @@ impl NativeActor for SourceCapability {
         state.enumerate_claims()
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_complete_transfer(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: CompleteTransfer) -> ClaimResult {
         state.complete_transfer(&mail.predecessor, &mail.successor, &mail.ref_kind)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_complete_release(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: CompleteRelease) -> ClaimResult {
         state.complete_release(&mail.bloom, &mail.ref_kind)

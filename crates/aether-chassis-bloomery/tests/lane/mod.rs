@@ -1,4 +1,3 @@
-#![allow(clippy::print_stderr)]
 //! The lane-boundary harness (#4727): a real coordinator, driven through a real
 //! `git worktree add` and a real lane subprocess, with the mock lane binary as
 //! the only substitution.
@@ -186,11 +185,6 @@ impl LaneHarness {
     /// The ledger exists but could not be read.
     pub fn ledger(&self) -> Vec<LaneRun> {
         read_ledger(self.runs.path()).unwrap()
-    }
-
-    /// The journal store path (for debugging `fake` outbox).
-    pub fn store_path(&self) -> String {
-        self.store_path.clone()
     }
 
     /// The nonces the store still holds as outstanding orders.
