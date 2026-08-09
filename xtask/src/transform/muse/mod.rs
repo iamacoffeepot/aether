@@ -9,6 +9,7 @@ use anyhow::Result;
 
 use crate::transform::TransformArgs;
 use crate::transform::lane::{Terminal, capture, record, write_prompt};
+use crate::transform::scratch::Scratch;
 
 /// The harness's runner-facing name, for the binary and for error text.
 const MUSE: &str = "muse";
@@ -92,7 +93,7 @@ pub(super) fn derive_terminal(transcript: &str) -> Option<Terminal> {
 /// The token counts are joined on afterwards from the session log, keyed by the
 /// id the transcript carries. A run whose log cannot be read still records its
 /// attempt, with the columns null rather than zero.
-pub(super) fn run(prompt: &str, args: &TransformArgs) -> Result<serde_json::Value> {
+pub(super) fn run(prompt: &str, args: &TransformArgs, scratch: &Scratch) -> Result<serde_json::Value> {
     let prompt_file = write_prompt(&args.out, prompt)?;
     let mut command = Command::new(MUSE);
     command
@@ -100,6 +101,7 @@ pub(super) fn run(prompt: &str, args: &TransformArgs) -> Result<serde_json::Valu
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    scratch.export(&mut command);
 
     let transcript = capture(command, &args.out, MUSE)?;
     Ok(record(derive_terminal(&transcript).map(|terminal| Terminal {

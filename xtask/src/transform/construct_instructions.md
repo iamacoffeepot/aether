@@ -40,10 +40,19 @@ say so plainly rather than guessing at a change to make.
    Do not refactor adjacent code, reformat untouched files, or land opportunistic
    fixes the order did not ask for.
 4. **Format before you finish.** Run `cargo fmt` so the candidate is not rejected
-   for a formatting slip. The heavier checks (clippy, docs, tests) run in the
-   verify lane against your candidate — you do not need to run them here, but do
-   not knowingly leave the tree in a state that cannot compile.
-5. **Stop at the candidate.** Leave the change in the working tree. You do not
+   for a formatting slip. The heavier checks (clippy, docs, tests, duplicate code,
+   unused dependencies) run in the verify lane against your candidate — you do not
+   need to run them here, but do not knowingly leave the tree in a state that
+   cannot compile.
+5. **Build scratch where the host put it.** If you do reach for a check that wants
+   a `CARGO_TARGET_DIR` of its own, put it under the path the `AETHER_LANE_SCRATCH`
+   environment variable names — never under `/tmp` or another default temp
+   directory. A build tree there fills the host's root filesystem, and once it is
+   full every later lane on this host dies before it compiles a line and hands back
+   empty evidence, which reads as a failure of the work rather than of the disk.
+   The lane clears its scratch directory when the run ends, so anything you leave
+   there costs nothing.
+6. **Stop at the candidate.** Leave the change in the working tree. You do not
    open a pull request, push, merge, or touch git history — the broker collects
    your candidate and evidence. Do not delete or rewrite files outside the work
    order's surface.
