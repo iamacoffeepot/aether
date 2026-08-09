@@ -6,7 +6,7 @@ use std::process::{self, Command};
 
 use anyhow::{Context, Result, bail};
 
-use crate::cargo::{run_captured, write_json_pretty};
+use crate::cargo::{WASM_TARGET, run_captured, write_json_pretty};
 use crate::transform::{Evidence, TransformArgs, build_evidence};
 
 /// One CI-mirroring invocation for a `verify.*` command id, plus the tools it
@@ -18,6 +18,13 @@ struct VerifyInvocation {
     /// The programs [`tools::preflight`] resolves through the dependency graph
     /// before anything is dispatched against this host.
     requires: &'static [&'static str],
+    /// The toolchain targets this member's work cross-compiles for, checked by
+    /// [`tools::preflight_targets`] alongside the programs.
+    ///
+    /// CI states these as the toolchain action's `targets:` line, and no `PATH`
+    /// probe can stand in for one: a host with every program installed and no
+    /// wasm32 standard library builds no component wasm at all.
+    requires_targets: &'static [&'static str],
     /// A cargo step this member needs run first, or `None` when it stands
     /// alone.
     ///
@@ -68,6 +75,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             args: &["fmt", "--all", "--", "--check"],
             env: &[],
             requires: &["cargo", "rustfmt"],
+            requires_targets: &[],
             prepare: None,
         }),
         "verify.clippy" => Some(VerifyInvocation {
@@ -75,6 +83,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             args: &["clippy", "--workspace", "--all-targets", "--keep-going", "--message-format=json"],
             env: &[],
             requires: &["cargo", "cargo-clippy"],
+            requires_targets: &[],
             prepare: None,
         }),
         "verify.docs" => Some(VerifyInvocation {
@@ -85,6 +94,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
                 "-D rustdoc::redundant_explicit_links -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links",
             )],
             requires: &["cargo"],
+            requires_targets: &[],
             prepare: None,
         }),
         "verify.test" => Some(VerifyInvocation {
@@ -105,6 +115,12 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             args: &["nextest", "run", "--all-features", "--profile", "ci", "--no-fail-fast"],
             env: &[("AETHER_REQUIRE_RUNTIME", "1"), ("AETHER_STORE_PATH", ":memory:")],
             requires: &["cargo", "cargo-nextest"],
+            // The prepare cross-builds every component crate for wasm32, so the
+            // target's standard library is as much a prerequisite as nextest
+            // itself. Named through `WASM_TARGET` — the same const the dist
+            // build passes to `--target`, so the check and the build cannot
+            // drift onto different triples.
+            requires_targets: &[WASM_TARGET],
             prepare: Some(&["xtask", "dist"]),
         }),
         "verify.dup" => Some(VerifyInvocation {
@@ -112,6 +128,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             args: &["--yes", "jscpd@5.0.12", "crates"],
             env: &[],
             requires: &["npx"],
+            requires_targets: &[],
             prepare: None,
         }),
         "verify.deps" => Some(VerifyInvocation {
@@ -126,6 +143,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             args: &["crates"],
             env: &[],
             requires: &["cargo", "cargo-machete"],
+            requires_targets: &[],
             prepare: None,
         }),
         _ => None,
@@ -188,6 +206,89 @@ fn verify_check_members() -> &'static [&'static str] {
 /// Pure so the aggregation is testable without spawning cargo.
 fn all_passed(statuses: &[bool]) -> bool {
     statuses.iter().all(|&passed| passed)
+}
+
+/// Every program the umbrella's members need — the roots
+/// [`tools::preflight`] resolves through the dependency graph.
+fn required_tools() -> Vec<&'static str> {
+    verify_check_members()
+        .iter()
+        .filter_map(|id| verify_command(id))
+        .flat_map(|invocation| invocation.requires.iter().copied())
+        .collect()
+}
+
+/// Every toolchain target the umbrella's members cross-build for, checked
+/// alongside the programs. Pure so the union is testable without probing a
+/// host: a target declared on a member but never gathered here is a
+/// prerequisite nothing verifies.
+fn required_targets() -> Vec<&'static str> {
+    verify_check_members()
+        .iter()
+        .filter_map(|id| verify_command(id))
+        .flat_map(|invocation| invocation.requires_targets.iter().copied())
+        .collect()
+}
+
+/// The log a member contributes when its prepare step failed, in place of the
+/// output it never produced.
+///
+/// CI runs this pre-build as a job step, and a step that exits non-zero ends the
+/// job. The lane's members are deliberately independent — one failing never
+/// suppresses another — but a member's own prepare is not a sibling: it builds
+/// the artifacts that member's tests load, so running the suite without it
+/// reports one host or pre-build fault once per affected test, and every one of
+/// those reads as a defect in code that is fine (#4717).
+///
+/// The opening line is doing the same work the findings preamble does: without
+/// it the reader sees a build failure with no statement of which step produced
+/// it, and attributes it to the member.
+fn prepare_failure_log(id: &str, prepare: &[&str], captured: &str) -> String {
+    format!(
+        "error: {id} did not run — its pre-build step `cargo {}` failed, so the artifacts its tests \
+         load were never built.\n{captured}",
+        prepare.join(" ")
+    )
+}
+
+/// Run one umbrella member and reduce its output to `(passed, log, exit_code)`.
+fn run_member(id: &str, invocation: &VerifyInvocation) -> Result<(bool, Vec<u8>, i32)> {
+    let output = run_captured(invocation.command())
+        .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
+
+    // A JSON-format member's verdict is ours to derive: its exit status is
+    // success even with lints present, because the run was not asked to deny
+    // them. Everything else mirrors its own exit.
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let (passed, rendered) = if id == "verify.clippy" {
+        (output.status.success() && clippy_verdict(&stdout), render_diagnostics(&stdout))
+    } else {
+        (output.status.success(), stdout)
+    };
+
+    let mut log = rendered.into_bytes();
+    log.extend_from_slice(&output.stderr);
+    Ok((passed, log, output.status.code().unwrap_or(1)))
+}
+
+/// Run `invocation`'s prepare step, when it has one. `None` is a member clear to
+/// run; `Some((log, exit_code))` is a prepare that failed, already framed as the
+/// member's log by [`prepare_failure_log`].
+fn run_prepare(id: &str, invocation: &VerifyInvocation) -> Result<Option<(String, i32)>> {
+    let Some(prepare) = invocation.prepare else {
+        return Ok(None);
+    };
+
+    let mut step = Command::new("cargo");
+    step.args(prepare);
+    let output = run_captured(step).with_context(|| format!("spawn cargo {}", prepare.join(" ")))?;
+    if output.status.success() {
+        return Ok(None);
+    }
+
+    let mut captured = String::from_utf8_lossy(&output.stdout).into_owned();
+    captured.push_str(&String::from_utf8_lossy(&output.stderr));
+    Ok(Some((prepare_failure_log(id, prepare, &captured), output.status.code().unwrap_or(1))))
 }
 
 /// The single mechanical-verify path: run the mapped command, capture
@@ -338,12 +439,8 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
     // Preflight before anything runs. A host missing a tool cannot compute what
     // the member would have said, and reporting that as a pass would let a
     // candidate integrate on the strength of a check that never happened.
-    let required: Vec<&str> = verify_check_members()
-        .iter()
-        .filter_map(|id| verify_command(id))
-        .flat_map(|invocation| invocation.requires.iter().copied())
-        .collect();
-    let missing = tools::preflight(&required);
+    let mut missing = tools::preflight(&required_tools());
+    missing.extend(tools::preflight_targets(&required_targets()));
     if !missing.is_empty() {
         let evidence = Evidence {
             findings: Some(tools::missing_findings(&missing)),
@@ -366,41 +463,19 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         let invocation = verify_command(id).expect("verify_check_members ids all resolve via verify_command");
         // The member's own prerequisite, run immediately before it rather than
         // once up front: it belongs to this member, and a member that is one day
-        // removed should take its prepare step with it.
-        if let Some(prepare) = invocation.prepare {
-            let mut step = Command::new("cargo");
-            step.args(prepare);
-            if let Ok(prepared) = run_captured(step)
-                && !prepared.status.success()
-            {
-                eprintln!(
-                    "{id}: `cargo {}` failed; the member runs anyway and reports what it finds",
-                    prepare.join(" ")
-                );
-            }
-        }
-
-        let output = run_captured(invocation.command())
-            .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
-
-        // A JSON-format member's verdict is ours to derive: its exit status is
-        // success even with lints present, because the run was not asked to deny
-        // them. Everything else mirrors its own exit.
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let (member_passed, rendered) = if id == "verify.clippy" {
-            (output.status.success() && clippy_verdict(&stdout), render_diagnostics(&stdout))
-        } else {
-            (output.status.success(), stdout)
+        // removed should take its prepare step with it. A failed prepare fails
+        // the member without running it — see `prepare_failure_log`.
+        let (member_passed, log_bytes, exit_code) = match run_prepare(id, &invocation)? {
+            Some((log, code)) => (false, log.into_bytes(), code),
+            None => run_member(id, &invocation)?,
         };
 
         let log_name = format!("{id}.log");
         let log_path = args.out.join(&log_name);
-        let mut log_bytes = rendered.clone().into_bytes();
-        log_bytes.extend_from_slice(&output.stderr);
         fs::write(&log_path, &log_bytes).with_context(|| format!("write {}", log_path.display()))?;
 
         if !member_passed && first_failure_code.is_none() {
-            first_failure_code = Some(output.status.code().unwrap_or(1));
+            first_failure_code = Some(exit_code);
         }
         outcomes.push((id, member_passed, String::from_utf8_lossy(&log_bytes).into_owned()));
         log_names.push(log_name);
@@ -432,9 +507,10 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_FINDING_LINES, VERIFY_CHECK, all_passed, clippy_verdict, distil_diagnostics, render_diagnostics,
-        verify_check_members, verify_command, verify_findings,
+        MAX_FINDING_LINES, VERIFY_CHECK, all_passed, clippy_verdict, distil_diagnostics, prepare_failure_log,
+        render_diagnostics, required_targets, verify_check_members, verify_command, verify_findings,
     };
+    use crate::cargo::WASM_TARGET;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
     use crate::transform::review::REVIEW_CRITIC;
 
@@ -529,6 +605,39 @@ mod tests {
         assert!(rendered.contains("unused import"));
         assert!(rendered.contains("could not compile"));
         assert!(!rendered.contains("build-finished"), "progress must not reach the findings");
+    }
+
+    #[test]
+    fn the_cross_target_the_pre_build_needs_reaches_the_preflight() {
+        // Tripwire: CI's toolchain step installs wasm32-unknown-unknown before
+        // `cargo xtask dist`, and the lane has no equivalent unless the member's
+        // declaration is gathered into the umbrella's preflight union. Declared
+        // but ungathered is the silent half of the bug: a host without the
+        // wasm32 standard library cross-builds no component wasm, the prepare
+        // fails, and `AETHER_REQUIRE_RUNTIME=1` — set two fields above so a
+        // missing wasm is loud — turns that one host fault into a failure per
+        // scenario test, every one of them reported against a candidate that is
+        // fine (#4717).
+        let test = verify_command("verify.test").expect("verify.test mapped");
+        assert_eq!(test.requires_targets, &[WASM_TARGET], "the dist pre-build cross-builds for this target");
+        assert!(required_targets().contains(&WASM_TARGET), "a declared target the preflight never checks is inert");
+    }
+
+    #[test]
+    fn a_failed_pre_build_says_which_step_failed_and_that_the_member_did_not_run() {
+        // Tripwire: the previous shape printed a line to xtask's own stderr and
+        // ran the suite anyway, so the member's log held thousands of tests
+        // failing on artifacts that were never built. What a Refine needs from
+        // this log is the pre-build's own diagnostics plus the fact that the
+        // member never ran — attribute it to the member and the model chases
+        // test failures whose cause is one line above them.
+        let log = prepare_failure_log("verify.test", &["xtask", "dist"], "error: could not compile `aether-kit-mark`");
+
+        let distilled = distil_diagnostics(&log).expect("a failed pre-build yields findings");
+
+        assert!(distilled.contains("cargo xtask dist"), "the step that failed is named");
+        assert!(distilled.contains("did not run"), "and the member's silence is stated, not inferred");
+        assert!(distilled.contains("could not compile `aether-kit-mark`"), "the pre-build's diagnostics survive");
     }
 
     #[test]
