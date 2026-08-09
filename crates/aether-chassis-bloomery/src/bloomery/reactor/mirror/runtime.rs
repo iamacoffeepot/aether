@@ -380,7 +380,7 @@ mod tests {
     fn encoded_view() -> Vec<u8> {
         let scope_revision = digest(10);
         let mut member = Membership {
-            workpiece: WorkpieceId("reactor-core".into()),
+            workpiece: WorkpieceId("issue-101".into()),
             scope_revision,
             configs: ConfigRegistry::default(),
             approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
@@ -422,7 +422,9 @@ mod tests {
             assert_eq!(entries.len(), 1, "the enqueued view is drainable on its topic");
 
             let acks = project_batch(&shell, &entries);
-            assert_eq!(fake.issue_count(), 2, "the carbon copy: one umbrella issue plus one workpiece issue");
+            assert_eq!(fake.issue_count(), 0, "no shadow issue is opened");
+            assert!(fake.comment_count() >= 1, "member evidence projects as comment on source issue");
+            let comments_first = fake.comment_count();
             assert_eq!(acks.len(), 1);
             assert!(
                 acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::ViewDocument),
@@ -439,7 +441,7 @@ mod tests {
         // crashes before acking it. A fresh reactor against the same store
         // re-drains the still-undelivered entry on its first pass and delivers
         // it (the boot-republish Done that moved here from #3497). Reconcile is
-        // idempotent, so the re-projection converges to the same carbon copy.
+        // idempotent, so the re-projection converges to the same comment set.
         {
             let mut store = SqliteStore::open(db).unwrap();
             store.enqueue_topic(Topic::ViewDocument, &encoded_view()).unwrap();
@@ -451,7 +453,7 @@ mod tests {
             assert_eq!(republished.len(), 1, "the unacked entry survived the restart and re-drains");
 
             let acks = project_batch(&shell, &republished);
-            assert_eq!(fake.issue_count(), 2, "idempotent reconcile converges to the same carbon copy");
+            assert_eq!(fake.comment_count(), comments_first, "idempotent reconcile converges to same comments");
             assert_eq!(acks.len(), 1);
 
             restarted.ack_outbox(acks[0].topic.as_deref(), acks[0].through_sequence).unwrap();
@@ -476,8 +478,18 @@ mod tests {
         let entries = store.drain_topic(Topic::LandingReceipt).unwrap();
         assert_eq!(entries.len(), 1, "the enqueued receipt is drainable on the receipt topic");
 
+        let expected_branch = "bloom/010101010101/landing";
+        fake.seed_ref(&format!("heads/{expected_branch}"), "abc");
+        fake.create_pull_request(&aether_bloomery_github::NewPullRequest {
+            title: "land".into(),
+            body: "".into(),
+            head: expected_branch.to_owned(),
+            base: "main".into(),
+        })
+        .unwrap();
+
         let acks = project_batch(&shell, &entries);
-        assert_eq!(fake.comment_count(), 1, "the receipt projects one landing comment on the umbrella issue");
+        assert_eq!(fake.comment_count(), 1, "the receipt projects one landing comment on the landing PR");
         assert_eq!(acks.len(), 1);
         assert!(
             acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::LandingReceipt),
@@ -530,7 +542,7 @@ mod tests {
             );
         }
         let acks = collect_sends::<AckOutbox>(&rx, 1);
-        assert_eq!(fake.issue_count(), 2, "the worker reconciled the carbon copy before acking");
+        assert_eq!(fake.comment_count(), 1, "the worker reconciled a source-issue comment before acking");
         assert!(
             acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::ViewDocument),
             "the ack covers the view-document topic",

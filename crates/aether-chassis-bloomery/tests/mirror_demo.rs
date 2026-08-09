@@ -1,16 +1,5 @@
-//! The ADR-0149 outward-mirror demo (#3459 step 7 coverage).
-//!
-//! Drives a synthetic bloom through the real journal (`SqliteStore`) and the
-//! pure reducer, assembles the view document, and projects it through the host
-//! projection cap shell onto a fake GitHub — the "Done" the issue names:
-//!
-//! - a carbon copy appears (an umbrella issue plus a workpiece issue per
-//!   member);
-//! - deleting a projection and re-projecting rebuilds it from the journal
-//!   alone (delete → reappear).
-//!
-//! No token, no network: the shell is mounted over the adapter's in-process
-//! `FakeGithub`.
+//! The ADR-0149 outward-mirror demo — projects onto existing source issues
+//! and the landing pull request, never opening shadow issues.
 
 #![allow(clippy::unwrap_used)]
 
@@ -30,8 +19,6 @@ fn digest(seed: u8) -> Digest {
 }
 
 fn membership(name: &str, revision: u8) -> Membership {
-    // The approval binds the member's subject (ADR-0174), which is only
-    // computable once the rest of the member is built.
     let mut member = Membership {
         workpiece: WorkpieceId(name.into()),
         scope_revision: digest(revision),
@@ -42,13 +29,10 @@ fn membership(name: &str, revision: u8) -> Membership {
     member
 }
 
-/// Seal a two-member synthetic bloom, journal the seal event, then replay the
-/// journal through the reducer to rebuild the snapshot — the real
-/// journal-then-reduce path, not a hand-built snapshot.
 fn synthetic_bloom_snapshot() -> Snapshot {
     let base = digest(0);
     let spec = BloomDraft {
-        proposals: vec![membership("reactor-core", 10), membership("coolant-loop", 20)],
+        proposals: vec![membership("issue-101", 10), membership("issue-102", 20)],
         base,
         ..BloomDraft::default()
     }
@@ -60,8 +44,6 @@ fn synthetic_bloom_snapshot() -> Snapshot {
     let mut store = SqliteStore::open(":memory:").unwrap();
     store.append_event("seal-1", &bytes).unwrap();
 
-    // Rebuild the snapshot purely from the journal — reduce then apply, event
-    // by event, exactly as recovery replay does.
     let mut snapshot = Snapshot::new(base);
     for record in store.replay_journal().unwrap() {
         let replayed: Event = from_bytes(&record.event).unwrap();
@@ -75,30 +57,18 @@ fn synthetic_bloom_snapshot() -> Snapshot {
 }
 
 #[test]
-fn a_synthetic_bloom_projects_a_carbon_copy_and_rebuilds_after_deletion() {
+fn a_synthetic_bloom_projects_comments_to_source_issues_and_is_idempotent() {
     let snapshot = synthetic_bloom_snapshot();
     let view = view_of(&snapshot, |_| None);
 
-    // Mount the projection cap shell over a fake GitHub; keep a handle to
-    // introspect what the shell projects.
     let fake = FakeGithub::new();
     let shell = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
 
-    // Carbon copy: 1 umbrella issue + 2 workpiece issues.
     shell.reconcile_view(&view).unwrap();
-    assert_eq!(fake.issue_count(), 3, "an umbrella issue plus one issue per workpiece");
-    let full = fake.issue_numbers();
+    assert_eq!(fake.issue_count(), 0, "no shadow issue is opened — source issues already exist");
+    let comments_first = fake.comment_count();
+    assert!(comments_first >= 2, "member evidence projects as comments on source issues");
 
-    // Idempotent: a second reconcile of the same view creates nothing new.
     shell.reconcile_view(&view).unwrap();
-    assert_eq!(fake.issue_numbers(), full, "reconcile is idempotent");
-
-    // Delete → reappear: an operator deletes a projection; re-projecting from
-    // the same journal-derived view rebuilds it.
-    let victim = full[1];
-    fake.delete_issue(victim);
-    assert_eq!(fake.issue_count(), 2);
-    shell.reconcile_view(&view).unwrap();
-    assert_eq!(fake.issue_count(), 3, "the deleted projection was rebuilt from the journal");
-    assert!(!fake.issue_numbers().contains(&victim), "the rebuilt issue is a fresh object");
+    assert_eq!(fake.comment_count(), comments_first, "reconcile is idempotent");
 }

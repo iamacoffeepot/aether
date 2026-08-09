@@ -184,6 +184,17 @@ impl FakeGithub {
         self.lock().issues.iter().find(|issue| issue.number == number).map(|issue| issue.body.clone())
     }
 
+    /// All comments on issue `number`, in creation order.
+    #[must_use]
+    pub fn comments_for_issue(&self, issue_number: u64) -> Vec<Comment> {
+        self.lock()
+            .comments
+            .iter()
+            .filter(|comment| comment.issue_number == issue_number)
+            .map(|comment| Comment { id: comment.id, body: comment.body.clone(), marker: parse_marker(&comment.body) })
+            .collect()
+    }
+
     /// Delete issue `number` and its comments — an operator removing a
     /// projection. The next reconcile finds no marker and recreates it.
     pub fn delete_issue(&self, number: u64) {
