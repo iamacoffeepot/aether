@@ -33,6 +33,12 @@ pub enum LocalExecutorError {
     /// or its correspondence never seeded, so the backend refuses cleanly rather
     /// than `git worktree add`-ing a target git cannot resolve.
     UnresolvedCheckout(Nonce),
+    /// The order named a diff base (the range the candidate is judged over) that
+    /// resolved no real git object. Refused rather than dropped: a review lane
+    /// handed no base falls back to the working-tree contract, and against an
+    /// already-committed candidate that diff is empty — which reads as "nothing
+    /// to review" rather than "the base did not resolve" (#4723).
+    UnresolvedDiffBase(Nonce),
     /// The correspondence store itself faulted while resolving the checkout.
     Correspondence(CorrespondenceError),
 }
@@ -54,6 +60,13 @@ impl fmt::Display for LocalExecutorError {
                     nonce.0
                 )
             }
+            Self::UnresolvedDiffBase(nonce) => {
+                write!(
+                    f,
+                    "local executor backend: no git-object correspondence for the diff base of nonce `{}`",
+                    nonce.0
+                )
+            }
             Self::Correspondence(error) => write!(f, "local executor backend: {error}"),
         }
     }
@@ -64,7 +77,11 @@ impl Error for LocalExecutorError {
         match self {
             Self::Spawn(error) | Self::Io(error) => Some(error),
             Self::Correspondence(error) => Some(error),
-            Self::Worktree(_) | Self::Evidence(_) | Self::NoRunForNonce(_) | Self::UnresolvedCheckout(_) => None,
+            Self::Worktree(_)
+            | Self::Evidence(_)
+            | Self::NoRunForNonce(_)
+            | Self::UnresolvedCheckout(_)
+            | Self::UnresolvedDiffBase(_) => None,
         }
     }
 }

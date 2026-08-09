@@ -62,7 +62,11 @@ pub(super) fn reduce_aggregate_verify_completed(
         // verify just built, and it is the passing review that consumes it.
         effects.push(Decision::DispatchAggregateReview {
             bloom: *bloom,
-            transformation: Transformation::for_aggregate_review(integration.tree, integration.head),
+            transformation: Transformation::for_aggregate_review(
+                integration.tree,
+                integration.head,
+                record.spec.base(),
+            ),
             roll: record.aggregate_rolls + 1,
             profile: stage_profile(&record.stage_catalog, StageId::AggregateReview),
         });

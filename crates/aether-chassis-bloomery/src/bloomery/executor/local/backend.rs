@@ -197,6 +197,21 @@ impl ExecutorBackend for LocalExecutor {
             .resolve_git(&order.transformation.checkout)?
             .ok_or_else(|| LocalExecutorError::UnresolvedCheckout(order.nonce.clone()))?
             .to_hex();
+        // The diff source rides the work order (#4723) and resolves the same way:
+        // an order that names one is judged over the range `base..checkout`, one
+        // that does not is judged over the working tree. Refused when it does not
+        // resolve rather than silently omitted — the omission is invisible at the
+        // lane, which then reads an empty working-tree diff as an empty candidate.
+        let diff_base_hex = order
+            .transformation
+            .diff_base
+            .map(|base| {
+                self.correspondence
+                    .resolve_git(&base)?
+                    .ok_or_else(|| LocalExecutorError::UnresolvedDiffBase(order.nonce.clone()))
+                    .map(|object| object.to_hex())
+            })
+            .transpose()?;
         // The subject the returning evidence binds to is the order's subject input
         // (the scope-revision digest the broker displayed), falling back to the
         // checkout only for a malformed order that carries no input.
@@ -217,6 +232,7 @@ impl ExecutorBackend for LocalExecutor {
         let spec = RunSpec {
             command: &order.transformation.command,
             checkout_hex: &checkout_hex,
+            diff_base_hex: diff_base_hex.as_deref(),
             worktree_dir: &worktree_dir,
             evidence_dir: &evidence_dir,
             nonce: &nonce,

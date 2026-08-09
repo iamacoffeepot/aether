@@ -492,6 +492,23 @@ pub struct Transformation {
     /// input while the `workflow_dispatch` itself stays pinned at the protected
     /// ref (the checkout target moves, the workflow definition does not).
     pub checkout: Digest,
+    /// The commit the candidate's diff is taken **against** — the work order's
+    /// diff source, distinct from the tree it is taken *in*
+    /// ([`checkout`](Self::checkout)).
+    ///
+    /// `None` names the working tree: the candidate is the uncommitted change
+    /// the checked-out tree carries, which is what every member lane produces.
+    /// `Some(base)` names a commit range instead — the candidate is everything
+    /// `base..checkout` contains. The aggregate review is the one stage whose
+    /// candidate is already committed (the integration the fold built), so a
+    /// working-tree diff there is always empty and a lane that assumed one
+    /// judged nothing at all (#4723).
+    ///
+    /// A digest like [`checkout`](Self::checkout), resolved to a real git object
+    /// by the executor backend through the same correspondence store, so the
+    /// reducer keeps holding digests rather than shas.
+    #[serde(default)]
+    pub diff_base: Option<Digest>,
     /// The declared output names the broker accepts.
     pub outputs: Vec<String>,
     /// The execution image.
@@ -575,6 +592,9 @@ impl Transformation {
             command: String::from(command),
             inputs: alloc::vec![subject],
             checkout,
+            // A member lane's candidate is the uncommitted change its worker
+            // leaves in the checked-out tree, so it names no diff base.
+            diff_base: None,
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
             image: String::from(image),
             limits: Budget::default(),
@@ -605,6 +625,9 @@ impl Transformation {
             command: String::from(VERIFY_CHECK_COMMAND),
             inputs: alloc::vec![subject],
             checkout,
+            // The mechanical lane runs a compiler over the checked-out tree and
+            // reads no diff at all, so there is no source to name.
+            diff_base: None,
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
             image: String::from("iama/verify:1"),
             limits: Budget::default(),
@@ -617,21 +640,31 @@ impl Transformation {
     /// The whole-bloom aggregate-review transformation (ADR-0153): the
     /// `review.critic` lane dispatched once per bloom against the integrated
     /// head — `subject` is the integrated tree digest the returned evidence
-    /// binds, `checkout` the landable head commit the critic checks out. The
-    /// same lane shape as the member `Review` egress it replaces (restricted
-    /// egress to the model API); the sealed intent the critic judges against
-    /// rides the advisory description the host threads on at dispatch.
+    /// binds, `checkout` the landable head commit the critic checks out, and
+    /// `base` the bloom's sealed base the fold was built onto. The same lane
+    /// shape as the member `Review` egress it replaces (restricted egress to the
+    /// model API); the sealed intent the critic judges against rides the
+    /// advisory description the host threads on at dispatch.
+    ///
+    /// `base` is what makes the critic's candidate visible. The integration is
+    /// committed, so the diff to judge is the range `base..checkout` — a lane
+    /// left to read the working tree here sees a clean checkout and judges an
+    /// empty candidate (#4723). It rides the work order as
+    /// [`diff_base`](Self::diff_base) rather than a stage flag the lane branches
+    /// on: the stage is what *knows* where its candidate lives, and the lane
+    /// then reads one field instead of re-deriving that knowledge.
     ///
     /// Dispatched only once [`for_aggregate_verify`](Self::for_aggregate_verify)
     /// has passed over the same fold: the compiler is the cheaper and more
     /// decisive gate, and there is nothing to judge in a fold that does not
     /// build.
     #[must_use]
-    pub fn for_aggregate_review(subject: Digest, checkout: Digest) -> Self {
+    pub fn for_aggregate_review(subject: Digest, checkout: Digest, base: Digest) -> Self {
         Self {
             command: String::from(REVIEW_CRITIC_COMMAND),
             inputs: alloc::vec![subject],
             checkout,
+            diff_base: Some(base),
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
             image: String::from("iama/review-claude:1"),
             limits: Budget::default(),
