@@ -66,11 +66,11 @@ pub mod study_report;
 pub mod values;
 
 pub use control::{
-    Admit, AdmitResult, AggregateReviewPayload, CONTROL_CORE_NAMESPACE, ClaimResult, ClaimSeal, Commit, CommitResult,
-    CompleteRelease, CompleteTransfer, ConfigRecord, DispatchPayload, EnumerateClaims, EnumerateClaimsResult,
-    IntegratePayload, JournalRecord, LandPayload, LoadConfigs, LoadConfigsResult, MembershipMutation, ObserveMainline,
-    ObserveMainlineResult, OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal, ReplayJournal,
-    ReplayJournalResult, ReviewPass, Topic, TransferSeal,
+    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, CONTROL_CORE_NAMESPACE, ClaimResult, ClaimSeal,
+    Commit, CommitResult, CompleteRelease, CompleteTransfer, ConfigRecord, DispatchPayload, EnumerateClaims,
+    EnumerateClaimsResult, IntegratePayload, JournalRecord, LandPayload, LoadConfigs, LoadConfigsResult,
+    MembershipMutation, ObserveMainline, ObserveMainlineResult, OutboxPayload, Query, QueryResult, RedispatchPayload,
+    ReleaseSeal, ReplayJournal, ReplayJournalResult, ReviewPass, Topic, TransferSeal,
 };
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};
@@ -84,10 +84,10 @@ pub use port::{
     PendingDecisionView, ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument, WorkHandle, WorkOrder,
 };
 pub use reduce::{
-    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AttemptCompletedError, BaseMismatch, BloomRecord,
-    BloomStatus, Decision, Decisions, Event, Fact, FoldedIntegration, IntegrateError, LandError, ObserveMainlineError,
-    Outcome, ResolveError, SealConflict, SealError, Snapshot, StageProgress, SupersedeError, is_active_unlanded,
-    reduce, view_of,
+    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError,
+    BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, FoldedIntegration, IntegrateError,
+    LandError, ObserveMainlineError, Outcome, ResolveError, SealConflict, SealError, Snapshot, StageProgress,
+    SupersedeError, is_active_unlanded, reduce, view_of,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;

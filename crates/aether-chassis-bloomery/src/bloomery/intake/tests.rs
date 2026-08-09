@@ -121,6 +121,7 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
             wedged: BTreeMap::new(),
             integration: None,
             aggregate_rolls: 0,
+            aggregate_verify_rolls: 0,
             review_park: None,
             superseded_by: None,
         },
@@ -670,16 +671,18 @@ fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
 #[test]
 fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
     // A well-formed dispatch only ever carries a dispatched member stage
-    // (Construct / Verify / the repair-only Refine); an order at any other
-    // stage — the retired member Review included (ADR-0153) — is corrupt. It is
-    // refused as OutOfLineStage rather than folded into the member's resolution,
-    // and (like a digest mismatch) the order is NOT consumed.
+    // (Construct / Verify / the repair-only Refine) or a bloom-level aggregate
+    // gate; an order at any other stage — the retired member Review included
+    // (ADR-0153), and the pre-seal Scope, which is an operator-harness process
+    // and never a dispatched lane — is corrupt. It is refused as OutOfLineStage
+    // rather than folded into the member's resolution, and (like a digest
+    // mismatch) the order is NOT consumed.
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let workpiece = WorkpieceId("wp-off".to_owned());
     let candidate = Digest::from_bytes([5; 32]);
     let mut record = dispatch_record("n-off", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
-    record.stage = StageId::AggregateVerify;
+    record.stage = StageId::Scope;
     record_dispatch(&mut store, &record).unwrap();
 
     let upload = UploadedEvidence {
@@ -692,7 +695,7 @@ fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
     };
     match admit_uploaded(&mut store, &upload).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(stage)) => {
-            assert_eq!(stage, StageId::AggregateVerify);
+            assert_eq!(stage, StageId::Scope);
         }
         other => panic!("expected OutOfLineStage refusal, got {other:?}"),
     }

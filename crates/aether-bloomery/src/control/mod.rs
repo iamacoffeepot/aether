@@ -167,6 +167,12 @@ topic_vocabulary! {
     /// which runs the `review.critic` lane against the integrated head under a
     /// bloom-level order record (ADR-0153).
     AggregateReview,
+    /// A whole-bloom aggregate-verify dispatch (reducer-minted, from
+    /// [`Decision::DispatchAggregateVerify`]), drained by the executor reactor,
+    /// which runs the mechanical `verify.check` lane against the folded head
+    /// under a bloom-level order record. Appended so the prior topics' display
+    /// spellings and ordering are unchanged.
+    AggregateVerify,
     /// A whole-document projection (host-minted): the view-document producer
     /// (#3497) enqueues [`ViewDocument`](crate::port::ViewDocument) payloads and
     /// the mirror reactor drains them onto the outward mirror. No [`Decision`]
@@ -194,6 +200,7 @@ impl Topic {
             Self::Land => "topic:land",
             Self::Integrate => "topic:integrate",
             Self::AggregateReview => "topic:aggregate_review",
+            Self::AggregateVerify => "topic:aggregate_verify",
             Self::ViewDocument => "topic:view_document",
         }
     }
@@ -215,6 +222,7 @@ impl Topic {
             Decision::DispatchLand { .. } => Some(Self::Land),
             Decision::DispatchIntegration { .. } => Some(Self::Integrate),
             Decision::DispatchAggregateReview { .. } => Some(Self::AggregateReview),
+            Decision::DispatchAggregateVerify { .. } => Some(Self::AggregateVerify),
             Decision::ClaimMembership { .. }
             | Decision::ReleaseMembership { .. }
             | Decision::InheritClaim { .. }
@@ -227,6 +235,7 @@ impl Topic {
             | Decision::AdvanceStage { .. }
             | Decision::RecordIntegration { .. }
             | Decision::RecordAggregateRoll { .. }
+            | Decision::RecordAggregateVerifyRoll { .. }
             | Decision::RevokeResolution { .. }
             | Decision::RecordReviewPark { .. }
             // Snapshot-only: the wedge reaches the outward mirror through the
@@ -366,6 +375,24 @@ pub struct AggregateReviewPayload {
     pub pass: ReviewPass,
     /// The [`AgentProfile`] the bloom's sealed stage catalog calibrates
     /// `AggregateReview` at (ADR-0174).
+    pub profile: AgentProfile,
+}
+
+/// The payload a [`Topic::AggregateVerify`] outbox row carries — the
+/// whole-bloom mechanical gate the executor reactor runs over the folded head.
+///
+/// Carries no pass discriminator: the verify lane runs the same `verify.check`
+/// fan-out every roll, with nothing analogous to the review's delta-confirm
+/// narrowing, so the roll count lives on the record and never changes what is
+/// dispatched.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AggregateVerifyPayload {
+    /// The verified bloom.
+    pub bloom: Digest,
+    /// The verify-lane transformation to submit.
+    pub transformation: Transformation,
+    /// The [`AgentProfile`] the bloom's sealed stage catalog calibrates
+    /// `AggregateVerify` at (ADR-0174).
     pub profile: AgentProfile,
 }
 

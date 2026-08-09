@@ -182,6 +182,30 @@ pub enum Fact {
         /// The observed head's digest, correspondence-bound to the real commit.
         head: Digest,
     },
+    /// A dispatched whole-bloom aggregate verify completed with evidence — the
+    /// mechanical gate over the fold, run before the critic sees it.
+    ///
+    /// A passing verdict dispatches the aggregate review against the same
+    /// fold; a failing one re-opens every member into `Refine` (revoking each
+    /// claim) until the stage's own budget is spent, then parks the bloom to
+    /// the owner. Every member re-opens because a fold that does not build
+    /// fails on the *combination* — the members verified individually and each
+    /// passed — and over-routing is the fail-closed direction.
+    ///
+    /// Carries no implication for that reason, which is what distinguishes it
+    /// from [`Fact::AggregateReviewCompleted`]: a critic names owners, a
+    /// compiler does not. Appended past [`Fact::ObserveMainline`] so the prior
+    /// facts' wire discriminants are unchanged.
+    AggregateVerifyCompleted {
+        /// The verified bloom.
+        bloom: BloomId,
+        /// The verify gate's pass/fail verdict.
+        passed: bool,
+        /// The verify evidence, bound to the folded tree it built — the
+        /// reducer refuses a verdict whose subject is not the held fold's
+        /// tree, so a stale verdict cannot act on a newer integration.
+        evidence: Evidence,
+    },
 }
 
 impl Fact {

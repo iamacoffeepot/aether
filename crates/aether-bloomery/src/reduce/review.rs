@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 
 use super::attempt::{DispatchTargets, SealedLine, move_effects};
 use super::{AggregateReviewError, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
+use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{ConfigRegistry, Evidence, ResolvedBloom};
 
@@ -110,8 +111,28 @@ pub(super) fn reduce_aggregate_review_completed(
     // repair target). The cleared fold marks the integration stale; when the
     // re-opened members re-integrate, the completing claim re-dispatches the
     // fold and the fresh head gets the delta-confirm.
-    effects.push(Decision::RecordIntegration { bloom: *bloom, integration: None });
-    for workpiece in &implicated {
+    effects.extend(reenter_members(record, bloom, &implicated, integration.tree));
+
+    Decisions { outcome: Outcome::AggregateReviewReentered { bloom: *bloom, members: implicated, rolls }, effects }
+}
+
+/// Clear the stale fold and route every named member back into the repair-only
+/// `Refine` against its own claimed candidate.
+///
+/// Shared by both aggregate gates because the routing is the same regardless of
+/// which one refused the fold: the claim is revoked (a bloom with a revoked
+/// claim cannot resolve), the cursor re-enters `Refine`, and the cleared fold
+/// marks the integration stale so the completing re-integration dispatches a
+/// fresh one. `fold` is the fold's tree, used only as the last-resort subject
+/// for a member carrying neither a cursor candidate nor a claim.
+pub(super) fn reenter_members(
+    record: &super::BloomRecord,
+    bloom: &BloomId,
+    members: &[WorkpieceId],
+    fold: Digest,
+) -> Vec<Decision> {
+    let mut effects = alloc::vec![Decision::RecordIntegration { bloom: *bloom, integration: None }];
+    for workpiece in members {
         effects.push(Decision::RevokeResolution { bloom: *bloom, workpiece: workpiece.clone() });
         let member = record.spec.members().iter().find(|member| member.workpiece == *workpiece);
         let candidate = record.claims.get(workpiece).map(|claim| claim.candidate);
@@ -126,13 +147,13 @@ pub(super) fn reduce_aggregate_review_completed(
         // the claimed candidate tree binds the evidence and its capture commit
         // is the checkout; the cursor's candidate carries the checkout pair.
         let (subject, checkout) = progress.candidate.map_or_else(
-            || (candidate.or_else(|| member.map(|m| m.scope_revision)).unwrap_or(integration.tree), record.spec.base()),
+            || (candidate.or_else(|| member.map(|m| m.scope_revision)).unwrap_or(fold), record.spec.base()),
             |current| (current.tree, current.checkout),
         );
         effects.extend(move_effects(
             *bloom,
             workpiece,
-            member.map_or(integration.tree, |m| m.scope_revision),
+            member.map_or(fold, |m| m.scope_revision),
             progress,
             DispatchTargets { subject, checkout },
             SealedLine {
@@ -141,5 +162,5 @@ pub(super) fn reduce_aggregate_review_completed(
             },
         ));
     }
-    Decisions { outcome: Outcome::AggregateReviewReentered { bloom: *bloom, members: implicated, rolls }, effects }
+    effects
 }

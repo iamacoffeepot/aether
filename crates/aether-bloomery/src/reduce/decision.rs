@@ -295,4 +295,39 @@ pub enum Decision {
         /// Which stage exhausted, and the failure that spent the last of it.
         wedge: Wedge,
     },
+    /// Dispatch the whole-bloom aggregate verify against the folded head — the
+    /// mechanical `verify.check` fan-out run once per bloom, before the critic
+    /// ever sees the fold.
+    ///
+    /// A snapshot-inert outbox effect like
+    /// [`Decision::DispatchAggregateReview`]; the host wraps the
+    /// transformation in a work order under a bloom-level order record.
+    /// Appended so the prior decisions' wire discriminants are unchanged.
+    DispatchAggregateVerify {
+        /// The verified bloom.
+        bloom: BloomId,
+        /// The verify lane transformation: `inputs[0]` is the folded tree
+        /// digest the returned evidence binds, `checkout` the folded head the
+        /// compiler builds.
+        transformation: Transformation,
+        /// Which verify pass this dispatches, against the stage's own budget.
+        roll: u32,
+        /// The [`AgentProfile`] the bloom's sealed stage catalog calibrates
+        /// `AggregateVerify` at (ADR-0174). A mechanical lane still takes its
+        /// profile off the sealed catalog, so a receipt attests the exact
+        /// configuration that ran.
+        profile: AgentProfile,
+    },
+    /// Record the bloom's consumed aggregate-verify verdict count.
+    ///
+    /// Separate from [`Decision::RecordAggregateRoll`] because the two
+    /// aggregate gates hold separate budgets in the catalog: a fold that
+    /// exhausts the compiler's rolls must not also have spent the critic's.
+    /// Appended so the prior decisions' wire discriminants are unchanged.
+    RecordAggregateVerifyRoll {
+        /// The verified bloom.
+        bloom: BloomId,
+        /// The verdicts consumed so far, this one included.
+        rolls: u32,
+    },
 }

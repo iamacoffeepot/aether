@@ -43,8 +43,9 @@ use std::time::{Duration, Instant};
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, AggregateReviewPayload, BloomId, ConfigRegistry, ConfigScopes, DispatchPayload, ExecutionStatus, Fact,
-    ModelOverride, Nonce, RedispatchPayload, ReviewPass, StageId, Topic, WorkHandle, WorkpieceId,
+    Admit, AggregateReviewPayload, AggregateVerifyPayload, BloomId, ConfigRegistry, ConfigScopes, DispatchPayload,
+    ExecutionStatus, Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, StageId, Topic, WorkHandle,
+    WorkpieceId,
 };
 use aether_bloomery_github::{SharedCorrespondence, candidate_ref_name, short_hex};
 use aether_data::wire::from_bytes;
@@ -639,6 +640,105 @@ fn drain_and_dispatch_aggregate(
     Ok((handles, ack_through, transient_failure))
 }
 
+/// Drain the aggregate-verify topic and submit each entry through the executor
+/// under a bloom-level order record — the mechanical `verify.check` fan-out run
+/// over the folded head, before the critic sees it.
+///
+/// Same ack-prefix / park / backoff semantics as [`drain_and_dispatch_aggregate`],
+/// and the intake routes the verdict by the record's `AggregateVerify` stage.
+/// Shorter than the review's drain because a compiler needs no prompt: no task
+/// composition, no pass framing, no findings row to clear or freeze — the lane
+/// gets the fold and runs.
+fn drain_and_dispatch_aggregate_verify(
+    store: &mut dyn StoreBackend,
+    executor: &ExecutorShell,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    let entries = store.drain_topic(Topic::AggregateVerify)?;
+    let mut handles = Vec::new();
+    let mut ack_through = None;
+    let mut transient_failure = None;
+    for entry in entries {
+        let Ok(payload) = from_bytes::<AggregateVerifyPayload>(&entry.payload) else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                "aggregate-verify outbox entry did not decode; stopping the ack prefix to re-drain",
+            );
+            break;
+        };
+        if payload.transformation.inputs.is_empty() {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                "aggregate-verify transformation carries no subject input; stopping the ack prefix to re-drain",
+            );
+            break;
+        }
+        // A retired plan's queued verify is retired with it, like the member and
+        // review lanes: the fold it would build belongs to a plan that no longer
+        // exists.
+        if !store.holds_active_membership(payload.bloom.as_bytes())? {
+            tracing::info!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                bloom = %short_hex(&payload.bloom),
+                "aggregate verify belongs to a bloom that holds no active membership; retiring it undispatched",
+            );
+            ack_through = Some(entry.sequence);
+            continue;
+        }
+
+        // The evidence-binding subject is the folded tree the reducer pinned as
+        // inputs[0] — also the displayed digest the returning verdict must bind.
+        let displayed = payload.transformation.inputs[0];
+        let record = DispatchRecord {
+            nonce: Nonce(format!("dispatch-{}", entry.sequence)),
+            bloom: BloomId(payload.bloom),
+            // A bloom-level order has no member axis: the stage discriminates at
+            // intake, and the empty workpiece never routes.
+            workpiece: WorkpieceId(String::new()),
+            profile: payload.profile,
+            scope_revision: displayed,
+            candidate: displayed,
+            displayed_digest: displayed,
+            stage: StageId::AggregateVerify,
+            // No model overlay: this is a mechanical lane, so it carries no
+            // resolved model for the same reason the member `Verify` does not.
+            transformation: payload.transformation,
+            configs: ConfigRegistry::default(),
+        };
+        match dispatch_and_record(executor, store, &record) {
+            Ok(handle) => {
+                handles.push(handle);
+                ack_through = Some(entry.sequence);
+            }
+            Err(error) if error.is_permanent() => {
+                tracing::error!(
+                    target: "aether_chassis_bloomery::executor",
+                    sequence = entry.sequence,
+                    bloom = ?record.bloom.0,
+                    nonce = %record.nonce.0,
+                    %error,
+                    "aggregate-verify submit refused permanently; parking the entry instead of re-driving",
+                );
+                ack_through = Some(entry.sequence);
+                break;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    sequence = entry.sequence,
+                    %error,
+                    "aggregate-verify submit/record failed; stopping the ack prefix to re-drive",
+                );
+                transient_failure = Some(entry.sequence);
+                break;
+            }
+        }
+    }
+    Ok((handles, ack_through, transient_failure))
+}
+
 /// The advisory section a re-dispatched lane reads the owner's decision from.
 /// Composes in-channel beside `## Findings`, the same plain-markdown way.
 const DECISION_SECTION: &str = "## Decision";
@@ -1138,6 +1238,25 @@ impl NativeActor for ExecutorReactorCapability {
                 }
                 Err(error) => {
                     tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-review drain failed");
+                }
+            }
+            // Drain + submit the whole-bloom aggregate verifies the same way —
+            // the mechanical gate the fold passes before its critic dispatches.
+            match drain_and_dispatch_aggregate_verify(store, &executor) {
+                Ok((handles, ack_through, transient_failure)) => {
+                    if let Some(sequence) = ack_through
+                        && let Err(error) = store.ack_topic(Topic::AggregateVerify, sequence)
+                    {
+                        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-verify ack failed; entries re-drive");
+                    }
+                    let now = Instant::now();
+                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
+                    if transient_failure.is_some() {
+                        state.backoff = next_backoff(state.backoff.as_ref(), transient_failure);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "aggregate-verify drain failed");
                 }
             }
             // Replay the attempts whose parked questions were answered (#3664),

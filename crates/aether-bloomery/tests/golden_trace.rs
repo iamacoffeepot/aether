@@ -21,8 +21,9 @@ use aether_data::wire::{from_bytes, to_vec};
 use common::{claim, digest, draft, event, membership};
 
 /// The canonical bloom, as the journal of admitted events: seal → integrate
-/// each member → resolve (the fold, which dispatches the aggregate review) →
-/// the passing aggregate verdict (which resolves) → land (ADR-0153).
+/// each member → resolve (the fold, which dispatches the aggregate verify) →
+/// the passing verify verdict (which dispatches the aggregate review) → the
+/// passing review verdict (which resolves) → land (ADR-0153).
 fn script() -> Vec<Event> {
     let members = vec![membership("alpha", 10), membership("beta", 11)];
     let spec = draft(1, members).seal();
@@ -34,6 +35,14 @@ fn script() -> Vec<Event> {
         event(
             "resolve",
             Fact::Resolve { bloom, tree: digest(30), head: digest(40), lineage: vec![digest(20), digest(21)] },
+        ),
+        event(
+            "aggregate-verify",
+            Fact::AggregateVerifyCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: digest(30), kind: EvidenceKind::VerificationResult, detail: digest(51) },
+            },
         ),
         event(
             "aggregate-review",
@@ -71,12 +80,16 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
     assert!(matches!(decisions[0].outcome, Outcome::Sealed(_)));
     assert!(matches!(decisions[1].outcome, Outcome::Integrated { .. }));
     assert!(matches!(decisions[2].outcome, Outcome::Integrated { .. }));
-    assert!(matches!(decisions[3].outcome, Outcome::AggregateReviewDispatched { roll: 1, .. }));
-    match &decisions[4].outcome {
+    // The fold dispatches the compiler, not the critic: a fold that does not
+    // build must never reach a model lane, and the review is what a *passing*
+    // verify hands off to.
+    assert!(matches!(decisions[3].outcome, Outcome::AggregateVerifyDispatched { roll: 1, .. }));
+    assert!(matches!(decisions[4].outcome, Outcome::AggregateVerifyPassed { rolls: 1, .. }));
+    match &decisions[5].outcome {
         Outcome::Resolved(resolved) => assert_eq!(resolved.resolution_claims.len(), 2),
         other => panic!("expected Resolved, got {other:?}"),
     }
-    assert!(matches!(decisions[5].outcome, Outcome::Landed(_)));
+    assert!(matches!(decisions[6].outcome, Outcome::Landed(_)));
     assert_eq!(snapshot.mainline, digest(40));
 }
 
@@ -176,9 +189,14 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // the predecessor whose refs an inheriting fold adopts, since a successor is a
 // different bloom and has no candidate refs of its own. `None` on the ordinary
 // path, but the field is in the stream either way.
+// Repinned again for #4696: the fold now dispatches `AggregateVerify` — the
+// mechanical gate the catalog always specified and nothing produced — and it is
+// a *passing* verify that dispatches the aggregate review. The script gained the
+// verify hop and the resolve step's decided output names a different stage, an
+// intended, coordinated break, recomputed.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0x00, 0x26, 0x90, 0xe0, 0x57, 0x03, 0xcd, 0x37, 0x40, 0x04, 0xc1, 0xb8, 0x3d, 0xe1, 0xa6, 0xa4, 0xaf, 0x00, 0x3c,
-    0x2b, 0xc2, 0x3e, 0xf5, 0xbf, 0xc4, 0x24, 0xa7, 0x51, 0x27, 0x48, 0x10, 0xed,
+    0x22, 0x15, 0x41, 0x23, 0x60, 0x15, 0x09, 0x47, 0xef, 0x29, 0x3f, 0xa7, 0x95, 0xd5, 0x03, 0xbf, 0xfd, 0x41, 0xad,
+    0xab, 0xd2, 0xd9, 0x5b, 0xb2, 0x04, 0xe5, 0x60, 0x89, 0x1f, 0xe7, 0x66, 0xab,
 ];
 
 #[test]

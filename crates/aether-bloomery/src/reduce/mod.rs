@@ -18,6 +18,7 @@
 //! the reducer enforces the same rule over its projection so seal decisions
 //! are correct before the store transaction commits.
 
+mod aggregate_verify;
 mod attempt;
 mod decision;
 mod error;
@@ -34,8 +35,9 @@ mod view;
 
 pub use decision::Decision;
 pub use error::{
-    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AttemptCompletedError, BaseMismatch, IntegrateError,
-    LandError, ObserveMainlineError, ResolveError, SealConflict, SealError, SupersedeError,
+    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError,
+    BaseMismatch, IntegrateError, LandError, ObserveMainlineError, ResolveError, SealConflict, SealError,
+    SupersedeError,
 };
 pub use event::{Event, Fact};
 pub use outcome::{Decisions, Outcome};
@@ -45,6 +47,7 @@ pub use view::view_of;
 
 use crate::values::ResolvedConfigs;
 
+use aggregate_verify::reduce_aggregate_verify_completed;
 use attempt::reduce_attempt_completed;
 use evidence::{reduce_admit_evidence, reduce_adopt_answer};
 use integrate::{reduce_integrate, reduce_resolve};
@@ -84,6 +87,9 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> 
         Fact::Resolve { bloom, tree, head, lineage } => reduce_resolve(snapshot, bloom, tree, head, lineage),
         Fact::AggregateReviewCompleted { bloom, passed, evidence, implicated } => {
             reduce_aggregate_review_completed(snapshot, bloom, *passed, evidence, implicated)
+        }
+        Fact::AggregateVerifyCompleted { bloom, passed, evidence } => {
+            reduce_aggregate_verify_completed(snapshot, bloom, *passed, evidence)
         }
         Fact::Land { bloom, new_head } => reduce_land(snapshot, bloom, new_head),
         Fact::ObserveMainline { head } => reduce_observe_mainline(snapshot, head),

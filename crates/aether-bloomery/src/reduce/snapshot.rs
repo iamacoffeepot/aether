@@ -119,6 +119,14 @@ pub struct BloomRecord {
     /// never buys a third roll. An adopting answer resets it — the owner
     /// buying a whole fresh cycle.
     pub aggregate_rolls: u32,
+    /// How many aggregate-*verify* verdicts this bloom has consumed, against
+    /// `AggregateVerify`'s own catalog budget.
+    ///
+    /// Counted apart from [`aggregate_rolls`](Self::aggregate_rolls) because
+    /// the two aggregate gates are separate stages holding separate budgets: a
+    /// fold that burned the compiler's rolls has not touched the critic's, and
+    /// one shared counter would let either gate spend the other's.
+    pub aggregate_verify_rolls: u32,
     /// The bloom-scope park (ADR-0153): the pending-decision question raised
     /// when the delta-confirm still failed at the two-pass ceiling — the
     /// failing review's record artifact digest, held in
@@ -278,7 +286,8 @@ impl Snapshot {
             | Decision::DispatchAttempt { .. }
             | Decision::DispatchLand { .. }
             | Decision::DispatchIntegration { .. }
-            | Decision::DispatchAggregateReview { .. } => {}
+            | Decision::DispatchAggregateReview { .. }
+            | Decision::DispatchAggregateVerify { .. } => {}
             Decision::RecordIntegration { bloom, integration } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.integration.clone_from(integration);
@@ -287,6 +296,11 @@ impl Snapshot {
             Decision::RecordAggregateRoll { bloom, rolls } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.aggregate_rolls = *rolls;
+                }
+            }
+            Decision::RecordAggregateVerifyRoll { bloom, rolls } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.aggregate_verify_rolls = *rolls;
                 }
             }
             Decision::RecordReviewPark { bloom, question } => {
@@ -353,6 +367,7 @@ impl BloomRecord {
             wedged: BTreeMap::new(),
             integration: None,
             aggregate_rolls: 0,
+            aggregate_verify_rolls: 0,
             review_park: None,
             superseded_by: None,
         }

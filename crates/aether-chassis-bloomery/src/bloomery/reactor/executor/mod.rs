@@ -34,7 +34,8 @@ impl ExecutorReactorCapability {
     /// [`Topic::Redispatch`] replay of an answered parked question (ADR-0151,
     /// #3664) — all three submit through the same executor shell and ride the
     /// same intake cycle.
-    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::Dispatch, Topic::AggregateReview, Topic::Redispatch];
+    pub const DRAINED_TOPICS: &'static [Topic] =
+        &[Topic::Dispatch, Topic::AggregateReview, Topic::AggregateVerify, Topic::Redispatch];
 }
 
 mod runtime;

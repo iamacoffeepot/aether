@@ -183,6 +183,7 @@ pub fn splice_bloom(snapshot: &mut Snapshot, spec: &BloomSpec, status: BloomStat
             wedged: BTreeMap::new(),
             integration: None,
             aggregate_rolls: 0,
+            aggregate_verify_rolls: 0,
             review_park: None,
             superseded_by: None,
         },
