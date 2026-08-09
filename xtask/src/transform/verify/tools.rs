@@ -12,6 +12,7 @@
 //! in between. A missing tool is a broken host, not a softer gate.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// One external program a verify member runs, and what it in turn needs.
@@ -85,10 +86,11 @@ fn is_available(program: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// A tool the host does not have, paired with how to get it.
+/// Something the host does not have — a program or a toolchain target —
+/// paired with how to get it.
 pub(super) struct Missing {
-    pub(super) program: &'static str,
-    pub(super) install: &'static str,
+    pub(super) requirement: &'static str,
+    pub(super) install: String,
 }
 
 /// Resolve `roots` through the graph and report **every** missing program.
@@ -100,7 +102,50 @@ pub(super) fn preflight(roots: &[&str]) -> Vec<Missing> {
     closure(roots)
         .into_iter()
         .filter(|program| !is_available(program))
-        .filter_map(|program| tool(program).map(|entry| Missing { program: entry.program, install: entry.install }))
+        .filter_map(|program| {
+            tool(program).map(|entry| Missing { requirement: entry.program, install: entry.install.to_owned() })
+        })
+        .collect()
+}
+
+/// Whether the standard library for `target` is installed for the toolchain in
+/// use — the cross-compilation half of the preflight, which no `PATH` probe can
+/// answer.
+///
+/// `rustc --print target-libdir` rather than `rustup target list --installed`:
+/// the question is a property of the active toolchain, and a host whose Rust
+/// came from a distribution package has no `rustup` to ask. rustc prints the
+/// path whether or not the target is installed, so the directory's existence is
+/// the signal — an unknown triple makes rustc itself exit non-zero.
+fn target_is_installed(target: &str) -> bool {
+    let probe = Command::new("rustc")
+        .args(["--print", "target-libdir", "--target", target])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    match probe {
+        Ok(output) if output.status.success() => {
+            String::from_utf8(output.stdout).is_ok_and(|libdir| Path::new(libdir.trim()).is_dir())
+        }
+        _ => false,
+    }
+}
+
+/// Report every toolchain target in `targets` this host cannot cross-build for.
+///
+/// The lane's `verify.test` pre-build cross-compiles the component wasm, and CI
+/// installs that target explicitly (the toolchain action's `targets:` line). A
+/// host without it builds no wasm, and `AETHER_REQUIRE_RUNTIME=1` — set so a
+/// missing component is loud rather than a silent skip — then fails one test per
+/// scenario for a reason no candidate can fix.
+pub(super) fn preflight_targets(targets: &[&'static str]) -> Vec<Missing> {
+    targets
+        .iter()
+        .copied()
+        .collect::<BTreeSet<&'static str>>()
+        .into_iter()
+        .filter(|target| !target_is_installed(target))
+        .map(|target| Missing { requirement: target, install: format!("rustup target add {target}") })
         .collect()
 }
 
@@ -112,12 +157,12 @@ pub(super) fn preflight(roots: &[&str]) -> Vec<Missing> {
 pub(super) fn missing_findings(missing: &[Missing]) -> String {
     let list = missing
         .iter()
-        .map(|entry| format!("- `{}` — {}", entry.program, entry.install))
+        .map(|entry| format!("- `{}` — {}", entry.requirement, entry.install))
         .collect::<Vec<String>>()
         .join("\n");
 
     format!(
-        "Verification did not run. This host is missing tools the verify lane needs, so it \
+        "Verification did not run. This host is missing tools or toolchain targets the verify lane needs, so it \
          cannot compute whether the candidate passes — which is not the same as the candidate \
          failing, and no change to the candidate can fix it.\n\n{list}\n\n\
          Install these on the executor host and re-dispatch."
@@ -126,7 +171,9 @@ pub(super) fn missing_findings(missing: &[Missing]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Missing, closure, missing_findings, preflight};
+    use std::process::Command;
+
+    use super::{Missing, closure, missing_findings, preflight, preflight_targets};
 
     #[test]
     fn a_tools_prerequisites_come_with_it() {
@@ -157,10 +204,50 @@ mod tests {
     }
 
     #[test]
+    fn an_uninstalled_target_is_reported_missing_with_the_command_that_installs_it() {
+        // Tripwire: the target probe must fail *closed*. It runs a real rustc
+        // against a triple no toolchain carries, so a regression to a probe
+        // that answers "installed" without looking — the shape a `PATH` scan or
+        // a swallowed spawn error takes — clears a host that cannot cross-build
+        // the component wasm, and the lane then spends a full suite run
+        // reporting one host fault as a failure per scenario test.
+        let missing = preflight_targets(&["definitely-not-a-real-target"]);
+
+        let [entry] = missing.as_slice() else {
+            panic!("an unknown triple is missing, got {} entries", missing.len())
+        };
+        assert_eq!(entry.requirement, "definitely-not-a-real-target");
+        assert_eq!(entry.install, "rustup target add definitely-not-a-real-target", "the report is a fix list");
+    }
+
+    #[test]
+    fn the_toolchain_that_runs_these_tests_probes_as_installed() {
+        // The other half of the same probe, against the one target every host
+        // running this suite provably has: its own. A probe that fails closed
+        // for everything — a spawn error read as absence, a libdir path never
+        // resolved — would refuse every host and wedge every bloom on a
+        // requirement nobody can satisfy, which is worse than the gap it
+        // replaces. Leaked, so the triple stays whatever this host is.
+        let host: &'static str = Box::leak(host_triple().into_boxed_str());
+
+        assert!(preflight_targets(&[host]).is_empty(), "{host} must probe as installed");
+    }
+
+    /// This host's target triple, from `rustc -vV`'s `host:` line.
+    fn host_triple() -> String {
+        let output = Command::new("rustc").arg("-vV").output().expect("rustc runs wherever this suite does");
+        String::from_utf8(output.stdout)
+            .expect("rustc -vV is utf-8")
+            .lines()
+            .find_map(|line| line.strip_prefix("host: ").map(str::to_owned))
+            .expect("rustc -vV reports a host triple")
+    }
+
+    #[test]
     fn the_findings_name_every_missing_tool_and_its_install() {
         let rendered = missing_findings(&[
-            Missing { program: "cargo-nextest", install: "cargo install cargo-nextest --locked" },
-            Missing { program: "node", install: "install Node.js (https://nodejs.org)" },
+            Missing { requirement: "cargo-nextest", install: "cargo install cargo-nextest --locked".to_owned() },
+            Missing { requirement: "node", install: "install Node.js (https://nodejs.org)".to_owned() },
         ]);
 
         assert!(rendered.contains("cargo-nextest"));
