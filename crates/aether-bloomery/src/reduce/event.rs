@@ -227,6 +227,37 @@ pub enum Fact {
         /// a superseded landing cannot re-open members under a newer one.
         evidence: Evidence,
     },
+    /// Hand a wedged member more attempts on the bloom it already belongs to,
+    /// resuming it from where it stopped (#4708).
+    ///
+    /// The escape from a wedge used to be supersession alone. But a bloom's
+    /// identity is the digest of its spec, so re-running work that has not
+    /// changed means altering something sealed — an operator fabricating a
+    /// content difference to express an execution decision, and discarding the
+    /// candidate the wedged member had already built along with it.
+    ///
+    /// A wedge is a fact about execution rather than about sealed work, which is
+    /// what makes it expressible as its own fact instead of a new identity. The
+    /// line against supersession follows the sealed `base`: a base that has not
+    /// moved, with the scope, membership, and configuration unchanged, is a
+    /// grant; anything else is a successor doing real work.
+    ///
+    /// Appended past [`Fact::LandingRejected`] so the prior facts' wire
+    /// discriminants are unchanged.
+    GrantAttempts {
+        /// The bloom the wedged member belongs to.
+        bloom: BloomId,
+        /// The wedged member.
+        workpiece: WorkpieceId,
+        /// The stage the grant believes the member is wedged at — refused when
+        /// it names any other, so a grant cannot act on a stale read.
+        stage: StageId,
+        /// How many more dispatched attempts the member may spend before it
+        /// wedges again. Bounded by the stage's own retry budget, and by the
+        /// bloom's sealed [`Budget::retry_cap`](crate::Budget::retry_cap) when
+        /// it states one.
+        attempts: u32,
+    },
 }
 
 impl Fact {

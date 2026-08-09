@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError, Decision,
-    IntegrateError, LandError, LandingRejectedError, ResolveError, SealError, SupersedeError,
+    GrantAttemptsError, IntegrateError, LandError, LandingRejectedError, ResolveError, SealError, SupersedeError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -261,4 +261,22 @@ pub enum Outcome {
     },
     /// A landing rejection was refused.
     LandingRejectedRefused(LandingRejectedError),
+    /// A wedged member was handed back attempts and re-dispatched on the bloom
+    /// it already belongs to (#4708) — no new bloom, no field of the spec
+    /// altered, and the candidate it had already built carried forward.
+    AttemptsGranted {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The resumed member.
+        workpiece: WorkpieceId,
+        /// The stage the member resumes at: the wedged stage itself, or `Refine`
+        /// when the wedge was a spent repair ceiling at `Verify` — re-running the
+        /// mechanical gate on an unchanged candidate cannot change its verdict.
+        resumes_at: StageId,
+        /// How many dispatched attempts the member may now spend before it
+        /// wedges again.
+        attempts: u32,
+    },
+    /// An attempt grant was refused.
+    GrantAttemptsRejected(GrantAttemptsError),
 }

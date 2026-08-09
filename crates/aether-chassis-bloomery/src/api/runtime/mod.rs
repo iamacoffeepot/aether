@@ -265,6 +265,19 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `POST /blooms/{id}/grant` — hand a wedged member more attempts and
+    /// resume it on the bloom it already belongs to (#4708).
+    #[http::route(Post, "/blooms/{id}/grant")]
+    fn on_grant(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.grant(&ctx, &id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
     /// `POST /blooms/{id}/answer` — adopt a signed answer to a parked question.
     #[http::route(Post, "/blooms/{id}/answer")]
     fn on_answer(

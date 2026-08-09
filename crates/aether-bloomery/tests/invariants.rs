@@ -17,10 +17,10 @@ use aether_bloomery::ConfigKind;
 use aether_bloomery::Decisions;
 use aether_bloomery::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, Artifact, AttemptCompletedError,
-    BloomId, BloomStatus, CandidateRef, CatalogError, Decision, Digest, Event, Evidence, EvidenceKind, Fact, KeyId,
-    LandError, LandingRejectedError, Observation, Outcome, Provenance, Question, ResolveError, ResolvedConfigs,
-    SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId, StageProgress, Statement, SupersedeError,
-    Unproducible, reduce,
+    BloomId, BloomStatus, CandidateRef, CatalogError, Decision, Digest, Event, Evidence, EvidenceKind, Fact,
+    GrantAttemptsError, KeyId, LandError, LandingRejectedError, Observation, Outcome, Provenance, Question,
+    ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId, StageProgress,
+    Statement, SupersedeError, Unproducible, reduce,
 };
 use aether_data::Kind;
 use aether_data::wire::to_vec;
@@ -1772,6 +1772,214 @@ fn a_failing_verify_reenters_refine_then_wedges_at_the_ceiling() {
     assert!(
         !d3.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. })),
         "a wedged terminal Verify stops dispatching",
+    );
+}
+
+// #4708 — Tripwire: a grant resumes a wedged member on the bloom it already
+// belongs to, and hands back exactly the attempts it names. The escape from a
+// wedge used to be supersession alone, which mints a new bloom id and re-enters
+// every non-inherited member at the entry stage — so an execution decision cost
+// a fabricated content difference *and* the work the member had already done.
+// `Construct`'s budget is 2, so a grant of 2 buys one retry and a second failure
+// wedges again; anything that mis-derives the counter shows up as a member that
+// re-wedges immediately or one that loops past its budget.
+#[test]
+fn a_grant_resumes_a_wedged_member_on_its_own_bloom() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec.clone())));
+
+    let fail = |key: &str| {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: false,
+                evidence: attempt_evidence(),
+                candidate: None,
+            },
+        )
+    };
+    let (snapshot, _) = step(&snapshot, &fail("c-fail-1"));
+    let (wedged, _) = step(&snapshot, &fail("c-fail-2"));
+    assert!(wedged.blooms.get(&bloom).unwrap().wedged.contains_key(&workpiece("wp")), "the member is wedged");
+
+    let grant = event(
+        "grant",
+        Fact::GrantAttempts { bloom, workpiece: workpiece("wp"), stage: StageId::Construct, attempts: 2 },
+    );
+    let (granted, decisions) = step(&wedged, &grant);
+    match &decisions.outcome {
+        Outcome::AttemptsGranted { resumes_at, attempts, .. } => {
+            assert_eq!(*resumes_at, StageId::Construct, "a non-Verify wedge resumes in place");
+            assert_eq!(*attempts, 2);
+        }
+        other => panic!("expected AttemptsGranted, got {other:?}"),
+    }
+    assert_eq!(
+        decisions.effects.iter().filter(|e| matches!(e, Decision::DispatchAttempt { .. })).count(),
+        1,
+        "the grant dispatches the resumed attempt itself",
+    );
+    let record = granted.blooms.get(&bloom).unwrap();
+    assert!(!record.wedged.contains_key(&workpiece("wp")), "a cursor that moves clears the wedge");
+    assert_eq!(record.spec, spec, "the grant alters no field of the sealed spec");
+    assert_eq!(granted.blooms.len(), 1, "and seals no successor");
+
+    // Tripwire: the grant's arithmetic. Two attempts means one retry and then a
+    // wedge — not a member that re-wedges on its first failure (headroom
+    // mis-derived) and not one that outlives its stage budget.
+    let (retried, d1) = step(&granted, &fail("c-fail-3"));
+    assert!(matches!(d1.outcome, Outcome::AttemptRetried { attempt: 2, .. }), "the first granted failure retries");
+    let (_, d2) = step(&retried, &fail("c-fail-4"));
+    assert!(matches!(d2.outcome, Outcome::AttemptWedged { .. }), "the second spends the grant and wedges again");
+}
+
+// #4708 — Tripwire: a `Verify` wedge is spent *repair rolls*, not spent
+// attempts, so a grant there resumes the member at `Refine` — the re-entry the
+// wedge denied — carrying the candidate it had already built. A grant that only
+// reset `attempts` would leave a Verify-wedged member exactly as stuck (the
+// cursor-carried `repair_rolls` is what wedged it), and one that resumed at
+// `Verify` would re-run the mechanical gate on an unchanged candidate, whose
+// verdict cannot change (ADR-0153). That is the most common wedge there is.
+#[test]
+fn a_grant_on_a_verify_wedge_resumes_at_refine_with_its_candidate() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let completion = |key: &str, stage: StageId, passed: bool, candidate: Option<CandidateRef>| {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage,
+                passed,
+                evidence: attempt_evidence(),
+                candidate,
+            },
+        )
+    };
+
+    // Construct passes with a capture, then Verify spends its whole repair
+    // ceiling (budget 3) and the member wedges holding that candidate.
+    let captured = CandidateRef { tree: digest(21), checkout: digest(22) };
+    let (snapshot, _) = step(&snapshot, &completion("c-pass", StageId::Construct, true, Some(captured)));
+    let (snapshot, _) = step(&snapshot, &completion("v-fail-1", StageId::Verify, false, None));
+    let (snapshot, _) = step(&snapshot, &completion("refine-pass-1", StageId::Refine, true, None));
+    let (snapshot, _) = step(&snapshot, &completion("v-fail-2", StageId::Verify, false, None));
+    let (snapshot, _) = step(&snapshot, &completion("refine-pass-2", StageId::Refine, true, None));
+    let (wedged, d) = step(&snapshot, &completion("v-fail-3", StageId::Verify, false, None));
+    assert!(matches!(d.outcome, Outcome::AttemptWedged { stage: StageId::Verify, .. }));
+
+    let grant =
+        event("grant", Fact::GrantAttempts { bloom, workpiece: workpiece("wp"), stage: StageId::Verify, attempts: 1 });
+    let (granted, decisions) = step(&wedged, &grant);
+    assert!(
+        matches!(&decisions.outcome, Outcome::AttemptsGranted { resumes_at: StageId::Refine, attempts: 1, .. }),
+        "a Verify wedge resumes at the Refine re-entry, got {:?}",
+        decisions.outcome,
+    );
+    match decisions.effects.iter().find(|e| matches!(e, Decision::DispatchAttempt { .. })) {
+        Some(Decision::DispatchAttempt { stage, transformation, candidate, .. }) => {
+            assert_eq!(*stage, StageId::Refine);
+            assert_eq!(*candidate, Some(captured.tree), "the resumed attempt keeps the candidate it had built");
+            assert_eq!(
+                transformation.inputs.first().copied(),
+                Some(captured.tree),
+                "and binds its evidence to that candidate, not the sealed base",
+            );
+        }
+        other => panic!("expected a Refine DispatchAttempt, got {other:?}"),
+    }
+
+    // A grant of 1 buys exactly one repair cycle: the re-entered Refine passes,
+    // the delta-confirm fails, and the member wedges again rather than looping.
+    let progress = granted.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
+    assert_eq!(progress.stage, StageId::Refine);
+    let (snapshot, _) = step(&granted, &completion("refine-pass-3", StageId::Refine, true, None));
+    let (_, d) = step(&snapshot, &completion("v-fail-4", StageId::Verify, false, None));
+    assert!(matches!(d.outcome, Outcome::AttemptWedged { .. }), "one granted roll, then wedged again");
+}
+
+// #4708 — the grant's refusals. A running member is not grantable (two workers
+// on one workpiece), a stale stage name is not silently applied to whatever the
+// record says now, and a request the member could never spend is refused naming
+// the ceiling rather than quietly clamped — a clamp would report a grant of five
+// while handing back two.
+#[test]
+fn grant_refuses_a_running_member_a_stale_stage_and_an_unspendable_request() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (running, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let grant = |key: &str, wp: &str, stage: StageId, attempts: u32| {
+        event(key, Fact::GrantAttempts { bloom, workpiece: workpiece(wp), stage, attempts })
+    };
+
+    let (_, d) = step(&running, &grant("g-running", "wp", StageId::Construct, 1));
+    assert!(
+        matches!(&d.outcome, Outcome::GrantAttemptsRejected(GrantAttemptsError::NotWedged(wp)) if *wp == workpiece("wp")),
+        "a member mid-flight has attempts already, got {:?}",
+        d.outcome,
+    );
+
+    let fail = |key: &str| {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: false,
+                evidence: attempt_evidence(),
+                candidate: None,
+            },
+        )
+    };
+    let (snapshot, _) = step(&running, &fail("c-fail-1"));
+    let (wedged, _) = step(&snapshot, &fail("c-fail-2"));
+
+    let (_, d) = step(&wedged, &grant("g-stale", "wp", StageId::Verify, 1));
+    assert!(
+        matches!(
+            d.outcome,
+            Outcome::GrantAttemptsRejected(GrantAttemptsError::StageMismatch {
+                wedged_at: StageId::Construct,
+                got: StageId::Verify,
+            })
+        ),
+        "a grant naming the wrong stage is refused, got {:?}",
+        d.outcome,
+    );
+
+    // `Construct`'s retry budget is 2, and no `retry_cap` is sealed, so 2 is the
+    // ceiling. Zero is refused on the same door: it would dispatch an attempt
+    // while granting nothing to spend on it.
+    for (key, attempts) in [("g-over", 3), ("g-zero", 0)] {
+        let (_, d) = step(&wedged, &grant(key, "wp", StageId::Construct, attempts));
+        assert!(
+            matches!(
+                d.outcome,
+                Outcome::GrantAttemptsRejected(GrantAttemptsError::BeyondCap { requested, cap: 2 })
+                    if requested == attempts
+            ),
+            "a grant of {attempts} is refused naming the ceiling, got {:?}",
+            d.outcome,
+        );
+    }
+
+    let (_, d) = step(&wedged, &grant("g-stranger", "nobody", StageId::Construct, 1));
+    assert!(
+        matches!(&d.outcome, Outcome::GrantAttemptsRejected(GrantAttemptsError::NotAMember(wp)) if *wp == workpiece("nobody")),
+        "a grant for a non-member is refused, got {:?}",
+        d.outcome,
     );
 }
 

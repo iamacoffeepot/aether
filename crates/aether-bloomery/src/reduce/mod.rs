@@ -24,6 +24,7 @@ mod decision;
 mod error;
 mod event;
 mod evidence;
+mod grant;
 mod integrate;
 mod land;
 mod landing;
@@ -37,8 +38,8 @@ mod view;
 pub use decision::Decision;
 pub use error::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError,
-    BaseMismatch, IntegrateError, LandError, LandingRejectedError, ResolveError, SealConflict, SealError,
-    SupersedeError,
+    BaseMismatch, GrantAttemptsError, IntegrateError, LandError, LandingRejectedError, ResolveError, SealConflict,
+    SealError, SupersedeError,
 };
 pub use event::{Event, Fact};
 pub use outcome::{Decisions, Outcome};
@@ -51,6 +52,7 @@ use crate::values::ResolvedConfigs;
 use aggregate_verify::reduce_aggregate_verify_completed;
 use attempt::reduce_attempt_completed;
 use evidence::{reduce_admit_evidence, reduce_adopt_answer};
+use grant::reduce_grant_attempts;
 use integrate::{reduce_integrate, reduce_resolve};
 use land::reduce_land;
 use landing::reduce_landing_rejected;
@@ -96,5 +98,8 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> 
         Fact::LandingRejected { bloom, evidence } => reduce_landing_rejected(snapshot, bloom, evidence),
         Fact::Land { bloom, new_head } => reduce_land(snapshot, bloom, new_head),
         Fact::ObserveMainline { head } => reduce_observe_mainline(snapshot, head),
+        Fact::GrantAttempts { bloom, workpiece, stage, attempts } => {
+            reduce_grant_attempts(snapshot, bloom, workpiece, *stage, *attempts)
+        }
     }
 }
