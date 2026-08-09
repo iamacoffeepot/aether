@@ -302,6 +302,27 @@ pub(super) fn reduce_supersede(
     if let Some(conflict) = membership_conflict(snapshot, successor.members(), Some(predecessor)) {
         return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::MembershipConflict(conflict)));
     }
+    // A successor that rebases takes mainline with it (#4709) — the resync
+    // trigger `reduce_observe_mainline` defers to, landing here because this is
+    // the machinery that mints the successor. Mainline only moves while nothing
+    // is in flight, so a repository that advances during a bloom leaves the
+    // observed head ahead of it, and a wedged bloom never leaves flight on its
+    // own: without this the coordinator can never catch up, and every successor
+    // inherits a base it cannot land on.
+    //
+    // Exactly two bases are admissible, and the second is the whole guard: the
+    // one mainline is already at, and the one the source last reported. Any
+    // other digest would let a caller write the compare-and-swap anchor
+    // directly.
+    let rebase = (successor.base() != snapshot.mainline).then_some(successor.base());
+    if let Some(base) = rebase
+        && base != snapshot.observed
+    {
+        return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::UnobservedBase {
+            base,
+            observed: snapshot.observed,
+        }));
+    }
     let mut effects = Vec::new();
     // Release the predecessor's memberships, then claim the successor's, then
     // inherit the predecessor's still-valid resolution claims, then name it
@@ -379,6 +400,13 @@ pub(super) fn reduce_supersede(
             // Every candidate was produced under the predecessor's id.
             adopt_from: Some(*predecessor),
         });
+    }
+    // Last, so the mainline move is part of the same atomic decision set that
+    // released the predecessor and claimed the successor: the base a land
+    // compare-and-swaps against and the bloom entitled to land on it change
+    // together or not at all.
+    if let Some(base) = rebase {
+        effects.push(Decision::AdvanceMainline { from: snapshot.mainline, to: base });
     }
     effects.push(Decision::MarkSuperseded { bloom: *predecessor, by: successor_id });
     Decisions { outcome: Outcome::Superseded { predecessor: *predecessor, successor: successor_id }, effects }

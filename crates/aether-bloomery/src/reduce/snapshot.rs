@@ -23,6 +23,16 @@ use crate::values::{
 pub struct Snapshot {
     /// The current mainline head — landing is a compare-and-swap against it.
     pub mainline: Digest,
+    /// The head the source last reported, which is not always one mainline was
+    /// free to move onto (#4709).
+    ///
+    /// Mainline may only advance when nothing is in flight, so a repository that
+    /// moves during a bloom leaves the two apart. This is the head a supersession
+    /// may rebase onto — the only base other than current mainline a successor
+    /// may take, which is what stops a caller from naming the compare-and-swap
+    /// anchor whatever it likes.
+    #[serde(default)]
+    pub observed: Digest,
     /// The active-membership map: which bloom each workpiece is claimed by.
     /// The at-most-one-active-bloom-per-workpiece constraint is this map's
     /// key uniqueness.
@@ -349,6 +359,10 @@ impl Snapshot {
             }
             Decision::AdvanceMainline { to, .. } => {
                 self.mainline = *to;
+                self.observed = *to;
+            }
+            Decision::RecordObservation { head } => {
+                self.observed = *head;
             }
             Decision::EmitReceipt(receipt) => {
                 if let Some(record) = self.blooms.get_mut(&receipt.bloom) {

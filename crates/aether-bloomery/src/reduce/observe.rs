@@ -15,12 +15,19 @@
 //! reducer decides what it means. The reducer stays pure — it is handed a digest
 //! and compares, never reaching for the repository itself.
 
-use super::{Decision, Decisions, ObserveMainlineError, Outcome, Snapshot, seal::active_unlanded_bloom};
+use super::{Decision, Decisions, Outcome, Snapshot, seal::active_unlanded_bloom};
 use crate::digest::Digest;
 
 pub(super) fn reduce_observe_mainline(snapshot: &Snapshot, head: &Digest) -> Decisions {
+    // Record what the repository said before deciding what it means. An
+    // observation always tells the truth about the head; only the *advance* is
+    // conditional, and separating the two is what gives a held observation
+    // somewhere to live (#4709). Recorded on every branch, so `observed` is
+    // always the freshest head the coordinator has heard of rather than the
+    // freshest one it was allowed to act on.
+    let mut effects = alloc::vec![Decision::RecordObservation { head: *head }];
     if snapshot.mainline == *head {
-        return Decisions::rejected(Outcome::MainlineUnchanged(*head));
+        return Decisions { outcome: Outcome::MainlineUnchanged(*head), effects };
     }
     // Hold the advance while a bloom is in flight. A sealed bloom's base is the
     // one head it may land on, so moving mainline out from under it converts its
@@ -31,15 +38,14 @@ pub(super) fn reduce_observe_mainline(snapshot: &Snapshot, head: &Digest) -> Dec
     // by then, and a bloom whose base really has moved still discovers it at
     // land time through the same `BaseMismatch` it would have hit anyway.
     //
-    // This is the conservative half of the policy. Advancing *through* a live
-    // bloom — superseding it onto the new base automatically — is the resync
-    // trigger, and it belongs with the machinery that can mint the successor
-    // rather than here, where the only available move is to strand it.
+    // This is the conservative half of the policy. The other half is a
+    // supersession that rebases onto the head recorded above — the resync
+    // trigger, which lives with the machinery that can mint the successor
+    // (`reduce_supersede`) rather than here, where the only available move is to
+    // strand it.
     if let Some(bloom) = active_unlanded_bloom(snapshot) {
-        return Decisions::rejected(Outcome::ObserveMainlineRejected(ObserveMainlineError::BloomInFlight(bloom)));
+        return Decisions { outcome: Outcome::MainlineHeld { head: *head, by: bloom }, effects };
     }
-    Decisions {
-        outcome: Outcome::MainlineAdvanced { from: snapshot.mainline, to: *head },
-        effects: alloc::vec![Decision::AdvanceMainline { from: snapshot.mainline, to: *head }],
-    }
+    effects.push(Decision::AdvanceMainline { from: snapshot.mainline, to: *head });
+    Decisions { outcome: Outcome::MainlineAdvanced { from: snapshot.mainline, to: *head }, effects }
 }

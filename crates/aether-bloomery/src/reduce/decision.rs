@@ -69,7 +69,15 @@ pub enum Decision {
         /// The resolved artifact.
         resolved: ResolvedBloom,
     },
-    /// Advance mainline as part of a land.
+    /// Advance mainline — emitted by a land, by an observation that found the
+    /// repository ahead with nothing in flight, and by a supersession that
+    /// rebases onto the observed head (#4709).
+    ///
+    /// Also refreshes the observed head, because every one of those three moves
+    /// mainline to a head at least as fresh as the last observation: a land
+    /// authors the head itself, and the other two move onto the observed one.
+    /// Without that, a land would leave `observed` pointing behind mainline and
+    /// the next supersession could rebase *backwards* onto it.
     AdvanceMainline {
         /// The prior mainline head.
         from: Digest,
@@ -349,5 +357,20 @@ pub enum Decision {
     SetUnresolved {
         /// The bloom returning to the working state.
         bloom: BloomId,
+    },
+    /// Record the head the source last reported, whether or not mainline was
+    /// free to move onto it (#4709).
+    ///
+    /// The live pointer half of the observation policy. Mainline is the base a
+    /// land compare-and-swaps against and may only move when nothing is in
+    /// flight; the observed head is just what the repository said, so it is
+    /// recorded unconditionally. Keeping them apart is what lets a supersession
+    /// rebase onto a head mainline was not allowed to follow — and recording it
+    /// as a decision rather than host state is what keeps it derivable from the
+    /// journal, which [`Snapshot`](crate::Snapshot) requires of everything it
+    /// holds. Appended so the prior decisions' wire discriminants are unchanged.
+    RecordObservation {
+        /// The head the source reported.
+        head: Digest,
     },
 }

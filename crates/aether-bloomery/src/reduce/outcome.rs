@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError, Decision,
-    IntegrateError, LandError, LandingRejectedError, ObserveMainlineError, ResolveError, SealError, SupersedeError,
+    IntegrateError, LandError, LandingRejectedError, ResolveError, SealError, SupersedeError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -185,8 +185,19 @@ pub enum Outcome {
     /// of a host that re-observes on a cadence, so it is a plain no-op rather
     /// than a refusal — nothing is wrong, there is simply nothing to move.
     MainlineUnchanged(Digest),
-    /// A mainline observation was refused.
-    ObserveMainlineRejected(ObserveMainlineError),
+    /// The repository is ahead of mainline, which may not follow yet because a
+    /// bloom is in flight (#4709).
+    ///
+    /// Not a refusal: the observation is recorded, and a supersession that
+    /// rebases onto this head is what lets mainline catch up. Refusing outright
+    /// is what left a wedged bloom pinning mainline forever, since a wedge never
+    /// leaves flight on its own.
+    MainlineHeld {
+        /// The head the repository is at.
+        head: Digest,
+        /// The in-flight bloom mainline is waiting on.
+        by: BloomId,
+    },
     /// A complete claim set folded and dispatched the whole-bloom aggregate
     /// verify — the mechanical gate over the fold, ahead of the critic.
     AggregateVerifyDispatched {

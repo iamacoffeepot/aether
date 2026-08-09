@@ -244,7 +244,11 @@ impl Topic {
             // member's `MemberView`, on the same reconcile the rest of the
             // member's state rides. A topic of its own would need a reactor to
             // drain it, and an undrained topic accumulates rows forever.
-            | Decision::RecordWedge { .. } => None,
+            | Decision::RecordWedge { .. }
+            // Snapshot-only: recording the observed head moves no bloom and
+            // opens no work. What acts on it is a later supersession, which
+            // carries its own topics.
+            | Decision::RecordObservation { .. } => None,
         }
     }
 }
