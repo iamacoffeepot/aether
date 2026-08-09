@@ -27,8 +27,8 @@ fn temp_root(label: &str) -> PathBuf {
 fn upload_dedups_identical_bytes_to_one_hash() {
     let root = temp_root("dedup");
     let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
-    let h1 = store.upload(b"the-bytes", meta("a"), None);
-    let h2 = store.upload(b"the-bytes", meta("a"), None);
+    let h1 = store.upload(b"the-bytes", meta("a"), None).expect("upload lands");
+    let h2 = store.upload(b"the-bytes", meta("a"), None).expect("upload lands");
     assert_eq!(h1, h2, "identical bytes dedup to the same content hash");
     assert_eq!(store.entry_count(), 1, "dedup stores one entry");
     let _ = fs::remove_dir_all(&root);
@@ -38,8 +38,8 @@ fn upload_dedups_identical_bytes_to_one_hash() {
 fn name_repoints_to_the_latest_uploaded_hash() {
     let root = temp_root("repoint");
     let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
-    let h_old = store.upload(b"v1", meta("a"), Some("svc".to_owned()));
-    let h_new = store.upload(b"v2", meta("a"), Some("svc".to_owned()));
+    let h_old = store.upload(b"v1", meta("a"), Some("svc".to_owned())).expect("upload lands");
+    let h_new = store.upload(b"v2", meta("a"), Some("svc".to_owned())).expect("upload lands");
     assert_ne!(h_old, h_new);
     let resolved = store.get(&Selector::Name("svc".to_owned())).expect("the name resolves");
     assert_eq!(resolved.hash, h_new, "the name points at the latest upload");
@@ -51,7 +51,7 @@ fn entries_and_metadata_persist_across_a_reopen() {
     let root = temp_root("persist");
     let hash = {
         let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
-        store.upload(b"persisted-bytes", meta("keep"), Some("svc".to_owned()))
+        store.upload(b"persisted-bytes", meta("keep"), Some("svc".to_owned())).expect("upload lands")
         // store drops here — LockGuard releases lock.pid
     };
     let mut reopened: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
@@ -71,11 +71,11 @@ fn lru_budget_evicts_the_oldest_unnamed_unpinned_entry() {
     // not a fourth, so the trigger upload forces exactly one eviction —
     // of the only unnamed, unpinned candidate.
     let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(40)).expect("open store");
-    let h_plain = store.upload(b"plain-aaaa", meta("a"), None);
-    let h_named = store.upload(b"named-bbbb", meta("a"), Some("keep".to_owned()));
-    let h_pinned = store.upload(b"pinned-ccc", meta("a"), None);
+    let h_plain = store.upload(b"plain-aaaa", meta("a"), None).expect("upload lands");
+    let h_named = store.upload(b"named-bbbb", meta("a"), Some("keep".to_owned())).expect("upload lands");
+    let h_pinned = store.upload(b"pinned-ccc", meta("a"), None).expect("upload lands");
     assert!(store.pin(&h_pinned), "pin targets a stored entry");
-    let _ = store.upload(b"trigger-ddd", meta("a"), None);
+    let _ = store.upload(b"trigger-ddd", meta("a"), None).expect("upload lands");
 
     assert!(store.contains(&h_named), "a named entry is never evicted");
     assert!(store.contains(&h_pinned), "a pinned entry is never evicted");
@@ -102,11 +102,11 @@ fn eviction_free_policy_retains_what_lru_would_reclaim() {
     let mut free_plain = String::new();
     for store in [&mut lru, &mut free] {
         // The unnamed, unpinned first entry is the eviction candidate.
-        let plain = store.upload(b"plain-aaaa", meta("a"), None);
-        store.upload(b"named-bbbb", meta("a"), Some("keep".to_owned()));
-        store.upload(b"pinned-ccc", meta("a"), None);
+        let plain = store.upload(b"plain-aaaa", meta("a"), None).expect("upload lands");
+        store.upload(b"named-bbbb", meta("a"), Some("keep".to_owned())).expect("upload lands");
+        store.upload(b"pinned-ccc", meta("a"), None).expect("upload lands");
         // Trigger an over-budget upload.
-        store.upload(b"trigger-ddd", meta("a"), None);
+        store.upload(b"trigger-ddd", meta("a"), None).expect("upload lands");
         if lru_plain.is_empty() {
             lru_plain = plain;
         } else {
@@ -125,8 +125,8 @@ fn eviction_free_policy_retains_what_lru_would_reclaim() {
 fn entries_iteration_exposes_hash_metadata_and_sequence() {
     let root = temp_root("entries");
     let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
-    let first = store.upload(b"first", meta("one"), Some("first".to_owned()));
-    let second = store.upload(b"second", meta("two"), None);
+    let first = store.upload(b"first", meta("one"), Some("first".to_owned())).expect("upload lands");
+    let second = store.upload(b"second", meta("two"), None).expect("upload lands");
 
     let mut rows: Vec<_> = store
         .entries()
@@ -153,7 +153,7 @@ fn sidecar_flattens_metadata_beside_the_sequence() {
     let root = temp_root("sidecar-shape");
     let hash = {
         let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
-        store.upload(b"shape", meta("flat"), None)
+        store.upload(b"shape", meta("flat"), None).expect("upload lands")
     };
     let sidecar_path = root.join("entries").join(format!("{hash}.manifest"));
     let value: serde_json::Value =
@@ -173,7 +173,7 @@ fn legacy_sidecar_without_sequence_restores_at_zero() {
     let root = temp_root("legacy-seq");
     let hash = {
         let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
-        store.upload(b"legacy", meta("old"), None)
+        store.upload(b"legacy", meta("old"), None).expect("upload lands")
     };
     let sidecar_path = root.join("entries").join(format!("{hash}.manifest"));
     let mut value: serde_json::Value =
@@ -187,22 +187,24 @@ fn legacy_sidecar_without_sequence_restores_at_zero() {
     let _ = fs::remove_dir_all(&root);
 }
 
-// Tripwire: a bytes-write failure must never leave a name pointer at an
-// unindexed hash — pre-creating a directory at the entry's bytes path forces
-// `atomic_write`'s rename to fail, so this fails on the unguarded code and
-// passes once the name insert is gated on `self.entries.contains_key`.
+// Tripwire: a bytes-write failure must reach the caller as an error, never
+// as a hash the store cannot resolve — pre-creating a directory at the
+// entry's bytes path forces `atomic_write`'s rename to fail. A hash handed
+// back here would resolve nowhere, turning a storage failure into a
+// selector failure at whatever call site later spends it.
 #[test]
-fn failed_write_leaves_no_dangling_name_pointer() {
+fn failed_write_reports_an_error_and_leaves_no_dangling_name_pointer() {
     let root = temp_root("failed-write");
     let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
     let bytes = b"never-lands";
     let hash = hash_hex(bytes);
     fs::create_dir_all(root.join("entries").join(&hash)).expect("pre-create a directory at the bytes path");
 
-    let returned = store.upload(bytes, meta("x"), Some("svc".to_owned()));
+    let result = store.upload(bytes, meta("x"), Some("svc".to_owned()));
 
-    assert_eq!(returned, hash, "upload still returns the content hash");
+    assert!(result.is_err(), "a write that never landed reports the storage failure: {result:?}");
     assert!(!store.contains(&hash), "the failed write leaves the hash unindexed");
     assert_eq!(store.name_for(&hash), None, "no dangling name pointer at an unindexed hash");
+    assert!(store.get(&Selector::Name("svc".to_owned())).is_none(), "the name resolves nowhere");
     let _ = fs::remove_dir_all(&root);
 }

@@ -708,8 +708,9 @@ impl NativeActor for FleetServer {
     /// the store, forks `staged_path --describe` to capture its
     /// `BinaryManifest`, stores both, and points `name` (when set) at
     /// the hash. Reply: `UploadBinaryResult::Ok { hash, name }`, or
-    /// `Err { error }` for an unreadable path or a `--describe` that
-    /// failed or didn't yield a parseable manifest.
+    /// `Err { error }` for an unreadable path, a `--describe` that
+    /// failed or didn't yield a parseable manifest, or a store write
+    /// that didn't land — an `Ok` hash is always resolvable.
     #[handler::single]
     fn on_upload_binary(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UploadBinary) -> UploadBinaryResult {
         match ingest_binary(&mut state.store, &mail.staged_path, mail.name.clone()) {
@@ -745,7 +746,8 @@ impl NativeActor for FleetServer {
     /// store, reads the manifest straight from the wasm (no execution
     /// step), stores both, and points `name` (when set) at the hash.
     /// Reply: `UploadComponentResult::Ok { hash, name }`, or
-    /// `Err { error }` for an unreadable path or an unparseable wasm.
+    /// `Err { error }` for an unreadable path, an unparseable wasm, or a
+    /// store write that didn't land — an `Ok` hash is always resolvable.
     #[handler::single]
     fn on_upload_component(
         state: &mut Self::State,
