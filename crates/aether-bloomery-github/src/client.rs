@@ -249,6 +249,12 @@ pub trait GithubApi {
     /// The projection surface is unreachable or returned an error status.
     fn update_issue(&self, number: u64, title: &str, body: &str) -> Result<(), GithubError>;
 
+    /// Fetch a single issue by number, if it exists.
+    ///
+    /// # Errors
+    /// The projection surface is unreachable or returned an error status.
+    fn get_issue(&self, number: u64) -> Result<Option<Issue>, GithubError>;
+
     /// Find the comment on `issue_number` whose marker carries `key`, if any.
     ///
     /// # Errors
@@ -1180,6 +1186,19 @@ impl<T: HttpTransport> GithubApi for ReqwestGithub<T> {
         let payload = serde_json::json!({ "title": title, "body": body }).to_string();
         self.request(Method::Patch, format!("{}/{number}", self.issues_url()), Some(payload))?;
         Ok(())
+    }
+
+    fn get_issue(&self, number: u64) -> Result<Option<Issue>, GithubError> {
+        let Some(response) = self.request_opt(Method::Get, format!("{}/{number}", self.issues_url()))? else {
+            return Ok(None);
+        };
+        let gh: GhIssue = decode(&response)?;
+        if gh.pull_request.is_some() {
+            return Ok(None);
+        }
+        let body = gh.body.unwrap_or_default();
+        let marker = parse_marker(&body);
+        Ok(Some(Issue { number: gh.number, title: gh.title, body, marker }))
     }
 
     fn find_comment(&self, issue_number: u64, key: &str) -> Result<Option<Comment>, GithubError> {

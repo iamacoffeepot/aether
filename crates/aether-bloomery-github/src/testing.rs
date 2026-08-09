@@ -184,6 +184,32 @@ impl FakeGithub {
         self.lock().issues.iter().find(|issue| issue.number == number).map(|issue| issue.body.clone())
     }
 
+    /// Seed an issue at `number` with the given `title` and `body` — a test's
+    /// way to stage a pre-existing source issue that a workpiece maps to.
+    pub fn seed_issue(&self, number: u64, title: &str, body: &str) {
+        let mut state = self.lock();
+        if let Some(existing) = state.issues.iter_mut().find(|issue| issue.number == number) {
+            title.clone_into(&mut existing.title);
+            body.clone_into(&mut existing.body);
+        } else {
+            state.issues.push(StoredIssue { number, title: title.to_owned(), body: body.to_owned() });
+            if state.next_issue < number {
+                state.next_issue = number;
+            }
+        }
+    }
+
+    /// Comments on issue `number`, if it exists.
+    #[must_use]
+    pub fn comments_on(&self, issue_number: u64) -> Vec<Comment> {
+        self.lock()
+            .comments
+            .iter()
+            .filter(|c| c.issue_number == issue_number)
+            .map(|c| Comment { id: c.id, body: c.body.clone(), marker: parse_marker(&c.body) })
+            .collect()
+    }
+
     /// Delete issue `number` and its comments — an operator removing a
     /// projection. The next reconcile finds no marker and recreates it.
     pub fn delete_issue(&self, number: u64) {
@@ -769,6 +795,16 @@ impl GithubApi for FakeGithub {
         title.clone_into(&mut issue.title);
         body.clone_into(&mut issue.body);
         Ok(())
+    }
+
+    fn get_issue(&self, number: u64) -> Result<Option<Issue>, GithubError> {
+        let state = self.lock();
+        Ok(state.issues.iter().find(|issue| issue.number == number).map(|issue| Issue {
+            number: issue.number,
+            title: issue.title.clone(),
+            body: issue.body.clone(),
+            marker: parse_marker(&issue.body),
+        }))
     }
 
     fn find_comment(&self, issue_number: u64, key: &str) -> Result<Option<Comment>, GithubError> {
