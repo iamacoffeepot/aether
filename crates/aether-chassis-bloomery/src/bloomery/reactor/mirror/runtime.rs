@@ -422,7 +422,7 @@ mod tests {
         fake.create_pull_request(&NewPullRequest {
             title: format!("land {}", short_hex(&bloom_id.0)),
             body: "landing".into(),
-            head: branch.clone(),
+            head: branch,
             base: "main".into(),
         })
         .unwrap();
@@ -494,7 +494,7 @@ mod tests {
         fake.create_pull_request(&NewPullRequest {
             title: format!("land {}", short_hex(&bloom.0)),
             body: "landing".into(),
-            head: branch.clone(),
+            head: branch,
             base: "main".into(),
         })
         .unwrap();
@@ -542,7 +542,7 @@ mod tests {
         fake.create_pull_request(&NewPullRequest {
             title: format!("land {}", short_hex(&bloom_id.0)),
             body: "landing".into(),
-            head: branch.clone(),
+            head: branch,
             base: "main".into(),
         })
         .unwrap();
