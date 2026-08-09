@@ -100,14 +100,26 @@ impl IntegrateReactorState {
     }
 }
 
-/// The idempotency key a bloom's resolve admits under — deterministic in the
-/// bloom, so a re-drain (before the ack lands, or after a crash-and-replay)
-/// reduces to a duplicate rather than a second resolve. A bloom resolves once.
-fn resolve_key(bloom: &Digest) -> IdempotencyKey {
+/// The idempotency key a bloom's resolve admits under.
+///
+/// Keyed by the integrated tree as well as the bloom, because the tree is what
+/// the resolve asserts: a re-drain of the *same* fold (before the ack lands, or
+/// after a crash-and-replay) re-derives the same tree and reduces to a
+/// duplicate, while a later lap that folds a genuinely different tree admits a
+/// second, distinct fact. A bloom resolves once per integration it folds: an
+/// aggregate-review finding routes a member back through Refine → Verify, and
+/// the lap that follows integrates a different tree under the same bloom
+/// (#4722). Under the bloom-only key that second resolve was swallowed as a
+/// replay and the run stopped dead.
+fn resolve_key(bloom: &Digest, tree: &Digest) -> IdempotencyKey {
     use core::fmt::Write;
-    let mut key = String::with_capacity(24 + 64);
+    let mut key = String::with_capacity(24 + 64 + 1 + 64);
     key.push_str("aether.bloomery.resolve:");
     for byte in bloom.as_bytes() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    key.push(':');
+    for byte in tree.as_bytes() {
         let _ = write!(key, "{byte:02x}");
     }
     IdempotencyKey(key)
@@ -236,7 +248,7 @@ fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOut
     };
     let tree = expected.tree;
     let event = Event {
-        idempotency_key: resolve_key(&payload.bloom),
+        idempotency_key: resolve_key(&payload.bloom, &tree),
         fact: Fact::Resolve {
             bloom,
             tree,

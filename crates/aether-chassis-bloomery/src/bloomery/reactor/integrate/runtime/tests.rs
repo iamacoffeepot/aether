@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{BloomId, Digest, Event, Fact, IntegratePayload, MemberCandidate, Topic, WorkpieceId};
+use aether_bloomery::{
+    BloomId, Digest, Event, Fact, IdempotencyKey, IntegratePayload, MemberCandidate, Topic, WorkpieceId,
+};
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitDataApi, GitSource, short_hex};
 use aether_data::wire::{from_bytes, to_vec};
@@ -64,6 +66,10 @@ fn decoded_resolve(admit: &aether_bloomery::Admit) -> (BloomId, Digest, Digest, 
         Fact::Resolve { bloom, tree, head, lineage } => (bloom, tree, head, lineage),
         other => panic!("expected Fact::Resolve, got {other:?}"),
     }
+}
+
+fn admitted_key(admit: &aether_bloomery::Admit) -> IdempotencyKey {
+    from_bytes::<Event>(&admit.event).unwrap().idempotency_key
 }
 
 // ADR-0152 — a completed claim set folds its candidate onto the integration
@@ -193,6 +199,49 @@ fn a_conflicting_member_refuses_the_fold_rather_than_re_driving_it() {
 
     assert!(admits.is_empty(), "a collision admits no resolve");
     assert_eq!(ack_through, Some(sequence), "the refusal is definitive — acked, never re-driven");
+}
+
+// #4722 — an aggregate-review finding routes a member back through Refine →
+// Verify, and the lap that follows folds a genuinely different tree under the
+// same bloom. Keyed by the bloom alone, that second resolve reduced to a
+// duplicate and the bloom stopped dead: no wedge, no evidence, no log line.
+// The two halves are one invariant — the key separates laps, without weakening
+// the crash-replay dedup it exists for, so both are asserted here rather than
+// split across tests that could drift apart.
+#[test]
+fn a_second_integration_of_the_same_bloom_admits_under_its_own_key() {
+    let (first, second) = (digest(0xAB), digest(0xAC));
+    let (fake, base) = seeded(&first);
+    fake.seed_git_object(&second);
+    let source = shell(fake);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+
+    enqueue_integration(&mut store, bloom, base, vec![first]);
+    let (first_lap, ack) = drain_and_integrate(&mut store, &source).unwrap();
+    store.ack_topic(Topic::Integrate, ack.unwrap()).unwrap();
+
+    // The finding sent the member back around; the repaired attempt captured a
+    // different candidate, so this lap folds a different tree.
+    enqueue_integration(&mut store, bloom, base, vec![second]);
+    let (second_lap, ack) = drain_and_integrate(&mut store, &source).unwrap();
+    store.ack_topic(Topic::Integrate, ack.unwrap()).unwrap();
+
+    // The same second-lap decision replayed — a crash before its ack landed.
+    enqueue_integration(&mut store, bloom, base, vec![second]);
+    let (replayed, _) = drain_and_integrate(&mut store, &source).unwrap();
+
+    assert_eq!(decoded_resolve(&second_lap[0]).1, second, "the second lap folded the repaired candidate");
+    assert_ne!(
+        admitted_key(&second_lap[0]),
+        admitted_key(&first_lap[0]),
+        "two laps assert two different integrations, so they admit under two keys",
+    );
+    assert_eq!(
+        admitted_key(&replayed[0]),
+        admitted_key(&second_lap[0]),
+        "a replay of one lap still reduces to that lap's single key",
+    );
 }
 
 // ADR-0152 — a drain interrupted between the final integrate and the resolve
