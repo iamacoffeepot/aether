@@ -3,10 +3,10 @@
 //!
 //! A lane is a child process of the coordinator daemon, so without this it comes
 //! up holding the coordinator's entire environment — and the coordinator's
-//! environment *is* its configuration (ADR-0090: every knob resolves argv > env
-//! > default). A lane that inherits it is not running beside the coordinator, it
-//! is running as a second copy of it: pointed at the same journal, holding the
-//! same credential, addressing the same repository.
+//! environment *is* its configuration (ADR-0090: every knob resolves argv, then
+//! env, then a default). A lane that inherits it is not running beside the
+//! coordinator, it is running as a second copy of it: pointed at the same
+//! journal, holding the same credential, addressing the same repository.
 //!
 //! That is not hypothetical. The store-backed integration tests fork the
 //! `bloomery` bin, and a forked bin whose `GITHUB_TOKEN` / `AETHER_GITHUB_OWNER`
@@ -31,6 +31,7 @@
 //! a mutation of production — and clearing it would cost every lane a cold
 //! compile.
 
+use std::env;
 use std::ffi::OsString;
 use std::process::Command;
 
@@ -70,7 +71,7 @@ pub(super) fn scrub_coordinator_env(command: &mut Command, inherited: impl Itera
 /// path exists to replace: nothing here is read *as* configuration, and the keys
 /// are collected only to take them away.
 pub(super) fn inherited_keys() -> impl Iterator<Item = OsString> {
-    std::env::vars_os().map(|(key, _)| key)
+    env::vars_os().map(|(key, _)| key)
 }
 
 #[cfg(test)]
