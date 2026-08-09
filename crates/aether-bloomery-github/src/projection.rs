@@ -1,31 +1,31 @@
-//! The projection backend (#3459 step 5): reconcile a [`ViewDocument`] into
-//! GitHub objects.
+//! The projection backend (#3459 step 5, revised projection onto existing objects).
 //!
-//! Every projected object carries a stable [`Marker`] — its internal Bloomery
+//! Every projected comment carries a stable [`Marker`] — its internal Bloomery
 //! key plus a content digest of the desired render. Reconcile is *find by key
 //! → compare digest → create / update / no-op*, so:
 //!
 //! - **Idempotent** — reconciling the same document twice is all no-ops, since
-//!   the second pass finds each object with a matching digest.
-//! - **Rebuildable** — a deleted object leaves no marker to find, so the next
-//!   reconcile recreates it (the "delete → reappear" property the demo proves).
+//!   the second pass finds each comment with a matching digest.
+//! - **Rebuildable** — a deleted comment leaves no marker to find, so the next
+//!   reconcile recreates it.
 //!
 //! # What maps to what
 //!
-//! - Each bloom → an **umbrella issue** (the aggregate bloom view), keyed by
-//!   the bloom id, its body summarizing status and membership.
-//! - Each member → a **workpiece issue**, keyed by workpiece *and* bloom so a
-//!   successor bloom's re-admission of the same workpiece is its own faithful
-//!   projection rather than clobbering the predecessor's (a shadow mirror
-//!   tracks every bloom's membership, superseded ones included).
-//! - Each member's approval and — once integrated — resolution → **comments**
-//!   on that workpiece issue. Evidence is projected as comments, not
-//!   check-runs: a check-run must attach to a commit, which only the git
-//!   source port (a separate slice) produces.
-//! - A [`LandingReceipt`] → a comment on the bloom's umbrella issue.
+//! - Each bloom's aggregate view → a **comment on its landing pull request**,
+//!   identified by [`landing_branch`]. The PR is per-bloom and closes on merge,
+//!   so no umbrella issue is opened.
+//! - Each member's evidence (approval, resolution, parked question) → **comments
+//!   on its source issue**, resolved from the workpiece id. A workpiece whose id
+//!   encodes an issue number (`issue-4628` → issue 4628) projects there; one
+//!   that does not has no home and is skipped explicitly, never a shadow issue.
+//! - A [`LandingReceipt`] → a comment on the bloom's landing pull request (and,
+//!   when the PR is absent, no fallback issue — the receipt is retried on the
+//!   next view once the PR exists).
 //!
 //! The projector reads only its own markers; free-form platform content is
-//! never interpreted as intent.
+//! never interpreted as intent. No projection path invokes the repository-wide
+//! issue-list walk (`find_issue`); all writes target a known issue/PR number
+//! and use comment-scoped `find_comment` for idempotency.
 
 use std::fmt::Write as _;
 
@@ -36,16 +36,16 @@ use aether_bloomery::{
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
-use crate::client::{GithubApi, GithubError, NewComment, NewIssue};
+use crate::client::{GithubApi, GithubError, NewComment, PullRequestApi};
 use crate::marker::{Marker, render_marker};
 use crate::short_hex;
 
-/// The outward projection mirror over a [`GithubApi`] client.
-pub struct GithubProjection<C: GithubApi> {
+/// The outward projection mirror over a [`GithubApi`] + [`PullRequestApi`] client.
+pub struct GithubProjection<C: GithubApi + PullRequestApi> {
     client: C,
 }
 
-impl<C: GithubApi> GithubProjection<C> {
+impl<C: GithubApi + PullRequestApi> GithubProjection<C> {
     /// Build a projection over `client`.
     pub const fn new(client: C) -> Self {
         Self { client }
@@ -57,25 +57,25 @@ impl<C: GithubApi> GithubProjection<C> {
     }
 
     fn reconcile_bloom(&self, bloom: &BloomView) -> Result<(), GithubError> {
-        let key = umbrella_key(bloom.id);
-        let digest = content_digest("bloomery.view.bloom", bloom);
-        let title = format!("Bloom {}", short_hex(&bloom.id.0));
-        let body = render_bloom_body(bloom);
-        self.upsert_issue(&key, digest, &title, &body)?;
+        // Aggregate view onto the landing PR, when it exists.
+        let branch = landing_branch(bloom.id);
+        if let Some(pr) = self.client.find_pull_request_for_head(&branch)? {
+            let key = umbrella_key(bloom.id);
+            let digest = content_digest("bloomery.view.bloom", bloom);
+            let body = render_bloom_body(bloom);
+            self.upsert_comment(pr.number, &key, digest, &body)?;
+        }
 
         for member in &bloom.members {
-            let issue_number = self.reconcile_member(bloom.id, member)?;
+            let Some(issue_number) = parse_issue_number(&member.workpiece.0) else {
+                continue;
+            };
+            if self.client.get_issue(issue_number)?.is_none() {
+                continue;
+            }
             self.reconcile_member_evidence(issue_number, member)?;
         }
         Ok(())
-    }
-
-    fn reconcile_member(&self, bloom: BloomId, member: &MemberView) -> Result<u64, GithubError> {
-        let key = member_key(bloom, &member.workpiece.0);
-        let digest = content_digest("bloomery.view.member", member);
-        let title = format!("Workpiece {}", member.workpiece.0);
-        let body = render_member_body(bloom, member);
-        self.upsert_issue(&key, digest, &title, &body)
     }
 
     fn reconcile_member_evidence(&self, issue_number: u64, member: &MemberView) -> Result<(), GithubError> {
@@ -89,7 +89,7 @@ impl<C: GithubApi> GithubProjection<C> {
             self.upsert_comment(issue_number, &key, digest, &render_resolution_body(resolution))?;
         }
 
-        // A parked question projects as a comment on the workpiece issue —
+        // A parked question projects as a comment on the source issue —
         // visible where a person already looks (ADR-0151). Keyed by workpiece so
         // it upserts in place, and content-digested over the pending decision so
         // re-reconciling the same hold is a no-op. The rendered body carries the
@@ -104,21 +104,6 @@ impl<C: GithubApi> GithubProjection<C> {
         Ok(())
     }
 
-    fn upsert_issue(&self, key: &str, digest: Digest, title: &str, human_body: &str) -> Result<u64, GithubError> {
-        let marker = Marker { key: key.to_owned(), digest };
-        let body = format!("{human_body}\n\n{}", render_marker(&marker));
-        match self.client.find_issue(key)? {
-            Some(existing) => {
-                if existing.marker.as_ref().map(|m| m.digest) == Some(digest) {
-                    return Ok(existing.number); // matching digest — no-op.
-                }
-                self.client.update_issue(existing.number, title, &body)?;
-                Ok(existing.number)
-            }
-            None => Ok(self.client.create_issue(&NewIssue { title: title.to_owned(), body })?.number),
-        }
-    }
-
     fn upsert_comment(
         &self,
         issue_number: u64,
@@ -130,7 +115,7 @@ impl<C: GithubApi> GithubProjection<C> {
         let body = format!("{human_body}\n\n{}", render_marker(&marker));
         if let Some(existing) = self.client.find_comment(issue_number, key)? {
             if existing.marker.as_ref().map(|m| m.digest) == Some(digest) {
-                return Ok(()); // matching digest — no-op.
+                return Ok(());
             }
             self.client.update_comment(existing.id, &body)
         } else {
@@ -140,7 +125,7 @@ impl<C: GithubApi> GithubProjection<C> {
     }
 }
 
-impl<C: GithubApi> ProjectionBackend for GithubProjection<C> {
+impl<C: GithubApi + PullRequestApi> ProjectionBackend for GithubProjection<C> {
     type Error = GithubError;
 
     fn reconcile_view(&self, view: &ViewDocument) -> Result<(), Self::Error> {
@@ -151,21 +136,13 @@ impl<C: GithubApi> ProjectionBackend for GithubProjection<C> {
     }
 
     fn project_receipt(&self, receipt: &LandingReceipt) -> Result<(), Self::Error> {
-        let key = umbrella_key(receipt.bloom);
-        // The umbrella issue is normally projected by a prior reconcile; if a
-        // receipt races ahead of it, open a minimal umbrella so the landing
-        // note has a home.
-        let issue_number = if let Some(existing) = self.client.find_issue(&key)? {
-            existing.number
-        } else {
-            let marker = Marker { key, digest: content_digest("bloomery.view.bloom.stub", receipt) };
-            let title = format!("Bloom {}", short_hex(&receipt.bloom.0));
-            let body = format!("Bloom umbrella (opened by landing receipt).\n\n{}", render_marker(&marker));
-            self.client.create_issue(&NewIssue { title, body })?.number
+        let branch = landing_branch(receipt.bloom);
+        let Some(pr) = self.client.find_pull_request_for_head(&branch)? else {
+            return Ok(());
         };
         let receipt_key = format!("receipt:{}", short_hex(&receipt.bloom.0));
         let digest = content_digest("bloomery.receipt", receipt);
-        self.upsert_comment(issue_number, &receipt_key, digest, &render_receipt_body(receipt))
+        self.upsert_comment(pr.number, &receipt_key, digest, &render_receipt_body(receipt))
     }
 }
 
@@ -173,8 +150,31 @@ fn umbrella_key(bloom: BloomId) -> String {
     format!("bloom:{}", short_hex(&bloom.0))
 }
 
-fn member_key(bloom: BloomId, workpiece: &str) -> String {
-    format!("wp:{workpiece}@bloom:{}", short_hex(&bloom.0))
+/// The branch a bloom's landing is proposed from — the per-bloom landing PR's
+/// head. Mirrors `GitSource::landing_branch` without depending on that crate.
+fn landing_branch(bloom: BloomId) -> String {
+    format!("bloom/{}/landing", short_hex(&bloom.0))
+}
+
+/// Map a `WorkpieceId` string to its source issue number, when it encodes one.
+///
+/// Recognized form is `issue-<digits>` where `<digits>` is a non-zero decimal
+/// u64; leading zeros are accepted but the numeric value is used. Any other
+/// string has no source-issue home.
+#[must_use]
+pub fn parse_issue_number(workpiece: &str) -> Option<u64> {
+    let suffix = workpiece.strip_prefix("issue-")?;
+    if suffix.is_empty() {
+        return None;
+    }
+    if !suffix.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let number: u64 = suffix.parse().ok()?;
+    if number == 0 {
+        return None;
+    }
+    Some(number)
 }
 
 /// sha256 over a domain tag (null-separated) and the value's canonical JSON —
@@ -229,31 +229,6 @@ fn render_bloom_body(bloom: &BloomView) -> String {
             (None, None) => "pending".to_owned(),
         };
         let _ = writeln!(body, "  - `{}` ({resolved})", member.workpiece.0);
-    }
-    body
-}
-
-fn render_member_body(bloom: BloomId, member: &MemberView) -> String {
-    let resolution = if member.resolution.is_some() {
-        "integrated"
-    } else {
-        "not yet integrated"
-    };
-    let mut body = format!("Workpiece `{}` as admitted into bloom `{}`.\n\n", member.workpiece.0, short_hex(&bloom.0));
-    let _ = writeln!(body, "- Scope revision: `{}`", short_hex(&member.scope_revision));
-    let _ = writeln!(body, "- Approval: {:?}", member.approval.kind);
-    let _ = writeln!(body, "- Resolution: {resolution}");
-    // A wedge is terminal, so it is stated rather than left to be inferred from
-    // a member that simply stops changing.
-    if let Some(wedge) = &member.wedge {
-        let _ = writeln!(
-            body,
-            "- **Wedged** at {:?}: the stage's retry budget is spent, so this member has stopped \
-             dispatching and the bloom cannot resolve. Superseding the bloom is the escape. \
-             Failing evidence: `{}`.",
-            wedge.stage,
-            short_hex(&wedge.evidence)
-        );
     }
     body
 }
