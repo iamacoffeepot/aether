@@ -45,7 +45,9 @@ use std::time::Duration;
 
 use aether_actor::Addressable;
 use aether_actor::runtime;
-use aether_bloomery::{Admit, BloomId, Digest, Event, Fact, IdempotencyKey, LandOutcome, LandPayload, LandProposal};
+use aether_bloomery::{
+    Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandOutcome, LandPayload, LandProposal,
+};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
@@ -122,6 +124,38 @@ fn land_key(bloom: &Digest) -> IdempotencyKey {
     IdempotencyKey(key)
 }
 
+/// The idempotency key a landing rejection admits under.
+///
+/// Keyed by the failing set as well as the bloom, so the *same* red gate
+/// re-observed on the next tick reduces to a duplicate, while a repaired bloom
+/// whose landing fails a different way still admits. Without the failing set a
+/// second, genuinely new rejection would be swallowed as a replay.
+fn rejected_key(bloom: &Digest, failing: &[String]) -> IdempotencyKey {
+    use core::fmt::Write;
+    let mut key = String::from("aether.bloomery.landing_rejected:");
+    for byte in bloom.as_bytes() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    let _ = write!(key, ":{}", failing.join(","));
+    IdempotencyKey(key)
+}
+
+/// The findings text a landing rejection leaves for the repair dispatch — the
+/// same bloom-row channel a failing aggregate review writes, so the Refine
+/// re-entry prompt picks it up through the path that already exists rather than
+/// a second one.
+fn landing_findings(failing: &[String]) -> String {
+    use core::fmt::Write;
+    let mut findings = String::from(
+        "The landing branch's CI refused this bloom's integrated head. These checks did not pass; \
+         repair them against current mainline, which has moved since the bloom sealed.\n",
+    );
+    for check in failing {
+        let _ = write!(findings, "\n- {check}");
+    }
+    findings
+}
+
 /// What watching an issued land proposal told the drain loop to do with its
 /// outbox entry.
 enum Watched {
@@ -132,6 +166,12 @@ enum Watched {
     Declined,
     /// Terminal — mainline moved; admit this and ack the entry.
     Landed(Admit),
+    /// The proposal's checks failed (#4689). Terminal *for this entry* — the
+    /// admit routes the bloom back into repair or parks it — so the entry is
+    /// acked rather than left polling a proposal nothing will accept. Carries
+    /// the failing check names, which the caller persists as the findings the
+    /// repair dispatch is directed by.
+    Rejected(Admit, Vec<String>),
 }
 
 /// Poll an issued land proposal and fold its state into the drain loop's three
@@ -145,6 +185,28 @@ fn watch_proposal(
     match source.poll_land(bloom, &payload.expected_base, number)? {
         LandProposal::Open => Ok(Watched::Open),
         LandProposal::Declined => Ok(Watched::Declined),
+        LandProposal::ChecksFailed { failing } => {
+            // The rejection binds the head that was proposed — the reducer
+            // refuses one naming any other head, so a rejection left over from
+            // a superseded landing cannot re-open members under a newer one.
+            // The detail artifact is the same head: the failing check names are
+            // the findings, and they are persisted beside the bloom rather than
+            // content-addressed here.
+            let event = Event {
+                idempotency_key: rejected_key(&payload.bloom, &failing),
+                fact: Fact::LandingRejected {
+                    bloom: *bloom,
+                    evidence: Evidence {
+                        subject: payload.new_head,
+                        kind: EvidenceKind::VerificationResult,
+                        detail: payload.new_head,
+                    },
+                },
+            };
+            to_vec(&event)
+                .map(|bytes| Watched::Rejected(Admit { event: bytes }, failing))
+                .map_err(|error| SourceError::Malformed(format!("landing rejection did not encode: {error}")))
+        }
         LandProposal::Landed(receipt) => {
             // Mainline actually moved. Admit `Fact::Land` carrying the head the
             // receipt attests — the commit mainline *became*, which under a
@@ -188,6 +250,23 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
             Ok(LandOutcome::Proposed { number }) => {
                 match watch_proposal(source, &bloom, &payload, number) {
                     Ok(Watched::Landed(admit)) => {
+                        admits.push(admit);
+                        ack_through = Some(entry.sequence);
+                    }
+                    Ok(Watched::Rejected(admit, failing)) => {
+                        // Persist the failing set on the bloom row before the
+                        // ack, so the repair dispatch the admit triggers finds
+                        // its findings already there. The empty workpiece key
+                        // is the bloom-scope row a failing aggregate verdict
+                        // uses, and every re-opened member reads it.
+                        store.record_review_findings(payload.bloom.as_bytes(), "", &landing_findings(&failing))?;
+                        tracing::warn!(
+                            target: "aether_chassis_bloomery::land",
+                            sequence = entry.sequence,
+                            number,
+                            failing = %failing.join(", "),
+                            "landing checks failed; routing the bloom back into the line",
+                        );
                         admits.push(admit);
                         ack_through = Some(entry.sequence);
                     }

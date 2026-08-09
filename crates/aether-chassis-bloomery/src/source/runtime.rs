@@ -229,6 +229,7 @@ impl SourceCapabilityState {
                 Err(error) => PollLandResult::Err { error: error.to_string() },
             },
             Ok(LandProposal::Declined) => PollLandResult::Declined,
+            Ok(LandProposal::ChecksFailed { failing }) => PollLandResult::ChecksFailed { failing },
             Err(error) => PollLandResult::Err { error: error.to_string() },
         }
     }

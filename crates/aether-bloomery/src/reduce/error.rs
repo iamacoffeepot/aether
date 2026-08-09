@@ -29,6 +29,22 @@ pub enum AggregateReviewError {
     NotAMember(WorkpieceId),
 }
 
+/// Why a landing rejection was refused (#4689).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum LandingRejectedError {
+    /// No bloom with this id, or it is not awaiting a landing — a rejection
+    /// against a bloom that already landed, or never resolved, changes nothing.
+    NotAwaitingLanding,
+    /// The rejection's evidence binds a head other than the one the bloom is
+    /// landing — a stale rejection from a superseded landing, never acted on.
+    SubjectMismatch {
+        /// The head the bloom is actually landing.
+        expected: Digest,
+        /// The head the rejection's evidence binds.
+        got: Digest,
+    },
+}
+
 /// Why an aggregate-verify completion was refused.
 ///
 /// The same three refusals the review gate makes about the same held fold,

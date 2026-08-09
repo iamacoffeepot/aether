@@ -50,6 +50,7 @@ fn view(resolve_second: bool) -> ViewDocument {
         status: BloomStatus::Sealed,
         superseded_by: None,
         members: vec![member_a, member_b],
+        landing_blocked: None,
     };
     ViewDocument { mainline: digest(0), blooms: vec![bloom] }
 }

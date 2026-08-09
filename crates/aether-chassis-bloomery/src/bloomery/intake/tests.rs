@@ -122,6 +122,8 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
             integration: None,
             aggregate_rolls: 0,
             aggregate_verify_rolls: 0,
+            landing_rolls: 0,
+            resolved_head: None,
             review_park: None,
             superseded_by: None,
         },

@@ -113,6 +113,28 @@ pub struct CheckRun {
     pub conclusion: CheckConclusion,
 }
 
+/// How the checks on a commit stand, folded from the check-run list.
+///
+/// What the land watch turns on: a landing proposal whose checks failed cannot
+/// merge and never will without a repair, which is the case the watch used to
+/// read as indistinguishable from "still running" and poll forever.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ChecksState {
+    /// No check has reported against this commit. Indistinguishable from checks
+    /// that have not been created yet, so it reads as pending, never as passing.
+    Absent,
+    /// At least one check is still queued or running.
+    Pending,
+    /// Every check completed, none with a failure-shaped conclusion.
+    Passed,
+    /// At least one check completed as failed, timed out, or was cancelled.
+    /// Carries the failing check names — the findings a repair is directed by.
+    Failed {
+        /// The names of the checks that did not pass, in listing order.
+        failing: Vec<String>,
+    },
+}
+
 /// The fields to create a check-run (inward-channel shape; unused this slice).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct NewCheckRun {
@@ -395,6 +417,13 @@ pub trait PullRequestApi {
     /// # Errors
     /// A transport fault or an error status.
     fn find_pull_request_for_head(&self, head: &str) -> Result<Option<PullRequest>, GithubError>;
+
+    /// How the checks on commit `sha` stand — the landing gate's verdict on a
+    /// proposal that has not merged yet.
+    ///
+    /// # Errors
+    /// The source surface is unreachable or returned an error status.
+    fn checks_for_ref(&self, sha: &str) -> Result<ChecksState, GithubError>;
 }
 
 /// A client or transport failure. A clean not-found is `Ok(None)` at the API
@@ -1062,6 +1091,49 @@ pub trait ActionsApi {
     fn list_run_artifacts(&self, run_id: u64) -> Result<Vec<Artifact>, GithubError>;
 }
 
+/// The `GET /commits/{sha}/check-runs` listing.
+#[derive(Deserialize)]
+struct GhCheckRunList {
+    check_runs: Vec<GhCheckRun>,
+}
+
+/// One row of that listing — the two fields the landing verdict turns on.
+#[derive(Deserialize)]
+struct GhCheckRun {
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+}
+
+/// Fold a commit's check runs into the landing gate's verdict.
+///
+/// Anything still queued or running makes the whole set pending, because a
+/// later check can still fail and a bloom must not be judged on a partial gate.
+/// A conclusion is failing unless it is one of the passing spellings — an
+/// unknown conclusion reads as a failure rather than being skipped past, so a
+/// vocabulary GitHub adds cannot silently pass the gate. `skipped` and
+/// `neutral` do not fail it: they are the shapes a conditional job takes when
+/// it correctly declines to run.
+fn fold_checks(runs: &[GhCheckRun]) -> ChecksState {
+    if runs.is_empty() {
+        return ChecksState::Absent;
+    }
+    if runs.iter().any(|run| run.status != "completed") {
+        return ChecksState::Pending;
+    }
+
+    let failing: Vec<String> = runs
+        .iter()
+        .filter(|run| !matches!(run.conclusion.as_deref(), Some("success" | "skipped" | "neutral")))
+        .map(|run| run.name.clone())
+        .collect();
+    if failing.is_empty() {
+        ChecksState::Passed
+    } else {
+        ChecksState::Failed { failing }
+    }
+}
+
 fn decode<D: for<'de> Deserialize<'de>>(response: &HttpResponse) -> Result<D, GithubError> {
     serde_json::from_str(&response.body).map_err(|error| GithubError::Decode(error.to_string()))
 }
@@ -1275,6 +1347,13 @@ impl<T: HttpTransport> PullRequestApi for ReqwestGithub<T> {
         };
         let gh: GhPullRequest = decode(&response)?;
         Ok(Some(gh.into_pull_request()))
+    }
+
+    fn checks_for_ref(&self, sha: &str) -> Result<ChecksState, GithubError> {
+        let url = format!("{}/repos/{}/commits/{sha}/check-runs", self.api_base, self.repo_path);
+        let response = self.request(Method::Get, url, None)?;
+        let listing: GhCheckRunList = decode(&response)?;
+        Ok(fold_checks(&listing.check_runs))
     }
 
     fn find_pull_request_for_head(&self, head: &str) -> Result<Option<PullRequest>, GithubError> {

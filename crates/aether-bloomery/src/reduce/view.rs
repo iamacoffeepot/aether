@@ -3,8 +3,8 @@
 
 use super::Snapshot;
 use crate::digest::Digest;
-use crate::ids::WorkpieceId;
-use crate::port::{BloomView, MemberView, PendingDecisionView, ViewDocument};
+use crate::ids::{StageId, WorkpieceId};
+use crate::port::{BloomView, LandingBlock, MemberView, PendingDecisionView, ViewDocument};
 use crate::values::Question;
 
 /// Assemble a self-contained [`ViewDocument`] from a snapshot — the pure
@@ -75,7 +75,20 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                     wedge: record.wedged.get(&member.workpiece).copied(),
                 })
                 .collect();
-            BloomView { id: record.spec.id(), status: record.status, superseded_by: record.superseded_by, members }
+            // Rendered only once a landing has actually been refused, so an
+            // ordinary bloom's view is unchanged.
+            let landing_blocked = (record.landing_rolls > 0).then(|| LandingBlock {
+                rolls: record.landing_rolls,
+                budget: record.stage_catalog.retry_budget_of(StageId::Land).unwrap_or(1),
+            });
+
+            BloomView {
+                id: record.spec.id(),
+                status: record.status,
+                superseded_by: record.superseded_by,
+                members,
+                landing_blocked,
+            }
         })
         .collect();
     ViewDocument { mainline: snapshot.mainline, blooms }

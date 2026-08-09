@@ -49,6 +49,25 @@ pub struct BloomView {
     pub superseded_by: Option<BloomId>,
     /// One entry per sealed member, in the spec's canonical order.
     pub members: Vec<MemberView>,
+    /// How many landing attempts the bloom's gate has refused (#4689), and how
+    /// many the sealed catalog allows.
+    ///
+    /// `Some` only once a landing has actually been refused, so an ordinary
+    /// bloom carries nothing here. What an operator reads to tell a bloom that
+    /// is *waiting* on its landing from one that is blocked by it — the two
+    /// were indistinguishable in this document, which is why a red landing
+    /// branch could sit unnoticed while the reactor polled it.
+    pub landing_blocked: Option<LandingBlock>,
+}
+
+/// A bloom's landing-gate standing, rendered when its landing has been refused.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct LandingBlock {
+    /// Landing attempts refused so far.
+    pub rolls: u32,
+    /// The `Land` binding's retry budget from the sealed catalog — the bound
+    /// stated rather than left for a reader to know.
+    pub budget: u32,
 }
 
 /// One member's outward view: the admitted workpiece, the exact scope

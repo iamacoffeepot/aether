@@ -236,6 +236,8 @@ impl Topic {
             | Decision::RecordIntegration { .. }
             | Decision::RecordAggregateRoll { .. }
             | Decision::RecordAggregateVerifyRoll { .. }
+            | Decision::RecordLandingRoll { .. }
+            | Decision::SetUnresolved { .. }
             | Decision::RevokeResolution { .. }
             | Decision::RecordReviewPark { .. }
             // Snapshot-only: the wedge reaches the outward mirror through the

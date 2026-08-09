@@ -58,7 +58,9 @@ use aether_bloomery::{
 };
 use serde::Serialize;
 
-use crate::client::{GitDataApi, GithubError, MergeResult, NewPullRequest, PullRequestApi, PullRequestState};
+use crate::client::{
+    ChecksState, GitDataApi, GithubError, MergeResult, NewPullRequest, PullRequestApi, PullRequestState,
+};
 use crate::correspondence::{Correspondence, CorrespondenceError, GitObjectId};
 use crate::short_hex;
 
@@ -991,10 +993,18 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
             return Ok(LandProposal::Declined);
         };
         let Some(merge_commit) = pull.merge_commit_sha else {
-            return Ok(if pull.state == PullRequestState::Open {
-                LandProposal::Open
-            } else {
-                LandProposal::Declined
+            if pull.state != PullRequestState::Open {
+                return Ok(LandProposal::Declined);
+            }
+            // An open proposal that has not merged is only *waiting* while its
+            // gate might still pass. Once a check has concluded red the
+            // proposal cannot merge, and reporting that as `Open` is what left
+            // a bloom polling something nothing would ever accept. Anything
+            // pending — or no check reported yet — stays open: a partial gate
+            // is not a verdict.
+            return Ok(match self.client.checks_for_ref(&pull.head_sha)? {
+                ChecksState::Failed { failing } => LandProposal::ChecksFailed { failing },
+                ChecksState::Absent | ChecksState::Pending | ChecksState::Passed => LandProposal::Open,
             });
         };
 
@@ -1180,6 +1190,7 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
 mod tests {
     use std::slice::from_ref;
 
+    use crate::client::ChecksState;
     use crate::correspondence::{CorrespondenceError, GitObjectId};
 
     use aether_bloomery::{
@@ -1689,6 +1700,51 @@ mod tests {
     // head from the proposal would attest a commit that is on no branch — and
     // leaving it unrecorded would break the next bloom's base check, which
     // reverse-resolves mainline through exactly this correspondence.
+    // #4689 — an open proposal is only *waiting* while its gate might still
+    // pass. A concluded-red gate means it can never merge, and reporting that as
+    // `Open` is what left a bloom polling something nothing would accept.
+    //
+    // Tripwire on the pending side above all: reading a partial gate as failed
+    // would tear a bloom's line open every time a slow check had not reported
+    // yet, which is worse than the bug being fixed.
+    #[test]
+    fn an_open_proposal_is_only_open_while_its_checks_might_still_pass() {
+        let fake = FakeGithub::new();
+        let bloom = bloom();
+        let base = digest(10);
+        fake.seed_ref("heads/main", &"a1".repeat(20));
+        fake.seed_correspondence(&base, &"a1".repeat(20));
+        let new_head = digest(90);
+        fake.seed_git_object(&new_head);
+        let source = git_source(&fake, true);
+
+        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head).unwrap() else {
+            panic!("expected Proposed");
+        };
+        let head_sha = fake.pull_request_head_sha(number).expect("the proposal has a head");
+
+        // No check has reported: nothing to judge, so the watch keeps waiting.
+        assert_eq!(source.poll_land(&bloom, &base, number).unwrap(), LandProposal::Open);
+
+        // A check still running is not a verdict — a later one can still fail.
+        fake.seed_checks(&head_sha, ChecksState::Pending);
+        assert_eq!(source.poll_land(&bloom, &base, number).unwrap(), LandProposal::Open);
+
+        fake.seed_checks(&head_sha, ChecksState::Passed);
+        assert_eq!(source.poll_land(&bloom, &base, number).unwrap(), LandProposal::Open);
+
+        // Red: terminal for the watch, carrying the names a repair is directed by.
+        fake.seed_checks(&head_sha, ChecksState::Failed { failing: alloc_vec(&["Clippy", "Rustdoc"]) });
+        assert_eq!(
+            source.poll_land(&bloom, &base, number).unwrap(),
+            LandProposal::ChecksFailed { failing: alloc_vec(&["Clippy", "Rustdoc"]) },
+        );
+    }
+
+    fn alloc_vec(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
     #[test]
     fn poll_land_reports_the_squash_commit_as_the_landed_head_and_records_it() {
         let fake = FakeGithub::new();

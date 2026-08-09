@@ -206,6 +206,27 @@ pub enum Fact {
         /// tree, so a stale verdict cannot act on a newer integration.
         evidence: Evidence,
     },
+    /// The landing proposal's own checks failed, so it cannot merge (#4689).
+    ///
+    /// The last gate outside the loop. A member verifies its own candidate and
+    /// [`Fact::AggregateVerifyCompleted`] verifies the fold, but neither judges
+    /// the fold against a mainline that has moved since the bloom sealed — that
+    /// only fails at the landing branch, downstream of every gate the bloom
+    /// controls.
+    ///
+    /// Within the `Land` binding's retry budget this un-resolves the bloom and
+    /// re-opens every member for repair; at the budget it parks to the owner.
+    /// Either way the bloom stops polling a proposal nothing will accept.
+    /// Appended past [`Fact::AggregateVerifyCompleted`] so the prior facts' wire
+    /// discriminants are unchanged.
+    LandingRejected {
+        /// The bloom whose landing was refused.
+        bloom: BloomId,
+        /// The rejection evidence, bound to the head the proposal offered — the
+        /// reducer refuses a verdict naming any other head, so a rejection from
+        /// a superseded landing cannot re-open members under a newer one.
+        evidence: Evidence,
+    },
 }
 
 impl Fact {

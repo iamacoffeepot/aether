@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError, Decision,
-    IntegrateError, LandError, ObserveMainlineError, ResolveError, SealError, SupersedeError,
+    IntegrateError, LandError, LandingRejectedError, ObserveMainlineError, ResolveError, SealError, SupersedeError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -227,4 +227,27 @@ pub enum Outcome {
     },
     /// An aggregate-verify completion was refused.
     AggregateVerifyRejected(AggregateVerifyError),
+    /// A refused landing un-resolved the bloom and re-opened its members: the
+    /// landing gate judged the fold against a mainline no gate inside the loop
+    /// sees, so the line reopens to answer it.
+    LandingReentered {
+        /// The bloom returned to the working state.
+        bloom: BloomId,
+        /// The re-opened members, in sealed membership order.
+        members: Vec<WorkpieceId>,
+        /// The landing attempts consumed, this one included.
+        rolls: u32,
+    },
+    /// A refused landing spent the `Land` budget: the bloom parks to the owner
+    /// rather than proposing a head its gate keeps refusing.
+    LandingParked {
+        /// The parked bloom.
+        bloom: BloomId,
+        /// The landing attempts consumed, this one included.
+        rolls: u32,
+        /// The parked question's digest — the rejection's record artifact.
+        question: Digest,
+    },
+    /// A landing rejection was refused.
+    LandingRejectedRefused(LandingRejectedError),
 }

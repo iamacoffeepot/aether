@@ -18,9 +18,9 @@ use aether_bloomery::Decisions;
 use aether_bloomery::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, Artifact, AttemptCompletedError,
     BloomId, BloomStatus, CandidateRef, CatalogError, Decision, Digest, Event, Evidence, EvidenceKind, Fact, KeyId,
-    LandError, Observation, ObserveMainlineError, Outcome, Provenance, Question, ResolveError, ResolvedConfigs,
-    SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId, StageProgress, Statement, SupersedeError,
-    Unproducible, reduce,
+    LandError, LandingRejectedError, Observation, ObserveMainlineError, Outcome, Provenance, Question, ResolveError,
+    ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId, StageProgress, Statement,
+    SupersedeError, Unproducible, reduce,
 };
 use aether_data::Kind;
 use aether_data::wire::to_vec;
@@ -691,6 +691,103 @@ fn verify_passed(bloom: BloomId, key: &str, tree: u8) -> Event {
             evidence: Evidence { subject: digest(tree), kind: EvidenceKind::VerificationResult, detail: digest(51) },
         },
     )
+}
+
+// #4689 — the landing gate is the last one, and the only one that judges the
+// bloom against a mainline that moved while it worked. A refused landing
+// un-resolves the bloom and re-opens every member for repair; the second
+// refusal spends the `Land` budget and parks it. Neither leaves the bloom
+// polling a proposal nothing will accept, which is the behaviour this replaces.
+//
+// Tripwire on the un-resolve above all: a bloom left `Resolved` while its
+// members repair would let the land reactor re-propose the exact head the gate
+// just refused, which is an infinite loop rather than a repair.
+#[test]
+fn a_refused_landing_reopens_the_line_then_parks_at_the_budget() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: claim("alpha", 10, 100) }));
+    let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "review",
+            Fact::AggregateReviewCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::ReviewFinding, detail: digest(50) },
+                implicated: vec![],
+            },
+        ),
+    );
+    assert_eq!(snapshot.blooms.get(&bloom).unwrap().status, BloomStatus::Resolved, "the bloom is awaiting its land");
+
+    let refused = |key: &str, head: u8| {
+        event(
+            key,
+            Fact::LandingRejected {
+                bloom,
+                evidence: Evidence {
+                    subject: digest(head),
+                    kind: EvidenceKind::VerificationResult,
+                    detail: digest(60),
+                },
+            },
+        )
+    };
+
+    // A rejection naming a head other than the one being landed is stale.
+    assert!(matches!(
+        reduce(&snapshot, &refused("stale", 99), &ResolvedConfigs::default()).outcome,
+        Outcome::LandingRejectedRefused(LandingRejectedError::SubjectMismatch { .. }),
+    ));
+
+    let (after1, d1) = step(&snapshot, &refused("red-1", 41));
+    assert!(matches!(&d1.outcome, Outcome::LandingReentered { members, rolls: 1, .. }
+        if *members == vec![workpiece("alpha"), workpiece("beta")]));
+    let record = after1.blooms.get(&bloom).unwrap();
+    assert_eq!(record.status, BloomStatus::Sealed, "the bloom is no longer land-ready");
+    assert_eq!(record.resolved_head, None, "and no longer names a head to propose");
+    assert!(record.claims.is_empty(), "every member's claim is revoked");
+    assert_eq!(record.landing_rolls, 1);
+    for member in ["alpha", "beta"] {
+        assert_eq!(record.progress.get(&workpiece(member)).unwrap().stage, StageId::Refine);
+    }
+
+    // Repair, re-fold, re-verify, re-review, and land again — the whole cycle,
+    // because a landing rejection re-opens the line rather than short-cutting
+    // back to a fresh proposal on the same artifact.
+    let (s2, _) = step(&after1, &event("i-a2", Fact::Integrate { bloom, claim: claim("alpha", 10, 102) }));
+    let (s2, _) = step(&s2, &event("i-b2", Fact::Integrate { bloom, claim: claim("beta", 11, 103) }));
+    let (s2, _) = step(&s2, &event("r2", Fact::Resolve { bloom, tree: digest(44), head: digest(45), lineage: vec![] }));
+    let (s2, _) = step(&s2, &verify_passed(bloom, "v2", 44));
+    let (s2, _) = step(
+        &s2,
+        &event(
+            "review-2",
+            Fact::AggregateReviewCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: digest(44), kind: EvidenceKind::ReviewFinding, detail: digest(51) },
+                implicated: vec![],
+            },
+        ),
+    );
+    assert_eq!(s2.blooms.get(&bloom).unwrap().status, BloomStatus::Resolved);
+
+    // The second refusal spends the budget: parked, nothing re-opens.
+    let (after2, d2) = step(&s2, &refused("red-2", 45));
+    assert!(matches!(d2.outcome, Outcome::LandingParked { rolls: 2, question, .. } if question == digest(60)));
+    assert!(
+        !d2.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. } | Decision::SetUnresolved { .. })),
+        "a parked bloom re-opens nothing",
+    );
+    assert_eq!(after2.blooms.get(&bloom).unwrap().review_park, Some(digest(60)));
 }
 
 // #4696 — a fold that does not build re-opens every member, not just an

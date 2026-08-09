@@ -762,6 +762,8 @@ fn project(
             | Decision::RecordIntegration { .. }
             | Decision::RecordAggregateRoll { .. }
             | Decision::RecordAggregateVerifyRoll { .. }
+            | Decision::RecordLandingRoll { .. }
+            | Decision::SetUnresolved { .. }
             | Decision::RecordReviewPark { .. }
             | Decision::RecordWedge { .. }
             | Decision::RevokeResolution { .. }

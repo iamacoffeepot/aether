@@ -26,6 +26,7 @@ mod event;
 mod evidence;
 mod integrate;
 mod land;
+mod landing;
 mod observe;
 mod outcome;
 mod review;
@@ -36,8 +37,8 @@ mod view;
 pub use decision::Decision;
 pub use error::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError,
-    BaseMismatch, IntegrateError, LandError, ObserveMainlineError, ResolveError, SealConflict, SealError,
-    SupersedeError,
+    BaseMismatch, IntegrateError, LandError, LandingRejectedError, ObserveMainlineError, ResolveError, SealConflict,
+    SealError, SupersedeError,
 };
 pub use event::{Event, Fact};
 pub use outcome::{Decisions, Outcome};
@@ -52,6 +53,7 @@ use attempt::reduce_attempt_completed;
 use evidence::{reduce_admit_evidence, reduce_adopt_answer};
 use integrate::{reduce_integrate, reduce_resolve};
 use land::reduce_land;
+use landing::reduce_landing_rejected;
 use observe::reduce_observe_mainline;
 use review::reduce_aggregate_review_completed;
 use seal::{reduce_seal, reduce_supersede};
@@ -91,6 +93,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> 
         Fact::AggregateVerifyCompleted { bloom, passed, evidence } => {
             reduce_aggregate_verify_completed(snapshot, bloom, *passed, evidence)
         }
+        Fact::LandingRejected { bloom, evidence } => reduce_landing_rejected(snapshot, bloom, evidence),
         Fact::Land { bloom, new_head } => reduce_land(snapshot, bloom, new_head),
         Fact::ObserveMainline { head } => reduce_observe_mainline(snapshot, head),
     }
