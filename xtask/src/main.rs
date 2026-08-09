@@ -17,8 +17,11 @@
 // xtask is a developer-facing build tool: emitting build progress + a
 // summary to the terminal is its purpose. The workspace
 // `print_stdout = warn` lint targets actor / library code, where a stray
-// print is a smell; here it is the intended output channel.
-#![allow(clippy::print_stdout)]
+// print is a smell; here it is the intended output channel. `print_stderr`
+// rides the same reasoning for the diagnostic half of that channel — a lane
+// reporting that its own prerequisite step failed has nowhere else to say so,
+// and swallowing it would hide the reason a member's result is unreliable.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod affected;
 mod cargo;
