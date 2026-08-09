@@ -233,11 +233,19 @@ pub trait GithubApi {
     /// idempotency lookup: a match with the desired digest is a no-op, a
     /// mismatch an update, `None` a create.
     ///
+    /// Historical list-and-scan path: the projection no longer calls it
+    /// (it projects onto existing issues and pull requests, never a shadow
+    /// issue), but the trait keeps it so existing call sites and the fake's
+    /// scan remain compiled while the projection is migrated.
+    ///
     /// # Errors
     /// The projection surface is unreachable or returned an error status.
     fn find_issue(&self, key: &str) -> Result<Option<Issue>, GithubError>;
 
     /// Open a new issue.
+    ///
+    /// Historical shadow-issue path: retained for compatibility, but the
+    /// projection no longer opens shadow issues.
     ///
     /// # Errors
     /// The projection surface is unreachable or returned an error status.
@@ -245,9 +253,20 @@ pub trait GithubApi {
 
     /// Overwrite an issue's title and body.
     ///
+    /// Historical shadow-issue path: retained for compatibility.
+    ///
     /// # Errors
     /// The projection surface is unreachable or returned an error status.
     fn update_issue(&self, number: u64, title: &str, body: &str) -> Result<(), GithubError>;
+
+    /// Fetch a single issue by number, or `None` if it does not exist. A
+    /// direct `GET /repos/{owner}/{repo}/issues/{number}` — no repository-wide
+    /// scan — so the projection can address the source issue a `WorkpieceId`
+    /// names without walking the whole issue list.
+    ///
+    /// # Errors
+    /// The projection surface is unreachable or returned an error status.
+    fn get_issue(&self, number: u64) -> Result<Option<Issue>, GithubError>;
 
     /// Find the comment on `issue_number` whose marker carries `key`, if any.
     ///
@@ -1180,6 +1199,21 @@ impl<T: HttpTransport> GithubApi for ReqwestGithub<T> {
         let payload = serde_json::json!({ "title": title, "body": body }).to_string();
         self.request(Method::Patch, format!("{}/{number}", self.issues_url()), Some(payload))?;
         Ok(())
+    }
+
+    fn get_issue(&self, number: u64) -> Result<Option<Issue>, GithubError> {
+        let url = format!("{}/{}", self.issues_url(), number);
+        let Some(response) = self.request_opt(Method::Get, url)? else {
+            return Ok(None);
+        };
+        let gh: GhIssue = decode(&response)?;
+        // Pull requests also appear on the issues endpoint; a request for a
+        // pull-request number still decodes, and the caller decides whether to
+        // treat it as an issue. Returning it here keeps `get_issue` a direct
+        // lookup without filtering.
+        let body = gh.body.unwrap_or_default();
+        let marker = parse_marker(&body);
+        Ok(Some(Issue { number: gh.number, title: gh.title, body, marker }))
     }
 
     fn find_comment(&self, issue_number: u64, key: &str) -> Result<Option<Comment>, GithubError> {

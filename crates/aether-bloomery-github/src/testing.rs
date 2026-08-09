@@ -192,6 +192,12 @@ impl FakeGithub {
         state.comments.retain(|comment| comment.issue_number != number);
     }
 
+    /// Delete comment `id` — an operator removing a projected comment.
+    /// The next reconcile finds no marker and recreates it.
+    pub fn delete_comment(&self, id: u64) {
+        self.lock().comments.retain(|comment| comment.id != id);
+    }
+
     /// Merge pull request `number` at `merge_commit_sha` — the fake's stand-in
     /// for the person who merges a landing proposal. Bloomery never merges (the
     /// client has no verb for it), so a land-watch test cannot reach this state
@@ -769,6 +775,16 @@ impl GithubApi for FakeGithub {
         title.clone_into(&mut issue.title);
         body.clone_into(&mut issue.body);
         Ok(())
+    }
+
+    fn get_issue(&self, number: u64) -> Result<Option<Issue>, GithubError> {
+        let state = self.lock();
+        Ok(state.issues.iter().find(|issue| issue.number == number).map(|issue| Issue {
+            number: issue.number,
+            title: issue.title.clone(),
+            body: issue.body.clone(),
+            marker: parse_marker(&issue.body),
+        }))
     }
 
     fn find_comment(&self, issue_number: u64, key: &str) -> Result<Option<Comment>, GithubError> {
