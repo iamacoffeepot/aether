@@ -193,7 +193,7 @@ impl NativeActor for ControlCore {
         // A duplicate key is already applied (in this process's life or rebuilt by
         // replay), so it needs no durable commit — reply immediately.
         if matches!(decisions.outcome, Outcome::Duplicate) {
-            inbound.reply(&admit_ok(&decisions.outcome));
+            inbound.reply(&admit_duplicate(&event.idempotency_key.0));
             return;
         }
         state.gate_or_commit(ctx, inbound, raw, event, decisions);
@@ -215,7 +215,7 @@ impl NativeActor for ControlCore {
         };
         let decisions = reduce(&state.snapshot, &event, &state.configs);
         if matches!(decisions.outcome, Outcome::Duplicate) {
-            inbound.reply(&admit_ok(&decisions.outcome));
+            inbound.reply(&admit_duplicate(&event.idempotency_key.0));
             return;
         }
         state.gate_or_commit(ctx, inbound, raw, event, decisions);
@@ -306,7 +306,7 @@ impl NativeActor for ControlCore {
             // The store already held this key durably though our snapshot did not —
             // a rare divergence (a reply racing a concurrent replay). Reply
             // Duplicate and do not double-apply.
-            CommitResult::Duplicate { .. } => admit_ok(&Outcome::Duplicate),
+            CommitResult::Duplicate { .. } => admit_duplicate(&key),
             // The durable uniqueness backstop refused a claim the reducer's snapshot
             // screen missed — do not apply; report the conflict.
             CommitResult::Conflict { workpiece, .. } => {
@@ -772,6 +772,23 @@ fn project(
         }
     }
     Ok((releases, claims, outbox))
+}
+
+/// Answer a duplicate admission, naming the key it discarded.
+///
+/// A duplicate is a *dropped fact*: the event reduces to nothing and none of the
+/// effects it would have carried run. An operator reads that in the reply, but a
+/// reactor admits fire-and-forget (`send_envelope_detached`) and never learns the
+/// outcome — so a reactor's discarded fact is otherwise invisible at every layer
+/// and the run simply stops, with no wedge and no evidence (#4722). The `warn`
+/// is the one place that can see it.
+fn admit_duplicate(idempotency_key: &str) -> AdmitResult {
+    tracing::warn!(
+        target: "aether_chassis_bloomery::control",
+        idempotency_key,
+        "admission reduced to a duplicate; the fact is discarded and a fire-and-forget admitter never learns it",
+    );
+    admit_ok(&Outcome::Duplicate)
 }
 
 /// Encode a reducer [`Outcome`] into an [`AdmitResult`], mapping an encode failure
