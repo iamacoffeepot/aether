@@ -18,20 +18,23 @@
 //!   on its source issue**, resolved from the workpiece id. A workpiece whose id
 //!   encodes an issue number (`issue-4628` → issue 4628) projects there; one
 //!   that does not has no home and is skipped explicitly, never a shadow issue.
-//! - A [`LandingReceipt`] → a comment on the bloom's landing pull request (and,
-//!   when the PR is absent, no fallback issue — the receipt is retried on the
-//!   next view once the PR exists).
+//! - A [`LandingReceipt`] → a comment on the bloom's landing pull request and,
+//!   for every member of that bloom that resolved to an existing source issue,
+//!   a copy on that source issue. If the PR or a source issue does not exist,
+//!   that copy is skipped. No new issue is ever opened.
 //!
 //! The projector reads only its own markers; free-form platform content is
 //! never interpreted as intent. No projection path invokes the repository-wide
 //! issue-list walk (`find_issue`); all writes target a known issue/PR number
 //! and use comment-scoped `find_comment` for idempotency.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::Mutex;
 
 use aether_bloomery::{
     BloomId, BloomView, Digest, Evidence, LandingReceipt, MemberView, PendingDecisionView, ProjectionBackend,
-    ResolutionClaim, ViewDocument,
+    ResolutionClaim, ViewDocument, WorkpieceId,
 };
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -43,12 +46,13 @@ use crate::short_hex;
 /// The outward projection mirror over a [`GithubApi`] + [`PullRequestApi`] client.
 pub struct GithubProjection<C: GithubApi + PullRequestApi> {
     client: C,
+    receipt_cache: Mutex<HashMap<BloomId, Vec<WorkpieceId>>>,
 }
 
 impl<C: GithubApi + PullRequestApi> GithubProjection<C> {
     /// Build a projection over `client`.
-    pub const fn new(client: C) -> Self {
-        Self { client }
+    pub fn new(client: C) -> Self {
+        Self { client, receipt_cache: Mutex::new(HashMap::new()) }
     }
 
     /// Borrow the underlying client (test introspection / receipt routing).
@@ -66,6 +70,7 @@ impl<C: GithubApi + PullRequestApi> GithubProjection<C> {
             self.upsert_comment(pr.number, &key, digest, &body)?;
         }
 
+        let mut resolvable: Vec<WorkpieceId> = Vec::new();
         for member in &bloom.members {
             let Some(issue_number) = parse_issue_number(&member.workpiece.0) else {
                 continue;
@@ -73,7 +78,13 @@ impl<C: GithubApi + PullRequestApi> GithubProjection<C> {
             if self.client.get_issue(issue_number)?.is_none() {
                 continue;
             }
+            resolvable.push(member.workpiece.clone());
             self.reconcile_member_evidence(issue_number, member)?;
+        }
+        if (!resolvable.is_empty() || !bloom.members.is_empty())
+            && let Ok(mut cache) = self.receipt_cache.lock()
+        {
+            cache.insert(bloom.id, resolvable);
         }
         Ok(())
     }
@@ -136,13 +147,26 @@ impl<C: GithubApi + PullRequestApi> ProjectionBackend for GithubProjection<C> {
     }
 
     fn project_receipt(&self, receipt: &LandingReceipt) -> Result<(), Self::Error> {
-        let branch = landing_branch(receipt.bloom);
-        let Some(pr) = self.client.find_pull_request_for_head(&branch)? else {
-            return Ok(());
-        };
         let receipt_key = format!("receipt:{}", short_hex(&receipt.bloom.0));
         let digest = content_digest("bloomery.receipt", receipt);
-        self.upsert_comment(pr.number, &receipt_key, digest, &render_receipt_body(receipt))
+        let body = render_receipt_body(receipt);
+
+        if let Some(pr) = self.client.find_pull_request_for_head(&landing_branch(receipt.bloom))? {
+            self.upsert_comment(pr.number, &receipt_key, digest, &body)?;
+        }
+
+        let targets: Vec<WorkpieceId> =
+            self.receipt_cache.lock().ok().and_then(|c| c.get(&receipt.bloom).cloned()).unwrap_or_default();
+        for workpiece in targets {
+            if let Some(issue_number) = parse_issue_number(&workpiece.0) {
+                if self.client.get_issue(issue_number)?.is_none() {
+                    continue;
+                }
+                let source_key = format!("receipt:{}:{}", short_hex(&receipt.bloom.0), workpiece.0);
+                self.upsert_comment(issue_number, &source_key, digest, &body)?;
+            }
+        }
+        Ok(())
     }
 }
 
