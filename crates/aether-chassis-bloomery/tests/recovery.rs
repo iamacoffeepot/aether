@@ -17,18 +17,15 @@
 mod common;
 
 use std::net::TcpStream;
-use std::thread;
-use std::time::{Duration, Instant};
 
 use aether_bloomery::{BloomId, Digest, Event, Fact, IdempotencyKey};
 use aether_chassis_bloomery::store::{
     AppendEvent, AppendEventResult, ClaimSeal, ClaimSealResult, DrainOutbox, DrainOutboxResult, EnqueueOutbox,
     EnqueueOutboxResult, ReplayJournal, ReplayJournalResult,
 };
-use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::to_vec;
 use aether_data::{Kind, mailbox_id_from_path};
-use aether_rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
+use common::client::{self, connect, handshake};
 use common::{Coordinator, free_port};
 use serde::Serialize;
 
@@ -38,71 +35,13 @@ fn spawn(port: u16, db: &str) -> Coordinator {
     Coordinator::spawn(port, &[("AETHER_STORE_PATH", db)])
 }
 
-/// Connect to the bin, retrying until it has bound its RPC port.
-fn connect(port: u16) -> TcpStream {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(stream) => {
-                stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
-                return stream;
-            }
-            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
-            Err(error) => panic!("could not reach the bloomery bin on port {port}: {error}"),
-        }
-    }
-}
-
-/// Handshake as a client peer.
-fn handshake(stream: &mut TcpStream) {
-    let hello = WireFrame::Hello(Hello {
-        wire_version: WIRE_VERSION,
-        peer: PeerKind::Client { client_name: "recovery-test".into(), client_version: "0.0.1".into() },
-    });
-    write_frame(stream, &hello).unwrap();
-    match read_frame(stream).unwrap() {
-        WireFrame::HelloAck(HelloAck { wire_version, .. }) => assert_eq!(wire_version, WIRE_VERSION),
-        other => panic!("expected HelloAck, got {other:?}"),
-    }
-}
-
-/// Issue one typed `Call` to the `aether.store` mailbox and decode the reply of
-/// the expected kind (collected from the `ReplyEvent` stream, closed by
-/// `ReplyEnd`).
+/// Issue one typed `Call` to the `aether.store` mailbox and decode its reply.
 fn call<Req, Reply>(stream: &mut TcpStream, cid: u64, request: &Req) -> Reply
 where
     Req: Kind + Serialize,
     Reply: Kind,
 {
-    let frame = WireFrame::Call {
-        cid: Some(cid),
-        envelope: MailEnvelope {
-            to: MailboxAddress { engine: None, mailbox: mailbox_id_from_path("aether.store") },
-            from: None,
-            kind: Req::ID,
-            correlation_id: None,
-            payload: request.encode_into_bytes(),
-        },
-    };
-    write_frame(stream, &frame).unwrap();
-
-    let mut reply: Option<Reply> = None;
-    loop {
-        match read_frame(stream).unwrap() {
-            WireFrame::ReplyEvent { cid: got, envelope } => {
-                assert_eq!(got, cid, "ReplyEvent cid mismatch");
-                if envelope.kind == Reply::ID {
-                    reply = Reply::decode_from_bytes(&envelope.payload);
-                }
-            }
-            WireFrame::ReplyEnd { cid: got, result } => {
-                assert_eq!(got, cid, "ReplyEnd cid mismatch");
-                result.unwrap();
-                return reply.expect("a reply of the expected kind arrived before ReplyEnd");
-            }
-            other => panic!("unexpected frame for call {cid}: {other:?}"),
-        }
-    }
+    client::call(stream, cid, mailbox_id_from_path("aether.store"), request)
 }
 
 #[test]
@@ -115,7 +54,7 @@ fn kill_and_restart_converges_over_rpc() {
     let port = free_port();
     let coordinator = spawn(port, db);
     let mut stream = connect(port);
-    handshake(&mut stream);
+    handshake(&mut stream, "recovery-test");
 
     // A real, wire-encoded bloom-protocol event — the shape the host journals.
     // The control core replays this journal at boot and decodes each record as an
@@ -148,7 +87,7 @@ fn kill_and_restart_converges_over_rpc() {
     let port = free_port();
     let _coordinator = spawn(port, db);
     let mut stream = connect(port);
-    handshake(&mut stream);
+    handshake(&mut stream, "recovery-test");
 
     // Journal replay: the sealed event survived the crash.
     let replay: ReplayJournalResult = call(&mut stream, 1, &ReplayJournal);

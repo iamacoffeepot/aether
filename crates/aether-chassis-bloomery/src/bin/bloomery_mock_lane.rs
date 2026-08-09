@@ -21,7 +21,13 @@ fn main() -> ExitCode {
         // the modes never produce.
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX)),
         Err(error) => {
-            eprintln!("{error}");
+            #[allow(
+                clippy::print_stderr,
+                reason = "a lane program reports its own failure on stderr; there is no logger in a child this short-lived"
+            )]
+            {
+                eprintln!("{error}");
+            }
             // Distinct from every scripted exit code, so a harness failure is
             // never mistaken for a lane that failed the way it was told to.
             ExitCode::from(101)

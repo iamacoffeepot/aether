@@ -13,7 +13,10 @@
 #![allow(clippy::unwrap_used, reason = "a fixture that cannot set up its process reports it by panicking")]
 
 use std::net::TcpListener;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
+
+pub mod client;
 
 /// Reserve a free localhost port by binding `:0`, then release it for the bin to
 /// claim. A small race window, tolerated by the callers' connect retry loops.
@@ -43,15 +46,31 @@ impl Coordinator {
     /// concurrently spawned bins) and closed standard streams. An entry in `env`
     /// overrides a default of the same name.
     pub fn spawn(rpc_port: u16, env: &[(&str, &str)]) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_bloomery"))
+        Self::spawn_in(rpc_port, None, env)
+    }
+
+    /// [`spawn`](Self::spawn), with the coordinator's working directory pinned
+    /// to `cwd`.
+    ///
+    /// The working directory is load-bearing for anything that shells git: the
+    /// local lane's `git worktree add` and `git fetch` run with no `-C`, so they
+    /// resolve against whatever repository the coordinator was started in. A
+    /// scenario that wants those to hit a scratch repository rather than the
+    /// developer's own has to say so here — and because it is per-process, each
+    /// scenario gets its own and they still run concurrently.
+    pub fn spawn_in(rpc_port: u16, cwd: Option<&Path>, env: &[(&str, &str)]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_bloomery"));
+        command
             .env("AETHER_RPC_PORT", rpc_port.to_string())
             .env("AETHER_HTTP_PORT", free_port().to_string())
             .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+        let child = command.spawn().unwrap();
 
         Self { pid: child.id(), child: Some(child) }
     }

@@ -35,8 +35,15 @@ pub struct Outcome {
     pub evidence: Option<Vec<u8>>,
     /// The process exit code.
     pub exit_code: i32,
-    /// Whether the run leaves a candidate change in the worktree.
-    pub writes_candidate: bool,
+    /// The candidate body to write into the worktree, or `None` to leave it
+    /// clean.
+    ///
+    /// Stamped with the run's nonce rather than fixed, because the coordinator
+    /// detects a candidate with `git status --porcelain`: a `Refine` re-entry
+    /// checks out the *previous* candidate, so a lane that rewrote identical
+    /// bytes would leave a clean tree and have its capture fail closed. A repair
+    /// lap has to change something, exactly as a real one does.
+    pub candidate: Option<String>,
 }
 
 /// The `result_record` a model lane nests — a terminal, non-errored run with
@@ -85,13 +92,11 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
     let body = |value: &Value| Some(serde_json::to_vec_pretty(value).unwrap_or_default());
 
     match mode {
-        LaneMode::NoEvidence => return Outcome { evidence: None, exit_code: 0, writes_candidate: false },
-        LaneMode::ExitsNonZero => return Outcome { evidence: None, exit_code: 2, writes_candidate: false },
-        LaneMode::EmptyEvidence => {
-            return Outcome { evidence: Some(Vec::new()), exit_code: 0, writes_candidate: false };
-        }
+        LaneMode::NoEvidence => return Outcome { evidence: None, exit_code: 0, candidate: None },
+        LaneMode::ExitsNonZero => return Outcome { evidence: None, exit_code: 2, candidate: None },
+        LaneMode::EmptyEvidence => return Outcome { evidence: Some(Vec::new()), exit_code: 0, candidate: None },
         LaneMode::MalformedEvidence => {
-            return Outcome { evidence: Some(b"{not json".to_vec()), exit_code: 0, writes_candidate: false };
+            return Outcome { evidence: Some(b"{not json".to_vec()), exit_code: 0, candidate: None };
         }
         // Handled per lane family below.
         LaneMode::Pass
@@ -115,7 +120,8 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
                 "result_record": result_record(false, Some("wrote the candidate.")),
             })),
             exit_code: 0,
-            writes_candidate: matches!(mode, LaneMode::Pass | LaneMode::NeverExits),
+            candidate: matches!(mode, LaneMode::Pass | LaneMode::NeverExits)
+                .then(|| format!("the candidate a mock construct lane left for run {nonce}.\n")),
         };
     }
 
@@ -137,7 +143,7 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
                 "result_record": result_record(false, findings.as_str()),
             })),
             exit_code: 0,
-            writes_candidate: false,
+            candidate: None,
         };
     }
 
@@ -154,7 +160,7 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
         object.insert("findings".to_owned(), Value::String(verify_findings(command)));
     }
 
-    Outcome { evidence: body(&evidence), exit_code: i32::from(!passed), writes_candidate: false }
+    Outcome { evidence: body(&evidence), exit_code: i32::from(!passed), candidate: None }
 }
 
 /// Apply an outcome: write the candidate into `worktree` when there is one, and
@@ -163,11 +169,8 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
 /// # Errors
 /// A directory could not be created or a file could not be written.
 pub fn apply(outcome: &Outcome, worktree: &Path, out: &Path) -> io::Result<()> {
-    if outcome.writes_candidate {
-        fs::write(
-            worktree.join(CANDIDATE_FILE),
-            "the candidate a mock construct lane leaves for the coordinator to capture.\n",
-        )?;
+    if let Some(candidate) = &outcome.candidate {
+        fs::write(worktree.join(CANDIDATE_FILE), candidate)?;
     }
     if let Some(evidence) = &outcome.evidence {
         fs::create_dir_all(out)?;
@@ -213,7 +216,7 @@ mod tests {
 
         assert_eq!(claimed["produced_candidate"], Value::Bool(true));
         assert!(
-            !outcome(CONSTRUCT_IMPLEMENT_COMMAND, "n-1", LaneMode::ConcludesWithoutWriting).writes_candidate,
+            outcome(CONSTRUCT_IMPLEMENT_COMMAND, "n-1", LaneMode::ConcludesWithoutWriting).candidate.is_none(),
             "the whole mode is a claim with nothing behind it",
         );
     }
@@ -242,6 +245,18 @@ mod tests {
         assert_eq!(evidence["status"], Value::String("fail".to_owned()));
         assert!(evidence["findings"].as_str().unwrap().contains("E0308"));
         assert_eq!(run.exit_code, 1);
+    }
+
+    #[test]
+    fn two_construct_runs_leave_distinguishable_candidates() {
+        // Tripwire: a `Refine` re-entry checks out the previous candidate, so a
+        // lane that rewrote identical bytes leaves `git status --porcelain`
+        // empty and the capture fails closed — the repair lap silently becomes a
+        // failed attempt, and a member that should land wedges instead.
+        let first = outcome(CONSTRUCT_IMPLEMENT_COMMAND, "n-1", LaneMode::Pass).candidate;
+        let second = outcome(CONSTRUCT_IMPLEMENT_COMMAND, "n-2", LaneMode::Pass).candidate;
+
+        assert!(first.is_some() && first != second, "a repair lap has to change something: {first:?} vs {second:?}");
     }
 
     #[test]

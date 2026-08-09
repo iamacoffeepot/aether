@@ -19,7 +19,7 @@
 //! [`TransformRunner`]: super::TransformRunner
 
 use std::path::Path;
-use std::{env, io};
+use std::{env, error, fmt, io, thread};
 
 pub mod argv;
 pub mod evidence;
@@ -39,8 +39,8 @@ pub enum MockLaneError {
     Io(io::Error),
 }
 
-impl std::fmt::Display for MockLaneError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for MockLaneError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Argv(error) => write!(f, "mock lane argv: {error}"),
             Self::Io(error) => write!(f, "mock lane io: {error}"),
@@ -48,7 +48,7 @@ impl std::fmt::Display for MockLaneError {
     }
 }
 
-impl std::error::Error for MockLaneError {}
+impl error::Error for MockLaneError {}
 
 impl From<ArgvError> for MockLaneError {
     fn from(error: ArgvError) -> Self {
@@ -116,7 +116,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I, worktree: &Path) -> Result<i
         // Park rather than spin: the harness's own budget ends this run, and the
         // coordinator's staleness sweep is what the scenario is watching.
         loop {
-            std::thread::park();
+            thread::park();
         }
     }
 
@@ -136,6 +136,7 @@ pub fn run_process() -> Result<i32, MockLaneError> {
 #[allow(clippy::unwrap_used, reason = "a fixture that cannot set up its files reports it by panicking")]
 mod tests {
     use std::fs;
+    use std::path::{Path, PathBuf};
 
     use aether_bloomery::{CONSTRUCT_IMPLEMENT_COMMAND, VERIFY_CHECK_COMMAND};
 
@@ -145,7 +146,7 @@ mod tests {
 
     // One dispatch's argv, laid out the way the backend lays a run out: the
     // worktree and the evidence dir as siblings under a shared base.
-    fn dispatch(base: &std::path::Path, command: &str, nonce: &str) -> (Vec<String>, std::path::PathBuf) {
+    fn dispatch(base: &Path, command: &str, nonce: &str) -> (Vec<String>, PathBuf) {
         let worktree = base.join(nonce);
         let out = base.join(format!("{nonce}-evidence"));
         fs::create_dir_all(&worktree).unwrap();
@@ -224,6 +225,6 @@ mod tests {
         // drifted from the backend's `<base>/<nonce>-evidence` layout, every
         // scenario would silently run the default mode and the scripts would
         // become decoration.
-        assert_eq!(script_dir(std::path::Path::new("/runs/n-1-evidence")), std::path::Path::new("/runs"));
+        assert_eq!(script_dir(Path::new("/runs/n-1-evidence")), Path::new("/runs"));
     }
 }

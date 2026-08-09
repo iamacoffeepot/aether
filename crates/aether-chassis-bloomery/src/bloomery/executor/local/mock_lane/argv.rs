@@ -9,6 +9,7 @@
 //! [`ProcessTransformRunner`]: super::super::ProcessTransformRunner
 
 use std::path::PathBuf;
+use std::{error, fmt};
 
 /// A lane dispatch's argv, as the mock reads it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -39,8 +40,8 @@ pub enum ArgvError {
     DanglingValue(String),
 }
 
-impl std::fmt::Display for ArgvError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ArgvError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingCommand => f.write_str("no positional transform command id"),
             Self::MissingOut => f.write_str("no --out directory"),
@@ -49,7 +50,7 @@ impl std::fmt::Display for ArgvError {
     }
 }
 
-impl std::error::Error for ArgvError {}
+impl error::Error for ArgvError {}
 
 /// Parse the arguments a dispatch appended after the lane program's own leading
 /// words.
@@ -86,6 +87,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<LaneArgs, ArgvEr
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a parser test that cannot parse its own fixture reports it by panicking")]
 mod tests {
     use std::path::Path;
 
