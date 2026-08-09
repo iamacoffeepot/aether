@@ -40,7 +40,8 @@ use aether_chassis_bloomery::store::{RecordConfig, RecordConfigResult};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
-use aether_rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
+use aether_rpc::WireFrame;
+use common::client::{call, call_frame, connect, handshake};
 use common::{Coordinator, free_port};
 use serde::Serialize;
 
@@ -48,72 +49,6 @@ use serde::Serialize;
 /// guard drops.
 fn spawn(port: u16, db: &str) -> Coordinator {
     Coordinator::spawn(port, &[("AETHER_STORE_PATH", db)])
-}
-
-/// Connect to the bin, retrying until it has bound its RPC port.
-fn connect(port: u16) -> TcpStream {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(stream) => {
-                stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-                return stream;
-            }
-            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
-            Err(error) => panic!("could not reach the bloomery bin on port {port}: {error}"),
-        }
-    }
-}
-
-/// Handshake as a client peer.
-fn handshake(stream: &mut TcpStream) {
-    let hello = WireFrame::Hello(Hello {
-        wire_version: WIRE_VERSION,
-        peer: PeerKind::Client { client_name: "control-loop-test".into(), client_version: "0.0.1".into() },
-    });
-    write_frame(stream, &hello).unwrap();
-    match read_frame(stream).unwrap() {
-        WireFrame::HelloAck(HelloAck { wire_version, .. }) => assert_eq!(wire_version, WIRE_VERSION),
-        other => panic!("expected HelloAck, got {other:?}"),
-    }
-}
-
-/// Issue one typed `Call` to `mailbox` and decode the reply of the expected kind
-/// (collected from the `ReplyEvent` stream, closed by `ReplyEnd`).
-fn call<Req, Reply>(stream: &mut TcpStream, cid: u64, mailbox: MailboxId, request: &Req) -> Reply
-where
-    Req: Kind + Serialize,
-    Reply: Kind,
-{
-    let frame = WireFrame::Call {
-        cid: Some(cid),
-        envelope: MailEnvelope {
-            to: MailboxAddress { engine: None, mailbox },
-            from: None,
-            kind: Req::ID,
-            correlation_id: None,
-            payload: request.encode_into_bytes(),
-        },
-    };
-    write_frame(stream, &frame).unwrap();
-
-    let mut reply: Option<Reply> = None;
-    loop {
-        match read_frame(stream).unwrap() {
-            WireFrame::ReplyEvent { cid: got, envelope } => {
-                assert_eq!(got, cid, "ReplyEvent cid mismatch");
-                if envelope.kind == Reply::ID {
-                    reply = Reply::decode_from_bytes(&envelope.payload);
-                }
-            }
-            WireFrame::ReplyEnd { cid: got, result } => {
-                assert_eq!(got, cid, "ReplyEnd cid mismatch");
-                result.unwrap();
-                return reply.expect("a reply of the expected kind arrived before ReplyEnd");
-            }
-            other => panic!("unexpected frame for call {cid}: {other:?}"),
-        }
-    }
 }
 
 /// Pipeline two typed `Call`s to `mailbox` — write **both** frames before reading
@@ -131,17 +66,7 @@ where
     Reply: Kind,
 {
     for (cid, request) in [(cids.0, requests.0), (cids.1, requests.1)] {
-        let frame = WireFrame::Call {
-            cid: Some(cid),
-            envelope: MailEnvelope {
-                to: MailboxAddress { engine: None, mailbox },
-                from: None,
-                kind: Req::ID,
-                correlation_id: None,
-                payload: request.encode_into_bytes(),
-            },
-        };
-        write_frame(stream, &frame).unwrap();
+        write_frame(stream, &call_frame(cid, mailbox, request)).unwrap();
     }
 
     let mut first: Option<Reply> = None;
@@ -252,7 +177,7 @@ fn control_loop_converges_through_the_reducer_across_a_restart() {
     let port = free_port();
     let coordinator = spawn(port, db);
     let mut stream = connect(port);
-    handshake(&mut stream);
+    handshake(&mut stream, "control-loop-test");
 
     let control = control_mailbox();
     let sealed = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp"));
@@ -267,7 +192,7 @@ fn control_loop_converges_through_the_reducer_across_a_restart() {
     let port = free_port();
     let _coordinator = spawn(port, db);
     let mut stream = connect(port);
-    handshake(&mut stream);
+    handshake(&mut stream, "control-loop-test");
     let control = control_mailbox();
 
     // Convergence through the reducer: the rebuilt snapshot names the bloom.
@@ -293,7 +218,7 @@ fn concurrent_same_key_admits_each_get_a_coherent_ok() {
     let port = free_port();
     let _coordinator = spawn(port, db);
     let mut stream = connect(port);
-    handshake(&mut stream);
+    handshake(&mut stream, "control-loop-test");
     let control = control_mailbox();
 
     // Two admits sharing one idempotency key, pipelined before either reply is
@@ -356,7 +281,7 @@ fn a_seal_naming_a_configuration_authored_after_boot_still_admits() {
     let port = free_port();
     let _coordinator = spawn(port, db);
     let mut stream = connect(port);
-    handshake(&mut stream);
+    handshake(&mut stream, "control-loop-test");
     let control = control_mailbox();
 
     let override_config = ModelOverride::default();

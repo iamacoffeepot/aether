@@ -39,8 +39,8 @@ pub mod local;
 mod routing;
 
 pub use local::{
-    CaptureIdentity, LocalExecutor, LocalExecutorError, ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec,
-    TransformRunner,
+    CaptureIdentity, DEFAULT_LANE_PROGRAM, LaneProgram, LocalExecutor, LocalExecutorError, ProcessTransformRunner,
+    RunLifecycle, RunProcess, RunSpec, TransformRunner, mock_lane,
 };
 pub use routing::RoutingExecutor;
 

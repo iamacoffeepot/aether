@@ -22,6 +22,7 @@ use std::sync::Arc;
 use aether_bloomery::{LandingReceipt, ProjectionBackend, ViewDocument};
 use aether_bloomery_github::{GithubConfig, GithubError, GithubProjection, ReqwestGithub, SharedCorrespondence};
 
+use super::executor::DEFAULT_LANE_PROGRAM;
 use crate::app_auth::AppTokenSource;
 use crate::store::SqliteCorrespondence;
 
@@ -148,6 +149,23 @@ pub struct GithubMirrorConfig {
     /// resolves regardless of the coordinator's cwd.
     #[config(default = ".bloomery/local-worktrees")]
     pub local_worktree_base: String,
+    /// The program a local lane dispatch spawns in the scratch worktree, as a
+    /// whole invocation — the program and the arguments that precede the
+    /// transform's own argv (#4727). The default is the portable entrypoint the
+    /// wrapper workflows run.
+    ///
+    /// Resolvable rather than hardcoded so a test can drive the *whole* dispatch
+    /// — the `git worktree add`, the environment scrub, the child, its exit
+    /// status, the `evidence.json` — against a stand-in that finishes in
+    /// milliseconds. Everything above the program is where the failures have
+    /// actually been, and a double mounted at the runner seam skips all of it.
+    ///
+    /// Named `AETHER_BLOOMERY_LANE_PROGRAM` rather than under this struct's
+    /// `AETHER_GITHUB` prefix, for the same reason the operator knobs are: which
+    /// program a lane runs is not a property of the GitHub connection, and holds
+    /// whether or not a remote is configured at all.
+    #[config(env = "AETHER_BLOOMERY_LANE_PROGRAM", default = "cargo xtask transform")]
+    pub local_lane_program: String,
     /// How long (in seconds) a tracked dispatch may stay unresolved before the
     /// executor reactor logs a `warn` naming the wedge ([`super::ExecutorReactorCapability`],
     /// #3635) — observability only, never a behavior change to admission or
@@ -211,6 +229,7 @@ impl Default for GithubMirrorConfig {
             local_lane_enabled: true,
             local_lane_commands: "construct.,review.".to_owned(),
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),
+            local_lane_program: DEFAULT_LANE_PROGRAM.to_owned(),
             stale_warn_after_secs: 1800,
             artifacts_root: None,
             operator_name: String::new(),

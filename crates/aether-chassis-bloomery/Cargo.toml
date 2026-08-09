@@ -14,6 +14,16 @@ name = "bloomery"
 path = "src/bin/bloomery.rs"
 required-features = ["runtime"]
 
+# The mock lane program the lane-boundary scenarios point
+# `AETHER_BLOOMERY_LANE_PROGRAM` at (#4727). A test fixture that has to be a
+# binary, because the seam it stands in for spawns a process. Built with the
+# crate rather than behind a feature so a plain `cargo test` compiles the
+# scenarios that resolve it through `CARGO_BIN_EXE_`.
+[[bin]]
+name = "bloomery-mock-lane"
+path = "src/bin/bloomery_mock_lane.rs"
+required-features = ["runtime"]
+
 [features]
 # Chassis-target default: the full native host (SQLite store runtime,
 # chassis, RPC/trace caps, signal driver). A wasm/marker consumer does

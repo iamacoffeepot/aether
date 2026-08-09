@@ -100,6 +100,6 @@ pub use values::{
     Forecast, Harness, LandingReceipt, MemberCandidate, MemberSubject, Membership, ModelOverride, NetworkProfile,
     Observation, OverrideError, PriceRow, PriceTable, Provenance, Question, REVIEW_CRITIC_COMMAND, ReasoningEffort,
     ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel, StageBinding, StageCatalog, StageOverride,
-    StageReceipt, Statement, StudyCost, StudyRecord, ToolPolicy, Transformation, Unproducible, Wedge, Workpiece,
-    config_address, decode_config, is_model_lane,
+    StageReceipt, Statement, StudyCost, StudyRecord, ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND,
+    Wedge, Workpiece, config_address, decode_config, is_model_lane,
 };
