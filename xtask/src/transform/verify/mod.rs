@@ -1,3 +1,4 @@
+mod nextest;
 mod tools;
 
 use std::fs;
@@ -257,6 +258,25 @@ fn distil_diagnostics(log: &str) -> Option<String> {
     Some(format!("{rendered}\n… {omitted} further diagnostic lines omitted"))
 }
 
+/// Distil one member's log the way *that* member's failures are written.
+///
+/// The openers in [`DIAGNOSTIC_OPENERS`] are rustc's, and a failing test is not
+/// a rustc diagnostic: the only line nextest leaves for them to match is its
+/// closing `error: test run failed`, which names nothing (#4712). So
+/// `verify.test` reads its own log first, and falls through to the generic
+/// distiller when that log names no failing test — which is what a compile
+/// error inside a test target produces, and that one *is* a rustc diagnostic
+/// arriving on the channel the openers were written for.
+fn distil_member(id: &str, log: &str) -> Option<String> {
+    if id == "verify.test"
+        && let Some(failures) = nextest::distil_test_failures(log)
+    {
+        return Some(failures);
+    }
+
+    distil_diagnostics(log)
+}
+
 /// Whether a log line opens (or locates) a diagnostic rather than reporting
 /// progress. Leading whitespace is ignored — rustc indents its `-->` locations.
 fn opens_a_diagnostic(line: &str) -> bool {
@@ -285,7 +305,7 @@ fn verify_findings(members: &[(&str, bool, String)]) -> Option<String> {
     let failed: Vec<String> = members
         .iter()
         .filter(|(_, passed, _)| !passed)
-        .filter_map(|(id, _, log)| distil_diagnostics(log).map(|body| format!("### {id}\n\n{body}")))
+        .filter_map(|(id, _, log)| distil_member(id, log).map(|body| format!("### {id}\n\n{body}")))
         .collect();
     if failed.is_empty() {
         return None;
@@ -572,6 +592,52 @@ mod tests {
 
         assert!(findings.contains("### verify.clippy"), "the failing member is named");
         assert!(!findings.contains("verify.fmt"), "a passing member contributes nothing");
+    }
+
+    #[test]
+    fn a_failing_test_member_names_the_test_rather_than_the_runner_summary() {
+        // Tripwire for #4712 at the seam: `distil_member` has to route
+        // verify.test through the nextest reader. Routed to the generic
+        // distiller instead, this whole log yields `error: test run failed` —
+        // the only line in it a rustc opener matches — and the model is asked
+        // to repair a failure it cannot see.
+        let log = "\
+        FAIL [   0.008s] ( 156/3737) aether-actor::asset_sections asset_rides_a_named_custom_section_byte_exact
+
+--- STDERR:              aether-actor::asset_sections asset_rides_a_named_custom_section_byte_exact ---
+thread 'asset_rides_a_named_custom_section_byte_exact' panicked at crates/aether-actor/tests/asset_sections.rs:85:9:
+AETHER_REQUIRE_RUNTIME=1 but aether_test_fixtures_bundle wasm not pre-built
+
+     Summary [  74.644s] 3737 tests run: 3736 passed, 1 failed, 20 skipped
+error: test run failed
+";
+
+        let findings = verify_findings(&[("verify.test", false, log.to_owned())]).expect("findings");
+
+        assert!(findings.contains("### verify.test"));
+        assert!(findings.contains("asset_rides_a_named_custom_section_byte_exact"), "the test is named");
+        assert!(findings.contains("crates/aether-actor/tests/asset_sections.rs:85:9"), "with its file and line");
+        assert!(findings.contains("wasm not pre-built"), "and what it said");
+    }
+
+    #[test]
+    fn a_compile_error_in_a_test_target_still_surfaces_through_the_rustc_channel() {
+        // Tripwire: a compile error inside a test target is a rustc diagnostic
+        // and reaches findings today. Routing verify.test unconditionally to
+        // the nextest reader would trade one blind failure shape for another —
+        // the log names no failing test, so the reader has nothing to say and
+        // the generic distiller must still get its turn.
+        let log = "\
+   Compiling aether-actor v0.3.0
+error[E0308]: mismatched types
+  --> crates/aether-actor/tests/asset_sections.rs:85:9
+error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previous error
+";
+
+        let findings = verify_findings(&[("verify.test", false, log.to_owned())]).expect("findings");
+
+        assert!(findings.contains("error[E0308]: mismatched types"));
+        assert!(findings.contains("--> crates/aether-actor/tests/asset_sections.rs:85:9"));
     }
 
     #[test]
