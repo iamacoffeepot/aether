@@ -1,3 +1,4 @@
+#![allow(clippy::absolute_paths)]
 //! The outward-mirror cap shell (#3459 step 7).
 //!
 //! The host mounts the `aether-bloomery-github` projection backend behind a

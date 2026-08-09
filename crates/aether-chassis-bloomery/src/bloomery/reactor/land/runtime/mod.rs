@@ -328,6 +328,19 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
     Ok((admits, ack_through))
 }
 
+fn connect_land_source(config: &GithubMirrorConfig) -> Result<SourceShell, BootError> {
+    #[cfg(any(test, feature = "testing"))]
+    if config.uses_fixture() {
+        use aether_bloomery_github::{GitSource, SharedCorrespondence};
+        let fake = config.shared_fixture();
+        let fake_for_git = fake.clone();
+        let correspondence: SharedCorrespondence = Arc::new(fake);
+        let git_source = GitSource::new(fake_for_git, Arc::clone(&correspondence), config.cas_land_enabled);
+        return Ok(SourceShell::new_with_correspondence(Arc::new(git_source), Arc::clone(&correspondence)));
+    }
+    SourceShell::connect(config).map_err(|e| BootError::Other(Box::new(e)))
+}
+
 #[runtime]
 impl NativeActor for LandReactorCapability {
     type State = LandReactorState;
@@ -360,19 +373,7 @@ impl NativeActor for LandReactorCapability {
             });
         }
 
-        #[cfg(any(test, feature = "testing"))]
-        let source = if config.uses_fixture() {
-            use aether_bloomery_github::{GitSource, SharedCorrespondence};
-            let fake = config.shared_fixture();
-            let fake_for_git = fake.clone();
-            let correspondence: SharedCorrespondence = Arc::new(fake);
-            let git_source = GitSource::new(fake_for_git, Arc::clone(&correspondence), config.cas_land_enabled);
-            SourceShell::new_with_correspondence(Arc::new(git_source), Arc::clone(&correspondence))
-        } else {
-            SourceShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?
-        };
-        #[cfg(not(any(test, feature = "testing")))]
-        let source = SourceShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
+        let source = connect_land_source(&config)?;
         let store = SqliteStore::open(&config.store_path).map_err(|e| BootError::Other(Box::new(e)))?;
         let interval = Duration::from_secs(config.poll_interval_secs.max(1));
         let timer = spawn_timer(

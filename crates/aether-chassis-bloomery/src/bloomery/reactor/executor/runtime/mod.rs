@@ -1125,6 +1125,15 @@ fn is_disabled_mount(config: &GithubMirrorConfig) -> bool {
     !config.missing_connection_knobs().is_empty() && !config.local_lane_enabled
 }
 
+fn connect_executor_correspondence(config: &GithubMirrorConfig) -> Result<SharedCorrespondence, BootError> {
+    #[cfg(any(test, feature = "testing"))]
+    if config.uses_fixture() {
+        let fake = config.shared_fixture();
+        return Ok(Arc::new(fake) as SharedCorrespondence);
+    }
+    config.connect_correspondence().map_err(|e| BootError::Other(Box::new(e)))
+}
+
 #[runtime]
 impl NativeActor for ExecutorReactorCapability {
     type State = ExecutorReactorState;
@@ -1204,15 +1213,7 @@ impl NativeActor for ExecutorReactorCapability {
         // correspondence handle on the shared store (ADR-0152). Fixture (#4732)
         // uses the in-memory FakeGithub correspondence so the candidate push
         // resolves without a SQLite store.
-        #[cfg(any(test, feature = "testing"))]
-        let correspondence = if config.uses_fixture() {
-            let fake = config.shared_fixture();
-            Arc::new(fake) as SharedCorrespondence
-        } else {
-            config.connect_correspondence().map_err(|e| BootError::Other(Box::new(e)))?
-        };
-        #[cfg(not(any(test, feature = "testing")))]
-        let correspondence = config.connect_correspondence().map_err(|e| BootError::Other(Box::new(e)))?;
+        let correspondence = connect_executor_correspondence(&config)?;
         Ok(ExecutorReactorState {
             executor: Some(executor),
             store: Some(store),

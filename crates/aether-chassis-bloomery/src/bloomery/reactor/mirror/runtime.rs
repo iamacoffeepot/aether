@@ -177,6 +177,25 @@ fn project_batch(projection: &ProjectionShell, entries: &[OutboxEntry]) -> Vec<A
     delivered.into_iter().map(|(topic, through_sequence)| AckOutbox { topic: Some(topic), through_sequence }).collect()
 }
 
+fn connect_mirror_shells(config: &GithubMirrorConfig) -> Result<(ProjectionShell, SourceShell), BootError> {
+    #[cfg(any(test, feature = "testing"))]
+    if config.uses_fixture() {
+        let fake = config.shared_fixture();
+        let fake_for_projection = fake.clone();
+        let projection =
+            ProjectionShell::new(Arc::new(aether_bloomery_github::GithubProjection::new(fake_for_projection)));
+        let fake_for_git = fake.clone();
+        let correspondence: aether_bloomery_github::SharedCorrespondence = Arc::new(fake);
+        let git_source =
+            aether_bloomery_github::GitSource::new(fake_for_git, Arc::clone(&correspondence), config.cas_land_enabled);
+        let source = SourceShell::new_with_correspondence(Arc::new(git_source), Arc::clone(&correspondence));
+        return Ok((projection, source));
+    }
+    let projection = ProjectionShell::connect(config).map_err(|e| BootError::Other(Box::new(e)))?;
+    let source = SourceShell::connect(config).map_err(|e| BootError::Other(Box::new(e)))?;
+    Ok((projection, source))
+}
+
 #[runtime]
 impl NativeActor for MirrorReactorCapability {
     type State = MirrorReactorState;
@@ -210,32 +229,7 @@ impl NativeActor for MirrorReactorCapability {
             });
         }
 
-        #[cfg(any(test, feature = "testing"))]
-        let (projection, source) = if config.uses_fixture() {
-            let fake = config.shared_fixture();
-            let fake_for_projection = fake.clone();
-            let projection =
-                ProjectionShell::new(Arc::new(aether_bloomery_github::GithubProjection::new(fake_for_projection)));
-            let source = {
-                use aether_bloomery_github::{GitSource, SharedCorrespondence};
-                use std::sync::Arc;
-                let fake_for_git = fake.clone();
-                let correspondence: SharedCorrespondence = Arc::new(fake);
-                let git_source = GitSource::new(fake_for_git, Arc::clone(&correspondence), config.cas_land_enabled);
-                SourceShell::new_with_correspondence(Arc::new(git_source), Arc::clone(&correspondence))
-            };
-            (projection, source)
-        } else {
-            let projection = ProjectionShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
-            let source = SourceShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
-            (projection, source)
-        };
-        #[cfg(not(any(test, feature = "testing")))]
-        let (projection, source) = {
-            let projection = ProjectionShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
-            let source = SourceShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
-            (projection, source)
-        };
+        let (projection, source) = connect_mirror_shells(&config)?;
         let interval = Duration::from_secs(config.poll_interval_secs.max(1));
         let timer = spawn_timer(
             Arc::clone(&mailer),

@@ -62,18 +62,13 @@ impl Coordinator {
     /// scenario gets its own and they still run concurrently.
     pub fn spawn_in(rpc_port: u16, cwd: Option<&Path>, env: &[(&str, &str)]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_bloomery"));
-        // Capture coordinator logs for fake-backend debugging (#4732)
-        let log_path = std::env::temp_dir().join(format!("bloomery-coordinator-{rpc_port}.log"));
-        let log_file = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).unwrap();
-        eprintln!("coordinator log: {}", log_path.display());
         command
             .env("AETHER_RPC_PORT", rpc_port.to_string())
             .env("AETHER_HTTP_PORT", free_port().to_string())
             .envs(env.iter().copied())
-            .env("RUST_LOG", "debug")
             .stdin(Stdio::null())
-            .stdout(Stdio::from(log_file.try_clone().unwrap()))
-            .stderr(Stdio::from(log_file));
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }

@@ -1,3 +1,4 @@
+#![allow(clippy::needless_pass_by_value)]
 //! The `SourceShell`-backed runtime for [`SourceCapability`] (ADR-0149 §The
 //! boundary).
 //!
@@ -401,6 +402,27 @@ impl SourceCapabilityState {
     }
 }
 
+fn source_claims_enabled(config: &super::SourceConfig) -> bool {
+    #[cfg(any(test, feature = "testing"))]
+    if config.uses_fixture() {
+        return true;
+    }
+    !(config.token.is_empty() || config.owner.is_empty() || config.repo.is_empty())
+}
+fn connect_source_shell(config: &super::SourceConfig) -> Result<SourceShell, BootError> {
+    #[cfg(any(test, feature = "testing"))]
+    if config.uses_fixture() {
+        use aether_bloomery_github::{GitSource, SharedCorrespondence};
+        use std::sync::Arc;
+        let fake = config.shared_fixture();
+        let fake_for_git = fake.clone();
+        let correspondence: SharedCorrespondence = Arc::new(fake);
+        let git_source = GitSource::new(fake_for_git, Arc::clone(&correspondence), config.cas_land_enabled);
+        return Ok(SourceShell::new_with_correspondence(Arc::new(git_source), correspondence));
+    }
+    SourceShell::connect(config).map_err(|error| BootError::Other(Box::new(error)))
+}
+
 #[runtime]
 impl NativeActor for SourceCapability {
     type State = SourceCapabilityState;
@@ -416,28 +438,8 @@ impl NativeActor for SourceCapability {
         // shell is still connected (it opens no network until driven) so a
         // later-configured bin needs no re-mount. Fixture backend (#4732) needs
         // no token and keeps claims enabled.
-        #[cfg(any(test, feature = "testing"))]
-        let claims_enabled =
-            config.uses_fixture() || !(config.token.is_empty() || config.owner.is_empty() || config.repo.is_empty());
-        #[cfg(not(any(test, feature = "testing")))]
-        let claims_enabled = !(config.token.is_empty() || config.owner.is_empty() || config.repo.is_empty());
-        #[cfg(any(test, feature = "testing"))]
-        let shell = if config.uses_fixture() {
-            use aether_bloomery_github::{GitSource, SharedCorrespondence};
-            use std::sync::Arc;
-            let fake = config.shared_fixture();
-            let fake_for_git = fake.clone();
-            let correspondence: SharedCorrespondence = Arc::new(fake);
-            let git_source = GitSource::new(fake_for_git, Arc::clone(&correspondence), config.cas_land_enabled);
-            // Allow env var in fixture bootstrap (cargo-deny disallows std::env::var in lib)
-            #[allow(clippy::disallowed_methods, clippy::absolute_paths)]
-            let _ = std::env::var("AETHER_GITHUB_FIXTURE_BASE_SHA");
-            SourceShell::new_with_correspondence(Arc::new(git_source), correspondence)
-        } else {
-            SourceShell::connect(&config).map_err(|error| BootError::Other(Box::new(error)))?
-        };
-        #[cfg(not(any(test, feature = "testing")))]
-        let shell = SourceShell::connect(&config).map_err(|error| BootError::Other(Box::new(error)))?;
+        let claims_enabled = source_claims_enabled(&config);
+        let shell = connect_source_shell(&config)?;
         tracing::info!(
             target: "aether_chassis_bloomery::source",
             claims_enabled,
@@ -482,13 +484,11 @@ impl NativeActor for SourceCapability {
     // The `#[handler::single]` contract requires the mail by value; every
     // handler here only borrows its fields to decode, so clippy sees a
     // by-ref opportunity the macro signature cannot take.
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_snapshot(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Snapshot) -> SnapshotResult {
         state.snapshot(&mail.base)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_observe_mainline(
         state: &mut Self::State,
@@ -498,7 +498,6 @@ impl NativeActor for SourceCapability {
         state.observe_mainline_head()
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_record_checkpoint(
         state: &mut Self::State,
@@ -508,7 +507,6 @@ impl NativeActor for SourceCapability {
         state.record_checkpoint(&mail.bloom, &mail.tree)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_list_checkpoints(
         state: &mut Self::State,
@@ -518,43 +516,36 @@ impl NativeActor for SourceCapability {
         state.list_checkpoints(&mail.bloom)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_integrate(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Integrate) -> IntegrateResult {
         state.integrate(&mail.bloom, &mail.candidate, &mail.expected)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_land(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Land) -> LandResult {
         state.land(&mail.bloom, &mail.expected_base, &mail.new_head)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_poll_land(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: PollLand) -> PollLandResult {
         state.poll_land(&mail.bloom, &mail.expected_base, mail.number)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_claim_seal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ClaimSeal) -> ClaimResult {
         state.claim_seal(&mail.bloom, &mail.workpieces)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_transfer_seal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: TransferSeal) -> ClaimResult {
         state.transfer_seal(&mail.predecessor, &mail.successor, &mail.carried, &mail.net_new, &mail.dropped)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_release_seal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ReleaseSeal) -> ClaimResult {
         state.release_seal(&mail.bloom, &mail.workpieces)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_enumerate_claims(
         state: &mut Self::State,
@@ -564,13 +555,11 @@ impl NativeActor for SourceCapability {
         state.enumerate_claims()
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_complete_transfer(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: CompleteTransfer) -> ClaimResult {
         state.complete_transfer(&mail.predecessor, &mail.successor, &mail.ref_kind)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_complete_release(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: CompleteRelease) -> ClaimResult {
         state.complete_release(&mail.bloom, &mail.ref_kind)
