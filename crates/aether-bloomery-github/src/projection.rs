@@ -70,7 +70,10 @@ impl<C> GithubProjection<C> {
         guard.insert(bloom, members.iter().map(|member| member.workpiece.0.clone()).collect());
     }
 
-    fn reconcile_member_evidence(&self, issue_number: u64, member: &MemberView) -> Result<(), GithubError> {
+    fn reconcile_member_evidence(&self, issue_number: u64, member: &MemberView) -> Result<(), GithubError>
+    where
+        C: GithubApi,
+    {
         let approval_key = format!("approval:{}", short_hex(&member.approval.subject));
         let approval_digest = content_digest("bloomery.view.evidence", &member.approval);
         self.upsert_comment(issue_number, &approval_key, approval_digest, &render_evidence_body(&member.approval))?;
