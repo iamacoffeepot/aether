@@ -8,7 +8,7 @@
 // actor's lock-free per-actor `CostCells` cache — on whichever worker is
 // dispatching it, exclusively) but *consumed* cross-thread — by the
 // `cost.tail` dump here, and by a future iamacoffeepot/aether#1178
-// producer-side `Σw` / `w_max` read at flush. Both reach the *same*
+// producer-side `total_work` / `max_group_work` read at flush. Both reach the *same*
 // `Arc<CostCell>` through this global table.
 //
 // Mirrors the routing-sibling [`CapabilityRegistry`] (`capability.rs`):
@@ -382,7 +382,7 @@ impl CostTable {
 /// A read-lock held over a [`CostTable`] for the span of one flush, plus
 /// the point-lookup the recruiter resolves each mail's cost through.
 /// Acquired once via [`CostTable::lookup`] and dropped when the flush's
-/// group accumulation finishes — so the whole `Σw` / `w_max` pass runs
+/// group accumulation finishes — so the whole `total_work` / `max_group_work` pass runs
 /// under a single read acquire, not one per mail.
 #[derive(Debug)]
 pub struct CostLookup<'a> {
@@ -682,7 +682,7 @@ mod tests {
 
     /// Two mails routed to the *same* handler resolve the same cost under
     /// one batch read — the per-mail point lookup the recruiter sums into a
-    /// group's `Σw`, without a lock acquire per mail.
+    /// group's accumulated work, without a lock acquire per mail.
     #[test]
     fn batch_lookup_repeats_under_one_lock() {
         let table = CostTable::new();

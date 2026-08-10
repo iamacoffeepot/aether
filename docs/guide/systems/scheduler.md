@@ -75,8 +75,12 @@ push lands on the worker's **own deque** (the keep-local path — same worker,
 LIFO pop, no cross-thread handoff), so a chain or a cheap fan-out stays on one
 warm worker. A flush whose fresh groups carry enough measured work additionally
 **broadcast-recruits** siblings: `recruit_k` sizes the recruitment from the
-per-handler execution-cost EWMAs (`K ≈ ceil(total_work / longest_pole)`, gated
-by the box-calibrated wake break-even), and `WakeSink::recruit` pushes that many
+per-handler execution-cost EWMAs (`K ≈ ceil(total_work / max_group_work)`, gated
+by the box-calibrated wake break-even). Both terms reduce the same set — this
+flush's fresh groups — one by summing them, the other by taking the largest,
+which is why a fan-out dominated by one fat group recruits nobody: a group is
+drained by a single worker, so no `K` beats that group's own serial drain. Then
+`WakeSink::recruit` pushes that many
 clones of the blob to the shared injector and unparks that many workers. When
 any contributing cost cell is untrustworthy, the decision falls back to the
 width gate (`AETHER_BLOB_RECRUIT_MIN`, default 9 — so a fan-out 8 wide or
