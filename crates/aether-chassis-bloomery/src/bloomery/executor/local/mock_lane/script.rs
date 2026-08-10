@@ -63,6 +63,8 @@ pub enum LaneMode {
     EmptyEvidence,
     /// Write bytes that do not decode as JSON.
     MalformedEvidence,
+    /// Write otherwise-valid evidence stamped for a different run.
+    MismatchedNonce,
     /// Exit non-zero having written nothing — an environment failure, as
     /// distinct from a candidate that failed its gate.
     ExitsNonZero,

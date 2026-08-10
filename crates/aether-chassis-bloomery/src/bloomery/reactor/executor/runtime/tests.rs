@@ -673,19 +673,20 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
         fake.seed_git_object(&digest(0xC0));
         Arc::new(fake)
     };
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-local", 5);
     let actions = Arc::new(ActionsExecutor::new(FakeGithub::new(), Arc::clone(&correspondence), lanes(), PINNED_REF));
     let runner = FixedRunner {
-        evidence: r#"{"command":"construct.implement","nonce":"x","produced_candidate":true,"result_record":{"schema":1,"is_error":false,"result":{"num_turns":3}}}"#.to_owned(),
+        evidence: format!(
+            r#"{{"command":"construct.implement","nonce":"dispatch-{sequence}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"result":{{"num_turns":3}}}}}}"#
+        ),
         lifecycle: RunLifecycle::Exited { success: true },
         captures: true,
     };
     let local = Arc::new(LocalExecutor::new(Arc::new(runner), correspondence, base.path()));
     let routing = RoutingExecutor::new(actions, local, vec!["construct.".to_owned()]);
     let shell = ExecutorShell::new(Arc::new(routing));
-
-    let mut store = SqliteStore::open(":memory:").unwrap();
-    let bloom = BloomId(digest(1));
-    let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-local", 5);
 
     let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
     store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();

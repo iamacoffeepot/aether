@@ -358,6 +358,10 @@ impl ExecutorBackend for LocalExecutor {
                 return Err(LocalExecutorError::Evidence(format!("{}: {read_error}", evidence_path.display())));
             }
         };
+        // Evidence must identify the order that produced it before any body claim
+        // is trusted. A stale or cross-wired evidence directory is otherwise able
+        // to advance a different order merely by carrying a passing verdict.
+        let nonce_matches = evidence_nonce_matches(&bytes, &handle.nonce);
         // Verdict from the run's own evidence, lane-specific. The construct lane's
         // gate demands a substantive conclusion (#3596) — a terminal `result` with
         // `is_error == false` AND a produced candidate — and is fail-closed on any
@@ -367,9 +371,9 @@ impl ExecutorBackend for LocalExecutor {
         // `exited_success` fallback survives only for a non-construct evidence shape
         // that stamps no status.
         let concluded = if is_construct {
-            construct_conclusion(&bytes)
+            nonce_matches && construct_conclusion(&bytes)
         } else {
-            parse_status(&bytes).unwrap_or(exited_success)
+            nonce_matches && parse_status(&bytes).unwrap_or(exited_success)
         };
         // A passed construct-lane run's work is captured while its worktree still
         // exists (ADR-0152) — commit + tree recorded as correspondence rows, the
@@ -407,10 +411,23 @@ impl ExecutorBackend for LocalExecutor {
             artifact_id: 0,
             size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
             candidate,
-            findings: parse_findings(&bytes),
-            cost: parse_cost(&bytes),
+            findings: nonce_matches.then(|| parse_findings(&bytes)).flatten(),
+            cost: nonce_matches.then(|| parse_cost(&bytes)).flatten(),
         }])
     }
+}
+
+/// Whether `bytes` carry a top-level nonce that decodes as an executor handle
+/// and names exactly `expected`. Evidence bodies are untrusted until this binds
+/// them to the registry entry that supplied their directory.
+fn evidence_nonce_matches(bytes: &[u8], expected: &Nonce) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Some(nonce) = value.get("nonce").filter(|nonce| nonce.is_string()) else {
+        return false;
+    };
+    serde_json::from_value::<Nonce>(nonce.clone()).is_ok_and(|actual| actual == *expected)
 }
 
 /// Read the verify lane's `status` field from an `evidence.json` byte string:
