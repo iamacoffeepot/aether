@@ -24,10 +24,10 @@ pub(super) const FAILURE_EVIDENCE_LOG_ENTRIES: u32 = 100;
 pub(super) const FAILURE_EVIDENCE_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(3);
 pub(super) const FAILURE_EVIDENCE_BUNDLE_BUDGET: Duration = Duration::from_secs(15);
 
-const MAX_PRIMARY_ERROR_BYTES: usize = 4_096;
-const MAX_OPERATION_BYTES: usize = 256;
-const MAX_ADDRESS_BYTES: usize = 4_096;
-const MAX_KIND_NAME_BYTES: usize = 256;
+pub(super) const MAX_PRIMARY_ERROR_BYTES: usize = 4_096;
+pub(super) const MAX_OPERATION_BYTES: usize = 256;
+pub(super) const MAX_ADDRESS_BYTES: usize = 4_096;
+pub(super) const MAX_KIND_NAME_BYTES: usize = 256;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum FailureEvidenceQuery {
@@ -127,44 +127,13 @@ impl FailureEvidenceSource for McpFailureEvidenceSource<'_> {
                     parse_tool_json("actor_cost", &body).map(FailureEvidenceValue::Json)
                 }
                 FailureEvidenceQuery::Frame { engine_id, window_id, scale, max_dimension } => {
-                    let result = super::capture::capture_frame(
+                    super::capture::capture_frame(
                         self.mcp,
-                        CaptureFrameArgs {
-                            engine_id,
-                            window_id,
-                            mails: Vec::new(),
-                            after_mails: Vec::new(),
-                            checks: Vec::new(),
-                            similarity: None,
-                            scale,
-                            max_dimension,
-                            include_image: Some(true),
-                            save_path: None,
-                        },
+                        failure_evidence_capture_args(engine_id, window_id, scale, max_dimension),
                     )
                     .await
-                    .map_err(mcp_error_message)?;
-                    let mut images = Vec::new();
-                    let mut capture_text = Vec::new();
-                    for content in result.content {
-                        match &content.raw {
-                            RawContent::Image(_) => images.push(content),
-                            RawContent::Text(text) => capture_text.push(text.text.clone()),
-                            _ => {
-                                return Err("capture_frame returned an unexpected non-image content block".into());
-                            }
-                        }
-                    }
-                    if images.is_empty() {
-                        return Err("capture_frame returned no inline PNG".into());
-                    }
-                    Ok(FailureEvidenceValue::Frame {
-                        summary: serde_json::json!({
-                            "image_content_blocks": images.len(),
-                            "capture_text": capture_text,
-                        }),
-                        images,
-                    })
+                    .map_err(mcp_error_message)
+                    .and_then(project_failure_evidence_capture)
                 }
             }
         })
@@ -177,6 +146,48 @@ fn mcp_error_message(error: McpError) -> String {
 
 fn parse_tool_json(tool: &str, body: &str) -> Result<Value, String> {
     serde_json::from_str(body).map_err(|error| format!("{tool} returned invalid JSON: {error}"))
+}
+
+pub(super) fn failure_evidence_capture_args(
+    engine_id: String,
+    window_id: String,
+    scale: Option<f32>,
+    max_dimension: Option<u32>,
+) -> CaptureFrameArgs {
+    CaptureFrameArgs {
+        engine_id,
+        window_id,
+        mails: Vec::new(),
+        after_mails: Vec::new(),
+        checks: Vec::new(),
+        similarity: None,
+        scale,
+        max_dimension,
+        include_image: Some(true),
+        save_path: None,
+    }
+}
+
+pub(super) fn project_failure_evidence_capture(result: CallToolResult) -> Result<FailureEvidenceValue, String> {
+    let mut images = Vec::new();
+    let mut capture_text = Vec::new();
+    for content in result.content {
+        match &content.raw {
+            RawContent::Image(_) => images.push(content),
+            RawContent::Text(text) => capture_text.push(text.text.clone()),
+            _ => return Err("capture_frame returned an unexpected non-image content block".into()),
+        }
+    }
+    if images.len() != 1 {
+        return Err(format!("capture_frame returned {} inline images; expected exactly one", images.len()));
+    }
+    Ok(FailureEvidenceValue::Frame {
+        summary: serde_json::json!({
+            "image_content_blocks": 1,
+            "capture_text": capture_text,
+        }),
+        images,
+    })
 }
 
 pub(super) fn select_failure_evidence_fleet(fleet: ListEnginesResponse, engine_id: &str) -> FailureEvidenceFleet {
@@ -222,7 +233,7 @@ fn validate_selectors(
 }
 
 pub(super) fn validate_failure_evidence_args(args: &mut CollectFailureEvidenceArgs) -> Result<(), McpError> {
-    parse_engine_id(&args.engine_id)?;
+    args.engine_id = parse_engine_id(&args.engine_id)?.0.to_string();
     validate_text(&args.primary_error, "primary_error", MAX_PRIMARY_ERROR_BYTES)?;
     if let Some(operation) = &args.operation {
         validate_text(operation, "operation", MAX_OPERATION_BYTES)?;
@@ -250,9 +261,15 @@ async fn run_observation<S: FailureEvidenceSource>(
     let limited_by_budget = remaining < observation_timeout;
     match time::timeout(remaining.min(observation_timeout), source.observe(query)).await {
         Ok(Ok(FailureEvidenceValue::Json(value))) => (FailureEvidenceObservation::Ok { value }, Vec::new()),
-        Ok(Ok(FailureEvidenceValue::Frame { summary, images })) => {
+        Ok(Ok(FailureEvidenceValue::Frame { summary, images })) if images.len() == 1 => {
             (FailureEvidenceObservation::Ok { value: summary }, images)
         }
+        Ok(Ok(FailureEvidenceValue::Frame { images, .. })) => (
+            FailureEvidenceObservation::Error {
+                error: format!("capture_frame returned {} inline images; expected exactly one", images.len()),
+            },
+            Vec::new(),
+        ),
         Ok(Err(error)) => (FailureEvidenceObservation::Error { error }, Vec::new()),
         Err(_) if limited_by_budget => (FailureEvidenceObservation::BudgetExhausted, Vec::new()),
         Err(_) => (FailureEvidenceObservation::Timeout, Vec::new()),

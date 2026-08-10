@@ -12,7 +12,8 @@ use crate::args::{
     CollectFailureEvidenceArgs, DeadEngineInfo, EngineInfo, FailureEvidenceFrameArgs, ListEnginesResponse,
 };
 
-const ENGINE_ID: &str = "00000000-0000-0000-0000-000000000475";
+const ENGINE_ID: &str = "abcdefab-cdef-4abc-8def-abcdefabcdef";
+const UPPERCASE_ENGINE_ID: &str = "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF";
 
 struct FakeReply {
     delay: Duration,
@@ -72,47 +73,123 @@ fn result_json(result: &CallToolResult) -> serde_json::Value {
     serde_json::from_str(&text.text).expect("inline failure-evidence JSON")
 }
 
+async fn assert_invalid_without_observations(request: CollectFailureEvidenceArgs, expected: &str) {
+    let mut source = FakeSource::default();
+    let error = collect_failure_evidence_with_source(
+        request,
+        &mut source,
+        Duration::from_millis(10),
+        Duration::from_millis(50),
+    )
+    .await
+    .expect_err("invalid failure-evidence arguments must fail");
+    assert!(error.message.contains(expected), "expected error containing {expected:?}, got {:?}", error.message);
+    assert!(source.calls.is_empty(), "validation must finish before observation");
+}
+
 #[tokio::test]
 async fn invalid_and_oversized_requests_make_no_observations() {
-    let mut source = FakeSource::default();
-    let mut invalid = args();
-    invalid.primary_error = "   ".into();
-    let error = collect_failure_evidence_with_source(
-        invalid,
-        &mut source,
-        Duration::from_millis(10),
-        Duration::from_millis(50),
-    )
-    .await
-    .expect_err("blank primary error must fail");
-    assert!(error.message.contains("primary_error"));
-    assert!(source.calls.is_empty());
+    let mut request = args();
+    request.engine_id = "not-a-uuid".into();
+    assert_invalid_without_observations(request, "valid UUID").await;
 
-    let mut oversized = args();
-    oversized.actors = (0..=MAX_FAILURE_EVIDENCE_ACTORS).map(|index| format!("actor-{index}")).collect();
-    let error = collect_failure_evidence_with_source(
-        oversized,
-        &mut source,
-        Duration::from_millis(10),
-        Duration::from_millis(50),
-    )
-    .await
-    .expect_err("too many actors must fail");
-    assert!(error.message.contains("at most 8 actors"));
-    assert!(source.calls.is_empty());
+    let mut request = args();
+    request.primary_error = "   ".into();
+    assert_invalid_without_observations(request, "primary_error must not be empty").await;
 
-    let mut invalid_frame = args();
-    invalid_frame.frame =
-        Some(FailureEvidenceFrameArgs { window_id: "17".into(), scale: Some(0.0), max_dimension: None });
-    collect_failure_evidence_with_source(
-        invalid_frame,
-        &mut source,
-        Duration::from_millis(10),
-        Duration::from_millis(50),
-    )
-    .await
-    .expect_err("invalid frame controls must fail before collection");
-    assert!(source.calls.is_empty());
+    let mut request = args();
+    request.primary_error = "x".repeat(MAX_PRIMARY_ERROR_BYTES + 1);
+    assert_invalid_without_observations(request, "primary_error exceeds").await;
+
+    let mut request = args();
+    request.operation = Some("  ".into());
+    assert_invalid_without_observations(request, "operation must not be empty").await;
+
+    let mut request = args();
+    request.operation = Some("x".repeat(MAX_OPERATION_BYTES + 1));
+    assert_invalid_without_observations(request, "operation exceeds").await;
+
+    for (field, count) in [
+        ("actors", MAX_FAILURE_EVIDENCE_ACTORS),
+        ("components", MAX_FAILURE_EVIDENCE_COMPONENTS),
+        ("kinds", MAX_FAILURE_EVIDENCE_KINDS),
+    ] {
+        let values = (0..=count).map(|index| format!("selector-{index}")).collect();
+        let mut request = args();
+        match field {
+            "actors" => request.actors = values,
+            "components" => request.components = values,
+            "kinds" => request.kinds = values,
+            _ => unreachable!(),
+        }
+        assert_invalid_without_observations(request, &format!("at most {count} {field}")).await;
+    }
+
+    for field in ["actors", "components", "kinds"] {
+        let mut request = args();
+        match field {
+            "actors" => request.actors = vec![" ".into()],
+            "components" => request.components = vec![" ".into()],
+            "kinds" => request.kinds = vec![" ".into()],
+            _ => unreachable!(),
+        }
+        assert_invalid_without_observations(request, &format!("{field}[0] must not be empty")).await;
+    }
+
+    for (field, max_bytes) in
+        [("actors", MAX_ADDRESS_BYTES), ("components", MAX_ADDRESS_BYTES), ("kinds", MAX_KIND_NAME_BYTES)]
+    {
+        let mut request = args();
+        let values = vec!["x".repeat(max_bytes + 1)];
+        match field {
+            "actors" => request.actors = values,
+            "components" => request.components = values,
+            "kinds" => request.kinds = values,
+            _ => unreachable!(),
+        }
+        assert_invalid_without_observations(request, &format!("{field}[0] exceeds")).await;
+    }
+}
+
+#[tokio::test]
+async fn invalid_frame_boundaries_make_no_observations() {
+    let mut invalid_window = args();
+    invalid_window.frame =
+        Some(FailureEvidenceFrameArgs { window_id: "not-a-window".into(), scale: None, max_dimension: None });
+    assert_invalid_without_observations(invalid_window, "window_id").await;
+
+    for scale in [0.0, -0.1, 1.1, f32::INFINITY, f32::NAN] {
+        let mut request = args();
+        request.frame =
+            Some(FailureEvidenceFrameArgs { window_id: "17".into(), scale: Some(scale), max_dimension: None });
+        assert_invalid_without_observations(request, "scale must be finite and in (0.0, 1.0]").await;
+    }
+
+    let mut zero_dimension = args();
+    zero_dimension.frame =
+        Some(FailureEvidenceFrameArgs { window_id: "17".into(), scale: None, max_dimension: Some(0) });
+    assert_invalid_without_observations(zero_dimension, "max_dimension must be greater than zero").await;
+}
+
+#[test]
+fn exact_string_and_frame_boundaries_are_accepted() {
+    let mut request = args();
+    request.primary_error = "e".repeat(MAX_PRIMARY_ERROR_BYTES);
+    request.operation = Some("o".repeat(MAX_OPERATION_BYTES));
+    request.actors = vec!["a".repeat(MAX_ADDRESS_BYTES)];
+    request.components = vec!["c".repeat(MAX_ADDRESS_BYTES)];
+    request.kinds = vec!["k".repeat(MAX_KIND_NAME_BYTES)];
+    request.frame = Some(FailureEvidenceFrameArgs {
+        window_id: "17".into(),
+        scale: Some(f32::MIN_POSITIVE),
+        max_dimension: Some(1),
+    });
+    validate_failure_evidence_args(&mut request).expect("documented byte and frame boundaries are inclusive");
+
+    let mut full_scale = args();
+    full_scale.frame =
+        Some(FailureEvidenceFrameArgs { window_id: "17".into(), scale: Some(1.0), max_dimension: Some(u32::MAX) });
+    validate_failure_evidence_args(&mut full_scale).expect("full scale and maximum dimension are valid");
 }
 
 #[tokio::test]
@@ -171,6 +248,30 @@ async fn selectors_are_sorted_deduplicated_and_forwarded_exactly() {
     assert_eq!(json["components"][0]["selector"], "component/a");
     assert_eq!(json["actors"][0]["mailbox_name"], "actor/a");
     assert_eq!(json["limits"]["actor_log_entries"], 100);
+}
+
+#[tokio::test]
+async fn engine_id_is_canonicalized_before_queries_and_output() {
+    let mut request = args();
+    request.engine_id = UPPERCASE_ENGINE_ID.into();
+    let mut source = FakeSource::with_replies([json_reply(serde_json::json!({"alive": []}))]);
+
+    let result =
+        collect_failure_evidence_with_source(request, &mut source, Duration::from_millis(50), Duration::from_secs(1))
+            .await
+            .expect("uppercase UUID spelling is valid");
+
+    assert_eq!(source.calls, vec![FailureEvidenceQuery::Fleet { engine_id: ENGINE_ID.into() }]);
+    assert_eq!(result_json(&result)["engine_id"], ENGINE_ID);
+
+    let selected = select_failure_evidence_fleet(
+        ListEnginesResponse {
+            engines: Some(vec![EngineInfo { engine_id: ENGINE_ID.into(), rpc_port: 1, last_heartbeat_age_millis: 0 }]),
+            recently_died: None,
+        },
+        ENGINE_ID,
+    );
+    assert_eq!(selected.alive.len(), 1, "the canonical selector matches canonical fleet rows");
 }
 
 #[tokio::test]
@@ -264,6 +365,73 @@ fn oversized_json_uses_the_whole_response_spill_before_images() {
 
     assert_eq!(result_json(&result), serde_json::json!({"file": "/tmp/bundle.json", "bytes": 123}));
     assert_eq!(result.content[1], image);
+}
+
+#[test]
+fn frame_argument_builder_forbids_mutation_checks_and_host_writes() {
+    let capture = failure_evidence_capture_args(ENGINE_ID.into(), "mbx-AAAA-AAAA-AAAA".into(), Some(0.5), Some(320));
+
+    assert_eq!(capture.engine_id, ENGINE_ID);
+    assert_eq!(capture.window_id, "mbx-AAAA-AAAA-AAAA");
+    assert!(capture.mails.is_empty());
+    assert!(capture.after_mails.is_empty());
+    assert!(capture.checks.is_empty());
+    assert!(capture.similarity.is_none());
+    assert_eq!(capture.scale, Some(0.5));
+    assert_eq!(capture.max_dimension, Some(320));
+    assert_eq!(capture.include_image, Some(true));
+    assert!(capture.save_path.is_none());
+}
+
+#[test]
+fn frame_projection_requires_exactly_one_inline_image() {
+    let image = Content::image("cG5n", "image/png");
+    let projected = project_failure_evidence_capture(CallToolResult::success(vec![
+        image.clone(),
+        Content::text("{\"verdict\":null}"),
+    ]))
+    .expect("one image plus capture text is valid");
+    let FailureEvidenceValue::Frame { summary, images } = projected else {
+        panic!("capture projection must remain a frame value");
+    };
+    assert_eq!(images, vec![image.clone()]);
+    assert_eq!(summary["image_content_blocks"], 1);
+
+    let missing = project_failure_evidence_capture(CallToolResult::success(vec![]))
+        .expect_err("a frame observation requires an inline image");
+    assert!(missing.contains("0 inline images; expected exactly one"));
+
+    let multiple = project_failure_evidence_capture(CallToolResult::success(vec![image.clone(), image]))
+        .expect_err("multiple inline images exceed the bounded frame contract");
+    assert!(multiple.contains("2 inline images; expected exactly one"));
+}
+
+#[tokio::test]
+async fn multiple_frame_images_are_recorded_as_an_error_and_not_emitted() {
+    let mut request = args();
+    request.frame = Some(FailureEvidenceFrameArgs { window_id: "42".into(), scale: None, max_dimension: None });
+    let mut source = FakeSource::with_replies([
+        json_reply(serde_json::json!({"alive": []})),
+        FakeReply {
+            delay: Duration::ZERO,
+            result: Ok(FailureEvidenceValue::Frame {
+                summary: serde_json::json!({"image_content_blocks": 2}),
+                images: vec![Content::image("a", "image/png"), Content::image("b", "image/png")],
+            }),
+        },
+    ]);
+
+    let result =
+        collect_failure_evidence_with_source(request, &mut source, Duration::from_millis(50), Duration::from_secs(1))
+            .await
+            .expect("capture cardinality failures are bundle data");
+
+    assert_eq!(result.content.len(), 1, "invalid image blocks never escape after the JSON bundle");
+    assert_eq!(result_json(&result)["frame"]["observation"]["status"], "error");
+    assert_eq!(
+        result_json(&result)["frame"]["observation"]["error"],
+        "capture_frame returned 2 inline images; expected exactly one"
+    );
 }
 
 #[tokio::test]

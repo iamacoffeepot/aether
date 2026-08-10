@@ -98,9 +98,10 @@ use self::components::{
 use self::envelope::{engine_envelope, local_envelope, validate_recipient_scope};
 #[cfg(test)]
 use self::failure_evidence::{
-    FAILURE_EVIDENCE_LOG_ENTRIES, FailureEvidenceQuery, FailureEvidenceSource, FailureEvidenceValue,
-    MAX_FAILURE_EVIDENCE_ACTORS, MAX_FAILURE_EVIDENCE_COMPONENTS, MAX_FAILURE_EVIDENCE_KINDS,
-    collect_failure_evidence_with_source, failure_evidence_result_with_spill, select_failure_evidence_fleet,
+    FAILURE_EVIDENCE_LOG_ENTRIES, FailureEvidenceQuery, FailureEvidenceSource, FailureEvidenceValue, MAX_ADDRESS_BYTES,
+    MAX_FAILURE_EVIDENCE_ACTORS, MAX_FAILURE_EVIDENCE_COMPONENTS, MAX_FAILURE_EVIDENCE_KINDS, MAX_KIND_NAME_BYTES,
+    MAX_OPERATION_BYTES, MAX_PRIMARY_ERROR_BYTES, collect_failure_evidence_with_source, failure_evidence_capture_args,
+    failure_evidence_result_with_spill, project_failure_evidence_capture, select_failure_evidence_fleet,
     validate_failure_evidence_args,
 };
 #[cfg(test)]
