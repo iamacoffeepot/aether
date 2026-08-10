@@ -36,7 +36,9 @@ use std::env;
 
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
-use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter, rgba_at};
+use aether_harness_substrate_capture::test_helpers::{
+    append_capture_probe, envelope, has_wgpu_adapter, rgba_at, srgb_byte_to_linear,
+};
 use aether_harness_substrate_capture::visual::decode_png;
 use aether_kinds::QuadSpace;
 use aether_math::{Mat4, Rgb, Rgba, Vec3};
@@ -177,31 +179,34 @@ const OUTPUT: u32 = 1;
 /// raster into a plane at the wash body's divisor — plus the probe that
 /// carries that plane into a readable texture.
 fn probed_program() -> ProgramRegister {
-    let full = SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full };
-    let off = |entry_point: &str, input, output| ProgramPass {
-        stage: PassStage::Fragment,
-        entry_point: entry_point.to_owned(),
-        inputs: vec![input],
-        output,
-        uniform_offset: 0,
-        uniform_length: stroke::StrokeUniforms::BYTES,
-        repeat: None,
-    };
-
-    ProgramRegister {
+    let mut register = ProgramRegister {
         // The skinning prelude rides along, as `stroke::program` appends
         // it: the ribbon stage poses the pen from `params.bones`, so the
         // module does not compile without it.
-        wgsl: format!("{}\n{}\n{PROBE_WGSL}", stroke::STROKE_WGSL, program::SKIN_WGSL),
-        bindings: vec![full; 2],
+        wgsl: format!("{}\n{}", stroke::STROKE_WGSL, program::SKIN_WGSL),
+        bindings: vec![SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full }],
         transients: vec![stroke::ink_plane_slot()],
         geometries: Vec::new(),
         depth_transients: Vec::new(),
-        passes: vec![
-            off("fs_ink_plane", InputSlot::Binding { index: RASTER }, OutputSlot::Transient { index: 0 }),
-            off("fs_probe", InputSlot::Transient { index: 0 }, OutputSlot::Binding { index: OUTPUT }),
-        ],
-    }
+        passes: vec![ProgramPass {
+            stage: PassStage::Fragment,
+            entry_point: "fs_ink_plane".to_owned(),
+            inputs: vec![InputSlot::Binding { index: RASTER }],
+            output: OutputSlot::Transient { index: 0 },
+            uniform_offset: 0,
+            uniform_length: stroke::StrokeUniforms::BYTES,
+            repeat: None,
+        }],
+    };
+    let output = append_capture_probe(
+        &mut register,
+        PROBE_WGSL,
+        vec![InputSlot::Transient { index: 0 }],
+        stroke::StrokeUniforms::BYTES,
+    );
+    assert_eq!(output, OUTPUT, "the probe binding layout changed");
+
+    register
 }
 
 /// The shipped stroke module with only a test entry point added: no
@@ -368,16 +373,6 @@ fn depth_weights(harness: &mut SubstrateHarness) -> [f32; 2] {
     let image = decode_png(captured.captured("snap_depth").expect("depth probe ran")).expect("decode depth probe png");
 
     [0, 1].map(|x| srgb_byte_to_linear(rgba_at(&image, x, 0)[0]) / 0.5)
-}
-
-/// Invert the offscreen target's sRGB transfer, byte to linear.
-fn srgb_byte_to_linear(byte: u8) -> f32 {
-    let encoded = f32::from(byte) / 255.0;
-    if encoded <= 0.04045 {
-        encoded / 12.92
-    } else {
-        ((encoded + 0.055) / 1.055).powf(2.4)
-    }
 }
 
 /// A plane rendered as text, so a failure shows the shape of the

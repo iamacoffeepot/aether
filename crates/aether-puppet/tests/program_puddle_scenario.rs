@@ -42,7 +42,7 @@ use std::env;
 
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
-use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter, rgba_at};
+use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter, rgba_at, srgb_byte_to_linear};
 use aether_harness_substrate_capture::visual::decode_png;
 use aether_kinds::QuadSpace;
 use aether_math::{Rgba, Vec2};
@@ -227,17 +227,6 @@ fn develop(
         }
     }
     plane
-}
-
-/// Invert the offscreen target's sRGB transfer: the capture's bytes are
-/// the encoded framebuffer values, and the comparison space is linear.
-fn srgb_byte_to_linear(byte: u8) -> f32 {
-    let encoded = f32::from(byte) / 255.0;
-    if encoded <= 0.04045 {
-        encoded / 12.92
-    } else {
-        ((encoded + 0.055) / 1.055).powf(2.4)
-    }
 }
 
 /// Every pixel of the developed plane within [`TOLERANCE_STEPS`] of the
