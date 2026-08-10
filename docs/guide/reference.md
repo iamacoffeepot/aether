@@ -28,6 +28,12 @@ old prose to override a live schema or current implementation.
 - `describe_handlers` reports native actor inputs and reply contracts.
 - `describe_component` reports a loaded component's handlers, fallback and boot
   config using its live lineage name.
+- `compare_component_contracts` compares baseline and candidate component
+  subjects, each with its own `engine_id` and textual lineage. It strictly
+  refreshes both live kind inventories and returns no verdict if either subject
+  cannot be fully observed. Its conservative verdict covers handler input and
+  declared reply schemas/classes, Config, and fallback only; docs, provenance,
+  costs, logs, and assets are excluded.
 - `describe_transforms` lists the static native transform inventory linked into
   the current `aether-mcp` build. It is not selected-engine state.
 - `list_components` reports stored component artifacts, not live instances.
