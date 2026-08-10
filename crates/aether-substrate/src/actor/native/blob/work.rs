@@ -101,7 +101,7 @@
 //! and size recruitment by the actual work. The recipient group is the unit
 //! of parallelism (a worker drains a whole group; groups can't split), so
 //! the blob is a parallel-machine makespan problem — optimal
-//! `K ≈ ceil(total_work / longest_pole)`, clamped to `[1, min(G, W)]` and
+//! `K ≈ ceil(total_work / max_group_work)`, clamped to `[1, min(G, W)]` and
 //! gated by `total_work > wake_cost_nanos()` (the box-calibrated wake break-even). [`recruit_k`]
 //! is that closed form. A cheap narrow blob yields `K = 1` and stays local
 //! — preserving the #1116 win for the right reason (cheapness, not
@@ -114,11 +114,12 @@
 //! blob rather than recruiting on a bad number. Width is the confidence
 //! fallback, no longer the primary signal.
 //!
-//! **Aggregation scope (iamacoffeepot/aether#1178 step 5):** `total_work` /
-//! `max_group_work` are summed over **this flush's fresh groups**, matching
-//! the existing per-flush `fresh_groups` width gate — numerator and
-//! denominator share the same scope, the recruit broadcast still fires once
-//! per flush, and a leftover-roll flush (0 fresh groups) recruits nobody.
+//! **Aggregation scope (iamacoffeepot/aether#1178 step 5):** both terms range
+//! over the same set — **this flush's fresh groups** — differing only in how
+//! they reduce it: `total_work` sums the groups' work, `max_group_work` takes
+//! the largest single one. That shared scope matches the existing per-flush
+//! `fresh_groups` width gate, the recruit broadcast still fires once per
+//! flush, and a leftover-roll flush (0 fresh groups) recruits nobody.
 //! A worker races the cursor over *all* published groups, but each flush's
 //! recruit sizes the *newly-published* parallelizable work it is waking
 //! siblings for.
@@ -208,11 +209,16 @@ fn wake_cost_nanos() -> u64 {
 /// groups. The recipient group is the unit of parallelism (a worker drains
 /// a whole group; groups can't split), so the blob is a parallel-machine
 /// makespan problem and the optimum is `K ≈ ceil(total_work /
-/// longest_pole)`, clamped to `[1, min(G, W)]`:
+/// max_group_work)`, clamped to `[1, min(G, W)]`. Both work terms range over
+/// the same set — this flush's fresh groups — and differ only in how they
+/// reduce it:
 ///
-/// - `total_work` is `Σw` over the fresh groups (how *much* work there is),
-/// - `max_group_work` is `w_max`, the longest pole (how *spreadable* it is
-///   — no `K` can beat the single fattest group's serial drain),
+/// - `total_work` sums the groups' work: how *much* work there is,
+/// - `max_group_work` takes the largest single group: how *spreadable* that
+///   work is. It is the longest pole in the tent — a group is drained by one
+///   worker and never split, so the fattest group's serial drain is a floor
+///   on the blob's makespan that no `K` can beat, and workers past
+///   `total_work / max_group_work` would find nothing left to claim,
 /// - `g` is the fresh-group count `G` (can't use more workers than groups),
 /// - `w` is the pool worker count `W` (can't use more workers than exist),
 /// - `wake_cost` is the per-handoff wake break-even (nanos) the caller
@@ -220,15 +226,15 @@ fn wake_cost_nanos() -> u64 {
 ///
 /// Below the wake break-even (`wake_cost`) the whole blob is too
 /// cheap to amortize a sibling wakeup, so `K = 1` (stay local). The divide
-/// rounds to nearest (`+ w_max/2`) so a blob that needs "just over" one
-/// extra worker gets it. Integer-only — the EWMA is fixed-point nanos
-/// (iamacoffeepot/aether#1128), no float on the flush path.
+/// rounds to nearest (`+ max_group_work / 2`) so a blob that needs "just
+/// over" one extra worker gets it. Integer-only — the EWMA is fixed-point
+/// nanos (iamacoffeepot/aether#1128), no float on the flush path.
 fn recruit_k(total_work: u64, max_group_work: u64, g: usize, w: usize, wake_cost: u64) -> usize {
     if total_work <= wake_cost || max_group_work == 0 {
         // Below the wake floor (or no measurable pole) — stay local.
         return 1;
     }
-    // Round-to-nearest integer divide of Σw / w_max, integer-only.
+    // Round-to-nearest integer divide of total_work / max_group_work, integer-only.
     let raw = (total_work + max_group_work / 2) / max_group_work;
     let ceiling = g.min(w).max(1);
     // `raw >= 1` here (total_work > 0 and the round-half divide never
@@ -295,7 +301,7 @@ struct Group {
     /// over every mail pushed into it, summing iamacoffeepot/aether#1128's
     /// per-handler EWMA mean (nanos). A group coalesces mails of different
     /// kinds (the `index` dedups by recipient, not by kind — `append_flush`),
-    /// so its work is a sum, not a single value — the recruiter's `w_max`
+    /// so its work is a sum, not a single value — the recruiter's `max_group_work`
     /// per-group term (iamacoffeepot/aether#1178). Written by the single
     /// producer (on push, fresh or appended), never read by a draining
     /// worker; an `AtomicU64` so the producer accumulates it without taking
@@ -336,7 +342,7 @@ impl Group {
     }
 
     /// The group's accumulated work `Σ cost(recipient, kᵢ)` (nanos).
-    /// Producer-side read for the recruiter's `w_max` term.
+    /// Producer-side read for the recruiter's `max_group_work` term.
     fn work(&self) -> u64 {
         self.work.load(Ordering::Relaxed)
     }
@@ -476,7 +482,7 @@ struct FlushOutcome {
     /// Number of new groups this flush published — the width that drives
     /// the confidence-fallback (width) recruitment gate.
     fresh_groups: usize,
-    /// `Σw`: the summed handler cost (nanos) of this flush's **fresh
+    /// The summed handler cost (nanos) of this flush's **fresh
     /// groups** — the cost-aware recruiter's numerator
     /// (iamacoffeepot/aether#1178). Scoped to fresh groups so it matches
     /// `fresh_groups` (the recruit decision is per-flush) and pairs
@@ -484,8 +490,9 @@ struct FlushOutcome {
     /// later flush appends to keep their *own* running `Group::work` total
     /// but do not re-enter another flush's `total_work`.
     total_work: u64,
-    /// `w_max`: the largest single fresh group's accumulated work (nanos)
-    /// — the longest pole, bounding how spreadable this flush's work is.
+    /// The largest single fresh group's accumulated work (nanos) — the
+    /// recruiter's denominator, bounding how spreadable this flush's work
+    /// is, since a group never splits across workers.
     max_group_work: u64,
     /// `true` when every fresh group's contributing handler cells were
     /// **trustworthy** (seeded, run at least once, low MAD). `false` if any
@@ -527,8 +534,8 @@ impl BlobWork {
     /// (written then published); seen recipients push onto their existing
     /// group's buffer (or, if it has been closed, deposit through
     /// `route_mail`). Returns the leftover (overflow / retired), the
-    /// fresh-group count, and the cost-aware recruit signals (`Σw` /
-    /// `w_max` / confidence) summed over this flush's fresh groups
+    /// fresh-group count, and the cost-aware recruit signals (`total_work` /
+    /// `max_group_work` / confidence) reduced over this flush's fresh groups
     /// (iamacoffeepot/aether#1178).
     fn append_flush(&self, routed: Vec<Mail>, index: &mut FxHashMap<MailboxId, usize>) -> FlushOutcome {
         // Single pass: a recipient already in `index` (a prior flush, or one
@@ -562,7 +569,7 @@ impl BlobWork {
                 // Accumulate cost onto the group's running total only when it
                 // is *fresh this flush* (`g >= base`); an append onto a
                 // prior-flush group keeps its own `Group::work` faithful for
-                // diagnostics but does not re-enter this flush's `Σw` scope.
+                // diagnostics but does not re-enter this flush's `total_work` scope.
                 if g >= base {
                     let (cost, confident) = group_mail_cost(&costs, mail.recipient, mail.kind);
                     group.add_work(cost);
@@ -593,8 +600,9 @@ impl BlobWork {
 
         match self.lifecycle.publish(staged) {
             Published::Ok => {
-                // Sum `Σw` / `w_max` over the freshly-published groups
-                // `[base, base + staged)` — the recruit scope (step 5).
+                // Reduce the freshly-published groups `[base, base + staged)`
+                // — the recruit scope (step 5) — into their sum and their
+                // largest.
                 let mut total_work = 0u64;
                 let mut max_group_work = 0u64;
                 for j in 0..staged {
@@ -925,7 +933,7 @@ fn group_cap_for(routed: &[Mail]) -> usize {
 ///
 /// When the flush's fresh-group cost is **trustworthy**
 /// (iamacoffeepot/aether#1178), size by [`recruit_k`] — the cost-aware
-/// `Σw / w_max` form — and still bound the injector churn by `recruit_cap`
+/// `total_work / max_group_work` form — and still bound the injector churn by `recruit_cap`
 /// (over-recruiting past the worker count adds no parallelism). When the
 /// cost is **unknown** (any contributing cell a neutral seed / absent /
 /// high-MAD), fall back to the original **width gate**: recruit only when
@@ -1425,14 +1433,14 @@ mod tests {
     /// fan-out that the old gate left serial now parallelises.
     #[test]
     fn recruit_k_heavy_narrow_recruits_full_width() {
-        // 3 groups × 50_000ns each: total 150_000, w_max 50_000 → round(3) = 3,
+        // 3 groups × 50_000ns each: total 150_000, max_group_work 50_000 → round(3) = 3,
         // clamped to min(G=3, W=8) = 3.
         assert_eq!(recruit_k(150_000, 50_000, 3, 8, 0), 3);
         // Two heavy groups, plenty of workers → 2.
         assert_eq!(recruit_k(100_000, 50_000, 2, 8, 0), 2);
     }
 
-    /// Balanced-wide: many equal groups → `K = min(G, W)`. `Σw` / `w_max` ≈ G,
+    /// Balanced-wide: many equal groups → `K = min(G, W)`. `total_work` / `max_group_work` ≈ G,
     /// clamped by the worker count.
     #[test]
     fn recruit_k_balanced_wide_recruits_to_worker_cap() {
@@ -1442,13 +1450,13 @@ mod tests {
         assert_eq!(recruit_k(60_000, 10_000, 6, 8, 0), 6);
     }
 
-    /// Skewed-wide: one fat pole plus many small groups → `K ≈ total /
-    /// longest_pole`, *not* G. The longest pole bounds the achievable
-    /// parallelism: extra workers past `total / w_max` can't beat the fat
-    /// group's serial drain.
+    /// Skewed-wide: one fat group plus many small ones → `K ≈ total_work /
+    /// max_group_work`, *not* G. The fattest group bounds the achievable
+    /// parallelism: extra workers past that ratio can't beat its serial
+    /// drain.
     #[test]
-    fn recruit_k_skewed_wide_sizes_by_longest_pole() {
-        // One 100_000ns pole + 10 × 1_000ns = 110_000 total, w_max 100_000 →
+    fn recruit_k_skewed_wide_sizes_by_max_group_work() {
+        // One 100_000ns pole + 10 × 1_000ns = 110_000 total, max_group_work 100_000 →
         // round(1.1) = 1, clamped to [1, min(11, 8)] = 1. The fat pole
         // dominates: no parallelism helps.
         assert_eq!(recruit_k(110_000, 100_000, 11, 8, 0), 1);
@@ -1469,7 +1477,7 @@ mod tests {
     /// `recruit_k` never exceeds `min(G, W)` and never drops below 1.
     #[test]
     fn recruit_k_clamps_to_min_g_w() {
-        // Huge Σw, tiny pole, but only 2 groups → clamped to G = 2.
+        // Huge total_work, tiny pole, but only 2 groups → clamped to G = 2.
         assert_eq!(recruit_k(1_000_000, 1, 2, 8, 0), 2);
         // Same, but only 1 worker → clamped to W = 1.
         assert_eq!(recruit_k(1_000_000, 1, 50, 1, 0), 1);
@@ -1498,8 +1506,8 @@ mod tests {
         }
     }
 
-    /// `FlushOutcome` carries the hand-summed `Σw` / `w_max` over the fresh
-    /// groups — including two mails to one recipient coalescing into one
+    /// `FlushOutcome` carries `total_work` / `max_group_work` reduced over the
+    /// fresh groups — including two mails to one recipient coalescing into one
     /// group whose work is the *sum* of both kinds' costs (here the same
     /// kind twice, so 2× the per-handler cost).
     #[test]
@@ -1518,8 +1526,8 @@ mod tests {
         let outcome = blob.append_flush(vec![mail_to(a, 0), mail_to(a, 1), mail_to(b, 2)], &mut index);
 
         assert_eq!(outcome.fresh_groups, 2, "two distinct recipients");
-        assert_eq!(outcome.total_work, 25_000, "Σw = a(2×10_000) + b(1×5_000)");
-        assert_eq!(outcome.max_group_work, 20_000, "w_max is a's coalesced group (two mails summed)");
+        assert_eq!(outcome.total_work, 25_000, "total_work = a(2×10_000) + b(1×5_000)");
+        assert_eq!(outcome.max_group_work, 20_000, "max_group_work is a's coalesced group (two mails summed)");
         assert!(outcome.cost_confident, "both handlers seeded + steady");
     }
 
@@ -1527,13 +1535,13 @@ mod tests {
     /// no cell at all) is "unknown cost": `cost_confident` is false, so the
     /// recruiter falls back to the width gate. Here a wide fan-out of unseen
     /// recipients clears `recruit_min` and recruits via the *fallback* path,
-    /// not `recruit_k` (which would see Σw = 0 and stay local).
+    /// not `recruit_k` (which would see total_work = 0 and stay local).
     #[test]
     fn unknown_cost_falls_back_to_width_gate() {
         let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         // recruit_min default is 9; build a 12-wide fan-out of unseeded
-        // recipients so the width fallback fires while Σw stays 0.
+        // recipients so the width fallback fires while total_work stays 0.
         let mut routed = Vec::new();
         let mut fixtures = Vec::new();
         for i in 0..12u8 {
@@ -1607,7 +1615,7 @@ mod tests {
 
         assert!(outcome.cost_confident, "all three handlers seeded + steady");
         assert_eq!(outcome.fresh_groups, 3);
-        // Σw = 150_000, w_max = 50_000 → K = 3, extra = 2 — recruited despite
+        // total_work = 150_000, max_group_work = 50_000 → K = 3, extra = 2 — recruited despite
         // being far below the width threshold.
         assert_eq!(recruit_extra(&outcome, 8, 0), 2, "heavy narrow fan-out recruits K-1 = 2 without the width gate");
     }
@@ -1623,7 +1631,7 @@ mod tests {
         let mut fixtures = Vec::new();
         for i in 0..3u8 {
             let (id, fix, _dir, _dep) = seizable_recipient(&registry, &format!("c{i}"));
-            // 200ns handlers → Σw = 600ns, under the 4300ns wake floor.
+            // 200ns handlers → total_work = 600ns, under the 4300ns wake floor.
             seed_steady_cost(&mailer, id, 200);
             routed.push(mail_to(id, i));
             fixtures.push(fix);
@@ -1637,7 +1645,7 @@ mod tests {
         assert_eq!(
             recruit_extra(&outcome, 8, WAKE_FLOOR_NANOS),
             0,
-            "cheap fan-out stays local (Σw below the wake floor)"
+            "cheap fan-out stays local (total_work below the wake floor)"
         );
     }
 }

@@ -106,7 +106,7 @@ pub struct Mailer {
     /// `CostCells` cache holds. The component-load / native-cap-boot
     /// path seeds it (alongside the cap-registry accept-set); the
     /// `cost.tail` dump and a future iamacoffeepot/aether#1178
-    /// producer-side `Σw` read it. Never touched on the per-dispatch
+    /// producer-side `total_work` read it. Never touched on the per-dispatch
     /// fold (that runs lock-free through the per-actor cache). Allocated
     /// empty by [`Self::new`] (like `trace_handle`).
     cost_table: Arc<CostTable>,
