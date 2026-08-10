@@ -117,13 +117,34 @@ fn write_failure_at_with_fault(
         write_atomically(&replacement.join(DIAGNOSTICS_FILE), &encoded, fault)?;
 
         let destination = execution_root.join(leaf);
-        if fault == PersistenceFault::Publish {
-            return Err("injected diagnostics publication failure".to_owned());
+        let backup = destination.exists().then(|| replacement.with_extension("backup"));
+        if let Some(backup) = &backup {
+            fs::rename(&destination, backup)
+                .map_err(|error| format!("stage prior {}: {error}", destination.display()))?;
         }
-        if destination.exists() {
-            fs::remove_dir_all(&destination).map_err(|error| format!("replace {}: {error}", destination.display()))?;
+
+        let publication = if fault == PersistenceFault::Publish {
+            Err("injected diagnostics publication failure".to_owned())
+        } else {
+            fs::rename(&replacement, &destination)
+                .map_err(|error| format!("publish {}: {error}", destination.display()))
+        };
+        match publication {
+            Ok(()) => {
+                if let Some(backup) = backup {
+                    fs::remove_dir_all(&backup)
+                        .map_err(|error| format!("retire prior {}: {error}", backup.display()))?;
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let Some(backup) = backup {
+                    fs::rename(&backup, &destination)
+                        .map_err(|restore| format!("{error}; restore prior {}: {restore}", destination.display()))?;
+                }
+                Err(error)
+            }
         }
-        fs::rename(&replacement, &destination).map_err(|error| format!("publish {}: {error}", destination.display()))
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(&replacement);
@@ -319,12 +340,12 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(root.join("execution/neighbor")).expect("neighbor remains"), "neighbor");
         assert!(
-            fs::read_dir(root.join("execution")).expect("list execution root").all(|entry| !entry
-                .expect("execution entry")
-                .file_name()
-                .to_string_lossy()
-                .ends_with(".tmp")),
-            "failed persistence leaves no temporary sibling"
+            fs::read_dir(root.join("execution")).expect("list execution root").all(|entry| {
+                let name = entry.expect("execution entry").file_name();
+                let name = name.to_string_lossy();
+                !name.ends_with(".tmp") && !name.ends_with(".backup")
+            }),
+            "failed persistence leaves no temporary or backup sibling"
         );
         fs::remove_dir_all(root).expect("remove temporary root");
     }
