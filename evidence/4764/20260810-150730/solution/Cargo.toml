@@ -1,0 +1,9 @@
+[package]
+name = "rigid-blend-consumer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+aether-math = { path = "/private/tmp/aether-dogfood-4764-source-20260810-150730/crates/aether-math" }
+
