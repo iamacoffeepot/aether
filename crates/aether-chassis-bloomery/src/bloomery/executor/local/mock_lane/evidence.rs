@@ -90,6 +90,11 @@ fn environment_findings() -> String {
 #[must_use]
 pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
     let body = |value: &Value| Some(serde_json::to_vec_pretty(value).unwrap_or_default());
+    let evidence_nonce = if mode == LaneMode::MismatchedNonce {
+        "mismatched-nonce"
+    } else {
+        nonce
+    };
 
     match mode {
         LaneMode::NoEvidence => return Outcome { evidence: None, exit_code: 0, candidate: None },
@@ -103,6 +108,7 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
         | LaneMode::Fail
         | LaneMode::Environment
         | LaneMode::ConcludesWithoutWriting
+        | LaneMode::MismatchedNonce
         | LaneMode::NeverExits => {}
     }
 
@@ -111,22 +117,25 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
         // it stamps no status, so the coordinator's construct gate is what
         // decides. `ConcludesWithoutWriting` is the interesting one: it claims a
         // candidate and leaves the tree clean, which the capture must catch.
-        let produced = matches!(mode, LaneMode::Pass | LaneMode::ConcludesWithoutWriting | LaneMode::NeverExits);
+        let produced = matches!(
+            mode,
+            LaneMode::Pass | LaneMode::ConcludesWithoutWriting | LaneMode::MismatchedNonce | LaneMode::NeverExits
+        );
         return Outcome {
             evidence: body(&json!({
                 "command": command,
-                "nonce": nonce,
+                "nonce": evidence_nonce,
                 "produced_candidate": produced,
                 "result_record": result_record(false, Some("wrote the candidate.")),
             })),
             exit_code: 0,
-            candidate: matches!(mode, LaneMode::Pass | LaneMode::NeverExits)
+            candidate: matches!(mode, LaneMode::Pass | LaneMode::MismatchedNonce | LaneMode::NeverExits)
                 .then(|| format!("the candidate a mock construct lane left for run {nonce}.\n")),
         };
     }
 
     if command == REVIEW_CRITIC_COMMAND {
-        let passed = matches!(mode, LaneMode::Pass | LaneMode::NeverExits);
+        let passed = matches!(mode, LaneMode::Pass | LaneMode::MismatchedNonce | LaneMode::NeverExits);
         let findings = match mode {
             LaneMode::Environment => Value::String(environment_findings()),
             _ if passed => Value::Null,
@@ -137,7 +146,7 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
         return Outcome {
             evidence: body(&json!({
                 "command": command,
-                "nonce": nonce,
+                "nonce": evidence_nonce,
                 "status": if passed { "pass" } else { "fail" },
                 "findings": findings,
                 "result_record": result_record(false, findings.as_str()),
@@ -148,10 +157,13 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
     }
 
     // Every remaining command is a mechanical verify lane.
-    let passed = matches!(mode, LaneMode::Pass | LaneMode::ConcludesWithoutWriting | LaneMode::NeverExits);
+    let passed = matches!(
+        mode,
+        LaneMode::Pass | LaneMode::ConcludesWithoutWriting | LaneMode::MismatchedNonce | LaneMode::NeverExits
+    );
     let mut evidence = json!({
         "command": command,
-        "nonce": nonce,
+        "nonce": evidence_nonce,
         "status": if passed { "pass" } else { "fail" },
         "exit_code": i32::from(!passed),
         "log": format!("{command}.log"),

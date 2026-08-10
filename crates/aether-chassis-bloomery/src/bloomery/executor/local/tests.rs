@@ -164,7 +164,7 @@ fn stream_evidence_evicts_the_consumed_run() {
 fn construct_verdict(evidence: &str) -> StageVerdict {
     let base = TempDir::new().unwrap();
     let exec = executor(&base, evidence, RunLifecycle::Exited { success: true });
-    let handle = exec.submit(&construct_order(digest(5), &test_nonce("g"))).unwrap();
+    let handle = exec.submit(&construct_order(digest(5), "n-g")).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
     NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes").verdict
 }
@@ -175,6 +175,26 @@ fn construct_gate_passes_a_substantive_conclusion() {
     // only shape that advances the member.
     let ev = r#"{"command":"construct.implement","nonce":"n-g","produced_candidate":true,"result_record":{"is_error":false,"result":{"num_turns":3}}}"#;
     assert_eq!(construct_verdict(ev), StageVerdict::VerificationPassed);
+}
+
+#[test]
+fn evidence_for_a_different_nonce_fails_closed_before_its_claims_are_read() {
+    let base = TempDir::new().unwrap();
+    let expected = "wo-authoritative";
+    let evidence = r#"{"command":"construct.implement","nonce":"wo-stale","produced_candidate":true,"findings":"do not trust this","result_record":{"schema":1,"is_error":false,"result":{"num_turns":3}}}"#;
+    let exec = executor(&base, evidence, RunLifecycle::Exited { success: true });
+    let handle = exec.submit(&construct_order(digest(5), expected)).unwrap();
+
+    let refs = exec.stream_evidence(&handle).unwrap();
+    let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes");
+    assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "a stale body cannot advance this order");
+    assert_eq!(refs[0].nonce, Nonce(expected.to_owned()), "the authoritative handle remains the claim nonce");
+    assert_eq!(refs[0].size_bytes, u64::try_from(evidence.len()).unwrap());
+    assert_eq!(upload.detail, Digest::of_wire_bytes(evidence.as_bytes()), "the raw evidence remains accountable");
+    assert!(refs[0].candidate.is_none(), "a stale construct body cannot trigger capture");
+    assert!(refs[0].findings.is_none(), "a stale body cannot direct a repair lap");
+    assert!(refs[0].cost.is_none(), "a stale body cannot enter study accounting");
+    assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Unknown, "the terminal stale body is consumed");
 }
 
 #[test]

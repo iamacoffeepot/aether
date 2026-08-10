@@ -178,6 +178,23 @@ fn evidence_that_does_not_decode_fails_its_attempt() {
 }
 
 #[test]
+fn wrong_nonce_evidence_never_advances_a_member_or_leaves_an_order_outstanding() {
+    // A valid-looking body from another run is stale evidence, not a verdict for
+    // this order. It must fail closed before construct capture, then exhaust the
+    // normal retry budget into an accountable wedge.
+    let (mut harness, bloom) = rest_under(LaneMode::MismatchedNonce);
+
+    assert!(bloom.members[0].resolution.is_none(), "a wrong-nonce pass never resolves the member");
+    assert!(bloom.members[0].wedge.is_some(), "wrong-nonce attempts reach the normal wedge counter");
+    assert!(harness.outstanding().is_empty(), "each rejected body consumes its order rather than stalling the lane");
+    assert!(
+        harness.ledger().iter().all(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND),
+        "stale construct evidence never captures a candidate or advances to verification",
+    );
+    harness.assert_live();
+}
+
+#[test]
 fn a_lane_that_exits_non_zero_without_evidence_fails_its_attempt() {
     // An environment failure rather than a candidate failure: the child died
     // before it could judge anything. It still has to reach the counter, or the
