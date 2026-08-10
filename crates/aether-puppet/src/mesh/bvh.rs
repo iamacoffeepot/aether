@@ -17,9 +17,9 @@ use std::{
     sync::Arc,
 };
 
-use aether_math::Vec3;
+use aether_math::{Rigid, Vec3};
 
-use crate::deform::{BONE_LIMIT, Rigid, RigidBounds, RigidDelta, Skin};
+use crate::deform::{BONE_LIMIT, RigidBounds, RigidDelta, Skin, relative_bounds, silhouette_bounds};
 
 const LEAF_SIZE: usize = 8;
 const SILHOUETTE_DIRECT_SIZE: u32 = 256;
@@ -131,11 +131,11 @@ impl PoseBounds {
             transforms
                 .get(bone)
                 .copied()
-                .and_then(|transform| transform.silhouette_bounds().map(|bounds| (transform, bounds)))
+                .and_then(|transform| silhouette_bounds(&transform).map(|bounds| (transform, bounds)))
         });
         let options: [Option<Rigid>; BONE_LIMIT] = array::from_fn(|bone| bones[bone].map(|v| v.0));
         let deltas: [[Option<RigidDelta>; BONE_LIMIT]; BONE_LIMIT] = array::from_fn(|from| {
-            array::from_fn(|to| options[from].zip(options[to]).and_then(|(from, to)| from.relative_bounds(&to)))
+            array::from_fn(|to| options[from].zip(options[to]).and_then(|(from, to)| relative_bounds(&from, &to)))
         });
         let masks = array::from_fn(|mask| {
             if mask == 0 {

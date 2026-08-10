@@ -102,7 +102,7 @@ use aether_actor::{ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor
 use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
 use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Render, WindowSize};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
-use aether_math::{Mat4, Vec2, Vec3};
+use aether_math::{Mat4, Rigid, Vec2, Vec3};
 use aether_render::{
     CreateGeometryResult, CreateTextureResult, ProgramRegisterResult, RenderCapability, ViewProjection,
 };
@@ -266,7 +266,7 @@ pub struct Puppet {
     /// Where each bone sends a point at `posed_at`, and the same table as
     /// the uniform lanes every vertex stage skins from. Empty at rest,
     /// where every bone is the identity.
-    transforms: Vec<deform::Rigid>,
+    transforms: Vec<Rigid>,
     bones: [f32; deform::BONE_LIMIT * 12],
     settings: extract::Settings,
     look: Look,
@@ -465,11 +465,8 @@ impl Puppet {
     /// eye is bound wholly to the head, so its blend at every point is
     /// the head's own map, and the paint reaches the pose by one
     /// transform of a couple of dozen planted points.
-    fn head_at_pose(&self) -> deform::Rigid {
-        self.skin
-            .as_ref()
-            .filter(|_| !self.pose.is_rest())
-            .map_or(deform::Rigid::IDENTITY, |skin| skin.head(&self.pose))
+    fn head_at_pose(&self) -> Rigid {
+        self.skin.as_ref().filter(|_| !self.pose.is_rest()).map_or(Rigid::IDENTITY, |skin| skin.head(&self.pose))
     }
 
     /// Bring the posed surface up to the current pose, if it is not there

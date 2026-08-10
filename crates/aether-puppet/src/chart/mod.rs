@@ -28,10 +28,9 @@ pub mod eye;
 pub mod mouth;
 pub mod nose;
 
-use aether_math::{Vec2, Vec3};
+use aether_math::{Rigid, Vec2, Vec3};
 
 use crate::anchor::{Anchor, Anchors};
-use crate::deform::Rigid;
 use crate::extract::Settings;
 use crate::feature::{Curve3, FeatureClass, Pen};
 use crate::mesh::Mesh;
