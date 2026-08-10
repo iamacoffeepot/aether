@@ -42,6 +42,31 @@ machinery, not as implicit merge gates.
 Do not copy a list from a CI log into a shell and run it. Logs are evidence;
 commands come from checked-in workflows and repository guidance.
 
+## Affected-code test run
+
+For a local reproduction of the pull-request test selection, run:
+
+```sh
+cargo xtask affected --run
+```
+
+The command computes the same conservative selection as PR CI, prints that
+selection, and then runs it. An empty selection succeeds without spawning a
+test command. A narrowed selection runs xtask's affected-selection invariants,
+then the selected packages with the CI nextest profile. Selections that need
+runtime artifacts pre-build them with `cargo xtask dist`; a `run_all` result
+pre-builds artifacts and runs the one-shard workspace nextest equivalent.
+
+`--run` requires `cargo-nextest`; selections that pre-build artifacts also
+require the `wasm32-unknown-unknown` Rust target. The test suite runs with the
+runtime requirement and isolated in-memory store used by the repository's
+verification lane, so a missing runtime artifact fails rather than silently
+skipping a scenario.
+
+This is an additive test-execution shortcut. It does not replace the required
+full-workspace formatting and clippy tier above, and it does not narrow compile
+coverage.
+
 ## Coupling-gap triage loop
 
 `cargo xtask affected` narrows a PR's CI to the workspace graph's

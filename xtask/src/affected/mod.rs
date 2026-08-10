@@ -30,6 +30,7 @@
 #[cfg(test)]
 mod invariants;
 mod rules;
+mod run;
 mod select;
 mod test_targets;
 
@@ -57,9 +58,32 @@ pub struct AffectedArgs {
     /// `wasm_needed` lines to the file `$GITHUB_OUTPUT` points at.
     #[arg(long)]
     github_output: bool,
+
+    /// Run the CI-equivalent test command for the computed selection.
+    #[arg(long)]
+    run: bool,
 }
 
 pub fn run(args: &AffectedArgs) -> Result<()> {
+    let result = compute(args)?;
+
+    report(&result.selection, result.changed_count);
+    if args.github_output {
+        write_github_output(&result.selection)?;
+    }
+    if args.run {
+        run::execute(&result.selection).with_context(|| format!("run affected selection from base {}", result.base))?;
+    }
+    Ok(())
+}
+
+struct AffectedResult {
+    base: String,
+    changed_count: usize,
+    selection: Selection,
+}
+
+fn compute(args: &AffectedArgs) -> Result<AffectedResult> {
     let repo_root = git_stdout(&["rev-parse", "--show-toplevel"], ".")?;
     let repo_root = repo_root.trim();
     let base = match &args.base {
@@ -103,11 +127,7 @@ pub fn run(args: &AffectedArgs) -> Result<()> {
         select(&graph, &changed, &wasm_sources, &wasm_consumers)?
     };
 
-    report(&selection, changed.len());
-    if args.github_output {
-        write_github_output(&selection)?;
-    }
-    Ok(())
+    Ok(AffectedResult { base, changed_count: changed.len(), selection })
 }
 
 fn report(selection: &Selection, changed_count: usize) {
