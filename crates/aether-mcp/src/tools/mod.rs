@@ -49,12 +49,13 @@ use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router
 use crate::args::ActorCostArgs;
 use crate::args::ActorLogsArgs;
 use crate::args::{
-    ApplyTerrainBrushArgs, CaptureFrameArgs, CollectFailureEvidenceArgs, CommitTerrainProposalArgs, ComponentSpec,
-    DescribeComponentArgs, DescribeHandlersArgs, DescribeKindsArgs, DiscardTerrainProposalArgs, EngineMailSpec,
-    ListBinariesArgs, ListComponentsArgs, ListEnginesArgs, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec,
-    ProposeTerrainEditArgs, ReplaceComponentArgs, ReplyEventJson, ReplyProjection, RunTerrainAutomatonArgs,
-    SendMailArgs, SendMailTracedArgs, SetTerrainProposalPreviewArgs, SpawnSubstrateArgs, TerminateSubstrateArgs,
-    TerrainEditorArgs, TerrainMarksArgs, UploadBinaryArgs, UploadComponentArgs,
+    ApplyTerrainBrushArgs, CaptureFrameArgs, CollectFailureEvidenceArgs, CommitTerrainProposalArgs,
+    CompareComponentContractsArgs, ComponentSpec, DescribeComponentArgs, DescribeHandlersArgs, DescribeKindsArgs,
+    DiscardTerrainProposalArgs, EngineMailSpec, ListBinariesArgs, ListComponentsArgs, ListEnginesArgs,
+    LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, ProposeTerrainEditArgs, ReplaceComponentArgs,
+    ReplyEventJson, ReplyProjection, RunTerrainAutomatonArgs, SendMailArgs, SendMailTracedArgs,
+    SetTerrainProposalPreviewArgs, SpawnSubstrateArgs, TerminateSubstrateArgs, TerrainEditorArgs, TerrainMarksArgs,
+    UploadBinaryArgs, UploadComponentArgs,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
@@ -68,6 +69,7 @@ use std::time::Duration;
 mod bytes;
 mod capture;
 mod components;
+mod contracts;
 mod describe;
 mod engine;
 mod envelope;
@@ -426,6 +428,16 @@ impl Mcp {
         Parameters(args): Parameters<DescribeComponentArgs>,
     ) -> Result<String, McpError> {
         guard_response_size("describe_component", describe::describe_component(self, args).await)
+    }
+
+    #[tool(
+        description = "Compare two explicitly selected loaded component revisions' typed-mail contracts. Each subject supplies its own engine_id and textual component lineage, so baseline and candidate may live in different engines when a changed kind schema cannot coexist in one registry. The tool resolves both subjects to live canonical lineage and mailbox identities, obtains fresh component capabilities, and requires a successful live aether.inventory.kinds refresh for each side before it compares handler input schemas, declared reply class/id/schema, Config schema, and fallback presence. It returns deterministic additions, removals, and exact before/after changes plus compatible. Removed handlers, changed input/reply/config contracts, config add/remove, and fallback loss are incompatible; new handlers and gaining a fallback are additive. Rustdoc, provenance, costs, logs, and assets do not affect the verdict. Any address, capability, refresh, decode, or descriptor lookup failure is an error with no compatibility verdict."
+    )]
+    pub async fn compare_component_contracts(
+        &self,
+        Parameters(args): Parameters<CompareComponentContractsArgs>,
+    ) -> Result<String, McpError> {
+        guard_response_size("compare_component_contracts", contracts::compare_component_contracts(self, args).await)
     }
 
     #[tool(

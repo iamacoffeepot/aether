@@ -956,6 +956,28 @@ pub struct DescribeComponentArgs {
     pub full: bool,
 }
 
+/// One explicitly selected live component revision for
+/// `compare_component_contracts`. Each side chooses its own engine because
+/// incompatible revisions of one kind name cannot coexist in one registry.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ComponentContractSubject {
+    /// Engine UUID hosting this revision (from `list_engines`).
+    pub engine_id: String,
+    /// Component lineage name, or an unambiguous ADR-0166 abbreviation. This
+    /// must be textual so the selected engine can prove its canonical lineage
+    /// and current mailbox identity before comparison.
+    pub component: String,
+}
+
+/// `compare_component_contracts` arguments.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CompareComponentContractsArgs {
+    /// Existing contract callers rely on.
+    pub baseline: ComponentContractSubject,
+    /// Proposed replacement contract.
+    pub candidate: ComponentContractSubject,
+}
+
 /// `actor_logs` arguments — pull entries out of one actor's
 /// per-actor log ring (ADR-0081). The substrate-side aggregator
 /// retired; each call queries a single actor by name. Aggregate

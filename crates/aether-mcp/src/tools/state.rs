@@ -12,6 +12,7 @@ use super::{
     validate_recipient_scope, wire,
 };
 use aether_data::canonical::kind_id_from_parts;
+use aether_kinds::{DescribeComponent, DescribeComponentResult};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,6 +33,16 @@ pub(super) struct DeliveredDirectMail {
     pub(super) engine: EngineId,
     pub(super) resolved_mailbox_id: MailboxId,
     pub(super) kind_name: String,
+}
+
+/// A comparison-only observation. Unlike the ordinary capability and kind
+/// caches, every field here was obtained from the selected engine during this
+/// tool invocation, so it is safe to use for a compatibility verdict.
+pub(super) struct StrictComponentSnapshot {
+    pub(super) mailbox_id: MailboxId,
+    pub(super) canonical_lineage: String,
+    pub(super) capabilities: super::ComponentCapabilities,
+    pub(super) kinds: HashMap<String, KindDescriptor>,
 }
 
 impl Mcp {
@@ -89,6 +100,32 @@ impl Mcp {
             Some(ResolveAddressResult::Err { error }) => Err(anyhow::anyhow!("{error}")),
             None => Err(anyhow::anyhow!("undecodable ResolveAddressResult")),
         }
+    }
+
+    /// Observe one component and its kind vocabulary for compatibility work.
+    /// This intentionally never consults the best-effort component/kind caches:
+    /// failed live observation must remain inconclusive rather than producing a
+    /// verdict from a stale partial view.
+    pub(super) async fn strict_component_snapshot(
+        &self,
+        engine: EngineId,
+        component: &str,
+    ) -> anyhow::Result<StrictComponentSnapshot> {
+        if component.starts_with("mbx-") {
+            anyhow::bail!("compare_component_contracts requires a textual component lineage, not a tagged mailbox id");
+        }
+        let (mailbox_id, canonical_lineage) = self.resolve_engine_address(engine, component).await?;
+        let reply = self
+            .session
+            .call_one(engine_envelope(engine, super::COMPONENT_CAP, &DescribeComponent { name: component.to_owned() }))
+            .await?;
+        let capabilities = match DescribeComponentResult::decode_from_bytes(&reply.payload) {
+            Some(DescribeComponentResult::Ok { capabilities }) => capabilities,
+            Some(DescribeComponentResult::Err { error }) => anyhow::bail!("component {component:?}: {error}"),
+            None => anyhow::bail!("component {component:?}: undecodable DescribeComponentResult"),
+        };
+        let kinds = self.refresh_engine_kinds_strict(engine).await?;
+        Ok(StrictComponentSnapshot { mailbox_id, canonical_lineage, capabilities, kinds })
     }
 
     /// Resolve a component registry selector hub-local to its wasm bytes +
@@ -549,6 +586,29 @@ impl Mcp {
             .get(&engine)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Replace an engine's vocabulary from a successful live inventory reply.
+    /// Unlike `refresh_engine_kinds`, this fails closed on RPC, decode, or
+    /// schema-wire errors and replaces (rather than merges into) the old map.
+    /// Compatibility checking cannot safely retain a descriptor after a failed
+    /// refresh or a removed live kind.
+    pub(super) async fn refresh_engine_kinds_strict(
+        &self,
+        engine: EngineId,
+    ) -> anyhow::Result<HashMap<String, KindDescriptor>> {
+        let reply = self.session.call_one(engine_envelope(engine, INVENTORY_CAP, &ListKinds {})).await?;
+        let result = ListKindsResult::decode_from_bytes(&reply.payload)
+            .ok_or_else(|| anyhow::anyhow!("undecodable ListKindsResult"))?;
+        let mut fresh: HashMap<String, KindDescriptor> =
+            descriptors::all().into_iter().map(|descriptor| (descriptor.name.clone(), descriptor)).collect();
+        for wire in result.kinds {
+            let schema = wire::from_bytes::<SchemaType>(&wire.schema_wire)
+                .map_err(|error| anyhow::anyhow!("undecodable schema for kind {}: {error}", wire.name))?;
+            fresh.insert(wire.name.clone(), KindDescriptor { name: wire.name, schema });
+        }
+        self.kinds.descriptors.lock().expect("kinds-cache mutex is never poisoned").insert(engine, fresh.clone());
+        Ok(fresh)
     }
 
     /// Batch-resolve `ids` that the engine's static map missed via

@@ -1,6 +1,7 @@
 mod bytes;
 mod capture;
 mod components;
+mod contracts;
 mod describe;
 mod engine;
 mod envelope;

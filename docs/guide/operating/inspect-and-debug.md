@@ -13,6 +13,7 @@ application failure.
 | Which kinds exist and what are their fields? | `describe_kinds` | one engine when selected | no explicit id with zero/many engines yields static baseline |
 | What do native caps accept and reply with? | `describe_handlers` | one engine | component-defined reply names may remain unresolved |
 | What does this wasm actor advertise? | `describe_component` | one loaded component | cache-first; lineage name enables live fallback on a miss |
+| Did one component revision preserve typed-mail callers? | `compare_component_contracts` | two explicit engine/component subjects | strict live refresh; no verdict when either side cannot be observed |
 | Which pure native transforms are linked? | `describe_transforms` | MCP build-static | not per-engine runtime state |
 | What did one actor say? | `actor_logs` | one mailbox | bounded ring; in-handler events only |
 | What does one handler cost? | `actor_cost` | one mailbox | EWMA instrumentation, not a profiler or scheduler control |
@@ -44,6 +45,18 @@ Use the narrowest introspection call that answers the question:
 - Use `describe_handlers` for native mailbox request → reply contracts.
 - Use `describe_component` for a wasm component's handlers, reply contracts,
   fallback, docs, and Config kind.
+- Use `compare_component_contracts` before switching consumers to a revision.
+  Give both a baseline and candidate `{ engine_id, component }`; separate
+  engines are expected when one revision changes a kind schema that a single
+  registry correctly refuses to host twice. The comparison resolves each
+  textual lineage to its canonical mailbox identity, refreshes each engine's
+  kind inventory live, then reports deterministic additions, removals, and
+  exact changes. It is deliberately conservative: removing a handler, changing
+  an input or declared reply contract, adding/removing/changing Config, or
+  losing fallback is incompatible. New handlers and gaining fallback are
+  additive. It does not judge rustdoc, build provenance, costs, logs, or assets.
+  A refresh, decode, or lookup failure is inconclusive and returns an error;
+  never treat a cached or partial comparison as a compatibility verdict.
 
 `describe_kinds` merges the MCP static baseline with the substrate's live
 `aether.inventory.kinds` response. The substrate serves its shared registry, so
