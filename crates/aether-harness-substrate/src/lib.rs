@@ -22,6 +22,7 @@
 
 pub mod cap;
 pub mod chassis;
+mod diagnostics;
 pub mod events;
 mod execute;
 mod harness;

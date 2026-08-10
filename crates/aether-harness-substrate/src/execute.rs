@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::error;
 use std::fmt;
 use std::marker::PhantomData;
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,7 @@ use aether_data::{Kind, KindId};
 use aether_kinds::{LoadComponent, LoadComponentUnder, NamedMail};
 use aether_window::{InjectWindowEvent, SyntheticWindowCapability, WindowId};
 
+use super::diagnostics::{self, CompletedStep};
 use super::harness::{SubstrateHarness, SubstrateHarnessError};
 
 /// Wall-clock budget a [`HarnessOp::poll_until`] step gives an
@@ -393,6 +395,17 @@ pub enum HarnessOutput {
     Captured(Vec<u8>),
 }
 
+impl HarnessOutput {
+    fn diagnostic_summary(&self) -> (&'static str, usize) {
+        match self {
+            Self::Advanced => ("advanced", 0),
+            Self::Mailed => ("mailed", 0),
+            Self::Replied(bytes) => ("replied", bytes.len()),
+            Self::Captured(bytes) => ("captured", bytes.len()),
+        }
+    }
+}
+
 /// Map of per-op outputs from a successful [`SubstrateHarness::execute`]
 /// call, keyed by each op's label. Fetch results by label so tests
 /// read by intent (`result.captured("snap")`) and survive step
@@ -511,6 +524,11 @@ impl fmt::Display for ExecutionError {
 
 impl error::Error for ExecutionError {}
 
+struct ExecutionFailure {
+    error: ExecutionError,
+    completed: Vec<CompletedStep>,
+}
+
 impl SubstrateHarness {
     /// Execute `steps` in order. Each op dispatches via the matching
     /// settlement-gated [`SubstrateHarness`] primitive, blocks until its
@@ -527,10 +545,74 @@ impl SubstrateHarness {
     /// replace them. Tests that assert intermediate state between ops
     /// stay imperative, or split into multiple `execute` calls.
     pub fn execute(&mut self, steps: Vec<(&str, HarnessOp)>) -> Result<ExecutionResult, ExecutionError> {
+        self.run_steps(steps).map_err(|failure| failure.error)
+    }
+
+    /// Execute `steps` like [`Self::execute`], retaining a bounded diagnostic
+    /// bundle only when the sequence fails. The original [`ExecutionError`]
+    /// is returned unchanged even if artifact persistence fails.
+    pub fn execute_with_diagnostics(
+        &mut self,
+        id: &str,
+        steps: Vec<(&str, HarnessOp)>,
+    ) -> Result<ExecutionResult, ExecutionError> {
+        self.execute_with_diagnostics_at(id, steps, None)
+    }
+
+    fn execute_with_diagnostics_at(
+        &mut self,
+        id: &str,
+        steps: Vec<(&str, HarnessOp)>,
+        root: Option<&Path>,
+    ) -> Result<ExecutionResult, ExecutionError> {
+        match self.run_steps(steps) {
+            Ok(result) => Ok(result),
+            Err(failure) => {
+                diagnostics::write_failure(
+                    root,
+                    id,
+                    &failure.completed,
+                    self.diagnostic_observed_kinds(),
+                    &failure.error,
+                );
+                Err(failure.error)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn execute_with_diagnostics_with_fault(
+        &mut self,
+        id: &str,
+        steps: Vec<(&str, HarnessOp)>,
+        root: Option<&Path>,
+        fault: diagnostics::PersistenceFault,
+    ) -> Result<ExecutionResult, ExecutionError> {
+        match self.run_steps(steps) {
+            Ok(result) => Ok(result),
+            Err(failure) => {
+                diagnostics::write_failure_with_fault(
+                    root,
+                    id,
+                    &failure.completed,
+                    self.diagnostic_observed_kinds(),
+                    &failure.error,
+                    fault,
+                );
+                Err(failure.error)
+            }
+        }
+    }
+
+    fn run_steps(&mut self, steps: Vec<(&str, HarnessOp)>) -> Result<ExecutionResult, Box<ExecutionFailure>> {
         let mut out = ExecutionResult::default();
+        let mut completed = Vec::new();
         for (label, op) in steps {
             if out.contains(label) {
-                return Err(ExecutionError::DuplicateLabel(label.to_owned()));
+                return Err(Box::new(ExecutionFailure {
+                    error: ExecutionError::DuplicateLabel(label.to_owned()),
+                    completed,
+                }));
             }
             let failed = |error| ExecutionError::OpFailed { label: label.to_owned(), error };
 
@@ -553,8 +635,11 @@ impl SubstrateHarness {
                         PollStep { label, recipient: &recipient, kind, payload: &payload, budget, observed_kind },
                         observe,
                     ),
-            }?;
+            }
+            .map_err(|error| Box::new(ExecutionFailure { error, completed: completed.clone() }))?;
 
+            let (output_class, byte_length) = output.diagnostic_summary();
+            completed.push(CompletedStep { label: label.to_owned(), output_class, byte_length });
             out.inner.insert(label.to_owned(), output);
         }
         Ok(out)
@@ -629,6 +714,11 @@ struct PollStep<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::env::temp_dir;
+    use std::fs;
+    use std::process::id;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use aether_window::{ListWindows, ListWindowsResult, WindowCapability};
 
     use super::*;
@@ -742,5 +832,150 @@ mod tests {
 
         let decoded: CastReply = result.reply("reply").expect("cast reply decodes");
         assert_eq!(decoded, reply);
+    }
+
+    #[test]
+    fn diagnosed_execution_retains_completed_steps_without_changing_the_error() {
+        let root = temp_dir().join(format!(
+            "aether-harness-execute-diagnostics-{}-{}",
+            id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock").as_nanos()
+        ));
+        fs::create_dir(&root).expect("create temporary artifact root");
+        let mut harness = SubstrateHarness::start().expect("boot harness");
+        let success_root = root.join("successful-execution");
+        let success = harness
+            .execute_with_diagnostics_at("success", vec![("advanced", HarnessOp::advance(1))], Some(&success_root))
+            .expect("a successful diagnosed execution returns normally");
+        assert!(success.contains("advanced"));
+        assert!(!success_root.exists(), "a successful execution does not look up or create an artifact root");
+
+        let missing = HarnessOp::poll_until_within(
+            Duration::ZERO,
+            WindowCapability::NAMESPACE,
+            &ListWindows,
+            |_: &ListWindowsResult| false,
+        );
+
+        let Err(error) = harness.execute_with_diagnostics_at(
+            "progress/failure",
+            vec![("advanced", HarnessOp::advance(1)), ("missing", missing)],
+            Some(&root),
+        ) else {
+            panic!("the unsatisfied observation fails");
+        };
+        let ExecutionError::PollTimeout { label, .. } = &error else {
+            panic!("expected the original poll-timeout error, got {error}");
+        };
+        assert_eq!(label, "missing");
+        assert!(error.to_string().contains("missing"));
+
+        let document =
+            fs::read_to_string(root.join("execution/progress-failure/diagnostics.json")).expect("diagnostics document");
+        assert!(document.contains("\"label\": \"advanced\""));
+        assert!(document.contains("\"output_class\": \"advanced\""));
+        assert!(document.contains("\"failing_label\": \"missing\""));
+        fs::remove_dir_all(root).expect("remove temporary artifact root");
+    }
+
+    #[test]
+    fn diagnosed_execution_writer_failure_preserves_the_primary_error() {
+        let root = temp_dir().join(format!(
+            "aether-harness-execute-diagnostics-write-failure-{}-{}",
+            id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock").as_nanos()
+        ));
+        fs::create_dir(&root).expect("create temporary root");
+        let blocked_root = root.join("not-a-directory");
+        fs::write(&blocked_root, "file blocks diagnostic directory creation").expect("create blocking file");
+
+        let mut ordinary = SubstrateHarness::start().expect("boot ordinary harness");
+        let Err(ordinary_error) = ordinary.execute(vec![(
+            "missing",
+            HarnessOp::poll_until_within(
+                Duration::ZERO,
+                WindowCapability::NAMESPACE,
+                &ListWindows,
+                |_: &ListWindowsResult| false,
+            ),
+        )]) else {
+            panic!("ordinary sequence fails");
+        };
+
+        let mut diagnosed = SubstrateHarness::start().expect("boot diagnosed harness");
+        let Err(diagnosed_error) = diagnosed.execute_with_diagnostics_at(
+            "blocked",
+            vec![(
+                "missing",
+                HarnessOp::poll_until_within(
+                    Duration::ZERO,
+                    WindowCapability::NAMESPACE,
+                    &ListWindows,
+                    |_: &ListWindowsResult| false,
+                ),
+            )],
+            Some(&blocked_root),
+        ) else {
+            panic!("diagnosed sequence fails");
+        };
+        assert!(matches!(diagnosed_error, ExecutionError::PollTimeout { .. }));
+        assert_eq!(diagnosed_error.to_string(), ordinary_error.to_string());
+        assert!(!blocked_root.join("execution").exists(), "failed artifact setup leaves no execution sibling");
+        fs::remove_dir_all(root).expect("remove temporary root");
+    }
+
+    #[test]
+    fn diagnosed_execution_post_staging_faults_preserve_the_primary_error() {
+        let mut ordinary = SubstrateHarness::start().expect("boot ordinary harness");
+        let Err(ordinary_error) = ordinary.execute(vec![(
+            "missing",
+            HarnessOp::poll_until_within(
+                Duration::ZERO,
+                WindowCapability::NAMESPACE,
+                &ListWindows,
+                |_: &ListWindowsResult| false,
+            ),
+        )]) else {
+            panic!("ordinary sequence fails");
+        };
+
+        for (name, fault) in
+            [("write", diagnostics::PersistenceFault::Write), ("publish", diagnostics::PersistenceFault::Publish)]
+        {
+            let root = temp_dir().join(format!(
+                "aether-harness-execute-diagnostics-{name}-fault-{}-{}",
+                id(),
+                SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock").as_nanos()
+            ));
+            fs::create_dir(&root).expect("create temporary root");
+            let mut diagnosed = SubstrateHarness::start().expect("boot diagnosed harness");
+            let Err(diagnosed_error) = diagnosed.execute_with_diagnostics_with_fault(
+                name,
+                vec![(
+                    "missing",
+                    HarnessOp::poll_until_within(
+                        Duration::ZERO,
+                        WindowCapability::NAMESPACE,
+                        &ListWindows,
+                        |_: &ListWindowsResult| false,
+                    ),
+                )],
+                Some(&root),
+                fault,
+            ) else {
+                panic!("diagnosed sequence fails");
+            };
+            assert!(matches!(diagnosed_error, ExecutionError::PollTimeout { .. }));
+            assert_eq!(diagnosed_error.to_string(), ordinary_error.to_string());
+            assert!(
+                fs::read_dir(root.join("execution")).expect("list execution root").all(|entry| !entry
+                    .expect("execution entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")),
+                "{name} fault leaves no temporary sibling"
+            );
+            fs::remove_dir_all(root).expect("remove temporary root");
+        }
     }
 }

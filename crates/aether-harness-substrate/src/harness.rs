@@ -798,6 +798,17 @@ impl SubstrateHarness {
             .collect()
     }
 
+    /// Best-effort observed-kind snapshot for failure diagnostics. Unlike the
+    /// assertion-facing [`Self::observed_kinds`], a poisoned recorder must not
+    /// obscure the execution error that triggered evidence retention.
+    pub(super) fn diagnostic_observed_kinds(&self) -> Vec<String> {
+        let registry = self.mail_registry();
+        self.observed_kinds
+            .lock()
+            .map(|kinds| kinds.iter().map(|kind| registry.kind_label(*kind)).collect())
+            .unwrap_or_default()
+    }
+
     /// Borrow the registered frame hook, if any. The capture crate's
     /// `RenderHarnessExt` reaches its concrete `GpuFrameHook` through this
     /// (via [`FrameHook::as_any`]) for render-typed accessors like the
