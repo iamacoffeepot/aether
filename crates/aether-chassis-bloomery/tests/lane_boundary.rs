@@ -18,7 +18,9 @@ mod lane;
 
 use std::path::Path;
 
-use aether_bloomery::{BloomView, CONSTRUCT_IMPLEMENT_COMMAND, VERIFY_CHECK_COMMAND};
+use aether_bloomery::{
+    BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND,
+};
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneScript};
 use lane::LaneHarness;
 
@@ -183,6 +185,32 @@ fn a_lane_that_exits_non_zero_without_evidence_fails_its_attempt() {
     let (mut harness, bloom) = rest_under(LaneMode::ExitsNonZero);
 
     assert!(bloom.members[0].wedge.is_some(), "a lane that died must reach the wedge counter");
+    harness.assert_live();
+}
+
+#[test]
+fn a_failing_aggregate_review_drives_a_repair_lap_that_resolves() {
+    // The mode #4730 called "review-finds-on-clean-tree", and the first
+    // scenario here that outlives the member line: a critic's finding lands
+    // against the *fold*, so a member that already resolved has to re-open and
+    // the second fold has to carry the repair. Everything behind
+    // Integrate→AggregateVerify→AggregateReview needs a GitHub, which the
+    // fixture backend supplies (#4732) — and needs it to mint real git objects,
+    // because the aggregate lanes check the fold out through the same real `git
+    // worktree add` every member lane uses.
+    let mut harness = LaneHarness::start(&LaneScript::all_passing().then(REVIEW_CRITIC_COMMAND, LaneMode::Fail));
+
+    // Two waits rather than one: the member coming to rest and the bloom
+    // resolving are distinct milestones, so a stall names which of them it
+    // stopped short of.
+    harness.settle("the member comes to rest", at_rest);
+    let bloom = harness.settle("the bloom resolves after its aggregate repair lap", |bloom| {
+        matches!(bloom.status, BloomStatus::Resolved | BloomStatus::Landed)
+    });
+
+    assert!(bloom.members[0].wedge.is_none(), "an aggregate finding inside the budget wedges nothing");
+    let critics = harness.ledger().into_iter().filter(|run| run.command == REVIEW_CRITIC_COMMAND).count();
+    assert!(critics >= 2, "the finding re-drove a critic over the repaired fold rather than being dropped: {critics}");
     harness.assert_live();
 }
 

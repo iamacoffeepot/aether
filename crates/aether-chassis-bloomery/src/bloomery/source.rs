@@ -54,6 +54,15 @@ impl SourceShell {
         Self { backend, correspondence: None }
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn new_with_correspondence(
+        backend: Arc<dyn SourceBackend<Error = SourceError> + Send + Sync>,
+        correspondence: SharedCorrespondence,
+    ) -> Self {
+        Self { backend, correspondence: Some(correspondence) }
+    }
+
     /// Connect a live GitHub-backed source port from resolved config, over the
     /// persisted correspondence (ADR-0150). The `cas_land_enabled` knob gates
     /// `land` — on by default since ADR-0149 migration step 3 made the CAS `land`

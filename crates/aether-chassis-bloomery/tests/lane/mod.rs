@@ -149,6 +149,12 @@ impl LaneHarness {
                 // failure modes live.
                 ("AETHER_GITHUB_LOCAL_LANE_COMMANDS", "construct.,review.,verify."),
                 ("AETHER_GITHUB_POLL_INTERVAL_SECS", "1"),
+                // In-memory GitHub for the aggregate line (#4732): the member
+                // line alone needs no GitHub, but Integrate→AggregateVerify→
+                // AggregateReview→Land do. `fake` mounts every reactor with an
+                // in-memory double and needs no token/owner/repo.
+                ("AETHER_GITHUB_BACKEND", "fixture"),
+                ("AETHER_GITHUB_FIXTURE_BASE_SHA", repo.head()),
                 // A fixed capture identity, so a candidate commit never depends
                 // on whatever git identity the host running the suite has.
                 ("AETHER_BLOOMERY_OPERATOR_NAME", "lane harness"),

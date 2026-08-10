@@ -53,6 +53,13 @@ runtime = [
     "dep:serde_json",
     "dep:signal-hook",
 ]
+# Lane-boundary harness (#4732): in-memory GitHub fixture so the
+# aggregate line (Integrate -> AggregateVerify -> AggregateReview -> Land)
+# runs without a live token. The `github_backend` field itself is
+# `#[cfg(any(test, feature = "testing"))]` so prod manifests never
+# advertise `AETHER_GITHUB_BACKEND` and prod binaries never link
+# `FakeGithub` unless the `testing` feature is enabled.
+testing = ["aether-bloomery-github/testing"]
 
 [dependencies]
 # Always-on (wasm-safe) — the `#[actor]` identity markers and the
@@ -134,6 +141,10 @@ inventory = { workspace = true }
 # The mirror demo (#3459 step 7) drives the projection against the adapter's
 # in-process `FakeGithub` double, so it needs no token or network.
 aether-bloomery-github = { path = "../aether-bloomery-github", features = ["testing"] }
+# The `bloomery` binary's `AETHER_GITHUB_BACKEND=fixture` path needs the
+# `testing` feature at runtime (not just `cfg(test)`), so the `cargo test`
+# harness's `CARGO_BIN_EXE_bloomery` is built with it via this self-dependency.
+aether-chassis-bloomery = { path = ".", features = ["testing"] }
 # The mirror-driver actor-path test drives the capability's handlers through the
 # substrate cap-test fixture (`aether_substrate::testing`), gated behind the
 # `test-support` feature so the fixture module is compiled for tests.
@@ -152,3 +163,4 @@ workspace = true
 # `inventory::submit!`), which cargo-machete's source-only scan cannot see.
 [package.metadata.cargo-machete]
 ignored = ["clap", "confique", "inventory"]
+

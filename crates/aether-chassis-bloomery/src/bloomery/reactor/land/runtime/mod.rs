@@ -328,6 +328,14 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
     Ok((admits, ack_through))
 }
 
+fn connect_land_source(config: &GithubMirrorConfig) -> Result<SourceShell, BootError> {
+    #[cfg(any(test, feature = "testing"))]
+    if config.uses_fixture() {
+        return Ok(config.fixture_source());
+    }
+    SourceShell::connect(config).map_err(|e| BootError::Other(Box::new(e)))
+}
+
 #[runtime]
 impl NativeActor for LandReactorCapability {
     type State = LandReactorState;
@@ -341,8 +349,10 @@ impl NativeActor for LandReactorCapability {
         let control_mailbox = <ControlCore as Addressable>::resolve(0, ());
 
         // Unconfigured → disabled: no shell, no store, no timer. The land outbox
-        // accumulates and drains once a token/owner/repo is supplied.
-        let configured = !(config.token.is_empty() || config.owner.is_empty() || config.repo.is_empty());
+        // accumulates and drains once a token/owner/repo is supplied, unless
+        // the `fake` backend is selected (#4732).
+        let configured =
+            config.uses_fixture() || !(config.token.is_empty() || config.owner.is_empty() || config.repo.is_empty());
         if !configured {
             tracing::info!(
                 target: "aether_chassis_bloomery::land",
@@ -358,7 +368,7 @@ impl NativeActor for LandReactorCapability {
             });
         }
 
-        let source = SourceShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
+        let source = connect_land_source(&config)?;
         let store = SqliteStore::open(&config.store_path).map_err(|e| BootError::Other(Box::new(e)))?;
         let interval = Duration::from_secs(config.poll_interval_secs.max(1));
         let timer = spawn_timer(
