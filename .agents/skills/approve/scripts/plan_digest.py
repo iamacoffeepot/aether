@@ -69,8 +69,18 @@ def _section_spans(body: str) -> dict[str, str]:
             continue
         if name in spans:
             raise PlanDigestError(f"duplicate managed heading: ## {name}")
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
-        spans[name] = body[match.start() : end]
+        followed_by_h2 = index + 1 < len(matches)
+        end = matches[index + 1].start() if followed_by_h2 else len(body)
+        span = body[match.start() : end]
+        # One empty line before a following H2 is Markdown layout rather than
+        # managed content. Exclude exactly that separator and preserve every
+        # other byte, including the managed content's own line ending, extra
+        # blank lines, and CRLF spelling.
+        if followed_by_h2 and span.endswith("\r\n\r\n"):
+            span = span[:-2]
+        elif followed_by_h2 and span.endswith("\n\n"):
+            span = span[:-1]
+        spans[name] = span
         positions[name] = match.start()
 
     missing = sorted(REQUIRED.difference(spans))
@@ -132,10 +142,7 @@ def digest_body(body: str) -> PlanDigest:
 
     canonical = bytearray(b"aether-plan:v1\0")
     for name in included:
-        # Blank line separators belong to the issue layout, not to either
-        # neighboring section. Canonicalize only that boundary so adding or
-        # removing an excluded H2 cannot change the preceding managed span.
-        payload = (spans[name].rstrip("\r\n") + "\n").encode("utf-8")
+        payload = spans[name].encode("utf-8")
         canonical.extend(name.encode("utf-8"))
         canonical.extend(b"\0")
         canonical.extend(str(len(payload)).encode("ascii"))
@@ -155,7 +162,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
-        body = Path(arguments.body_file).read_text(encoding="utf-8")
+        body = Path(arguments.body_file).read_bytes().decode("utf-8")
         result = digest_body(body)
     except (OSError, UnicodeError, PlanDigestError) as error:
         print(f"plan-digest: {error}", file=sys.stderr)

@@ -71,6 +71,40 @@ class PlanDigestTests(unittest.TestCase):
             with self.subTest(replacement=replacement):
                 self.assertNotEqual(plan_digest.digest_body(replacement).plan_sha256, original)
 
+    def test_extra_managed_blank_line_invalidates_approval(self) -> None:
+        original = plan_digest.digest_body(BASE).plan_sha256
+        without_layout_separator = BASE.replace(
+            "N/A — workflow-only change.\n\n## Side findings",
+            "N/A — workflow-only change.\n## Side findings",
+        )
+        extra_managed_blank = BASE.replace(
+            "Use durable artifacts.\n\n## Implementation plan",
+            "Use durable artifacts.\n\n\n## Implementation plan",
+        )
+
+        self.assertEqual(plan_digest.digest_body(without_layout_separator).plan_sha256, original)
+        self.assertNotEqual(plan_digest.digest_body(extra_managed_blank).plan_sha256, original)
+
+    def test_crlf_bytes_are_preserved_deterministically(self) -> None:
+        crlf = BASE.replace("\n", "\r\n")
+        first = plan_digest.digest_body(crlf).plan_sha256
+        second = plan_digest.digest_body(crlf).plan_sha256
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, plan_digest.digest_body(BASE).plan_sha256)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            body_path = Path(temporary) / "body.md"
+            body_path.write_bytes(crlf.encode("utf-8"))
+            completed = subprocess.run(
+                [sys.executable, "-I", str(Path(plan_digest.__file__)), "--body-file", str(body_path)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["plan_sha256"], first)
+
     def test_user_prose_and_side_findings_are_excluded(self) -> None:
         original = plan_digest.digest_body(BASE).plan_sha256
         changed_prose = BASE.replace("Original user prose.", "Original user prose, expanded.")
