@@ -29,7 +29,7 @@ Infer type conservatively:
 
 Infer scope from an explicit crate/path or established meta-scope. If it is ambiguous, end the turn with one concise scope question rather than guessing. A separable multi-idea sketch needs a user-approved split before filing multiple issues.
 
-Apply `type:<type>` inline. Apply `crate:<scope>` only when scope is a real crate; meta-scopes such as `workflow`, `repo`, `ci`, `docs`, and `guide` deliberately have no crate label. If a real checked-in crate lacks its label, create that one crate label first. Validate extra labels instead of inventing them. Never add `phase:*`, `size:*`, or `model:*`.
+Apply `type:<type>` inline. Apply `crate:<scope>` only when scope is a real crate; meta-scopes such as `workflow`, `repo`, `ci`, `docs`, and `guide` deliberately have no crate label. If a real checked-in crate lacks its label, create that one crate label first. Validate extra labels instead of inventing them. Never add managed scope sections or body routing metadata; a sketch starts unscoped.
 
 ## Body
 
@@ -52,7 +52,7 @@ For `--from-wish`, resolve the persisted leaf from the main repository root. Req
 
 Create over REST with title, file-backed body, and labels in the same request. On an uncertain response, search for the exact title and author before retrying so a timeout cannot create a duplicate.
 
-Verify the returned object is an issue, its title/labels match, and it has no phase label. Report:
+Verify the returned object is an issue, its title and taxonomy labels match, and its body contains no managed scope section. Report:
 
 ```text
 Filed #N: <title>

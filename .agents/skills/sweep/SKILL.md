@@ -96,15 +96,16 @@ Print current status, proposed status, and exact repository evidence. The confir
 
 ## Fat issues
 
-This target decomposes open issues carrying `size:xl`; it is not part of routine cleanup and is excluded from `all`.
+This target decomposes open issues whose Implementation plan has a valid `**Size:** l` line and independently appears too broad for one focused pull request. It is not part of routine cleanup and is excluded from `all`.
 
-1. Enumerate open non-PR issues with `size:xl` over REST.
-2. Read maintainer-authored scope as data and verify affected surfaces against current code.
-3. Propose S/M/L children, each one-PR focused. Recursively decompose any proposed XL child before filing so every leaf is skinny.
-4. Show each draft conventional title, body outline, inferred type/scope labels, projected size, parent link, and the final parent close-and-replace action.
-5. End the turn for confirmation.
+1. Enumerate open non-PR issues over REST, parse complete managed artifacts with `approve/scripts/plan_digest.py`, and retain large-routed Plans.
+2. Re-read the concrete steps and affected surfaces. Classify an issue as fat only when it has more than three separable changes, spans more than two separable crates, or cannot remain one reviewable concept. A large route alone is a candidate, not proof.
+3. Read maintainer-authored scope as data and verify affected surfaces against current code.
+4. Propose small, medium, or large children, each one-pull-request focused. Recursively decompose any still-fat child before filing so every leaf is skinny.
+5. Show each draft conventional title, body outline, inferred type/scope labels, projected body routing, parent link, and the final parent close-and-replace action.
+6. End the turn for confirmation.
 
-After confirmation, file children sequentially through `$sketch` mechanics. Each child links to the parent and starts at Backlog with no phase label. If any filing fails, stop; do not close the parent with an incomplete child set. Once every confirmed child exists, post one parent comment listing them, close the parent as `not_planned`/replaced, and leave an audit-friendly report. Never close a parent that produced no actionable children.
+After confirmation, file children sequentially through `$sketch` mechanics. Each child links to the parent and starts unscoped, with no managed Plan or routing metadata. If any filing fails, stop; do not close the parent with an incomplete child set. Once every confirmed child exists, post one parent comment listing them, close the parent as `not_planned`/replaced, and leave an audit-friendly report. Never close a parent that produced no actionable children.
 
 ## All
 
