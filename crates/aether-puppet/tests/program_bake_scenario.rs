@@ -107,7 +107,9 @@ use std::time::Instant;
 
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
-use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter, rgba_at};
+use aether_harness_substrate_capture::test_helpers::{
+    append_capture_probe, envelope, has_wgpu_adapter, rgba_at, srgb_byte_to_linear,
+};
 use aether_harness_substrate_capture::visual::decode_png;
 use aether_kinds::QuadSpace;
 use aether_math::{Mat4, Rgba, Vec3};
@@ -123,9 +125,9 @@ use aether_puppet::labels::{self, Labels};
 use aether_puppet::mesh::Mesh;
 use aether_render::QuadBlend;
 use aether_render::{
-    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot, OutputSlot,
-    PassStage, ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, TextureFormat, TextureSampling,
-    TextureUsage, TexturedQuad, UpdateGeometry,
+    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot,
+    ProgramDispatch, ProgramRegister, ProgramRegisterResult, TextureFormat, TextureSampling, TextureUsage,
+    TexturedQuad, UpdateGeometry,
 };
 
 /// The canvas the CI parity bakes at: small enough that the oracle walks
@@ -248,17 +250,8 @@ const PROBE: u32 = bake::PACKED + 1;
 /// and one fragment pass reading the plane the draw pass just filled.
 fn probed_program<const CLASS_COUNT: usize>() -> ProgramRegister {
     let mut register = bake::program::<CLASS_COUNT>();
-    register.wgsl = format!("{}\n{PROBE_WGSL}", register.wgsl);
-    register.bindings.push(bake::packed_slot());
-    register.passes.push(ProgramPass {
-        stage: PassStage::Fragment,
-        entry_point: "fs_probe".to_owned(),
-        inputs: vec![InputSlot::Binding { index: bake::PACKED }],
-        output: OutputSlot::Binding { index: PROBE },
-        uniform_offset: 0,
-        uniform_length: 0,
-        repeat: None,
-    });
+    let output = append_capture_probe(&mut register, PROBE_WGSL, vec![InputSlot::Binding { index: bake::PACKED }], 0);
+    assert_eq!(output, PROBE, "the probe binding layout changed");
 
     register
 }
@@ -351,17 +344,6 @@ fn overlay(texture_id: u32, width: usize, height: usize) -> DrawTexturedQuads {
             v1: 1.0,
             tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
         }],
-    }
-}
-
-/// Invert the offscreen target's sRGB transfer: the capture's bytes are
-/// the encoded framebuffer values, and the comparison space is linear.
-fn srgb_byte_to_linear(byte: u8) -> f32 {
-    let encoded = f32::from(byte) / 255.0;
-    if encoded <= 0.04045 {
-        encoded / 12.92
-    } else {
-        ((encoded + 0.055) / 1.055).powf(2.4)
     }
 }
 

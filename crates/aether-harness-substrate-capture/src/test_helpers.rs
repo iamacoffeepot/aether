@@ -12,6 +12,9 @@ use std::path::PathBuf;
 pub use aether_harness_substrate::test_helpers::{
     envelope, init_save_sandbox, locate_component_wasm, require_wasm, test_namespace_roots, write_fixture,
 };
+use aether_render::{
+    InputSlot, OutputSlot, PassStage, ProgramPass, ProgramRegister, SlotExtent, SlotSpec, TextureFormat,
+};
 
 use crate::visual::Image;
 
@@ -90,4 +93,87 @@ pub fn rgb_close(actual: [u8; 4], expected: [u8; 3], tolerance: u8) -> bool {
 #[must_use]
 pub fn pixel_is_lit(img: &Image, x: u32, y: u32, bg: [u8; 3], tolerance: u8) -> bool {
     !rgb_close(rgba_at(img, x, y), bg, tolerance)
+}
+
+/// Decode one sRGB capture byte into its linear channel value.
+#[must_use]
+pub fn srgb_byte_to_linear(byte: u8) -> f32 {
+    let encoded = f32::from(byte) / 255.0;
+    if encoded <= 0.04045 {
+        encoded / 12.92
+    } else {
+        ((encoded + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Append a scenario-owned capture probe to an authored render program.
+///
+/// The helper owns only the repeated registration choreography. The probe
+/// shader and its inputs remain with the scenario that defines what is being
+/// observed.
+///
+/// # Panics
+///
+/// Panics if the register contains more bindings than can be addressed by a
+/// `u32` program slot.
+#[must_use]
+pub fn append_capture_probe(
+    register: &mut ProgramRegister,
+    probe_wgsl: &str,
+    inputs: Vec<InputSlot>,
+    uniform_length: u32,
+) -> u32 {
+    let output = u32::try_from(register.bindings.len()).expect("program binding count exceeds u32");
+
+    register.wgsl.push('\n');
+    register.wgsl.push_str(probe_wgsl);
+    register.bindings.push(SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full });
+    register.passes.push(ProgramPass {
+        stage: PassStage::Fragment,
+        entry_point: "fs_probe".to_owned(),
+        inputs,
+        output: OutputSlot::Binding { index: output },
+        uniform_offset: 0,
+        uniform_length,
+        repeat: None,
+    });
+
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_capture_probe_adds_the_declared_binding_and_pass() {
+        let initial = SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full };
+        let inputs = vec![InputSlot::Binding { index: 0 }];
+        let mut register = ProgramRegister {
+            wgsl: "base".to_owned(),
+            bindings: vec![initial],
+            transients: Vec::new(),
+            geometries: Vec::new(),
+            depth_transients: Vec::new(),
+            passes: Vec::new(),
+        };
+
+        let output = append_capture_probe(&mut register, "probe", inputs.clone(), 24);
+
+        assert_eq!(output, 1);
+        assert_eq!(register.wgsl, "base\nprobe");
+        assert_eq!(register.bindings, vec![initial, initial]);
+        assert_eq!(
+            register.passes,
+            vec![ProgramPass {
+                stage: PassStage::Fragment,
+                entry_point: "fs_probe".to_owned(),
+                inputs,
+                output: OutputSlot::Binding { index: output },
+                uniform_offset: 0,
+                uniform_length: 24,
+                repeat: None,
+            }]
+        );
+    }
 }

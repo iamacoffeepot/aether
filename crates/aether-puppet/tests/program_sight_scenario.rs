@@ -92,7 +92,9 @@ use std::time::Instant;
 
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
-use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter, rgba_at};
+use aether_harness_substrate_capture::test_helpers::{
+    append_capture_probe, envelope, has_wgpu_adapter, rgba_at, srgb_byte_to_linear,
+};
 use aether_harness_substrate_capture::visual::decode_png;
 use aether_kinds::QuadSpace;
 use aether_math::{Mat4, Rgba, Vec3};
@@ -105,9 +107,9 @@ use aether_puppet::mesh::Mesh;
 use aether_puppet::{Pose, anchor, chart, deform, ribbon, style, visibility};
 use aether_render::QuadBlend;
 use aether_render::{
-    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot, OutputSlot,
-    PassStage, ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, SlotExtent, SlotSpec,
-    TextureFormat, TextureSampling, TextureUsage, TexturedQuad, UpdateGeometry,
+    CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot,
+    ProgramDispatch, ProgramRegister, ProgramRegisterResult, TextureFormat, TextureSampling, TextureUsage,
+    TexturedQuad, UpdateGeometry,
 };
 
 /// The canvas the CI parity runs at. The field is the canvas's own
@@ -247,22 +249,18 @@ const FIELD_PROBE: u32 = sight::PLANE_COUNT as u32;
 /// the graph just filled.
 fn probed_program() -> ProgramRegister {
     let mut register = sight::program();
-    register.wgsl = format!("{}\n{PROBE_WGSL}", register.wgsl);
-    register.bindings.push(SlotSpec { format: TextureFormat::Rgba8, extent: SlotExtent::Full });
-    register.passes.push(ProgramPass {
-        stage: PassStage::Fragment,
-        entry_point: "fs_probe".to_owned(),
-        inputs: vec![
+    let output = append_capture_probe(
+        &mut register,
+        PROBE_WGSL,
+        vec![
             InputSlot::Binding { index: sight::SEEN },
             InputSlot::Binding { index: sight::REACH },
             InputSlot::Binding { index: sight::COVERAGE },
             InputSlot::Binding { index: sight::REFERENCE },
         ],
-        output: OutputSlot::Binding { index: FIELD_PROBE },
-        uniform_offset: 0,
-        uniform_length: 0,
-        repeat: None,
-    });
+        0,
+    );
+    assert_eq!(output, FIELD_PROBE, "the probe binding layout changed");
 
     register
 }
@@ -357,17 +355,6 @@ fn overlay(texture_id: u32, width: usize, height: usize) -> DrawTexturedQuads {
             v1: 1.0,
             tint: Rgba::new(1.0, 1.0, 1.0, 1.0),
         }],
-    }
-}
-
-/// Invert the offscreen target's sRGB transfer: the capture's bytes are
-/// the encoded framebuffer values, and the comparison space is linear.
-fn srgb_byte_to_linear(byte: u8) -> f32 {
-    let encoded = f32::from(byte) / 255.0;
-    if encoded <= 0.04045 {
-        encoded / 12.92
-    } else {
-        ((encoded + 0.055) / 1.055).powf(2.4)
     }
 }
 
