@@ -106,7 +106,7 @@ fn document<'a>(
         failure: FailureDocument {
             category: error_category(error),
             message: error.to_string(),
-            failing_label: failure_label(error),
+            failing_label: Some(failure_label(error)),
         },
         completed: completed
             .iter()
@@ -130,13 +130,13 @@ fn error_category(error: &ExecutionError) -> &'static str {
     }
 }
 
-fn failure_label(error: &ExecutionError) -> Option<&str> {
+fn failure_label(error: &ExecutionError) -> &str {
     match error {
         ExecutionError::DuplicateLabel(label)
         | ExecutionError::OpFailed { label, .. }
         | ExecutionError::ReplyDecode { label, .. }
-        | ExecutionError::PollTimeout { label, .. } => Some(label),
-        ExecutionError::NoSuchReply(_) => None,
+        | ExecutionError::PollTimeout { label, .. }
+        | ExecutionError::NoSuchReply(label) => label,
     }
 }
 
@@ -212,6 +212,10 @@ mod tests {
         write_failure_at(&root, "one/two", &completed, vec!["aether.test".to_owned()], &failure())
             .expect("write diagnostics");
         let bytes = fs::read_to_string(root.join("execution/one-two/diagnostics.json")).expect("read diagnostics");
+        let repeated = root.join("execution/one-two/diagnostics.json");
+        write_failure_at(&root, "one/two", &completed, vec!["aether.test".to_owned()], &failure())
+            .expect("replace diagnostics");
+        assert_eq!(bytes, fs::read_to_string(repeated).expect("read repeated diagnostics"));
         assert!(bytes.contains("\"version\": 1"));
         assert!(bytes.contains("\"byte_length\": 99"));
         assert!(!bytes.contains("raw mail bytes"));
@@ -234,7 +238,9 @@ mod tests {
     #[test]
     fn error_projection_names_each_category_label() {
         let errors = [
+            ExecutionError::DuplicateLabel("duplicate".to_owned()),
             failure(),
+            ExecutionError::NoSuchReply("absent".to_owned()),
             ExecutionError::ReplyDecode { label: "decode".to_owned(), error: "bad".to_owned() },
             ExecutionError::PollTimeout {
                 label: "poll".to_owned(),
@@ -245,8 +251,15 @@ mod tests {
                 observed: "none".to_owned(),
             },
         ];
-        assert_eq!(error_category(&errors[0]), "operation_failed");
-        assert_eq!(failure_label(&errors[1]), Some("decode"));
-        assert_eq!(failure_label(&errors[2]), Some("poll"));
+        assert_eq!(error_category(&errors[0]), "duplicate_label");
+        assert_eq!(failure_label(&errors[0]), "duplicate");
+        assert_eq!(error_category(&errors[1]), "operation_failed");
+        assert_eq!(failure_label(&errors[1]), "fail");
+        assert_eq!(error_category(&errors[2]), "no_such_reply");
+        assert_eq!(failure_label(&errors[2]), "absent");
+        assert_eq!(error_category(&errors[3]), "reply_decode");
+        assert_eq!(failure_label(&errors[3]), "decode");
+        assert_eq!(error_category(&errors[4]), "poll_timeout");
+        assert_eq!(failure_label(&errors[4]), "poll");
     }
 }

@@ -853,4 +853,50 @@ mod tests {
         assert!(document.contains("\"failing_label\": \"missing\""));
         fs::remove_dir_all(root).expect("remove temporary artifact root");
     }
+
+    #[test]
+    fn diagnosed_execution_writer_failure_preserves_the_primary_error() {
+        let root = temp_dir().join(format!(
+            "aether-harness-execute-diagnostics-write-failure-{}-{}",
+            id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock").as_nanos()
+        ));
+        fs::create_dir(&root).expect("create temporary root");
+        let blocked_root = root.join("not-a-directory");
+        fs::write(&blocked_root, "file blocks diagnostic directory creation").expect("create blocking file");
+
+        let mut ordinary = SubstrateHarness::start().expect("boot ordinary harness");
+        let Err(ordinary_error) = ordinary.execute(vec![(
+            "missing",
+            HarnessOp::poll_until_within(
+                Duration::ZERO,
+                WindowCapability::NAMESPACE,
+                &ListWindows,
+                |_: &ListWindowsResult| false,
+            ),
+        )]) else {
+            panic!("ordinary sequence fails");
+        };
+
+        let mut diagnosed = SubstrateHarness::start().expect("boot diagnosed harness");
+        let Err(diagnosed_error) = diagnosed.execute_with_diagnostics_at(
+            "blocked",
+            vec![(
+                "missing",
+                HarnessOp::poll_until_within(
+                    Duration::ZERO,
+                    WindowCapability::NAMESPACE,
+                    &ListWindows,
+                    |_: &ListWindowsResult| false,
+                ),
+            )],
+            Some(&blocked_root),
+        ) else {
+            panic!("diagnosed sequence fails");
+        };
+        assert!(matches!(diagnosed_error, ExecutionError::PollTimeout { .. }));
+        assert_eq!(diagnosed_error.to_string(), ordinary_error.to_string());
+        assert!(!blocked_root.join("execution").exists(), "failed artifact setup leaves no execution sibling");
+        fs::remove_dir_all(root).expect("remove temporary root");
+    }
 }
