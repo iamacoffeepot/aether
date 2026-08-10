@@ -34,6 +34,10 @@ old prose to override a live schema or current implementation.
   Use the result of `load_component` and name-addressed `describe_component`
   when reasoning about a live lineage.
 - `actor_logs` and `actor_cost` provide bounded per-actor evidence.
+- `collect_failure_evidence` preserves a caller-supplied primary error while
+  gathering a bounded, non-mutating snapshot of explicitly selected live-engine
+  fleet, kind, component, actor, cost, and optional frame evidence. It neither
+  replays the operation nor recovers already-evicted traces, logs, or replies.
 
 The [capability index](reference/capability-index.md) routes static concepts;
 the [operating chapter](operating/index.md) explains safe use.
