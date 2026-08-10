@@ -2374,25 +2374,73 @@ mod sealed_catalog {
         let catalog = recalibrated_construct();
         let (draft, configs) = draft_with_catalog(1, vec![approved(membership("wp", 10))], &catalog);
 
-        let decided = reduce(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(draft.seal())), &configs);
+        let spec = draft.seal();
+        let bloom = spec.id();
+        let seal = event("seal", Fact::Seal(spec));
+        let decided = reduce(&Snapshot::new(digest(1)), &seal, &configs);
         assert!(matches!(decided.outcome, Outcome::Sealed(_)), "the authored catalog seals: {:?}", decided.outcome);
 
-        let dispatched = decided
+        let (construct_command, construct_profile) = decided
             .effects
             .iter()
             .find_map(|effect| match effect {
-                Decision::DispatchAttempt { profile, stage: StageId::Construct, .. } => Some(profile),
+                Decision::DispatchAttempt { profile, stage: StageId::Construct, transformation, .. } => {
+                    Some((transformation.command.as_str(), profile))
+                }
                 _ => None,
             })
             .expect("sealing dispatches the entry stage");
 
-        let authored = catalog.profile_for(StageId::Construct).expect("the catalog binds Construct");
-        assert_eq!(dispatched, authored, "the dispatch runs the agent the sealed catalog names");
-        assert_ne!(
-            dispatched,
-            &StageCatalog::profile_of(StageId::Construct),
-            "and that is not the compiled line's calibration, or the assertion above proves nothing",
+        let mut snapshot = Snapshot::new(digest(1)).apply(&seal, &decided, &configs);
+        let construct_pass = event(
+            "construct-pass",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(70) },
+                candidate: None,
+            },
         );
+        let construct_decided = reduce(&snapshot, &construct_pass, &configs);
+        snapshot = snapshot.apply(&construct_pass, &construct_decided, &configs);
+
+        let verify_failed = event(
+            "verify-failed",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Verify,
+                passed: false,
+                evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(71) },
+                candidate: None,
+            },
+        );
+        let decided = reduce(&snapshot, &verify_failed, &configs);
+        let (refine_command, refine_profile) = decided
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                Decision::DispatchAttempt { profile, stage: StageId::Refine, transformation, .. } => {
+                    Some((transformation.command.as_str(), profile))
+                }
+                _ => None,
+            })
+            .expect("a failing Verify dispatches Refine");
+
+        assert_eq!(construct_command, refine_command, "Construct and Refine share the construct command");
+        assert_eq!(
+            construct_profile,
+            catalog.profile_for(StageId::Construct).expect("the catalog binds Construct"),
+            "Construct runs the profile its sealed catalog names",
+        );
+        assert_eq!(
+            refine_profile,
+            catalog.profile_for(StageId::Refine).expect("the catalog binds Refine"),
+            "Refine runs the profile its sealed catalog names",
+        );
+        assert_ne!(construct_profile, refine_profile, "the shared command must not collapse stage-specific profiles");
     }
 
     // Tripwire: the reducer counts to the *sealed* catalog's retry budget. This is
