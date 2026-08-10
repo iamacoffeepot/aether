@@ -49,12 +49,12 @@ use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router
 use crate::args::ActorCostArgs;
 use crate::args::ActorLogsArgs;
 use crate::args::{
-    ApplyTerrainBrushArgs, CaptureFrameArgs, CommitTerrainProposalArgs, ComponentSpec, DescribeComponentArgs,
-    DescribeHandlersArgs, DescribeKindsArgs, DiscardTerrainProposalArgs, EngineMailSpec, ListBinariesArgs,
-    ListComponentsArgs, ListEnginesArgs, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, ProposeTerrainEditArgs,
-    ReplaceComponentArgs, ReplyEventJson, ReplyProjection, RunTerrainAutomatonArgs, SendMailArgs, SendMailTracedArgs,
-    SetTerrainProposalPreviewArgs, SpawnSubstrateArgs, TerminateSubstrateArgs, TerrainEditorArgs, TerrainMarksArgs,
-    UploadBinaryArgs, UploadComponentArgs,
+    ApplyTerrainBrushArgs, CaptureFrameArgs, CollectFailureEvidenceArgs, CommitTerrainProposalArgs, ComponentSpec,
+    DescribeComponentArgs, DescribeHandlersArgs, DescribeKindsArgs, DiscardTerrainProposalArgs, EngineMailSpec,
+    ListBinariesArgs, ListComponentsArgs, ListEnginesArgs, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec,
+    ProposeTerrainEditArgs, ReplaceComponentArgs, ReplyEventJson, ReplyProjection, RunTerrainAutomatonArgs,
+    SendMailArgs, SendMailTracedArgs, SetTerrainProposalPreviewArgs, SpawnSubstrateArgs, TerminateSubstrateArgs,
+    TerrainEditorArgs, TerrainMarksArgs, UploadBinaryArgs, UploadComponentArgs,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
@@ -71,6 +71,7 @@ mod components;
 mod describe;
 mod engine;
 mod envelope;
+mod failure_evidence;
 mod ids;
 mod logs_cost;
 mod mail;
@@ -95,6 +96,14 @@ use self::components::{
     component_config_bytes, reject_zero_replicas, replica_base_name, replica_names, selector_with_explicit_export,
 };
 use self::envelope::{engine_envelope, local_envelope, validate_recipient_scope};
+#[cfg(test)]
+use self::failure_evidence::{
+    FAILURE_EVIDENCE_LOG_ENTRIES, FailureEvidenceQuery, FailureEvidenceSource, FailureEvidenceValue, MAX_ADDRESS_BYTES,
+    MAX_FAILURE_EVIDENCE_ACTORS, MAX_FAILURE_EVIDENCE_COMPONENTS, MAX_FAILURE_EVIDENCE_KINDS, MAX_KIND_NAME_BYTES,
+    MAX_OPERATION_BYTES, MAX_PRIMARY_ERROR_BYTES, collect_failure_evidence_with_source, failure_evidence_capture_args,
+    failure_evidence_result_with_spill, project_failure_evidence_capture, select_failure_evidence_fleet,
+    validate_failure_evidence_args,
+};
 #[cfg(test)]
 use self::ids::{parse_kind_id, render_compact_tree, static_kind_name};
 #[cfg(test)]
@@ -383,6 +392,16 @@ impl Mcp {
         Parameters(args): Parameters<CaptureFrameArgs>,
     ) -> Result<CallToolResult, McpError> {
         capture::capture_frame(self, args).await
+    }
+
+    #[tool(
+        description = "Collect a bounded, non-mutating live-engine failure bundle while preserving the caller's required `primary_error`. Requires one engine id and explicit selectors: at most 8 actor lineage names, 8 component lineage names, 16 exact kind names, plus an optional exact `frame.window_id`. Selectors are validated, sorted, and deduplicated before any observation. The result records the selected live/recently-dead fleet row, full schemas for selected kinds, full component descriptions, and for each actor a log tail capped at 100 entries plus its complete cost table. Each observation has a 3-second cap and records success, error, timeout, or budget_exhausted without preventing later observations; the whole bundle has a 15-second budget. Optional frame capture returns the structured JSON text block first and a bounded inline PNG second. This tool never sends mail, replays or retries the failed operation, runs checks, reads a reference image, writes a host file, changes lifecycle state, or performs cleanup. Oversized JSON uses the standard whole-response spill projection."
+    )]
+    pub async fn collect_failure_evidence(
+        &self,
+        Parameters(args): Parameters<CollectFailureEvidenceArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        failure_evidence::collect_failure_evidence(self, args).await
     }
 
     #[tool(

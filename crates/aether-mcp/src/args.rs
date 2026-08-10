@@ -219,6 +219,49 @@ pub struct ListEnginesArgs {
     pub show: Option<String>,
 }
 
+/// Optional non-mutating frame selector for `collect_failure_evidence`.
+/// The aggregate deliberately exposes only inline-image shaping: it cannot
+/// send mail, run checks, compare a host reference, or write a host file.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub struct FailureEvidenceFrameArgs {
+    /// Exact engine window id, as the tagged `mbx-…` string returned by the
+    /// window inventory (or a decimal `u64` accepted by `capture_frame`).
+    pub window_id: String,
+    /// Optional proportional inline-image reduction in `(0.0, 1.0]`.
+    #[serde(default)]
+    pub scale: Option<f32>,
+    /// Optional inclusive ceiling for the inline image's long edge.
+    #[serde(default)]
+    pub max_dimension: Option<u32>,
+}
+
+/// `collect_failure_evidence` arguments. Every selector is explicit and
+/// bounded; collection observes only and never retries the failed operation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CollectFailureEvidenceArgs {
+    /// Engine UUID tied to the original failure (from `list_engines`).
+    pub engine_id: String,
+    /// Non-empty caller-supplied original failure. Preserved verbatim as the
+    /// bundle's primary error even when every observation fails.
+    pub primary_error: String,
+    /// Optional short name of the failed operation, such as `send_mail`.
+    #[serde(default)]
+    pub operation: Option<String>,
+    /// Up to eight exact actor mailbox lineage names. Each receives a log
+    /// tail capped at 100 entries and its complete current cost table.
+    #[serde(default)]
+    pub actors: Vec<String>,
+    /// Up to eight exact component lineage names to describe in full.
+    #[serde(default)]
+    pub components: Vec<String>,
+    /// Up to sixteen exact kind names to describe with full schemas.
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    /// Optional exact-window, non-mutating inline frame observation.
+    #[serde(default)]
+    pub frame: Option<FailureEvidenceFrameArgs>,
+}
+
 /// `send_mail` arguments — a best-effort batch.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendMailArgs {
@@ -667,6 +710,77 @@ pub struct ListEnginesResponse {
     /// `"alive"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recently_died: Option<Vec<DeadEngineInfo>>,
+}
+
+/// Fleet rows matching the explicitly selected failure-evidence engine.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FailureEvidenceFleet {
+    pub alive: Vec<EngineInfo>,
+    pub recently_died: Vec<DeadEngineInfo>,
+}
+
+/// One bounded observation in a failure-evidence bundle. Failures are data so
+/// one unavailable surface never replaces the caller's primary error or
+/// prevents later observations.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum FailureEvidenceObservation {
+    Ok { value: serde_json::Value },
+    Error { error: String },
+    Timeout,
+    BudgetExhausted,
+}
+
+/// One explicitly named selector and its observation.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct NamedFailureEvidence {
+    pub selector: String,
+    pub observation: FailureEvidenceObservation,
+}
+
+/// The two bounded observations collected for one actor mailbox.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ActorFailureEvidence {
+    pub mailbox_name: String,
+    pub logs: FailureEvidenceObservation,
+    pub cost: FailureEvidenceObservation,
+}
+
+/// The optional exact-window capture observation. A successful value describes
+/// the following image blocks; the PNG bytes remain MCP image content rather
+/// than being duplicated inside the JSON bundle.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FrameFailureEvidence {
+    pub window_id: String,
+    pub observation: FailureEvidenceObservation,
+}
+
+/// Fixed collection limits recorded with every bundle.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FailureEvidenceLimits {
+    pub max_actors: usize,
+    pub max_components: usize,
+    pub max_kinds: usize,
+    pub actor_log_entries: u32,
+    pub observation_timeout_millis: u64,
+    pub bundle_budget_millis: u64,
+}
+
+/// Structured text projection returned first by `collect_failure_evidence`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FailureEvidenceBundle {
+    pub engine_id: String,
+    pub primary_error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    pub limits: FailureEvidenceLimits,
+    pub fleet: FailureEvidenceObservation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<FailureEvidenceObservation>,
+    pub components: Vec<NamedFailureEvidence>,
+    pub actors: Vec<ActorFailureEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame: Option<FrameFailureEvidence>,
 }
 
 /// Per-item outcome from a `send_mail` batch.

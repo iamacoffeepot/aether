@@ -19,6 +19,7 @@ application failure.
 | Did mail settle and what replied? | `send_mail` | one or more independent items | fixed await bound; partial replies on timeout |
 | What causal chain ran? | `send_mail_traced` | one atomic batch/engine | trace rings are best-effort and bounded |
 | What is rendered now? | `capture_frame` | one engine | requires a render-capable chassis |
+| What live evidence remains after a failure? | `collect_failure_evidence` | one engine plus explicit selectors | 3 seconds per observation, 15 seconds total |
 
 ## 1. Pin the target
 
@@ -134,6 +135,36 @@ chassis and native handler surface before treating a capture error as a render
 regression. Rendering semantics and window focus behavior are covered in
 [Rendering & camera](../systems/rendering.md) and [Window](../systems/window.md).
 
+## 6. Collect a post-failure bundle
+
+Use `collect_failure_evidence` after an operation has already failed and before
+terminate, restart, replace, or retry can destroy live evidence. Supply the
+original error in `primary_error`, the exact `engine_id`, and only the actors,
+components, kinds, and optional window that matter. The aggregate validates all
+selectors before observing anything, sorts and deduplicates them, then records:
+
+- the selected engine's current live and recently-dead fleet rows;
+- full schemas for up to 16 exact kinds;
+- full descriptions for up to eight component lineage names;
+- a log tail capped at 100 entries and the complete cost table for each of up
+  to eight actor lineage names;
+- optionally, one bounded inline PNG for an exact `window_id`.
+
+Each observation has a three-second cap and reports `ok`, `error`, `timeout`, or
+`budget_exhausted` in place. One failure does not discard the primary error or
+prevent later observations while the 15-second whole-bundle budget remains.
+The structured JSON block is always first; a successful frame follows as MCP
+image content. Oversized JSON follows the standard whole-response spill
+contract and must be read from the returned temporary path before cleanup.
+
+This is observation, not recovery. The aggregate sends no mail, does not replay
+or retry the failed operation, runs no frame checks or reference comparison,
+writes no capture destination, changes no lifecycle state, and performs no
+cleanup. It cannot reconstruct evidence that was already lost: evicted actor
+log or trace-ring entries, host stderr, replies removed after a pending-call
+timeout, or the causal trace of an earlier untraced call remain unavailable.
+Collect those surfaces separately when they are required.
+
 ## Timeout and observability limits
 
 Timeouts bound the observer; they do not cancel engine work.
@@ -143,6 +174,7 @@ Timeouts bound the observer; they do not cancel engine work.
 | `send_mail` | fixed 300-second whole-call await per item | status `timeout`, `timed_out: true`, and projected replies collected so far |
 | `send_mail_traced` | defaults to 300 seconds; caller value clamps at 600 seconds | timeout response omits root, replies, tree, and node count |
 | `fire_and_forget` mail | no settlement wait | later state/log/frame evidence only |
+| `collect_failure_evidence` | 3 seconds per observation, 15 seconds for the bundle | primary error plus per-selector error/timeout/budget status; later observations continue while budget remains |
 | most `call_one`-based tools | no shared MCP settlement deadline | transport close/error or the tool's own subsystem bound |
 
 These are await bounds, not whole-tool deadlines. Plain `send_mail` starts its
