@@ -80,6 +80,12 @@ fn cargo() -> String {
     env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
 }
 
+/// A command using Cargo's resolved binary, for xtask subcommands that are
+/// not builds but must still honor Cargo's own re-invocation environment.
+pub fn command() -> Command {
+    Command::new(cargo())
+}
+
 pub fn build_component(plan: &BuildPlan, profile: Profile) -> Result<()> {
     let mut cmd = build_command(profile);
     cmd.args(["--target", WASM_TARGET, "-p", &plan.package]);
