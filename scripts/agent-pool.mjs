@@ -116,8 +116,8 @@ export function isHeadInput(path) {
   // (task, cli_version, model), so a Claude box only ever resumes a Claude
   // session and those bytes never enter its prompt; folding them in would
   // spuriously trip head-drift and retire a reusable entry on a Codex-only
-  // edit. Likewise sibling assets under .claude/skills/ (headless/protocol.md,
-  // reference files, on-demand skill bodies) do NOT ride the static head, so
+  // edit. Likewise workflow files, reference files, and on-demand skill
+  // bodies do NOT ride the static head, so
   // matching only the SKILL.md leaf keeps them out. The blob hash still
   // covers a SKILL.md's body, so a body-only .claude edit over-retires —
   // fail-safe (over-retire, never serve a stale head); narrowing past the
