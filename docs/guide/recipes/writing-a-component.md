@@ -119,13 +119,27 @@ The package and engine are always explicit. The command infers the wasm target
 only when that package exposes one component; otherwise add the exact artifact
 stem, for example `--target my_component`. It connects to
 `http://127.0.0.1:8890/mcp` by default; use `--mcp-endpoint <URL>` for another
-configured streamable-HTTP endpoint.
+configured streamable-HTTP endpoint. This flag changes the connection only: it
+does not transfer the wasm. Run xtask on the MCP/fleet host, or on a filesystem
+where the built artifact has the same absolute path visible to that host,
+because `upload_component.staged_path` is read there.
 
 Without an existing instance, the first successful pass uploads and loads the
 component. The command prints and retains both the canonical loaded name and
-the `mailbox_id`; later passes upload and replace that same mailbox. To replace
-an instance from the first pass, supply the exact current public replacement
-selector returned by `load_component`:
+the `mailbox_id`; later passes upload and replace that same mailbox. For a
+defaultless multi-actor module, select the actor namespace on that first load:
+
+```sh
+cargo xtask dev-component \
+  --package my-component \
+  --engine-id <engine UUID> \
+  --export example.alpha
+```
+
+`--export` applies only to the initial load. Later replacements reuse the actor
+already hosted by the mailbox. To replace an existing instance from the first
+pass, supply the exact current public replacement selector returned by
+`load_component`:
 
 ```sh
 cargo xtask dev-component \
@@ -138,6 +152,8 @@ The approved workflow calls this the existing-lineage mode, but the live
 `replace_component` contract concretely accepts a tagged mailbox id, not a
 lineage string. `dev-component` therefore does not hash or infer a mailbox id
 from a name. A malformed id is rejected before the watcher starts.
+`--mailbox-id` and `--export` conflict because replace-first mode already has a
+hosted actor to reuse.
 
 The package root is watched recursively and generated target output is ignored.
 Edits are debounced, rebuilds are serialized, and edits arriving during a pass

@@ -9,7 +9,7 @@ use aether_data::{Tag, tagged_id};
 use anyhow::{Context, Result, anyhow, bail};
 use cargo_metadata::{Metadata, MetadataCommand};
 use clap::Args;
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, RawContent};
 use rmcp::transport::StreamableHttpClientTransport;
@@ -39,7 +39,10 @@ pub struct DevComponentArgs {
     /// Existing component mailbox id (`mbx-...`) to replace on the first pass.
     #[arg(long, value_parser = parse_mailbox_id)]
     mailbox_id: Option<String>,
-    /// Streamable-HTTP MCP endpoint exposed by the Aether tunnel.
+    /// Actor namespace to select on the first load. Conflicts with `--mailbox-id`.
+    #[arg(long, conflicts_with = "mailbox_id")]
+    export: Option<String>,
+    /// Streamable-HTTP MCP endpoint on a host that can read the built artifact at the same absolute path.
     #[arg(long, default_value = DEFAULT_MCP_ENDPOINT)]
     mcp_endpoint: String,
 }
@@ -150,6 +153,7 @@ pub fn run(args: &DevComponentArgs) -> Result<()> {
         CargoArtifactBuilder { plan, component, wasm_profile_dir },
         McpToolCaller { endpoint: args.mcp_endpoint.clone() },
         &args.engine_id,
+        args.export.as_deref(),
         &package_root,
         &generated_target,
         &mut binding,
@@ -192,6 +196,7 @@ async fn watch<B: ArtifactBuilder, C: ToolCaller>(
     mut builder: B,
     mut caller: C,
     engine_id: &str,
+    export: Option<&str>,
     package_root: &Path,
     generated_target: &Path,
     binding: &mut Option<LiveBinding>,
@@ -208,7 +213,7 @@ async fn watch<B: ArtifactBuilder, C: ToolCaller>(
     let stop = ctrl_c();
     tokio::pin!(stop);
     tokio::select! {
-        result = run_pass(&mut builder, &mut caller, engine_id, binding) => report_pass(result),
+        result = run_pass(&mut builder, &mut caller, engine_id, export, binding) => report_pass(result),
         signal = &mut stop => {
             signal.context("install Ctrl-C handler")?;
             return Ok(());
@@ -223,7 +228,7 @@ async fn watch<B: ArtifactBuilder, C: ToolCaller>(
             }
         }
         tokio::select! {
-            result = run_pass(&mut builder, &mut caller, engine_id, binding) => report_pass(result),
+            result = run_pass(&mut builder, &mut caller, engine_id, export, binding) => report_pass(result),
             signal = &mut stop => {
                 signal.context("install Ctrl-C handler")?;
                 return Ok(());
@@ -243,12 +248,14 @@ async fn run_pass<B: ArtifactBuilder, C: ToolCaller>(
     builder: &mut B,
     caller: &mut C,
     engine_id: &str,
+    export: Option<&str>,
     binding: &mut Option<LiveBinding>,
 ) -> Result<String> {
     let artifact = builder.build().context("build selected component")?;
+    let staged_path = artifact_path_for_upload(&artifact)?;
     let uploaded: UploadReply = serde_json::from_value(
         caller
-            .call("upload_component", json!({ "staged_path": artifact.to_string_lossy(), "name": null }))
+            .call("upload_component", json!({ "staged_path": staged_path, "name": null }))
             .await
             .context("upload selected component")?,
     )
@@ -272,17 +279,27 @@ async fn run_pass<B: ArtifactBuilder, C: ToolCaller>(
         ));
     }
 
+    let mut load_arguments = json!({ "engine_id": engine_id, "selector": uploaded.hash });
+    if let Some(export) = export {
+        load_arguments
+            .as_object_mut()
+            .expect("load arguments are an object")
+            .insert("export".to_string(), Value::String(export.to_string()));
+    }
     let loaded: LoadReply = serde_json::from_value(
-        caller
-            .call("load_component", json!({ "engine_id": engine_id, "selector": uploaded.hash }))
-            .await
-            .context("load component into engine")?,
+        caller.call("load_component", load_arguments).await.context("load component into engine")?,
     )
     .context("decode load_component response")?;
     parse_mailbox_id(&loaded.mailbox_id).map_err(anyhow::Error::msg)?;
     let message = format!("loaded {} ({})", loaded.name, loaded.mailbox_id);
     *binding = Some(LiveBinding { mailbox_id: loaded.mailbox_id, canonical_name: Some(loaded.name) });
     Ok(message)
+}
+
+fn artifact_path_for_upload(artifact: &Path) -> Result<&str> {
+    artifact.to_str().with_context(|| {
+        format!("built wasm path is not valid UTF-8 and cannot be sent to upload_component: {}", artifact.display())
+    })
 }
 
 async fn next_edit_batch(
@@ -319,13 +336,15 @@ async fn next_edit_batch(
 }
 
 fn event_is_relevant(event: &Event, package_root: &Path, generated_target: &Path) -> bool {
-    event.paths.iter().any(|path| path.starts_with(package_root) && !path.starts_with(generated_target))
+    !matches!(event.kind, EventKind::Access(_))
+        && event.paths.iter().any(|path| path.starts_with(package_root) && !path.starts_with(generated_target))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::EventKind;
+    use clap::{CommandFactory, Parser, error::ErrorKind};
+    use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind, RenameMode};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
@@ -366,6 +385,12 @@ mod tests {
 
     fn mailbox_id() -> String {
         aether_data::MailboxId::from_name("example.echo").to_string()
+    }
+
+    #[derive(Debug, Parser)]
+    struct ArgsHarness {
+        #[command(flatten)]
+        args: DevComponentArgs,
     }
 
     fn metadata() -> Metadata {
@@ -440,6 +465,42 @@ mod tests {
         assert!(parse_mailbox_id("mbx-not-base32").is_err());
     }
 
+    #[test]
+    fn export_help_is_visible_and_conflicts_with_replace_first() {
+        let help = ArgsHarness::command().render_long_help().to_string();
+        assert!(help.contains("--export <EXPORT>"));
+        assert!(help.contains("same absolute path"));
+
+        let error = ArgsHarness::try_parse_from([
+            "test",
+            "--package",
+            "chosen",
+            "--engine-id",
+            "engine",
+            "--mailbox-id",
+            &mailbox_id(),
+            "--export",
+            "example.alpha",
+        ])
+        .expect_err("export and replace-first must conflict");
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_artifact_path_is_rejected_before_upload() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let artifact = PathBuf::from(OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]));
+        assert!(
+            artifact_path_for_upload(&artifact)
+                .expect_err("non-UTF-8 path must fail")
+                .to_string()
+                .contains("not valid UTF-8")
+        );
+    }
+
     #[tokio::test]
     async fn first_load_retains_canonical_name_and_mailbox_for_replace() {
         let artifact = PathBuf::from("/tmp/component.wasm");
@@ -454,8 +515,8 @@ mod tests {
         let calls = caller.calls.clone();
         let mut binding = None;
 
-        run_pass(&mut builder, &mut caller, "engine", &mut binding).await.expect("load pass");
-        run_pass(&mut builder, &mut caller, "engine", &mut binding).await.expect("replace pass");
+        run_pass(&mut builder, &mut caller, "engine", Some("example.echo"), &mut binding).await.expect("load pass");
+        run_pass(&mut builder, &mut caller, "engine", Some("example.echo"), &mut binding).await.expect("replace pass");
 
         assert_eq!(
             binding,
@@ -469,8 +530,10 @@ mod tests {
             calls.iter().map(|(tool, _)| *tool).collect::<Vec<_>>(),
             ["upload_component", "load_component", "upload_component", "replace_component"]
         );
+        assert_eq!(calls[1].1["export"], "example.echo");
         assert_eq!(calls[3].1["mailbox_id"], mailbox_id);
         assert_eq!(calls[3].1["selector"], "hash-2");
+        assert!(calls[3].1.get("export").is_none());
     }
 
     #[tokio::test]
@@ -481,7 +544,7 @@ mod tests {
         let original = LiveBinding { mailbox_id: mailbox_id(), canonical_name: None };
         let mut binding = Some(original.clone());
 
-        run_pass(&mut builder, &mut caller, "engine", &mut binding).await.expect("replace pass");
+        run_pass(&mut builder, &mut caller, "engine", None, &mut binding).await.expect("replace pass");
 
         assert_eq!(binding, Some(original));
         assert_eq!(calls.lock().expect("calls mutex")[1].0, "replace_component");
@@ -492,14 +555,20 @@ mod tests {
         let original = LiveBinding { mailbox_id: mailbox_id(), canonical_name: Some("canonical".to_string()) };
 
         let mut binding = Some(original.clone());
-        assert!(run_pass(&mut builder([Err("build")]), &mut caller([]), "engine", &mut binding).await.is_err());
+        assert!(run_pass(&mut builder([Err("build")]), &mut caller([]), "engine", None, &mut binding).await.is_err());
         assert_eq!(binding, Some(original.clone()));
 
         let mut binding = Some(original.clone());
         assert!(
-            run_pass(&mut builder([Ok(PathBuf::from("/tmp/a"))]), &mut caller([Err("upload")]), "engine", &mut binding)
-                .await
-                .is_err()
+            run_pass(
+                &mut builder([Ok(PathBuf::from("/tmp/a"))]),
+                &mut caller([Err("upload")]),
+                "engine",
+                None,
+                &mut binding
+            )
+            .await
+            .is_err()
         );
         assert_eq!(binding, Some(original.clone()));
 
@@ -509,6 +578,7 @@ mod tests {
                 &mut builder([Ok(PathBuf::from("/tmp/a"))]),
                 &mut caller([Ok(json!({"hash":"h"})), Err("load")]),
                 "engine",
+                None,
                 &mut binding
             )
             .await
@@ -522,6 +592,7 @@ mod tests {
                 &mut builder([Ok(PathBuf::from("/tmp/a"))]),
                 &mut caller([Ok(json!({"hash":"h"})), Err("replace")]),
                 "engine",
+                None,
                 &mut binding
             )
             .await
@@ -538,14 +609,27 @@ mod tests {
         let manifest = Event::new(EventKind::Any).add_path(root.join("Cargo.toml"));
         let generated = Event::new(EventKind::Any).add_path(target.join("wasm/debug/component.wasm"));
         let outside = Event::new(EventKind::Any).add_path(PathBuf::from("/work/other/src/lib.rs"));
+        let access = Event::new(EventKind::Access(AccessKind::Any)).add_path(root.join("src/lib.rs"));
+        let create = Event::new(EventKind::Create(CreateKind::Any)).add_path(root.join("src/new.rs"));
+        let modify = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join("src/lib.rs"));
+        let remove = Event::new(EventKind::Remove(RemoveKind::Any)).add_path(root.join("src/old.rs"));
+        let rename = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(root.join("src/old.rs"))
+            .add_path(root.join("src/new.rs"));
 
         assert!(event_is_relevant(&source, root, target));
         assert!(event_is_relevant(&manifest, root, target));
         assert!(!event_is_relevant(&generated, root, target));
         assert!(!event_is_relevant(&outside, root, target));
+        assert!(!event_is_relevant(&access, root, target));
+        assert!(event_is_relevant(&create, root, target));
+        assert!(event_is_relevant(&modify, root, target));
+        assert!(event_is_relevant(&remove, root, target));
+        assert!(event_is_relevant(&rename, root, target));
 
         let (events_tx, mut events_rx) = unbounded_channel();
         events_tx.send(Ok(generated)).expect("watch channel open");
+        events_tx.send(Ok(access)).expect("watch channel open");
         events_tx.send(Ok(source)).expect("watch channel open");
         events_tx.send(Ok(manifest)).expect("watch channel open");
         events_tx.send(Ok(outside)).expect("watch channel open");
