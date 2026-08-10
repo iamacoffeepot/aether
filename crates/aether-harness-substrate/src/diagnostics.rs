@@ -21,6 +21,13 @@ pub struct CompletedStep {
     pub byte_length: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersistenceFault {
+    None,
+    Write,
+    Publish,
+}
+
 #[derive(Serialize)]
 struct DiagnosticsDocument<'a> {
     version: u8,
@@ -58,6 +65,22 @@ pub fn write_failure(
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::print_stderr)] // Artifact retention is secondary to the primary test failure.
+pub fn write_failure_with_fault(
+    root: Option<&Path>,
+    id: &str,
+    completed: &[CompletedStep],
+    observed_kinds: Vec<String>,
+    error: &ExecutionError,
+    fault: PersistenceFault,
+) {
+    let root = root.map_or_else(artifact_root, Path::to_path_buf);
+    if let Err(error) = write_failure_at_with_fault(&root, id, completed, observed_kinds, error, fault) {
+        eprintln!("could not retain substrate harness diagnostics: {error}");
+    }
+}
+
 #[allow(clippy::disallowed_methods)] // CARGO_TARGET_DIR is Cargo's external artifact-root contract.
 fn artifact_root() -> PathBuf {
     env::var_os("CARGO_TARGET_DIR").map_or_else(|| PathBuf::from("target"), PathBuf::from).join(ARTIFACT_DIRECTORY)
@@ -70,6 +93,17 @@ fn write_failure_at(
     observed_kinds: Vec<String>,
     error: &ExecutionError,
 ) -> Result<(), String> {
+    write_failure_at_with_fault(root, id, completed, observed_kinds, error, PersistenceFault::None)
+}
+
+fn write_failure_at_with_fault(
+    root: &Path,
+    id: &str,
+    completed: &[CompletedStep],
+    observed_kinds: Vec<String>,
+    error: &ExecutionError,
+    fault: PersistenceFault,
+) -> Result<(), String> {
     let leaf = sanitize_id(id);
     let execution_root = root.join(EXECUTION_DIRECTORY);
     fs::create_dir_all(&execution_root).map_err(|error| format!("create {}: {error}", execution_root.display()))?;
@@ -80,9 +114,12 @@ fn write_failure_at(
         let document = document(id, completed, observed_kinds, error);
         let encoded =
             serde_json::to_vec_pretty(&document).map_err(|error| format!("serialize diagnostics: {error}"))?;
-        write_atomically(&replacement.join(DIAGNOSTICS_FILE), &encoded)?;
+        write_atomically(&replacement.join(DIAGNOSTICS_FILE), &encoded, fault)?;
 
         let destination = execution_root.join(leaf);
+        if fault == PersistenceFault::Publish {
+            return Err("injected diagnostics publication failure".to_owned());
+        }
         if destination.exists() {
             fs::remove_dir_all(&destination).map_err(|error| format!("replace {}: {error}", destination.display()))?;
         }
@@ -165,9 +202,12 @@ fn temporary_sibling(parent: &Path, leaf: &str) -> Result<PathBuf, String> {
     Ok(parent.join(format!(".{leaf}.{nonce}.tmp")))
 }
 
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+fn write_atomically(path: &Path, bytes: &[u8], fault: PersistenceFault) -> Result<(), String> {
     let temporary = path.with_extension("json.tmp");
     let mut file = fs::File::create(&temporary).map_err(|error| format!("create {}: {error}", temporary.display()))?;
+    if fault == PersistenceFault::Write {
+        return Err("injected diagnostics write failure".to_owned());
+    }
     file.write_all(bytes).map_err(|error| format!("write {}: {error}", temporary.display()))?;
     file.write_all(b"\n").map_err(|error| format!("finish {}: {error}", temporary.display()))?;
     file.sync_all().map_err(|error| format!("sync {}: {error}", temporary.display()))?;
@@ -261,5 +301,41 @@ mod tests {
         assert_eq!(failure_label(&errors[3]), "decode");
         assert_eq!(error_category(&errors[4]), "poll_timeout");
         assert_eq!(failure_label(&errors[4]), "poll");
+    }
+
+    fn fault_keeps_published_leaf_and_neighbors(fault: PersistenceFault) {
+        let root = temporary_root("fault");
+        let completed = vec![CompletedStep { label: "old".to_owned(), output_class: "mailed", byte_length: 0 }];
+        write_failure_at(&root, "same", &completed, Vec::new(), &failure()).expect("publish prior leaf");
+        fs::write(root.join("execution/neighbor"), "neighbor").expect("publish neighbor");
+        let prior = fs::read_to_string(root.join("execution/same/diagnostics.json")).expect("read prior leaf");
+
+        let error = write_failure_at_with_fault(&root, "same", &[], Vec::new(), &failure(), fault)
+            .expect_err("injected persistence fault fails");
+        assert!(error.contains("injected diagnostics"));
+        assert_eq!(
+            fs::read_to_string(root.join("execution/same/diagnostics.json")).expect("prior leaf remains"),
+            prior
+        );
+        assert_eq!(fs::read_to_string(root.join("execution/neighbor")).expect("neighbor remains"), "neighbor");
+        assert!(
+            fs::read_dir(root.join("execution")).expect("list execution root").all(|entry| !entry
+                .expect("execution entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")),
+            "failed persistence leaves no temporary sibling"
+        );
+        fs::remove_dir_all(root).expect("remove temporary root");
+    }
+
+    #[test]
+    fn write_fault_cleans_temporary_sibling_without_replacing_published_data() {
+        fault_keeps_published_leaf_and_neighbors(PersistenceFault::Write);
+    }
+
+    #[test]
+    fn publication_fault_cleans_temporary_sibling_without_replacing_published_data() {
+        fault_keeps_published_leaf_and_neighbors(PersistenceFault::Publish);
     }
 }
