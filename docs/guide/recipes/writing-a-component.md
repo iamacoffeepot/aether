@@ -104,6 +104,53 @@ target/wasm32-unknown-unknown/debug/my_component.wasm
 component set. Use the direct package build for iteration and the distribution
 command when validating packaging/discovery.
 
+### Use the watched development loop
+
+When an engine is already running, `dev-component` owns the repetitive
+build/upload/load-or-replace loop:
+
+```sh
+cargo xtask dev-component \
+  --package my-component \
+  --engine-id <engine UUID>
+```
+
+The package and engine are always explicit. The command infers the wasm target
+only when that package exposes one component; otherwise add the exact artifact
+stem, for example `--target my_component`. It connects to
+`http://127.0.0.1:8890/mcp` by default; use `--mcp-endpoint <URL>` for another
+configured streamable-HTTP endpoint.
+
+Without an existing instance, the first successful pass uploads and loads the
+component. The command prints and retains both the canonical loaded name and
+the `mailbox_id`; later passes upload and replace that same mailbox. To replace
+an instance from the first pass, supply the exact current public replacement
+selector returned by `load_component`:
+
+```sh
+cargo xtask dev-component \
+  --package my-component \
+  --engine-id <engine UUID> \
+  --mailbox-id mbx-...
+```
+
+The approved workflow calls this the existing-lineage mode, but the live
+`replace_component` contract concretely accepts a tagged mailbox id, not a
+lineage string. `dev-component` therefore does not hash or infer a mailbox id
+from a name. A malformed id is rejected before the watcher starts.
+
+The package root is watched recursively and generated target output is ignored.
+Edits are debounced, rebuilds are serialized, and edits arriving during a pass
+coalesce into another pass. A build, upload, load, or replacement error is
+reported without changing the command's last known live binding; the watcher
+then waits for the next edit. Replacement itself retains the current MCP tool's
+phase-dependent failure semantics, so inspect the selected component after a
+replacement error before relying on its guest state.
+
+Ctrl-C stops only this local developer loop. It does not drop the component,
+terminate the engine, or clean up any lifecycle resource. You remain responsible
+for the engine and component you explicitly selected.
+
 ## 5. Upload, then load
 
 Stored artifacts and live instances are different resources:
@@ -161,7 +208,7 @@ upload_component(staged_path = ".../my_component.wasm", name = "my-component-dev
 
 replace_component(
   engine_id,
-  component = "<loaded lineage or mailbox id required by live schema>",
+  mailbox_id = "<LoadResult.mailbox_id>",
   selector = "<new_hash>"
 )
 ```

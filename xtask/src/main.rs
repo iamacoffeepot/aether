@@ -25,6 +25,7 @@
 
 mod affected;
 mod cargo;
+mod dev_component;
 mod dist;
 mod inventory;
 mod package;
@@ -34,6 +35,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::affected::AffectedArgs;
+use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
 use crate::package::PackageArgs;
 use crate::transform::TransformArgs;
@@ -47,6 +49,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Watch, build, upload, and hot-reload one component on an explicit engine.
+    DevComponent(DevComponentArgs),
     /// Build component wasm + chassis bins into `dist/` with a manifest.
     Dist(DistArgs),
     /// Emit the shippable depot layout (ADR-0163 §1): the chassis binary,
@@ -69,6 +73,7 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::DevComponent(args) => dev_component::run(&args),
         Commands::Dist(args) => dist::run(&args),
         Commands::Package(args) => package::run(&args),
         Commands::Transform(args) => transform::run(&args),
