@@ -29,6 +29,7 @@
 //! on the pose *and* the eye, so it alone is genuinely re-extracted, off
 //! the posed surface.
 
+pub use aether_math::Rigid;
 use aether_math::Vec3;
 #[cfg(test)]
 use core::iter;
@@ -92,21 +93,6 @@ pub const INFLUENCES: usize = 4;
 /// scales with the mesh.
 const MINIMUM_SHARE: f32 = 1.0e-4;
 
-/// An affine map, held as the three images of the basis and the image of
-/// the origin.
-///
-/// Sampled out of a composition of rotations rather than multiplied
-/// together: each bone's rule is written the way the rig describes it —
-/// rotate about this pivot, then that one — and an affine map is fully
-/// determined by where it sends four points. So the rule stays readable
-/// and the matrix falls out of it, instead of the rule being rewritten as
-/// a product nobody can check against the reference.
-#[derive(Clone, Copy, Debug)]
-pub struct Rigid {
-    columns: [Vec3; 3],
-    translation: Vec3,
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct RigidBounds {
     pub stretch: f32,
@@ -132,110 +118,45 @@ fn operator_bound(columns: &[Vec3; 3]) -> f32 {
         * (1.0 + 8.0 * f32::EPSILON)
 }
 
-impl Rigid {
-    pub const IDENTITY: Self = Self { columns: [Vec3::X, Vec3::Y, Vec3::Z], translation: Vec3::ZERO };
+fn rigid_parts(rigid: &Rigid) -> ([Vec3; 3], Vec3) {
+    let [x, y, z] = rigid.rows();
 
-    /// The affine map `send` performs, read off its action on the origin
-    /// and the three basis vectors.
-    pub(crate) fn sample(send: impl Fn(Vec3) -> Vec3) -> Self {
-        let translation = send(Vec3::ZERO);
+    (
+        [Vec3::new(x[0], y[0], z[0]), Vec3::new(x[1], y[1], z[1]), Vec3::new(x[2], y[2], z[2])],
+        Vec3::new(x[3], y[3], z[3]),
+    )
+}
 
-        Self { columns: [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| send(axis) - translation), translation }
-    }
+/// Pose-wide scalar bounds used by every silhouette node this bone
+/// influences. Computing them once avoids transforming a sphere and cone
+/// separately at every node visited by the query.
+pub(crate) fn silhouette_bounds(rigid: &Rigid) -> Option<RigidBounds> {
+    let (columns, _) = rigid_parts(rigid);
+    let stretch = operator_bound(&columns);
 
-    /// Where this map sends a point.
-    pub fn point(&self, p: Vec3) -> Vec3 {
-        self.direction(p) + self.translation
-    }
+    (stretch.is_finite() && stretch >= 0.0).then_some(RigidBounds { stretch })
+}
 
-    /// Where this map sends a direction — a normal, or the offset a decal
-    /// stands off its surface by.
-    pub fn direction(&self, v: Vec3) -> Vec3 {
-        self.columns[0] * v.x + self.columns[1] * v.y + self.columns[2] * v.z
-    }
+/// Conservative linear, translational, and angular distances between two
+/// affine bone maps.
+pub(crate) fn relative_bounds(from: &Rigid, to: &Rigid) -> Option<RigidDelta> {
+    let (from_columns, from_translation) = rigid_parts(from);
+    let (to_columns, to_translation) = rigid_parts(to);
+    let difference =
+        [from_columns[0] - to_columns[0], from_columns[1] - to_columns[1], from_columns[2] - to_columns[2]];
+    // For rotations, `||A - B|| = 2 sin(theta / 2)`. Gershgorin's
+    // operator upper bound keeps the recovered relative angle wide.
+    let displacement = operator_bound(&difference);
+    let translation = (from_translation - to_translation).length() * (1.0 + 8.0 * f32::EPSILON);
+    let rotation = (2.0 * (displacement * 0.5).min(1.0).asin() + 32.0 * f32::EPSILON).min(PI);
 
-    /// Pose-wide scalar bounds used by every silhouette node this bone
-    /// influences. Computing them once avoids transforming a sphere and
-    /// cone separately at every node visited by the query.
-    pub(crate) fn silhouette_bounds(&self) -> Option<RigidBounds> {
-        let stretch = operator_bound(&self.columns);
-
-        (stretch.is_finite() && stretch >= 0.0).then_some(RigidBounds { stretch })
-    }
-
-    /// Conservative linear, translational, and angular distances between
-    /// two affine bone maps.
-    pub(crate) fn relative_bounds(&self, other: &Self) -> Option<RigidDelta> {
-        let difference = [
-            self.columns[0] - other.columns[0],
-            self.columns[1] - other.columns[1],
-            self.columns[2] - other.columns[2],
-        ];
-        // For rotations, `||A - B|| = 2 sin(theta / 2)`. Gershgorin's
-        // operator upper bound keeps the recovered relative angle wide.
-        let displacement = operator_bound(&difference);
-        let translation = (self.translation - other.translation).length() * (1.0 + 8.0 * f32::EPSILON);
-        let rotation = (2.0 * (displacement * 0.5).min(1.0).asin() + 32.0 * f32::EPSILON).min(PI);
-
-        (displacement.is_finite()
-            && translation.is_finite()
-            && rotation.is_finite()
-            && displacement >= 0.0
-            && translation >= 0.0
-            && rotation >= 0.0)
-            .then_some(RigidDelta { displacement, translation, rotation })
-    }
-
-    /// The inverse, given the linear part is a rotation: its transpose,
-    /// and the translation carried back through it.
-    ///
-    /// Every bone rule is a composition of rotations about pivots, so the
-    /// linear part is orthonormal by construction and the transpose is the
-    /// inverse. Nothing here scales or shears, and if anything ever does
-    /// this is the assertion that has to move first.
-    pub fn inverse(&self) -> Self {
-        let [x, y, z] = self.columns;
-        let columns = [Vec3::new(x.x, y.x, z.x), Vec3::new(x.y, y.y, z.y), Vec3::new(x.z, y.z, z.z)];
-        let inverted = Self { columns, translation: Vec3::ZERO };
-
-        Self { columns, translation: -inverted.direction(self.translation) }
-    }
-
-    /// `self + other * weight`, the accumulation linear blend skinning is.
-    ///
-    /// At *one* point, blending the maps and applying the blend once is
-    /// the same answer as applying each map and blending the results, so
-    /// this order is free and lets a vertex's position, its normal and its
-    /// standoff share a single blend.
-    ///
-    /// Across *several* points it is not. Interpolating transforms between
-    /// three corners and applying the result to the interpolated point is
-    /// a different function from posing each corner and interpolating
-    /// those — see [`Skin::pose_curves`], where the difference is the
-    /// drawing leaving the surface.
-    fn add_scaled(self, other: &Self, weight: f32) -> Self {
-        Self {
-            columns: [0, 1, 2].map(|axis| self.columns[axis] + other.columns[axis] * weight),
-            translation: self.translation + other.translation * weight,
-        }
-    }
-
-    const ZERO: Self = Self { columns: [Vec3::ZERO; 3], translation: Vec3::ZERO };
-
-    /// The three rows a uniform block carries this map as: each the
-    /// linear part's row followed by that axis' translation, so a shader
-    /// poses a point by three dot products against `vec4(p, 1)` and a
-    /// direction by three against `vec4(v, 0)`.
-    ///
-    /// Rows rather than the columns the struct holds, because a row is
-    /// what a dot product wants and the transposition is free here and
-    /// per-vertex there.
-    fn rows(&self) -> [[f32; 4]; 3] {
-        let [x, y, z] = self.columns;
-        let t = self.translation;
-
-        [[x.x, y.x, z.x, t.x], [x.y, y.y, z.y, t.y], [x.z, y.z, z.z, t.z]]
-    }
+    (displacement.is_finite()
+        && translation.is_finite()
+        && rotation.is_finite()
+        && displacement >= 0.0
+        && translation >= 0.0
+        && rotation >= 0.0)
+        .then_some(RigidDelta { displacement, translation, rotation })
 }
 
 /// The bone table a uniform blob carries, as little-endian `f32` lanes:

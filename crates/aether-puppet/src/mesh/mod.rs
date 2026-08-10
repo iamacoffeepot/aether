@@ -16,9 +16,9 @@
 
 pub mod bvh;
 
-use aether_math::Vec3;
+use aether_math::{Rigid, Vec3};
 
-use crate::deform::{Rigid, Skin};
+use crate::deform::Skin;
 use bvh::{Bvh, SilhouetteBvh};
 
 const FACING_BLOCK_SIZE: usize = 8192;

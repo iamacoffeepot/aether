@@ -42,7 +42,7 @@ pub mod survey;
 
 use std::collections::VecDeque;
 
-use aether_math::{Mat4, Vec2, Vec3};
+use aether_math::{Mat4, Rigid, Vec2, Vec3};
 use aether_render::{
     CreateGeometry, CreateTexture, DestroyTexture, DrawMaterialTextured, GeometrySlotSpec, MaterialRect,
     MaterialTexturedRect, ProgramDestroy, ProgramDispatch, ProgramRegister, QuadBlend, TextureFormat, TextureSampling,
@@ -57,7 +57,7 @@ use survey::Survey;
 
 use crate::anchor::Anchors;
 use crate::chart::{self, Face};
-use crate::deform::{BONE_LIMIT, Rigid, Skin};
+use crate::deform::{BONE_LIMIT, Skin};
 use crate::extract::Settings;
 use crate::labels;
 use crate::mesh::Mesh;

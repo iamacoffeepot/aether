@@ -35,6 +35,7 @@ mod aabb;
 mod color;
 mod mat;
 mod quat;
+mod rigid;
 #[cfg(test)]
 mod test_helpers;
 mod vec;
@@ -43,6 +44,7 @@ pub use aabb::{Aabb, Axis};
 pub use color::{Hsl, Rgb, Rgba};
 pub use mat::Mat4;
 pub use quat::Quat;
+pub use rigid::Rigid;
 pub use vec::{Vec2, Vec3, Vec4};
 
 // Re-export the standard math constants under our own crate root so
