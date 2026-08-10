@@ -1535,7 +1535,7 @@ mod tests {
     /// no cell at all) is "unknown cost": `cost_confident` is false, so the
     /// recruiter falls back to the width gate. Here a wide fan-out of unseen
     /// recipients clears `recruit_min` and recruits via the *fallback* path,
-    /// not `recruit_k` (which would see total_work = 0 and stay local).
+    /// not `recruit_k` (which would see `total_work` = 0 and stay local).
     #[test]
     fn unknown_cost_falls_back_to_width_gate() {
         let (registry, mailer) = bare_substrate();
