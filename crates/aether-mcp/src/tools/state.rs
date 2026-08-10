@@ -605,6 +605,15 @@ impl Mcp {
         for wire in result.kinds {
             let schema = wire::from_bytes::<SchemaType>(&wire.schema_wire)
                 .map_err(|error| anyhow::anyhow!("undecodable schema for kind {}: {error}", wire.name))?;
+            let expected_id = KindId(kind_id_from_parts(&wire.name, &schema));
+            if wire.id != expected_id {
+                anyhow::bail!(
+                    "kind {} advertises id {:#x}, but its live name/schema canonically identify as {:#x}",
+                    wire.name,
+                    wire.id.0,
+                    expected_id.0
+                );
+            }
             fresh.insert(wire.name.clone(), KindDescriptor { name: wire.name, schema });
         }
         self.kinds.descriptors.lock().expect("kinds-cache mutex is never poisoned").insert(engine, fresh.clone());

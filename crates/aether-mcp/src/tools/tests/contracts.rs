@@ -1,11 +1,19 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use super::super::contracts::{
-    ConfigContract, ContractIdentity, ContractSnapshot, HandlerContract, ReplyContractSnapshot, diff_contracts,
+    ConfigContract, ContractIdentity, ContractSnapshot, HandlerContract, ReplyContractSnapshot, descriptor,
+    diff_contracts,
 };
-use super::super::test_support::{boot_hub, connect_mcp};
+use super::super::test_support::{
+    TerrainReplyEvent, TerrainRouteReply, boot_hub, boot_hub_with_route_loopback, connect_mcp,
+    try_boot_hub_with_terrain_route_loopback,
+};
 use super::super::*;
-use aether_data::{EngineId, Uuid};
+use crate::args::{CompareComponentContractsArgs, ComponentContractSubject};
+use aether_data::{EngineId, KindId, Uuid, canonical::kind_id_from_parts, mailbox_id_from_path, tagged_id, wire};
+use aether_kinds::{ComponentCapabilities, DescribeComponent, DescribeComponentResult, KindDescriptorWire};
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
 
 fn identity(engine_id: &str, lineage: &str) -> ContractIdentity {
     ContractIdentity {
@@ -146,4 +154,101 @@ async fn strict_refresh_failure_returns_an_error_before_any_contract_verdict() {
         mcp.refresh_engine_kinds_strict(engine).await.is_err(),
         "an unreachable routed engine is inconclusive, never a stale successful refresh"
     );
+}
+
+fn live_inventory(name: &str, schema: &SchemaType) -> ListKindsResult {
+    ListKindsResult {
+        kinds: vec![KindDescriptorWire {
+            id: KindId(kind_id_from_parts(name, schema)),
+            name: name.to_owned(),
+            schema_wire: wire::to_vec(schema).expect("schema wire-encodes"),
+        }],
+    }
+}
+
+#[test]
+fn capability_descriptor_lookup_rejects_handler_and_config_id_mismatches() {
+    let name = "aether.test.subject";
+    let schema = SchemaType::String;
+    let kinds = HashMap::from([(name.to_owned(), KindDescriptor { name: name.to_owned(), schema: schema.clone() })]);
+    let expected = KindId(kind_id_from_parts(name, &schema));
+    assert!(descriptor(&kinds, name, expected, "handler input").is_ok());
+    for role in ["handler input", "Config"] {
+        let error = descriptor(&kinds, name, KindId(expected.0 ^ 1), role)
+            .expect_err("same-name descriptor must still match the capability's exact id");
+        assert!(error.to_string().contains("not advertised"), "{role}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn strict_refresh_rejects_a_wire_id_that_disagrees_with_its_name_and_schema() {
+    let name = "aether.test.inconsistent";
+    let mut inventory = live_inventory(name, &SchemaType::String);
+    inventory.kinds[0].id = KindId(0x4755);
+    let (_chassis, port) = boot_hub_with_route_loopback(inventory, Arc::new(AtomicUsize::new(0)));
+    let mcp = connect_mcp(port);
+    let error = mcp
+        .refresh_engine_kinds_strict(EngineId(Uuid::from_u128(0x0047_5501)))
+        .await
+        .expect_err("an inconsistent live descriptor is inconclusive");
+    assert!(error.to_string().contains("canonically identify"));
+}
+
+#[tokio::test]
+async fn router_dispatches_a_fresh_compatible_comparison_with_explicit_subject_identities() {
+    let baseline = "aether.component/aether.embedded:baseline";
+    let candidate = "aether.component/aether.embedded:candidate";
+    let first_engine = EngineId(Uuid::from_u128(0x0047_5502));
+    let second_engine = EngineId(Uuid::from_u128(0x0047_5503));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let replies = Arc::new(Mutex::new(VecDeque::from([
+        TerrainRouteReply {
+            events: vec![TerrainReplyEvent {
+                kind: DescribeComponentResult::ID,
+                payload: DescribeComponentResult::Ok { capabilities: ComponentCapabilities::default() }
+                    .encode_into_bytes(),
+            }],
+            settle: true,
+        },
+        TerrainRouteReply {
+            events: vec![TerrainReplyEvent {
+                kind: DescribeComponentResult::ID,
+                payload: DescribeComponentResult::Ok { capabilities: ComponentCapabilities::default() }
+                    .encode_into_bytes(),
+            }],
+            settle: true,
+        },
+    ])));
+    let inventory = ListKindsResult { kinds: Vec::new() };
+    let Ok((_chassis, port)) = try_boot_hub_with_terrain_route_loopback(inventory, Arc::clone(&calls), replies) else {
+        return;
+    };
+    let output = connect_mcp(port)
+        .compare_component_contracts(Parameters(CompareComponentContractsArgs {
+            baseline: ComponentContractSubject {
+                engine_id: first_engine.0.to_string(),
+                component: baseline.to_owned(),
+            },
+            candidate: ComponentContractSubject {
+                engine_id: second_engine.0.to_string(),
+                component: candidate.to_owned(),
+            },
+        }))
+        .await
+        .expect("both routed live subjects compare");
+    let result: serde_json::Value = serde_json::from_str(&output).expect("comparison JSON");
+    assert_eq!(result["compatible"], true);
+    assert_eq!(result["baseline"]["engine_id"], first_engine.0.to_string());
+    assert_eq!(result["candidate"]["engine_id"], second_engine.0.to_string());
+    assert_eq!(result["baseline"]["canonical_lineage"], baseline);
+    assert_eq!(result["candidate"]["canonical_lineage"], candidate);
+    assert_eq!(
+        result["baseline"]["mailbox_id"],
+        tagged_id::encode(mailbox_id_from_path(baseline).0).expect("fixture mailbox id is taggable")
+    );
+    let calls = calls.lock().expect("calls mutex is sound");
+    assert_eq!(calls.len(), 4, "each subject performs live describe plus strict inventory refresh");
+    assert_eq!(calls.iter().filter(|call| call.kind == DescribeComponent::ID).count(), 2);
+    assert_eq!(calls.iter().filter(|call| call.kind == ListKinds::ID).count(), 2);
+    drop(calls);
 }

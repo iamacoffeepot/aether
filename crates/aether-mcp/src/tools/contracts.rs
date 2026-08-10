@@ -91,7 +91,7 @@ async fn snapshot_subject(mcp: &Mcp, engine: EngineId, component: &str) -> anyho
     };
     let mut handlers = BTreeMap::new();
     for handler in observed.capabilities.handlers {
-        let input = descriptor(&observed.kinds, &handler.name, "handler input")?;
+        let input = descriptor(&observed.kinds, &handler.name, handler.id, "handler input")?;
         let contract = HandlerContract {
             input_schema: input.schema.clone(),
             reply: reply_snapshot(&observed.kinds, handler.reply)?,
@@ -104,7 +104,7 @@ async fn snapshot_subject(mcp: &Mcp, engine: EngineId, component: &str) -> anyho
         .capabilities
         .config
         .map(|config| {
-            let descriptor = descriptor(&observed.kinds, &config.name, "Config")?;
+            let descriptor = descriptor(&observed.kinds, &config.name, config.id, "Config")?;
             Ok::<ConfigContract, anyhow::Error>(ConfigContract {
                 id: tagged_id::encode(config.id.0).unwrap_or_else(|| format!("{:#x}", config.id.0)),
                 name: config.name,
@@ -115,12 +115,23 @@ async fn snapshot_subject(mcp: &Mcp, engine: EngineId, component: &str) -> anyho
     Ok(ContractSnapshot { identity, handlers, config, fallback: observed.capabilities.fallback.is_some() })
 }
 
-fn descriptor<'a>(
+pub(super) fn descriptor<'a>(
     kinds: &'a HashMap<String, KindDescriptor>,
     name: &str,
+    expected_id: KindId,
     role: &str,
 ) -> anyhow::Result<&'a KindDescriptor> {
-    kinds.get(name).ok_or_else(|| anyhow::anyhow!("{role} kind {name:?} missing from strict live inventory"))
+    let descriptor =
+        kinds.get(name).ok_or_else(|| anyhow::anyhow!("{role} kind {name:?} missing from strict live inventory"))?;
+    let actual_id = KindId(kind_id_from_parts(&descriptor.name, &descriptor.schema));
+    if actual_id != expected_id {
+        anyhow::bail!(
+            "{role} kind {name:?} canonically identifies as {:#x}, not advertised {:#x}",
+            actual_id.0,
+            expected_id.0
+        );
+    }
+    Ok(descriptor)
 }
 
 fn reply_snapshot(
