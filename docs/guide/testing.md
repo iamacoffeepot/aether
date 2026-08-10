@@ -141,6 +141,16 @@ headless, so any rendered-output assertion has to use SubstrateHarness plus its 
 extension, and any
 externally-addressable-over-the-wire assertion has to be FleetHarness.
 
+Bloomery coordinator behavior has a third boundary: use
+**LaneHarness** for a scenario that must prove the coordinator makes progress
+through its durable work loop, rather than merely that a reducer or runner
+returns an expected value. It forks the production coordinator and drives its
+real local-lane boundary while replacing only the expensive transform program
+and GitHub service. That makes it the right tier for dispatch, evidence, retry,
+wedge, aggregate, and liveness contracts; it is not a model-quality evaluation
+or proof that the real transform program, live credentials, or GitHub transport
+work. See [SubstrateHarness, FleetHarness, and LaneHarness](testing/substrateharness-and-fleetharness.md#laneharness-topology).
+
 For overlay rendering, split structural and raster proof deliberately. Assert exact
 rectangle geometry, clips, texture coordinates, tint, texture identity, projection
 space, and submission order through `SubstrateHarness::committed_overlay_snapshot`; then use
