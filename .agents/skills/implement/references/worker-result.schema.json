@@ -35,8 +35,7 @@
       "type": "array",
       "items": {
         "type": "string"
-      },
-      "uniqueItems": true
+      }
     },
     "checks": {
       "type": "object",

@@ -15,7 +15,7 @@ Read [Codex harness](../_shared/codex-harness.md), [GitHub workflow](../_shared/
 
 Require at least one exchange in which repository tooling, process, harness behavior, or project mechanics were encountered. If there is no reviewable activity, report `Nothing to retrospect — the session has no activity to review.`
 
-This skill does not scope, design, plan, implement, comment on, modify, or close existing issues. It does not open a PR. New issues remain Backlog by carrying no `phase:*` label.
+This skill does not scope, design, plan, implement, comment on, modify, or close existing issues. It does not open a PR. New issues remain unscoped because they contain no managed scope section.
 
 ## First turn: enumerate, classify, and draft
 
@@ -33,7 +33,7 @@ Use focused repository reads and REST issue metadata to verify classification. T
 
 For every `File` candidate, prepare the exact issue through `$sketch` mechanics:
 
-1. Infer a conventional title and `type:*` label from the current sketch rules. Add `crate:*` only for a real crate; Codex/workflow/repo meta-scopes deliberately have no crate label. Add `papercut` and no `phase:*` label.
+1. Infer a conventional title and `type:*` label from the current sketch rules. Add `crate:*` only for a real crate; Codex/workflow/repo meta-scopes deliberately have no crate label. Add `papercut` and no managed scope section or body routing metadata.
 2. Verify proposed labels exist. If sketch mechanics require creating a missing crate label, include that exact label creation in the confirmation plan.
 3. Preserve the enumerated candidate description verbatim in the blockquote. Add only two or three grounded sentences; do not speculate or perform scope/design work.
 4. Use this exact body shape:
@@ -83,7 +83,7 @@ Immediately before each create:
 1. Recheck likely duplicates through REST. If an approved candidate is now tracked, skip it and report the issue number rather than creating a duplicate.
 2. Verify the title, labels, and body still match the approved draft. If a required label is missing, create it only when that prerequisite was shown and approved; otherwise stop for confirmation.
 3. Write the approved markdown to a temporary file with `apply_patch`; never interpolate it into a shell command.
-4. Create the issue with `POST repos/iamacoffeepot/aether/issues`, passing `type:*`, optional real-crate `crate:*`, and `papercut` inline. Do not use a GraphQL convenience command, add a phase label, or post an audit comment.
+4. Create the issue with `POST repos/iamacoffeepot/aether/issues`, passing `type:*`, optional real-crate `crate:*`, and `papercut` inline. Do not use a GraphQL convenience command, add managed scope artifacts, or post an audit comment.
 5. Record the returned issue number and title before proceeding to the next draft.
 
 File sequentially so an uncertain response cannot create several duplicates. On a mutation error, re-read repository issue state before any retry. If success cannot be established, stop the batch: already filed issues remain filed, the failed item is reported as uncertain or failed, and later items are reported as not attempted. Never repeat the whole batch.
