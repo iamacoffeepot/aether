@@ -269,6 +269,17 @@ does not expose synthetic injection.
 panic or explicit persistence. It avoids filling successful CI runs with images
 while making a failed visual assertion inspectable.
 
+For a declarative sequence where failure evidence is useful before any visual
+assertion, opt in explicitly with `SubstrateHarness::execute_with_diagnostics`.
+It returns the same typed `ExecutionError` as `execute`; on failure only, it
+writes `target/substrate-harness-artifacts/execution/<id>/diagnostics.json`.
+The versioned record contains the original id, failure category/message and
+failing label, completed labels in order with output class and byte length, and
+the oldest-first observed kind names. It intentionally excludes reply bytes and
+PNG data. Diagnostic I/O is best-effort and cannot replace the primary error.
+CI already uploads this artifact root on failure. Keep visual PNG evidence with
+`ArtifactGuard`; the execution bundle is non-visual progress context.
+
 Pair it with structural checks (dimensions, non-background pixels, regions,
 reference relation) rather than only golden-byte equality. GPU/render changes
 can be semantically correct without byte-identical PNG compression or edge

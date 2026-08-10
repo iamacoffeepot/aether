@@ -206,3 +206,10 @@ returning `Err`. Attach an already-loaded same-size reference PNG with
 oracle; the frame reductions above stay what decides pass or fail. CI uploads each
 failed shard's `target/substrate-harness-artifacts/**` tree for download; a green run uploads
 nothing.
+
+`ArtifactGuard` owns visual bytes. For a declarative harness sequence that fails
+before a capture or reply assertion, use `SubstrateHarness::execute_with_diagnostics`
+instead of making ordinary `execute` a filesystem writer. It retains a failure-only,
+bounded JSON record under `target/substrate-harness-artifacts/execution/<id>/` while
+returning the original typed `ExecutionError`; see the harness guide for its exact
+fields and the visual/non-visual split.
