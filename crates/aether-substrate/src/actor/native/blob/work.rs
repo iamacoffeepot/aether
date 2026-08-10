@@ -823,7 +823,7 @@ impl BlobProducer {
             // broadcast-recruits siblings, sized by the cost-aware
             // recruiter (iamacoffeepot/aether#1178).
             self.sink.schedule(Arc::clone(&blob_dyn));
-            let extra = recruit_extra(&outcome, self.sink.workers());
+            let extra = recruit_extra(&outcome, self.sink.workers(), wake_cost_nanos());
             if extra > 0 {
                 self.sink.recruit(&blob_dyn, extra);
             }
@@ -931,12 +931,12 @@ fn group_cap_for(routed: &[Mail]) -> usize {
 /// high-MAD), fall back to the original **width gate**: recruit only when
 /// the fresh-group count clears `recruit_min`, capped by `recruit_cap`.
 /// Width is the confidence fallback, no longer the primary signal.
-fn recruit_extra(outcome: &FlushOutcome, w: usize) -> usize {
+fn recruit_extra(outcome: &FlushOutcome, w: usize, wake_cost: u64) -> usize {
     if outcome.fresh_groups == 0 {
         return 0;
     }
     if outcome.cost_confident {
-        let k = recruit_k(outcome.total_work, outcome.max_group_work, outcome.fresh_groups, w, wake_cost_nanos());
+        let k = recruit_k(outcome.total_work, outcome.max_group_work, outcome.fresh_groups, w, wake_cost);
         k.min(recruit_cap()).saturating_sub(1)
     } else if outcome.fresh_groups >= recruit_min() {
         // Confidence fallback: the unchanged width gate.
@@ -1551,7 +1551,7 @@ mod tests {
         assert!(!outcome.cost_confident, "unseeded handlers mark the blob unknown-cost");
         // The width fallback recruits (12 >= recruit_min 9): G.min(cap) - 1 =
         // 11 (the final W cap lives in WakeSink::recruit, as it did pre-#1178).
-        let extra = recruit_extra(&outcome, 8);
+        let extra = recruit_extra(&outcome, 8, 10_000);
         assert_eq!(extra, 11, "width fallback recruits G.min(recruit_cap) - 1");
     }
 
@@ -1576,7 +1576,7 @@ mod tests {
 
         assert!(!outcome.cost_confident);
         assert_eq!(
-            recruit_extra(&outcome, 8),
+            recruit_extra(&outcome, 8, 10_000),
             0,
             "narrow unknown-cost fan-out stays local (width fallback, < recruit_min)"
         );
@@ -1609,7 +1609,7 @@ mod tests {
         assert_eq!(outcome.fresh_groups, 3);
         // Σw = 150_000, w_max = 50_000 → K = 3, extra = 2 — recruited despite
         // being far below the width threshold.
-        assert_eq!(recruit_extra(&outcome, 8), 2, "heavy narrow fan-out recruits K-1 = 2 without the width gate");
+        assert_eq!(recruit_extra(&outcome, 8, 0), 2, "heavy narrow fan-out recruits K-1 = 2 without the width gate");
     }
 
     /// A *cheap* narrow fan-out with trustworthy cost stays `K = 1` (local) —
@@ -1634,6 +1634,10 @@ mod tests {
         let outcome = blob.append_flush(routed, &mut index);
 
         assert!(outcome.cost_confident);
-        assert_eq!(recruit_extra(&outcome, 8), 0, "cheap fan-out stays local (Σw below the wake floor)");
+        assert_eq!(
+            recruit_extra(&outcome, 8, WAKE_FLOOR_NANOS),
+            0,
+            "cheap fan-out stays local (Σw below the wake floor)"
+        );
     }
 }
