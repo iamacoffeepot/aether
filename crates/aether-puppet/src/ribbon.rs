@@ -1,74 +1,28 @@
-//! Strokes to triangles.
+//! Puppet policy and renderer packing for shared eye-facing stroke geometry.
 //!
-//! The offline renderer ends at SVG, where a stroke is a centreline and a
-//! width and the backend does the rest. A substrate has no such backend —
-//! `aether.draw_triangle` takes triangles — so the ribbon has to be built
-//! here, two per segment, the same shape `aether.kit.mesh` already uses for
-//! its polygon outlines.
-//!
-//! Two things differ from that outline, and both come from wanting a pen
-//! rather than a wire.
-//!
-//! **The ribbon faces the eye.** An outline offset in the surface plane
-//! disappears edge-on; a drawn line never does, because a pen line is not a
-//! thing in the world with a side to it. Offsetting perpendicular to the
-//! stroke *and* to the view keeps the full width from every angle.
-//!
-//! **Width is angular, not absolute.** A plotter draws at one pen width
-//! wherever the subject is on the page, so a world-space width — which
-//! thins with distance like real geometry — reads as wire, not ink.
-//! Scaling the half-width by the distance to the eye holds it constant on
-//! screen, and needs no viewport: the angle is the parameter.
+//! `aether_mesh::stroke` owns the numeric solve. This module retains the
+//! puppet's public API, resolves feature policy into angular parameters, and
+//! packs renderer-neutral positions into coloured `DrawTriangle`s.
 
 use aether_math::{Rgb, Vec3};
+use aether_mesh::stroke::{self, StrokeParameters, StrokePoint};
 use aether_render::{DrawTriangle, Vertex};
 
 use crate::feature::{Curve3, Pen};
-use crate::style::{pressure, wander};
 
-/// Page pixels per radian of arc: the one bridge between the offline
-/// renderer's page-space measurements and the angular units used here.
-/// The offline renderer draws on a 900 px page at this field of view,
-/// which works out to ~1410 px per radian. Any figure quoted in page
-/// pixels — a width, a wobble, a length floor — divides by this to cross.
+pub use aether_mesh::stroke::{Anchor, NOT_DRAWN, Rail};
+
+/// Page pixels per radian of arc: the bridge between the offline renderer's
+/// page-space measurements and the angular units used by the shared solve.
 const PAGE_PIXELS_PER_RADIAN: f32 = 1410.0;
 
-/// Half-width of a stroke at unit distance, in radians. Multiplied by the
-/// distance to the eye it becomes a world half-width that projects to the
-/// same size wherever the subject sits.
-/// Derived, not guessed: half of the offline silhouette's 2 px, divided by
-/// the conversion above, divided again by the silhouette's own `base_width`
-/// of 2.0 — since this is multiplied by the class weight.
+/// Half-width of a stroke at unit distance, in radians.
 const ANGULAR_HALF_WIDTH: f32 = 0.00035;
 
-/// One page pixel of hand-wander, in the same angular units. Bare, because
-/// `ribbon` multiplies it by the class's own `wobble_amplitude` — which is
-/// already in page pixels — so the class amplitude lands exactly once.
+/// One page pixel of hand-wander, in angular units.
 const ANGULAR_WOBBLE: f32 = 1.0 / PAGE_PIXELS_PER_RADIAN;
 
-/// Nearest and furthest a point's own depth cue is allowed to reach.
-///
-/// The ink pass' vertex stage clamps by the same pair, restated in its
-/// WGSL because a shader constant cannot be imported. The two must move
-/// together.
-const DEPTH_WEIGHT_FLOOR: f32 = 0.82;
-const DEPTH_WEIGHT_CEILING: f32 = 1.22;
-
-/// What [`reference_depth`] answers for a curve that is not drawn at
-/// this eye at all.
-///
-/// A real reference depth is a distance and so never negative, which is
-/// what lets one number carry both the value and the verdict — the ink
-/// pass reads it out of a single plane and collapses the curve's rails
-/// where it is negative.
-pub const NOT_DRAWN: f32 = -1.0;
-
 /// Minimum angular arc a curve must span to read as ink.
-///
-/// Authored marks are exempt: the chart intentionally carries details
-/// smaller than the noise floor applied to extracted strokes. Kept as
-/// one function so the CPU oracle and the GPU curve reduction receive
-/// the same policy value.
 #[must_use]
 pub fn minimum_angular_length(curve: &Curve3) -> f32 {
     if curve.authored {
@@ -78,53 +32,13 @@ pub fn minimum_angular_length(curve: &Curve3) -> f32 {
     }
 }
 
-/// One point's rail pair, solved but not yet widened.
-///
-/// `offset` reaches from the centre to the right rail at full pressure,
-/// so a consumer scales it by whatever taper it believes in and mirrors
-/// it for the left. That is the whole difference between the two
-/// consumers: [`ribbon`] multiplies by the `taper` solved here from the
-/// run it was handed, and the ink pass' vertex stage multiplies by one
-/// read from the visibility field instead.
-#[derive(Clone, Copy)]
-pub struct Rail {
-    pub centre: Vec3,
-    pub offset: Vec3,
-    pub taper: f32,
-}
-
-/// One point's rail solve with the eye factored out.
-///
-/// Every field is a function of the curve alone, so a curve that has
-/// not changed shape packs the same anchors from every angle — which is
-/// what lets the ink pass upload a resident curve's ribbon once and
-/// derive its rails per frame in the vertex stage
-/// (iamacoffeepot/aether#4440).
-///
-/// The two scalars are the eye-free halves of their products. `half` is
-/// the angular half-width before the distance to the eye scales it into
-/// a world one, and `drift` is the wobble's displacement before the
-/// same distance does — so the stage that has the eye multiplies each
-/// by the depth it measures and nothing else has to travel.
-#[derive(Clone, Copy)]
-pub struct Anchor {
-    /// Where the pen goes, before the wobble displaces it.
-    pub pos: Vec3,
-    /// The chord across the point — the next point less the previous —
-    /// whose cross product with the view gives the offset's direction.
-    pub along: Vec3,
-    /// Angular half-width at full pressure, per unit of depth.
-    pub half: f32,
-    /// Hand-wander displacement, per unit of depth.
-    pub drift: f32,
-}
-
+/// Colour selected by the puppet pen policy.
+#[must_use]
 pub fn ink(pen: Pen) -> Rgb {
     match pen {
         Pen::Ink => Rgb::new(0.106, 0.106, 0.122),
         Pen::Accent => Rgb::new(0.247, 0.498, 0.816),
         Pen::Pale => Rgb::new(0.490, 0.490, 0.525),
-        // Diagnostic only. One hue per bone for the weight-paint view.
         Pen::Bone(index) => {
             const WHEEL: [Rgb; 6] = [
                 Rgb::new(0.73, 0.71, 0.66),
@@ -139,166 +53,47 @@ pub fn ink(pen: Pen) -> Rgb {
     }
 }
 
-/// One curve's anchors, or nothing if it carries no segment at all.
-///
-/// The whole rail solve save the eye, which is exactly the part that
-/// can be packed once and left on the GPU. Nothing here is a function
-/// of where the viewer stands: the chord across a point is the curve's
-/// own, the wobble's argument is world position (a stroke bends the
-/// same way from every angle and stays continuous across a weld), and
-/// the two scalars are the eye-free halves of their products.
+/// Append the curve's eye-free anchors through the shared solve.
 pub fn anchors(curve: &Curve3, jitter: u64, out: &mut Vec<Anchor>) -> bool {
-    if curve.points.len() < 2 {
-        return false;
-    }
-
-    let (weight, amplitude) = (curve.class.base_width(), curve.class.wobble_amplitude());
-    // The wobble's phase is per-stroke and its argument is world
-    // position, so neither is keyed to the page.
-    let seed = curve.seed ^ jitter;
-    let last = curve.points.len() - 1;
-
-    out.extend(curve.points.iter().enumerate().map(|(index, point)| Anchor {
-        pos: point.pos,
-        along: curve.points[(index + 1).min(last)].pos - curve.points[index.saturating_sub(1)].pos,
-        half: ANGULAR_HALF_WIDTH * weight * point.weight,
-        drift: wander(seed, point.pos) * ANGULAR_WOBBLE * amplitude,
-    }));
-
-    true
+    stroke::anchors(stroke_points(curve), parameters(curve), curve.seed, jitter, out)
 }
 
-/// The stroke's own average distance to the eye, or [`NOT_DRAWN`] where
-/// the curve does not read at this eye at all.
-///
-/// This is the whole of what the eye decides about a curve rather than
-/// about one of its points, and so the whole of what the ink pass has
-/// to deliver per frame — one float per curve against a rail buffer's
-/// megabytes (iamacoffeepot/aether#4440). Two questions share the walk
-/// because both are sums over the curve against the same distances.
-///
-/// The average is taken per stroke rather than per scene so the depth
-/// cue reads as one line turning through depth, not as a global fog.
-///
-/// The length floor does not reach an authored mark, and that exemption
-/// is not a nicety. It is a noise rejector, and the chart draws no
-/// noise: a cupid's bow is a fifth of a mouth wide, a lip corner tick is
-/// smaller still, and the iris hook arrives as two short arcs because a
-/// lid crosses it. Every one of those is under the floor and every one
-/// of them was silently missing — the mouth came out as two bare lines
-/// and the eyes as blanks, with nothing having errored.
+/// Return the curve's average eye distance, or [`NOT_DRAWN`] if it is too short.
 pub fn reference_depth(curve: &Curve3, eye: Vec3) -> f32 {
-    if curve.points.len() < 2 {
-        return NOT_DRAWN;
-    }
-
-    // Arc measured in radians rather than world units, so the length
-    // floor means the same thing at any distance.
-    let (mut total, mut arc) = (0.0f32, 0.0f32);
-    for (index, point) in curve.points.iter().enumerate() {
-        let depth = (point.pos - eye).length();
-        total += depth;
-        if let Some(next) = curve.points.get(index + 1) {
-            arc += (next.pos - point.pos).length() / depth.max(1e-4);
-        }
-    }
-    if arc < minimum_angular_length(curve) {
-        return NOT_DRAWN;
-    }
-
-    total / curve.points.len() as f32
+    stroke::reference_depth(stroke_points(curve), parameters(curve), eye)
 }
 
-/// One point's rail pair against an eye: where its centre lands once
-/// the wobble displaces it, and the offset reaching the right rail at
-/// full pressure.
-///
-/// The one place the eye meets the solve, and so the one place the ink
-/// pass' vertex stage has to reproduce — line for line, since a
-/// disagreement here is a drawing of a different width.
+/// Solve one anchor against an eye into its centre and full-pressure offset.
 #[must_use]
 pub fn rail(anchor: &Anchor, reference: f32, eye: Vec3) -> (Vec3, Vec3) {
-    let to_eye = eye - anchor.pos;
-    let depth = to_eye.length().max(1e-4);
-    // Perpendicular to the stroke and to the view at once, which is
-    // what keeps a line from vanishing when it turns edge-on.
-    let across = anchor.along.cross(to_eye);
-    let across = if across.length() < 1e-9 {
-        Vec3::new(0.0, 0.0, 0.0)
-    } else {
-        across.normalize()
-    };
-
-    // Nearer stroke points are bolder — the one cue that keeps a flat
-    // line drawing from reading as a decal on glass. The angular
-    // half-width holds screen width constant through depth, so this
-    // rides on top of it rather than being cancelled by it.
-    let depth_weight = (reference / depth).clamp(DEPTH_WEIGHT_FLOOR, DEPTH_WEIGHT_CEILING);
-
-    (anchor.pos + across * (anchor.drift * depth), across * (anchor.half * depth * depth_weight))
+    stroke::rail(anchor, reference, eye)
 }
 
-/// One curve's rail pairs, or nothing if it is too short to read once
-/// projected.
-///
-/// The three pieces above put together, and after ADR-0172 the parity
-/// oracle rather than the per-frame producer: the frame's ink derives
-/// its rails from the same three in the ink pass' vertex stage. The
-/// taper is the one part not shared — it is solved here against the arc
-/// of the curve this was handed, so a caller that split the curve into
-/// visible runs first gets ends anchored on those runs, while the ink
-/// pass reads its taper out of the visibility field instead.
+/// Append the curve's solved rails through the shared solve.
 pub fn rails(curve: &Curve3, eye: Vec3, jitter: u64, out: &mut Vec<Rail>) -> bool {
-    let reference = reference_depth(curve, eye);
-    let mut anchored = Vec::with_capacity(curve.points.len());
-    if reference < 0.0 || !anchors(curve, jitter, &mut anchored) {
-        return false;
-    }
-
-    // The taper's own parameter, walked a second time because it is a
-    // per-point prefix rather than the curve's total — and because this
-    // is the oracle's path, where a second walk costs nothing that the
-    // frame pays for.
-    let angular: Vec<f32> = curve
-        .points
-        .windows(2)
-        .scan(0.0f32, |total, pair| {
-            *total += (pair[1].pos - pair[0].pos).length() / (pair[0].pos - eye).length().max(1e-4);
-            Some(*total)
-        })
-        .collect();
-    let length = angular.last().copied().unwrap_or(0.0);
-
-    out.extend(anchored.iter().enumerate().map(|(index, anchor)| {
-        let (centre, offset) = rail(anchor, reference, eye);
-
-        Rail { centre, offset, taper: pressure(angular.get(index.saturating_sub(1)).copied().unwrap_or(0.0), length) }
-    }));
-
-    true
+    stroke::rails(stroke_points(curve), parameters(curve), eye, curve.seed, jitter, out)
 }
 
-/// One visible run as a triangle strip, or nothing if it is too short to
-/// read once projected.
-///
-/// The CPU path, and after ADR-0172 the parity oracle rather than the
-/// per-frame producer: the ink the frame shows is rasterized from
-/// [`rails`] by the stroke program instead.
+/// Append one visible run as coloured renderer triangles.
 pub fn ribbon(curve: &Curve3, eye: Vec3, jitter: u64, out: &mut Vec<DrawTriangle>) {
-    let mut solved = Vec::with_capacity(curve.points.len());
-    if !rails(curve, eye, jitter, &mut solved) {
-        return;
-    }
-
     let colour = ink(curve.pen);
-    let widened = |rail: &Rail| (rail.centre - rail.offset * rail.taper, rail.centre + rail.offset * rail.taper);
+    out.extend(
+        stroke::ribbon(stroke_points(curve), parameters(curve), eye, curve.seed, jitter)
+            .into_iter()
+            .map(|[a, b, c]| triangle(a, b, c, colour)),
+    );
+}
 
-    let mut previous = widened(&solved[0]);
-    for rail in &solved[1..] {
-        let current = widened(rail);
-        out.push(triangle(previous.0, current.0, current.1, colour));
-        out.push(triangle(previous.0, current.1, previous.1, colour));
-        previous = current;
+fn stroke_points(curve: &Curve3) -> impl Iterator<Item = StrokePoint> + Clone + '_ {
+    curve.points.iter().map(|point| StrokePoint { pos: point.pos, weight: point.weight })
+}
+
+fn parameters(curve: &Curve3) -> StrokeParameters {
+    StrokeParameters {
+        angular_half_width: ANGULAR_HALF_WIDTH * curve.class.base_width(),
+        angular_wobble: ANGULAR_WOBBLE,
+        wobble_scale: curve.class.wobble_amplitude(),
+        minimum_angular_length: minimum_angular_length(curve),
     }
 }
 
@@ -309,5 +104,73 @@ fn triangle(a: Vec3, b: Vec3, c: Vec3, colour: Rgb) -> DrawTriangle {
             Vertex { x: b.x, y: b.y, z: b.z, color: colour },
             Vertex { x: c.x, y: c.y, z: c.z, color: colour },
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::feature::{FeatureClass, SurfacePoint};
+
+    #[test]
+    fn fixed_seed_ribbon_preserves_position_and_colour_bits() {
+        let mut points = vec![
+            SurfacePoint::on_surface(Vec3::new(-0.7, 0.2, 0.4), Vec3::new(0.0, 0.0, 1.0)),
+            SurfacePoint::on_surface(Vec3::new(0.1, 0.8, 0.6), Vec3::new(0.0, 0.0, 1.0)),
+            SurfacePoint::on_surface(Vec3::new(0.9, 0.3, 1.1), Vec3::new(0.0, 0.0, 1.0)),
+        ];
+        points[0].weight = 0.65;
+        points[1].weight = 1.2;
+        points[2].weight = 0.8;
+        let curve = Curve3 {
+            points,
+            class: FeatureClass::Hatch { level: 1 },
+            pen: Pen::Accent,
+            seed: 0x1234_5678_9abc_def0,
+            authored: false,
+        };
+        let mut triangles = Vec::new();
+
+        ribbon(&curve, Vec3::new(2.4, -1.3, 5.7), 0x0fed_cba9_8765_4321, &mut triangles);
+
+        let actual: Vec<_> = triangles
+            .iter()
+            .map(|triangle| {
+                triangle.verts.map(|vertex| {
+                    [
+                        vertex.x.to_bits(),
+                        vertex.y.to_bits(),
+                        vertex.z.to_bits(),
+                        vertex.color.r.to_bits(),
+                        vertex.color.g.to_bits(),
+                        vertex.color.b.to_bits(),
+                    ]
+                })
+            })
+            .collect();
+        let expected = vec![
+            [
+                [0xbf33_9e78, 0x3e4e_8b25, 0x3ecd_8973, 0x3e7c_ed91, 0x3efe_f9db, 0x3f50_e560],
+                [0x3dc9_6911, 0x3f4e_339e, 0x3f1a_5e44, 0x3e7c_ed91, 0x3efe_f9db, 0x3f50_e560],
+                [0x3dcb_5a47, 0x3f4d_6604, 0x3f19_ed94, 0x3e7c_ed91, 0x3efe_f9db, 0x3f50_e560],
+            ],
+            [
+                [0xbf33_9e78, 0x3e4e_8b25, 0x3ecd_8973, 0x3e7c_ed91, 0x3efe_f9db, 0x3f50_e560],
+                [0x3dcb_5a47, 0x3f4d_6604, 0x3f19_ed94, 0x3e7c_ed91, 0x3efe_f9db, 0x3f50_e560],
+                [0xbf33_50b8, 0x3e4d_479f, 0x3ecd_00b5, 0x3e7c_ed91, 0x3efe_f9db, 0x3f50_e560],
+            ],
+            [
+                [0x3dc9_6911, 0x3f4e_339e, 0x3f1a_5e44, 0x3e7c_ed91, 0x3efe_f9db, 0x3f50_e560],
+                [0x3f66_50ef, 0x3e99_45bd, 0x3f8c_c902, 0x3e7c_ed91, 0x3efe_f9db, 0x3f50_e560],
+                [0x3f66_3261, 0x3e98_ce5f, 0x3f8c_c39c, 0x3e7c_ed91, 0x3efe_f9db, 0x3f50_e560],
+            ],
+            [
+                [0x3dc9_6911, 0x3f4e_339e, 0x3f1a_5e44, 0x3e7c_ed91, 0x3efe_f9db, 0x3f50_e560],
+                [0x3f66_3261, 0x3e98_ce5f, 0x3f8c_c39c, 0x3e7c_ed91, 0x3efe_f9db, 0x3f50_e560],
+                [0x3dcb_5a47, 0x3f4d_6604, 0x3f19_ed94, 0x3e7c_ed91, 0x3efe_f9db, 0x3f50_e560],
+            ],
+        ];
+
+        assert_eq!(actual, expected);
     }
 }

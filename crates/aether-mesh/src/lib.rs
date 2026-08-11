@@ -1,5 +1,5 @@
-//! Mesh DSL parser, typed AST, mesher, and minimal OBJ import/export for the
-//! primitive-composition format defined by ADR-0026 and ADR-0051.
+//! Shared mesh and stroke geometry: the mesh DSL parser, typed AST, mesher,
+//! minimal OBJ import/export, and renderer-neutral eye-facing stroke ribbons.
 //!
 //! Library-only (per ADR-0053): produces triangles, doesn't render. The
 //! `aether-mesh-viewer` runtime consumes this crate to mesh DSL text
@@ -24,6 +24,7 @@ pub mod point;
 pub mod polygon;
 pub mod serialize;
 pub mod simplify;
+pub mod stroke;
 pub mod surface_net;
 pub mod tessellate;
 

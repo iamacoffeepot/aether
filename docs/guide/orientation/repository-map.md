@@ -94,7 +94,7 @@ decision.
 | `aether-kit-terrain` | world / mark / terra / mover terrain-authoring actors |
 | `aether-kit-sim` | reference game-loop pair: the `TurnSim` authority and `PlayerClient` presentation actor |
 | `aether-kit-workbench` | terrain-annotation workbench assembly composing the widget / terrain / console layers |
-| `aether-mesh` | mesh DSL, parsing/serialization, cleanup, polygon tessellation, surface nets |
+| `aether-mesh` | mesh DSL, parsing/serialization, cleanup, polygon tessellation, surface nets, shared eye-facing stroke ribbon geometry |
 | `aether-puppet` | the wasm-hosted mascot actor: mesh-derived pen-plotter line art, authored face controls, rigging, and render mail |
 
 These crates are valuable examples, but “in tree” does not mean “native.” The
