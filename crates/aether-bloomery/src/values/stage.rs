@@ -4,8 +4,8 @@
 //! The pipeline is a closed stage vocabulary compiled into Rust, not a
 //! workflow language. A [`StageBinding`] declares what one stage consumes
 //! and produces, the profile that runs it, its process, its completion gate,
-//! and its retry budget. The full [`StageCatalog`] is itself a digest the
-//! bloom freezes at seal.
+//! and its retry budget. A bloom can freeze an authored [`StageCatalog`] in its
+//! configuration registry at seal.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -159,8 +159,8 @@ impl ContentAddressed for StageCatalog {
 }
 
 impl StageCatalog {
-    /// The catalog's content-addressed digest — the value a bloom freezes at
-    /// seal.
+    /// The catalog's content-addressed digest — the address an operator records
+    /// in a bloom's configuration registry at seal.
     #[must_use]
     pub fn digest(&self) -> Digest {
         digest_of(self)
@@ -184,9 +184,8 @@ impl StageCatalog {
         Self { bindings: StageId::ALL.iter().copied().map(Self::binding_of).collect() }
     }
 
-    /// The [`line`](Self::line) catalog's digest — the only stage-catalog digest
-    /// a v1 bloom may seal. Recomputes the twelve small bindings (cheap and
-    /// `no_std`-clean, no lazy static).
+    /// The [`line`](Self::line) catalog's digest. Recomputes the twelve small
+    /// bindings (cheap and `no_std`-clean, no lazy static).
     #[must_use]
     pub fn line_digest() -> Digest {
         Self::line().digest()
@@ -231,9 +230,8 @@ impl StageCatalog {
     ///
     /// The one place the "which catalog does this bloom run" question is answered,
     /// so the seal door, the snapshot fold, and anything later cannot give
-    /// different answers for the same spec. An unresolvable entry falls back to
-    /// the line: `reduce` refuses a spec naming content it was not given, so by
-    /// the time this is reachable the address resolved once already.
+    /// different answers for the same spec. A present unresolved entry is
+    /// refused before this lookup; only absence selects the compiled line.
     #[must_use]
     pub fn sealed_in(scopes: ConfigScopes<'_>, configs: &ResolvedConfigs) -> Self {
         configs.resolve::<Self>(scopes).ok().flatten().unwrap_or_else(Self::line)
@@ -777,7 +775,7 @@ mod tests {
         }
     }
 
-    // Tripwire: the line catalog's digest. Computed over the authored bindings,
+    // Tripwire: the compiled line catalog's digest. Computed over its authored bindings,
     // so it drifts the moment any consumes/produces/profile/process/gate/retry
     // value changes — catching an unintended catalog edit. Recompute-and-repin
     // only when a change *intends* to alter the authored line.
@@ -843,7 +841,7 @@ mod tests {
         assert_eq!(
             *StageCatalog::line_digest().as_bytes(),
             GOLDEN_LINE_DIGEST,
-            "authored stage catalog drifted from the pinned golden digest"
+            "compiled stage catalog drifted from the pinned golden digest"
         );
     }
 

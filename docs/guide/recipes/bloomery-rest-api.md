@@ -42,7 +42,8 @@ closed`.
 | `GET /workpieces` | List staged workpieces. |
 | `POST /drafts` | Open an empty draft; returns its handle (`draft_id`). |
 | `GET /drafts` · `GET /drafts/{id}` | List / read open drafts. |
-| `PATCH /drafts/{id}` | Replace the present fields of a draft (membership, base, stage catalog, toolchain, policy, budget, forecast). |
+| `PATCH /drafts/{id}` | Replace the present fields of a draft (membership, base, configuration registry, budget, forecast). |
+| `POST /configs` | Canonically encode and durably store a configuration by kind; returns its content address. |
 | `POST /drafts/{id}/seal` | Run the approve gate over every proposal (the body carries one scope projection per member), freeze the draft to a `BloomSpec`, and admit `Fact::Seal`; returns the reducer outcome. |
 | `POST /blooms/{id}/supersede` | Seal the named successor draft and admit `Fact::Supersede` against the `{id}` predecessor. |
 | `POST /blooms/{id}/grant` | Hand a wedged member more attempts and resume it on the `{id}` bloom, without sealing anything. |
@@ -62,29 +63,23 @@ representation notes carry from those types:
 - **Bloom ids in a URL path** (`/blooms/{id}`) are the lowercase **hex** of that
   digest. The seal outcome hands the id back as the byte array, so hex-encode
   it before addressing the bloom by path.
-- **The stage catalog** a draft freezes has exactly one admissible value: the
-  content address of the stage line the pipeline runs. Every other digest — the
-  all-zero default a fresh draft opens with included — is refused as
-  `UnknownStageCatalog`. The catalog is authored in Rust and re-digests whenever
-  a stage binding or an agent profile changes, so read the current value instead
-  of copying one out of a document:
-
-  ```bash
-  cargo run -q -p aether-bloomery --example stage-catalog-digest
-  # → [127,22,234,145,78,255,219,36,…]
-  ```
+- **Configuration registries** map a kind name to the content address returned
+  by `POST /configs`. A draft with no stage-catalog entry uses the compiled
+  default line; an entry names the authored catalog the bloom runs. A present
+  entry whose kind or content the host cannot resolve fails loudly rather than
+  silently falling back.
 
 ## A curl walkthrough
 
 The walkthrough reuses a handful of digests, so bind them once — three
-placeholder byte arrays and the one stage catalog the reducer admits:
+placeholder byte arrays. It authors its stage catalog through the same generic
+route every configuration uses:
 
 ```bash
 intent='[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]'
 revision='[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]'
 detail='[9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9]'
 base='[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]'
-catalog=$(cargo run -q -p aether-bloomery --example stage-catalog-digest)
 ```
 
 Stage a workpiece (its `intent` / `scope_revision` are digest byte arrays):
@@ -101,8 +96,18 @@ Open a draft and read the handle it mints:
 curl -s -X POST localhost:8910/drafts        # → {"draft_id":"1","draft":{…}}
 ```
 
-Shape the draft into an admissible bloom — one member and the stage catalog
-(`PATCH` fields mirror `BloomDraft`):
+Author a stage catalog, then shape the draft into an admissible bloom. The
+catalog below is illustrative; it must bind every stage exactly once and name
+only host-routable processes:
+
+```bash
+catalog=$(curl -s -X POST localhost:8910/configs -H 'content-type: application/json' -d @catalog.json | jq '.digest')
+```
+
+`catalog.json` has the generic authoring shape
+`{"kind":"aether.bloomery.stage_catalog","value":{...}}`. `value` is the
+full `StageCatalog` JSON document; save the returned `digest` under the same
+kind in the draft registry.
 
 ```bash
 curl -s -X PATCH localhost:8910/drafts/1 -H 'content-type: application/json' -d @- <<JSON
@@ -115,10 +120,13 @@ curl -s -X PATCH localhost:8910/drafts/1 -H 'content-type: application/json' -d 
     }
   ],
   "base": $base,
-  "stage_catalog": $catalog
+  "configs": { "entries": { "aether.bloomery.stage_catalog": $catalog } }
 }
 JSON
 ```
+
+Omit `configs` to use the compiled default stage line. A partial `PATCH`
+preserves the existing registry, while a present `configs` object replaces it.
 
 The `approval` here is a placeholder that only has to be reducer-shaped
 (an `Approval` binding the member's own `scope_revision`) — the seal replaces it
