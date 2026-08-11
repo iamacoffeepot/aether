@@ -53,6 +53,14 @@ top-level `.jscpd.json` `ignore` array, and new members of
 removals, exact renames, comments, strings, and unrelated JSON/TOML keys do not
 fail the diff. Each finding is printed as `file:line — token — added line`.
 
+The pull-request checkout contains proposed code, so CI does not execute the
+scanner from that checkout. It materializes `scripts/check-suppressions.py`
+from the event's exact base commit into runner-temporary storage and runs that
+trusted blob against the explicit base and head refs. The only fallback to the
+head blob is the bootstrap case where the event base does not contain the
+newly introduced scanner at all; after this gate lands, a later pull request
+cannot make its suppressions pass by weakening the scanner in the same diff.
+
 Run the same mechanical scan locally with:
 
 ```sh

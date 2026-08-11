@@ -66,9 +66,13 @@ jobs:
 
   # A suppression makes the tool it targets green by construction, so this
   # check must sit outside the affected-code filter. It scans only additions
-  # in the PR's exact merge-base/head diff. Findings stay visible even when an
-  # owner-edited, commit-bound hidden marker in the current PR body signs them
-  # off; pushes and manual runs have no PR authorization context and skip.
+  # in the PR's exact merge-base/head diff. A pull_request checkout exposes the
+  # proposed tree, so the scanner itself is materialized from the event base;
+  # otherwise the same PR could weaken the scanner that judges it. The one
+  # bootstrap exception is a base that does not contain the newly introduced
+  # scanner yet. Findings stay visible even when an owner-edited, commit-bound
+  # hidden marker in the current PR body signs them off; pushes and manual runs
+  # have no PR authorization context and skip.
   suppressions:
     name: New suppressions
     if: github.event_name == 'pull_request'
@@ -77,11 +81,33 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+      - name: Materialize the trusted suppression scanner
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SCANNER_PATH: ${{ runner.temp }}/check-suppressions.py
+        run: |
+          set -euo pipefail
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+          if git cat-file -e "${BASE_SHA}:scripts/check-suppressions.py"; then
+            git show "${BASE_SHA}:scripts/check-suppressions.py" > "${SCANNER_PATH}"
+            echo "Using suppression scanner from event base ${BASE_SHA}"
+          else
+            # Bootstrap only: the base of the PR that introduces this gate has
+            # no trusted scanner blob yet. Once landed, every later PR takes
+            # the base branch above and cannot execute its proposed scanner.
+            git show "${HEAD_SHA}:scripts/check-suppressions.py" > "${SCANNER_PATH}"
+            echo "::notice::Event base has no suppression scanner; using head ${HEAD_SHA} for bootstrap"
+          fi
+          test -s "${SCANNER_PATH}"
       - name: Reject newly introduced suppressions
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          SCANNER_PATH: ${{ runner.temp }}/check-suppressions.py
         run: >-
-          python3 scripts/check-suppressions.py
+          python3 "${SCANNER_PATH}"
           --base "${{ github.event.pull_request.base.sha }}"
           --head "${{ github.event.pull_request.head.sha }}"
           --pull-request "${{ github.event.pull_request.number }}"

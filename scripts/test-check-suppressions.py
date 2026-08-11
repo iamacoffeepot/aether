@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).with_name("check-suppressions.py")
+REPOSITORY_ROOT = SCRIPT.parent.parent
 SPEC = importlib.util.spec_from_file_location("check_suppressions", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 scanner = importlib.util.module_from_spec(SPEC)
@@ -348,6 +349,33 @@ class SignoffTests(unittest.TestCase):
 
         with self.assertRaises(scanner.OperationalError):
             scanner.trusted_signoff(self.number, "iamacoffeepot/aether", self.base, self.head, "token", unavailable)
+
+
+class WorkflowWiringTests(unittest.TestCase):
+    def test_pull_request_materializes_the_scanner_from_the_event_base(self) -> None:
+        workflow = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        suppression_job = workflow.split("\n  suppressions:\n", maxsplit=1)[1].split("\n  fmt:\n", maxsplit=1)[0]
+
+        self.assertIn('git cat-file -e "${BASE_SHA}^{commit}"', suppression_job)
+        self.assertIn('if git cat-file -e "${BASE_SHA}:scripts/check-suppressions.py"; then', suppression_job)
+        self.assertIn(
+            'git show "${BASE_SHA}:scripts/check-suppressions.py" > "${SCANNER_PATH}"', suppression_job
+        )
+        self.assertIn(
+            'git show "${HEAD_SHA}:scripts/check-suppressions.py" > "${SCANNER_PATH}"', suppression_job
+        )
+        self.assertIn('python3 "${SCANNER_PATH}"', suppression_job)
+        self.assertNotIn("python3 scripts/check-suppressions.py", suppression_job)
+
+        base_selection = suppression_job.index(
+            'git show "${BASE_SHA}:scripts/check-suppressions.py" > "${SCANNER_PATH}"'
+        )
+        bootstrap_selection = suppression_job.index(
+            'git show "${HEAD_SHA}:scripts/check-suppressions.py" > "${SCANNER_PATH}"'
+        )
+        execution = suppression_job.index('python3 "${SCANNER_PATH}"')
+        self.assertLess(base_selection, bootstrap_selection)
+        self.assertLess(bootstrap_selection, execution)
 
 
 if __name__ == "__main__":
