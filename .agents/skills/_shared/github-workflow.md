@@ -2,7 +2,7 @@
 
 Repository: `iamacoffeepot/aether`.
 
-Use `gh api` REST endpoints whenever REST can perform the operation. Avoid GraphQL-backed convenience commands. Use GraphQL only to enumerate and resolve pull-request review threads and to mark a draft pull request ready for review.
+Use `gh api` REST endpoints whenever REST can perform the operation. Avoid GraphQL-backed convenience commands. Use GraphQL only to read issue edit provenance, enumerate and resolve pull-request review threads, and mark a draft pull request ready for review.
 
 ## Durable workflow evidence
 
@@ -12,7 +12,7 @@ Derive the current state from durable artifacts:
 
 - an open issue without all required managed sections is unscoped;
 - an open issue with complete managed sections and valid routing lines is planned;
-- a planned issue is approved only by a current trusted approval comment defined below;
+- a planned issue is approved only by a current trusted hidden approval record defined below;
 - an owned issue worktree or branch is implementation work in progress;
 - a draft pull request is the reviewable implementation artifact;
 - the current head's checks, trusted direct-review verdict, native review blockers, review threads, declared-surface diff, and dogfood evidence determine whether it is landable;
@@ -47,16 +47,17 @@ The Implementation plan ends with exactly these three non-empty lines:
 
 The Plan digest includes, in scope-owned order, the exact UTF-8 spans for Problem statement, Design notes, Implementation plan, optional Sub-issues, optional Depends on, Declared surface, and Dogfood brief. It deliberately excludes Side findings and every unmanaged section. The only layout byte excluded from a managed span is one empty-line separator immediately before a following H2: the content line ending remains, while an additional blank line and the exact LF/CRLF spelling remain approval-bearing. Use `approve/scripts/plan_digest.py`; do not reproduce its parser or canonicalization in another skill.
 
-## Trusted approval comments
+## Trusted approval records
 
-An approval is one immutable issue comment with exactly two lines: the marker and one compact JSON object.
+An approval is one canonical single-line HTML comment in the issue body's unmanaged prefix before the first managed H2:
 
 ```text
-<!-- aether-approval:v1 -->
-{"authority":"owner","base_sha":"<full commit>","effective_tier":"human","issue":123,"model":"opus","plan_sha256":"<64 lowercase hex>","policy_tier":"human","size":"l"}
+<!-- aether-approval:v2 {"authority":"owner","base_sha":"<full commit>","effective_tier":"human","issue":123,"model":"opus","plan_sha256":"<64 lowercase hex>","policy_tier":"human","size":"l"} -->
 ```
 
-The JSON object has exactly the eight keys shown. Validate types and enum values strictly. `authority` is either `owner` or `policy-auto`. The payload's authority is descriptive; trust comes from the comment author and GitHub's `author_association`. Owner authority requires `OWNER`. Policy-auto authority requires `OWNER`, `MEMBER`, or `COLLABORATOR`. Ignore comments from any other association even when their payload claims authority.
+Keep records in append order immediately before `## Problem statement`. The hidden prefix is outside every managed Plan span, so appending a record does not alter the digest it carries. Never place a record inside or after a managed section. Parse records only with `approve/scripts/approval_records.py`; it requires the exact one-line wrapper, compact sorted JSON, the eight keys shown, strict types and enums, and optional issue identity.
+
+The payload's authority is descriptive; trust comes from the effective editor of the current body. Query the issue's latest `userContentEdits` editor through GraphQL; when GitHub reports no edit, use the issue author. Owner authority requires the effective editor to be the repository owner. Policy-auto authority requires the effective editor to be the owner or to have repository write permission. A later edit by anyone else makes every body record untrusted until a permitted editor revalidates the current body. A failed, truncated, or ambiguous provenance read is unknown authority, never a pass.
 
 A current approval matches all of:
 
@@ -66,7 +67,16 @@ A current approval matches all of:
 - the policy and effective tiers resolved for that same base;
 - an authority permitted for the effective tier.
 
-Any managed approval-bearing edit changes the digest. A different base commit requires a new approval. Changes to Side findings or unmanaged prose do not. Never edit or delete old approval comments; non-matching records are durable history, not current authority. When several comments match, use the newest trusted one. Posting an exact matching record is idempotent and must not create another comment.
+Any managed approval-bearing edit changes the digest. A different base commit requires a new approval. Changes to Side findings or unmanaged prose do not. Preserve old v2 lines byte-for-byte; non-matching records are durable history, not current authority. When several body records match, use the last trusted one in body order. Appending an exact matching record is idempotent and must not add another line.
+
+During migration only, when no current trusted v2 body record exists, consumers may fall back to a legacy v1 issue comment with exactly these two lines:
+
+```text
+<!-- aether-approval:v1 -->
+{"authority":"owner","base_sha":"<full commit>","effective_tier":"human","issue":123,"model":"opus","plan_sha256":"<64 lowercase hex>","policy_tier":"human","size":"l"}
+```
+
+The v1 comment must satisfy the same strict payload and current-identity checks. Trust still comes from its GitHub `author_association`: owner authority requires `OWNER`, while policy-auto accepts `OWNER`, `MEMBER`, or `COLLABORATOR`. Approve never writes v1. Once an equivalent v2 line has been inserted and verified, the redundant visible v1 comment may be deleted; otherwise old comments remain read-only history.
 
 ## Trusted direct-review verdicts
 
@@ -111,7 +121,7 @@ Use paginated REST endpoints for comments, issue timelines, pull requests, revie
 - Create or edit with file inputs such as `-F body=@/tmp/aether-issue-<N>.md`.
 - Preserve every unmanaged body byte when replacing managed sections.
 - Immediately before a full-body `PATCH`, re-read issue number, title, and body. Abort on a concurrent managed-section edit; merge only non-overlapping user prose.
-- Comments hold immutable approvals and concise human-directed evidence. Do not post synthetic progress state.
+- Hidden body comments hold approval machinery. Visible comments are only for concise human-directed evidence; do not post approval JSON or synthetic progress state.
 
 ## Pull-request facts
 
