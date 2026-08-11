@@ -41,7 +41,44 @@ Rust tier.
 The checked-in workflows are authoritative for the exact current jobs. The
 aggregate `CI pass` check combines applicable gates such as formatting, clippy,
 docs, marker/feature boundary builds, workspace tests, duplicate-code and
-unused-dependency checks, wasm packaging, and contract jobs. Path filters can make a job intentionally inapplicable.
+unused-dependency checks, wasm packaging, and contract jobs. Path filters can
+make a job intentionally inapplicable.
+
+The pull-request-only `New suppressions` job is deliberately outside those
+filters. It examines additions between the pull request's resolved merge base
+and head and rejects four forms: line-anchored Rust `allow(...)` or
+`expect(...)` attributes, Rust `#[ignore]` attributes, new members of the
+top-level `.jscpd.json` `ignore` array, and new members of
+`package.metadata.cargo-machete.ignored`. The standing suppression population,
+removals, exact renames, comments, strings, and unrelated JSON/TOML keys do not
+fail the diff. Each finding is printed as `file:line — token — added line`.
+
+Run the same mechanical scan locally with:
+
+```sh
+python3 scripts/check-suppressions.py
+```
+
+It defaults to the merge base of `origin/main` and `HEAD`; `--base` and
+`--head` select explicit refs. The `verify.suppress` transform runs that exact
+command, and it is a member of `verify.check`. Bloomery has no pull-request
+owner context, so a finding always leaves that lane red for operator action.
+
+A repository owner can sign off an intentional pull-request suppression only
+by editing the pull request's main body so it contains exactly one canonical
+hidden record:
+
+```text
+<!-- aether-suppression-signoff:v1 {"base_sha":"<40 lowercase hex>","head_sha":"<40 lowercase hex>","pull_request":123} -->
+```
+
+The scanner verifies the current body and latest body editor through GitHub
+GraphQL. The latest editor must be the repository owner, and the record must
+bind the current pull-request number, resolved merge base, and head exactly.
+An agent-authored initial body is not authorization. A push, base change, or
+later non-owner body edit invalidates a previous sign-off until the owner edits
+the current body again. The sign-off changes only the exit status: findings
+remain in the job log.
 
 Branch protection currently requires two status checks: `CI pass` and `Lint
 title`. It does not configure required pull-request reviews. `CI pass` proves
@@ -150,6 +187,7 @@ Choose the smallest command that crosses the changed boundary:
 | Markdown/navigation | `mdbook build docs` plus relative-link validation |
 | One Rust unit | `cargo test <name>` |
 | One crate | `cargo test -p <crate>` or `cargo check -p <crate>` |
+| Added-suppression diff | `python3 scripts/check-suppressions.py` |
 | Formatting | `cargo fmt -- --check` |
 | Lints | `cargo clippy --all-targets -- -D warnings` |
 | Doc comments and intra-doc links | `cargo doc --workspace --no-deps --document-private-items` |

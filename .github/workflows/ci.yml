@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 # A push to a branch supersedes that branch's in-flight run: cancel it
 # instead of letting it hold 8-vCPU runners to completion (the account
@@ -62,6 +63,29 @@ jobs:
               # jscpd's gate threshold lives in .jscpd.json, so a config
               # edit must re-run the dup-check job.
               - '.jscpd.json'
+
+  # A suppression makes the tool it targets green by construction, so this
+  # check must sit outside the affected-code filter. It scans only additions
+  # in the PR's exact merge-base/head diff. Findings stay visible even when an
+  # owner-edited, commit-bound hidden marker in the current PR body signs them
+  # off; pushes and manual runs have no PR authorization context and skip.
+  suppressions:
+    name: New suppressions
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - name: Reject newly introduced suppressions
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/check-suppressions.py
+          --base "${{ github.event.pull_request.base.sha }}"
+          --head "${{ github.event.pull_request.head.sha }}"
+          --pull-request "${{ github.event.pull_request.number }}"
+          --repository "${{ github.repository }}"
 
   fmt:
     name: Format
@@ -469,12 +493,13 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, clippy, docs, test, dup-check, unused-deps, lock-freshness ]
+    needs: [ changes, suppressions, fmt, clippy, docs, test, dup-check, unused-deps, lock-freshness ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
         run: |
           echo "changes: ${{ needs.changes.result }}"
+          echo "suppressions: ${{ needs.suppressions.result }}"
           echo "fmt:     ${{ needs.fmt.result }}"
           echo "clippy:  ${{ needs.clippy.result }}"
           echo "docs:    ${{ needs.docs.result }}"
@@ -484,6 +509,11 @@ jobs:
           echo "lock-freshness: ${{ needs.lock-freshness.result }}"
           fail=0
           [[ "${{ needs.changes.result }}" == "success" ]] || fail=1
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            [[ "${{ needs.suppressions.result }}" == "success" ]] || fail=1
+          else
+            [[ "${{ needs.suppressions.result }}" == "skipped" ]] || fail=1
+          fi
           [[ "${{ needs.fmt.result }}"     == "success" ]] || fail=1
           [[ "${{ needs.clippy.result }}"  == "success" || "${{ needs.clippy.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.docs.result }}"    == "success" || "${{ needs.docs.result }}" == "skipped" ]] || fail=1
