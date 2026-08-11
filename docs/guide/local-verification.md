@@ -13,6 +13,21 @@ cargo fmt -- --check
 cargo clippy --all-targets -- -D warnings
 ```
 
+In a multi-worktree checkout with `sccache` installed, run those commands
+through `scripts/cargo-cached.sh` to reuse compiled dependencies without
+sharing build outputs:
+
+```sh
+scripts/cargo-cached.sh fmt -- --check
+scripts/cargo-cached.sh clippy --all-targets -- -D warnings
+```
+
+`scripts/cargo-cached.sh` always uses the current worktree's `target/`
+directory and disables Cargo incremental compilation. It deliberately
+overrides ambient `CARGO_TARGET_DIR`, `RUSTC_WRAPPER`, and `CARGO_INCREMENTAL`
+for that command. The cache is compiler-level only; never configure multiple
+divergent worktrees to share a target directory.
+
 Fix either failure locally. Run `cargo fmt` to apply formatting, then repeat the
 check. This tier applies to every branch using the planned `implement` workflow,
 including a documentation-only implementation branch. Documentation-only work
@@ -165,6 +180,8 @@ longer needed or ask before preserving useful artifacts.
 Keep each divergent worktree on its own Cargo target directory. Never point
 multiple worktrees at one shared `CARGO_TARGET_DIR`: incremental metadata can
 surface a dependency compiled from another branch and produce phantom errors.
+Use `scripts/cargo-cached.sh` when available to share compiler results through
+sccache, not target artifacts.
 
 Tests must also isolate namespace roots, ports, artifact stores, and other host
 resources. Prefer SubstrateHarness/FleetHarness builders and allocated temp roots over
