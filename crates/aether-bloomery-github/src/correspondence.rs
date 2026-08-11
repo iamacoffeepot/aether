@@ -1,32 +1,26 @@
-//! The persisted git-object↔bloom-digest correspondence (ADR-0150, amended
-//! 2026-07-18 for [#3590]; this slice [#3603]).
+//! Git object semantics at the backend-correspondence adapter edge.
 //!
 //! A bloomery [`Digest`] is a pure content-address — a sha256 over a bloom
 //! *value*'s aether-wire bytes — and is **never** the sha of any git object.
 //! Real GitHub repositories are sha1 (20-byte / 40-hex) object format, so the
-//! source port cannot hand a digest to git as an object sha. Instead it persists
-//! the mapping as *data*: given a real commit or tree object, which bloom value
-//! that object carries, and back. The git side of each correspondence is
-//! **format-tagged bytes** ([`GitObjectId`]) — `sha1`/20 today, `sha256`/32 if
-//! GitHub ships SHA-256 repositories — so the schema survives the object-format
-//! transition unchanged.
+//! source port cannot hand a digest to git as an object sha. The domain-owned
+//! [`aether_bloomery::Correspondence`] stores backend object bytes opaquely;
+//! this module owns the checked conversion between those bytes and the
+//! **format-tagged** [`GitObjectId`] consumed by Git APIs.
 //!
-//! This trait is the port-level seam the [`GitSource`](crate::GitSource) backend
-//! resolves through, mirroring the [`GitDataApi`](crate::GitDataApi) /
-//! [`ActionsApi`](crate::ActionsApi) seams: the durable implementation lives in
-//! the host (a `SQLite`-backed table), and the in-process double (`FakeGithub`,
-//! behind the `testing` feature) implements it for token- and
-//! network-free tests. The crate owns [`GitObjectId`] because it is the one
-//! crate permitted to reason about git object shas — core `aether_bloomery` keeps
-//! [`Digest`] a pure content-address with no git concept.
+//! The compatibility [`Correspondence`] facade retains the Git-shaped API used
+//! by the local executor and lane callers assigned to #4744. It delegates to a
+//! domain correspondence and performs the checked conversion; new source and
+//! Actions code use the domain port directly.
 //!
 //! [#3590]: https://github.com/iamacoffeepot/aether/issues/3590
 //! [#3603]: https://github.com/iamacoffeepot/aether/issues/3603
 
-use std::error::Error;
-use std::fmt;
+use std::sync::Arc;
 
-use aether_bloomery::Digest;
+use aether_bloomery::{BackendObjectId, Correspondence as DomainCorrespondence, Digest};
+
+pub use aether_bloomery::CorrespondenceError;
 
 /// The object format a [`GitObjectId`]'s bytes are in — the format tag ADR-0150
 /// requires so the correspondence schema survives a SHA-256 object-format
@@ -113,6 +107,44 @@ impl GitObjectId {
     }
 }
 
+impl From<GitObjectId> for BackendObjectId {
+    fn from(object: GitObjectId) -> Self {
+        Self::new(object.bytes)
+    }
+}
+
+impl From<&GitObjectId> for BackendObjectId {
+    fn from(object: &GitObjectId) -> Self {
+        Self::new(object.bytes.clone())
+    }
+}
+
+impl TryFrom<BackendObjectId> for GitObjectId {
+    type Error = CorrespondenceError;
+
+    fn try_from(object: BackendObjectId) -> Result<Self, Self::Error> {
+        let format = match object.as_bytes().len() {
+            20 => GitObjectFormat::Sha1,
+            32 => GitObjectFormat::Sha256,
+            length => {
+                return Err(CorrespondenceError::new(format!(
+                    "backend object id is {length} bytes; a git object id must be 20-byte SHA-1 or 32-byte SHA-256",
+                )));
+            }
+        };
+        Self::new(format, object.into_bytes())
+            .ok_or_else(|| CorrespondenceError::new("backend object id does not match the inferred git format"))
+    }
+}
+
+impl TryFrom<&BackendObjectId> for GitObjectId {
+    type Error = CorrespondenceError;
+
+    fn try_from(object: &BackendObjectId) -> Result<Self, Self::Error> {
+        Self::try_from(object.clone())
+    }
+}
+
 // One hex character to its 0..=15 nibble, or `None` for a non-hex byte.
 fn hex_nibble(byte: u8) -> Option<u8> {
     match byte {
@@ -123,41 +155,8 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-/// A correspondence-store fault — a durable-storage read/write that failed
-/// (transport, disk, or a decode of a stored row). Distinct from a clean absent
-/// correspondence, which the resolve methods report as `Ok(None)` rather than an
-/// error: a never-recorded object is an expected state (the boundary this slice
-/// draws), not a fault.
-#[derive(Debug)]
-pub struct CorrespondenceError {
-    message: String,
-}
-
-impl CorrespondenceError {
-    /// Wrap a storage fault description.
-    #[must_use]
-    pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
-    }
-}
-
-impl fmt::Display for CorrespondenceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "git correspondence store: {}", self.message)
-    }
-}
-
-impl Error for CorrespondenceError {}
-
-/// The persisted git-object↔bloom-digest correspondence the source port resolves
-/// real git shas through (ADR-0150). One record maps one bloom [`Digest`] to the
-/// real git object ([`GitObjectId`]) that carries its value, resolvable in both
-/// directions. The durable implementation lives in the host; the in-process
-/// `FakeGithub` double (behind the `testing` feature) implements it for tests.
-///
-/// `&self` methods with interior mutability so the source backend — which holds
-/// the correspondence behind a shared handle and calls it from `SourceBackend`'s
-/// `&self` methods — can record and resolve without an exclusive borrow.
+/// The temporary Git-shaped view of a domain correspondence retained for the
+/// local executor and lane callers migrated by #4744.
 pub trait Correspondence {
     /// Record that git object `git` carries bloom value `digest` (both
     /// directions). Last-writer-wins on the digest key, so re-recording the same
@@ -182,8 +181,31 @@ pub trait Correspondence {
     fn resolve_digest(&self, git: &GitObjectId) -> Result<Option<Digest>, CorrespondenceError>;
 }
 
+impl<T> Correspondence for T
+where
+    T: DomainCorrespondence + ?Sized,
+{
+    fn record(&self, digest: &Digest, git: &GitObjectId) -> Result<(), CorrespondenceError> {
+        DomainCorrespondence::record(self, digest, &BackendObjectId::from(git))
+    }
+
+    fn resolve_git(&self, digest: &Digest) -> Result<Option<GitObjectId>, CorrespondenceError> {
+        DomainCorrespondence::resolve_backend_object(self, digest)?.map(GitObjectId::try_from).transpose()
+    }
+
+    fn resolve_digest(&self, git: &GitObjectId) -> Result<Option<Digest>, CorrespondenceError> {
+        DomainCorrespondence::resolve_digest(self, &BackendObjectId::from(git))
+    }
+}
+
+/// A shared Git-facing compatibility view retained until #4744 migrates the
+/// remaining local executor and lane callers to the domain contract.
+pub type SharedCorrespondence = Arc<dyn Correspondence + Send + Sync>;
+
 #[cfg(test)]
 mod tests {
+    use aether_bloomery::BackendObjectId;
+
     use super::{GitObjectFormat, GitObjectId};
 
     #[test]
@@ -217,5 +239,23 @@ mod tests {
 
         assert!(GitObjectId::from_hex(&"c".repeat(39)).is_none(), "a 39-hex sha is neither format");
         assert!(GitObjectId::from_hex(&"z".repeat(40)).is_none(), "a non-hex char is rejected");
+    }
+
+    #[test]
+    fn backend_conversion_revalidates_sha1_and_sha256_lengths() {
+        for (length, format) in [(20, GitObjectFormat::Sha1), (32, GitObjectFormat::Sha256)] {
+            let backend = BackendObjectId::new(vec![0xAB; length]);
+            let git = GitObjectId::try_from(backend.clone()).expect("a supported git object length converts");
+
+            assert_eq!(git.format(), format);
+            assert_eq!(BackendObjectId::from(git), backend);
+        }
+
+        for length in [0, 19, 21, 31, 33] {
+            assert!(
+                GitObjectId::try_from(BackendObjectId::new(vec![0; length])).is_err(),
+                "an opaque {length}-byte id is not a Git object id",
+            );
+        }
     }
 }

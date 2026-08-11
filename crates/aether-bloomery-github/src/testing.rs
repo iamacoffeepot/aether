@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use aether_bloomery::{BloomId, Digest};
+use aether_bloomery::{BackendObjectId, BloomId, Correspondence, CorrespondenceError, Digest};
 use sha2::{Digest as _, Sha256};
 
 use crate::client::{
@@ -32,7 +32,7 @@ use crate::client::{
     MergeResult, NewComment, NewIssue, NewPullRequest, PullRequest, PullRequestApi, PullRequestState, RunConclusion,
     RunStatus, WorkflowRun, strip_heads,
 };
-use crate::correspondence::{Correspondence, CorrespondenceError, GitObjectId};
+use crate::correspondence::GitObjectId;
 use crate::executor::INPUT_NONCE;
 use crate::marker::parse_marker;
 use crate::source::{EMPTY_TREE, digest_from_hex, render_claim_message, render_tombstone_message, to_hex};
@@ -136,7 +136,7 @@ struct State {
     // resolve real git shas through (ADR-0150), keyed forward by the 32-byte
     // digest; the reverse direction scans for the matching object (a test store
     // is small).
-    correspondence: HashMap<[u8; 32], GitObjectId>,
+    correspondence: HashMap<[u8; 32], BackendObjectId>,
     // The repository commit objects are minted in and read from, when the fake
     // is backed by a real one (`with_object_repo`). `None` keeps the synthetic
     // in-memory shas.
@@ -371,7 +371,8 @@ impl FakeGithub {
     /// If `sha` is not a well-formed git object sha — a test-setup bug.
     pub fn seed_correspondence(&self, digest: &Digest, sha: &str) {
         let git = GitObjectId::from_hex(sha).expect("seed_correspondence: sha must be 40/64-hex");
-        self.lock().correspondence.insert(*digest.as_bytes(), git);
+        let object = BackendObjectId::from(git);
+        self.lock().correspondence.insert(*digest.as_bytes(), object);
     }
 
     /// Record a correspondence for `digest` against a synthetic git object sha
@@ -779,21 +780,21 @@ fn merged_tree(base: &str, head: &str) -> String {
 }
 
 impl Correspondence for FakeGithub {
-    fn record(&self, digest: &Digest, git: &GitObjectId) -> Result<(), CorrespondenceError> {
-        self.lock().correspondence.insert(*digest.as_bytes(), git.clone());
+    fn record(&self, digest: &Digest, object: &BackendObjectId) -> Result<(), CorrespondenceError> {
+        self.lock().correspondence.insert(*digest.as_bytes(), object.clone());
         Ok(())
     }
 
-    fn resolve_git(&self, digest: &Digest) -> Result<Option<GitObjectId>, CorrespondenceError> {
+    fn resolve_backend_object(&self, digest: &Digest) -> Result<Option<BackendObjectId>, CorrespondenceError> {
         Ok(self.lock().correspondence.get(digest.as_bytes()).cloned())
     }
 
-    fn resolve_digest(&self, git: &GitObjectId) -> Result<Option<Digest>, CorrespondenceError> {
+    fn resolve_digest(&self, object: &BackendObjectId) -> Result<Option<Digest>, CorrespondenceError> {
         Ok(self
             .lock()
             .correspondence
             .iter()
-            .find_map(|(digest, object)| (object == git).then(|| Digest::from_bytes(*digest))))
+            .find_map(|(digest, stored)| (stored == object).then(|| Digest::from_bytes(*digest))))
     }
 }
 

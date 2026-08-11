@@ -42,10 +42,12 @@ use std::fmt;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::{
-    Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, WorkHandle, WorkOrder, is_model_lane,
+    Conclusion, CorrespondenceError, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce,
+    SharedCorrespondence, WorkHandle, WorkOrder, is_model_lane,
 };
 
 use crate::client::{ActionsApi, GithubError, RunConclusion, RunStatus, WorkflowRun, name_carries_nonce};
+use crate::correspondence::GitObjectId;
 
 /// The `workflow_dispatch` input key carrying the typed lane command — the
 /// correlation contract with the external wrapper workflow, whose `inputs:`
@@ -71,8 +73,6 @@ pub const INPUT_MODEL: &str = "model";
 /// The input key carrying the resolved reasoning-effort tier — the model
 /// wrapper's sibling of [`INPUT_MODEL`].
 pub const INPUT_EFFORT: &str = "effort";
-use crate::correspondence::CorrespondenceError;
-use crate::source::SharedCorrespondence;
 
 /// An executor-port fault. Its own type because the port needs an arm the value
 /// vocabulary does not carry — a message asked to act on a run that does not
@@ -311,9 +311,10 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
         // pinned ref where the checkout target belongs (the stub bug this fixes).
         let subject = self
             .correspondence
-            .resolve_git(&order.transformation.checkout)?
+            .resolve_backend_object(&order.transformation.checkout)?
             .ok_or_else(|| ExecutorError::UnresolvedCheckout(order.nonce.clone()))?
-            .to_hex();
+            .try_into()
+            .map(|object: GitObjectId| object.to_hex())?;
         let mut inputs = BTreeMap::new();
         inputs.insert(INPUT_COMMAND.to_owned(), order.transformation.command.clone());
         inputs.insert(INPUT_SUBJECT.to_owned(), subject);

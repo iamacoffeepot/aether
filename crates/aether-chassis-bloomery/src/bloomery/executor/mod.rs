@@ -30,10 +30,13 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
-#[cfg(any(test, feature = "testing"))]
-use aether_bloomery_github::SharedCorrespondence;
-use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, LaneWorkflows};
+use aether_bloomery::{
+    EvidenceRef, ExecutionStatus, ExecutorBackend, SharedCorrespondence as DomainSharedCorrespondence, WorkHandle,
+    WorkOrder,
+};
+use aether_bloomery_github::{
+    ActionsExecutor, ExecutorError, GithubError, LaneWorkflows, SharedCorrespondence as GitSharedCorrespondence,
+};
 
 use super::mirror::GithubMirrorConfig;
 
@@ -201,9 +204,10 @@ impl ExecutorShell {
         #[cfg(any(test, feature = "testing"))]
         if config.uses_fixture() {
             let fake = config.shared_fixture();
+            let concrete = Arc::new(fake.clone());
             let actions = Arc::new(ActionsExecutor::new(
-                fake.clone(),
-                Arc::new(fake.clone()) as SharedCorrespondence,
+                fake,
+                Arc::clone(&concrete) as DomainSharedCorrespondence,
                 LaneWorkflows {
                     mechanical: config.executor_workflow_file.clone(),
                     model: config.executor_model_workflow_file.clone(),
@@ -213,19 +217,19 @@ impl ExecutorShell {
             if !config.local_lane_enabled {
                 return Ok(Self::new(actions));
             }
-            let correspondence: SharedCorrespondence = Arc::new(fake);
+            let correspondence = concrete as GitSharedCorrespondence;
             let local = Arc::new(LocalExecutor::from_config(config, correspondence));
             return Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, config.local_lane_prefixes()))));
         }
         let missing = config.missing_connection_knobs();
         if missing.is_empty() {
-            let correspondence = config.connect_correspondence()?;
+            let (domain_correspondence, git_correspondence) = config.connect_correspondence_views()?;
             // Both backends resolve the order's checkout digest to a real git object
             // through the same persisted correspondence (ADR-0150) — one store over
             // the shared `store_path`, mirroring the source shell.
             let actions = Arc::new(ActionsExecutor::new(
                 config.connect_client()?,
-                Arc::clone(&correspondence),
+                domain_correspondence,
                 LaneWorkflows {
                     mechanical: config.executor_workflow_file.clone(),
                     model: config.executor_model_workflow_file.clone(),
@@ -236,7 +240,7 @@ impl ExecutorShell {
             if !config.local_lane_enabled {
                 return Ok(Self::new(actions));
             }
-            let local = Arc::new(LocalExecutor::from_config(config, correspondence));
+            let local = Arc::new(LocalExecutor::from_config(config, git_correspondence));
             return Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, config.local_lane_prefixes()))));
         }
 
@@ -249,7 +253,8 @@ impl ExecutorShell {
         if !config.local_lane_enabled {
             return Ok(Self::new(actions));
         }
-        let local = Arc::new(LocalExecutor::from_config(config, config.connect_correspondence()?));
+        let (_, correspondence) = config.connect_correspondence_views()?;
+        let local = Arc::new(LocalExecutor::from_config(config, correspondence));
         Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, config.local_lane_prefixes()))))
     }
 
