@@ -3,10 +3,10 @@
 //! executes it, and writes nonce-tagged evidence bytes a broker can
 //! validate. Two lanes share this entrypoint:
 //!
-//! - The **mechanical verify lane** (`verify.fmt` / `verify.clippy` /
-//!   `verify.docs`, #3501) — a zero-secret cargo invocation byte-for-byte
-//!   with CI. `verify.test` is deliberately out of scope (CI's test lane
-//!   pre-builds with `cargo xtask dist` under a heavier toolchain).
+//! - The **mechanical verify lane** (`verify.fmt`, `verify.clippy`,
+//!   `verify.docs`, `verify.test`, `verify.dup`, `verify.deps`, and
+//!   `verify.suppress`, #3501) — zero-secret invocations byte-for-byte with CI.
+//!   The `verify.check` umbrella runs all seven without short-circuiting.
 //! - The **model-driven construct lane** (`construct.implement`, #3511) —
 //!   runs headless Claude at the resolved model + reasoning effort against the
 //!   checked-out **subject** tree, and writes the nonce-tagged **result record**

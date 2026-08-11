@@ -8,11 +8,10 @@
 //! tests (which read `target/…`) are untouched.
 //!
 //! `transform` is ADR-0149 §Execution's portable execution unit: it
-//! runs one typed `verify.fmt` / `verify.clippy` / `verify.docs`
-//! command — the same cargo invocation CI runs — identically on a
-//! laptop and under the thin `transform.yml` wrapper workflow.
-//! `verify.test` parity is a follow-up (issue #3501) — CI's actual
-//! test lane is a heavier shape this slice doesn't reproduce.
+//! runs one typed `verify.*` command — the same invocation CI runs —
+//! identically on a laptop and under the thin `transform.yml` wrapper
+//! workflow. `verify.check` aggregates formatting, clippy, docs, tests,
+//! duplicate code, unused dependencies, and added suppressions.
 
 // xtask is a developer-facing build tool: emitting build progress + a
 // summary to the terminal is its purpose. The workspace
@@ -59,10 +58,10 @@ enum Commands {
     /// directory uploaded verbatim.
     Package(PackageArgs),
     /// ADR-0149 §Execution's portable execution unit: run one typed
-    /// mechanical-verify command (`verify.fmt` / `verify.clippy` /
-    /// `verify.docs`) — the same cargo invocation CI runs — and write
-    /// nonce-tagged evidence bytes. `verify.test` parity is a
-    /// follow-up (issue #3501).
+    /// mechanical-verify command (`verify.fmt`, `verify.clippy`,
+    /// `verify.docs`, `verify.test`, `verify.dup`, `verify.deps`, or
+    /// `verify.suppress`) — the same invocation CI runs — and write
+    /// nonce-tagged evidence bytes. `verify.check` runs the full set.
     Transform(TransformArgs),
     /// Compute the affected package set for PR CI test selection
     /// (issue #3611): changed paths against a base ref, mapped through
