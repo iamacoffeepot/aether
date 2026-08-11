@@ -44,6 +44,27 @@ an issue implementation worktree.
 Never implement planned work directly in the primary `main` checkout. Never
 move the primary checkout between branches to make another workflow convenient.
 
+## Cache Cargo builds without sharing targets
+
+When several worktrees build the same Rust dependencies, opt into the local
+sccache wrapper with `cargo cached <cargo arguments>`. For example:
+
+```sh
+cargo cached check
+cargo cached test -p aether-core
+```
+
+The wrapper finds the current worktree root, uses `sccache` as Cargo's compiler
+wrapper, disables Cargo incremental compilation, and writes outputs to that
+worktree's `target/` directory. It requires `sccache` on `PATH` and reports a
+clear error when it is unavailable or the command is not run inside a Git
+worktree.
+
+This is opt-in: ordinary `cargo` commands retain their current behavior. Never
+point two divergent worktrees at a shared `CARGO_TARGET_DIR`; sccache shares
+compiler results safely, while a shared target directory can mix branch-local
+incremental metadata and produce phantom errors.
+
 ## Existing state is an ownership signal
 
 An existing path or branch is not clutter merely because it is clean. It can be
