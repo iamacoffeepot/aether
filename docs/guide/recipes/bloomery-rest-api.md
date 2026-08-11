@@ -116,6 +116,7 @@ curl -s -X PATCH localhost:8910/drafts/1 -H 'content-type: application/json' -d 
     {
       "workpiece": "wp-1",
       "scope_revision": $revision,
+      "configs": { "entries": {} },
       "approval": { "subject": $revision, "kind": "Approval", "detail": $detail }
     }
   ],
