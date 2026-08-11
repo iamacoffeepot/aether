@@ -130,9 +130,8 @@ fn seal_event_configured(key: &str, base: u8, workpiece: &str, configs: ConfigRe
     };
     // The approval binds the member's subject (ADR-0174).
     member.approval.subject = member.subject();
-    // The seal must freeze the one line the pipeline runs (#3506): the reducer
-    // rejects a bloom whose stage-catalog digest is not `StageCatalog::line_digest`
-    // (the zero default is inadmissible).
+    // An empty registry selects the compiled stage line. A configured seal uses
+    // the catalog content the caller resolved before reducing.
     let spec =
         BloomDraft { proposals: vec![member], base: Digest::from_bytes([base; 32]), ..BloomDraft::default() }.seal();
     Event { idempotency_key: IdempotencyKey(key.to_owned()), fact: Fact::Seal(spec) }
