@@ -47,11 +47,11 @@ move the primary checkout between branches to make another workflow convenient.
 ## Cache Cargo builds without sharing targets
 
 When several worktrees build the same Rust dependencies, opt into the local
-sccache wrapper with `cargo cached <cargo arguments>`. For example:
+sccache wrapper with `scripts/cargo-cached.sh <cargo arguments>`. For example:
 
 ```sh
-cargo cached check
-cargo cached test -p aether-core
+scripts/cargo-cached.sh check
+scripts/cargo-cached.sh test -p aether-data
 ```
 
 The wrapper finds the current worktree root, uses `sccache` as Cargo's compiler

@@ -3,9 +3,10 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
-const WRAPPER = join(dirname(new URL(import.meta.url).pathname), 'cargo-cached.sh');
+const WRAPPER = join(dirname(fileURLToPath(import.meta.url)), 'cargo-cached.sh');
 
 function command(command, args, cwd, env = {}) {
     return execFileSync(command, args, { cwd, env: { ...process.env, ...env }, encoding: 'utf8' });
@@ -56,16 +57,16 @@ function records(log) {
     return readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
 }
 
-test('cargo cached preserves arguments, isolates worktrees, overrides ambient values, and propagates cargo exits', (t) => {
+test('direct wrapper invocation preserves arguments, isolates worktrees, overrides ambient values, and propagates cargo exits', (t) => {
     const fixture = setupWorktrees();
     t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
 
-    command('sh', [WRAPPER, 'check', '-p', 'example', '--features', 'fast mode'], fixture.first, wrapperEnv(fixture, {
+    command(WRAPPER, ['check', '-p', 'example', '--features', 'fast mode'], fixture.first, wrapperEnv(fixture, {
         CARGO_TARGET_DIR: '/ambient/target',
         RUSTC_WRAPPER: '/ambient/wrapper',
         CARGO_INCREMENTAL: '1',
     }));
-    command('sh', [WRAPPER, 'test'], fixture.second, wrapperEnv(fixture));
+    command(WRAPPER, ['test'], fixture.second, wrapperEnv(fixture));
 
     const [first, second] = records(fixture.log);
     assert.deepEqual(first.args, ['check', '-p', 'example', '--features', 'fast mode']);
@@ -76,7 +77,7 @@ test('cargo cached preserves arguments, isolates worktrees, overrides ambient va
     assert.ok(first.wrapper.startsWith('/'));
     assert.equal(first.incremental, '0');
 
-    const failed = spawnSync('sh', [WRAPPER, 'check'], {
+    const failed = spawnSync(WRAPPER, ['check'], {
         cwd: fixture.first,
         env: wrapperEnv(fixture, { FAKE_CARGO_EXIT: '17' }),
         encoding: 'utf8',
@@ -84,16 +85,16 @@ test('cargo cached preserves arguments, isolates worktrees, overrides ambient va
     assert.equal(failed.status, 17);
 });
 
-test('cargo cached reports its Git and sccache prerequisites', (t) => {
+test('direct wrapper invocation reports its Git and sccache prerequisites', (t) => {
     const outside = mkdtempSync(join(tmpdir(), 'cargo-cached-outside-'));
     t.after(() => rmSync(outside, { recursive: true, force: true }));
-    const outsideGit = spawnSync('sh', [WRAPPER, 'check'], { cwd: outside, encoding: 'utf8' });
+    const outsideGit = spawnSync(WRAPPER, ['check'], { cwd: outside, encoding: 'utf8' });
     assert.equal(outsideGit.status, 2);
     assert.match(outsideGit.stderr, /inside a Git worktree/);
 
     const fixture = setupWorktrees();
     t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
-    const noSccache = spawnSync('sh', [WRAPPER, 'check'], {
+    const noSccache = spawnSync(WRAPPER, ['check'], {
         cwd: fixture.first,
         env: { ...process.env, PATH: '/usr/bin:/bin' },
         encoding: 'utf8',

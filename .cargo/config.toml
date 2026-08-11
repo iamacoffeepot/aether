@@ -3,4 +3,3 @@
 # xtask/src/main.rs.
 [alias]
 xtask = "run --package xtask --"
-cached = "!scripts/cargo-cached.sh"
