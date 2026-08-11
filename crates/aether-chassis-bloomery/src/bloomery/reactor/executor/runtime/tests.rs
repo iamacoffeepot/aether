@@ -976,6 +976,7 @@ fn park_and_answer(
         detail: question,
         candidate: None,
         findings: None,
+        failed_verifiers: aether_bloomery::VerifyFailureSet::EMPTY,
         cost: None,
     };
     assert!(matches!(admit_uploaded(store, &upload).unwrap(), AdmitDecision::Admitted(_)), "the parked upload admits");

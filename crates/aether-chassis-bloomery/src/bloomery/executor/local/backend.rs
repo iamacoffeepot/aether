@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use aether_bloomery::digest::ContentAddressed;
 use aether_bloomery::{
     CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, StageVerdict, StudyCost,
-    WorkHandle, WorkOrder, digest_of, is_model_lane,
+    VerifyFailureSet, WorkHandle, WorkOrder, digest_of, is_model_lane,
 };
 use aether_bloomery_github::{GitObjectId, SharedCorrespondence, parse_study_cost};
 use serde::Serialize;
@@ -19,7 +19,7 @@ use super::lane_program::LaneProgram;
 use super::process_runner::{CaptureIdentity, ProcessTransformRunner};
 use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
-use crate::bloomery::intake::attempt_artifact_name;
+use crate::bloomery::intake::NameEvidenceClaims;
 use crate::bloomery::mirror::GithubMirrorConfig;
 
 /// One tracked run: the spawned child, its scratch worktree, where its evidence
@@ -43,6 +43,9 @@ struct Run {
     // stamped `status`, so the gate must know which lane produced the evidence —
     // and must know it even when the evidence bytes do not decode (fail-closed).
     is_construct: bool,
+    // Whether the evidence body belongs to a mechanical verify lane and must
+    // decode ADR-0178's `failed_verifiers` field.
+    is_verify: bool,
 }
 
 /// The local-process executor backend: an in-process registry of tracked runs
@@ -227,6 +230,7 @@ impl ExecutorBackend for LocalExecutor {
         // construct-specific evidence gate (substantive-conclusion, #3596),
         // which the review lane's `status`-stamped evidence must not ride.
         let is_construct = order.transformation.command == CONSTRUCT_IMPLEMENT_COMMAND;
+        let is_verify = order.transformation.command.starts_with("verify.");
         let is_model_lane = is_model_lane(&order.transformation.command);
         // The stage's resolved agent profile, overlaid onto the order by the
         // dispatching host (ADR-0149 §The line) — never a backend-local config
@@ -251,7 +255,7 @@ impl ExecutorBackend for LocalExecutor {
             task: is_model_lane.then_some(order.transformation.description.as_deref()).flatten(),
         };
         let process = self.runner.start(&spec)?;
-        self.lock().insert(nonce, Run { process, worktree_dir, evidence_dir, subject, is_construct });
+        self.lock().insert(nonce, Run { process, worktree_dir, evidence_dir, subject, is_construct, is_verify });
         Ok(WorkHandle::new(order.nonce.clone()))
     }
 
@@ -305,12 +309,19 @@ impl ExecutorBackend for LocalExecutor {
         // Pull the run's on-disk location, binding digest, and terminal exit out of
         // the guarded region, then drop the lock — the evidence read is blocking IO
         // and must not hold the registry mutex.
-        let (evidence_dir, subject, lifecycle, is_construct, worktree_dir) = {
+        let (evidence_dir, subject, lifecycle, is_construct, is_verify, worktree_dir) = {
             let mut runs = self.lock();
             let Some(run) = runs.get_mut(&handle.nonce.0) else {
                 return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
             };
-            (run.evidence_dir.clone(), run.subject, run.process.poll(), run.is_construct, run.worktree_dir.clone())
+            (
+                run.evidence_dir.clone(),
+                run.subject,
+                run.process.poll(),
+                run.is_construct,
+                run.is_verify,
+                run.worktree_dir.clone(),
+            )
         };
         let exited_success = matches!(lifecycle, RunLifecycle::Exited { success: true });
         let evidence_path = evidence_dir.join("evidence.json");
@@ -339,10 +350,11 @@ impl ExecutorBackend for LocalExecutor {
                     self.lock().remove(&handle.nonce.0);
                     self.release_worktree(&worktree_dir);
                     return Ok(vec![EvidenceRef {
-                        name: attempt_artifact_name(
+                        name: NameEvidenceClaims::attempt_artifact_name(
                             &handle.nonce,
                             &subject,
                             StageVerdict::VerificationFailed,
+                            VerifyFailureSet::EMPTY,
                             &Digest::of_wire_bytes(&[]),
                         ),
                         nonce: handle.nonce.clone(),
@@ -350,6 +362,7 @@ impl ExecutorBackend for LocalExecutor {
                         size_bytes: 0,
                         candidate: None,
                         findings: None,
+                        failed_verifiers: VerifyFailureSet::EMPTY,
                         // Synthesized, not reported: there are no evidence bytes
                         // to read a cost out of, so the attempt is unmeasured.
                         cost: None,
@@ -362,6 +375,11 @@ impl ExecutorBackend for LocalExecutor {
         // is trusted. A stale or cross-wired evidence directory is otherwise able
         // to advance a different order merely by carrying a passing verdict.
         let nonce_matches = evidence_nonce_matches(&bytes, &handle.nonce);
+        let failed_verifiers = if is_verify && nonce_matches {
+            parse_failed_verifiers(&bytes)
+        } else {
+            Some(VerifyFailureSet::EMPTY)
+        };
         // Verdict from the run's own evidence, lane-specific. The construct lane's
         // gate demands a substantive conclusion (#3596) — a terminal `result` with
         // `is_error == false` AND a produced candidate — and is fail-closed on any
@@ -372,6 +390,8 @@ impl ExecutorBackend for LocalExecutor {
         // that stamps no status.
         let concluded = if is_construct {
             nonce_matches && construct_conclusion(&bytes)
+        } else if is_verify {
+            nonce_matches && failed_verifiers.is_some() && parse_status(&bytes).unwrap_or(exited_success)
         } else {
             nonce_matches && parse_status(&bytes).unwrap_or(exited_success)
         };
@@ -401,7 +421,9 @@ impl ExecutorBackend for LocalExecutor {
         // The detail digest is the content address of the evidence bytes — the
         // supporting artifact the verdict points at.
         let detail = Digest::of_wire_bytes(&bytes);
-        let name = attempt_artifact_name(&handle.nonce, &subject, verdict, &detail);
+        let failed_verifiers = failed_verifiers.unwrap_or_default();
+        let name =
+            NameEvidenceClaims::attempt_artifact_name(&handle.nonce, &subject, verdict, failed_verifiers, &detail);
         Ok(vec![EvidenceRef {
             name,
             nonce: handle.nonce.clone(),
@@ -412,6 +434,7 @@ impl ExecutorBackend for LocalExecutor {
             size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
             candidate,
             findings: nonce_matches.then(|| parse_findings(&bytes)).flatten(),
+            failed_verifiers,
             cost: nonce_matches.then(|| parse_cost(&bytes)).flatten(),
         }])
     }
@@ -441,6 +464,16 @@ fn parse_status(bytes: &[u8]) -> Option<bool> {
         "fail" => Some(false),
         _ => None,
     }
+}
+
+/// Decode the optional body-derived ADR-0178 failure set. Absence is the valid
+/// empty/pass representation; a present malformed or noncanonical value is an
+/// invalid body (`None`) and makes the local verdict fail closed.
+fn parse_failed_verifiers(bytes: &[u8]) -> Option<VerifyFailureSet> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value
+        .get("failed_verifiers")
+        .map_or(Some(VerifyFailureSet::EMPTY), |failures| serde_json::from_value(failures.clone()).ok())
 }
 
 // The evidence's top-level `findings` prose — what the review critic stamped

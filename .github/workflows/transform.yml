@@ -10,12 +10,13 @@ run-name: transform ${{ inputs.command }} ${{ inputs.nonce }}
 # carries `permissions: { contents: read }` and no secrets.
 #
 # The uploaded artifact's NAME is the intake's data channel (#3501): the
-# pull side decodes `attempt.<verdict>.<subject_hex>.<detail_hex>.<nonce>`
+# pull side decodes `attempt.<verdict>.<failure_mask>.<subject_hex>.<detail_hex>.<nonce>`
 # from the name alone (`NameEvidenceClaims`), no artifact-byte fetch. The
 # `displayed` input carries the scope-revision digest hex the evidence must
 # name (the executor resolves it from the work order's evidence-binding
-# input); the verdict token is `pass`/`fail` from the transform's exit, and
-# the detail hex is the sha256 of the evidence bytes. A dispatch without
+# input); the verdict token is `pass`/`fail` from the transform's exit, the
+# exact two-digit failure mask is validated from `failed_verifiers`, and the
+# detail hex is the sha256 of the evidence bytes. A dispatch without
 # `displayed` (a manual smoke run) falls back to the legacy
 # `evidence-<nonce>` name, which the intake skips as a stray upload.
 
@@ -63,17 +64,62 @@ jobs:
           NONCE: ${{ inputs.nonce }}
           OUTCOME: ${{ steps.transform.outcome }}
         run: |
+          if [ "$OUTCOME" = "success" ]; then verdict=pass; else verdict=fail; fi
+          if [ ! -f evidence/evidence.json ]; then
+            echo "::error::transform produced no evidence.json"
+            exit 1
+          fi
+          status=$(jq -er '.status | select(. == "pass" or . == "fail")' evidence/evidence.json)
+          if [ "$status" != "$verdict" ]; then
+            echo "::error::evidence status does not match transform outcome"
+            exit 1
+          fi
+          mask_value=$(jq -er '
+            def verifier_bit:
+              if . == "verify.preflight" then 1
+              elif . == "verify.fmt" then 2
+              elif . == "verify.clippy" then 4
+              elif . == "verify.docs" then 8
+              elif . == "verify.test" then 16
+              elif . == "verify.dup" then 32
+              elif . == "verify.deps" then 64
+              else error("unknown verifier failure")
+              end;
+            if .status == "pass" and has("failed_verifiers") then
+              error("passing evidence must omit failed_verifiers")
+            elif .status == "fail" and (has("failed_verifiers") | not) then
+              error("failing evidence must carry failed_verifiers")
+            elif (.failed_verifiers // [] | type) != "array" then
+              error("failed_verifiers must be an array")
+            else
+              (.failed_verifiers // []) as $failures
+              | [$failures[] | verifier_bit] as $bits
+              | if ($bits | unique | length) != ($bits | length) then
+                  error("duplicate verifier failure")
+                elif $bits != ($bits | sort) then
+                  error("verifier failures are not in canonical order")
+                elif .status == "fail" and ($bits | length) == 0 then
+                  error("failing evidence must carry a nonempty failure set")
+                else
+                  reduce $bits[] as $bit (0; . + $bit)
+                end
+            end
+          ' evidence/evidence.json)
+          mask=$(printf '%02x' "$mask_value")
+          if [ "$verdict" = "pass" ] && [ "$mask" != "00" ]; then
+            echo "::error::passing evidence must encode mask 00"
+            exit 1
+          fi
+          if [ "$verdict" = "fail" ] && [ "$mask" = "00" ]; then
+            echo "::error::failing evidence must encode a nonzero mask"
+            exit 1
+          fi
           if [ -z "$DISPLAYED" ]; then
             echo "name=evidence-$NONCE" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if [ "$OUTCOME" = "success" ]; then verdict=pass; else verdict=fail; fi
-          if [ -f evidence/evidence.json ]; then
-            detail=$(sha256sum evidence/evidence.json | cut -d' ' -f1)
-          else
-            detail=$(printf '0%.0s' $(seq 64))
-          fi
-          echo "name=attempt.$verdict.$DISPLAYED.$detail.$NONCE" >> "$GITHUB_OUTPUT"
+          detail=$(sha256sum evidence/evidence.json | cut -d' ' -f1)
+          echo "name=attempt.$verdict.$mask.$DISPLAYED.$detail.$NONCE" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
