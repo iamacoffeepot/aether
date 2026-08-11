@@ -1,6 +1,6 @@
 ---
 name: approve
-description: "Validate one, several explicitly listed, or every planned Aether issue, resolve its declared surface through approval policy, and record a digest-bound trusted approval comment. Use for Plan-to-implementation authorization; never edit scope or dispatch implementation."
+description: "Validate one, several explicitly listed, or every planned Aether issue, resolve its declared surface through approval policy, and record a digest-bound trusted hidden approval record. Use for Plan-to-implementation authorization; never edit scope or dispatch implementation."
 ---
 
 # Approve
@@ -23,7 +23,7 @@ A user-issued single issue or explicit batch is the owner's approval decision fo
 
 Restrict `--note` and `--skip-adr` to one named issue. `--skip-adr` requires a non-empty reason and bypasses only an unmerged ADR prerequisite, never ADR approval routing or another gate.
 
-Sweep is two-turn: discover and validate without mutations, show exact approvals and drops, then wait for confirmation. On the confirmed turn refresh and revalidate the exact proposed set before posting comments. Do not ask for redundant confirmation for a single issue or explicit batch.
+Sweep is two-turn: discover and validate without mutations, show exact approvals and drops, then wait for confirmation. On the confirmed turn refresh and revalidate the exact proposed set before editing issue bodies. Do not ask for redundant confirmation for a single issue or explicit batch.
 
 ## Trust and shell safety
 
@@ -59,7 +59,7 @@ python3 -I .agents/skills/approve/scripts/plan_digest.py \
 
 Require stable JSON, the five required non-empty managed sections, scope-owned order, no duplicate headings, and valid final routing lines. Dogfood must be a specific `N/A` statement or all four required fields with medium `drive`, `author`, or `build-layer`. Side findings never block approval.
 
-Retain the returned digest, size, and model. Recompute them from a fresh body immediately before posting approval.
+Retain the returned digest, size, and model. Recompute them from a fresh body immediately before appending approval.
 
 ## Grounding and freshness
 
@@ -111,11 +111,17 @@ No tier weakens structure, dependency, grounding, digest, or surface gates.
 
 ## Existing approvals and idempotency
 
-Page every issue comment. Parse only comments whose first line is the exact approval marker and whose second line is the only remaining content. Require a strict JSON object with exactly the shared contract's keys and values.
+Stage the fresh issue body and run:
 
-Validate trust from `author_association`, not payload claims. A current record must match the issue, captured base, digest, size, model, policy tier, effective tier, and permitted authority. Report malformed or untrusted lookalikes but ignore them as authority.
+```text
+python3 -I .agents/skills/approve/scripts/approval_records.py \
+  --body-file /tmp/aether-plan-body-<N>.md \
+  --issue <N>
+```
 
-If a current trusted record exists, report `already approved` and post nothing. A record for another body digest or base is stale history. Never edit or delete it.
+Validate body-record trust from the issue's effective editor under the shared GraphQL provenance contract, not payload claims. A current record must match the issue, captured base, digest, size, model, policy tier, effective tier, and permitted authority. Report malformed or untrusted lookalikes but ignore them as authority.
+
+If a current trusted v2 record exists, report `already approved` and edit nothing. A record for another body digest or base is stale history and remains byte-for-byte unchanged. Approve does not use the migration-only v1 fallback for idempotency; it writes v2 whenever no current trusted v2 exists.
 
 ## Re-read and record
 
@@ -125,20 +131,20 @@ For every passing issue, retain identity, exact body, dependency state, target e
 2. re-read dependencies and ADR pull requests;
 3. fetch when the run crossed a confirmation turn or base freshness is uncertain;
 4. recompute digest, grounding, containment, ADR routing, and policy at the final base;
-5. page comments again and stop idempotently if an exact trusted record appeared.
+5. parse body records again and stop idempotently if an exact trusted record appeared.
 
-Build one comment containing only the exact marker and compact sorted-key JSON payload. Stage it with `apply_patch`, post it through REST, then re-read the returned comment and verify body, author, association, and payload. On an uncertain response, search for the exact record before retrying.
+Build one canonical `<!-- aether-approval:v2 {...} -->` line with compact sorted-key JSON. Splice it immediately before `## Problem statement`, after any prior v2 history, while preserving every other body byte. Stage the complete body with `apply_patch`, re-read identity and the original body immediately before a file-backed REST `PATCH`, and abort on any concurrent change. Then re-read the exact remote body, parse the appended line, and verify trusted effective-editor provenance. Never post a v2 approval as an issue comment. On an uncertain response, re-read the body and provenance before retrying.
 
-Post an optional human-readable `--note` as a separate comment only after approval is verified. For an ADR override, name the bypassed pull requests and the owner's reason in that separate note. A note never carries approval authority.
+Post an optional human-readable `--note` as a separate visible comment only after approval is verified. For an ADR override, name the bypassed pull requests and the owner's reason in that separate note. A note never carries approval authority.
 
 ## Explicit batches and sweep
 
-Validate every named issue before the first mutation. Show passes and failures with digest, size/model, base, surface, policy/effective tier, authority, dependencies, ADR result, and umbrella status. Post passing approvals serially. Stop later mutations on systemic authentication or rate-limit failure; otherwise preserve and report exact partial results.
+Validate every named issue before the first mutation. Show passes and failures with digest, size/model, base, surface, policy/effective tier, authority, dependencies, ADR result, and umbrella status. Append passing approvals serially. Stop later mutations on systemic authentication or rate-limit failure; otherwise preserve and report exact partial results.
 
-Sweep discovers all open non-PR issues whose bodies contain a complete managed Plan accepted by the digest helper. Exclude pure umbrellas from implementation dispatch but allow owner approval. The first turn prints every proposed record, every drop reason, and the captured base, explicitly stating that no comment was posted. The confirmed turn rediscovers the numbered set and revalidates it rather than approving a new query result.
+Sweep discovers all open non-PR issues whose bodies contain a complete managed Plan accepted by the digest helper. Exclude pure umbrellas from implementation dispatch but allow owner approval. The first turn prints every proposed record, every drop reason, and the captured base, explicitly stating that no issue body was edited. The confirmed turn rediscovers the numbered set and revalidates it rather than approving a new query result.
 
 ## Completion
 
-Report each issue's final digest, approved base, size/model, declared surface, policy/effective tier, authority, dependency and ADR results, umbrella marker, comment id, optional note, and every failed or skipped mutation. Point an approved implementable issue to `$implement <N>` only as a next action.
+Report each issue's final digest, approved base, size/model, declared surface, policy/effective tier, authority, dependency and ADR results, umbrella marker, body-record position, optional note, and every failed or skipped mutation. Point an approved implementable issue to `$implement <N>` only as a next action.
 
-Never edit issue bodies, repair scope, resolve Side findings, dispatch implementation, create a worktree, open a pull request, close an umbrella, notify another person, or merge from this skill.
+Never edit managed issue sections, repair scope, resolve Side findings, dispatch implementation, create a worktree, open a pull request, close an umbrella, notify another person, or merge from this skill.

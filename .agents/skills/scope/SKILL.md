@@ -18,7 +18,7 @@ $scope --sweep
 $scope --sweep <issue-number> [<issue-number> ...]
 ```
 
-A single-issue invocation authorizes edits to that issue's managed sections. `--phase` rewrites the named artifact and every downstream artifact: `define` starts at Problem statement, `design` starts at Design notes, and `plan` starts at Implementation plan. The resulting approval digest changes naturally. Do not delete or edit old approval comments.
+A single-issue invocation authorizes edits to that issue's managed sections. `--phase` rewrites the named artifact and every downstream artifact: `define` starts at Problem statement, `design` starts at Design notes, and `plan` starts at Implementation plan. The resulting approval digest changes naturally. Preserve every hidden v2 approval line byte-for-byte; scope never creates, edits, reorders, or deletes approval history.
 
 Run a sweep in two turns. First discover and validate candidates, show the complete plan and every drop, and end with a confirmation request. After confirmation, refresh `origin/main`, revalidate, dispatch isolated drafting work, and apply results serially. A commentary question is not confirmation.
 
@@ -41,12 +41,12 @@ Reject duplicate managed headings or a downstream artifact that conceals an upst
 
 ## Own and preserve body sections
 
-Own exactly the H2 sections listed by the shared GitHub contract. Preserve every other byte. Replace an existing managed span in place and append a missing span in scope-owned order. Omit Sub-issues, Depends on, and Side findings when empty; require the other five at completed Plan.
+Own exactly the H2 sections listed by the shared GitHub contract. Preserve every other byte, including the complete unmanaged prefix and its hidden approval history. Replace an existing managed span in place and append a missing span in scope-owned order. Omit Sub-issues, Depends on, and Side findings when empty; require the other five at completed Plan.
 
 Before every full-body `PATCH`:
 
 1. Capture `{number,title,body,state}` and the exact managed spans used as inputs.
-2. Splice only managed spans and assert all unmanaged bytes remain present and ordered.
+2. Splice only managed spans and assert all unmanaged bytes remain present and ordered, with the prefix before the first managed H2 byte-for-byte identical.
 3. Require at least one distinctive title word in the new Problem statement when one exists.
 4. Re-read immediately before writing. Abort on identity, close-state, implementation-artifact, or concurrent managed-span changes. Re-splice into fresh non-overlapping user prose.
 5. Stage final markdown in `/tmp` with `apply_patch`, send it as a file-backed REST request, then re-read and verify exact managed spans.
