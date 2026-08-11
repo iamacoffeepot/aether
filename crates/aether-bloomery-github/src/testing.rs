@@ -371,8 +371,7 @@ impl FakeGithub {
     /// If `sha` is not a well-formed git object sha — a test-setup bug.
     pub fn seed_correspondence(&self, digest: &Digest, sha: &str) {
         let git = GitObjectId::from_hex(sha).expect("seed_correspondence: sha must be 40/64-hex");
-        let object = BackendObjectId::from(git);
-        self.lock().correspondence.insert(*digest.as_bytes(), object);
+        self.record_correspondence(digest, BackendObjectId::from(git));
     }
 
     /// Record a correspondence for `digest` against a synthetic git object sha
@@ -383,6 +382,17 @@ impl FakeGithub {
     /// the same digest.
     pub fn seed_git_object(&self, digest: &Digest) {
         self.seed_correspondence(digest, &to_hex(digest));
+    }
+
+    // Keep the fake faithful to the durable store's two-axis uniqueness: a new
+    // digest for an existing backend object retires the old forward mapping,
+    // while HashMap insertion retires the old reverse mapping for a digest.
+    fn record_correspondence(&self, digest: &Digest, object: BackendObjectId) {
+        let mut state = self.lock();
+        state
+            .correspondence
+            .retain(|stored_digest, stored_object| stored_digest == digest.as_bytes() || stored_object != &object);
+        state.correspondence.insert(*digest.as_bytes(), object);
     }
 
     /// Arm a merge of `head` into `base` (bare branch names) to answer with a
@@ -781,7 +791,7 @@ fn merged_tree(base: &str, head: &str) -> String {
 
 impl Correspondence for FakeGithub {
     fn record(&self, digest: &Digest, object: &BackendObjectId) -> Result<(), CorrespondenceError> {
-        self.lock().correspondence.insert(*digest.as_bytes(), object.clone());
+        self.record_correspondence(digest, object.clone());
         Ok(())
     }
 
@@ -982,13 +992,44 @@ mod tests {
     //! else exercises it yet — so its contract is pinned here rather than
     //! discovered later through a port test that passes for the wrong reason.
 
-    use super::{FakeGithub, GitDataApi, MergeResult};
+    use aether_bloomery::{BackendObjectId, Correspondence, Digest};
+
+    use super::{FakeGithub, GitDataApi, GitObjectId, MergeResult};
 
     // Seed `branch` at a commit carrying `tree`, and hand back that commit's sha.
     fn branch_at(fake: &FakeGithub, branch: &str, tree: &str) -> String {
         let commit = fake.create_commit(branch, tree, &[]).unwrap();
         fake.seed_ref(&format!("heads/{branch}"), &commit.sha);
         commit.sha
+    }
+
+    #[test]
+    fn correspondence_object_reassignment_retires_the_old_digest() {
+        let fake = FakeGithub::new();
+        let old_digest = Digest::from_bytes([1; 32]);
+        let new_digest = Digest::from_bytes([2; 32]);
+        let sha = "3a3f8c0b9e1d2a4f6b8c0e2d4a6f8b0c1e3d5a7f";
+        let object = BackendObjectId::from(GitObjectId::from_hex(sha).unwrap());
+
+        fake.seed_correspondence(&old_digest, sha);
+        fake.seed_correspondence(&new_digest, sha);
+
+        assert_eq!(fake.resolve_backend_object(&old_digest).unwrap(), None);
+        assert_eq!(fake.resolve_digest(&object).unwrap(), Some(new_digest));
+    }
+
+    #[test]
+    fn correspondence_digest_reassignment_retires_the_old_object() {
+        let fake = FakeGithub::new();
+        let digest = Digest::from_bytes([1; 32]);
+        let old_object = BackendObjectId::new(vec![2; 20]);
+        let new_object = BackendObjectId::new(vec![3; 32]);
+
+        fake.record(&digest, &old_object).unwrap();
+        fake.record(&digest, &new_object).unwrap();
+
+        assert_eq!(fake.resolve_digest(&old_object).unwrap(), None);
+        assert_eq!(fake.resolve_backend_object(&digest).unwrap(), Some(new_object));
     }
 
     #[test]

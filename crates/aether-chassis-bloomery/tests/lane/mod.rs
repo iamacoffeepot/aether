@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, BloomView, CONTROL_CORE_NAMESPACE, ConfigRegistry, Digest, Event, Evidence,
-    EvidenceKind, Fact, IdempotencyKey, Membership, Outcome, Query, QueryResult, ViewDocument, WorkpieceId,
+    EvidenceKind, Fact, IdempotencyKey, Membership, Outcome, Query, QueryResult, Snapshot, ViewDocument, WorkpieceId,
 };
 use aether_bloomery_github::{Correspondence, GitObjectId};
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneRun, LaneScript, read_ledger};
@@ -125,7 +125,7 @@ impl LaneHarness {
         // which lives in this same database. Seeding it here is what makes the
         // scratch repository's commit the tree every lane checks out — without
         // it the very first submit refuses with an unresolved checkout.
-        let base = Digest::from_bytes([0xB0; 32]);
+        let base = Snapshot::GENESIS_MAINLINE;
         SqliteCorrespondence::open(&store_path)
             .unwrap()
             .record(&base, &GitObjectId::from_hex(repo.head()).unwrap())

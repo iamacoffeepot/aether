@@ -130,7 +130,8 @@ impl SourceShell {
             .correspondence
             .as_ref()
             .ok_or_else(|| SourceError::Correspondence(CorrespondenceError::new("no correspondence store mounted")))?;
-        if correspondence.resolve_backend_object(&Snapshot::GENESIS_MAINLINE)?.is_some() {
+        if let Some(object) = correspondence.resolve_backend_object(&Snapshot::GENESIS_MAINLINE)? {
+            GitObjectId::try_from(object)?;
             return Ok(());
         }
 
@@ -333,7 +334,7 @@ impl SourceShell {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use aether_bloomery::SharedCorrespondence;
+    use aether_bloomery::{BackendObjectId, SharedCorrespondence};
     use aether_bloomery_github::testing::FakeGithub;
     use aether_bloomery_github::{GitObjectId, GitSource};
 
@@ -405,6 +406,20 @@ mod tests {
             .to_hex(),
             opening_head,
             "the later boot leaves genesis bound to the head the journal opened against",
+        );
+    }
+
+    #[test]
+    fn genesis_reconcile_rejects_a_non_git_backend_binding() {
+        let fake = FakeGithub::new();
+        let correspondence: SharedCorrespondence = Arc::new(fake.clone());
+        correspondence.record(&Snapshot::GENESIS_MAINLINE, &BackendObjectId::new(vec![0xAB; 17])).unwrap();
+        let backend = Arc::new(GitSource::new(fake, Arc::clone(&correspondence), true));
+        let shell = SourceShell { backend, correspondence: Some(correspondence) };
+
+        assert!(
+            matches!(shell.reconcile_genesis_mainline(), Err(SourceError::Correspondence(_))),
+            "an opaque binding that cannot cross the Git adapter boundary must not suppress authoritative seeding",
         );
     }
 
