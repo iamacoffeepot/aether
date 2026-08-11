@@ -3,12 +3,12 @@
 set -eu
 
 if ! worktree_root=$(git rev-parse --show-toplevel 2>/dev/null); then
-    echo "cargo cached must run inside a Git worktree" >&2
+    echo "scripts/cargo-cached.sh must run inside a Git worktree" >&2
     exit 2
 fi
 
 if ! sccache_path=$(command -v sccache); then
-    echo "cargo cached requires sccache on PATH" >&2
+    echo "scripts/cargo-cached.sh requires sccache on PATH" >&2
     exit 2
 fi
 

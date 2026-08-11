@@ -90,7 +90,7 @@ test('direct wrapper invocation reports its Git and sccache prerequisites', (t) 
     t.after(() => rmSync(outside, { recursive: true, force: true }));
     const outsideGit = spawnSync(WRAPPER, ['check'], { cwd: outside, encoding: 'utf8' });
     assert.equal(outsideGit.status, 2);
-    assert.match(outsideGit.stderr, /inside a Git worktree/);
+    assert.match(outsideGit.stderr, /scripts\/cargo-cached\.sh must run inside a Git worktree/);
 
     const fixture = setupWorktrees();
     t.after(() => rmSync(fixture.root, { recursive: true, force: true }));
@@ -100,5 +100,5 @@ test('direct wrapper invocation reports its Git and sccache prerequisites', (t) 
         encoding: 'utf8',
     });
     assert.equal(noSccache.status, 2);
-    assert.match(noSccache.stderr, /requires sccache on PATH/);
+    assert.match(noSccache.stderr, /scripts\/cargo-cached\.sh requires sccache on PATH/);
 });
