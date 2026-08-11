@@ -5,8 +5,6 @@
 //! taper like pen pressure, and carry stable world-space wobble. Consumers
 //! choose colour and pack the returned positions for their renderer.
 
-#![allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
-
 use aether_math::{TAU, Vec3};
 
 /// What [`reference_depth`] answers for a stroke that is not drawn.
@@ -71,7 +69,13 @@ pub fn wander(seed: u64, at: Vec3) -> f32 {
     let (f1, f2) = (5.5 + hash_unit(seed ^ 0x1234_9abc) * 2.5, 15.0 + hash_unit(seed ^ 0xfeed_beef) * 6.0);
     let (a, b) = (Vec3::new(0.71, 0.52, 0.47), Vec3::new(-0.44, 0.63, 0.64));
 
-    (at.dot(a) * f1 + p1).sin() * 0.72 + (at.dot(b) * f2 + p2).sin() * 0.28
+    let first_phase = at.dot(a) * f1;
+    let first_phase = first_phase + p1;
+    let first = first_phase.sin() * 0.72;
+    let second_phase = at.dot(b) * f2;
+    let second_phase = second_phase + p2;
+    let second = second_phase.sin() * 0.28;
+    first + second
 }
 
 /// Pencil pressure: light at the entry, full through the middle, tapering at the exit.
@@ -83,7 +87,8 @@ pub fn pressure(travelled: f32, total: f32) -> f32 {
     }
 
     let ends = (travelled / ramp).min((total - travelled) / ramp).clamp(0.0, 1.0);
-    0.42 + 0.58 * ends.sqrt()
+    let swell = 0.58 * ends.sqrt();
+    0.42 + swell
 }
 
 /// Append eye-free anchors for a stroke, returning false for fewer than two points.
@@ -119,20 +124,20 @@ pub fn anchors(
 /// Return the stroke's average eye distance, or [`NOT_DRAWN`] if it is too short.
 pub fn reference_depth(points: impl IntoIterator<Item = StrokePoint>, parameters: StrokeParameters, eye: Vec3) -> f32 {
     let mut points = points.into_iter().peekable();
-    let (mut count, mut total, mut arc) = (0usize, 0.0f32, 0.0f32);
+    let (mut count, mut total, mut arc) = (0.0f32, 0.0f32, 0.0f32);
     while let Some(point) = points.next() {
         let depth = (point.pos - eye).length();
-        count += 1;
+        count += 1.0;
         total += depth;
         if let Some(next) = points.peek() {
             arc += (next.pos - point.pos).length() / depth.max(1e-4);
         }
     }
-    if count < 2 || arc < parameters.minimum_angular_length {
+    if count < 2.0 || arc < parameters.minimum_angular_length {
         return NOT_DRAWN;
     }
 
-    total / count as f32
+    total / count
 }
 
 /// Solve one anchor against an eye into its centre and full-pressure offset.
@@ -224,7 +229,10 @@ fn hash64(mut value: u64) -> u64 {
 }
 
 fn hash_unit(seed: u64) -> f32 {
-    (hash64(seed) >> 40) as f32 / (1u64 << 24) as f32
+    let sample = (hash64(seed) >> 40).to_le_bytes();
+    let high = f32::from(u16::from_le_bytes([sample[1], sample[2]])) * 256.0;
+    let value = high + f32::from(sample[0]);
+    value / 16_777_216.0
 }
 
 #[cfg(test)]
