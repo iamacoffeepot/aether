@@ -16,7 +16,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use aether_bloomery::{Budget, Digest, Event, Forecast, Membership, StageId, Statement, Workpiece, WorkpieceId};
+use aether_bloomery::{
+    Budget, ConfigRegistry, Digest, Event, Forecast, Membership, StageId, Statement, Workpiece, WorkpieceId,
+};
 
 use crate::bloomery::{AdrTouch, Completeness};
 
@@ -51,6 +53,9 @@ pub struct DraftPatch {
     /// Replace the proposed memberships.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposals: Option<Vec<Membership>>,
+    /// Replace the bloom configuration registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configs: Option<ConfigRegistry>,
     /// Replace the base tree digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<Digest>,

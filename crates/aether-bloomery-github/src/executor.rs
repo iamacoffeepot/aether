@@ -43,7 +43,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::{
     Conclusion, CorrespondenceError, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce,
-    SharedCorrespondence, WorkHandle, WorkOrder, is_model_lane,
+    SharedCorrespondence, VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
 };
 
 use crate::client::{ActionsApi, GithubError, RunConclusion, RunStatus, WorkflowRun, name_carries_nonce};
@@ -270,6 +270,16 @@ fn digest_hex(digest: &Digest) -> String {
     hex
 }
 
+// Decode ADR-0178's exact mask token from a canonical attempt artifact name.
+// A legacy/stray/malformed name has no typed failures; the intake name decoder
+// independently refuses malformed attempt names before they become uploads.
+fn artifact_failed_verifiers(name: &str) -> VerifyFailureSet {
+    name.strip_prefix("attempt.")
+        .and_then(|rest| rest.split('.').nth(1))
+        .and_then(VerifyFailureSet::from_mask)
+        .unwrap_or_default()
+}
+
 // Map a resolved run's folded lifecycle onto the port's `ExecutionStatus`.
 fn map_status(run: &WorkflowRun) -> ExecutionStatus {
     match run.status {
@@ -320,8 +330,8 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
         inputs.insert(INPUT_SUBJECT.to_owned(), subject);
         inputs.insert(INPUT_NONCE.to_owned(), order.nonce.0.clone());
         // The scope-revision `inputs[0]` binds the returned evidence: the wrapper
-        // embeds it in the attempt artifact's name (`attempt.<verdict>.<subject_hex>.
-        // <detail_hex>.<nonce>`, #3501), which the pull-side `NameEvidenceClaims`
+        // embeds it in the attempt artifact's name (`attempt.<verdict>.<failure_mask>.
+        // <subject_hex>.<detail_hex>.<nonce>`, ADR-0178), which the pull-side `NameEvidenceClaims`
         // decodes and the broker re-checks against the order's displayed digest.
         // An input-less order (a bare smoke-run shape) omits it and the wrapper
         // falls back to the legacy `evidence-<nonce>` name the intake skips.
@@ -387,6 +397,7 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
             .into_iter()
             .filter(|a| name_carries_nonce(&a.name, &handle.nonce.0))
             .map(|a| EvidenceRef {
+                failed_verifiers: artifact_failed_verifiers(&a.name),
                 name: a.name,
                 nonce: handle.nonce.clone(),
                 artifact_id: a.id,
@@ -409,7 +420,8 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
 mod tests {
     use aether_bloomery::{
         Budget, Conclusion, Digest, ExecutionStatus, ExecutorBackend, Harness, NetworkProfile, Nonce,
-        REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolvedModel, Transformation, WorkHandle, WorkOrder,
+        REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolvedModel, Transformation, VerifyFailure, VerifyFailureSet,
+        WorkHandle, WorkOrder,
     };
 
     use std::sync::Arc;
@@ -524,7 +536,7 @@ mod tests {
     #[test]
     fn submit_hands_the_wrapper_the_evidence_binding_digest_hex() {
         // The scope-revision `inputs[0]` rides the dispatch as `displayed` so the
-        // wrapper can compose the `attempt.<verdict>.<subject_hex>.<detail_hex>.<nonce>`
+        // wrapper can compose the `attempt.<verdict>.<failure_mask>.<subject_hex>.<detail_hex>.<nonce>`
         // artifact name the intake's `NameEvidenceClaims` decodes (#3501).
         let fake = FakeGithub::new();
         let mut bound = order("n-2");
@@ -678,6 +690,28 @@ mod tests {
         let evidence = exec.stream_evidence(&handle).unwrap();
         let ids: Vec<u64> = evidence.iter().map(|e| e.artifact_id).collect();
         assert_eq!(ids, vec![1], "the n-42 artifact must not leak into n-4's evidence set");
+    }
+
+    #[test]
+    fn stream_evidence_decodes_the_canonical_failure_mask() {
+        let fake = FakeGithub::new();
+        let exec = executor(fake.clone());
+        let handle = exec.submit(&order("n-mask")).unwrap();
+        let run_id = fake.seed_run("n-mask", RunStatus::Completed, Some(RunConclusion::Failure));
+        fake.seed_run_artifacts(
+            run_id,
+            vec![Artifact {
+                id: 1,
+                name: format!("attempt.fail.12.{}.{}.n-mask", "11".repeat(32), "22".repeat(32)),
+                size_bytes: 10,
+            }],
+        );
+
+        let evidence = exec.stream_evidence(&handle).unwrap();
+        assert_eq!(
+            evidence[0].failed_verifiers,
+            [VerifyFailure::Fmt, VerifyFailure::Test].into_iter().collect::<VerifyFailureSet>(),
+        );
     }
 
     #[test]

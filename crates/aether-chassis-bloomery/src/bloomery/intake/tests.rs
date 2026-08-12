@@ -8,8 +8,8 @@ use std::sync::Arc;
 use aether_bloomery::{
     BloomDraft, BloomId, BloomRecord, BloomStatus, Budget, ConfigRegistry, Decision, Digest, Event, Evidence,
     EvidenceKind, EvidenceRef, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce,
-    Outcome, ResolvedConfigs, Snapshot, StageCatalog, StageId, StageVerdict, Transformation, WorkHandle, WorkpieceId,
-    reduce,
+    Outcome, ResolvedConfigs, Snapshot, StageCatalog, StageId, StageVerdict, Transformation, VerifyFailure,
+    VerifyFailureSet, WorkHandle, WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -168,6 +168,7 @@ fn a_matching_upload_admits_a_bound_integrate_fact() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
@@ -209,6 +210,7 @@ fn a_parked_upload_admits_a_question_evidence_fact_and_consumes_the_order() {
         detail: Digest::from_bytes([8; 32]),
         candidate: None,
         findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
@@ -240,6 +242,7 @@ fn an_unknown_nonce_is_refused() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
     };
     assert!(matches!(
@@ -267,6 +270,7 @@ fn a_right_nonce_with_the_wrong_digest_is_refused_and_the_order_stays_live() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
     };
     match admit_uploaded(&mut store, &lying).unwrap() {
@@ -337,6 +341,7 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
             detail: Digest::from_bytes([7; 32]),
             candidate: None,
             findings: None,
+            failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
         },
     );
@@ -386,6 +391,7 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
             detail: Digest::from_bytes([7; 32]),
             candidate: None,
             findings: None,
+            failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
         },
     );
@@ -482,6 +488,7 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
@@ -537,6 +544,7 @@ fn a_failing_terminal_verify_admits_attempt_completed_not_integrate() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: None,
+        failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
         cost: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
@@ -553,6 +561,43 @@ fn a_failing_terminal_verify_admits_attempt_completed_not_integrate() {
         admit_uploaded(&mut store, &upload).unwrap(),
         AdmitDecision::Refused(IntakeRefusal::UnknownNonce(_))
     ));
+}
+
+#[test]
+fn invalid_verifier_sets_are_refused_without_consuming_the_order() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let workpiece = WorkpieceId("wp-verify-contract".to_owned());
+    let candidate = Digest::from_bytes([5; 32]);
+    let failures = VerifyFailureSet::one(VerifyFailure::Fmt);
+    let cases = [
+        ("n-empty-fail", StageId::Verify, StageVerdict::VerificationFailed, VerifyFailureSet::EMPTY),
+        ("n-pass-set", StageId::Verify, StageVerdict::VerificationPassed, failures),
+        ("n-construct-set", StageId::Construct, StageVerdict::VerificationFailed, failures),
+        ("n-park-set", StageId::Verify, StageVerdict::Parked, failures),
+    ];
+
+    for (nonce, stage, verdict, failed_verifiers) in cases {
+        let mut record = dispatch_record(nonce, bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
+        record.stage = stage;
+        record_dispatch(&mut store, &record).unwrap();
+        let upload = UploadedEvidence {
+            nonce: Nonce(nonce.to_owned()),
+            subject: candidate,
+            verdict,
+            detail: Digest::from_bytes([7; 32]),
+            candidate: None,
+            findings: None,
+            failed_verifiers,
+            cost: None,
+        };
+
+        assert!(matches!(
+            admit_uploaded(&mut store, &upload).unwrap(),
+            AdmitDecision::Refused(IntakeRefusal::InvalidVerifierFailures { .. })
+        ));
+        assert!(store.lookup_order(nonce).unwrap().is_some(), "`{nonce}` remains live after refusal");
+    }
 }
 
 // ADR-0153 — an AggregateReview order's verdict admits as
@@ -576,6 +621,7 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: Some("pillar 2: the members disagree about the tick order".to_owned()),
+        failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &failing).unwrap() else {
@@ -604,6 +650,7 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
         detail: Digest::from_bytes([8; 32]),
         candidate: None,
         findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &passing).unwrap() else {
@@ -638,6 +685,7 @@ fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: Some(findings.to_owned()),
+        failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &failing).unwrap() else {
@@ -673,6 +721,7 @@ fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
         detail: Digest::from_bytes([8; 32]),
         candidate: None,
         findings: Some("[wp-a] Still leaking.".to_owned()),
+        failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
     };
     assert!(matches!(admit_uploaded(&mut store, &delta_fail).unwrap(), AdmitDecision::Admitted(_)));
@@ -707,6 +756,7 @@ fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
     };
     match admit_uploaded(&mut store, &upload).unwrap() {
@@ -752,6 +802,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
             size_bytes: 10,
             candidate: None,
             findings: None,
+            failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
         };
 
@@ -760,7 +811,39 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         assert_eq!(decoded.subject, subject);
         assert_eq!(decoded.verdict, verdict);
         assert_eq!(decoded.detail, detail);
+        assert!(decoded.failed_verifiers.is_empty());
     }
+
+    let nonce = Nonce("dispatch-mask".to_owned());
+    let subject = Digest::from_bytes([1; 32]);
+    let detail = Digest::from_bytes([2; 32]);
+    let failures = [VerifyFailure::Fmt, VerifyFailure::Docs].into_iter().collect::<VerifyFailureSet>();
+    let name = NameEvidenceClaims::attempt_artifact_name(
+        &nonce,
+        &subject,
+        StageVerdict::VerificationFailed,
+        failures,
+        &detail,
+    );
+    let reference = EvidenceRef {
+        name: name.clone(),
+        nonce,
+        artifact_id: 3,
+        size_bytes: 10,
+        candidate: None,
+        findings: None,
+        failed_verifiers: failures,
+        cost: None,
+    };
+    assert_eq!(claims.claim_for(&reference).expect("typed mask decodes").failed_verifiers, failures);
+
+    for invalid_mask in ["0A", "80", "0", "gg"] {
+        let malformed =
+            EvidenceRef { name: name.replacen(".0a.", &format!(".{invalid_mask}."), 1), ..reference.clone() };
+        assert!(claims.claim_for(&malformed).is_none(), "mask `{invalid_mask}` must not become an upload");
+    }
+    let mismatched = EvidenceRef { failed_verifiers: VerifyFailureSet::EMPTY, ..reference };
+    assert!(claims.claim_for(&mismatched).is_none(), "body/name projections must agree");
 
     // A non-attempt artifact name (a study record, a stray log) is skipped, not
     // mis-decoded into a bogus attempt result.
@@ -771,6 +854,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         size_bytes: 3,
         candidate: None,
         findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
     };
     assert!(claims.claim_for(&stray).is_none(), "a non-attempt name yields no claim");
@@ -838,6 +922,11 @@ fn verify_findings_persist_on_a_failing_verify_and_clear_on_a_pass() {
         detail: Digest::from_bytes([7; 32]),
         candidate: None,
         findings: findings.map(str::to_owned),
+        failed_verifiers: if verdict == StageVerdict::VerificationFailed {
+            VerifyFailureSet::one(VerifyFailure::Clippy)
+        } else {
+            VerifyFailureSet::EMPTY
+        },
         cost: None,
     };
 
@@ -945,6 +1034,7 @@ fn a_measured_attempt_writes_one_priced_study_row_and_an_unmeasured_one_writes_n
             detail: Digest::from_bytes([7; 32]),
             candidate: None,
             findings: None,
+            failed_verifiers: VerifyFailureSet::EMPTY,
             cost: Some(cost),
         },
     );
@@ -1040,6 +1130,7 @@ fn second_attempt(
             detail: Digest::from_bytes([7; 32]),
             candidate: None,
             findings: None,
+            failed_verifiers: VerifyFailureSet::EMPTY,
             cost,
         },
     );

@@ -3,10 +3,10 @@
 //! executes it, and writes nonce-tagged evidence bytes a broker can
 //! validate. Two lanes share this entrypoint:
 //!
-//! - The **mechanical verify lane** (`verify.fmt` / `verify.clippy` /
-//!   `verify.docs`, #3501) — a zero-secret cargo invocation byte-for-byte
-//!   with CI. `verify.test` is deliberately out of scope (CI's test lane
-//!   pre-builds with `cargo xtask dist` under a heavier toolchain).
+//! - The **mechanical verify lane** (`verify.fmt`, `verify.clippy`,
+//!   `verify.docs`, `verify.test`, `verify.dup`, `verify.deps`, and
+//!   `verify.suppress`, #3501) — zero-secret invocations byte-for-byte with CI.
+//!   The `verify.check` umbrella runs all seven without short-circuiting.
 //! - The **model-driven construct lane** (`construct.implement`, #3511) —
 //!   runs headless Claude at the resolved model + reasoning effort against the
 //!   checked-out **subject** tree, and writes the nonce-tagged **result record**
@@ -29,9 +29,8 @@ mod scratch;
 mod verify;
 
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
 
-use aether_bloomery::Harness;
+use aether_bloomery::{Harness, VerifyFailureSet};
 use anyhow::{Result, bail};
 use clap::Args;
 use serde::Serialize;
@@ -109,6 +108,10 @@ struct Evidence {
     /// the channel stays presence-driven rather than needing a lane flag.
     #[serde(skip_serializing_if = "Option::is_none")]
     findings: Option<String>,
+    /// The exact failed `verify.check` members (ADR-0178). Absent on a pass;
+    /// present and nonempty on a failed umbrella run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed_verifiers: Option<VerifyFailureSet>,
 }
 
 /// Assembles the evidence record from a captured run's status — pure
@@ -116,20 +119,23 @@ struct Evidence {
 fn build_evidence(
     command: &str,
     nonce: Option<String>,
-    status: ExitStatus,
+    passed: bool,
+    exit_code: Option<i32>,
     log_file: String,
     findings: Option<String>,
+    failed_verifiers: Option<VerifyFailureSet>,
 ) -> Evidence {
     Evidence {
         findings,
+        failed_verifiers,
         command: command.to_string(),
         nonce,
-        status: if status.success() {
+        status: if passed {
             "pass"
         } else {
             "fail"
         },
-        exit_code: status.code(),
+        exit_code,
         log: log_file,
     }
 }
@@ -208,22 +214,38 @@ mod tests {
 
     #[test]
     fn evidence_assembly_carries_status_nonce_and_exit_code() {
-        use std::os::unix::process::ExitStatusExt;
-        use std::process::ExitStatus;
-
-        let pass = ExitStatus::from_raw(0);
-        let evidence =
-            build_evidence("verify.fmt", Some("nonce-1".to_string()), pass, "verify.fmt.log".to_string(), None);
+        let evidence = build_evidence(
+            "verify.fmt",
+            Some("nonce-1".to_string()),
+            true,
+            Some(0),
+            "verify.fmt.log".to_string(),
+            None,
+            None,
+        );
         assert_eq!(evidence.command, "verify.fmt");
         assert_eq!(evidence.nonce, Some("nonce-1".to_string()));
         assert_eq!(evidence.status, "pass");
         assert_eq!(evidence.exit_code, Some(0));
         assert_eq!(evidence.log, "verify.fmt.log");
 
-        let fail = ExitStatus::from_raw(1 << 8);
-        let evidence = build_evidence("verify.clippy", None, fail, "verify.clippy.log".to_string(), None);
+        let failures = aether_bloomery::VerifyFailureSet::one(aether_bloomery::VerifyFailure::Clippy);
+        let evidence = build_evidence(
+            "verify.clippy",
+            None,
+            false,
+            Some(1),
+            "verify.clippy.log".to_string(),
+            None,
+            Some(failures),
+        );
         assert_eq!(evidence.status, "fail");
         assert_eq!(evidence.exit_code, Some(1));
         assert_eq!(evidence.nonce, None);
+        assert_eq!(evidence.failed_verifiers, Some(failures));
+        assert_eq!(
+            serde_json::to_value(&evidence).expect("evidence serializes")["failed_verifiers"],
+            serde_json::json!(["verify.clippy"]),
+        );
     }
 }

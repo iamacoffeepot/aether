@@ -17,7 +17,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::ids::Nonce;
-use crate::values::{CandidateRef, StudyCost, Transformation};
+use crate::values::{CandidateRef, StudyCost, Transformation, VerifyFailureSet};
 
 /// A fully-resolved unit of work to dispatch. The [`Transformation`] already
 /// carries the typed command id, digest-pinned inputs, declared outputs,
@@ -110,6 +110,11 @@ pub struct EvidenceRef {
     /// and from every lane that stamps none. Host-recorded state riding the
     /// reference, like `candidate` — never part of the artifact-name contract.
     pub findings: Option<String>,
+    /// The exact failed members of a `verify.check` result (ADR-0178). The
+    /// local backend decodes this from the evidence body; the name-only Actions
+    /// backend decodes the equivalent mask from the artifact name. Empty on a
+    /// pass and on every non-Verify lane.
+    pub failed_verifiers: VerifyFailureSet,
     /// What the attempt cost (#4679) — reported by a backend that reads the
     /// run's evidence bytes itself (the local executor, from the result
     /// record's token/cost columns); `None` from the name-only Actions lane,

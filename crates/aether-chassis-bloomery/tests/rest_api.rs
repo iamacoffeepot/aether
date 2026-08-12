@@ -24,11 +24,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    BloomDraft, ConfigRegistry, Digest, Evidence, EvidenceKind, KeyId, Membership, Provenance, SignatureEnvelope,
-    Statement, Workpiece, WorkpieceId,
+    AgentProfile, BloomDraft, ConfigRegistry, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId,
+    Membership, Provenance, ReasoningEffort, SignatureEnvelope, StageCatalog, StageId, Statement, ToolPolicy, Topic,
+    Workpiece, WorkpieceId,
 };
 use aether_chassis_bloomery::api::{MemberProjection, SealRequest};
-use aether_chassis_bloomery::bloomery::{AdrTouch, Completeness};
+use aether_chassis_bloomery::bloomery::{AdrTouch, Completeness, TopicOutbox};
+use aether_chassis_bloomery::store::SqliteStore;
+use aether_data::wire::from_bytes;
 use common::{Coordinator, free_port};
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::Value;
@@ -158,11 +161,17 @@ fn owner_allowlist() -> String {
 /// pointing the pre-seal approve gate at `policy_path` (#3583). Reaped when the
 /// returned guard drops.
 fn spawn(http_port: u16, rpc_port: u16, policy_path: &str) -> Coordinator {
+    spawn_with_store(http_port, rpc_port, policy_path, ":memory:")
+}
+
+/// [`spawn`], with a caller-provided durable store for a test that reads the
+/// dispatch outbox through a second store connection.
+fn spawn_with_store(http_port: u16, rpc_port: u16, policy_path: &str, store_path: &str) -> Coordinator {
     Coordinator::spawn(
         rpc_port,
         &[
             ("AETHER_HTTP_PORT", &http_port.to_string()),
-            ("AETHER_STORE_PATH", ":memory:"),
+            ("AETHER_STORE_PATH", store_path),
             ("AETHER_SIGNING_ALLOWLIST", &owner_allowlist()),
             ("AETHER_APPROVAL_POLICY_FILE", policy_path),
         ],
@@ -624,4 +633,75 @@ fn authoring_a_config_stores_it_under_a_stable_content_address() {
     // typo cannot reach the store as bytes that will not decode at dispatch.
     let (status, _) = send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": 7 })));
     assert_eq!(status, 400, "a value that does not match the schema is refused before any write");
+}
+
+// ADR-0174 — the generic authoring route and the draft registry are only useful
+// if the reducer dispatches the catalog they name. This drives that whole path:
+// author a catalog over HTTP, PATCH and GET its registry, seal it, then decode
+// the durable dispatch record. The exact profile assertion distinguishes the
+// authored construct binding from the compiled fallback.
+#[test]
+fn authored_stage_catalog_reaches_the_dispatch_profile() {
+    let http_port = free_port();
+    let rpc_port = free_port();
+    let (_policy_dir, policy_path) = test_policy();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store_path = store_dir.path().join("bloomery.db");
+    let store_path = store_path.to_str().unwrap();
+    let _coordinator = spawn_with_store(http_port, rpc_port, &policy_path, store_path);
+
+    wait_for_200(http_port, "/drafts");
+
+    let authored_profile = AgentProfile {
+        harness: Harness::Codex,
+        model: "gpt-5.6".to_owned(),
+        effort: ReasoningEffort::Max,
+        tools: ToolPolicy::ReadOnly,
+    };
+    let mut catalog = StageCatalog::line();
+    catalog
+        .bindings
+        .iter_mut()
+        .find(|binding| binding.stage == StageId::Construct)
+        .expect("the compiled catalog binds Construct")
+        .profile = authored_profile.clone();
+
+    let (status, authored) = send_json(
+        http_port,
+        "POST",
+        "/configs",
+        &serde_json::json!({ "kind": "aether.bloomery.stage_catalog", "value": catalog }),
+    );
+    assert_eq!(status, 200, "the authored catalog is durable before its address is returned");
+    let catalog_address: Digest = serde_json::from_value(authored["digest"].clone()).unwrap();
+
+    let mut configs = ConfigRegistry::default();
+    configs.insert_named("aether.bloomery.stage_catalog", catalog_address);
+    let (status, opened) = send_json(http_port, "POST", "/drafts", &Value::Null);
+    assert_eq!(status, 201, "open draft");
+    let draft_id = opened["draft_id"].as_str().unwrap();
+    let mut patch = serde_json::to_value(valid_draft("wp-1")).unwrap();
+    patch["configs"] = serde_json::to_value(&configs).unwrap();
+    let (status, patched) = send_json(http_port, "PATCH", &format!("/drafts/{draft_id}"), &patch);
+    assert_eq!(status, 200, "patch the authored catalog address into the draft registry");
+    assert_eq!(patched["draft"]["configs"], serde_json::to_value(&configs).unwrap());
+    let (status, fetched) = get_json(http_port, &format!("/drafts/{draft_id}"));
+    assert_eq!(status, 200, "read patched draft");
+    assert_eq!(fetched["draft"]["configs"], serde_json::to_value(&configs).unwrap());
+
+    wait_for_200(http_port, "/view");
+    let (status, sealed) = send_json(
+        http_port,
+        "POST",
+        &format!("/drafts/{draft_id}/seal"),
+        &seal_body(vec![projection(&["docs/guide/x.md"], complete())]),
+    );
+    assert_eq!(status, 200, "seal the draft carrying the authored catalog: {sealed:?}");
+
+    let mut store = SqliteStore::open(store_path).unwrap();
+    let entries = store.drain_topic(Topic::Dispatch).unwrap();
+    assert_eq!(entries.len(), 1, "sealing dispatches the member's Construct attempt");
+    let payload: DispatchPayload = from_bytes(&entries[0].payload).unwrap();
+    assert_eq!(payload.stage, StageId::Construct);
+    assert_eq!(payload.profile, authored_profile, "the dispatch carries the catalog profile the operator authored");
 }

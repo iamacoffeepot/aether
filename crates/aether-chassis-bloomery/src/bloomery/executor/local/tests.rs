@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
     Conclusion, Digest, ExecutionStatus, ExecutorBackend, Harness, Nonce, ReasoningEffort, ResolvedModel, StageId,
-    StageVerdict, Transformation, WorkHandle,
+    StageVerdict, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle,
 };
 use tempfile::TempDir;
 
@@ -95,7 +95,11 @@ fn a_verify_status_field_drives_the_verdict() {
     // regardless of the (stubbed) exit, so the name-encoded verdict is the claim.
     let base = TempDir::new().unwrap();
     let subject = digest(7);
-    let exec = executor(&base, r#"{"command":"verify.check","status":"fail"}"#, RunLifecycle::Exited { success: true });
+    let exec = executor(
+        &base,
+        r#"{"command":"verify.check","nonce":"n-v","status":"fail","failed_verifiers":["verify.fmt","verify.test"]}"#,
+        RunLifecycle::Exited { success: true },
+    );
 
     let order = aether_bloomery::WorkOrder {
         transformation: Transformation::for_member_stage(StageId::Verify, subject, digest(0xC0)),
@@ -111,6 +115,44 @@ fn a_verify_status_field_drives_the_verdict() {
         "the evidence status, not the exit, drives the verdict"
     );
     assert_eq!(upload.subject, subject);
+    let expected = [VerifyFailure::Fmt, VerifyFailure::Test].into_iter().collect::<VerifyFailureSet>();
+    assert_eq!(refs[0].failed_verifiers, expected, "the reference carries the body-derived canonical set");
+    assert_eq!(upload.failed_verifiers, expected, "the name decode agrees with the body-derived reference");
+}
+
+#[test]
+fn a_passing_verify_body_projects_the_empty_failure_set() {
+    let base = TempDir::new().unwrap();
+    let evidence = r#"{"command":"verify.check","nonce":"n-pass","status":"pass"}"#;
+    let exec = executor(&base, evidence, RunLifecycle::Exited { success: true });
+    let order = aether_bloomery::WorkOrder {
+        transformation: Transformation::for_member_stage(StageId::Verify, digest(7), digest(0xC0)),
+        nonce: Nonce("n-pass".to_owned()),
+    };
+
+    let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
+    let upload = NameEvidenceClaims.claim_for(&reference).expect("canonical local name decodes");
+
+    assert!(reference.failed_verifiers.is_empty());
+    assert!(upload.failed_verifiers.is_empty());
+    assert_eq!(upload.verdict, StageVerdict::VerificationPassed);
+}
+
+#[test]
+fn a_malformed_body_failure_set_fails_closed() {
+    let base = TempDir::new().unwrap();
+    let evidence = r#"{"command":"verify.check","nonce":"n-bad-set","status":"pass","failed_verifiers":["verify.test","verify.fmt"]}"#;
+    let exec = executor(&base, evidence, RunLifecycle::Exited { success: true });
+    let order = aether_bloomery::WorkOrder {
+        transformation: Transformation::for_member_stage(StageId::Verify, digest(7), digest(0xC0)),
+        nonce: Nonce("n-bad-set".to_owned()),
+    };
+
+    let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
+    let upload = NameEvidenceClaims.claim_for(&reference).expect("the fail-closed empty-mask name decodes");
+
+    assert_eq!(upload.verdict, StageVerdict::VerificationFailed);
+    assert!(upload.failed_verifiers.is_empty(), "invalid body data is never projected as a typed claim");
 }
 
 #[test]

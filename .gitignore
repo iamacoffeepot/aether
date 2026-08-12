@@ -29,14 +29,10 @@
 .claude/skills/*
 !.claude/skills/adr/
 !.claude/skills/approve/
-!.claude/skills/bounce/
 !.claude/skills/delegate/
 !.claude/skills/dogfood/
-!.claude/skills/findings/
 !.claude/skills/implement/
-!.claude/skills/judge/
 !.claude/skills/wish/
-!.claude/skills/release-init/
 !.claude/skills/scope/
 !.claude/skills/retrospect/
 !.claude/skills/review/
