@@ -1320,6 +1320,59 @@ fn an_answer_that_does_not_adopt_a_held_question_is_refused() {
     assert!(held.blooms.get(&bloom).unwrap().holds.contains(&question_digest), "a refused answer leaves the hold");
 }
 
+// ADR-0182 — the reducer takes its released question from the submitter's
+// `parents`, in the submitter's order. `Fact::AdoptAnswer` carries no question
+// field, so on a multi-hold bloom `parents` alone decides which hold falls, and
+// a later parent that is also an open hold never gets a look in.
+//
+// Tripwire: this is the property that forces the host answer route to require
+// `parents` to equal exactly the question its signature is bound to. As long as
+// the reducer picks this way, a route that merely verified the signature — or
+// that checked `parents.contains(&question)` — would let a submitter aim a
+// genuine envelope at a hold the signature never named.
+#[test]
+fn the_released_hold_is_the_first_parent_in_submitter_order() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("first", 10), membership("second", 11)]).seal();
+    let bloom = spec.id();
+    let (mut snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    // A parked question raises one hold per member, so a two-hold bloom is the
+    // ordinary shape rather than a contrived one.
+    let first = parked_question("first").id();
+    let second = parked_question("second").id();
+    let park = |subject, detail| Evidence { subject, kind: EvidenceKind::Question, detail };
+    (snapshot, _) = step(&snapshot, &event("p1", Fact::AdmitEvidence { bloom, evidence: park(digest(70), first) }));
+    (snapshot, _) = step(&snapshot, &event("p2", Fact::AdmitEvidence { bloom, evidence: park(digest(71), second) }));
+
+    let holds = &snapshot.blooms.get(&bloom).unwrap().holds;
+    assert!(holds.contains(&first) && holds.contains(&second), "both questions are held");
+    // The two orders have to disagree for the second case below to distinguish
+    // them, so pin that rather than leaving it to the fixture's digests.
+    assert!(first < second, "the fixture needs digest order to prefer `first`");
+
+    // A sole parent names the hold that falls, and only that one.
+    let (released, adopted) =
+        step(&snapshot, &event("a1", Fact::AdoptAnswer { bloom, answer: answer_adopting(second) }));
+    assert!(
+        matches!(adopted.outcome, Outcome::AnswerAdopted { question: q, .. } if q == second),
+        "the sole parent is the released question",
+    );
+    let holds = &released.blooms.get(&bloom).unwrap().holds;
+    assert!(!holds.contains(&second) && holds.contains(&first), "only the named hold falls");
+
+    // `[second, first]` *contains* `first` and still releases `second`: the scan
+    // stops at the first parent that is an open hold, in the order the submitter
+    // wrote them — not in digest order, which would have preferred `first`.
+    let mut both = answer_adopting(second);
+    both.parents = vec![second, first];
+    let (_, adopted) = step(&snapshot, &event("a2", Fact::AdoptAnswer { bloom, answer: both }));
+    assert!(
+        matches!(adopted.outcome, Outcome::AnswerAdopted { question: q, .. } if q == second),
+        "submitter order picks the winner, so membership alone cannot pin which hold falls",
+    );
+}
+
 // m4 — an unknown bloom and a not-yet-resolved bloom each land-refuse with their
 // own reason, never a misreported BaseMismatch.
 #[test]

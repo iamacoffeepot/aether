@@ -24,9 +24,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    AgentProfile, ApprovalPolicy, ApprovalRule, BloomDraft, ConfigKind, ConfigRegistry, Digest, DispatchPayload,
-    Evidence, EvidenceKind, Harness, KeyId, Membership, Provenance, ReasoningEffort, SignatureEnvelope, StageCatalog,
-    StageId, Statement, Tier, ToolPolicy, Topic, Workpiece, WorkpieceId,
+    AgentProfile, ApprovalPolicy, ApprovalRule, AuthorityDoor, BloomDraft, BloomId, ClaimRefKind, ConfigKind,
+    ConfigRegistry, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId, Membership,
+    ORPHAN_CLAIM_RELEASE_WORDS, OrphanClaimRelease, Provenance, ReasoningEffort, SignatureEnvelope, StageCatalog,
+    StageId, Statement, Tier, ToolPolicy, Topic, Workpiece, WorkpieceId, authorization_message,
 };
 use aether_chassis_bloomery::api::{MemberProjection, SealRequest};
 use aether_chassis_bloomery::bloomery::{AdrTouch, Completeness, TopicOutbox};
@@ -108,16 +109,23 @@ fn member(workpiece: &str, revision: Digest, detail: Digest) -> Membership {
 
 /// An author-signed statement over `subject`'s bytes by the allowlisted `owner`
 /// — the above-auto member's owner approval the seal path verifies through the
-/// `aether.signing` capability.
+/// `aether.signing` capability. Signed at [`AuthorityDoor::Approve`] bound to
+/// the same scope revision the words name (ADR-0182).
 fn owner_signed_statement(subject: Digest) -> Statement {
-    let words = subject.as_bytes().to_vec();
+    owner_signed_at(AuthorityDoor::Approve, subject, subject.as_bytes().to_vec(), vec![])
+}
+
+/// An author-signed statement by the allowlisted `owner` over `words`, signed as
+/// authority for `door` bound to `binding`, naming `parents` (ADR-0182).
+fn owner_signed_at(door: AuthorityDoor, binding: Digest, words: Vec<u8>, parents: Vec<Digest>) -> Statement {
+    let message = authorization_message(door, binding, &words);
     Statement {
-        words: words.clone(),
+        words,
         provenance: Provenance::AuthorSignature(SignatureEnvelope {
             signer: KeyId("owner".to_owned()),
-            signature: owner_signing_key().sign(&words).to_bytes().to_vec(),
+            signature: owner_signing_key().sign(message.as_bytes()).to_bytes().to_vec(),
         }),
-        parents: vec![],
+        parents,
     }
 }
 
@@ -257,6 +265,12 @@ fn bloom_hex(bloom_id: &Value) -> String {
         .collect()
 }
 
+/// Hex-encode a [`Digest`] for a path segment that names one — the answer
+/// route's `{question}` and the release route's `{digest}`.
+fn hex_of(digest: &Digest) -> String {
+    digest.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// A valid single-workpiece draft the reducer admits: the member's approval
 /// evidence binds its own scope revision, and the stage catalog is the one line
 /// the reducer requires (`StageCatalog::line_digest`, not the zero default).
@@ -384,50 +398,7 @@ fn rest_api_drives_a_bloom_end_to_end() {
     let (status, _) = try_http(http_port, "GET", &format!("/artifacts/{}", "0".repeat(64)), None).unwrap();
     assert_eq!(status, 404, "missing artifact");
 
-    // The answer route (ADR-0151). A malformed statement body is a clean 400,
-    // not a panic; a malformed bloom id is a 400.
-    let (status, _) =
-        try_http(http_port, "POST", &format!("/blooms/{bloom_id}/answer"), Some(b"not a statement")).unwrap();
-    assert_eq!(status, 400, "malformed answer body");
-    let (status, _) = try_http(http_port, "POST", "/blooms/xyz/answer", Some(b"{}")).unwrap();
-    assert_eq!(status, 400, "malformed bloom id");
-
-    // An author-signed answer whose signature does NOT verify against the
-    // configured allowlist is rejected at the gate — a 400, never admitted.
-    // The signature is empty (not a 64-byte ed25519 signature), so the real
-    // provider refuses it where the fake always-valid provider would have
-    // admitted it.
-    let words = b"answer: choose A".to_vec();
-    let unsigned = Statement {
-        words: words.clone(),
-        provenance: Provenance::AuthorSignature(SignatureEnvelope {
-            signer: KeyId("owner".to_owned()),
-            signature: vec![],
-        }),
-        parents: vec![Digest::from_bytes([222; 32])],
-    };
-    let (status, _) =
-        send_json(http_port, "POST", &format!("/blooms/{bloom_id}/answer"), &serde_json::to_value(&unsigned).unwrap());
-    assert_eq!(status, 400, "an answer with an unverifiable signature is rejected at the gate");
-
-    // A genuine author signature by the allowlisted `owner` verifies and
-    // admits; adopting no held question reduces to a clean rejection outcome
-    // — the sealed bloom carries no parked hold — 200 carrying the reducer's
-    // refusal, mirroring how seal rejections surface. This is the real
-    // custody path: the answer verified against the host-local allowlist, not
-    // the retired always-valid stub.
-    let answer = Statement {
-        words: words.clone(),
-        provenance: Provenance::AuthorSignature(SignatureEnvelope {
-            signer: KeyId("owner".to_owned()),
-            signature: owner_signing_key().sign(&words).to_bytes().to_vec(),
-        }),
-        parents: vec![Digest::from_bytes([222; 32])],
-    };
-    let (status, answered) =
-        send_json(http_port, "POST", &format!("/blooms/{bloom_id}/answer"), &serde_json::to_value(&answer).unwrap());
-    assert_eq!(status, 200, "answer admitted: {answered:?}");
-    assert_eq!(answered["outcome"]["AdoptAnswerRejected"], "NoMatchingHold", "no parked hold to adopt");
+    assert_answer_door_binds_its_question(http_port, &bloom_id);
 }
 
 /// The above-auto deferred-verify seal path (#3599): an above-auto member whose
@@ -812,4 +783,168 @@ fn authored_stage_catalog_reaches_the_dispatch_profile() {
     let payload: DispatchPayload = from_bytes(&entries[0].payload).unwrap();
     assert_eq!(payload.stage, StageId::Construct);
     assert_eq!(payload.profile, authored_profile, "the dispatch carries the catalog profile the operator authored");
+}
+
+/// The orphan-claim release door over its own route (ADR-0179/ADR-0182).
+///
+/// The door and the binding `request_claim_release` hands to `aether.signing`
+/// are otherwise untested from outside: no other case in this file reaches
+/// `POST /claims/releases`, so a route dialling the wrong door — or binding to a
+/// digest read out of the submitted envelope instead of recomputed from the
+/// request body — would ship green. Each case here is genuinely signed by the
+/// allowlisted owner and differs from the admitting one in exactly one of those
+/// two axes.
+#[test]
+fn the_release_route_binds_its_own_door_and_request_digest() {
+    run_with_bloomery("the_release_route_binds_its_own_door_and_request_digest", |http_port| {
+        wait_for_200(http_port, "/view");
+
+        // A holder this journal has never seen, so the reducer's orphanhood gate
+        // passes and the only thing left to decide the outcome is the signature.
+        let target = OrphanClaimRelease {
+            ref_kind: ClaimRefKind::MainlineAdmission,
+            expected_holder: BloomId(Digest::from_bytes([201; 32])),
+        };
+        let binding = target.request();
+        let words = ORPHAN_CLAIM_RELEASE_WORDS.as_bytes().to_vec();
+        let body = |authorization: &Statement| {
+            serde_json::json!({
+                "ref_kind": serde_json::to_value(&target.ref_kind).unwrap(),
+                "expected_holder": serde_json::to_value(target.expected_holder).unwrap(),
+                "authorization": serde_json::to_value(authorization).unwrap(),
+            })
+        };
+
+        // Right door, wrong request. The words this door signs are a fixed
+        // constant, so this envelope is byte-identical to the admitting one
+        // except for the request it was minted for — which is precisely the
+        // universal-release-token shape ADR-0182 closes.
+        let other_request = Digest::from_bytes([202; 32]);
+        let wrong_binding =
+            owner_signed_at(AuthorityDoor::OrphanClaimRelease, other_request, words.clone(), vec![binding]);
+        let (status, _) = send_json(http_port, "POST", "/claims/releases", &body(&wrong_binding));
+        assert_eq!(status, 400, "a release signed for another request does not verify against this one");
+
+        // Right request, wrong door — an answer-door envelope over the same
+        // binding. Pins that the route dials `OrphanClaimRelease` specifically.
+        let wrong_door = owner_signed_at(AuthorityDoor::Answer, binding, words.clone(), vec![binding]);
+        let (status, _) = send_json(http_port, "POST", "/claims/releases", &body(&wrong_door));
+        assert_eq!(status, 400, "a release signed at another door does not verify at this one");
+
+        // Both right: verifies against the custodied allowlist and admits, and
+        // the `202` hands back the request digest the coordinator recomputed
+        // from the body. This is the case that would break if the route bound to
+        // anything other than `OrphanClaimRelease` + `target.request()`.
+        let authorized = owner_signed_at(AuthorityDoor::OrphanClaimRelease, binding, words, vec![binding]);
+        let (status, accepted) = send_json(http_port, "POST", "/claims/releases", &body(&authorized));
+        assert_eq!(status, 202, "an authorized release is accepted: {accepted:?}");
+        assert_eq!(accepted["request"], hex_of(&binding), "the 202 hands back the recomputed request digest");
+    });
+}
+
+/// The answer door over its route (ADR-0151, ADR-0182): malformed segments, an
+/// unverifiable signature, and the two ways an envelope can be aimed at a hold
+/// its signature never named — re-parented onto the path question, and genuinely
+/// signed for the path question but pointed elsewhere.
+fn assert_answer_door_binds_its_question(http_port: u16, bloom_id: &str) {
+    // The answer route (ADR-0151, ADR-0182). The question rides the path, so
+    // every malformed segment is a clean 400 rather than a panic.
+    let question = Digest::from_bytes([222; 32]);
+    let question_hex = hex_of(&question);
+    let (status, _) =
+        try_http(http_port, "POST", &format!("/blooms/{bloom_id}/answer/{question_hex}"), Some(b"not a statement"))
+            .unwrap();
+    assert_eq!(status, 400, "malformed answer body");
+    let (status, _) = try_http(http_port, "POST", &format!("/blooms/xyz/answer/{question_hex}"), Some(b"{}")).unwrap();
+    assert_eq!(status, 400, "malformed bloom id");
+    let (status, _) = try_http(http_port, "POST", &format!("/blooms/{bloom_id}/answer/xyz"), Some(b"{}")).unwrap();
+    assert_eq!(status, 400, "malformed question digest");
+
+    // An author-signed answer whose signature does NOT verify against the
+    // configured allowlist is rejected at the gate — a 400, never admitted.
+    // The signature is empty (not a 64-byte ed25519 signature), so the real
+    // provider refuses it where the fake always-valid provider would have
+    // admitted it.
+    let words = b"answer: choose A".to_vec();
+    let unsigned = Statement {
+        words: words.clone(),
+        provenance: Provenance::AuthorSignature(SignatureEnvelope {
+            signer: KeyId("owner".to_owned()),
+            signature: vec![],
+        }),
+        parents: vec![question],
+    };
+    let (status, _) = send_json(
+        http_port,
+        "POST",
+        &format!("/blooms/{bloom_id}/answer/{question_hex}"),
+        &serde_json::to_value(&unsigned).unwrap(),
+    );
+    assert_eq!(status, 400, "an answer with an unverifiable signature is rejected at the gate");
+
+    // The replay ADR-0182 closes. This answer is genuinely signed by the
+    // allowlisted owner and carries the same words as the one below — but it was
+    // signed for a *different* question, and re-parenting it onto this one does
+    // not move the signature. Before the binding was signed this admitted,
+    // because the only thing tying an envelope to a question was `parents`.
+    let other_question = Digest::from_bytes([223; 32]);
+    let mut replayed = owner_signed_at(AuthorityDoor::Answer, other_question, words.clone(), vec![other_question]);
+    replayed.parents = vec![question];
+    let (status, _) = send_json(
+        http_port,
+        "POST",
+        &format!("/blooms/{bloom_id}/answer/{question_hex}"),
+        &serde_json::to_value(&replayed).unwrap(),
+    );
+    assert_eq!(status, 400, "an answer signed for another question does not verify when re-parented onto this one");
+
+    // The other direction, and the one a signature check alone cannot catch
+    // (ADR-0182). This envelope is genuine *for the question the path names* —
+    // it verifies — but its unsigned `parents` was rewritten to point at a
+    // sibling hold. `Fact::AdoptAnswer` carries no question, so the reducer
+    // takes its target from `parents`: verifying alone would admit this and
+    // release `other_question`, a hold nobody signed for. The route refuses it
+    // before the signature is even dialled, so the binding the path names and
+    // the hold the reducer releases cannot come apart.
+    let mut misparented = owner_signed_at(AuthorityDoor::Answer, question, words.clone(), vec![question]);
+    misparented.parents = vec![other_question];
+    let (status, _) = send_json(
+        http_port,
+        "POST",
+        &format!("/blooms/{bloom_id}/answer/{question_hex}"),
+        &serde_json::to_value(&misparented).unwrap(),
+    );
+    assert_eq!(status, 400, "an answer whose parents name a different question than the path is refused");
+
+    // Membership is not enough, which is why the route requires equality with a
+    // single-element list. The reducer releases the first parent that is an open
+    // hold in the submitter's order (pinned in `aether-bloomery`'s
+    // `the_released_hold_is_the_first_parent_in_submitter_order`), so this list
+    // *contains* the path question and would still have released
+    // `other_question` on a two-hold bloom.
+    let mut both_parents = owner_signed_at(AuthorityDoor::Answer, question, words.clone(), vec![question]);
+    both_parents.parents = vec![other_question, question];
+    let (status, _) = send_json(
+        http_port,
+        "POST",
+        &format!("/blooms/{bloom_id}/answer/{question_hex}"),
+        &serde_json::to_value(&both_parents).unwrap(),
+    );
+    assert_eq!(status, 400, "parents merely containing the path question is refused, not just parents missing it");
+
+    // A genuine author signature by the allowlisted `owner`, bound to the
+    // question the path names, verifies and admits; adopting no held question
+    // reduces to a clean rejection outcome — the sealed bloom carries no parked
+    // hold — 200 carrying the reducer's refusal, mirroring how seal rejections
+    // surface. This is the real custody path: the answer verified against the
+    // host-local allowlist, not the retired always-valid stub.
+    let answer = owner_signed_at(AuthorityDoor::Answer, question, words, vec![question]);
+    let (status, answered) = send_json(
+        http_port,
+        "POST",
+        &format!("/blooms/{bloom_id}/answer/{question_hex}"),
+        &serde_json::to_value(&answer).unwrap(),
+    );
+    assert_eq!(status, 200, "answer admitted: {answered:?}");
+    assert_eq!(answered["outcome"]["AdoptAnswerRejected"], "NoMatchingHold", "no parked hold to adopt");
 }

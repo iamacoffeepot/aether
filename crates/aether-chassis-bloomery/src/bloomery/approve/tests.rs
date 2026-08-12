@@ -9,8 +9,11 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use aether_bloomery::{
+    AuthorityDoor, Ed25519KeyProvider, EvidenceKind, KeyId, Provenance, SignatureEnvelope, Statement,
+    authorization_message, digest_of,
+};
 use aether_bloomery::{Digest, FakeKeyProvider};
-use aether_bloomery::{Ed25519KeyProvider, EvidenceKind, KeyId, Provenance, SignatureEnvelope, Statement, digest_of};
 use ed25519_dalek::{Signer, SigningKey};
 
 use super::{
@@ -227,13 +230,16 @@ fn provider(signer: &str, key: &SigningKey) -> Ed25519KeyProvider {
     Ed25519KeyProvider::new(BTreeMap::from([(KeyId(signer.to_owned()), key.verifying_key())]))
 }
 
-/// An author-signed statement over `words` by `signer` using `key`.
-fn signed_statement(signer: &str, key: &SigningKey, words: &[u8]) -> Statement {
+/// An author-signed statement over `words` by `signer` using `key`, signed as
+/// approve-door authority bound to `bound` (ADR-0182) — the message
+/// `approval_from_statement` verifies against.
+fn signed_statement(signer: &str, key: &SigningKey, words: &[u8], bound: Digest) -> Statement {
+    let message = authorization_message(AuthorityDoor::Approve, bound, words);
     Statement {
         words: words.to_vec(),
         provenance: Provenance::AuthorSignature(SignatureEnvelope {
             signer: KeyId(signer.to_owned()),
-            signature: key.sign(words).to_bytes().to_vec(),
+            signature: key.sign(message.as_bytes()).to_bytes().to_vec(),
         }),
         parents: vec![],
     }
@@ -243,7 +249,7 @@ fn signed_statement(signer: &str, key: &SigningKey, words: &[u8]) -> Statement {
 fn an_authorized_signed_statement_over_the_revision_forms_the_approval() {
     let key = signing_key(7);
     let keys = provider("owner", &key);
-    let statement = signed_statement("owner", &key, revision().as_bytes());
+    let statement = signed_statement("owner", &key, revision().as_bytes(), revision());
     let evidence = approval_from_statement(revision(), &statement, &keys).expect("verified statement forms approval");
     assert_eq!(evidence.kind, EvidenceKind::Approval);
     assert!(evidence.validates(&revision()));
@@ -257,7 +263,7 @@ fn a_statement_over_another_revision_is_rejected() {
     // Signed correctly, but over a different revision's bytes — never approves
     // this one (old evidence never validates a replacement).
     let other = Digest::from_bytes([1; 32]);
-    let statement = signed_statement("owner", &key, other.as_bytes());
+    let statement = signed_statement("owner", &key, other.as_bytes(), other);
     assert_eq!(approval_from_statement(revision(), &statement, &keys), Err(StatementRejected::WrongSubject));
 }
 
@@ -279,7 +285,24 @@ fn a_signature_outside_the_key_policy_is_rejected() {
     // A genuine signature over the right revision, but the signer is not in the
     // allowlist — fail-closed, distinct from the tier policy (who may sign).
     let keys = provider("owner", &key);
-    let statement = signed_statement("intruder", &key, revision().as_bytes());
+    let statement = signed_statement("intruder", &key, revision().as_bytes(), revision());
+    assert_eq!(approval_from_statement(revision(), &statement, &keys), Err(StatementRejected::Unverified));
+}
+
+#[test]
+fn a_signature_bound_to_another_revision_is_rejected_even_with_the_right_words() {
+    // ADR-0182: the words and the signed binding are separate checks, and this
+    // door keeps both. The words are exactly this revision's bytes, so the
+    // synchronous precheck passes; only the signed binding names another
+    // revision, so verification is what refuses. Tripwire: were the binding
+    // dropped back out of the signed message, this statement would approve a
+    // revision it was never signed for.
+    let key = signing_key(7);
+    let keys = provider("owner", &key);
+    let other = Digest::from_bytes([1; 32]);
+    let statement = signed_statement("owner", &key, revision().as_bytes(), other);
+
+    assert_eq!(precheck_statement(revision(), &statement), Ok(()), "the words bind this revision, so precheck passes");
     assert_eq!(approval_from_statement(revision(), &statement, &keys), Err(StatementRejected::Unverified));
 }
 
@@ -289,7 +312,7 @@ fn precheck_rejects_a_wrong_subject_and_a_non_author_statement_without_a_key_pol
     // A genuine author signature, but over another revision's bytes — the
     // synchronous pre-check refuses it before any signature verification.
     let other = Digest::from_bytes([1; 32]);
-    let wrong_subject = signed_statement("owner", &key, other.as_bytes());
+    let wrong_subject = signed_statement("owner", &key, other.as_bytes(), other);
     assert_eq!(precheck_statement(revision(), &wrong_subject), Err(StatementRejected::WrongSubject));
 
     // The right subject, but no author signature — never instruction-capable.
@@ -302,14 +325,14 @@ fn precheck_rejects_a_wrong_subject_and_a_non_author_statement_without_a_key_pol
 
     // A correct-subject author signature passes the pre-check regardless of
     // whether the signature itself verifies — that check is the caller's next step.
-    let ok = signed_statement("owner", &key, revision().as_bytes());
+    let ok = signed_statement("owner", &key, revision().as_bytes(), revision());
     assert_eq!(precheck_statement(revision(), &ok), Ok(()));
 }
 
 #[test]
 fn verified_statement_approval_binds_the_revision_and_details_the_statement() {
     let key = signing_key(7);
-    let statement = signed_statement("owner", &key, revision().as_bytes());
+    let statement = signed_statement("owner", &key, revision().as_bytes(), revision());
     let evidence = verified_statement_approval(revision(), &statement);
     assert_eq!(evidence.kind, EvidenceKind::Approval);
     assert!(evidence.validates(&revision()), "the formed approval binds the revision");

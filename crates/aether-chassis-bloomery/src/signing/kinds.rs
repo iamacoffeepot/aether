@@ -9,33 +9,70 @@
 //! serde-encoded but not `Schema`, and this capability has no reason to key or
 //! filter on any of its fields.
 
+use aether_bloomery::{AuthorityDoor, Digest};
+use aether_data::wire::to_vec;
 use serde::{Deserialize, Serialize};
 
 /// Verify `statement`'s author signature against the host-custodied
-/// authorized-signer allowlist (ADR-0151 key policy).
+/// authorized-signer allowlist (ADR-0151 key policy), as authority for exactly
+/// the request `authority` names.
+///
+/// The capability verifies against the authority the *caller* supplies, never
+/// against anything read out of the statement's own bytes (ADR-0182). That is
+/// the whole point: a statement's `parents` are outside its signature, so a door
+/// that let the envelope name its own target would accept a captured envelope
+/// re-pointed at any request. Each route derives its binding independently — the
+/// seal path from the member's scope revision, the answer route from the
+/// question the request named, the release route by recomputing the request
+/// digest from the typed target in the body.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.signing.verify")]
 pub struct Verify {
     /// The `aether_data::wire`-encoded [`aether_bloomery::Statement`] to verify.
     #[serde(with = "aether_data::bytes")]
     pub statement: Vec<u8>,
+    /// The `aether_data::wire`-encoded `(AuthorityDoor, Digest)` the host
+    /// derived — which door this verification is for, and the exact request
+    /// digest the signature must be bound to. Build it with [`authority_bytes`].
+    #[serde(with = "aether_data::bytes")]
+    pub authority: Vec<u8>,
+}
+
+/// Encode the `(door, binding)` authority a [`Verify`] carries.
+///
+/// Infallible by invariant, like [`aether_bloomery::digest_of`]: a closed enum's
+/// tag plus 32 digest bytes cannot approach the ADR-0118 `u32` wire-length
+/// ceiling, so an encode failure here is a broken invariant rather than a
+/// runtime condition a caller could answer.
+///
+/// # Panics
+///
+/// Panics if the pair fails to wire-encode, which cannot happen for any
+/// `(AuthorityDoor, Digest)`.
+#[must_use]
+pub fn authority_bytes(door: AuthorityDoor, binding: Digest) -> Vec<u8> {
+    to_vec(&(door, binding)).expect("a door tag and a 32-byte digest never approach the ADR-0118 u32 ceiling")
 }
 
 /// Reply to [`Verify`].
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.signing.verify_result")]
 pub enum VerifyResult {
-    /// The statement decoded; `verified` is whether its author signature checks
-    /// against an allowlisted signer over its exact words. A non-author
-    /// provenance and an unknown / mismatched / malformed signature all resolve
-    /// `verified: false` — the gate is fail-closed.
+    /// The statement and the authority both decoded; `verified` is whether the
+    /// author signature checks against an allowlisted signer over the
+    /// authorization message for that door, that binding, and the statement's
+    /// exact words. A non-author provenance, an unknown / mismatched / malformed
+    /// signature, and a genuine signature supplied under a door or binding it was
+    /// not signed for all resolve `verified: false` — the gate is fail-closed.
     Ok {
         /// Whether the author signature verified.
         verified: bool,
     },
     /// The request could not be evaluated — the `statement` bytes did not decode
-    /// to a [`aether_bloomery::Statement`]. Distinct from `Ok { verified: false }`
-    /// (a well-formed statement that simply did not verify).
+    /// to a [`aether_bloomery::Statement`], or the `authority` bytes did not
+    /// decode to a `(AuthorityDoor, Digest)`. Distinct from
+    /// `Ok { verified: false }` (a well-formed request that simply did not
+    /// verify).
     Err {
         /// A human-readable failure reason.
         error: String,

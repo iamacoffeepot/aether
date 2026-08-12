@@ -23,8 +23,8 @@
 
 use aether_actor::Manual;
 use aether_bloomery::{
-    ClaimRefState, EnumerateClaims, EnumerateClaimsResult, Event, Fact, IdempotencyKey, OrphanClaimRelease,
-    OrphanClaimReleaseRecord, Query, QueryResult,
+    AuthorityDoor, ClaimRefState, EnumerateClaims, EnumerateClaimsResult, Event, Fact, IdempotencyKey,
+    OrphanClaimRelease, OrphanClaimReleaseRecord, Query, QueryResult,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
@@ -34,7 +34,7 @@ use super::hex::{digest_from_hex, hex_encode};
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed};
 use crate::api::dto::{ClaimRefView, ClaimsView, ReleaseRequest};
-use crate::signing::{SigningCapability, Verify};
+use crate::signing::{SigningCapability, Verify, authority_bytes};
 
 impl ApiCapabilityState {
     /// `GET /claims` — enumerate every live claim ref and its holder.
@@ -46,10 +46,14 @@ impl ApiCapabilityState {
     ///
     /// The route is the cryptographic trust gate, exactly as the answer route
     /// is: it dials `aether.signing` to verify the author signature against the
-    /// host-custodied allowlist before admitting, and the reducer independently
+    /// host-custodied allowlist before admitting, bound to the request digest it
+    /// recomputes from the typed target (ADR-0182), and the reducer independently
     /// re-checks that the statement's words and parents bind *this* request. Both
-    /// halves are load-bearing — a verified signature over the right words but
-    /// the wrong parent would otherwise authorize releasing any ref at all.
+    /// halves are load-bearing, and in different ways. The signed binding is what
+    /// stops a captured envelope authorizing a second release — `parents` is
+    /// outside the signature, so the reducer's check alone was rewritable by
+    /// whoever held the envelope. The reducer's check is what still holds on
+    /// replay, where no key material exists to re-run the first.
     ///
     /// A body that does not decode is a `400`. Everything past that is decided
     /// downstream: a signature that does not verify answers `400` from the verify
@@ -66,6 +70,10 @@ impl ApiCapabilityState {
             Err(error) => return Routed::Reply(error_response(500, &format!("authorization encode failed: {error}"))),
         };
 
+        // Recomputed from the typed target in the request body, never read out of
+        // the envelope (ADR-0182), and used for both bindings below.
+        let binding = target.request();
+
         // The request digest is the idempotency key as well as the handle, so a
         // resubmitted release is a duplicate rather than a second deletion — the
         // reducer's own repeat guard and this key agree on what "the same
@@ -74,11 +82,19 @@ impl ApiCapabilityState {
         let event = Event {
             idempotency_key: IdempotencyKey(format!(
                 "aether.bloomery.orphan_claim_release:{}",
-                hex_encode(target.request().as_bytes())
+                hex_encode(binding.as_bytes())
             )),
             fact: Fact::RequestOrphanClaimRelease { request: target, authorization },
         };
-        let correlation = self.send_tracked(ctx.actor::<SigningCapability>(), &Verify { statement });
+        // The words this door signs are a fixed constant, so before the binding
+        // was signed one author signature verified forever and re-pointed at any
+        // ref by a rewrite of `parents` — a universal release token for this
+        // door. Signing the binding is what makes a captured envelope good for
+        // the one release it was minted for.
+        let correlation = self.send_tracked(
+            ctx.actor::<SigningCapability>(),
+            &Verify { statement, authority: authority_bytes(AuthorityDoor::OrphanClaimRelease, binding) },
+        );
         Routed::DeferredVerify { correlation, subject: "release authorization", event: Box::new(event) }
     }
 
