@@ -952,22 +952,30 @@ pub trait CandidatePush: Send + Sync {
 ///
 /// # Warning to anyone extending the in-process fixture tier
 ///
-/// This is the **only** pusher the reactor is ever constructed with — there is
-/// no injection seam — so an in-process scenario that reaches
-/// [`push_admitted_candidates`] force-pushes against whatever `origin` the
-/// developer's checkout points at. [`on_dispatch_tick`] calls
-/// [`pull_and_admit`] unconditionally, dozens of times per scenario, so the tick
-/// loop is not what holds it back. What holds it back today is one link further
-/// down: `FakeGithub::dispatch_workflow` records a dispatch and never a run, so
-/// `find_run` answers `None`, the intake cycle matches nothing, and the push
-/// loop iterates an empty slice.
+/// Which pusher a reactor carries is chosen at boot by
+/// [`default_candidate_push`] (#4835), and that choice keys on the *backend
+/// configuration* rather than on build shape. Two routes therefore differ:
+/// [`ExecutorReactorState::with_parts`] — the fixture-shaped constructor these
+/// scenarios use — resolves the refusing arm, while a reactor that comes up
+/// through `init` without `AETHER_GITHUB_BACKEND=fixture` still carries *this*
+/// pusher even under `cargo test` (#4842).
+///
+/// That distinction is what a scenario on the second route has to respect,
+/// because nothing downstream holds it back. [`on_dispatch_tick`] calls
+/// [`pull_and_admit`] unconditionally, dozens of times per scenario, so the
+/// tick loop is not a barrier. What stops such a scenario today is one link
+/// further down: `FakeGithub::dispatch_workflow` records a dispatch and never a
+/// run, so `find_run` answers `None`, the intake cycle matches nothing, and the
+/// push loop iterates an empty slice.
 ///
 /// That containment is one `seed_run` away from gone. A scenario that seeds a
 /// completed run with artifacts — the natural next step when extending this
 /// harness toward the real pull path — makes an admitted capture reach here,
 /// and the correspondence the fixture already seeds resolves its checkout to a
-/// real commit. Before writing such a scenario, give the reactor a recording
-/// pusher; do not let the default one run under `cargo test`.
+/// real commit, against whatever `origin` the developer's checkout points at.
+/// Before writing such a scenario, put a recording seam in through
+/// [`ExecutorReactorState::with_pusher`]; do not rely on the boot-time selector
+/// having picked the refusing arm for you.
 ///
 /// [`on_dispatch_tick`]: ExecutorReactorCapability
 struct GitCandidatePush;
@@ -1238,9 +1246,12 @@ fn pull_and_admit(
 /// [`pull_and_admit`] ends by calling [`push_admitted_candidates`], which
 /// resolves an admitted capture's `checkout` through the correspondence store
 /// and publishes that commit at [`candidate_ref_name`]. This function does
-/// neither, because the only pusher the reactor is ever built with shells a real
-/// `git push --force origin` (`GitCandidatePush`) and a scenario must not run
-/// one. The fixture harness plants the candidate ref itself, through the same
+/// neither. A scenario's reactor comes up through
+/// [`ExecutorReactorState::with_parts`], whose pusher refuses every push
+/// (#4835), so routing the fold through the real publish would buy a refusal
+/// rather than a push — and the arm that would *not* refuse shells a real
+/// `git push --force origin`, which a scenario must never run. The fixture
+/// harness plants the candidate ref itself, through the same
 /// `candidate_ref_name` helper.
 ///
 /// So the ADR-0152 candidate push is substituted as surely as the verdict is,
