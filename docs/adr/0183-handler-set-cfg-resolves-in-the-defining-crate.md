@@ -1,4 +1,4 @@
-# ADR-0181: Handler-Set `#[cfg]` Resolves in the Defining Crate
+# ADR-0183: Handler-Set `#[cfg]` Resolves in the Defining Crate
 
 - **Status:** Proposed
 - **Date:** 2026-08-12
