@@ -33,6 +33,6 @@ pub use projection::{
     BloomView, LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ViewDocument,
 };
 pub use source::{
-    Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, IntegrateOutcome, IntegrationPosition,
-    LandOutcome, LandProposal, SourceBackend, SourceSnapshot,
+    Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome, IntegrateOutcome,
+    IntegrationPosition, LandOutcome, LandProposal, SourceBackend, SourceSnapshot,
 };

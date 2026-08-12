@@ -178,6 +178,37 @@ pub enum ClaimOutcome {
     },
 }
 
+/// The outcome of the per-ref release completion
+/// ([`complete_release`](SourceBackend::complete_release), ADR-0179).
+///
+/// Distinct from the shared [`ClaimOutcome`] the whole-op claim/transfer/release
+/// paths return, because those collapse exactly the states an authorized orphan
+/// release has to tell apart: a live expected-holder deletion, an already-absent
+/// ref, and a ref another holder has since taken all read as
+/// [`ClaimOutcome::Acquired`] or a bare [`Held`](ClaimOutcome::Held) there. A
+/// durable release request records one of these as its terminal result, so the
+/// operator learns which of the three actually happened.
+///
+/// [`AlreadyAbsent`](Self::AlreadyAbsent) is a *success*: it is what a redrive
+/// sees when the source deletion landed but the process died before the
+/// completion was admitted, so treating absence as an error would make the same
+/// authorized request impossible to finish idempotently.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ClaimReleaseOutcome {
+    /// The expected holder held the ref and it was released — CAS to a
+    /// tombstone (the linearization point), then the name-only cleanup delete.
+    Released,
+    /// The typed ref does not exist, or was already tombstoned by an interrupted
+    /// release. Idempotent terminal success.
+    AlreadyAbsent,
+    /// The ref exists under another holder, so it was spared untouched — the
+    /// expected-holder compare-and-swap refusing to clobber a concurrent change.
+    Changed {
+        /// The holder the ref was actually found at.
+        observed_holder: BloomId,
+    },
+}
+
 /// Who a live claim ref points at, as [`enumerate_claims`](SourceBackend::enumerate_claims)
 /// classifies it (ADR-0150 §The claim registry, amended PR #3556). An absent ref
 /// is not a holder — it is simply not enumerated.
@@ -469,21 +500,27 @@ pub trait SourceBackend {
     /// - **Tombstone sweep** — `expected_holder` is `None`: a
     ///   [`Tombstoned`](ClaimHolder::Tombstoned) ref is deleted (finishing an
     ///   interrupted release's name-only cleanup), and a non-tombstoned ref is
-    ///   spared as [`ClaimOutcome::Held`] rather than touched. Safe for any
-    ///   instance — a tombstone *is* the released state.
+    ///   spared as [`ClaimReleaseOutcome::Changed`] rather than touched. Safe for
+    ///   any instance — a tombstone *is* the released state.
     /// - **Stranded-drop release** — `expected_holder` is `Some(bloom)`: a ref
     ///   held by `bloom` is CAS-to-tombstoned then deleted (the same linearizing
     ///   release [`release_seal`](Self::release_seal) runs); an already-tombstoned
     ///   ref is swept; a ref a foreign bloom holds is spared as
-    ///   [`ClaimOutcome::Held`]. The `Some(bloom)` guard is the exclusivity check —
-    ///   the caller names the holder whose release it is authorizing.
+    ///   [`ClaimReleaseOutcome::Changed`]. The `Some(bloom)` guard is the
+    ///   exclusivity check — the caller names the holder whose release it is
+    ///   authorizing.
+    /// - **Authorized orphan release** — the ADR-0179 operator path, which is the
+    ///   same `Some(bloom)` shape and the reason this operation reports
+    ///   [`ClaimReleaseOutcome`] rather than the shared [`ClaimOutcome`]: a
+    ///   durable release request has to journal *which* terminal it reached, and
+    ///   `Acquired` cannot distinguish a live deletion from an already-absent ref.
     ///
     /// # Errors
-    /// Backend-defined — a transport or backend fault, distinct from the clean
-    /// [`ClaimOutcome::Held`] refusal.
+    /// Backend-defined — a transport or backend fault, distinct from every clean
+    /// [`ClaimReleaseOutcome`].
     fn complete_release(
         &self,
         expected_holder: Option<&BloomId>,
         ref_kind: &ClaimRefKind,
-    ) -> Result<ClaimOutcome, Self::Error>;
+    ) -> Result<ClaimReleaseOutcome, Self::Error>;
 }

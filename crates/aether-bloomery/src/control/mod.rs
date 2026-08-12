@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::reduce::Decision;
-use crate::values::{AgentProfile, ConfigRegistry, MemberCandidate, Transformation};
+use crate::values::{AgentProfile, ConfigRegistry, MemberCandidate, OrphanClaimRelease, Transformation};
 
 /// One active-membership mutation the store applies inside the combined
 /// [`Commit`] transaction: a workpiece claimed (or released) for a bloom. The
@@ -182,6 +182,12 @@ topic_vocabulary! {
     /// Its payload type [`ViewDocument`](crate::port::ViewDocument) already lives
     /// in this crate.
     ViewDocument,
+    /// An authorized orphan-claim release (reducer-minted, from
+    /// [`Decision::DispatchOrphanClaimRelease`]), drained by the claim-release
+    /// reactor, which runs the source port's expected-holder compare-and-swap and
+    /// admits the terminal result (ADR-0179). Appended so the prior topics'
+    /// display spellings and ordering are unchanged.
+    OrphanClaimRelease,
 }
 
 impl Topic {
@@ -202,6 +208,7 @@ impl Topic {
             Self::AggregateReview => "topic:aggregate_review",
             Self::AggregateVerify => "topic:aggregate_verify",
             Self::ViewDocument => "topic:view_document",
+            Self::OrphanClaimRelease => "topic:orphan_claim_release",
         }
     }
 
@@ -223,6 +230,7 @@ impl Topic {
             Decision::DispatchIntegration { .. } => Some(Self::Integrate),
             Decision::DispatchAggregateReview { .. } => Some(Self::AggregateReview),
             Decision::DispatchAggregateVerify { .. } => Some(Self::AggregateVerify),
+            Decision::DispatchOrphanClaimRelease { .. } => Some(Self::OrphanClaimRelease),
             Decision::ClaimMembership { .. }
             | Decision::ReleaseMembership { .. }
             | Decision::InheritClaim { .. }
@@ -248,7 +256,12 @@ impl Topic {
             // Snapshot-only: recording the observed head moves no bloom and
             // opens no work. What acts on it is a later supersession, which
             // carries its own topics.
-            | Decision::RecordObservation { .. } => None,
+            | Decision::RecordObservation { .. }
+            // Snapshot-only: the release record is the status route's read
+            // surface. The effect that reaches the source is its sibling
+            // `DispatchOrphanClaimRelease`, and giving the record its own topic
+            // would enqueue a row nothing drains.
+            | Decision::RecordOrphanClaimRelease { .. } => None,
         }
     }
 }
@@ -452,6 +465,21 @@ pub struct LandPayload {
     pub new_head: Digest,
 }
 
+/// The authorized orphan-claim release outbox payload (ADR-0179): the request
+/// digest the completion admits back under, plus the typed target the source
+/// port's expected-holder compare-and-swap runs against. The control core
+/// enqueues it under [`Topic::OrphanClaimRelease`] from a
+/// [`Decision::DispatchOrphanClaimRelease`]; the claim-release reactor drains it.
+/// Defined here (always compiled) so the host reactor can decode it inward,
+/// cycle-free — like [`OutboxPayload`] / [`LandPayload`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct OrphanClaimReleasePayload {
+    /// The request digest — the idempotency anchor the completion admits under.
+    pub request: Digest,
+    /// The signed target: which typed ref, and the holder the CAS expects.
+    pub target: OrphanClaimRelease,
+}
+
 /// The combined atomic store commit (ADR-0149 §The control core). One
 /// transact-mail carrying the idempotency-keyed journal event plus the
 /// reducer's membership mutations and outbox payloads, applied in a **single**
@@ -644,6 +672,15 @@ pub enum AdmitResult {
 pub struct Query {
     /// The bloom to read, as its digest bytes; unset reads the whole document.
     pub bloom: Option<Vec<u8>>,
+    /// An orphan-claim release request to read, as its digest bytes (ADR-0179).
+    ///
+    /// Its own field rather than a second meaning for `bloom` because the two
+    /// name different things — a bloom id and a release request digest — and a
+    /// shared field would make an unrecognised digest ambiguous between "no such
+    /// bloom" and "no such release". Takes precedence when both are set; a
+    /// request digest is the more specific read.
+    #[serde(default)]
+    pub release: Option<Vec<u8>>,
 }
 
 /// Reply to [`Query`]: the requested projection as canonical
@@ -674,6 +711,27 @@ pub enum QueryResult {
         /// A human-readable failure reason.
         error: String,
     },
+    /// One orphan-claim release request's journal-derived state, wire-encoded
+    /// [`OrphanClaimReleaseRecord`](crate::values::OrphanClaimReleaseRecord)
+    /// (ADR-0179). Appended so the prior variants' wire discriminants are
+    /// unchanged.
+    Release {
+        /// The wire-encoded `OrphanClaimReleaseRecord` — its `completion` is
+        /// `None` while the release is still pending.
+        #[serde(with = "aether_data::bytes")]
+        record: Vec<u8>,
+    },
+    /// No orphan-claim release request with the requested digest is known
+    /// (ADR-0179).
+    ///
+    /// Its own variant rather than a second meaning for [`NotFound`](Self::NotFound)
+    /// for the same reason [`Query::release`] is its own field: the reply is what
+    /// the reader renders, so collapsing the two makes an unrecognised digest
+    /// name the wrong resource — a missing release would report "no bloom". The
+    /// [`Query`] doc already refuses that ambiguity on the request side; this
+    /// keeps the answer side honest too. Appended so the prior variants' wire
+    /// discriminants are unchanged.
+    ReleaseNotFound,
 }
 
 /// The `aether.source.*` claim transact-mail kinds the control core sends to
@@ -681,8 +739,8 @@ pub enum QueryResult {
 /// [`Commit`] family) so the host can re-export them inward, cycle-free.
 mod source_mail;
 pub use source_mail::{
-    ClaimResult, ClaimSeal, CompleteRelease, CompleteTransfer, EnumerateClaims, EnumerateClaimsResult, ObserveMainline,
-    ObserveMainlineResult, ReleaseSeal, TransferSeal,
+    ClaimResult, ClaimSeal, CompleteRelease, CompleteReleaseResult, CompleteTransfer, EnumerateClaims,
+    EnumerateClaimsResult, ObserveMainline, ObserveMainlineResult, ReleaseSeal, TransferSeal,
 };
 
 mod claim_plan;

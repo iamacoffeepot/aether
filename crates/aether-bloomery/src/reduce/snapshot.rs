@@ -13,8 +13,8 @@ use super::{Decision, Decisions, Event, Fact, Outcome};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    BloomSpec, CandidateRef, ConfigScopes, DispatchKey, Evidence, EvidenceKind, ResolutionClaim, ResolvedConfigs,
-    StageCatalog, VerifyFailureSet, Wedge,
+    BloomSpec, CandidateRef, ConfigScopes, DispatchKey, Evidence, EvidenceKind, OrphanClaimReleaseRecord,
+    ResolutionClaim, ResolvedConfigs, StageCatalog, VerifyFailureSet, Wedge,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -41,6 +41,16 @@ pub struct Snapshot {
     pub blooms: BTreeMap<BloomId, BloomRecord>,
     /// The idempotency keys already applied — a replayed key is a no-op.
     pub seen: BTreeSet<IdempotencyKey>,
+    /// The authorized orphan-claim releases this instance has admitted, keyed by
+    /// request digest (ADR-0179).
+    ///
+    /// Journal-derived like the rest of the projection, and the reason a repeated
+    /// request is idempotent rather than a second release: the reducer reads this
+    /// map before enqueuing, so a resubmitted digest returns the recorded state
+    /// and emits no effect. The status route reads it too — pending until the
+    /// reactor's completion folds a terminal result in.
+    #[serde(default)]
+    pub orphan_releases: BTreeMap<Digest, OrphanClaimReleaseRecord>,
 }
 
 impl Snapshot {
@@ -333,8 +343,18 @@ impl Snapshot {
             // replays a held work order host-side under a fresh nonce rather than
             // deciding a dispatch, so ADR-0151's "parking consumes no retry" holds
             // structurally — the ledger never sees it. Its hold release rides
-            // ReleaseHold.
-            Decision::RedispatchStage { .. } => {}
+            // ReleaseHold. An orphan-claim release is inert for a different
+            // reason: it dispatches no member work at all, so it counts against
+            // no bloom's retry ledger — its whole state is the record below.
+            Decision::RedispatchStage { .. } | Decision::DispatchOrphanClaimRelease { .. } => {}
+            Decision::RecordOrphanClaimRelease { request, target, completion } => {
+                // Opening the record and completing it write the same entry, so
+                // the completion overwrites rather than inserting beside — a
+                // request digest names exactly one release for the life of the
+                // journal.
+                self.orphan_releases
+                    .insert(*request, OrphanClaimReleaseRecord { target: target.clone(), completion: *completion });
+            }
             Decision::RecordIntegration { bloom, integration } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.integration.clone_from(integration);
