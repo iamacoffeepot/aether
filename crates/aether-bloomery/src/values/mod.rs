@@ -156,10 +156,10 @@ pub enum EvidenceKind {
 /// grades the actuals against after landing (ADR-0149 §The bloom, ADR-0177).
 ///
 /// Graded, never enforced: an overshoot is reported and refuses no dispatch.
-/// Each field names the quantity it measures, because each is a different unit
-/// and none of them is elapsed bloom time — [`predicted_worker_secs`] sums what
-/// the workers spent, which a bloom running members concurrently undercounts
-/// against the clock on the wall.
+/// Each field names the quantity it measures, because none of them is elapsed
+/// bloom time — [`predicted_worker_secs`] sums the attempts' own durations, so
+/// a bloom running members concurrently accumulates it faster than the clock on
+/// the wall.
 ///
 /// [`predicted_worker_secs`]: Self::predicted_worker_secs
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]

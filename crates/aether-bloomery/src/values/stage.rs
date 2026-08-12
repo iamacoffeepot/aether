@@ -944,6 +944,24 @@ mod tests {
         assert_eq!(StageCatalog::line().validate(), Ok(()));
     }
 
+    // Tripwire: the seal door refuses a wall-clock limit no worker could run
+    // under — zero (no time at all) and anything past the one-day ceiling. The
+    // limit is authored by hand, which is where a mistyped unit lands, and an
+    // unvalidated one would ride every dispatch of that stage with nothing
+    // downstream able to tell it from a deliberate value.
+    #[test]
+    fn validate_refuses_a_wall_clock_limit_outside_the_authored_range() {
+        assert_eq!(
+            catalog_with_wall_clock(StageId::Verify, 0).validate(),
+            Err(CatalogError::WallClockOutOfRange { stage: StageId::Verify, wall_clock_secs: 0 })
+        );
+        assert_eq!(
+            catalog_with_wall_clock(StageId::Verify, ExecutionLimits::MAX_WALL_CLOCK_SECS + 1).validate(),
+            Err(CatalogError::WallClockOutOfRange { stage: StageId::Verify, wall_clock_secs: 86_401 })
+        );
+        assert_eq!(catalog_with_wall_clock(StageId::Verify, 900).validate(), Ok(()));
+    }
+
     #[test]
     fn line_digest_matches_pinned_golden() {
         assert_eq!(
@@ -1014,22 +1032,35 @@ mod tests {
         );
     }
 
-    // Tripwire: the seal door refuses a wall-clock limit no worker could run
-    // under — zero (no time at all) and anything past the one-day ceiling. The
-    // limit is authored by hand, which is where a mistyped unit lands, and an
-    // unvalidated one would ride every dispatch of that stage with nothing
-    // downstream able to tell it from a deliberate value.
+    // The checkout target is a separate axis from the evidence-binding subject:
+    // `checkout` is the git commit the worker checks out (the sealed source),
+    // `inputs[0]` is the scope-revision digest the returned evidence binds to.
+    // Tripwire: a construction that conflated the two — dropping `checkout` or
+    // mirroring `subject` into it — would break the subject-threading contract
+    // #3572 established for the model lanes.
     #[test]
-    fn validate_refuses_a_wall_clock_limit_outside_the_authored_range() {
-        assert_eq!(
-            catalog_with_wall_clock(StageId::Verify, 0).validate(),
-            Err(CatalogError::WallClockOutOfRange { stage: StageId::Verify, wall_clock_secs: 0 })
+    fn member_stage_transformation_carries_the_checkout_distinct_from_the_subject() {
+        let subject = Digest::from_bytes([7; 32]);
+        let checkout = Digest::from_bytes([9; 32]);
+        let construct = Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout);
+        assert_eq!(construct.checkout, checkout, "the checkout target is threaded onto the transformation");
+        assert_eq!(construct.inputs, alloc::vec![subject], "the subject stays the evidence-binding input, untouched");
+        assert_ne!(construct.checkout, construct.inputs[0], "checkout and subject are independent axes");
+    }
+
+    // The reducer never authors the advisory work-order description (#3595): it
+    // holds only digests, so `for_member_stage` builds every lane with
+    // `description: None`. The host populates it at dispatch from durable state —
+    // a construction that filled it in here would leak un-threaded text and mask
+    // a missing-description warn.
+    #[test]
+    fn for_member_stage_authors_no_description() {
+        let subject = Digest::from_bytes([7; 32]);
+        let checkout = Digest::from_bytes([9; 32]);
+        assert!(
+            Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout).description.is_none(),
+            "the reducer holds only digests; the description is threaded on at dispatch",
         );
-        assert_eq!(
-            catalog_with_wall_clock(StageId::Verify, ExecutionLimits::MAX_WALL_CLOCK_SECS + 1).validate(),
-            Err(CatalogError::WallClockOutOfRange { stage: StageId::Verify, wall_clock_secs: 86_401 })
-        );
-        assert_eq!(catalog_with_wall_clock(StageId::Verify, 900).validate(), Ok(()));
     }
 
     // Every dispatch constructor copies the limit off the binding it was handed
@@ -1067,37 +1098,6 @@ mod tests {
                 .limits
                 .wall_clock_secs,
             3_600
-        );
-    }
-
-    // The checkout target is a separate axis from the evidence-binding subject:
-    // `checkout` is the git commit the worker checks out (the sealed source),
-    // `inputs[0]` is the scope-revision digest the returned evidence binds to.
-    // Tripwire: a construction that conflated the two — dropping `checkout` or
-    // mirroring `subject` into it — would break the subject-threading contract
-    // #3572 established for the model lanes.
-    #[test]
-    fn member_stage_transformation_carries_the_checkout_distinct_from_the_subject() {
-        let subject = Digest::from_bytes([7; 32]);
-        let checkout = Digest::from_bytes([9; 32]);
-        let construct = Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout);
-        assert_eq!(construct.checkout, checkout, "the checkout target is threaded onto the transformation");
-        assert_eq!(construct.inputs, alloc::vec![subject], "the subject stays the evidence-binding input, untouched");
-        assert_ne!(construct.checkout, construct.inputs[0], "checkout and subject are independent axes");
-    }
-
-    // The reducer never authors the advisory work-order description (#3595): it
-    // holds only digests, so `for_member_stage` builds every lane with
-    // `description: None`. The host populates it at dispatch from durable state —
-    // a construction that filled it in here would leak un-threaded text and mask
-    // a missing-description warn.
-    #[test]
-    fn for_member_stage_authors_no_description() {
-        let subject = Digest::from_bytes([7; 32]);
-        let checkout = Digest::from_bytes([9; 32]);
-        assert!(
-            Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout).description.is_none(),
-            "the reducer holds only digests; the description is threaded on at dispatch",
         );
     }
 
