@@ -24,9 +24,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    AgentProfile, BloomDraft, ConfigRegistry, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId,
-    Membership, Provenance, ReasoningEffort, SignatureEnvelope, StageCatalog, StageId, Statement, ToolPolicy, Topic,
-    Workpiece, WorkpieceId,
+    AgentProfile, ApprovalPolicy, ApprovalRule, BloomDraft, ConfigKind, ConfigRegistry, Digest, DispatchPayload,
+    Evidence, EvidenceKind, Harness, KeyId, Membership, Provenance, ReasoningEffort, SignatureEnvelope, StageCatalog,
+    StageId, Statement, Tier, ToolPolicy, Topic, Workpiece, WorkpieceId,
 };
 use aether_chassis_bloomery::api::{MemberProjection, SealRequest};
 use aether_chassis_bloomery::bloomery::{AdrTouch, Completeness, TopicOutbox};
@@ -633,6 +633,114 @@ fn authoring_a_config_stores_it_under_a_stable_content_address() {
     // typo cannot reach the store as bytes that will not decode at dispatch.
     let (status, _) = send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": 7 })));
     assert_eq!(status, 400, "a value that does not match the schema is refused before any write");
+}
+
+// #4616 — the pre-seal approve gate resolves its tier policy from the draft's
+// own registry rather than from the file the host booted with, so the tier a
+// member is admitted at is a property of the bloom.
+//
+// The A/B is the whole point and both halves run in one process against one
+// file policy: the same declared surface, the same projection with no signed
+// statement, refused under the file policy (`crates/aether-data/**` is `human`)
+// and admitted under a sealed policy that resolves it `auto`. Nothing else about
+// the request changes, so a pass cannot come from anywhere but the sealed value.
+//
+// The refusals pinned alongside it are the security decisions, not error
+// plumbing: a member sealing its own policy would choose the tier admitting that
+// member, and a bloom-wide address with no content must refuse rather than fall
+// back to the file — falling back would admit the bloom at a tier its own
+// receipt contradicts.
+#[test]
+fn a_sealed_approval_policy_decides_the_tier_the_file_policy_would_refuse() {
+    let http_port = free_port();
+    let rpc_port = free_port();
+    let (_policy_dir, policy_path) = test_policy();
+    let _coordinator = spawn(http_port, rpc_port, &policy_path);
+
+    wait_for_200(http_port, "/drafts");
+    wait_for_200(http_port, "/view");
+
+    // The surface the file policy resolves `human`; the projection carries no
+    // signed statement, so an above-auto resolution refuses the seal.
+    let surface = ["crates/aether-data/src/lib.rs"];
+    let seal = || seal_body(vec![projection(&surface, complete())]);
+
+    let (status, _) = send_json(http_port, "POST", &format!("/drafts/{}/seal", draft_with(http_port, None)), &seal());
+    assert_eq!(status, 422, "under the file policy the surface is human and the seal fails closed");
+
+    // A member that seals the policy deciding its own admission is refused
+    // outright — neither resolved (self-authorization) nor ignored (a sealed
+    // configuration nothing reads).
+    let mut member_scoped = valid_draft("wp-1");
+    member_scoped.proposals[0].configs.insert::<ApprovalPolicy>(Digest::from_bytes([5; 32]));
+    let (status, _) = send_json(
+        http_port,
+        "POST",
+        &format!("/drafts/{}/seal", patch_draft(http_port, &serde_json::to_value(&member_scoped).unwrap())),
+        &seal(),
+    );
+    assert_eq!(status, 422, "a member-scoped approval policy fails the seal closed");
+
+    // A bloom-wide entry whose content was never authored refuses rather than
+    // silently falling through to the file policy.
+    let dangling = ApprovalPolicy { default: Tier::Auto, rules: vec![] };
+    let (status, _) = send_json(
+        http_port,
+        "POST",
+        &format!("/drafts/{}/seal", draft_with(http_port, Some(registry_naming(dangling.address())))),
+        &seal(),
+    );
+    assert_eq!(status, 422, "a sealed policy address with no stored content fails the seal closed");
+
+    // The same surface, admitted `auto` by a policy the draft seals.
+    let authored = ApprovalPolicy {
+        default: Tier::Judge,
+        rules: vec![ApprovalRule { glob: "crates/aether-data/**".to_owned(), tier: Tier::Auto }],
+    };
+    let (status, stored) = send_json(
+        http_port,
+        "POST",
+        "/configs",
+        &serde_json::json!({ "kind": "aether.bloomery.approval_policy", "value": authored }),
+    );
+    assert_eq!(status, 200, "the authored policy is durable before its address is returned: {stored:?}");
+    let address: Digest = serde_json::from_value(stored["digest"].clone()).unwrap();
+    assert_eq!(address, authored.address(), "the route addresses the policy exactly as a typed seal would");
+
+    let sealed_draft = draft_with(http_port, Some(registry_naming(address)));
+    let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{sealed_draft}/seal"), &seal());
+    assert_eq!(status, 200, "the sealed policy admits the surface the file policy refused: {sealed:?}");
+    let bloom_id = bloom_hex(&sealed["outcome"]["Sealed"]);
+    let (status, view) = get_json(http_port, &format!("/blooms/{bloom_id}"));
+    assert_eq!(status, 200, "the bloom sealed under its own policy is live");
+    assert_eq!(view["members"][0]["approval"]["kind"], "Approval", "the member carries a gate-formed approval");
+}
+
+/// A bloom-wide registry naming `address` as the approval policy.
+fn registry_naming(address: Digest) -> ConfigRegistry {
+    let mut configs = ConfigRegistry::default();
+    configs.insert::<ApprovalPolicy>(address);
+    configs
+}
+
+/// Open a draft shaped like [`valid_draft`] with `configs` as its bloom-wide
+/// registry, and return its handle.
+fn draft_with(http_port: u16, configs: Option<ConfigRegistry>) -> String {
+    let mut patch = serde_json::to_value(valid_draft("wp-1")).unwrap();
+    if let Some(configs) = configs {
+        patch["configs"] = serde_json::to_value(&configs).unwrap();
+    }
+    patch_draft(http_port, &patch)
+}
+
+/// Open a fresh draft, PATCH `patch` into it, and return its handle.
+fn patch_draft(http_port: u16, patch: &Value) -> String {
+    let (status, opened) = send_json(http_port, "POST", "/drafts", &Value::Null);
+    assert_eq!(status, 201, "open draft");
+    let draft_id = opened["draft_id"].as_str().unwrap().to_owned();
+    let (status, _) = send_json(http_port, "PATCH", &format!("/drafts/{draft_id}"), patch);
+    assert_eq!(status, 200, "patch draft {draft_id}");
+    draft_id
 }
 
 // ADR-0174 — the generic authoring route and the draft registry are only useful

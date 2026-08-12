@@ -26,9 +26,15 @@
 //! Content addressing makes the write idempotent — identical content under the
 //! same kind addresses to the same digest and rewrites the same row — so the
 //! route is safely repeatable.
+//!
+//! Authoring also fills this cap's own resolved-configuration cache, and the
+//! boot [`LoadConfigs`] read seeds it. The pre-seal approve gate resolves a
+//! draft's sealed tier policy out of that cache (#4616) rather than reaching the
+//! store from inside a synchronous admission decision, so the cap needs the
+//! content in hand before it can gate anything.
 
 use aether_actor::Manual;
-use aether_bloomery::{Digest, config_address};
+use aether_bloomery::{Digest, LoadConfigs, LoadConfigsResult, config_address};
 use aether_codec::encode_schema;
 use aether_data::schema::SchemaType;
 use aether_kinds::descriptors;
@@ -58,6 +64,19 @@ pub(super) struct ConfigView {
     digest: Digest,
     /// The kind the bytes decode as — the registry key.
     kind: String,
+}
+
+/// One authored configuration held across its store write: the view the caller
+/// gets back, and the canonical bytes that join this cap's resolved-config cache
+/// once the row is durable.
+///
+/// The bytes ride along rather than being re-fetched, because the whole point of
+/// caching them here is to keep the pre-seal gate off the store: an operator who
+/// authors a policy and immediately seals a draft naming it would otherwise race
+/// a read that has no reason to have happened yet.
+pub(super) struct AuthoredConfig {
+    pub(super) view: ConfigView,
+    pub(super) bytes: Vec<u8>,
 }
 
 /// The kind's schema, from the descriptor inventory this binary links.
@@ -93,23 +112,63 @@ impl ApiCapabilityState {
         };
 
         let digest = config_address(&request.kind, &bytes);
-        let record = RecordConfig { digest: digest.as_bytes().to_vec(), kind: request.kind.clone(), bytes };
+        let record =
+            RecordConfig { digest: digest.as_bytes().to_vec(), kind: request.kind.clone(), bytes: bytes.clone() };
         let correlation = self.send_tracked(ctx.actor::<StoreCapability>(), &record);
         // Held across the write rather than rebuilt from the store's reply,
         // which carries only success or failure — the address is this route's to
         // report.
-        self.configs.insert(correlation, ConfigView { digest, kind: request.kind });
+        self.authoring.insert(correlation, AuthoredConfig { view: ConfigView { digest, kind: request.kind }, bytes });
         Routed::Deferred(correlation)
     }
 
     /// Answer a held authoring request from the store's write reply: `200` with
     /// the address on a durable write, `500` on a failed one — never an address
     /// the caller could seal against nothing.
+    ///
+    /// A durable write also makes the content resolvable here, so a draft sealing
+    /// the address the caller just received gates without waiting on another
+    /// store read. A failed write files nothing: the address never reached the
+    /// caller, and caching content the store does not hold would let a seal
+    /// succeed here that no restart could reproduce.
     pub(super) fn resolve_config_write(&mut self, ctx: &NativeCtx<'_, Manual>, error: Option<&str>) -> Option<()> {
-        let view = self.configs.remove(&ctx.reply_target().correlation_id)?;
-        let response = error
-            .map_or_else(|| json(200, &view), |error| error_response(500, &format!("config write failed: {error}")));
+        let AuthoredConfig { view, bytes } = self.authoring.remove(&ctx.reply_target().correlation_id)?;
+        let response = match error {
+            None => {
+                self.configs.insert(view.digest, view.kind.clone(), bytes);
+                json(200, &view)
+            }
+            Some(error) => error_response(500, &format!("config write failed: {error}")),
+        };
         self.answer(ctx, &response);
         Some(())
     }
+
+    /// Fill the resolved-configuration cache from the store's boot read (#4616).
+    ///
+    /// The boot posture is the control core's (ADR-0174): an unreadable table or
+    /// a malformed address aborts rather than coming up on a partial cache,
+    /// because a cap that silently held less content than the store does would
+    /// gate a seal against a policy it merely failed to read — resolving a lower
+    /// tier than the bloom actually sealed, which is the one failure this whole
+    /// path exists to make impossible.
+    pub(super) fn hydrate_configs(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: LoadConfigsResult) {
+        let records = match mail {
+            LoadConfigsResult::Ok { records } => records,
+            LoadConfigsResult::Err { error } => ctx.fatal_abort(format!("boot configuration read failed: {error}")),
+        };
+        for record in records {
+            let Some(address) = Digest::from_slice(&record.digest) else {
+                ctx.fatal_abort(format!("stored configuration `{}` has a malformed address", record.kind));
+            };
+            self.configs.insert(address, record.kind, record.bytes);
+        }
+        self.configs_ready = true;
+    }
+}
+
+/// Ask the store for every stored configuration — the boot read the cap's `wire`
+/// fires so the pre-seal gate has content to resolve a sealed policy against.
+pub(super) fn load_configs(ctx: &mut NativeCtx<'_>) {
+    ctx.actor::<StoreCapability>().send_detached(&LoadConfigs);
 }

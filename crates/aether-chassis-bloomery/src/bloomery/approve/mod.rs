@@ -27,7 +27,11 @@
 //!    closed, and umbrella integrity. Any failure fails **closed**: no approval.
 //! 3. **Tier resolution** over the declared surface — the ported
 //!    `scripts/surface-match.py --tier` semantics (most-restrictive-wins,
-//!    fail-closed to `human` out of grammar).
+//!    fail-closed to `human` out of grammar). The policy it resolves against is
+//!    the one the draft seals bloom-wide under `aether.bloomery.approval_policy`
+//!    (#4616, ADR-0174), falling back to the host's
+//!    [`load_policy`] file only when the draft seals none — so the tier a member
+//!    was admitted at is a property of the bloom, not of the coordinator's disk.
 //! 4. The `pre_approved` owner override: resolves the *tier* to `auto`
 //!    (owner-actor-verified upstream), waiving the tier but **not** the gate
 //!    checks — and it cannot pass a firing ADR gate.
@@ -48,7 +52,7 @@ mod policy;
 mod statement;
 
 pub use gate::{AdmissionRequest, AdrTouch, Completeness, Decision, Gate, Incompleteness};
-pub use policy::{ApprovalPolicy, PolicyError, Tier};
+pub use policy::{ApprovalPolicy, PolicyError, Tier, load_policy};
 pub use statement::{StatementRejected, approval_from_statement, precheck_statement, verified_statement_approval};
 
 #[cfg(test)]

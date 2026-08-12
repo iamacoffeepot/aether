@@ -6,6 +6,7 @@
 //! DAG is built from; they are plain data — no I/O, no engine boot, no
 //! GitHub types — and are content-addressed the same way (`digest_of`).
 
+mod approval;
 mod bloom;
 mod config;
 mod model_override;
@@ -17,6 +18,7 @@ mod statement;
 mod study;
 mod verify;
 
+pub use approval::{ApprovalPolicy, ApprovalRule, Tier};
 pub use bloom::{
     BloomDraft, BloomSpec, LandingReceipt, MemberCandidate, MemberSubject, Membership, ResolutionClaim, ResolvedBloom,
 };
