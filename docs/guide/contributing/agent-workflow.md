@@ -57,9 +57,9 @@ idea or rough issue
 ```
 
 These artifacts are independent facts. A branch does not prove approval. Green
-CI does not prove review acceptance. A semantic review does not clear a native
-change request or unresolved thread. A closed issue does not prove that a named
-pull request merged.
+CI does not prove that the current diff was inspected. Direct inspection does
+not clear a native change request or unresolved thread. A closed issue does not
+prove that a named pull request merged.
 
 Issue labels are taxonomy only. They can identify the conventional-commit type,
 affected Cargo scopes, or other searchable classifications, but they do not
@@ -153,14 +153,14 @@ owns the exact hosted inventory.
 
 ## Review, findings, and dogfood are head-bound
 
-After CI is green, implementation records one semantic direct-review artifact
-for the exact PR, head SHA, and current Plan digest. GitHub reports it as a
-commenting review because an author cannot natively approve their own PR. Its
-trust comes from the review record and author association, not a payload claim.
+After CI is green, the implementer directly inspects the complete current-head
+diff against the Plan and records the result in the ordinary human-readable
+implementation handoff. The implementer is the reviewer for this loop; it does
+not post JSON or HTML machine markers in PR reviews or comments.
 
 Review acceptance has three separate gates:
 
-1. the newest trusted semantic verdict for this head and digest says approve;
+1. direct inspection of the exact current head found no unresolved defect;
 2. no reviewer's latest active native decision is changes requested; and
 3. every review thread is resolved.
 
@@ -168,7 +168,7 @@ Actionable findings enter the implementation's integrated repair loop. Verify
 each item, fix it within the approved surface or give a concrete justification,
 push an ordinary commit, rerun local checks and CI, reply to its anchored thread,
 and resolve the thread only after the disposition is visible. The changed head
-then needs a fresh semantic verdict. A root-level or out-of-scope problem returns
+then needs fresh direct inspection. A root-level or out-of-scope problem returns
 to the appropriate managed scope artifact instead of being silently waived.
 
 The issue's Dogfood brief says either why no consumer trial applies or defines

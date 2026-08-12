@@ -90,12 +90,13 @@ remain in the job log.
 
 Branch protection currently requires two status checks: `CI pass` and `Lint
 title`. It does not configure required pull-request reviews. `CI pass` proves
-the applicable tree checks; it does not prove automated review, dogfood, or
-lifecycle readiness. Those are separate direct-drive facts: the implementation
-skill records a trusted semantic review for the exact head and Plan digest,
-requires native change requests and review threads to be clear, and runs the
-scoped dogfood trial when the issue body calls for one. Landing independently
-re-reads those facts before clearing draft state.
+the applicable tree checks; it does not prove direct inspection, dogfood, or
+lifecycle readiness. Those are separate direct-drive facts: the implementer
+directly inspects and repairs the exact current-head diff, records a
+human-readable handoff without posting a JSON/HTML review marker, requires
+native change requests and review threads to be clear, and runs the scoped
+dogfood trial when the issue body calls for one. Landing independently re-reads
+those facts before clearing draft state.
 
 Do not copy a list from a CI log into a shell and run it. Logs are evidence;
 commands come from checked-in workflows and repository guidance.

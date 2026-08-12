@@ -252,9 +252,10 @@ are not substitutes.
 
 **Direct-review verdict**
 
-A trusted semantic pull-request review bound to the exact PR, current head, and
-Plan digest. It is independent of native GitHub review decisions and unresolved
-threads.
+The implementer's human-readable handoff that the exact current-head diff was
+inspected against the approved Plan and has no unresolved defect. It is not a
+visible JSON/HTML PR marker, and it is independent of native GitHub review
+decisions and unresolved threads.
 
 **Landable draft**
 

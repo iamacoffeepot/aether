@@ -111,8 +111,8 @@ The workflow derives progress from concrete artifacts:
 | Owned issue worktree or branch | Implementation is in progress or paused |
 | Open draft pull request | Reviewable implementation exists |
 | Draft current head with pending/red required checks | Build/test proof is incomplete |
-| Green current head without accepted review/thread/dogfood facts | QA evidence is incomplete |
-| Green, contained current head with accepted review, clear threads, and required dogfood | Landable draft; explicit landing authority is still required |
+| Green current head without direct-inspection/thread/dogfood facts | QA evidence is incomplete |
+| Green, contained current head with direct inspection complete, clear threads, and required dogfood | Landable draft; explicit landing authority is still required |
 | Named pull request merged and closing issue closed | Done |
 
 Never infer one row from another. Each consumer re-reads the exact facts it
@@ -150,20 +150,15 @@ Local checks support this evidence but do not replace it.
 
 ### Direct review and native blockers
 
-Direct review records a strict two-line `aether-direct-review:v1` commenting
-review whose payload contains the exact head SHA, Plan digest, pull-request
-number, and semantic `APPROVE` or `REQUEST_CHANGES` verdict. A trusted artifact:
+The implementer directly inspects the complete current-head diff against the
+approved Plan, repairs every defect, reruns the applicable proof, and records an
+ordinary human-readable handoff naming the exact head. This direct-drive review
+does not post JSON or HTML machine markers in PR reviews or comments.
 
-- comes from the current PR's paginated reviews endpoint;
-- is a `COMMENTED` review from an owner, member, or collaborator;
-- binds both its REST commit id and payload to the current head;
-- binds the current PR and freshly recomputed Plan digest.
-
-The newest matching trusted artifact is the semantic verdict. Native decisions
-remain separate: each reviewer's latest active `CHANGES_REQUESTED` blocks until
-that reviewer approves or GitHub reports it dismissed. Every unresolved review
-thread blocks independently. Neither a native approval nor a marker posted in a
-different GitHub object substitutes for the semantic artifact.
+Native decisions remain separate: each reviewer's latest active
+`CHANGES_REQUESTED` blocks until that reviewer approves or GitHub reports it
+dismissed. Every unresolved review thread blocks independently. Direct
+inspection does not waive either native signal.
 
 ### Dogfood
 
@@ -176,7 +171,7 @@ and contain no actionable result. Evidence from an older head is stale.
 Review and dogfood findings are verified, fixed inside the approved surface or
 justified with evidence, committed and plain-pushed, replied to, and resolved
 only after their disposition is visible. Every push creates a new head that must
-repeat checks, semantic review, and required dogfood.
+repeat checks, direct inspection, and required dogfood.
 
 A needed path outside the Declared surface, broken Plan premise, or incompatible
 design returns to the matching managed scope artifact. It is not license to
