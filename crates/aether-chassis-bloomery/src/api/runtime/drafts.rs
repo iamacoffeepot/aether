@@ -51,9 +51,6 @@ impl ApiCapabilityState {
         if let Some(base) = patch.base {
             draft.base = base;
         }
-        if let Some(budget) = patch.budget {
-            draft.budget = budget;
-        }
         if let Some(forecast) = patch.forecast {
             draft.forecast = forecast;
         }

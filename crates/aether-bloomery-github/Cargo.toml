@@ -21,12 +21,22 @@ aether-bloomery = { path = "../aether-bloomery", default-features = false }
 # runners); tests never touch the network (they inject a fake), so the
 # `blocking`/`json`/`default-tls` surface is compile-only in CI.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "default-tls"] }
+# RS256 GitHub-App JWT signing for the `app_auth` installation-token custody
+# (ADR-0149 §Migration step 3) — the App JWT the token exchange authenticates
+# with. Non-optional because this whole crate is the GitHub adapter: a consumer
+# that does not want the protocol does not depend on the crate at all, so a
+# mirrored feature would gate nothing an existing gate does not.
+jsonwebtoken = "9"
 serde = { workspace = true, features = ["derive", "std"] }
 # Request/response bodies and the marker change-detection digest are JSON;
 # the digest is sha256 over a value's canonical JSON so a re-render with the
 # same content is a byte-stable marker and the reconcile no-ops.
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# The token custody warns when GitHub reports an installation-token expiry it
+# cannot parse, so the adapter emits its own diagnostics rather than swallowing
+# a malformed expiry silently.
+tracing = { workspace = true, features = ["std"] }
 
 [features]
 # Exposes the in-process `FakeGithub` double so a downstream crate (the host

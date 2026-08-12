@@ -18,17 +18,18 @@ mod runtime;
 use aether_actor::actor;
 
 // The handled-kind types the `#[actor(singleton)]` dispatch table references —
-// the downstream reply kinds (one typed handler each, so the accept-set stays
-// buffered rather than tripping the streaming path a broad `#[fallback]` would)
-// and the settlement-notice safety net. The request-ingress kinds are the
-// per-route kinds `#[http::router]` mints in `runtime.rs`, registered by the
-// generated glue rather than a bare `HttpServerRequest` handler (#3672).
-use aether_bloomery::{AdmitResult, EnumerateClaimsResult, QueryResult, ReplayJournalResult};
+// the hand-written handlers' reply kinds (one typed handler each, so the
+// accept-set stays buffered rather than tripping the streaming path a broad
+// `#[fallback]` would) and the settlement-notice safety net. The request-ingress
+// kinds are the per-route kinds `#[http::router]` mints in `runtime/mod.rs`, and
+// a deferred route's reply kind rides its own `#[http::reply]` glue (ADR-0154),
+// so neither is named here. The boot configuration read answers no route at all,
+// so its reply is hand-written and named here (#4616).
+use aether_bloomery::{AdmitResult, LoadConfigsResult};
 use aether_kinds::trace::Settled;
 
-use crate::artifacts::GetResult;
 use crate::signing::VerifyResult;
-use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult};
+use crate::store::RecordDispatchDescriptionResult;
 
 /// Addressing identity for the `aether.bloomery.api` capability (ADR-0122).
 #[actor(singleton, root)]

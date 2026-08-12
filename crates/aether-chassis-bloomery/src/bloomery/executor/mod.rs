@@ -30,13 +30,8 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use aether_bloomery::{
-    EvidenceRef, ExecutionStatus, ExecutorBackend, SharedCorrespondence as DomainSharedCorrespondence, WorkHandle,
-    WorkOrder,
-};
-use aether_bloomery_github::{
-    ActionsExecutor, ExecutorError, GithubError, LaneWorkflows, SharedCorrespondence as GitSharedCorrespondence,
-};
+use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, SharedCorrespondence, WorkHandle, WorkOrder};
+use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, LaneWorkflows};
 
 use super::{CoordinatorConfig, GithubConnectionConfig};
 
@@ -203,15 +198,14 @@ impl ExecutorShell {
     pub fn connect(
         connection: &GithubConnectionConfig,
         coordinator: &CoordinatorConfig,
-        domain_correspondence: DomainSharedCorrespondence,
-        git_correspondence: GitSharedCorrespondence,
+        correspondence: SharedCorrespondence,
     ) -> Result<Self, GithubError> {
         #[cfg(any(test, feature = "testing"))]
         if connection.uses_fixture() {
             let fake = connection.shared_fixture();
             let actions = Arc::new(ActionsExecutor::new(
                 fake,
-                domain_correspondence,
+                Arc::clone(&correspondence),
                 LaneWorkflows {
                     mechanical: connection.executor_workflow_file.clone(),
                     model: connection.executor_model_workflow_file.clone(),
@@ -221,14 +215,14 @@ impl ExecutorShell {
             if !coordinator.local_lane_enabled {
                 return Ok(Self::new(actions));
             }
-            let local = Arc::new(LocalExecutor::from_config(coordinator, git_correspondence));
+            let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence));
             return Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, coordinator.local_lane_prefixes()))));
         }
         let missing = connection.missing_connection_knobs();
         if missing.is_empty() {
             let actions = Arc::new(ActionsExecutor::new(
                 connection.connect_client()?,
-                domain_correspondence,
+                Arc::clone(&correspondence),
                 LaneWorkflows {
                     mechanical: connection.executor_workflow_file.clone(),
                     model: connection.executor_model_workflow_file.clone(),
@@ -239,7 +233,7 @@ impl ExecutorShell {
             if !coordinator.local_lane_enabled {
                 return Ok(Self::new(actions));
             }
-            let local = Arc::new(LocalExecutor::from_config(coordinator, git_correspondence));
+            let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence));
             return Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, coordinator.local_lane_prefixes()))));
         }
 
@@ -252,7 +246,7 @@ impl ExecutorShell {
         if !coordinator.local_lane_enabled {
             return Ok(Self::new(actions));
         }
-        let local = Arc::new(LocalExecutor::from_config(coordinator, git_correspondence));
+        let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence));
         Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, coordinator.local_lane_prefixes()))))
     }
 

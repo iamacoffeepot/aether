@@ -12,13 +12,13 @@ use std::collections::BTreeMap;
 use aether_bloomery::{
     AgentSelection, AggregateReviewPayload, BloomId, ConfigKind, ConfigRegistry, DispatchPayload, EvidenceRef,
     ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce, ReasoningEffort, RedispatchPayload,
-    ReviewPass, SharedCorrespondence as DomainSharedCorrespondence, StageCatalog, StageId, StageOverride, Topic,
-    Transformation, WorkHandle, WorkOrder, WorkpieceId,
+    ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride, Topic, Transformation, WorkHandle,
+    WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
-    ActionsExecutor, Artifact, ExecutorError, GitObjectId, GithubError, LaneWorkflows, RunConclusion, RunStatus,
-    SharedCorrespondence as GitSharedCorrespondence, StageVerdict,
+    ActionsExecutor, Artifact, ExecutorError, GithubError, LaneWorkflows, RunConclusion, RunStatus, StageVerdict,
+    to_hex,
 };
 use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
@@ -197,7 +197,11 @@ fn enqueue_dispatch_with_configs(
         bloom: bloom.0,
         workpiece: WorkpieceId(workpiece.to_owned()),
         stage,
-        transformation: Transformation::for_member_stage(stage, scope_revision, digest(0xC0)),
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(stage),
+            scope_revision,
+            digest(0xC0),
+        ),
         scope_revision,
         candidate: None,
         configs,
@@ -228,7 +232,12 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
     let payload = AggregateReviewPayload {
         profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: bloom.0,
-        transformation: Transformation::for_aggregate_review(digest(30), digest(40), digest(50)),
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(30),
+            digest(40),
+            digest(50),
+        ),
         pass: ReviewPass::Full,
     };
     // A queued review belongs to a live bloom; the drain reads its membership to
@@ -276,7 +285,12 @@ fn the_second_aggregate_roll_frames_a_delta_confirm_against_the_frozen_findings(
     let payload = AggregateReviewPayload {
         profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: bloom.0,
-        transformation: Transformation::for_aggregate_review(digest(30), digest(40), digest(50)),
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(30),
+            digest(40),
+            digest(50),
+        ),
         pass: ReviewPass::DeltaConfirm,
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
@@ -315,7 +329,12 @@ fn a_fresh_roll_one_aggregate_dispatch_clears_the_stale_frozen_row() {
     let payload = AggregateReviewPayload {
         profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: bloom.0,
-        transformation: Transformation::for_aggregate_review(digest(30), digest(40), digest(50)),
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(30),
+            digest(40),
+            digest(50),
+        ),
         pass: ReviewPass::Full,
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
@@ -449,7 +468,12 @@ fn drain_dispatches_the_review_lane_under_its_own_calibrated_profile() {
     let payload = AggregateReviewPayload {
         profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: digest(1),
-        transformation: Transformation::for_aggregate_review(digest(30), digest(40), digest(50)),
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(30),
+            digest(40),
+            digest(50),
+        ),
         pass: ReviewPass::Full,
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
@@ -525,7 +549,8 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
 
     // A well-formed dispatch, then a subject-less one, then another well-formed one.
     let (first, _) = enqueue_construct_dispatch(&mut store, bloom, "wp-a", 5);
-    let mut subjectless = Transformation::for_member_stage(StageId::Construct, digest(9), digest(0xC0));
+    let mut subjectless =
+        Transformation::for_member_stage(&StageCatalog::binding_of(StageId::Construct), digest(9), digest(0xC0));
     subjectless.inputs.clear();
     let payload = DispatchPayload {
         profile: StageCatalog::profile_of(StageId::Construct),
@@ -673,13 +698,11 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
     // backends resolve it — the local lane checks it out for the `git worktree add`.
     let fake = FakeGithub::new();
     fake.seed_git_object(&digest(0xC0));
-    let correspondence = Arc::new(fake);
-    let domain_correspondence = Arc::clone(&correspondence) as DomainSharedCorrespondence;
-    let git_correspondence = correspondence as GitSharedCorrespondence;
+    let correspondence = Arc::new(fake) as SharedCorrespondence;
     let mut store = SqliteStore::open(":memory:").unwrap();
     let bloom = BloomId(digest(1));
     let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-local", 5);
-    let actions = Arc::new(ActionsExecutor::new(FakeGithub::new(), domain_correspondence, lanes(), PINNED_REF));
+    let actions = Arc::new(ActionsExecutor::new(FakeGithub::new(), Arc::clone(&correspondence), lanes(), PINNED_REF));
     let runner = FixedRunner {
         evidence: format!(
             r#"{{"command":"construct.implement","nonce":"dispatch-{sequence}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"result":{{"num_turns":3}}}}}}"#
@@ -687,7 +710,7 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
         lifecycle: RunLifecycle::Exited { success: true },
         captures: true,
     };
-    let local = Arc::new(LocalExecutor::new(Arc::new(runner), git_correspondence, base.path()));
+    let local = Arc::new(LocalExecutor::new(Arc::new(runner), correspondence, base.path()));
     let routing = RoutingExecutor::new(actions, local, vec!["construct.".to_owned()]);
     let shell = ExecutorShell::new(Arc::new(routing));
 
@@ -861,7 +884,11 @@ fn drain_stamps_the_record_axes_from_the_payload() {
         bloom: bloom.0,
         workpiece: WorkpieceId("wp-cand".to_owned()),
         stage: StageId::Verify,
-        transformation: Transformation::for_member_stage(StageId::Verify, candidate_tree, digest(0xC0)),
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Verify),
+            candidate_tree,
+            digest(0xC0),
+        ),
         scope_revision: digest(5),
         candidate: Some(candidate_tree),
         configs: ConfigRegistry::default(),
@@ -884,14 +911,15 @@ fn drain_stamps_the_record_axes_from_the_payload() {
 // (failing) work.
 #[test]
 fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
-    use aether_bloomery::{CandidateRef, Correspondence as _, Event, IdempotencyKey};
+    use aether_bloomery::{CandidateRef, Event, IdempotencyKey};
 
     let bloom = BloomId(digest(1));
     let capture = CandidateRef { tree: digest(0xAB), checkout: digest(0xAC) };
     let store = FakeGithub::new();
+    // `seed_git_object` records the digest against its own hex rendering, so
+    // that rendering is the sha a correspondence-resolved push must name.
     store.seed_git_object(&capture.checkout);
-    let commit_hex =
-        GitObjectId::try_from(store.resolve_backend_object(&capture.checkout).unwrap().unwrap()).unwrap().to_hex();
+    let commit_hex = to_hex(&capture.checkout);
     let admission = |passed: bool, candidate: Option<CandidateRef>| {
         let fact = Fact::AttemptCompleted {
             bloom,
@@ -910,7 +938,7 @@ fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
     };
 
     let pusher = RecordingPush::default();
-    let correspondence: DomainSharedCorrespondence = Arc::new(store);
+    let correspondence: SharedCorrespondence = Arc::new(store);
     push_admitted_candidates(
         &[admission(true, Some(capture)), admission(false, Some(capture)), admission(true, None)],
         Some(&correspondence),
@@ -1297,15 +1325,14 @@ fn a_local_only_boot_mounts_and_says_why_an_actions_lane_cannot_run() {
     // What the mount costs an Actions-routed lane: a refusal that names the
     // knobs, rather than a dispatch into a backend with no credential.
     let fake = Arc::new(FakeGithub::new());
-    let shell = ExecutorShell::connect(
-        &connection,
-        &coordinator,
-        Arc::clone(&fake) as DomainSharedCorrespondence,
-        fake as GitSharedCorrespondence,
-    )
-    .expect("a local-only shell connects without GitHub");
+    let shell = ExecutorShell::connect(&connection, &coordinator, fake as SharedCorrespondence)
+        .expect("a local-only shell connects without GitHub");
     let order = WorkOrder {
-        transformation: Transformation::for_member_stage(StageId::Verify, digest(0xC0), digest(0xC0)),
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Verify),
+            digest(0xC0),
+            digest(0xC0),
+        ),
         nonce: Nonce("probe".to_owned()),
     };
     let refusal = shell.submit(&order).expect_err("a verify lane routes to Actions, which is unconfigured");
@@ -1323,7 +1350,11 @@ fn an_unconfigured_actions_refusal_is_permanent_so_the_drain_parks_it() {
     // implies progress while guaranteeing none.
     let refusal = UnconfiguredActionsBackend::new("GITHUB_TOKEN".to_owned())
         .submit(&WorkOrder {
-            transformation: Transformation::for_member_stage(StageId::Verify, digest(0xC0), digest(0xC0)),
+            transformation: Transformation::for_member_stage(
+                &StageCatalog::binding_of(StageId::Verify),
+                digest(0xC0),
+                digest(0xC0),
+            ),
             nonce: Nonce("probe".to_owned()),
         })
         .expect_err("the stub refuses every submit");

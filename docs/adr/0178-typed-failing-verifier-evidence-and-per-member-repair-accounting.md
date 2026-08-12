@@ -1,6 +1,6 @@
 # ADR-0178: Typed failing-verifier evidence and per-member repair accounting
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-10
 
 ## Context

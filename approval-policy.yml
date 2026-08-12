@@ -5,11 +5,22 @@
 # an approval tier over a workpiece's declared surface (the `## Declared surface`
 # glob block the scope revision carries). ADR-0149 / ADR-0151.
 #
-# The policy is Bloomery-owned: the host gate
-# (`crates/aether-chassis-bloomery/src/bloomery/approve/`) carries the `--tier`
+# This file is the FALLBACK, not the authority. A draft that seals an
+# `aether.bloomery.approval_policy` entry in its bloom-wide configuration
+# registry is gated against that sealed value, so the tier its members were
+# admitted at is part of what the bloom attests rather than a property of the
+# coordinator's disk (ADR-0174, #4616). A draft that seals none is gated against
+# the rules below, which is what keeps a coordinator that has authored no policy
+# working unchanged — and what keeps this file's git history the delegation
+# ladder's audit trail.
+#
+# The policy is Bloomery-owned: the value type
+# (`crates/aether-bloomery/src/values/approval.rs`) carries the `--tier`
 # resolution over these rules in Rust, matching the `scripts/surface-match.py`
 # resolver, so the semantics below are the contract the gate honours, not a
-# script's.
+# script's. The host gate
+# (`crates/aether-chassis-bloomery/src/bloomery/approve/`) only reads this file
+# into that value.
 #
 # Resolution is most-restrictive-match-wins (human > judge > auto): a path's
 # tier is the most restrictive rule that matches it, and a path matched by no

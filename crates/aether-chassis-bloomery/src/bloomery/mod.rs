@@ -26,7 +26,7 @@ mod study;
 
 pub use approve::{
     AdmissionRequest, AdrTouch, ApprovalPolicy, Completeness, Decision, Gate, Incompleteness, PolicyError,
-    StatementRejected, Tier, approval_from_statement, precheck_statement, verified_statement_approval,
+    StatementRejected, Tier, approval_from_statement, load_policy, precheck_statement, verified_statement_approval,
 };
 pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};
 pub use cli::BloomeryCli;

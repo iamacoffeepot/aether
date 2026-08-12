@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
-    Budget, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, NetworkProfile, Nonce, Transformation,
+    Digest, EvidenceRef, ExecutionLimits, ExecutionStatus, ExecutorBackend, NetworkProfile, Nonce, Transformation,
     VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder,
 };
 use aether_bloomery_github::ExecutorError;
@@ -70,7 +70,7 @@ fn order(command: &str, nonce: &str) -> WorkOrder {
             diff_base: None,
             outputs: Vec::new(),
             image: "iama/x:1".to_owned(),
-            limits: Budget::default(),
+            limits: ExecutionLimits { wall_clock_secs: 3_600 },
             network: NetworkProfile::None,
             description: None,
             model: None,

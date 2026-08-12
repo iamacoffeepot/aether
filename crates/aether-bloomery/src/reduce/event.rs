@@ -256,9 +256,9 @@ pub enum Fact {
         /// it names any other, so a grant cannot act on a stale read.
         stage: StageId,
         /// How many more dispatched attempts the member may spend before it
-        /// wedges again. Bounded by the stage's own retry budget, and by the
-        /// bloom's sealed [`Budget::retry_cap`](crate::Budget::retry_cap) when
-        /// it states one.
+        /// wedges again. Bounded by the stage's own
+        /// [`retry_budget`](crate::StageBinding::retry_budget) in the sealed
+        /// catalog, which is the whole retry authority (ADR-0177).
         attempts: u32,
     },
     /// A dispatched member Verify returned a typed failing-verifier set

@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::Path;
 
-use aether_bloomery_github::GitObjectId;
+use aether_bloomery::BackendObjectId;
 
 use super::runner::CapturedObjects;
 use super::{LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner};
@@ -14,12 +14,12 @@ use super::{LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunn
 /// The canned capture a [`FixedRunner`] with `captures: true` returns: a
 /// fixed commit/tree object pair, so a test can assert the digests the
 /// backend derives and records from it.
+///
+/// Twenty distinct bytes each — a SHA-1-shaped id, since that is what a real
+/// capture against today's git produces.
 #[must_use]
 pub fn canned_capture() -> CapturedObjects {
-    CapturedObjects {
-        commit: GitObjectId::from_hex(&"c".repeat(40)).expect("40 hex chars is a well-formed sha1"),
-        tree: GitObjectId::from_hex(&"d".repeat(40)).expect("40 hex chars is a well-formed sha1"),
-    }
+    CapturedObjects { commit: BackendObjectId::new(vec![0xcc; 20]), tree: BackendObjectId::new(vec![0xdd; 20]) }
 }
 
 /// A runner that writes `evidence` and returns a process fixed at `lifecycle`.

@@ -1,12 +1,38 @@
-//! The router's state: the pre-seal shaping maps, the ceilings that bound
-//! them, the in-flight reply-correlation tables, and the [`Routed`] disposition
-//! every route helper returns for [`finish`] to settle against those tables.
+//! The router's state: the pre-seal shaping maps, the ceilings that bound them,
+//! the multi-hop join tables, and the [`Routed`] disposition every route helper
+//! returns for [`finish`] to dispatch.
+//!
+//! # Two kinds of deferral
+//!
+//! A route that forwards one request and answers its one reply carries no state
+//! here at all: [`finish`] hands it to `ctx.defer(&request).to::<Peer>()`, the
+//! ADR-0154 relay, which stashes the requester's reply target in the ADR-0139
+//! request-context table and lets the paired `#[http::reply]` route answer it.
+//! The send *inherits* the request's causal chain, so the request stays in
+//! flight across the round-trip and the HTTP server's own `502` / timeout nets
+//! bound a downstream that never answers — nothing is held here and nothing
+//! needs reaping.
+//!
+//! What remains are the genuine **multi-hop** flows, which the 1:1 relay cannot
+//! express: the answer and orphan-claim-release routes verify a signature
+//! *before* they admit ([`VerifyPending`], shared by both), and a seal joins N
+//! member verifications before admitting once ([`PendingSeal`]). Each holds the
+//! request across a hop whose reply is not the answer, so each keeps an explicit
+//! obligation — and because their final `Admit` is dispatched from a reply
+//! handler rather than a route, it re-defers into
+//! [`pending`](ApiCapabilityState::pending) and is answered by hand. Those tables
+//! are domain join state, not correlation bookkeeping.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use aether_actor::{HandlesKind, Manual};
-use aether_bloomery::{Admit, BloomDraft, BloomId, Digest, Event, Statement, Workpiece};
+#[cfg(feature = "github")]
+use aether_bloomery::EnumerateClaims;
+use aether_bloomery::{
+    Admit, ApprovalPolicy, BloomDraft, BloomId, Digest, Event, Query, ReplayJournal, ResolvedConfigs, Statement,
+    Workpiece,
+};
 use aether_data::wire::to_vec;
 use aether_data::{Kind, MailId, MailboxId};
 use aether_http as http;
@@ -15,13 +41,16 @@ use aether_kinds::trace::Settled;
 use aether_substrate::actor::native::{NativeActorMailbox, NativeCtx};
 use aether_substrate::{InboundMail, Mailer};
 
-use super::configs::ConfigView;
 use super::response::error_response;
-use crate::bloomery::ApprovalPolicy;
+use crate::artifacts::{ArtifactsCapability, Get};
 // The control core is a native sibling cap since the wasm-boundary retirement
 // (ADR-0149 §The boundary, amended), addressed as a typed peer
-// (`ctx.actor::<ControlCore>()`) rather than a `resolve_embedded` component lineage.
+// (`ctx.defer(&request).to::<ControlCore>()`) rather than a `resolve_embedded`
+// component lineage.
 use crate::control::ControlCore;
+#[cfg(feature = "github")]
+use crate::source::SourceCapability;
+use crate::store::{RecordConfig, StoreCapability};
 
 /// Per-process ceilings on the pre-seal shaping maps. Staged workpieces and
 /// open drafts are pure in-memory shaping state with no durable owner to evict
@@ -48,15 +77,30 @@ pub(super) const MAX_OPEN_SEALS: usize = 1024;
 pub(super) const MAX_SEAL_MEMBERS: usize = 256;
 
 /// The control-plane REST router state: the pre-seal shaping maps plus the
-/// in-flight reply-correlation table.
+/// multi-hop join tables. A direct one-request/one-reply route holds nothing
+/// here — the ADR-0154 relay carries it.
 pub struct ApiCapabilityState {
     /// This cap's own mailbox, the settlement-notice target.
     pub(super) self_mailbox: MailboxId,
-    /// The parsed tier policy the pre-seal approve gate decides over (issue
-    /// #3583). `None` when the policy file was unreadable or malformed at init —
-    /// the gate then fails closed (no member resolves `auto`).
-    pub(super) policy: Option<ApprovalPolicy>,
-    /// Cached mailer for `send_envelope_detached` settlement subscriptions.
+    /// The host's file-loaded tier policy — the fallback a draft that seals no
+    /// `aether.bloomery.approval_policy` entry is gated against (issue #3583,
+    /// #4616). `None` when the policy file was unreadable or malformed at init;
+    /// a draft that seals none then has nothing to decide over and its seal fails
+    /// closed (no member resolves `auto`).
+    pub(super) file_policy: Option<ApprovalPolicy>,
+    /// Configuration content behind the addresses a draft's registry seals — the
+    /// same window onto the store the control core keeps (ADR-0174), filled from
+    /// the boot [`LoadConfigs`](aether_bloomery::LoadConfigs) read and from every
+    /// successful `POST /configs` write. The pre-seal gate is synchronous over
+    /// in-memory state, so a sealed policy has to be resolvable without a store
+    /// round trip inside the admission path.
+    pub(super) configs: ResolvedConfigs,
+    /// Whether the boot configuration read has landed. Until it has, this cap
+    /// cannot tell an unsealed policy from one whose content it merely has not
+    /// fetched — the two decide opposite tiers — so a seal arriving first is
+    /// refused rather than gated against the fallback.
+    pub(super) configs_ready: bool,
+    /// Cached mailer for the multi-hop flows' settlement subscriptions.
     pub(super) mailer: Arc<Mailer>,
     /// Staged workpieces, keyed by their workpiece id.
     pub(super) staged: BTreeMap<String, Workpiece>,
@@ -64,8 +108,11 @@ pub struct ApiCapabilityState {
     pub(super) drafts: BTreeMap<u64, BloomDraft>,
     /// The next draft handle to mint.
     pub(super) next_draft: u64,
-    /// Deferred HTTP replies awaiting a downstream cap reply, keyed by the
-    /// downstream dispatch's `MailId.correlation_id`.
+    /// Requests awaiting the **terminal** `Admit` of a multi-hop flow, keyed by
+    /// that admit dispatch's `MailId.correlation_id`. Only the answer and seal
+    /// flows reach here: their admit is dispatched from a reply handler, which
+    /// has no route obligation to defer, so it is held and answered by hand. A
+    /// direct admit route never inserts — the relay carries it.
     pub(super) pending: HashMap<u64, InboundMail>,
     /// Answer requests awaiting a signature verification from the
     /// `aether.signing` capability, keyed by the verify dispatch's
@@ -81,51 +128,28 @@ pub struct ApiCapabilityState {
     pub(super) seals: HashMap<u64, PendingSeal>,
     /// The next seal handle to mint.
     pub(super) next_seal: u64,
-    /// Authored scope revisions held across their store write (#4588), keyed by
-    /// the write dispatch's `MailId.correlation_id`. The reply carries only
-    /// success or failure, so the view the caller gets back waits here rather
-    /// than being rebuilt from it.
-    pub(super) configs: HashMap<u64, ConfigView>,
     /// Each in-flight above-auto member verification, keyed by its `Verify`
     /// dispatch `MailId.correlation_id`, back-pointing at the held [`PendingSeal`]
     /// and the member it forms the approval for on a verified reply.
     pub(super) seal_verifications: HashMap<u64, SealVerify>,
-    #[cfg(feature = "github")]
-    /// Orphan-claim release submissions awaiting their signature verification
-    /// (ADR-0179), keyed by the verify dispatch's `MailId.correlation_id`. Held
-    /// separately from `verifying` so the reply handler can tell a release verify
-    /// from an answer verify by correlation alone, the same way `seal_verifications`
-    /// separates the seal-member verifies.
-    pub(super) releasing: HashMap<u64, ReleasePending>,
-    #[cfg(feature = "github")]
-    /// The request digest each in-flight release admit will report, keyed by the
-    /// admit dispatch's `MailId.correlation_id`. A release answers `202` with its
-    /// digest rather than the bare reducer outcome every other write route
-    /// returns, and the digest is not recoverable from the admit reply.
-    pub(super) release_admits: HashMap<u64, Digest>,
 }
 
-#[cfg(feature = "github")]
-/// A release submission held across the signature-verification round trip: the
-/// reply obligation, the request digest the `202` carries, and the request event
-/// to admit once (and only if) the signature verifies.
-pub(super) struct ReleasePending {
-    /// The held HTTP reply obligation.
-    pub(super) inbound: InboundMail,
-    /// The request digest — the handle the accepted reply hands back.
-    pub(super) request: Digest,
-    /// The `Fact::RequestOrphanClaimRelease` event to admit on a verified
-    /// signature.
-    pub(super) event: Event,
-}
-
-/// An answer request held across the signature-verification round trip: the
-/// reply obligation and the adoption event to admit once (and only if) the
-/// signature verifies.
+/// A request held across a signature-verification round trip: the reply
+/// obligation and the event to admit once (and only if) the signature verifies.
+///
+/// Two routes hold one: `POST /blooms/{id}/answer` (its event is
+/// `Fact::AdoptAnswer`) and `POST /claims/releases` (its event is
+/// `Fact::RequestOrphanClaimRelease`, ADR-0179). They are the same flow —
+/// verify, then admit — so they share the table rather than each keeping a
+/// parallel one; `subject` is the only thing that differs, and it differs only
+/// in what a rejection says the operator got wrong.
 pub(super) struct VerifyPending {
     /// The held HTTP reply obligation.
     pub(super) inbound: InboundMail,
-    /// The `Fact::AdoptAnswer` event to admit on a verified signature.
+    /// What the operator submitted, named for the rejection message: an
+    /// `"answer statement"` or a `"release authorization"`.
+    pub(super) subject: &'static str,
+    /// The event to admit on a verified signature.
     pub(super) event: Event,
 }
 
@@ -195,31 +219,39 @@ pub(super) struct PendingVerify {
 }
 
 /// A route's disposition: an immediate response (the in-memory shaping routes),
-/// a deferral keyed by the downstream dispatch correlation (the durable
-/// read/write routes), or a signature-gated deferral (the answer route).
+/// a downstream request to relay (the durable read/write routes), or one of the
+/// two multi-hop deferrals that hold their own join state.
+///
+/// The relay variants each carry the **request itself** rather than a dispatch
+/// correlation: [`finish`] is what forwards them, so the route helper decides
+/// *what* to ask and the adapter decides *whom* to ask. That is what lets the
+/// send be an inherited `ctx.defer(…).to::<Peer>()` instead of a detached one —
+/// a route helper holds no ctx it could defer through.
 pub(super) enum Routed {
     /// Reply now with this response.
     Reply(HttpServerResponse),
-    /// Await the downstream reply correlated by this id.
-    Deferred(u64),
+    /// Relay to the control core; its `AdmitResult` answers.
+    Admit(Admit),
+    /// Relay to the control core; its `QueryResult` answers.
+    Query(Query),
+    /// Relay to the store; its `ReplayJournalResult` answers.
+    ReplayJournal(ReplayJournal),
+    /// Relay to the artifacts cap; its `GetResult` answers.
+    Get(Get),
+    /// Relay to the store; its `RecordConfigResult` answers.
+    RecordConfig(RecordConfig),
+    /// Relay to the source cap; its `EnumerateClaimsResult` answers (ADR-0179).
     #[cfg(feature = "github")]
-    /// Await the `aether.signing` verify reply for an orphan-claim release
-    /// (ADR-0179), then admit `event` on a verified signature and answer `202`
-    /// with `request`, or answer `400` on a rejection.
-    DeferredRelease {
-        /// The verify dispatch correlation the reply will echo.
-        correlation: u64,
-        /// The request digest the accepted reply reports.
-        request: Digest,
-        /// The release request event to admit once the signature verifies.
-        event: Box<Event>,
-    },
+    EnumerateClaims(EnumerateClaims),
     /// Await the `aether.signing` verify reply correlated by this id, then admit
-    /// `event` on a verified signature or answer `400` on a rejection.
+    /// `event` on a verified signature or answer `400` naming `subject` on a
+    /// rejection.
     DeferredVerify {
         /// The verify dispatch correlation the reply will echo.
         correlation: u64,
-        /// The adoption event to admit once the signature verifies.
+        /// What the operator submitted, for the rejection message.
+        subject: &'static str,
+        /// The event to admit once the signature verifies.
         event: Box<Event>,
     },
     /// Await N `aether.signing` verify replies for an above-auto seal (issue
@@ -228,22 +260,27 @@ pub(super) enum Routed {
     DeferredSeal(Box<PendingSealSetup>),
 }
 
-impl ApiCapabilityState {
-    /// Encode the event, wrap it in an [`Admit`], and dispatch it to the
-    /// control core, deferring the HTTP reply on the admit reply.
-    pub(super) fn admit(&self, ctx: &NativeCtx<'_, Manual>, event: &Event) -> Routed {
-        let bytes = match to_vec(event) {
-            Ok(bytes) => bytes,
-            Err(error) => return Routed::Reply(error_response(500, &format!("event encode failed: {error}"))),
-        };
-        Routed::Deferred(self.send_tracked(ctx.actor::<ControlCore>(), &Admit { event: bytes }))
+/// Encode `event` and wrap it in an [`Admit`] for the control core, or answer
+/// `500` if it will not encode. Shared by every route that admits directly —
+/// grant, and the all-auto seal / supersede fast path.
+pub(super) fn admit(event: &Event) -> Routed {
+    match to_vec(event) {
+        Ok(bytes) => Routed::Admit(Admit { event: bytes }),
+        Err(error) => Routed::Reply(error_response(500, &format!("event encode failed: {error}"))),
     }
+}
 
+impl ApiCapabilityState {
     /// Dispatch a mail to a peer cap's typed handle as a fresh causal root,
     /// subscribe to its settlement (the no-reply safety net), and return the
     /// correlation the reply will echo. The `HandlesKind` gate makes a
-    /// wrong-kind dispatch a compile error — the raw-envelope form this
-    /// replaces had no such check.
+    /// wrong-kind dispatch a compile error.
+    ///
+    /// Only the multi-hop flows dispatch this way. A hop taken from a reply
+    /// handler has no request chain to inherit and no route obligation to
+    /// defer, so it starts a fresh root and pairs with an explicit settlement
+    /// subscription; a direct route relays through
+    /// [`Ctx::defer`](aether_http::Ctx::defer) instead and needs neither.
     pub(super) fn send_tracked<R, K>(&self, target: NativeActorMailbox<'_, R>, payload: &K) -> u64
     where
         R: HandlesKind<K>,
@@ -266,9 +303,11 @@ impl ApiCapabilityState {
         mail_id.correlation_id
     }
 
-    /// Answer a deferred request from a downstream reply: the reply's
-    /// `sender.correlation_id` is auto-echoed (ADR-0042) to the dispatch that
-    /// deferred it, so it recovers the held reply guard.
+    /// Answer a multi-hop flow's held request from its terminal `Admit` reply:
+    /// the reply's `sender.correlation_id` is auto-echoed (ADR-0042) to the
+    /// dispatch that deferred it, so it recovers the held obligation. A miss is
+    /// a no-op — a relay-backed admit was already answered through its deferred
+    /// source, and the two stores are mutually exclusive.
     pub(super) fn answer(&mut self, ctx: &NativeCtx<'_, Manual>, response: &HttpServerResponse) {
         let correlation = ctx.reply_target().correlation_id;
         if let Some(inbound) = self.pending.remove(&correlation) {
@@ -278,12 +317,18 @@ impl ApiCapabilityState {
 }
 
 /// Adapt a route helper's [`Routed`] disposition into the `http::Outcome` a
-/// `#[http::route]` method returns, carrying the reply-obligation stash that the
-/// single `on_request` ingress did before the router became per-route (#3672).
+/// `#[http::route]` method returns.
+///
 /// `Reply` answers inline — the macro glue replies through the still-held
-/// inbound — while every deferred variant moves the request's inbound into its
-/// correlation table and returns `Deferred` so the glue does not also answer;
-/// the reply / settlement handlers recover it by correlation exactly as before.
+/// inbound. Each relay variant forwards its request with
+/// `ctx.defer(&request).to::<Peer>()`: the send inherits the request's causal
+/// chain, so the request stays in flight and the requester's reply target rides
+/// the ADR-0139 context table to the paired `#[http::reply]` route. Nothing is
+/// taken from the inbound and nothing is recorded here — that is the whole point
+/// of the migration (ADR-0154 §3).
+///
+/// The two multi-hop variants still move the request's inbound into their join
+/// table and return `Deferred`, because their next hop is not the answer.
 pub(super) fn finish(
     state: &mut ApiCapabilityState,
     mut ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
@@ -291,17 +336,15 @@ pub(super) fn finish(
 ) -> http::Outcome {
     match routed {
         Routed::Reply(response) => http::Outcome::Reply(response),
-        Routed::Deferred(correlation) => {
-            state.pending.insert(correlation, ctx.take_inbound());
-            http::Outcome::Deferred
-        }
-        Routed::DeferredVerify { correlation, event } => {
-            state.verifying.insert(correlation, VerifyPending { inbound: ctx.take_inbound(), event: *event });
-            http::Outcome::Deferred
-        }
+        Routed::Admit(request) => ctx.defer(&request).to::<ControlCore>(),
+        Routed::Query(request) => ctx.defer(&request).to::<ControlCore>(),
+        Routed::ReplayJournal(request) => ctx.defer(&request).to::<StoreCapability>(),
+        Routed::Get(request) => ctx.defer(&request).to::<ArtifactsCapability>(),
+        Routed::RecordConfig(request) => ctx.defer(&request).to::<StoreCapability>(),
         #[cfg(feature = "github")]
-        Routed::DeferredRelease { correlation, request, event } => {
-            state.releasing.insert(correlation, ReleasePending { inbound: ctx.take_inbound(), request, event: *event });
+        Routed::EnumerateClaims(request) => ctx.defer(&request).to::<SourceCapability>(),
+        Routed::DeferredVerify { correlation, subject, event } => {
+            state.verifying.insert(correlation, VerifyPending { inbound: ctx.take_inbound(), subject, event: *event });
             http::Outcome::Deferred
         }
         Routed::DeferredSeal(setup) => {

@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use super::attempt::stage_profile;
+use super::attempt::stage_binding;
 use super::review::reenter_members;
 use super::{AggregateVerifyError, BloomStatus, Decision, Decisions, Outcome, Snapshot};
 use crate::ids::{BloomId, StageId};
@@ -58,17 +58,20 @@ pub(super) fn reduce_aggregate_verify_completed(
     ];
 
     if passed {
+        let binding = stage_binding(&record.stage_catalog, StageId::AggregateReview);
+
         // The fold stays held: the review judges the same integration this
         // verify just built, and it is the passing review that consumes it.
         effects.push(Decision::DispatchAggregateReview {
             bloom: *bloom,
             transformation: Transformation::for_aggregate_review(
+                &binding,
                 integration.tree,
                 integration.head,
                 record.spec.base(),
             ),
             roll: record.aggregate_rolls + 1,
-            profile: stage_profile(&record.stage_catalog, StageId::AggregateReview),
+            profile: binding.profile,
         });
         return Decisions { outcome: Outcome::AggregateVerifyPassed { bloom: *bloom, rolls }, effects };
     }

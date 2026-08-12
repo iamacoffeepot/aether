@@ -14,8 +14,8 @@ use aether_substrate::actor::native::NativeCtx;
 
 use super::hex::{digest_from_hex, hex_encode};
 use super::response::{error_response, json};
-use super::state::{ApiCapabilityState, Routed, VerifyPending};
-use crate::api::dto::{GrantRequest, OutcomeView, SupersedeRequest};
+use super::state::{ApiCapabilityState, Routed, VerifyPending, admit};
+use crate::api::dto::{GrantRequest, OutcomeView, ReleaseAcceptedView, SupersedeRequest};
 use crate::control::ControlCore;
 use crate::signing::{SigningCapability, Verify, VerifyResult};
 
@@ -59,7 +59,7 @@ impl ApiCapabilityState {
     /// successor doing real work. Admitting it needs no approve gate — a grant
     /// seals nothing, claims nothing, and alters no field the members' approvals
     /// bind — so unlike the supersede route it admits straight through.
-    pub(super) fn grant(&self, ctx: &NativeCtx<'_, Manual>, id: &str, body: &[u8]) -> Routed {
+    pub(super) fn grant(id: &str, body: &[u8]) -> Routed {
         let bloom = match digest_from_hex(id) {
             Some(digest) => BloomId(digest),
             None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
@@ -73,13 +73,10 @@ impl ApiCapabilityState {
             format!("aether.bloomery.grant:{}:{}:{stage:?}:{attempts}", hex_encode(bloom.0.as_bytes()), workpiece.0)
         });
 
-        self.admit(
-            ctx,
-            &Event {
-                idempotency_key: IdempotencyKey(key),
-                fact: Fact::GrantAttempts { bloom, workpiece, stage, attempts },
-            },
-        )
+        admit(&Event {
+            idempotency_key: IdempotencyKey(key),
+            fact: Fact::GrantAttempts { bloom, workpiece, stage, attempts },
+        })
     }
 
     /// `POST /blooms/{id}/answer` — adopt an answer to a parked question,
@@ -113,16 +110,20 @@ impl ApiCapabilityState {
         let key = format!("aether.bloomery.answer:{}", hex_encode(digest_of(&answer).as_bytes()));
         let event = Event { idempotency_key: IdempotencyKey(key), fact: Fact::AdoptAnswer { bloom, answer } };
         let correlation = self.send_tracked(ctx.actor::<SigningCapability>(), &Verify { statement });
-        Routed::DeferredVerify { correlation, event: Box::new(event) }
+        Routed::DeferredVerify { correlation, subject: "answer statement", event: Box::new(event) }
     }
 
-    /// Resolve a held answer request from the `aether.signing` verify reply: a
-    /// verified signature admits the stashed adoption event (re-deferring on the
+    /// Resolve a held verify-then-admit request from the `aether.signing` verify
+    /// reply: a verified signature admits the stashed event (re-deferring on the
     /// reducer reply); a `verified: false` verdict or an undecodable-statement
-    /// error is a `400`.
+    /// error is a `400` naming what the operator submitted.
+    ///
+    /// Serves both flows that hold across a verification — the adopted answer and
+    /// the orphan-claim release (ADR-0179) — because past the signature they are
+    /// the same act: admit the held event, then answer from the reducer's reply.
     pub(super) fn resolve_verify(&mut self, ctx: &NativeCtx<'_, Manual>, result: VerifyResult) {
         let correlation = ctx.reply_target().correlation_id;
-        let Some(VerifyPending { inbound, event }) = self.verifying.remove(&correlation) else {
+        let Some(VerifyPending { inbound, subject, event }) = self.verifying.remove(&correlation) else {
             return;
         };
         match result {
@@ -136,24 +137,24 @@ impl ApiCapabilityState {
                 }
             },
             VerifyResult::Ok { verified: false } => {
-                inbound.reply(&error_response(400, "answer statement is not an author signature or did not verify"));
+                inbound.reply(&error_response(400, &format!("{subject} is not an author signature or did not verify")));
             }
             VerifyResult::Err { error } => {
-                inbound.reply(&error_response(400, &format!("answer statement did not verify: {error}")));
+                inbound.reply(&error_response(400, &format!("{subject} did not verify: {error}")));
             }
         }
     }
 
     /// `GET /blooms` and `GET /view` — read the whole live projection.
-    pub(super) fn query(&self, ctx: &NativeCtx<'_, Manual>, bloom: Option<Vec<u8>>) -> Routed {
-        Routed::Deferred(self.send_tracked(ctx.actor::<ControlCore>(), &Query { bloom, release: None }))
+    pub(super) fn query(bloom: Option<Vec<u8>>) -> Routed {
+        Routed::Query(Query { bloom, release: None })
     }
 
     /// `GET /blooms/{id}` — read one bloom's live view by hex id.
-    pub(super) fn query_bloom(&self, ctx: &NativeCtx<'_, Manual>, id: &str) -> Routed {
+    pub(super) fn query_bloom(id: &str) -> Routed {
         digest_from_hex(id).map_or_else(
             || Routed::Reply(error_response(400, "bloom id is not a 32-byte hex digest")),
-            |digest| self.query(ctx, Some(digest.as_bytes().to_vec())),
+            |digest| Self::query(Some(digest.as_bytes().to_vec())),
         )
     }
 }
@@ -163,10 +164,29 @@ impl ApiCapabilityState {
 pub(super) fn admit_response(result: AdmitResult) -> HttpServerResponse {
     match result {
         AdmitResult::Ok { outcome } => match from_bytes::<Outcome>(&outcome) {
-            Ok(outcome) => json(200, &OutcomeView { outcome }),
+            Ok(outcome) => admitted_response(outcome),
             Err(error) => error_response(500, &format!("outcome decode failed: {error}")),
         },
         AdmitResult::Err { error } => error_response(500, &error),
+    }
+}
+
+/// Render one admitted reducer outcome into the write route's response.
+///
+/// Every write route answers `200` with the outcome it produced, except the one
+/// whose admission only *accepts* work: an authorized orphan-claim release is
+/// durably queued for the release reactor rather than performed, so it answers
+/// `202` and hands back the request digest `GET /claims/releases/{digest}` reads
+/// by (ADR-0179). The digest rides the outcome itself, so the route holds
+/// nothing across the admit to report it — the same reason `RecordConfigResult`
+/// carries its stored bytes rather than the authoring route keeping a
+/// correlation map (ADR-0154 §3).
+fn admitted_response(outcome: Outcome) -> HttpServerResponse {
+    match &outcome {
+        Outcome::OrphanClaimReleaseRequested { request } => {
+            json(202, &ReleaseAcceptedView { request: hex_encode(request.as_bytes()), outcome })
+        }
+        _ => json(200, &OutcomeView { outcome }),
     }
 }
 
@@ -184,8 +204,9 @@ pub(super) fn query_response(result: QueryResult) -> HttpServerResponse {
         },
         QueryResult::NotFound => error_response(404, "no bloom with that id"),
         QueryResult::Err { error } => error_response(500, &error),
-        // A projection read never asks for a release record, so a `Release` reply
-        // on this correlation is a routing bug rather than an answer to render.
+        // The shared `#[http::reply]` sends every `Release` variant to
+        // `release_status_response` before it reaches here, so one arriving is a
+        // routing bug rather than an answer to render.
         QueryResult::Release { .. } => error_response(500, "projection read answered with a release record"),
     }
 }

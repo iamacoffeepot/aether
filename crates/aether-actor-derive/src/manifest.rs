@@ -41,11 +41,38 @@ fn emit_record_copy_block(
     }
 }
 
-/// The `(length term, copy block)` pair for one handler's `aether.kinds.inputs`
-/// record. Shared by the actor-side manifest and the ADR-0169 handler-set
-/// manifest so a set's records are byte-identical to the ones the same handler
-/// would have produced declared locally.
-fn handler_record_terms(h: &HandlerFn, section_version: &TokenStream2) -> (TokenStream2, TokenStream2) {
+/// One record's contribution to a manifest: the statement that adds its byte
+/// length to the running total, and the block that copies its bytes into the
+/// output array. Both are statements so a `#[cfg]` can gate them — a `#[cfg]`
+/// cannot gate an operand of `+`, which is why the length is accumulated rather
+/// than folded (iamacoffeepot/aether#4811).
+struct RecordTerms {
+    len_stmt: TokenStream2,
+    copy_block: TokenStream2,
+}
+
+/// Wrap a raw length expression and copy block in the statement forms
+/// [`RecordTerms`] carries, gated by `cfgs`.
+fn record_terms(cfgs: &[syn::Attribute], len_expr: &TokenStream2, copy_block: &TokenStream2) -> RecordTerms {
+    RecordTerms {
+        len_stmt: quote! {
+            #(#cfgs)*
+            {
+                len += #len_expr;
+            }
+        },
+        copy_block: quote! {
+            #(#cfgs)*
+            #copy_block
+        },
+    }
+}
+
+/// The manifest terms for one handler's `aether.kinds.inputs` record. Shared by
+/// the actor-side manifest and the ADR-0169 handler-set manifest so a set's
+/// records are byte-identical to the ones the same handler would have produced
+/// declared locally.
+fn handler_record_terms(h: &HandlerFn, section_version: &TokenStream2) -> RecordTerms {
     let k = &h.kind_ty;
     let doc_expr = option_str_token(h.agent_doc.as_ref());
     // ADR-0112 / ADR-0134: the reply class rides the handler record as a
@@ -76,7 +103,6 @@ fn handler_record_terms(h: &HandlerFn, section_version: &TokenStream2) -> (Token
             #reply_id_expr,
         )
     };
-    let len_term = quote! { (1 + #record_len) };
     let copy_block = emit_record_copy_block(
         section_version,
         &record_len,
@@ -90,7 +116,7 @@ fn handler_record_terms(h: &HandlerFn, section_version: &TokenStream2) -> (Token
             )
         },
     );
-    (len_term, copy_block)
+    record_terms(&h.cfgs, &quote! { (1 + #record_len) }, &copy_block)
 }
 
 /// ADR-0169: the `&'static [u8]` manifest bytes for a handler set's own
@@ -102,11 +128,20 @@ pub fn build_handler_set_manifest_const(handlers: &[HandlerFn]) -> TokenStream2 
     let section_version = quote! {
         ::aether_actor::__macro_internals::INPUTS_SECTION_VERSION
     };
-    let (len_terms, copy_blocks): (Vec<_>, Vec<_>) =
-        handlers.iter().map(|h| handler_record_terms(h, &section_version)).unzip();
+    let (len_stmts, copy_blocks): (Vec<_>, Vec<_>) = handlers
+        .iter()
+        .map(|h| {
+            let terms = handler_record_terms(h, &section_version);
+            (terms.len_stmt, terms.copy_block)
+        })
+        .unzip();
     quote! {
         &{
-            const LEN: usize = #(#len_terms)+*;
+            const LEN: usize = {
+                let mut len = 0usize;
+                #(#len_stmts)*
+                len
+            };
             let mut out = [0u8; LEN];
             let mut pos: usize = 0usize;
             #(#copy_blocks)*
@@ -124,48 +159,58 @@ pub fn build_inputs_manifest_consts(
     config_kind_ty: Option<&Type>,
     handler_set: Option<(&syn::Path, &Type)>,
 ) -> TokenStream2 {
-    let mut len_terms: Vec<TokenStream2> = Vec::new();
+    let mut len_stmts: Vec<TokenStream2> = Vec::new();
     let mut copy_blocks: Vec<TokenStream2> = Vec::new();
     let section_version = quote! {
         ::aether_actor::__macro_internals::INPUTS_SECTION_VERSION
     };
 
     for h in handlers {
-        let (len_term, copy_block) = handler_record_terms(h, &section_version);
-        len_terms.push(len_term);
-        copy_blocks.push(copy_block);
+        let terms = handler_record_terms(h, &section_version);
+        len_stmts.push(terms.len_stmt);
+        copy_blocks.push(terms.copy_block);
     }
+
+    // The fallback, component-doc, and config records belong to the actor rather
+    // than to any one handler, so they carry no `#[cfg]` of their own.
+    let mut push_ungated = |len_expr: &TokenStream2, copy_block: &TokenStream2| {
+        let terms = record_terms(&[], len_expr, copy_block);
+        len_stmts.push(terms.len_stmt);
+        copy_blocks.push(terms.copy_block);
+    };
 
     if let Some(f) = fallback {
         let doc_expr = option_str_token(f.agent_doc.as_ref());
-        len_terms.push(quote! {
-            (1 + ::aether_actor::__macro_internals::canonical::inputs_fallback_len(#doc_expr))
-        });
-        copy_blocks.push(emit_record_copy_block(
-            &section_version,
-            &quote! {
-                ::aether_actor::__macro_internals::canonical::inputs_fallback_len(#doc_expr)
-            },
-            &quote! {
-                ::aether_actor::__macro_internals::canonical::write_inputs_fallback::<RECORD_LEN>(#doc_expr)
-            },
-        ));
+        let record_len = quote! {
+            ::aether_actor::__macro_internals::canonical::inputs_fallback_len(#doc_expr)
+        };
+        push_ungated(
+            &quote! { (1 + #record_len) },
+            &emit_record_copy_block(
+                &section_version,
+                &record_len,
+                &quote! {
+                    ::aether_actor::__macro_internals::canonical::write_inputs_fallback::<RECORD_LEN>(#doc_expr)
+                },
+            ),
+        );
     }
 
     if let Some(doc) = component_doc {
         let doc_lit = doc.as_str();
-        len_terms.push(quote! {
-            (1 + ::aether_actor::__macro_internals::canonical::inputs_component_len(#doc_lit))
-        });
-        copy_blocks.push(emit_record_copy_block(
-            &section_version,
-            &quote! {
-                ::aether_actor::__macro_internals::canonical::inputs_component_len(#doc_lit)
-            },
-            &quote! {
-                ::aether_actor::__macro_internals::canonical::write_inputs_component::<RECORD_LEN>(#doc_lit)
-            },
-        ));
+        let record_len = quote! {
+            ::aether_actor::__macro_internals::canonical::inputs_component_len(#doc_lit)
+        };
+        push_ungated(
+            &quote! { (1 + #record_len) },
+            &emit_record_copy_block(
+                &section_version,
+                &record_len,
+                &quote! {
+                    ::aether_actor::__macro_internals::canonical::write_inputs_component::<RECORD_LEN>(#doc_lit)
+                },
+            ),
+        );
     }
 
     // ADR-0090 (issue 1257): emit a `Config` record keyed by the
@@ -174,27 +219,25 @@ pub fn build_inputs_manifest_consts(
     // the macro-synthesized `()` case, so a no-config component stays
     // clean. Variant tag `0x03` matches `InputsRecord::Config`.
     if let Some(cfg) = config_kind_ty {
-        len_terms.push(quote! {
-            (1 + ::aether_actor::__macro_internals::canonical::inputs_config_len(
+        let record_len = quote! {
+            ::aether_actor::__macro_internals::canonical::inputs_config_len(
                 <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
                 <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
-            ))
-        });
-        copy_blocks.push(emit_record_copy_block(
-            &section_version,
-            &quote! {
-                ::aether_actor::__macro_internals::canonical::inputs_config_len(
-                    <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
-                    <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
-                )
-            },
-            &quote! {
-                ::aether_actor::__macro_internals::canonical::write_inputs_config::<RECORD_LEN>(
-                    <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
-                    <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
-                )
-            },
-        ));
+            )
+        };
+        push_ungated(
+            &quote! { (1 + #record_len) },
+            &emit_record_copy_block(
+                &section_version,
+                &record_len,
+                &quote! {
+                    ::aether_actor::__macro_internals::canonical::write_inputs_config::<RECORD_LEN>(
+                        <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
+                        <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
+                    )
+                },
+            ),
+        );
     }
 
     // ADR-0169: an adopted handler set's records join this actor's manifest, so
@@ -205,34 +248,31 @@ pub fn build_inputs_manifest_consts(
     // The consts below are nested items, where `Self` does not resolve, so the
     // adopting type is named concretely.
     if let Some((set, self_ty)) = handler_set {
-        len_terms.push(quote! {
-            <#self_ty as #set>::__AETHER_HANDLER_SET_MANIFEST.len()
-        });
-        copy_blocks.push(quote! {
-            {
-                const SET_BYTES: &'static [u8] = <#self_ty as #set>::__AETHER_HANDLER_SET_MANIFEST;
-                let mut index = 0;
-                while index < SET_BYTES.len() {
-                    out[pos] = SET_BYTES[index];
-                    pos += 1;
-                    index += 1;
+        push_ungated(
+            &quote! { <#self_ty as #set>::__AETHER_HANDLER_SET_MANIFEST.len() },
+            &quote! {
+                {
+                    const SET_BYTES: &'static [u8] = <#self_ty as #set>::__AETHER_HANDLER_SET_MANIFEST;
+                    let mut index = 0;
+                    while index < SET_BYTES.len() {
+                        out[pos] = SET_BYTES[index];
+                        pos += 1;
+                        index += 1;
+                    }
                 }
-            }
-        });
+            },
+        );
     }
-
-    let len_expr = if len_terms.is_empty() {
-        // Unreachable in practice — `handlers_impl` rejects the empty
-        // case earlier — but keep the const arithmetic well-typed so
-        // a stripped-down macro test with no records still compiles.
-        quote! { 0usize }
-    } else {
-        quote! { #(#len_terms)+* }
-    };
 
     quote! {
         #[doc(hidden)]
-        pub const __AETHER_INPUTS_MANIFEST_LEN: usize = #len_expr;
+        // The accumulator starts at zero, so a manifest with no surviving record
+        // — every handler `#[cfg]`-stripped — is still well-typed.
+        pub const __AETHER_INPUTS_MANIFEST_LEN: usize = {
+            let mut len = 0usize;
+            #(#len_stmts)*
+            len
+        };
 
         #[doc(hidden)]
         pub const __AETHER_INPUTS_MANIFEST: [u8; Self::__AETHER_INPUTS_MANIFEST_LEN] = {
@@ -431,14 +471,22 @@ pub fn build_kinds_section_retention_statics(
     // into the larger static identifiers below — a bare numeric ident
     // isn't valid on its own, so it must stay a format arg, not a
     // standalone `Ident`.
-    let retained_kinds: Vec<(Type, String)> = handlers
+    // iamacoffeepot/aether#4811: the index is assigned here, at expansion time,
+    // before any `#[cfg]` is evaluated — a proc macro cannot know which
+    // configuration the crate is being built in. So a gated-out kind leaves a
+    // hole in the suffix sequence rather than renumbering its siblings, which is
+    // also the property worth having: the suffix exists only to keep these
+    // statics uniquely named inside one compilation unit, nothing reads it by
+    // name from outside, and a hole keeps every surviving identifier stable
+    // across configurations.
+    let retained_kinds: Vec<(Type, String, Vec<syn::Attribute>)> = handlers
         .iter()
         .enumerate()
-        .map(|(idx, h)| (h.kind_ty.clone(), idx.to_string()))
-        .chain(config_kind_ty.map(|cfg| (cfg.clone(), "CONFIG".to_string())))
+        .map(|(idx, h)| (h.kind_ty.clone(), idx.to_string(), h.cfgs.clone()))
+        .chain(config_kind_ty.map(|cfg| (cfg.clone(), "CONFIG".to_string(), Vec::new())))
         .collect();
 
-    let statics = retained_kinds.iter().map(|(k, idx)| {
+    let statics = retained_kinds.iter().map(|(k, idx, cfgs)| {
         let schema_ident = quote::format_ident!("__AETHER_HANDLERS_KIND_SCHEMA_{}_{}", self_ty_hint, idx);
         let len_ident = quote::format_ident!("__AETHER_HANDLERS_KIND_CANONICAL_LEN_{}_{}", self_ty_hint, idx);
         let bytes_ident = quote::format_ident!("__AETHER_HANDLERS_KIND_CANONICAL_BYTES_{}_{}", self_ty_hint, idx);
@@ -454,13 +502,16 @@ pub fn build_kinds_section_retention_statics(
             // sees a `&'static SchemaType` / `&'static KindLabels`
             // instead of materializing a temporary whose non-trivial
             // Drop can't run at compile time.
+            #(#cfgs)*
             static #schema_ident: ::aether_actor::__macro_internals::SchemaType =
                 <#k as ::aether_actor::__macro_internals::Schema>::SCHEMA;
+            #(#cfgs)*
             const #len_ident: usize =
                 ::aether_actor::__macro_internals::canonical::canonical_len_kind(
                     <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                     &#schema_ident,
                 );
+            #(#cfgs)*
             const #bytes_ident: [u8; #len_ident] =
                 ::aether_actor::__macro_internals::canonical::canonical_serialize_kind::<#len_ident>(
                     <#k as ::aether_actor::__macro_internals::Kind>::NAME,
@@ -470,6 +521,7 @@ pub fn build_kinds_section_retention_statics(
             // (ADR-0118 / issue 1984: the owned aether-wire encoding) so
             // retention records (when this kind lives in a dependency
             // rlib) pair cleanly with the primary records by id.
+            #(#cfgs)*
             #[cfg(target_family = "wasm")]
             #[unsafe(link_section = "aether.kinds")]
             static #section_ident: [u8; #len_ident + 1] = {
@@ -493,6 +545,7 @@ pub fn build_kinds_section_retention_statics(
             // without a `Schema::LABEL` (none today — every derived
             // Kind sets one — but defensive against future hand-rolled
             // Schema impls).
+            #(#cfgs)*
             static #labels_static_ident: ::aether_actor::__macro_internals::KindLabels =
                 ::aether_actor::__macro_internals::KindLabels {
                     // Issue 469: `KindLabels.kind_id` is typed
@@ -506,14 +559,17 @@ pub fn build_kinds_section_retention_statics(
                     ),
                     root: <#k as ::aether_actor::__macro_internals::Schema>::LABEL_NODE,
                 };
+            #(#cfgs)*
             const #labels_len_ident: usize =
                 ::aether_actor::__macro_internals::canonical::canonical_len_labels(
                     &#labels_static_ident,
                 );
+            #(#cfgs)*
             const #labels_bytes_ident: [u8; #labels_len_ident] =
                 ::aether_actor::__macro_internals::canonical::canonical_serialize_labels::<#labels_len_ident>(
                     &#labels_static_ident,
                 );
+            #(#cfgs)*
             #[cfg(target_family = "wasm")]
             #[unsafe(link_section = "aether.kinds.labels")]
             static #labels_section_ident: [u8; #labels_len_ident + 1] = {

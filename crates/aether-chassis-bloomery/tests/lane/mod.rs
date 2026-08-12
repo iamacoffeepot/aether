@@ -55,10 +55,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    Admit, AdmitResult, BloomDraft, BloomView, CONTROL_CORE_NAMESPACE, ConfigRegistry, Digest, Event, Evidence,
-    EvidenceKind, Fact, IdempotencyKey, Membership, Outcome, Query, QueryResult, Snapshot, ViewDocument, WorkpieceId,
+    Admit, AdmitResult, BackendObjectId, BloomDraft, BloomView, CONTROL_CORE_NAMESPACE, ConfigRegistry, Correspondence,
+    Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Outcome, Query, QueryResult, Snapshot,
+    ViewDocument, WorkpieceId,
 };
-use aether_bloomery_github::{Correspondence, GitObjectId};
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneRun, LaneScript, read_ledger};
 use aether_chassis_bloomery::store::{SqliteCorrespondence, SqliteStore, StoreBackend};
 use aether_data::wire::{from_bytes, to_vec};
@@ -126,10 +126,7 @@ impl LaneHarness {
         // scratch repository's commit the tree every lane checks out — without
         // it the very first submit refuses with an unresolved checkout.
         let base = Snapshot::GENESIS_MAINLINE;
-        SqliteCorrespondence::open(&store_path)
-            .unwrap()
-            .record(&base, &GitObjectId::from_hex(repo.head()).unwrap())
-            .unwrap();
+        SqliteCorrespondence::open(&store_path).unwrap().record(&base, &backend_object(repo.head())).unwrap();
 
         let rpc_port = free_port();
         let coordinator = Coordinator::spawn_in(
@@ -312,4 +309,24 @@ impl LaneHarness {
 /// The native control core's mailbox, addressed by its lineage path.
 fn control_mailbox() -> MailboxId {
     mailbox_id_from_path(CONTROL_CORE_NAMESPACE)
+}
+
+/// The scratch repository's real HEAD sha as the opaque backend object the
+/// correspondence stores — the same bytes the coordinator's own capture path
+/// decodes out of `git rev-parse`, decoded here so the harness seeds the store
+/// without naming a Git-adapter type.
+///
+/// # Panics
+/// `sha` is not even-length lowercase-or-uppercase hex, which `git rev-parse`
+/// never prints.
+fn backend_object(sha: &str) -> BackendObjectId {
+    assert!(sha.len().is_multiple_of(2) && !sha.is_empty(), "git printed a sha that is not whole bytes: {sha}");
+    BackendObjectId::new(
+        sha.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(str::from_utf8(pair).expect("a git sha is ASCII"), 16).expect("a git sha is hex")
+            })
+            .collect(),
+    )
 }

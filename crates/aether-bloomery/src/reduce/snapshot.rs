@@ -13,8 +13,8 @@ use super::{Decision, Decisions, Event, Fact, Outcome};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    BloomSpec, CandidateRef, ConfigScopes, Evidence, EvidenceKind, OrphanClaimReleaseRecord, ResolutionClaim,
-    ResolvedConfigs, StageCatalog, VerifyFailureSet, Wedge,
+    BloomSpec, CandidateRef, ConfigScopes, DispatchKey, Evidence, EvidenceKind, OrphanClaimReleaseRecord,
+    ResolutionClaim, ResolvedConfigs, StageCatalog, VerifyFailureSet, Wedge,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -125,6 +125,22 @@ pub struct BloomRecord {
     /// whether its next verdict is still pending or has already come back
     /// failing, so the cursor cannot distinguish mid-flight from wedged.
     pub wedged: BTreeMap<WorkpieceId, Wedge>,
+    /// How many times each execution slot has been dispatched — the bloom's
+    /// dispatch ledger, and the source of the study grade's retry axis
+    /// (ADR-0180). Journal-derived and replay-rebuilt like the rest of the
+    /// record: every dispatch decision the reducer emits increments its own
+    /// [`DispatchKey`], so replaying the same facts rebuilds the same counts and
+    /// a bloom journaled before the ledger existed gets one for free.
+    ///
+    /// A record of what was *spent*, never headroom that may be handed back.
+    /// [`StageProgress::attempts`] resets at each stage advance, a grant lowers
+    /// `attempts` / `repair_rolls` to leave the granted allowance, and an
+    /// adopted answer zeroes [`aggregate_rolls`](Self::aggregate_rolls) — all
+    /// correct as budget cursors and all wrong as history, which is why the
+    /// ledger sits beside them rather than being read out of one. Nothing inside
+    /// a bloom's life clears it; only a successor, being a distinct id with its
+    /// own record, starts a fresh one.
+    pub dispatches: BTreeMap<DispatchKey, u32>,
     /// The integration fold's output held while the bloom's aggregate review
     /// runs (ADR-0153): set when [`Fact::Resolve`] verifies the claim set and
     /// dispatches the review, consumed by a passing
@@ -318,17 +334,19 @@ impl Snapshot {
                     record.wedged.insert(workpiece.clone(), *wedge);
                 }
             }
-            // Snapshot-inert outbox effects the store projects and republishes,
-            // rebuilt on replay from the journaled fact — they carry no in-snapshot
-            // state, like EmitReceipt's outbox row. A dispatch's paired cursor rides
-            // its sibling AdvanceStage; a re-dispatch's hold release rides ReleaseHold.
-            Decision::RedispatchStage { .. }
-            | Decision::DispatchAttempt { .. }
-            | Decision::DispatchLand { .. }
+            Decision::DispatchAttempt { .. }
             | Decision::DispatchIntegration { .. }
-            | Decision::DispatchAggregateReview { .. }
             | Decision::DispatchAggregateVerify { .. }
-            | Decision::DispatchOrphanClaimRelease { .. } => {}
+            | Decision::DispatchAggregateReview { .. }
+            | Decision::DispatchLand { .. } => self.apply_dispatch_effect(effect),
+            // Wholly snapshot-inert, like EmitReceipt's outbox row: a re-dispatch
+            // replays a held work order host-side under a fresh nonce rather than
+            // deciding a dispatch, so ADR-0151's "parking consumes no retry" holds
+            // structurally — the ledger never sees it. Its hold release rides
+            // ReleaseHold. An orphan-claim release is inert for a different
+            // reason: it dispatches no member work at all, so it counts against
+            // no bloom's retry ledger — its whole state is the record below.
+            Decision::RedispatchStage { .. } | Decision::DispatchOrphanClaimRelease { .. } => {}
             Decision::RecordOrphanClaimRelease { request, target, completion } => {
                 // Opening the record and completing it write the same entry, so
                 // the completion overwrites rather than inserting beside — a
@@ -394,6 +412,41 @@ impl Snapshot {
         }
     }
 
+    /// Count one dispatch in the bloom's ledger (ADR-0180) — the fold the five
+    /// dispatch decisions share. Their outbox rows are the store's and are
+    /// untouched here; only the slot count is this fold's.
+    ///
+    /// Split out of [`apply_effect`](Self::apply_effect) for the same reason
+    /// [`apply_landing_effect`](Self::apply_landing_effect) is: the five arms
+    /// read as one group, differing only in which [`DispatchKey`] they resolve
+    /// to, and that shape is only visible when they sit together. Deriving the
+    /// key from the dispatch decision itself, rather than from a second effect
+    /// emitted beside it, is what keeps the ledger from desynchronizing — a
+    /// dispatch site added later is counted the moment its decision joins the
+    /// match. Any other decision is a no-op here, and an unknown bloom is
+    /// ignored exactly as every other record-scoped arm ignores one.
+    fn apply_dispatch_effect(&mut self, effect: &Decision) {
+        let (bloom, key) = match effect {
+            Decision::DispatchAttempt { bloom, workpiece, stage, .. } => {
+                (bloom, DispatchKey::Member { workpiece: workpiece.clone(), stage: *stage })
+            }
+            Decision::DispatchIntegration { bloom, .. } => (bloom, DispatchKey::Bloom { stage: StageId::Integrate }),
+            Decision::DispatchAggregateVerify { bloom, .. } => {
+                (bloom, DispatchKey::Bloom { stage: StageId::AggregateVerify })
+            }
+            Decision::DispatchAggregateReview { bloom, .. } => {
+                (bloom, DispatchKey::Bloom { stage: StageId::AggregateReview })
+            }
+            Decision::DispatchLand { bloom, .. } => (bloom, DispatchKey::Bloom { stage: StageId::Land }),
+            _ => return,
+        };
+
+        if let Some(record) = self.blooms.get_mut(bloom) {
+            let count = record.dispatches.entry(key).or_insert(0);
+            *count = count.saturating_add(1);
+        }
+    }
+
     /// Fold the three decisions that move a bloom across the land boundary
     /// (#4689) — resolving onto a head, returning off one when its landing was
     /// refused, and the attempt counter that bounds the round trip.
@@ -447,6 +500,7 @@ impl BloomRecord {
             holds: BTreeSet::new(),
             progress: BTreeMap::new(),
             wedged: BTreeMap::new(),
+            dispatches: BTreeMap::new(),
             integration: None,
             aggregate_rolls: 0,
             aggregate_verify_rolls: 0,

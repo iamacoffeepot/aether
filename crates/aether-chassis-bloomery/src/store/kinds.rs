@@ -302,11 +302,33 @@ pub struct RecordConfig {
 /// Reply to [`RecordConfig`]. The authoring route answers its caller from this,
 /// so a `200` means the configuration is durable and a later seal naming the
 /// address will actually resolve it.
+///
+/// `Ok` echoes the whole record it stored — `digest`, `kind`, and `bytes` — so
+/// the authoring route can both render its response and file the content in its
+/// resolved-configuration cache from the reply alone. Without the echo the route
+/// would have to hold all three in a correlation map across the write, which is
+/// the bookkeeping the ADR-0154 relay exists to retire — the reply is the only
+/// thing the paired `#[http::reply]` route receives, so anything the route needs
+/// must travel in it.
+///
+/// The bytes ride the reply rather than being re-read, because the point of
+/// caching them in the api cap (#4616) is to keep the synchronous pre-seal gate
+/// off the store: an operator who authors a policy and immediately seals a draft
+/// naming it would otherwise race a read that has no reason to have happened yet.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.store.record_config_result")]
 pub enum RecordConfigResult {
     /// The configuration is stored under its address.
-    Ok,
+    Ok {
+        /// The stored configuration's content address, echoed from the request.
+        #[serde(with = "aether_data::bytes")]
+        digest: Vec<u8>,
+        /// The kind the bytes decode as, echoed from the request.
+        kind: String,
+        /// The stored canonical bytes, echoed from the request.
+        #[serde(with = "aether_data::bytes")]
+        bytes: Vec<u8>,
+    },
     /// The write failed.
     Err {
         /// A human-readable failure reason.

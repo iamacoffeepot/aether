@@ -12,11 +12,19 @@
 //! does not know may be another instance's live bloom. That is exactly why the
 //! release requires a signature — the operator investigates the holder and
 //! signs, accepting the uncertainty the machine cannot resolve on its own.
+//!
+//! Two of the three routes are ordinary ADR-0154 relays — `GET /claims` defers
+//! on the source cap's enumeration and `GET /claims/releases/{digest}` on the
+//! control core's `Query`, each answered by the paired `#[http::reply]` next
+//! door. The submission is the one that is not: it verifies a signature *before*
+//! it admits, so it is a genuine multi-hop and holds its request in the shared
+//! [`verifying`](super::state::ApiCapabilityState::verifying) table the answer
+//! route already keeps.
 
 use aether_actor::Manual;
 use aether_bloomery::{
-    Admit, ClaimRefState, Digest, EnumerateClaims, EnumerateClaimsResult, Event, Fact, IdempotencyKey,
-    OrphanClaimRelease, OrphanClaimReleaseRecord, Query, QueryResult,
+    ClaimRefState, EnumerateClaims, EnumerateClaimsResult, Event, Fact, IdempotencyKey, OrphanClaimRelease,
+    OrphanClaimReleaseRecord, Query, QueryResult,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
@@ -24,16 +32,14 @@ use aether_substrate::actor::native::NativeCtx;
 
 use super::hex::{digest_from_hex, hex_encode};
 use super::response::{error_response, json};
-use super::state::{ApiCapabilityState, ReleasePending, Routed};
-use crate::api::dto::{ClaimRefView, ClaimsView, ReleaseAcceptedView, ReleaseRequest};
-use crate::control::ControlCore;
+use super::state::{ApiCapabilityState, Routed};
+use crate::api::dto::{ClaimRefView, ClaimsView, ReleaseRequest};
 use crate::signing::{SigningCapability, Verify};
-use crate::source::SourceCapability;
 
 impl ApiCapabilityState {
     /// `GET /claims` — enumerate every live claim ref and its holder.
-    pub(super) fn list_claims(&self, ctx: &NativeCtx<'_, Manual>) -> Routed {
-        Routed::Deferred(self.send_tracked(ctx.actor::<SourceCapability>(), &EnumerateClaims))
+    pub(super) fn list_claims() -> Routed {
+        Routed::EnumerateClaims(EnumerateClaims)
     }
 
     /// `POST /claims/releases` — authorize releasing one orphaned claim ref.
@@ -63,63 +69,25 @@ impl ApiCapabilityState {
         // The request digest is the idempotency key as well as the handle, so a
         // resubmitted release is a duplicate rather than a second deletion — the
         // reducer's own repeat guard and this key agree on what "the same
-        // request" means.
-        let digest = target.request();
+        // request" means. It rides the admitted outcome back out, so nothing has
+        // to be held here to report it in the `202`.
         let event = Event {
             idempotency_key: IdempotencyKey(format!(
                 "aether.bloomery.orphan_claim_release:{}",
-                hex_encode(digest.as_bytes())
+                hex_encode(target.request().as_bytes())
             )),
             fact: Fact::RequestOrphanClaimRelease { request: target, authorization },
         };
         let correlation = self.send_tracked(ctx.actor::<SigningCapability>(), &Verify { statement });
-        Routed::DeferredRelease { correlation, request: digest, event: Box::new(event) }
+        Routed::DeferredVerify { correlation, subject: "release authorization", event: Box::new(event) }
     }
 
     /// `GET /claims/releases/{digest}` — read one release request's state.
-    pub(super) fn query_claim_release(&self, ctx: &NativeCtx<'_, Manual>, digest: &str) -> Routed {
+    pub(super) fn query_claim_release(digest: &str) -> Routed {
         digest_from_hex(digest).map_or_else(
             || Routed::Reply(error_response(400, "release id is not a 32-byte hex digest")),
-            |digest| {
-                Routed::Deferred(self.send_tracked(
-                    ctx.actor::<ControlCore>(),
-                    &Query { bloom: None, release: Some(digest.as_bytes().to_vec()) },
-                ))
-            },
+            |digest| Routed::Query(Query { bloom: None, release: Some(digest.as_bytes().to_vec()) }),
         )
-    }
-
-    /// Resolve a held release request from the `aether.signing` verify reply: a
-    /// verified signature admits the stashed request event (re-deferring on the
-    /// reducer reply); a rejection is a `400` with nothing attempted.
-    pub(super) fn resolve_release_verify(
-        &mut self,
-        ctx: &NativeCtx<'_, Manual>,
-        correlation: u64,
-        verified: Result<bool, String>,
-    ) {
-        let Some(ReleasePending { inbound, request, event }) = self.releasing.remove(&correlation) else {
-            return;
-        };
-        match verified {
-            Ok(true) => match to_vec(&event) {
-                Ok(bytes) => {
-                    let correlation = self.send_tracked(ctx.actor::<ControlCore>(), &Admit { event: bytes });
-                    self.pending.insert(correlation, inbound);
-                    self.release_admits.insert(correlation, request);
-                }
-                Err(error) => {
-                    inbound.reply(&error_response(500, &format!("event encode failed: {error}")));
-                }
-            },
-            Ok(false) => {
-                inbound
-                    .reply(&error_response(400, "release authorization is not an author signature or did not verify"));
-            }
-            Err(error) => {
-                inbound.reply(&error_response(400, &format!("release authorization did not verify: {error}")));
-            }
-        }
     }
 }
 
@@ -145,13 +113,6 @@ pub(super) fn claims_response(result: EnumerateClaimsResult) -> HttpServerRespon
     }
 }
 
-/// Render a release submission's admit reply: `202` with the request digest once
-/// the fact is durably admitted, so the operator has the handle to poll before
-/// the reactor has run.
-pub(super) fn release_accepted_response(request: Digest, outcome: aether_bloomery::Outcome) -> HttpServerResponse {
-    json(202, &ReleaseAcceptedView { request: hex_encode(request.as_bytes()), outcome })
-}
-
 /// Render a release-status read. A `Release` reply carries the record; a
 /// `NotFound` means no such request was ever admitted here.
 pub(super) fn release_status_response(result: QueryResult) -> HttpServerResponse {
@@ -163,7 +124,7 @@ pub(super) fn release_status_response(result: QueryResult) -> HttpServerResponse
         QueryResult::NotFound => error_response(404, "no orphan claim release with that request digest"),
         QueryResult::Err { error } => error_response(500, &error),
         // A release read asks for one record; the document / bloom variants
-        // answer a different question and cannot arrive on this correlation.
+        // answer a different question and cannot arrive on this reply.
         QueryResult::Document { .. } | QueryResult::Bloom { .. } => {
             error_response(500, "release read answered with a projection")
         }

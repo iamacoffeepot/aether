@@ -256,7 +256,17 @@ fn author_config<K: ConfigKind>(stream: &mut TcpStream, cid: u64, value: &K) -> 
         RecordConfig { digest: address.as_bytes().to_vec(), kind: K::NAME.to_owned(), bytes: to_vec(value).unwrap() };
     let store = mailbox_id_from_path("aether.store");
     match call::<_, RecordConfigResult>(stream, cid, store, &record) {
-        RecordConfigResult::Ok => address,
+        // Tripwire: `POST /configs` renders its response *and* fills the api
+        // cap's resolved-config cache from this echo rather than from a held
+        // correlation entry (#3694, #4616), so an echo that does not reproduce
+        // the request hands a caller a digest that resolves to nothing — the
+        // ADR-0174 divergence the write exists to close.
+        RecordConfigResult::Ok { digest, kind, bytes } => {
+            assert_eq!(digest, address.as_bytes(), "the write echoes the address it stored under");
+            assert_eq!(kind, K::NAME, "the write echoes the kind it stored under");
+            assert_eq!(bytes, to_vec(value).unwrap(), "the write echoes the bytes it stored");
+            address
+        }
         RecordConfigResult::Err { error } => panic!("config write failed: {error}"),
     }
 }

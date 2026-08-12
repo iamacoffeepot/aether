@@ -11,33 +11,37 @@
 //! the segment dispatch and path-capture binding the hand-rolled
 //! method-plus-path `match` used to carry (#3672).
 //!
-//! # The two route shapes
+//! # The three route shapes
 //!
 //! Pre-seal shaping is pure in-memory state (ADR-0149 §The bloom: drafts
-//! "claim nothing"), so those routes reply synchronously. The routes that read
-//! or write durable state forward a mail to a peer cap and reply only on its
-//! reply — the control-core actor (`aether.bloomery.admit` / `aether.bloomery.query`),
-//! the store (`aether.store.replay_journal`), or the artifacts cap
-//! (`aether.artifacts.get`). An HTTP handler cannot block on a mail reply, so
-//! the deferral rides the request→dispatch→reply correlation the RPC and HTTP
-//! server caps use:
+//! "claim nothing"), so those routes reply synchronously.
 //!
-//! - [`take_inbound`](NativeCtx::take_inbound) moves the request's reply
-//!   obligation into a guard that keeps its causal chain open across the async
-//!   boundary — without it the chain settles when the handler returns and the
-//!   HTTP server's own `502` safety net fires.
-//! - The downstream mail is dispatched as a fresh root via
-//!   [`send_envelope_detached`](NativeCtx::send_envelope_detached); the returned
-//!   [`MailId`](aether_data::MailId)'s `correlation_id` keys the held guard in `pending`.
-//! - The downstream reply's `sender.correlation_id` is auto-echoed to that same
-//!   id (ADR-0042), so a **typed** reply handler recovers the guard via
-//!   `ctx.reply_target().correlation_id` and answers through it. The reply
-//!   correlation deliberately does *not* go through a `#[fallback]`: a fallback
-//!   would widen the actor's accept-set to every kind — including the request-
-//!   stream kinds — and the HTTP server would then route each request down the
-//!   streaming path instead of delivering a buffered `HttpServerRequest`.
-//! - A settlement subscription answers `504` for a request whose downstream
-//!   chain settles without ever replying (a dropped or unloaded control core).
+//! A route that reads or writes durable state forwards one request to a peer cap
+//! and answers its one reply. Those are **deferred routes** over the ADR-0154
+//! relay: the route returns `ctx.defer(&request).to::<Peer>()` and a paired
+//! `#[http::reply]` method maps the peer's reply into the response. The send
+//! inherits the request's causal chain (ADR-0080 §7), so the request stays in
+//! flight across the round-trip without anything being held here, and the
+//! requester's reply target rides the ADR-0139 request-context table rather than
+//! a correlation map of ours. A peer that settles without replying is answered
+//! by the HTTP server's own `502`; one that never settles, by its request
+//! timeout. Neither needs machinery in this cap.
+//!
+//! Three routes are genuinely **multi-hop** and keep an explicit obligation,
+//! because their next hop is not the answer: `POST /blooms/{id}/answer` and
+//! `POST /claims/releases` each verify a signature before they admit, and
+//! `POST /drafts/{id}/seal` joins N member verifications before admitting once
+//! (the ADR-0154 §2 scatter/gather exclusion). Their terminal `Admit` is
+//! dispatched from a reply handler, which holds no route obligation to defer, so
+//! it goes out as a tracked fresh root and is answered by hand from
+//! [`state::ApiCapabilityState::pending`]; a settlement subscription answers
+//! `504` if that chain never replies.
+//!
+//! A reply is delivered to a **typed** handler and deliberately not to a
+//! `#[fallback]`: a fallback would widen the actor's accept-set to every kind —
+//! including the request-stream kinds — and the HTTP server would then route each
+//! request down the streaming path instead of delivering a buffered
+//! `HttpServerRequest`.
 //!
 //! # The module tree
 //!
@@ -45,8 +49,8 @@
 //! `#[http::route]` method and every typed reply handler stays here, each a
 //! two-line delegation to the module that owns the work. [`state`] holds the
 //! router state, the ceilings that bound it, and the deferral machinery;
-//! [`workpieces`], [`drafts`], [`seal`], [`blooms`] and [`reads`] hold one
-//! resource each; [`response`] and [`hex`] hold the shared response
+//! [`workpieces`], [`drafts`], [`seal`], [`blooms`], `claims` and [`reads`] hold
+//! one resource each; [`response`] and [`hex`] hold the shared response
 //! constructors and the bloom-id URL codec.
 
 mod blooms;
@@ -65,10 +69,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use aether_actor::{Manual, runtime};
-#[cfg(feature = "github")]
-use aether_bloomery::Outcome;
-use aether_bloomery::{AdmitResult, EnumerateClaimsResult, QueryResult, ReplayJournal, ReplayJournalResult};
+use aether_bloomery::{
+    AdmitResult, EnumerateClaimsResult, LoadConfigsResult, QueryResult, ReplayJournal, ReplayJournalResult,
+    ResolvedConfigs,
+};
 use aether_http as http;
+use aether_http::HttpServerResponse;
 use aether_kinds::trace::Settled;
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -76,41 +82,41 @@ pub use aether_substrate::chassis::error::BootError;
 
 pub use state::ApiCapabilityState;
 
-#[cfg(feature = "github")]
-use aether_data::wire::from_bytes;
-
 use blooms::{admit_response, query_response};
 #[cfg(feature = "github")]
-use claims::{claims_response, release_accepted_response, release_status_response};
+use claims::{claims_response, release_status_response};
+use configs::{config_response, load_configs};
 use reads::{artifact_response, journal_response};
 use response::{error_response, json};
-#[cfg(feature = "github")]
-use state::ReleasePending;
 use state::{Routed, SealVerify, VerifyPending, finish};
 
 use super::BloomeryApiCapability;
 use super::dto::WorkpiecesView;
-use crate::artifacts::{ArtifactsCapability, Get, GetResult};
-use crate::bloomery::ApprovalPolicy;
+use crate::artifacts::{Get, GetResult};
+use crate::bloomery::load_policy;
 use crate::signing::VerifyResult;
-use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult, StoreCapability};
+use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult};
 
 /// The claim routes' bodies for a build with no GitHub source runtime: an
 /// immediate `503` rather than a deferral onto a `SourceCapability` mailbox that
 /// was never registered.
 ///
-/// Without this the three routes are actively harmful rather than merely absent:
-/// `GET /claims` would return `Routed::Deferred` on a warn-dropped send and hang
-/// its caller until the settlement net fired, and `POST /claims/releases` would
-/// verify the signature, journal a pending release, and enqueue an outbox row
-/// that no reactor drains in that build — a request durably pending forever.
+/// The three routes themselves stay unconditional, because `#[http::router]`
+/// collects its method list before the compiler strips `#[cfg]`s — a per-method
+/// gate leaves the generated dispatch table naming a method that is not there.
+/// Answering `503` from the body is also the honest behavior rather than a
+/// workaround: without this the routes would be actively harmful instead of
+/// merely absent. `GET /claims` would relay onto a mailbox nothing registered and
+/// hang its caller on the HTTP server's timeout, and `POST /claims/releases`
+/// would verify the signature, journal a pending release, and enqueue an outbox
+/// row that no reactor drains in that build — a request durably pending forever.
 #[cfg(not(feature = "github"))]
 impl ApiCapabilityState {
     fn claims_unavailable() -> Routed {
         Routed::Reply(error_response(503, "claim inspection and release need the GitHub source runtime"))
     }
 
-    fn list_claims(&self, _ctx: &NativeCtx<'_, Manual>) -> Routed {
+    fn list_claims() -> Routed {
         Self::claims_unavailable()
     }
 
@@ -118,81 +124,39 @@ impl ApiCapabilityState {
         Self::claims_unavailable()
     }
 
-    fn query_claim_release(&self, _ctx: &NativeCtx<'_, Manual>, _digest: &str) -> Routed {
+    fn query_claim_release(_digest: &str) -> Routed {
         Self::claims_unavailable()
     }
 }
 
 /// Render a claim enumeration. Unreachable without the GitHub source runtime —
-/// the route that would ask for one refuses first — so the reply only has to
-/// exist for the accepted-kind table.
+/// the route that would ask for one refuses first — so it only has to exist for
+/// the `#[http::reply]` glue the route's paired handler generates.
 #[cfg(not(feature = "github"))]
-fn claims_response(_result: EnumerateClaimsResult) -> aether_http::HttpServerResponse {
+fn claims_response(_result: EnumerateClaimsResult) -> HttpServerResponse {
     error_response(503, "claim inspection needs the GitHub source runtime")
 }
 
-/// Whether `correlation` names an in-flight release verification. Always false
-/// without the github feature, where no release route exists to start one.
-#[cfg(feature = "github")]
-fn releasing_contains(state: &ApiCapabilityState, correlation: u64) -> bool {
-    state.releasing.contains_key(&correlation)
-}
-
+/// Render a release-status read, unreachable for the same reason.
 #[cfg(not(feature = "github"))]
-const fn releasing_contains(_state: &ApiCapabilityState, _correlation: u64) -> bool {
-    false
-}
-
-/// Resolve a held release verification. Unreachable without the github feature,
-/// where `releasing_contains` is constant-false.
-#[cfg(feature = "github")]
-fn resolve_release(state: &mut ApiCapabilityState, ctx: &NativeCtx<'_, Manual>, correlation: u64, mail: VerifyResult) {
-    state.resolve_release_verify(ctx, correlation, verify_verdict(mail));
-}
-
-#[cfg(not(feature = "github"))]
-fn resolve_release(
-    _state: &mut ApiCapabilityState,
-    _ctx: &NativeCtx<'_, Manual>,
-    _correlation: u64,
-    _mail: VerifyResult,
-) {
-}
-
-/// Take the held reply obligation of a release verification whose chain settled
-/// without a reply.
-#[cfg(feature = "github")]
-fn release_settled(state: &mut ApiCapabilityState, correlation: u64) -> Option<aether_substrate::InboundMail> {
-    state.releasing.remove(&correlation).map(|ReleasePending { inbound, .. }| inbound)
-}
-
-#[cfg(not(feature = "github"))]
-const fn release_settled(_state: &mut ApiCapabilityState, _correlation: u64) -> Option<aether_substrate::InboundMail> {
-    None
-}
-
-/// Flatten a signing reply into the verified-or-why the release gate decides on.
-/// The release path only ever needs "did this signature hold", so it takes the
-/// verdict rather than the reply kind and stays independent of the two other
-/// verify consumers' own handling.
-#[cfg(feature = "github")]
-fn verify_verdict(result: VerifyResult) -> Result<bool, String> {
-    match result {
-        VerifyResult::Ok { verified } => Ok(verified),
-        VerifyResult::Err { error } => Err(error),
-    }
+fn release_status_response(_result: QueryResult) -> HttpServerResponse {
+    error_response(503, "claim release status needs the GitHub source runtime")
 }
 
 /// Composer-supplied params for the REST control api cap (ADR-0156 §3 `Params`
-/// channel): the tier-policy file the pre-seal approve gate loads at init (issue
-/// #3583). Threaded from the shared GitHub config's `approval_policy_file` at
-/// chassis build so one Bloomery configuration serves every reader — a
-/// composer-computed value, not an operator-resolvable knob, so it is `Params`.
-/// A policy that fails to load leaves the cap with no policy, so the gate fails
-/// **closed** — every member resolves `human` and its seal is refused, never
-/// silently `auto`.
+/// channel): the fallback tier-policy file the pre-seal approve gate loads at
+/// init (issue #3583). Threaded from the shared GitHub config's
+/// `approval_policy_file` at chassis build so one Bloomery configuration serves
+/// every reader — a composer-computed value, not an operator-resolvable knob, so
+/// it is `Params`.
+///
+/// The file is the fallback, not the authority: a draft that seals an
+/// `aether.bloomery.approval_policy` entry is gated against that sealed value
+/// (#4616). A policy file that fails to load leaves the cap with no fallback, so
+/// a draft sealing none fails **closed** — its seal is refused rather than
+/// admitted at a tier nothing decided.
 pub struct ApiParams {
-    /// Repository-relative path to the Bloomery-owned tier policy
+    /// Repository-relative path to the Bloomery-owned fallback tier policy
     /// (`approval-policy.yml`).
     pub approval_policy_file: String,
 }
@@ -209,30 +173,32 @@ impl NativeActor for BloomeryApiCapability {
     const NAMESPACE: &'static str = "aether.bloomery.api";
 
     fn init((): (), params: ApiParams, ctx: &mut NativeInitCtx<'_>) -> Result<ApiCapabilityState, BootError> {
-        // Load the tier policy once at init. An unreadable or malformed policy is
-        // not a boot failure — it leaves the cap policy-less, and the pre-seal
-        // gate then fails closed (every member resolves `human`, its seal is
+        // Load the fallback tier policy once at init. An unreadable or malformed
+        // file is not a boot failure — it leaves the cap fallback-less, and a
+        // draft that seals no policy of its own then fails closed (its seal is
         // refused), which is the security-required posture: never silently `auto`.
-        let policy = match ApprovalPolicy::load(Path::new(&params.approval_policy_file)) {
+        let file_policy = match load_policy(Path::new(&params.approval_policy_file)) {
             Ok(policy) => Some(policy),
             Err(error) => {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::api",
                     path = %params.approval_policy_file,
                     ?error,
-                    "approval policy unavailable; the pre-seal approve gate fails closed (no auto tier)"
+                    "fallback approval policy unavailable; a draft sealing none fails closed (no auto tier)"
                 );
                 None
             }
         };
         tracing::info!(
             target: "aether_chassis_bloomery::api",
-            policy_loaded = policy.is_some(),
+            policy_loaded = file_policy.is_some(),
             "bloomery REST control api mounted"
         );
         Ok(ApiCapabilityState {
             self_mailbox: ctx.self_id(),
-            policy,
+            file_policy,
+            configs: ResolvedConfigs::default(),
+            configs_ready: false,
             mailer: ctx.mailer(),
             staged: BTreeMap::new(),
             drafts: BTreeMap::new(),
@@ -240,20 +206,21 @@ impl NativeActor for BloomeryApiCapability {
             pending: HashMap::new(),
             verifying: HashMap::new(),
             seals: HashMap::new(),
-            configs: HashMap::new(),
             next_seal: 1,
             seal_verifications: HashMap::new(),
-            #[cfg(feature = "github")]
-            releasing: HashMap::new(),
-            #[cfg(feature = "github")]
-            release_admits: HashMap::new(),
         })
     }
 
+    /// Read the stored configuration set so a sealed tier policy is resolvable
+    /// from inside the synchronous pre-seal gate (#4616). Lives here rather than
+    /// in `init` because it is mail, and `init` has none.
+    ///
     /// `#[http::router]` appends the per-route `RegisterRouteSelf` sends to
     /// this body — one exact-match claim per `(static head, method)` group,
     /// registered on the HTTP ingress cap (ADR-0130) post-init (#3672).
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {}
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+        load_configs(ctx);
+    }
 
     /// `POST /workpieces` — stage a workpiece for later draft membership.
     #[http::route(Post, "/workpieces")]
@@ -267,7 +234,7 @@ impl NativeActor for BloomeryApiCapability {
     /// route for every configuration kind: adding a kind adds no route.
     #[http::route(Post, "/configs")]
     fn on_post_configs(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = state.author_config(&ctx, &ctx.request().body);
+        let routed = configs::author_config(&ctx.request().body);
         finish(state, ctx, routed)
     }
 
@@ -332,14 +299,14 @@ impl NativeActor for BloomeryApiCapability {
     /// `GET /blooms` — read the whole live projection.
     #[http::route(Get, "/blooms")]
     fn on_get_blooms(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = state.query(&ctx, None);
+        let routed = ApiCapabilityState::query(None);
         finish(state, ctx, routed)
     }
 
     /// `GET /view` — read the whole live projection (the `GET /blooms` alias).
     #[http::route(Get, "/view")]
     fn on_get_view(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = state.query(&ctx, None);
+        let routed = ApiCapabilityState::query(None);
         finish(state, ctx, routed)
     }
 
@@ -351,7 +318,7 @@ impl NativeActor for BloomeryApiCapability {
         id: http::Path<String>,
     ) -> http::Outcome {
         let id = id.0;
-        let routed = state.query_bloom(&ctx, &id);
+        let routed = ApiCapabilityState::query_bloom(&id);
         finish(state, ctx, routed)
     }
 
@@ -377,7 +344,7 @@ impl NativeActor for BloomeryApiCapability {
         id: http::Path<String>,
     ) -> http::Outcome {
         let id = id.0;
-        let routed = state.grant(&ctx, &id, &ctx.request().body);
+        let routed = ApiCapabilityState::grant(&id, &ctx.request().body);
         finish(state, ctx, routed)
     }
 
@@ -397,7 +364,7 @@ impl NativeActor for BloomeryApiCapability {
     /// (ADR-0179). The diagnostic that used to require `git ls-remote`.
     #[http::route(Get, "/claims")]
     fn on_get_claims(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = state.list_claims(&ctx);
+        let routed = ApiCapabilityState::list_claims();
         finish(state, ctx, routed)
     }
 
@@ -421,15 +388,14 @@ impl NativeActor for BloomeryApiCapability {
         digest: http::Path<String>,
     ) -> http::Outcome {
         let digest = digest.0;
-        let routed = state.query_claim_release(&ctx, &digest);
+        let routed = ApiCapabilityState::query_claim_release(&digest);
         finish(state, ctx, routed)
     }
 
     /// `GET /journal` — read the durable event journal from the store.
     #[http::route(Get, "/journal")]
     fn on_get_journal(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = Routed::Deferred(state.send_tracked(ctx.actor::<StoreCapability>(), &ReplayJournal));
-        finish(state, ctx, routed)
+        finish(state, ctx, Routed::ReplayJournal(ReplayJournal))
     }
 
     /// `GET /artifacts/{digest}` — fetch a content-addressed artifact.
@@ -439,70 +405,75 @@ impl NativeActor for BloomeryApiCapability {
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         digest: http::Path<String>,
     ) -> http::Outcome {
-        let routed =
-            Routed::Deferred(state.send_tracked(ctx.actor::<ArtifactsCapability>(), &Get { digest: digest.0 }));
-        finish(state, ctx, routed)
+        finish(state, ctx, Routed::Get(Get { digest: digest.0 }))
     }
 
-    /// The control core's reply to a `Fact::Seal` / `Fact::Supersede` admit —
-    /// the reducer outcome, or an admit error.
+    /// The control core's reply to an admit — the reducer outcome, or an admit
+    /// error.
+    ///
+    /// The one reply kind two different flows produce, so it is the one reply
+    /// handler still written by hand. A direct admit route (grant, and the
+    /// all-auto seal / supersede fast path) relayed its request, so its
+    /// requester is recovered from the deferred-source context; the answer and
+    /// seal flows dispatched their terminal admit from a reply handler, so
+    /// theirs is held in `pending`. The two stores are mutually exclusive — the
+    /// recovery that does not match this reply is a no-op — so calling both is
+    /// how one handler serves both without needing to know which flow it is
+    /// answering.
     #[handler::manual]
     fn on_admit_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: AdmitResult) {
-        // A release submission answers `202` with its request digest rather than
-        // the bare outcome, because the digest is the handle the status route
-        // reads by and the admit reply does not carry it. Only a github build has
-        // release routes, so only it holds that correlation.
-        #[cfg(feature = "github")]
-        let response = match state.release_admits.remove(&ctx.reply_target().correlation_id) {
-            Some(request) => match &mail {
-                AdmitResult::Ok { outcome } => match from_bytes::<Outcome>(outcome) {
-                    Ok(outcome) => release_accepted_response(request, outcome),
-                    Err(error) => error_response(500, &format!("outcome decode failed: {error}")),
-                },
-                AdmitResult::Err { error } => error_response(500, error),
-            },
-            None => admit_response(mail),
-        };
-        #[cfg(not(feature = "github"))]
         let response = admit_response(mail);
+
+        http::answer_deferred(ctx, &response);
         state.answer(ctx, &response);
     }
 
-    /// The control core's reply to a live projection read.
-    #[handler::manual]
-    fn on_query_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: QueryResult) {
-        // The release branch is its own reply variant, so the read it answers is
-        // decided by the payload rather than by a second correlation table.
-        #[cfg(feature = "github")]
-        let response = match mail {
+    /// The control core's reply to a live projection read, or to an
+    /// orphan-claim release's status read (ADR-0179).
+    ///
+    /// One `Query` kind answers both, so which read this is answering is decided
+    /// by the reply's own variant rather than by anything the route held — the
+    /// relay surfaces no correlation to key a second table on.
+    #[http::reply]
+    fn on_query_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: QueryResult,
+    ) -> HttpServerResponse {
+        match mail {
             QueryResult::Release { .. } => release_status_response(mail),
             mail => query_response(mail),
-        };
-        #[cfg(not(feature = "github"))]
-        let response = query_response(mail);
-        state.answer(ctx, &response);
+        }
     }
 
     /// The source cap's reply to a claim enumeration (ADR-0179).
-    #[handler::manual]
+    #[http::reply]
     fn on_enumerate_claims_result(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Manual>,
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
         mail: EnumerateClaimsResult,
-    ) {
-        state.answer(ctx, &claims_response(mail));
+    ) -> HttpServerResponse {
+        claims_response(mail)
     }
 
     /// The store's reply to a journal read.
-    #[handler::manual]
-    fn on_replay_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: ReplayJournalResult) {
-        state.answer(ctx, &journal_response(mail));
+    #[http::reply]
+    fn on_replay_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: ReplayJournalResult,
+    ) -> HttpServerResponse {
+        journal_response(mail)
     }
 
     /// The artifacts cap's reply to an artifact fetch.
-    #[handler::manual]
-    fn on_get_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: GetResult) {
-        state.answer(ctx, &artifact_response(mail));
+    #[http::reply]
+    fn on_get_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: GetResult,
+    ) -> HttpServerResponse {
+        artifact_response(mail)
     }
 
     /// The `aether.signing` capability's reply to an answer-gate verify. A
@@ -518,8 +489,6 @@ impl NativeActor for BloomeryApiCapability {
         let correlation = ctx.reply_target().correlation_id;
         if state.seal_verifications.contains_key(&correlation) {
             state.resolve_seal_verify(ctx, correlation, mail);
-        } else if cfg!(feature = "github") && releasing_contains(state, correlation) {
-            resolve_release(state, ctx, correlation, mail);
         } else {
             state.resolve_verify(ctx, mail);
         }
@@ -528,14 +497,28 @@ impl NativeActor for BloomeryApiCapability {
     /// The store's reply to an authored configuration's write (ADR-0174). The
     /// authoring route deferred its caller on this, so the reply answers with the
     /// address on a durable write and a `500` on a failed one — a caller never
-    /// gets an address it could seal against a row that is not there.
+    /// gets an address it could seal against a row that is not there. The address
+    /// is the reply's own echo, so the route holds nothing across the write. The
+    /// same echo carries the stored bytes, so a durable write also files the
+    /// content in the resolved-configuration cache the pre-seal gate reads
+    /// (#4616) — an operator can seal the address the write just handed back
+    /// without racing another store read.
+    #[http::reply]
+    fn on_record_config_result(
+        state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: RecordConfigResult,
+    ) -> HttpServerResponse {
+        config_response(state, mail)
+    }
+
+    /// The store's reply to the boot configuration read (#4616). Fills the
+    /// resolved-configuration cache the pre-seal gate resolves a draft's sealed
+    /// tier policy out of, and marks it ready — a seal arriving before this is
+    /// refused rather than gated against content the cap has not read.
     #[handler::manual]
-    fn on_record_config_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: RecordConfigResult) {
-        let error = match mail {
-            RecordConfigResult::Ok => None,
-            RecordConfigResult::Err { error } => Some(error),
-        };
-        state.resolve_config_write(ctx, error.as_deref());
+    fn on_load_configs_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadConfigsResult) {
+        state.hydrate_configs(ctx, mail);
     }
 
     /// The store's reply to a fire-and-forget dispatch-description write (#3595).
@@ -553,22 +536,19 @@ impl NativeActor for BloomeryApiCapability {
         }
     }
 
-    /// A downstream chain settled. If its request is still pending, the
-    /// downstream produced no reply (a dropped or unloaded control core, or a
-    /// dropped signing capability) — answer `504` rather than leave the client
-    /// hung.
+    /// A multi-hop chain settled. If its request is still held, the downstream
+    /// produced no reply (a dropped or unloaded control core, or a dropped
+    /// signing capability) — answer `504` rather than leave the client hung.
+    ///
+    /// Only the multi-hop hops subscribe here. A deferred route's downstream is
+    /// sent on the request's own inherited chain, so a silent peer is answered
+    /// by the HTTP server's `502` net and a hung one by its request timeout —
+    /// neither reaches this handler (ADR-0154 §3).
     #[handler::manual]
     fn on_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_, Manual>, mail: Settled) {
         if let Some(inbound) = state.pending.remove(&mail.root.correlation_id) {
-            // A release admit holds a second entry keyed by the same correlation;
-            // drop it here too, or a control core that stops replying leaves one
-            // digest per request behind forever.
-            #[cfg(feature = "github")]
-            state.release_admits.remove(&mail.root.correlation_id);
             inbound.reply(&error_response(504, "control-plane request settled without a reply"));
         } else if let Some(VerifyPending { inbound, .. }) = state.verifying.remove(&mail.root.correlation_id) {
-            inbound.reply(&error_response(504, "signature verification settled without a reply"));
-        } else if let Some(inbound) = release_settled(state, mail.root.correlation_id) {
             inbound.reply(&error_response(504, "signature verification settled without a reply"));
         } else if let Some(SealVerify { seal, .. }) = state.seal_verifications.remove(&mail.root.correlation_id) {
             // An above-auto member's verify chain settled without a reply — the
