@@ -5,14 +5,33 @@ on:
     types: [opened, edited, labeled, unlabeled, reopened]
 
 permissions:
-  issues: write
+  contents: read
 
 jobs:
   enforce:
     name: Lint title and auto-apply type/crate labels
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Resolve canonical issue title scopes
+        id: scopes
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/issue-title-scopes.sh --self-test
+          {
+            echo 'valid_crates<<EOF'
+            scripts/issue-title-scopes.sh
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
       - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          VALID_CRATES: ${{ steps.scopes.outputs.valid_crates }}
         with:
           script: |
             const issue = context.payload.issue;
@@ -80,18 +99,7 @@ jobs:
               const typeFromTitle = m[1];
               const crateFromTitle = m[2];
 
-              const allRepoLabels = await github.paginate(
-                github.rest.issues.listLabelsForRepo,
-                {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  per_page: 100,
-                }
-              );
-              const validCrates = allRepoLabels
-                .filter(l => l.name.startsWith('crate:'))
-                .map(l => l.name.slice('crate:'.length))
-                .sort();
+              const validCrates = process.env.VALID_CRATES.split('\n').filter(Boolean).sort();
 
               const isCrate = validCrates.includes(crateFromTitle);
               const isMeta = META_SCOPES.includes(crateFromTitle);

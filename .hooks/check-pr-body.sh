@@ -107,24 +107,20 @@ valid_scope() {
         *" $scope "*) return 0 ;;
     esac
 
-    if [[ -f "$root/Cargo.toml" ]] && grep -qE "name[[:space:]]*=[[:space:]]*\"aether-$scope\"" "$root"/crates/*/Cargo.toml 2>/dev/null; then
-        return 0
-    fi
-
-    if [[ -f "$root/crates/aether-$scope/Cargo.toml" ]]; then
-        return 0
-    fi
-
-    return 1
+    "$root/scripts/issue-title-scopes.sh" --check "$scope"
 }
 
 if [[ ",$allowed," != *",e,"* ]] && (( is_issue_cmd == 1 )) && [[ -n "$title" ]]; then
     title_re='^(feat|fix|chore|docs|perf|refactor|flake)\(([a-z0-9-]+)(/[a-z0-9-]+)?\):[[:space:]].+$'
     if [[ "$title" =~ $title_re ]]; then
         scope="${BASH_REMATCH[2]}"
-        if ! valid_scope "$scope"; then
-            issues+=("Pattern E: issue title scope '$scope' is not a known crate or meta-scope")
-        fi
+        valid_scope "$scope"
+        scope_status=$?
+        case "$scope_status" in
+            0) ;;
+            1) issues+=("Pattern E: issue title scope '$scope' is not a known crate or meta-scope") ;;
+            *) issues+=("Pattern E: unable to validate issue title scope '$scope' from Cargo metadata") ;;
+        esac
     else
         issues+=("Pattern E: issue title must match {type}({crate}): subject; allowed types: feat, fix, chore, docs, perf, refactor, flake")
     fi
