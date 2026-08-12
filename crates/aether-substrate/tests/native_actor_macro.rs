@@ -609,7 +609,9 @@ struct CfgStripped {
     tag: u32,
 }
 
-struct CfgGatedCap;
+struct CfgGatedCap {
+    seen: AtomicU32,
+}
 
 #[aether_actor::actor]
 impl NativeActor for CfgGatedCap {
@@ -617,19 +619,25 @@ impl NativeActor for CfgGatedCap {
     const NAMESPACE: &'static str = "test.macro_native_actor.cfg_gated";
 
     fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self)
+        Ok(Self { seen: AtomicU32::new(0) })
     }
 
     #[aether_actor::handler::single]
-    fn on_kept(&self, _ctx: &mut NativeCtx<'_>, _mail: CfgKept) {}
+    fn on_kept(&self, _ctx: &mut NativeCtx<'_>, mail: CfgKept) {
+        self.seen.fetch_add(mail.tag, AtomicOrdering::SeqCst);
+    }
 
     #[aether_actor::handler::single]
     #[cfg(test)]
-    fn on_present(&self, _ctx: &mut NativeCtx<'_>, _mail: CfgPresent) {}
+    fn on_present(&self, _ctx: &mut NativeCtx<'_>, mail: CfgPresent) {
+        self.seen.fetch_add(mail.tag, AtomicOrdering::SeqCst);
+    }
 
     #[aether_actor::handler::single]
     #[cfg(not(test))]
-    fn on_stripped(&self, _ctx: &mut NativeCtx<'_>, _mail: CfgStripped) {}
+    fn on_stripped(&self, _ctx: &mut NativeCtx<'_>, mail: CfgStripped) {
+        self.seen.fetch_add(mail.tag, AtomicOrdering::SeqCst);
+    }
 }
 
 /// Tripwire: a `#[cfg]`-stripped handler contributes no measured kind and no
