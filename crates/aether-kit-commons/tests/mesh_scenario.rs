@@ -24,11 +24,13 @@
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{
-    init_save_sandbox, require_runtime, test_namespace_roots, write_fixture,
+    envelope, init_save_sandbox, require_runtime, test_namespace_roots, write_fixture,
 };
-use aether_harness_substrate_capture::visual::{decode_png, differs_from_background};
-use aether_kinds::{LoadComponent, LoadResult, MeshLoadResult};
+use aether_harness_substrate_capture::visual::{Image, decode_png, differs_from_background};
+use aether_kinds::{LoadComponent, LoadResult, MeshLoadResult, Render, WindowId, WindowSize};
+use aether_kit_commons::camera::{CameraOrbitSet, OrbitParams};
 use aether_kit_commons::mesh::LoadMesh;
+use core::f32::consts::FRAC_PI_2;
 
 // Force linkage of `aether-kit-commons`'s `inventory::submit!` `KindDescriptor`
 // entries into this test binary. Cargo treats integration tests as
@@ -42,6 +44,10 @@ use std::path::Path;
 
 /// User-facing component name passed to `LoadComponent`.
 const COMPONENT_NAME: &str = "mv";
+const CAMERA_COMPONENT_NAME: &str = "aether.kit.camera";
+const OUTLINE_WINDOW_WIDTH: u32 = 768;
+const OUTLINE_WINDOW_HEIGHT: u32 = 576;
+const OUTLINE_WINDOW_ID: WindowId = WindowId(1);
 
 /// Full mailbox address the substrate registers for the loaded
 /// component (issue 634 Phase 4 PR 1). Mail to the bare
@@ -65,6 +71,38 @@ v -0.5  0.5 0
 f 1 2 3 4
 ";
 const BAD_DSL: &[u8] = b"(box not-a-number 1 1)\n";
+const OUTLINED_PLATE_DSL: &[u8] = b"(box 2 2 0.002 :color 6)\n";
+
+fn loaded_component_address(name: &str) -> String {
+    use aether_actor::Addressable;
+    format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
+}
+
+fn load_kit_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, name: &str) {
+    let loaded = harness
+        .execute(vec![(
+            "load",
+            HarnessOp::send_and_await_reply(
+                "aether.component",
+                &LoadComponent {
+                    wasm: wasm.to_vec(),
+                    name: Some(name.to_owned()),
+                    config: Vec::new(),
+                    export: Some(export.to_owned()),
+                },
+            ),
+        )])
+        .expect("load sequence");
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { name: address, .. } => {
+            assert!(
+                address.ends_with(&format!(":{name}")),
+                "export {export} should register under :{name}; got {address}"
+            );
+        }
+        LoadResult::Err { error } => panic!("load {export}: {error}"),
+    }
+}
 
 /// Load `aether-kit-commons`'s pre-built wasm into the harness, selecting the
 /// `mesh_viewer` export (ADR-0096; the kit is defaultless per ADR-0138, so
@@ -73,24 +111,146 @@ const BAD_DSL: &[u8] = b"(box not-a-number 1 1)\n";
 /// a missing subscription.
 fn load_viewer(harness: &mut SubstrateHarness, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read kit wasm");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: Some(COMPONENT_NAME.to_owned()),
-                    config: Vec::new(),
-                    export: Some("aether.kit.mesh".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { .. } => {}
-        LoadResult::Err { error } => panic!("load_component: {error}"),
+    load_kit_export(harness, &wasm, "aether.kit.mesh", COMPONENT_NAME);
+}
+
+fn capture_outlined_mesh(
+    harness: &mut SubstrateHarness,
+    camera_address: &str,
+    viewer_address: &str,
+    label: &'static str,
+) -> Vec<u8> {
+    let mails = vec![envelope(camera_address, &Render), envelope(viewer_address, &Render)];
+    let captured = harness
+        .execute(vec![(label, HarnessOp::capture_with_mails(mails, Vec::new()))])
+        .expect("capture outlined mesh");
+    captured.captured(label).expect("capture step ran").to_vec()
+}
+
+fn is_slate(rgb: &[u8]) -> bool {
+    (55..=155).contains(&rgb[0])
+        && (55..=155).contains(&rgb[1])
+        && (65..=175).contains(&rgb[2])
+        && rgb[0].abs_diff(rgb[1]) <= 5
+        && rgb[2] >= rgb[0]
+}
+
+fn horizontal_outline_thickness(image: &Image) -> u32 {
+    let y = image.height / 2;
+    let center = image.width / 2;
+    let start = center.saturating_sub(24);
+    let end = (center + 24).min(image.width.saturating_sub(1));
+    let mut longest = 0;
+    let mut current = 0;
+    for x in start..=end {
+        let offset = ((y * image.width + x) * 4) as usize;
+        if is_slate(&image.rgba[offset..offset + 3]) {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
     }
+    longest
+}
+
+fn vertical_outline_thickness(image: &Image) -> u32 {
+    let x = image.width / 2;
+    let mut longest = 0;
+    let mut current = 0;
+    for y in 0..image.height {
+        let offset = ((y * image.width + x) * 4) as usize;
+        if is_slate(&image.rgba[offset..offset + 3]) {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    longest
+}
+
+#[test]
+fn edge_on_outline_stays_visible_and_keeps_apparent_width() {
+    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
+        return;
+    };
+    let wasm = fs::read(wasm_path).expect("read kit wasm");
+    let sandbox = init_save_sandbox("kit-mesh-outline");
+    let path = write_fixture("outlined_plate.dsl", OUTLINED_PLATE_DSL);
+    let mut harness = SubstrateHarness::builder()
+        .with_render()
+        .with_component_host()
+        .size(OUTLINE_WINDOW_WIDTH, OUTLINE_WINDOW_HEIGHT)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
+
+    load_kit_export(&mut harness, &wasm, "aether.kit.camera", CAMERA_COMPONENT_NAME);
+    load_kit_export(&mut harness, &wasm, "aether.kit.mesh", COMPONENT_NAME);
+    let camera = loaded_component_address(CAMERA_COMPONENT_NAME);
+    let viewer = component_address();
+    let loaded = harness
+        .execute(vec![
+            (
+                "aspect",
+                HarnessOp::send_and_settle(
+                    camera.as_str(),
+                    &WindowSize {
+                        window: OUTLINE_WINDOW_ID,
+                        width: OUTLINE_WINDOW_WIDTH,
+                        height: OUTLINE_WINDOW_HEIGHT,
+                    },
+                ),
+            ),
+            (
+                "load_mesh",
+                HarnessOp::send_and_await_reply(viewer.as_str(), &LoadMesh { namespace: "save".to_owned(), path }),
+            ),
+        ])
+        .expect("set aspect + load edge-on fixture");
+    let reply = loaded.reply::<MeshLoadResult>("load_mesh").expect("decode MeshLoadResult");
+    assert!(reply.ok, "edge-on DSL should load: {:?}", reply.error);
+
+    let orbit = |distance, yaw| CameraOrbitSet {
+        name: "main".to_owned(),
+        params: OrbitParams {
+            distance: Some(distance),
+            pitch: Some(0.0),
+            yaw: Some(yaw),
+            speed: Some(0.0),
+            fov_y_rad: None,
+            target: Some([0.0, 0.0, 0.0]),
+        },
+    };
+    harness
+        .execute(vec![("edge_on", HarnessOp::send_and_settle(camera.as_str(), &orbit(4.0, FRAC_PI_2)))])
+        .expect("set edge-on orbit");
+    let edge_on = capture_outlined_mesh(&mut harness, &camera, &viewer, "edge_on_capture");
+
+    harness
+        .execute(vec![("near", HarnessOp::send_and_settle(camera.as_str(), &orbit(2.5, 0.0)))])
+        .expect("set near face-on orbit");
+    let near = capture_outlined_mesh(&mut harness, &camera, &viewer, "near_capture");
+
+    harness
+        .execute(vec![("far", HarnessOp::send_and_settle(camera.as_str(), &orbit(8.0, 0.0)))])
+        .expect("set far face-on orbit");
+    let far = capture_outlined_mesh(&mut harness, &camera, &viewer, "far_capture");
+
+    let edge_on_image = decode_png(&edge_on).expect("decode edge-on capture");
+    let near_image = decode_png(&near).expect("decode near capture");
+    let far_image = decode_png(&far).expect("decode far capture");
+    let edge_on_thickness = horizontal_outline_thickness(&edge_on_image);
+    let near_thickness = vertical_outline_thickness(&near_image);
+    let far_thickness = vertical_outline_thickness(&far_image);
+    assert!(edge_on_thickness > 0, "the slate outline must remain visible with its authored plate edge-on");
+    assert!(near_thickness > 0, "the slate outline must remain visible at the near face-on pose");
+    assert!(far_thickness > 0, "the slate outline must remain visible at the far face-on pose");
+    assert!(
+        near_thickness.abs_diff(far_thickness) <= 1,
+        "angular outline width should stay constant within one raster pixel; near={near_thickness}px far={far_thickness}px",
+    );
 }
 
 /// Assert that `aether.draw_triangle` was observed at least once.
