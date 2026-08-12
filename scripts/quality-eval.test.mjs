@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
-import { withinTrailingWindow, deterministicSample, parseClosingIssue, isCodeBearing } from './quality-eval-select.mjs'
-import { parseVerdict, aggregateRates } from './quality-eval-judge.mjs'
+import { withinTrailingWindow, deterministicSample, parseClosingIssue, isCodeBearing, parsePlanRouting } from './quality-eval-select.mjs'
+import { parseVerdict, aggregateRates, renderRollup } from './quality-eval-judge.mjs'
 
 const DAY = 86_400_000
 const NOW = 1_700_000_000_000 // fixed "now" so the window math is deterministic
@@ -44,6 +49,45 @@ test('isCodeBearing requires a crate source file', () => {
   assert.equal(isCodeBearing([]), false)
 })
 
+const VALID_PLAN = `## Implementation plan
+
+1. Make the bounded change.
+
+**Size:** m
+**Implementation model:** sonnet
+**Routing reason:** One focused parser and its tests.
+
+## Declared surface
+
+\`\`\`
+scripts/example.mjs
+\`\`\``
+
+test('parsePlanRouting returns the normalized final Plan routing', () => {
+  assert.deepEqual(parsePlanRouting(VALID_PLAN), { size: 'm', model: 'sonnet' })
+  assert.deepEqual(
+    parsePlanRouting(
+      VALID_PLAN.replace('**Size:** m', '**Size:** s\n').replace('**Implementation model:** sonnet', '**Implementation model:** haiku\n'),
+    ),
+    { size: 's', model: 'haiku' },
+  )
+})
+
+test('parsePlanRouting rejects missing and duplicated managed Plan sections', () => {
+  assert.equal(parsePlanRouting('## Description\n\nNo Plan here.'), null)
+  assert.equal(parsePlanRouting(`${VALID_PLAN}\n\n## Implementation plan\n\n**Size:** l\n**Implementation model:** opus\n**Routing reason:** Duplicate.`), null)
+})
+
+test('parsePlanRouting rejects duplicated, malformed, and misplaced routing', () => {
+  assert.equal(parsePlanRouting(VALID_PLAN.replace('1. Make the bounded change.', '1. Make the bounded change.\n\n**Size:** s')), null)
+  assert.equal(parsePlanRouting(VALID_PLAN.replace('**Size:** m', '**Size:** medium')), null)
+  assert.equal(parsePlanRouting(VALID_PLAN.replace('**Size:** m', ' **Size:** m')), null)
+  assert.equal(parsePlanRouting(VALID_PLAN.replace('**Size:** m', '**Size:**  m')), null)
+  assert.equal(parsePlanRouting(VALID_PLAN.replace('**Implementation model:** sonnet', '**Implementation model:** gpt-5')), null)
+  assert.equal(parsePlanRouting(VALID_PLAN.replace('**Routing reason:** One focused parser and its tests.', '**Routing reason:**')), null)
+  assert.equal(parsePlanRouting(VALID_PLAN.replace('**Routing reason:** One focused parser and its tests.', '**Routing reason:** One focused parser and its tests.\n\n4. Not final.')), null)
+})
+
 test('parseVerdict extracts verdict + defect_class, ignoring class on correct', () => {
   assert.deepEqual(parseVerdict('```quality-verdict\nverdict: correct\ndefect_class: none\n```'), {
     verdict: 'correct',
@@ -67,20 +111,20 @@ test('parseVerdict extracts verdict + defect_class, ignoring class on correct', 
 // ever drifts, these fixed rates change and this test catches it.
 test('aggregateRates groups by size/model and rates over scored samples only', () => {
   const verdicts = [
-    { issue: 1, verdict: 'correct', size_label: 'size:l', model_label: 'model:opus' },
-    { issue: 2, verdict: 'defect', size_label: 'size:l', model_label: 'model:opus' },
-    { issue: 3, verdict: 'correct', size_label: 'size:m', model_label: 'model:sonnet' },
-    { issue: 4, verdict: 'unknown', size_label: 'size:m', model_label: 'model:sonnet' },
+    { issue: 1, verdict: 'correct', size: 'l', model: 'opus' },
+    { issue: 2, verdict: 'defect', size: 'l', model: 'opus' },
+    { issue: 3, verdict: 'correct', size: 'm', model: 'sonnet' },
+    { issue: 4, verdict: 'unknown', size: 'm', model: 'sonnet' },
   ]
   const { rows, overall } = aggregateRates(verdicts)
 
-  const lOpus = rows.find((r) => r.size_label === 'size:l' && r.model_label === 'model:opus')
+  const lOpus = rows.find((r) => r.size === 'l' && r.model === 'opus')
   assert.deepEqual(
     { total: lOpus.total, correct: lOpus.correct, defect: lOpus.defect, defect_rate: lOpus.defect_rate },
     { total: 2, correct: 1, defect: 1, defect_rate: 0.5 },
   )
 
-  const mSonnet = rows.find((r) => r.size_label === 'size:m' && r.model_label === 'model:sonnet')
+  const mSonnet = rows.find((r) => r.size === 'm' && r.model === 'sonnet')
   // One correct + one unknown: scored denominator is 1, so defect_rate is 0 — the
   // unknown neither scores as correct nor inflates the defect rate.
   assert.deepEqual(
@@ -95,6 +139,79 @@ test('aggregateRates groups by size/model and rates over scored samples only', (
 })
 
 test('aggregateRates reports a null rate when no sample is scorable', () => {
-  const { overall } = aggregateRates([{ issue: 9, verdict: 'unknown', size_label: 'size:s', model_label: 'model:opus' }])
+  const { overall } = aggregateRates([{ issue: 9, verdict: 'unknown', size: 's', model: 'opus' }])
   assert.equal(overall.defect_rate, null)
+})
+
+test('renderRollup carries normalized size/model fields into the judge report', () => {
+  const rollup = renderRollup([{ issue: 11, verdict: 'defect', defect_class: 'boundary', size: 's', model: 'haiku' }])
+  assert.match(rollup, /\| s \| haiku \| 1 \| 0 \| 1 \| 100% \|/)
+  assert.match(rollup, /#11 \(s \/ haiku\) — boundary/)
+  assert.doesNotMatch(rollup, /size:s|model:haiku/)
+})
+
+test('quality-eval-run preserves the normalized routing fields and model alias', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'quality-eval-run-test-'))
+  const bin = join(root, 'bin')
+  const home = join(root, 'home')
+  const issue = process.pid
+  const agentLog = `/tmp/quality-eval-agent-${issue}.jsonl`
+  mkdirSync(bin)
+  mkdirSync(home)
+  writeFileSync(
+    join(bin, 'git'),
+    `#!/usr/bin/env bash
+if [[ "\${1:-}" == clone ]]; then
+  mkdir -p "\${@: -1}"
+  exit 0
+fi
+if [[ "\${1:-}" == -C ]]; then
+  case "\${3:-}" in
+    rev-list) printf '%s\\n' "$QUALITY_TEST_PARENT_SHA" ;;
+    diff) printf 'candidate diff' ;;
+    show) printf 'landed diff' ;;
+  esac
+fi
+exit 0
+`,
+  )
+  writeFileSync(join(bin, 'timeout'), '#!/usr/bin/env bash\nshift\nexec "$@"\n')
+  writeFileSync(join(bin, 'claude'), '#!/usr/bin/env bash\nexit 0\n')
+  chmodSync(join(bin, 'git'), 0o755)
+  chmodSync(join(bin, 'timeout'), 0o755)
+  chmodSync(join(bin, 'claude'), 0o755)
+
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(agentLog, { force: true })
+  })
+
+  const input = `${JSON.stringify({
+    issue,
+    parent_sha: '1'.repeat(40),
+    squash_sha: '2'.repeat(40),
+    model: 'haiku',
+    size: 's',
+    issue_body: 'Implement the issue.',
+  })}\n`
+  const records = join(root, 'records.jsonl')
+  writeFileSync(records, input)
+  const result = spawnSync('bash', [fileURLToPath(new URL('./quality-eval-run.sh', import.meta.url)), records], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      HOME: home,
+      GITHUB_WORKSPACE: root,
+      QUALITY_TEST_PARENT_SHA: '1'.repeat(40),
+    },
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.notEqual(result.stdout.trim(), '', result.stderr)
+  const record = JSON.parse(result.stdout.trim())
+  assert.equal(record.model, 'haiku')
+  assert.equal(record.size, 's')
+  assert.deepEqual(Object.keys(record).sort(), ['candidate_diff', 'issue', 'landed_diff', 'model', 'size'])
+  assert.match(result.stderr, /\(model haiku\)/)
 })

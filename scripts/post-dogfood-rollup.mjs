@@ -1,23 +1,19 @@
 #!/usr/bin/env node
-// Post a dogfood rollup onto its feature issue as one living, marker-
-// anchored comment, and set or clear the advisory `dogfood:unresolved`
-// label (issue 2967). Mirrors scripts/post-review-rollup.mjs — same env
-// contract, fetch wrapper, marker-anchored upsert, and label set/clear.
+// Post a direct-drive dogfood rollup onto its feature issue as one living,
+// marker-anchored comment, and set or clear the advisory
+// `dogfood:unresolved` label (issue 2967). The local dogfood skill builds and
+// validates the rollup before invoking this deterministic poster.
 //
-// The posture matches the review poster: the comment and label are
-// advisory. The teeth are the /land gate that reads `dogfood:unresolved`
-// (a separate skill-text change), not a CI failure here. A failed API
-// call logs and continues where the review poster does.
+// The comment and label are advisory. The teeth are the land gate that reads
+// `dogfood:unresolved`, not a failure invented by this poster.
 //
-// The marker line carries the retry state the dogfood action's resolve
-// step reads back on the next green event (issue 2968): it is extended
+// The marker line carries durable attempt state (issue 2968): it is extended
 // from the bare `<!-- aether-dogfood -->` to
 // `<!-- aether-dogfood attempts=<N> verdict=<green|failed> -->`, where
 // `attempts` is this comment's attempt number (the ATTEMPT env, defaulting
 // to 1) and `verdict` is `green` when the trial is clean and `failed` when
-// the actionability predicate fires or the attempt did not succeed. A
-// `green` verdict is terminal (no more auto-runs); `attempts >= the cap`
-// is terminal-failed. The upsert lookup still matches on the bare
+// the actionability predicate fires or the attempt did not succeed. The
+// upsert lookup still matches on the bare
 // `<!-- aether-dogfood` prefix, so an old bare-marker comment migrates to
 // the extended form in place on the first post that carries the state.
 //
@@ -27,7 +23,7 @@
 //   ISSUE               the feature issue to comment on (required)
 //   PR                  the PR to carry the label (optional; defaults to ISSUE)
 //   RUN_REF             <issue>/<run-id> — the evidence-branch path segment
-//   RUN_URL             Actions URL for a no-rollup attempt's transcript
+//   RUN_URL             transcript URL for a no-rollup attempt
 //   ROLLUP_PATH         rollup.json (the workflow's returned rollup); unset or
 //                       unreadable records a no-rollup attempt
 //   ATTEMPT             this trial's attempt number, baked into the marker

@@ -4,7 +4,7 @@
 # closing issue BLIND, then harvests the candidate diff beside the landed "ground
 # truth" diff. Emits one judge-input record per line:
 #
-#   {issue, candidate_diff, landed_diff, model, model_label, size_label}
+#   {issue, candidate_diff, landed_diff, model, size}
 #
 # Blindness is STRUCTURAL, not incidental:
 #   * The scratch repo is a single-revision clone — `git clone --revision=<parent>
@@ -36,18 +36,6 @@ server="${GITHUB_SERVER_URL:-https://github.com}"
 workspace="${GITHUB_WORKSPACE:-$PWD}"
 agent_timeout="${QUALITY_EVAL_AGENT_TIMEOUT:-1800}"
 
-# The label -> model mapping mirrors agent-work.yml's "Resolve the driving model"
-# step (current fleet routing): opus for model:opus, else the headless sonnet
-# string, so the eval runs each blind re-implementation under the model the
-# pipeline would actually route that issue to.
-resolve_model() {
-  case "$1" in
-    model:opus) echo "opus" ;;
-    model:sonnet) echo "claude-sonnet-5" ;;
-    *) echo "claude-sonnet-5" ;;
-  esac
-}
-
 contaminated=0
 processed=0
 
@@ -58,10 +46,23 @@ while IFS= read -r line; do
   issue=$(jq -r '.issue' <<<"$line")
   parent_sha=$(jq -r '.parent_sha' <<<"$line")
   squash_sha=$(jq -r '.squash_sha' <<<"$line")
-  model_label=$(jq -r '.model_label // ""' <<<"$line")
-  size_label=$(jq -r '.size_label // ""' <<<"$line")
+  model=$(jq -r '.model // ""' <<<"$line")
+  size=$(jq -r '.size // ""' <<<"$line")
   issue_body=$(jq -r '.issue_body // ""' <<<"$line")
-  model=$(resolve_model "$model_label")
+  case "$model" in
+    haiku|sonnet|opus) ;;
+    *)
+      echo "[#${issue}] SKIP: unsupported Plan model alias: ${model:-<missing>}" >&2
+      continue
+      ;;
+  esac
+  case "$size" in
+    s|m|l) ;;
+    *)
+      echo "[#${issue}] SKIP: unsupported Plan size: ${size:-<missing>}" >&2
+      continue
+      ;;
+  esac
 
   scratch=$(mktemp -d)
   echo "[#${issue}] blind run at parent ${parent_sha:0:12} (model ${model})" >&2
@@ -162,9 +163,8 @@ while IFS= read -r line; do
     --arg candidate_diff "$candidate_diff" \
     --arg landed_diff "$landed_diff" \
     --arg model "$model" \
-    --arg model_label "$model_label" \
-    --arg size_label "$size_label" \
-    '{issue: $issue, candidate_diff: $candidate_diff, landed_diff: $landed_diff, model: $model, model_label: $model_label, size_label: $size_label}'
+    --arg size "$size" \
+    '{issue: $issue, candidate_diff: $candidate_diff, landed_diff: $landed_diff, model: $model, size: $size}'
 
   processed=$((processed + 1))
   untrust_scratch

@@ -30,8 +30,9 @@ use crate::ids::StageId;
 use crate::values::{AgentProfile, Harness, ReasoningEffort, StageCatalog, is_model_lane};
 
 /// A per-workpiece override of *how* the model lanes run for this workpiece
-/// (ADR-0149 §The line, #3511) — the successor of today's free-text `model:*`
-/// label. Each field is optional: an unset field falls through to the stage
+/// (ADR-0149 §The line, #3511). This is runtime configuration sealed into the
+/// bloom, independent of the contributor workflow's Plan routing. Each field is
+/// optional: an unset field falls through to the stage
 /// [`AgentProfile`] default at [resolution](Self::resolve), so an empty override
 /// changes nothing and a set field pins exactly that value into the sealed
 /// bloom.
