@@ -695,6 +695,13 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         // once up front: it belongs to this member, and a member that is one day
         // removed should take its prepare step with it. A failed prepare fails
         // the member without running it — see `prepare_failure_log`.
+        //
+        // It is the member's own failure, not an operational one, even though
+        // the member never ran: ADR-0178 rules that "a failed member
+        // preparation step belongs to that member's identity". The host half of
+        // it is already covered — the preflight checks the cross-target the
+        // pre-build needs — so what is left is the candidate breaking its own
+        // build.
         let (outcome, log_bytes, exit_code) = match run_prepare(id, &invocation)? {
             Some((log, code)) => (MemberOutcome::Failed, log.into_bytes(), code),
             None => run_member(id, &invocation)?,
