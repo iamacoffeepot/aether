@@ -17,10 +17,12 @@ use aether_bloomery::ConfigKind;
 use aether_bloomery::Decisions;
 use aether_bloomery::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, Artifact, AttemptCompletedError,
-    BloomId, BloomStatus, CandidateRef, CatalogError, Decision, Digest, DispatchKey, Event, Evidence, EvidenceKind,
-    Fact, GrantAttemptsError, KeyId, LandError, LandingRejectedError, Observation, Outcome, Provenance, Question,
-    ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId, StageProgress,
-    Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure, VerifyFailureSet, grade, reduce,
+    BloomId, BloomStatus, CandidateRef, CatalogError, ClaimRefKind, Decision, Digest, DispatchKey, Event, Evidence,
+    EvidenceKind, Fact, GrantAttemptsError, KeyId, LandError, LandingRejectedError, ORPHAN_CLAIM_RELEASE_WORDS,
+    Observation, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseError, Outcome, Provenance,
+    Question, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId,
+    StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure, VerifyFailureSet, grade,
+    reduce,
 };
 use aether_data::Kind;
 use aether_data::wire::to_vec;
@@ -3074,4 +3076,169 @@ mod mainline_resync {
         );
         assert_eq!(next.mainline, digest(1), "and mainline stays where it was");
     }
+}
+
+/// An author-signed statement asserting `words` over `parents` — the shape the
+/// orphan-release door requires. The reducer only checks provenance *class* and
+/// binding, so the envelope's bytes need not verify here; the cryptographic gate
+/// is the host route's, upstream of admission.
+fn signed(words: &str, parents: Vec<Digest>) -> Statement {
+    Statement {
+        words: words.as_bytes().to_vec(),
+        provenance: Provenance::AuthorSignature(SignatureEnvelope {
+            signer: KeyId("operator".into()),
+            signature: vec![0; 64],
+        }),
+        parents,
+    }
+}
+
+fn release_target(holder: u8) -> OrphanClaimRelease {
+    OrphanClaimRelease { ref_kind: ClaimRefKind::MainlineAdmission, expected_holder: BloomId(digest(holder)) }
+}
+
+fn release_event(key: &str, target: &OrphanClaimRelease, authorization: Statement) -> Event {
+    event(key, Fact::RequestOrphanClaimRelease { request: target.clone(), authorization })
+}
+
+#[test]
+fn an_orphaned_holder_releases_once_and_a_repeat_enqueues_nothing() {
+    // Tripwire on ADR-0179's whole reason to exist plus its idempotency clause: a
+    // holder no bloom record knows must be releasable, and re-submitting the same
+    // request must return the handle without enqueuing a second release. A lost
+    // repeat guard means an operator's double-click deletes a ref twice — the
+    // second time against whatever holder has since taken it.
+    let target = release_target(200);
+    let authorization = signed(ORPHAN_CLAIM_RELEASE_WORDS, vec![target.request()]);
+    let snapshot = Snapshot::default();
+
+    let (snapshot, decisions) = step(&snapshot, &release_event("release-1", &target, authorization.clone()));
+
+    assert_eq!(decisions.outcome, Outcome::OrphanClaimReleaseRequested { request: target.request() });
+    assert_eq!(
+        decisions.effects.iter().filter(|e| matches!(e, Decision::DispatchOrphanClaimRelease { .. })).count(),
+        1,
+        "an admitted request enqueues exactly one source effect",
+    );
+    assert_eq!(
+        snapshot.orphan_releases.get(&target.request()).map(|record| record.completion),
+        Some(None),
+        "the request is recorded pending",
+    );
+
+    let (_, repeat) = step(&snapshot, &release_event("release-2", &target, authorization));
+
+    assert_eq!(repeat.outcome, Outcome::OrphanClaimReleaseRequested { request: target.request() });
+    assert!(repeat.effects.is_empty(), "a repeat of a recorded request enqueues no second release");
+}
+
+#[test]
+fn a_locally_known_holder_is_refused_however_it_is_signed() {
+    // Tripwire on the safety boundary: this door exists only for a holder no
+    // journal knows. A bloom the snapshot holds belongs to reconcile, supersede,
+    // or the land-time release, and letting a signature reach it would make this
+    // a second, unaudited route around all three — able to free the claim refs of
+    // a bloom that is still working.
+    let (snapshot, spec) = sealed_and_resolved(1, vec![membership("wp-1", 1)], 40);
+    let target = OrphanClaimRelease { ref_kind: ClaimRefKind::MainlineAdmission, expected_holder: spec.id() };
+
+    let (after, decisions) = step(
+        &snapshot,
+        &release_event("release-known", &target, signed(ORPHAN_CLAIM_RELEASE_WORDS, vec![target.request()])),
+    );
+
+    assert_eq!(decisions.outcome, Outcome::OrphanClaimReleaseRejected(OrphanClaimReleaseError::HolderKnown(spec.id())),);
+    assert!(after.orphan_releases.is_empty(), "a refused request records nothing");
+}
+
+#[test]
+fn an_authorization_that_does_not_bind_this_request_is_refused() {
+    // Tripwire on the parent binding. The words alone are a reusable token: a
+    // signature harvested from one release would authorize every other if the
+    // parents were not checked, which is the difference between "release this ref"
+    // and "release anything". The wrong-words case is the same gate from the other
+    // side — a signature over unrelated instruction text must not be replayable
+    // here.
+    let target = release_target(200);
+    let snapshot = Snapshot::default();
+
+    let wrong_parent = signed(ORPHAN_CLAIM_RELEASE_WORDS, vec![digest(99)]);
+    let (_, decisions) = step(&snapshot, &release_event("release-a", &target, wrong_parent));
+    assert_eq!(decisions.outcome, Outcome::OrphanClaimReleaseRejected(OrphanClaimReleaseError::AuthorizationNotBound),);
+
+    let wrong_words = signed("release everything", vec![target.request()]);
+    let (_, decisions) = step(&snapshot, &release_event("release-b", &target, wrong_words));
+    assert_eq!(decisions.outcome, Outcome::OrphanClaimReleaseRejected(OrphanClaimReleaseError::AuthorizationNotBound),);
+
+    let observed = Statement {
+        words: ORPHAN_CLAIM_RELEASE_WORDS.as_bytes().to_vec(),
+        provenance: Provenance::ObservationAttestation(Observation { source: "a mirror".into() }),
+        parents: vec![target.request()],
+    };
+    let (_, decisions) = step(&snapshot, &release_event("release-c", &target, observed));
+    assert_eq!(decisions.outcome, Outcome::OrphanClaimReleaseRejected(OrphanClaimReleaseError::NotInstructionCapable),);
+}
+
+#[test]
+fn the_first_completion_wins_and_a_redrive_changes_nothing() {
+    // Tripwire on the terminal: the first result is what the source actually did.
+    // A redrive arriving after it re-reads an absent ref and would otherwise
+    // overwrite `Released` with `AlreadyAbsent`, rewriting the audit trail of a
+    // destructive act into something weaker than what happened.
+    let target = release_target(200);
+    let request = target.request();
+    let (snapshot, _) = step(
+        &Snapshot::default(),
+        &release_event("release-1", &target, signed(ORPHAN_CLAIM_RELEASE_WORDS, vec![request])),
+    );
+
+    let completed = event(
+        "complete-1",
+        Fact::CompleteOrphanClaimRelease { request, completion: OrphanClaimReleaseCompletion::Released },
+    );
+    let (snapshot, decisions) = step(&snapshot, &completed);
+    assert_eq!(
+        decisions.outcome,
+        Outcome::OrphanClaimReleaseCompleted { request, completion: OrphanClaimReleaseCompletion::Released },
+    );
+    assert_eq!(
+        snapshot.orphan_releases.get(&request).and_then(|record| record.completion),
+        Some(OrphanClaimReleaseCompletion::Released),
+    );
+
+    let redrive = event(
+        "complete-2",
+        Fact::CompleteOrphanClaimRelease { request, completion: OrphanClaimReleaseCompletion::AlreadyAbsent },
+    );
+    let (after, decisions) = step(&snapshot, &redrive);
+    assert_eq!(
+        decisions.outcome,
+        Outcome::OrphanClaimReleaseRejected(OrphanClaimReleaseError::AlreadyCompleted(request)),
+    );
+    assert_eq!(
+        after.orphan_releases.get(&request).and_then(|record| record.completion),
+        Some(OrphanClaimReleaseCompletion::Released),
+        "the first terminal stands",
+    );
+}
+
+#[test]
+fn a_completion_for_an_unadmitted_request_opens_no_record() {
+    // Tripwire: the completion door must not be an admission door. If it opened a
+    // record, a fabricated or mis-routed completion would manufacture the audit
+    // trail of a release nobody ever authorized.
+    let request = digest(77);
+    let (after, decisions) = step(
+        &Snapshot::default(),
+        &event(
+            "complete-orphan",
+            Fact::CompleteOrphanClaimRelease { request, completion: OrphanClaimReleaseCompletion::Released },
+        ),
+    );
+
+    assert_eq!(
+        decisions.outcome,
+        Outcome::OrphanClaimReleaseRejected(OrphanClaimReleaseError::UnknownRequest(request)),
+    );
+    assert!(after.orphan_releases.is_empty());
 }

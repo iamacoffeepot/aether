@@ -51,9 +51,9 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    BackendObjectId, BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ContentAddressed,
-    CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal, LandingReceipt,
-    SharedCorrespondence, SourceBackend, SourceSnapshot, WorkpieceId, digest_of,
+    BackendObjectId, BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,
+    ContentAddressed, CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal,
+    LandingReceipt, SharedCorrespondence, SourceBackend, SourceSnapshot, WorkpieceId, digest_of,
 };
 use serde::Serialize;
 
@@ -679,50 +679,70 @@ impl<C: GitDataApi + PullRequestApi> GitSource<C> {
         targets: &[(ClaimRefKind, String)],
     ) -> Result<ClaimOutcome, SourceError> {
         for (kind, name) in targets {
-            let Some(current) = self.client.get_ref(name)? else {
-                continue;
-            };
-            let claim_state = self.classify_holder(&current.sha)?;
-            // An already-tombstoned ref is released regardless of `owner` — the
-            // tombstone *is* the released state, so finishing the interrupted
-            // cleanup delete is pure name reclamation, safe for any instance. But
-            // guard the cleanup with the same CAS the live-holder branch uses: a
-            // blind name-only delete would race a fresh claim that reused the name
-            // in the window since the read, so re-assert the observed tombstone via
-            // a no-op fast-forward first. If the ref moved to an unrelated fresh
-            // claim commit that reassertion 422s (the new commit is not a
-            // fast-forward descendant of the stale tombstone), so the name has
-            // already been reclaimed by that holder — skip the delete and move on
-            // rather than clobbering a claim we never owned.
-            if matches!(claim_state, ClaimHolder::Tombstoned) {
+            match self.release_target(owner, name)? {
+                // Both clean terminals mean this ref is no longer held by the
+                // owner, which is all an all-or-nothing release needs; the walk
+                // continues.
+                ClaimReleaseOutcome::Released | ClaimReleaseOutcome::AlreadyAbsent => {}
+                ClaimReleaseOutcome::Changed { observed_holder } => {
+                    return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by: observed_holder });
+                }
+            }
+        }
+        Ok(ClaimOutcome::Acquired)
+    }
+
+    // Release exactly one ref by name, reporting which of the three terminals it
+    // reached. The single-ref body [`release_targets`] walks and
+    // [`complete_release`] returns directly, so the CAS-to-tombstone guard,
+    // the tombstone-race reassertion, and the lost-CAS re-read live in one place
+    // rather than being written twice with a different result type each.
+    fn release_target(&self, owner: Option<&BloomId>, name: &str) -> Result<ClaimReleaseOutcome, SourceError> {
+        let Some(current) = self.client.get_ref(name)? else {
+            return Ok(ClaimReleaseOutcome::AlreadyAbsent);
+        };
+        // An already-tombstoned ref is released regardless of `owner` — the
+        // tombstone *is* the released state, so finishing the interrupted cleanup
+        // delete is pure name reclamation, safe for any instance. But guard the
+        // cleanup with the same CAS the live-holder branch uses: a blind name-only
+        // delete would race a fresh claim that reused the name in the window since
+        // the read, so re-assert the observed tombstone via a no-op fast-forward
+        // first. If the ref moved to an unrelated fresh claim commit that
+        // reassertion 422s (the new commit is not a fast-forward descendant of the
+        // stale tombstone), so the name has already been reclaimed by that holder —
+        // skip the delete rather than clobbering a claim we never owned. Either way
+        // the holder this call was authorized against is gone, which is
+        // `AlreadyAbsent`.
+        let holder = match self.classify_holder(&current.sha)? {
+            ClaimHolder::Tombstoned => {
                 match self.client.update_ref(name, &current.sha, false) {
                     Ok(_) => self.client.delete_ref(name)?,
                     Err(GithubError::Status { status: 422, .. }) => {}
                     Err(error) => return Err(SourceError::Github(error)),
                 }
-                continue;
+                return Ok(ClaimReleaseOutcome::AlreadyAbsent);
             }
-            let ClaimHolder::Held(holder) = claim_state else {
-                unreachable!("Tombstoned handled above")
-            };
-            // A live ref is released only when `owner` names its holder; a `None`
-            // sweep, or a mismatch, spares it and reports the holder.
-            if owner != Some(&holder) {
-                return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by: holder });
-            }
-            let tombstone = self.client.create_commit(&render_tombstone_message(), EMPTY_TREE, &[current.sha])?;
-            match self.client.update_ref(name, &tombstone.sha, false) {
-                Ok(_) => {}
-                // Lost the fast-forward CAS to a concurrent mutation — re-read the
-                // holder and report it rather than deleting a ref we no longer own.
-                Err(GithubError::Status { status: 422, .. }) => {
-                    return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by: self.require_holder(name)? });
-                }
-                Err(error) => return Err(SourceError::Github(error)),
-            }
-            self.client.delete_ref(name)?;
+            ClaimHolder::Held(holder) => holder,
+        };
+
+        // A live ref is released only when `owner` names its holder; a `None`
+        // sweep, or a mismatch, spares it and reports the holder it found.
+        if owner != Some(&holder) {
+            return Ok(ClaimReleaseOutcome::Changed { observed_holder: holder });
         }
-        Ok(ClaimOutcome::Acquired)
+
+        let tombstone = self.client.create_commit(&render_tombstone_message(), EMPTY_TREE, &[current.sha])?;
+        match self.client.update_ref(name, &tombstone.sha, false) {
+            Ok(_) => {}
+            // Lost the fast-forward CAS to a concurrent mutation — re-read the
+            // holder and report it rather than deleting a ref we no longer own.
+            Err(GithubError::Status { status: 422, .. }) => {
+                return Ok(ClaimReleaseOutcome::Changed { observed_holder: self.require_holder(name)? });
+            }
+            Err(error) => return Err(SourceError::Github(error)),
+        }
+        self.client.delete_ref(name)?;
+        Ok(ClaimReleaseOutcome::Released)
     }
 }
 
@@ -1182,8 +1202,8 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
         &self,
         expected_holder: Option<&BloomId>,
         ref_kind: &ClaimRefKind,
-    ) -> Result<ClaimOutcome, Self::Error> {
-        self.release_targets(expected_holder, &[(ref_kind.clone(), Self::ref_name(ref_kind))])
+    ) -> Result<ClaimReleaseOutcome, Self::Error> {
+        self.release_target(expected_holder, &Self::ref_name(ref_kind))
     }
 }
 
@@ -1197,8 +1217,8 @@ mod tests {
 
     use aether_bloomery::{
         BackendObjectId, BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState,
-        Correspondence as DomainCorrespondence, CorrespondenceError, Digest, IntegrateOutcome, LandOutcome,
-        LandProposal, SourceBackend, WorkpieceId,
+        ClaimReleaseOutcome, Correspondence as DomainCorrespondence, CorrespondenceError, Digest, IntegrateOutcome,
+        LandOutcome, LandProposal, SourceBackend, WorkpieceId,
     };
 
     use std::sync::Arc;
@@ -2046,16 +2066,18 @@ mod tests {
         seed_tombstone(&fake, &claim_ref(&w1));
         source.claim_seal(&bloom_id(9), from_ref(&w2)).unwrap();
 
-        // The tombstoned ref is swept.
+        // The tombstoned ref is swept. A tombstone *is* the released state, so
+        // the sweep reports it absent rather than freshly released.
         assert_eq!(
             source.complete_release(None, &ClaimRefKind::Workpiece(w1.clone())).unwrap(),
-            ClaimOutcome::Acquired
+            ClaimReleaseOutcome::AlreadyAbsent
         );
         assert!(!fake.ref_exists(&claim_ref(&w1)), "the tombstoned ref name was reclaimed");
 
-        // A live ref under a `None` sweep is spared (reported Held), never deleted.
+        // A live ref under a `None` sweep is spared, reporting the holder it
+        // found, never deleted.
         let outcome = source.complete_release(None, &ClaimRefKind::Workpiece(w2.clone())).unwrap();
-        assert_eq!(outcome, ClaimOutcome::Held { ref_kind: ClaimRefKind::Workpiece(w2.clone()), held_by: bloom_id(9) });
+        assert_eq!(outcome, ClaimReleaseOutcome::Changed { observed_holder: bloom_id(9) });
         assert!(fake.ref_exists(&claim_ref(&w2)), "a live ref is not swept");
     }
 
@@ -2073,13 +2095,23 @@ mod tests {
         // Naming the owner releases exactly its ref (the stranded-drop release path).
         assert_eq!(
             source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(mine.clone())).unwrap(),
-            ClaimOutcome::Acquired
+            ClaimReleaseOutcome::Released
         );
         assert!(!fake.ref_exists(&claim_ref(&mine)), "the owner's ref was released");
 
-        // A ref a foreign bloom holds is spared even when a holder is named.
+        // A ref a foreign bloom holds is spared even when a holder is named — the
+        // expected-holder compare that keeps the ADR-0179 operator surface from
+        // destroying another instance's live claim.
         let outcome = source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(theirs.clone())).unwrap();
-        assert_eq!(outcome, ClaimOutcome::Held { ref_kind: ClaimRefKind::Workpiece(theirs.clone()), held_by: foreign });
+        assert_eq!(outcome, ClaimReleaseOutcome::Changed { observed_holder: foreign });
         assert!(fake.ref_exists(&claim_ref(&theirs)), "the foreign ref is spared");
+
+        // An absent ref is the idempotent terminal success — the crash-after-delete
+        // redrive ADR-0179 relies on to finish a release whose completion was
+        // never admitted.
+        assert_eq!(
+            source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(mine)).unwrap(),
+            ClaimReleaseOutcome::AlreadyAbsent
+        );
     }
 }

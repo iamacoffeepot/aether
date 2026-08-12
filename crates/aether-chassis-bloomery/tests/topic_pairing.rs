@@ -14,7 +14,8 @@
 
 use aether_bloomery::Topic;
 use aether_chassis_bloomery::bloomery::{
-    ExecutorReactorCapability, IntegrateReactorCapability, LandReactorCapability, MirrorReactorCapability,
+    ClaimReleaseReactorCapability, ExecutorReactorCapability, IntegrateReactorCapability, LandReactorCapability,
+    MirrorReactorCapability,
 };
 
 /// The topics that still have no draining host reactor, each with the issue
@@ -36,6 +37,7 @@ fn every_reducer_topic_pairs_with_exactly_one_drainer() {
     // orphan bug class — and this fails naming the unpaired topic. A second
     // drainer (double-processing) fails the same way.
     let drained: Vec<Topic> = [
+        ClaimReleaseReactorCapability::DRAINED_TOPICS,
         ExecutorReactorCapability::DRAINED_TOPICS,
         IntegrateReactorCapability::DRAINED_TOPICS,
         LandReactorCapability::DRAINED_TOPICS,

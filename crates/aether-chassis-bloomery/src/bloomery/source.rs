@@ -22,9 +22,9 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BackendObjectId, BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, CorrespondenceError, Digest,
-    IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal, SharedCorrespondence, Snapshot, SourceBackend,
-    SourceSnapshot, WorkpieceId,
+    BackendObjectId, BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,
+    CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal,
+    SharedCorrespondence, Snapshot, SourceBackend, SourceSnapshot, WorkpieceId,
 };
 use aether_bloomery_github::{GitObjectId, GitSource, GithubError, SourceError};
 
@@ -314,16 +314,17 @@ impl SourceShell {
     }
 
     /// Idempotent per-ref release completion: sweep a tombstoned ref (`None`
-    /// holder) or release a ref held by `Some(bloom)`.
+    /// holder), release a ref held by `Some(bloom)`, or — the ADR-0179 operator
+    /// path — release one orphaned ref against its expected holder.
     ///
     /// # Errors
-    /// A transport or backend fault, distinct from the clean
-    /// [`ClaimOutcome::Held`] refusal.
+    /// A transport or backend fault, distinct from every clean
+    /// [`ClaimReleaseOutcome`].
     pub fn complete_release(
         &self,
         expected_holder: Option<&BloomId>,
         ref_kind: &ClaimRefKind,
-    ) -> Result<ClaimOutcome, SourceError> {
+    ) -> Result<ClaimReleaseOutcome, SourceError> {
         self.backend.complete_release(expected_holder, ref_kind)
     }
 }

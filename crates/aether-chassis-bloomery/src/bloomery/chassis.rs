@@ -27,9 +27,9 @@ use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
 #[cfg(feature = "github")]
 use crate::bloomery::{
-    ExecutorReactorCapability, ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig, IntegrateReactorCapability,
-    IntegrateReactorSetup, LandReactorCapability, LandReactorSetup, MirrorReactorCapability, MirrorReactorSetup,
-    ProjectionShell, SourceShell,
+    ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ExecutorReactorCapability, ExecutorReactorSetup,
+    ExecutorShell, GithubConnectionConfig, IntegrateReactorCapability, IntegrateReactorSetup, LandReactorCapability,
+    LandReactorSetup, MirrorReactorCapability, MirrorReactorSetup, ProjectionShell, SourceShell,
 };
 use crate::control::ControlCore;
 use crate::session::{SessionConfig, SessionPoolCapability};
@@ -100,6 +100,7 @@ struct BloomeryActorSetups {
     executor: ExecutorReactorSetup,
     land: LandReactorSetup,
     integrate: IntegrateReactorSetup,
+    claim_release: ClaimReleaseReactorSetup,
     source: SourceSetup,
 }
 
@@ -188,6 +189,11 @@ fn actor_setups(
             store_path: coordinator.store_path.clone(),
             poll_interval_secs: coordinator.poll_interval_secs,
             repository,
+        },
+        claim_release: ClaimReleaseReactorSetup {
+            source: configured.then(|| source.clone()),
+            store_path: coordinator.store_path.clone(),
+            poll_interval_secs: coordinator.poll_interval_secs,
         },
         source: SourceSetup { shell: source, claims_enabled: configured },
     })
@@ -369,6 +375,7 @@ impl BootableChassis for BloomeryChassis {
             // `Fact::Land` back to the control core. Receives the already-built
             // source shell and its coordinator scalars.
             .with_actor::<LandReactorCapability>(setups.land)
+            .with_actor::<ClaimReleaseReactorCapability>(setups.claim_release)
             // The integrate reactor (#3650, ADR-0152): drains the reducer's
             // `aether.bloomery.integrate` decisions, folds the claimed candidate
             // onto the bloom's integration branch, and admits `Fact::Resolve`

@@ -27,14 +27,15 @@
 //! by the HTTP server's own `502`; one that never settles, by its request
 //! timeout. Neither needs machinery in this cap.
 //!
-//! Two routes are genuinely **multi-hop** and keep an explicit obligation,
-//! because their next hop is not the answer: `POST /blooms/{id}/answer` verifies
-//! a signature before it admits, and `POST /drafts/{id}/seal` joins N member
-//! verifications before admitting once (the ADR-0154 §2 scatter/gather
-//! exclusion). Their terminal `Admit` is dispatched from a reply handler, which
-//! holds no route obligation to defer, so it goes out as a tracked fresh root
-//! and is answered by hand from [`state::ApiCapabilityState::pending`]; a
-//! settlement subscription answers `504` if that chain never replies.
+//! Three routes are genuinely **multi-hop** and keep an explicit obligation,
+//! because their next hop is not the answer: `POST /blooms/{id}/answer` and
+//! `POST /claims/releases` each verify a signature before they admit, and
+//! `POST /drafts/{id}/seal` joins N member verifications before admitting once
+//! (the ADR-0154 §2 scatter/gather exclusion). Their terminal `Admit` is
+//! dispatched from a reply handler, which holds no route obligation to defer, so
+//! it goes out as a tracked fresh root and is answered by hand from
+//! [`state::ApiCapabilityState::pending`]; a settlement subscription answers
+//! `504` if that chain never replies.
 //!
 //! A reply is delivered to a **typed** handler and deliberately not to a
 //! `#[fallback]`: a fallback would widen the actor's accept-set to every kind —
@@ -48,11 +49,13 @@
 //! `#[http::route]` method and every typed reply handler stays here, each a
 //! two-line delegation to the module that owns the work. [`state`] holds the
 //! router state, the ceilings that bound it, and the deferral machinery;
-//! [`workpieces`], [`drafts`], [`seal`], [`blooms`] and [`reads`] hold one
-//! resource each; [`response`] and [`hex`] hold the shared response
+//! [`workpieces`], [`drafts`], [`seal`], [`blooms`], `claims` and [`reads`] hold
+//! one resource each; [`response`] and [`hex`] hold the shared response
 //! constructors and the bloom-id URL codec.
 
 mod blooms;
+#[cfg(feature = "github")]
+mod claims;
 mod configs;
 mod drafts;
 mod hex;
@@ -67,7 +70,8 @@ use std::path::Path;
 
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{
-    AdmitResult, LoadConfigsResult, QueryResult, ReplayJournal, ReplayJournalResult, ResolvedConfigs,
+    AdmitResult, EnumerateClaimsResult, LoadConfigsResult, QueryResult, ReplayJournal, ReplayJournalResult,
+    ResolvedConfigs,
 };
 use aether_http as http;
 use aether_http::HttpServerResponse;
@@ -79,6 +83,8 @@ pub use aether_substrate::chassis::error::BootError;
 pub use state::ApiCapabilityState;
 
 use blooms::{admit_response, query_response};
+#[cfg(feature = "github")]
+use claims::{claims_response, release_status_response};
 use configs::{config_response, load_configs};
 use reads::{artifact_response, journal_response};
 use response::{error_response, json};
@@ -90,6 +96,52 @@ use crate::artifacts::{Get, GetResult};
 use crate::bloomery::load_policy;
 use crate::signing::VerifyResult;
 use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult};
+
+/// The claim routes' bodies for a build with no GitHub source runtime: an
+/// immediate `503` rather than a deferral onto a `SourceCapability` mailbox that
+/// was never registered.
+///
+/// The three routes themselves stay unconditional, because `#[http::router]`
+/// collects its method list before the compiler strips `#[cfg]`s — a per-method
+/// gate leaves the generated dispatch table naming a method that is not there.
+/// Answering `503` from the body is also the honest behavior rather than a
+/// workaround: without this the routes would be actively harmful instead of
+/// merely absent. `GET /claims` would relay onto a mailbox nothing registered and
+/// hang its caller on the HTTP server's timeout, and `POST /claims/releases`
+/// would verify the signature, journal a pending release, and enqueue an outbox
+/// row that no reactor drains in that build — a request durably pending forever.
+#[cfg(not(feature = "github"))]
+impl ApiCapabilityState {
+    fn claims_unavailable() -> Routed {
+        Routed::Reply(error_response(503, "claim inspection and release need the GitHub source runtime"))
+    }
+
+    fn list_claims() -> Routed {
+        Self::claims_unavailable()
+    }
+
+    fn request_claim_release(&self, _ctx: &NativeCtx<'_, Manual>, _body: &[u8]) -> Routed {
+        Self::claims_unavailable()
+    }
+
+    fn query_claim_release(_digest: &str) -> Routed {
+        Self::claims_unavailable()
+    }
+}
+
+/// Render a claim enumeration. Unreachable without the GitHub source runtime —
+/// the route that would ask for one refuses first — so it only has to exist for
+/// the `#[http::reply]` glue the route's paired handler generates.
+#[cfg(not(feature = "github"))]
+fn claims_response(_result: EnumerateClaimsResult) -> HttpServerResponse {
+    error_response(503, "claim inspection needs the GitHub source runtime")
+}
+
+/// Render a release-status read, unreachable for the same reason.
+#[cfg(not(feature = "github"))]
+fn release_status_response(_result: QueryResult) -> HttpServerResponse {
+    error_response(503, "claim release status needs the GitHub source runtime")
+}
 
 /// Composer-supplied params for the REST control api cap (ADR-0156 §3 `Params`
 /// channel): the fallback tier-policy file the pre-seal approve gate loads at
@@ -308,6 +360,38 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `GET /claims` — enumerate the live claim refs and their holders
+    /// (ADR-0179). The diagnostic that used to require `git ls-remote`.
+    #[http::route(Get, "/claims")]
+    fn on_get_claims(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = ApiCapabilityState::list_claims();
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /claims/releases` — authorize releasing one orphaned claim ref with
+    /// an author signature (ADR-0179).
+    #[http::route(Post, "/claims/releases")]
+    fn on_post_claim_release(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+    ) -> http::Outcome {
+        let routed = state.request_claim_release(&ctx, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /claims/releases/{digest}` — read one authorized release's
+    /// journal-derived state: pending, or its terminal result.
+    #[http::route(Get, "/claims/releases/{digest}")]
+    fn on_get_claim_release(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        digest: http::Path<String>,
+    ) -> http::Outcome {
+        let digest = digest.0;
+        let routed = ApiCapabilityState::query_claim_release(&digest);
+        finish(state, ctx, routed)
+    }
+
     /// `GET /journal` — read the durable event journal from the store.
     #[http::route(Get, "/journal")]
     fn on_get_journal(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
@@ -344,14 +428,32 @@ impl NativeActor for BloomeryApiCapability {
         state.answer(ctx, &response);
     }
 
-    /// The control core's reply to a live projection read.
+    /// The control core's reply to a live projection read, or to an
+    /// orphan-claim release's status read (ADR-0179).
+    ///
+    /// One `Query` kind answers both, so which read this is answering is decided
+    /// by the reply's own variant rather than by anything the route held — the
+    /// relay surfaces no correlation to key a second table on.
     #[http::reply]
     fn on_query_result(
         _state: &mut ApiCapabilityState,
         _ctx: &mut NativeCtx<'_, Manual>,
         mail: QueryResult,
     ) -> HttpServerResponse {
-        query_response(mail)
+        match mail {
+            QueryResult::Release { .. } | QueryResult::ReleaseNotFound => release_status_response(mail),
+            mail => query_response(mail),
+        }
+    }
+
+    /// The source cap's reply to a claim enumeration (ADR-0179).
+    #[http::reply]
+    fn on_enumerate_claims_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: EnumerateClaimsResult,
+    ) -> HttpServerResponse {
+        claims_response(mail)
     }
 
     /// The store's reply to a journal read.

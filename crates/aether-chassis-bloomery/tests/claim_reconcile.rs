@@ -48,7 +48,7 @@ use aether_bloomery_github::GitSource;
 use aether_bloomery_github::testing::FakeGithub;
 use aether_chassis_bloomery::bloomery::SourceShell;
 use aether_chassis_bloomery::source::SourceCapabilityState;
-use aether_chassis_bloomery::source::kinds::ClaimResult;
+use aether_chassis_bloomery::source::kinds::{ClaimResult, CompleteReleaseResult};
 use aether_data::wire::from_bytes;
 
 fn digest(seed: u8) -> Digest {
@@ -423,7 +423,16 @@ fn drive_heals(state: &SourceCapabilityState, snapshot: &Snapshot) {
                 );
             }
             HealOp::Release(mail) => {
-                assert_eq!(state.complete_release(&mail.bloom, &mail.ref_kind), ClaimResult::Acquired);
+                // Every clean release terminal is convergence for a boot heal:
+                // the ref is not held by the stranded predecessor any more,
+                // whether this call deleted it or a prior one already had.
+                assert!(
+                    matches!(
+                        state.complete_release(&mail.bloom, &mail.ref_kind),
+                        CompleteReleaseResult::Released | CompleteReleaseResult::AlreadyAbsent
+                    ),
+                    "a planned heal release converges",
+                );
             }
         }
     }

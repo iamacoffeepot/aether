@@ -225,7 +225,12 @@ impl LaneHarness {
     /// The query was refused or its reply did not decode.
     pub fn view(&mut self) -> ViewDocument {
         self.cid += 1;
-        match call::<_, QueryResult>(&mut self.stream, self.cid, control_mailbox(), &Query { bloom: None }) {
+        match call::<_, QueryResult>(
+            &mut self.stream,
+            self.cid,
+            control_mailbox(),
+            &Query { bloom: None, release: None },
+        ) {
             QueryResult::Document { document } => from_bytes(&document).expect("the projection decodes"),
             other => panic!("expected a document reply, got {other:?}"),
         }

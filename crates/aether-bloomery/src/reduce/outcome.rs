@@ -7,12 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError, Decision,
-    GrantAttemptsError, IntegrateError, LandError, LandingRejectedError, ResolveError, SealError, SupersedeError,
-    VerifyFailedError,
+    GrantAttemptsError, IntegrateError, LandError, LandingRejectedError, OrphanClaimReleaseError, ResolveError,
+    SealError, SupersedeError, VerifyFailedError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{LandingReceipt, ResolvedBloom, VerifyFailureSet};
+use crate::values::{LandingReceipt, OrphanClaimReleaseCompletion, ResolvedBloom, VerifyFailureSet};
 
 /// The result of reducing one event: an outcome plus the ordered effects that
 /// enter the transactional outbox.
@@ -285,4 +285,21 @@ pub enum Outcome {
     GrantAttemptsRejected(GrantAttemptsError),
     /// A typed member-Verify failure was refused.
     VerifyFailedRejected(VerifyFailedError),
+    /// An authorized orphan-claim release was admitted and its source effect
+    /// enqueued (ADR-0179). A repeat of a request id already on record resolves
+    /// here too, carrying no effects — the recorded state is what the status
+    /// route reads, and re-enqueuing would release twice.
+    OrphanClaimReleaseRequested {
+        /// The request digest — the handle the status route reads by.
+        request: Digest,
+    },
+    /// An authorized release reached its terminal result.
+    OrphanClaimReleaseCompleted {
+        /// The completed request.
+        request: Digest,
+        /// Which terminal the source reached.
+        completion: OrphanClaimReleaseCompletion,
+    },
+    /// An orphan-claim release request or completion was refused.
+    OrphanClaimReleaseRejected(OrphanClaimReleaseError),
 }

@@ -11,7 +11,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::values::{
-    AgentProfile, ConfigRegistry, Evidence, MemberCandidate, ResolutionClaim, ResolvedBloom, Transformation, Wedge,
+    AgentProfile, ConfigRegistry, Evidence, MemberCandidate, OrphanClaimRelease, OrphanClaimReleaseCompletion,
+    ResolutionClaim, ResolvedBloom, Transformation, Wedge,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -375,5 +376,38 @@ pub enum Decision {
     RecordObservation {
         /// The head the source reported.
         head: Digest,
+    },
+    /// Record an authorized orphan-claim release request as pending, or fold its
+    /// terminal result onto the record already there (ADR-0179).
+    ///
+    /// One decision for both edges because they write the same map entry: an
+    /// admitted request inserts it with `completion: None`, and the reactor's
+    /// completion overwrites that field. Splitting them would mean two variants
+    /// whose only difference is whether one `Option` is populated.
+    RecordOrphanClaimRelease {
+        /// The request digest keying the record.
+        request: Digest,
+        /// The signed target — carried so a replayed journal rebuilds the
+        /// pending record without re-deriving it from the fact.
+        target: OrphanClaimRelease,
+        /// The terminal result, or `None` to open the record as pending.
+        completion: Option<OrphanClaimReleaseCompletion>,
+    },
+    /// Drive the source-port expected-holder compare-and-swap that releases one
+    /// orphaned claim ref (ADR-0179) — the transactional-outbox intent the
+    /// claim-release reactor drains.
+    ///
+    /// A snapshot-inert outbox effect like [`Decision::DispatchLand`]: the
+    /// terminal result folds in later from the reactor's
+    /// [`Fact::CompleteOrphanClaimRelease`](crate::Fact::CompleteOrphanClaimRelease)
+    /// admit, never from this decision. Emitted exactly once per request digest —
+    /// a repeat request re-reads the record and enqueues nothing — so an
+    /// authorized release is executed once however many times it is submitted.
+    /// Appended so the prior decisions' wire discriminants are unchanged.
+    DispatchOrphanClaimRelease {
+        /// The request digest the completion admits back under.
+        request: Digest,
+        /// The typed ref and expected holder the compare-and-swap runs against.
+        target: OrphanClaimRelease,
     },
 }
