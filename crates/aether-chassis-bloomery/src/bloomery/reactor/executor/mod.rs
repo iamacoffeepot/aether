@@ -35,8 +35,8 @@ pub struct ExecutorReactorSetup {
     pub stale_warn_after_secs: u64,
     pub repository: Option<(String, String)>,
     pub disabled_missing: Vec<&'static str>,
-    // The candidate-ref push seam (ADR-0152); chosen at boot by
-    // `default_candidate_push`.
+    /// The candidate-ref push seam (ADR-0152); chosen at boot by
+    /// [`default_candidate_push`].
     pub pusher: Arc<dyn CandidatePush>,
 }
 
