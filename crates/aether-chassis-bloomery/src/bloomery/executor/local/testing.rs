@@ -4,7 +4,7 @@
 //! unit tests and the executor-reactor runtime test.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aether_bloomery::BackendObjectId;
 
@@ -41,9 +41,13 @@ impl TransformRunner for FixedRunner {
     }
 
     // The stub never materializes a real worktree (`start` writes only the
-    // evidence dir), so there is nothing to tear down.
+    // evidence dir), so there is nothing to tear down and nothing is registered.
     fn release(&self, _worktree_dir: &Path) -> Result<(), LocalExecutorError> {
         Ok(())
+    }
+
+    fn registered_worktrees(&self) -> Result<Vec<PathBuf>, LocalExecutorError> {
+        Ok(Vec::new())
     }
 
     fn capture(&self, _worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError> {

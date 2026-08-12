@@ -205,46 +205,58 @@ impl LocalExecutor {
         true
     }
 
-    // Reclaim every directory under the scratch root belonging to no live order,
-    // returning how many were reclaimed.
+    // Reclaim the scratch checkouts belonging to no live order, returning how many
+    // were reclaimed.
     //
-    // A directory here is named for the dispatch that made it, so its owning nonce
-    // reads straight back out of the name — and a nonce absent from `live` names an
-    // order the store has already consumed, whose checkout is pure leftover. The
-    // read of the root is best-effort: an absent root is the ordinary
-    // nothing-dispatched-locally-yet case, and an unreadable one is logged and
-    // skipped rather than failing a boot over a cleanup.
+    // The candidates are the repo's *registered* worktrees, not the scratch root's
+    // directory listing. The listing cannot tell this backend's checkouts from
+    // anything else a deployment keeps under the configured root — and it is a
+    // configured root, so the sweep must not assume it owns everything below it;
+    // acting on a directory listing means deleting an operator's files on the
+    // strength of where they sat. A registration, filtered to direct children of
+    // the root, is positive proof of a checkout this backend created: `git
+    // worktree add` at `base_dir/<nonce>` is the only thing that makes one.
+    //
+    // What that leaves behind is a dispatch that died between creating its
+    // directory and registering the worktree. That is bounded litter at a nonce
+    // path no dispatch reuses, and `reclaim_worktree_path` clears it if the same
+    // nonce ever dispatches again — a fair trade against a sweep that could delete
+    // something it does not own.
     fn sweep_abandoned(&self, live: &HashSet<&str>) -> usize {
-        let entries = match fs::read_dir(&self.base_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return 0,
+        // Canonical, because git reports canonical paths and the configured root
+        // may be relative or reached through a symlink. An absent root is the
+        // ordinary nothing-dispatched-locally-yet case.
+        let Ok(base) = fs::canonicalize(&self.base_dir) else {
+            return 0;
+        };
+        let registered = match self.runner.registered_worktrees() {
+            Ok(registered) => registered,
             Err(error) => {
                 tracing::warn!(
-                    base = %self.base_dir.display(),
                     %error,
-                    "local executor backend: scratch root unreadable; abandoned checkouts not reclaimed",
+                    "local executor backend: worktree registrations unreadable; abandoned checkouts not reclaimed",
                 );
                 return 0;
             }
         };
+
         let mut reclaimed = 0;
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let (owner, is_checkout) =
-                name.strip_suffix(EVIDENCE_SUFFIX).map_or((name.as_str(), true), |owner| (owner, false));
-            if live.contains(owner) {
+        for worktree in registered {
+            let Some(nonce) = scratch_nonce_of(&base, &worktree) else {
+                continue;
+            };
+            if live.contains(nonce.as_str()) {
                 continue;
             }
             tracing::info!(
-                nonce = %owner,
-                path = %entry.path().display(),
-                "local executor backend: reclaiming a scratch directory left by an order that is no longer outstanding",
+                %nonce,
+                worktree = %worktree.display(),
+                "local executor backend: reclaiming a scratch checkout left by an order that is no longer outstanding",
             );
-            if is_checkout {
-                self.reclaim_checkout(&entry.path());
-            } else {
-                remove_abandoned(&entry.path());
-            }
+            self.reclaim_checkout(&worktree);
+            // The run's evidence dir is the checkout's sibling by construction, so
+            // reclaiming one reclaims the pair rather than leaving half a run behind.
+            remove_abandoned(&self.base_dir.join(format!("{nonce}{EVIDENCE_SUFFIX}")));
             reclaimed += 1;
         }
         reclaimed
@@ -252,10 +264,8 @@ impl LocalExecutor {
 
     // Drop an abandoned checkout through the runner seam, which removes the
     // directory and the `git worktree` registration together. Falls back to a plain
-    // directory removal when git refuses the path: a dispatch that died between
-    // creating its directory and registering the worktree left the coordinator's
-    // litter behind all the same, and a reclaim that gave up there would re-warn at
-    // every boot for the life of the host.
+    // directory removal when git refuses the path, so a registration whose
+    // directory git will not take back still stops costing disk.
     fn reclaim_checkout(&self, dir: &Path) {
         if let Err(error) = self.runner.release(dir) {
             tracing::warn!(
@@ -639,21 +649,34 @@ impl ReconcileLanes for LocalExecutor {
     }
 }
 
-/// Remove an abandoned scratch path, folding a failure into a warn — the caller
-/// is a best-effort cleanup, and a directory that will not go away must not fail
-/// a boot.
+/// The dispatch nonce a registered worktree belongs to, or `None` when the
+/// worktree is not one of this backend's.
+///
+/// Every scratch checkout it makes is a direct child of the (canonical) scratch
+/// root named for its dispatch nonce, so anything else in the repo's worktree
+/// list — the operator's own, another tool's, one under a different root — is
+/// outside the sweep's remit and reads as `None`.
+fn scratch_nonce_of(base: &Path, worktree: &Path) -> Option<String> {
+    let parent = fs::canonicalize(worktree.parent()?).ok()?;
+    if parent != *base {
+        return None;
+    }
+    Some(worktree.file_name()?.to_str()?.to_owned())
+}
+
+/// Remove an abandoned scratch directory, folding a failure into a warn — the
+/// caller is a best-effort cleanup, and a directory that will not go away must
+/// not fail a boot. An already-absent path is the reclaim already being done,
+/// not a failure.
 fn remove_abandoned(path: &Path) {
-    let removed = if path.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    };
-    if let Err(error) = removed {
-        tracing::warn!(
+    match fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
             path = %path.display(),
             %error,
-            "local executor backend: abandoned scratch path could not be removed",
-        );
+            "local executor backend: abandoned scratch directory could not be removed",
+        ),
     }
 }
 

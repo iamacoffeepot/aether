@@ -394,6 +394,9 @@ struct RecordingRunner {
     evidence: Option<String>,
     lifecycle: RunLifecycle,
     released: Arc<Mutex<Vec<PathBuf>>>,
+    // What the backing repository reports as registered scratch checkouts — the
+    // boot sweep's discriminator, which the stub otherwise has no way to have.
+    registered: Vec<PathBuf>,
 }
 
 impl TransformRunner for RecordingRunner {
@@ -408,6 +411,10 @@ impl TransformRunner for RecordingRunner {
     fn release(&self, worktree_dir: &Path) -> Result<(), LocalExecutorError> {
         self.released.lock().unwrap().push(worktree_dir.to_owned());
         Ok(())
+    }
+
+    fn registered_worktrees(&self) -> Result<Vec<PathBuf>, LocalExecutorError> {
+        Ok(self.registered.clone())
     }
 
     fn capture(&self, _worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError> {
@@ -435,7 +442,26 @@ fn recording_executor(
     lifecycle: RunLifecycle,
 ) -> (LocalExecutor, Arc<Mutex<Vec<PathBuf>>>) {
     let released = Arc::new(Mutex::new(Vec::new()));
-    let runner = RecordingRunner { evidence: evidence.map(str::to_owned), lifecycle, released: Arc::clone(&released) };
+    let runner = RecordingRunner {
+        evidence: evidence.map(str::to_owned),
+        lifecycle,
+        released: Arc::clone(&released),
+        registered: Vec::new(),
+    };
+    (LocalExecutor::new(Arc::new(runner), correspondence(), base.path()), released)
+}
+
+// The same seam with the repository reporting `registered` as its scratch
+// checkouts — what the boot sweep reads to tell this backend's own worktrees from
+// anything else living under the configured root.
+fn sweeping_executor(base: &TempDir, registered: Vec<PathBuf>) -> (LocalExecutor, Arc<Mutex<Vec<PathBuf>>>) {
+    let released = Arc::new(Mutex::new(Vec::new()));
+    let runner = RecordingRunner {
+        evidence: None,
+        lifecycle: RunLifecycle::Running,
+        released: Arc::clone(&released),
+        registered,
+    };
     (LocalExecutor::new(Arc::new(runner), correspondence(), base.path()), released)
 }
 
@@ -473,6 +499,10 @@ impl TransformRunner for CapturingRunner {
 
     fn release(&self, _worktree_dir: &Path) -> Result<(), LocalExecutorError> {
         Ok(())
+    }
+
+    fn registered_worktrees(&self) -> Result<Vec<PathBuf>, LocalExecutorError> {
+        Ok(Vec::new())
     }
 
     fn capture(&self, _worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError> {
@@ -926,27 +956,50 @@ fn cancelling_a_readopted_run_reclaims_its_checkout() {
 #[test]
 fn reconcile_reclaims_the_scratch_of_an_order_that_is_no_longer_outstanding() {
     // The leak the sweep exists to end, and — in the same assertion — the far worse
-    // inverse. The sweep's only input is the live set the re-adoption already read,
-    // so a checkout it removes is provably one no order is waiting on; getting that
-    // backwards would delete a running lane's worktree.
+    // inverse. The sweep's only input beyond the registrations is the live set the
+    // re-adoption already read, so a checkout it removes is provably one no order is
+    // waiting on; getting that backwards would delete a running lane's worktree.
     let base = TempDir::new().unwrap();
     let live = test_nonce("live");
     let consumed = test_nonce("consumed");
     seed_scratch(&base, &live, None);
     seed_scratch(&base, &consumed, Some("{}"));
-    let (exec, released) = recording_executor(&base, None, RunLifecycle::Running);
+    let registered = vec![base.path().join(&live), base.path().join(&consumed)];
+    let (exec, released) = sweeping_executor(&base, registered);
 
     let report = exec.reconcile(&[outstanding(digest(5), &live)]);
 
-    assert_eq!(report.reclaimed, 2, "the abandoned order's checkout and evidence dir are both reclaimed");
+    assert_eq!(report.reclaimed, 1, "the one abandoned checkout is reclaimed");
     assert_eq!(
         *released.lock().unwrap(),
         vec![base.path().join(&consumed)],
         "only the abandoned checkout goes through the release seam",
     );
-    assert!(!base.path().join(format!("{consumed}-evidence")).exists(), "the abandoned evidence dir is removed");
+    assert!(!base.path().join(format!("{consumed}-evidence")).exists(), "its evidence dir goes with it");
     assert!(base.path().join(&live).exists(), "the live order's checkout is untouched");
     assert!(base.path().join(format!("{live}-evidence")).exists(), "so is its evidence dir");
+}
+
+#[test]
+fn the_sweep_leaves_alone_what_this_backend_did_not_register() {
+    // The scratch root is a configured path, and a deployment is entitled to keep
+    // its own files under it — a scenario harness writes its lane script beside the
+    // run directories. Reading the root's directory listing as "everything here is
+    // mine and no order claims it" deletes those on the strength of where they sit;
+    // a `git worktree` registration under the root is what the backend can actually
+    // prove it created.
+    let base = TempDir::new().unwrap();
+    let stranger = base.path().join("not-a-run");
+    fs::create_dir_all(&stranger).unwrap();
+    fs::write(base.path().join("lane-script.json"), "{}").unwrap();
+    let (exec, released) = sweeping_executor(&base, Vec::new());
+
+    let report = exec.reconcile(&[]);
+
+    assert_eq!(report.reclaimed, 0, "an unregistered path is not this backend's to reclaim");
+    assert!(released.lock().unwrap().is_empty(), "nothing was released");
+    assert!(stranger.exists(), "a directory the backend never registered survives");
+    assert!(base.path().join("lane-script.json").exists(), "so does a plain file under the root");
 }
 
 #[test]
