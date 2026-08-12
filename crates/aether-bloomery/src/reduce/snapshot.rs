@@ -347,29 +347,7 @@ impl Snapshot {
             }
             Decision::RecordEvidence { bloom, evidence } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
-                    // Append in admission order — the evidence log is a growing
-                    // journal-derived history, not a keyed latest-wins map.
-                    record.evidence.push(evidence.clone());
-                    // A question admission derives a pending-decision hold as part
-                    // of this same fold (ADR-0151, no new fact): the question digest
-                    // (the evidence detail) blocks the bloom until an answer releases
-                    // it.
-                    if evidence.kind == EvidenceKind::Question {
-                        record.holds.insert(evidence.detail);
-                    }
-                    // An executor-fault admission folds the aggregate-review
-                    // fault series in the same way and for the same reason
-                    // (ADR-0176, no new fact and no new decision): the series is
-                    // derived from the evidence log, so replay rebuilds it and a
-                    // fault on a fresh fold starts over rather than inheriting
-                    // the previous fold's spent retries.
-                    if evidence.kind == EvidenceKind::ExecutorFault {
-                        record.aggregate_fault = Some(AggregateReviewFault::next(
-                            record.aggregate_fault.as_ref(),
-                            evidence.subject,
-                            evidence.detail,
-                        ));
-                    }
+                    record.record_evidence(evidence);
                 }
             }
             Decision::ReleaseHold { bloom, question } => {
@@ -567,6 +545,42 @@ impl BloomRecord {
             review_park: None,
             aggregate_fault: None,
             superseded_by: None,
+        }
+    }
+
+    /// Fold one admitted evidence artifact into the record: the log entry, plus
+    /// whatever derived state its kind carries.
+    ///
+    /// Two kinds carry derived state, both by the same rule — a hold or a fault
+    /// series is *read out of* the evidence log rather than written by a fact of
+    /// its own, so replay rebuilds it for free and no second decision can
+    /// desynchronize from it. They sit together here for the same reason
+    /// [`Snapshot::apply_dispatch_effect`] groups the dispatch arms: the shape is
+    /// only visible when the derivations are in one place.
+    fn record_evidence(&mut self, evidence: &Evidence) {
+        // Append in admission order — the evidence log is a growing
+        // journal-derived history, not a keyed latest-wins map.
+        self.evidence.push(evidence.clone());
+        match evidence.kind {
+            // A question admission derives a pending-decision hold (ADR-0151):
+            // the question digest (the evidence detail) blocks the bloom until an
+            // answer releases it.
+            EvidenceKind::Question => {
+                self.holds.insert(evidence.detail);
+            }
+            // An executor-fault admission derives the aggregate-review fault
+            // series (ADR-0176), keyed to the subject it names — so a fault on a
+            // fresh fold starts over rather than inheriting the previous fold's
+            // spent retries.
+            EvidenceKind::ExecutorFault => {
+                self.aggregate_fault =
+                    Some(AggregateReviewFault::next(self.aggregate_fault.as_ref(), evidence.subject, evidence.detail));
+            }
+            EvidenceKind::Approval
+            | EvidenceKind::VerificationResult
+            | EvidenceKind::ReviewFinding
+            | EvidenceKind::ResolutionClaim
+            | EvidenceKind::StudyRecord => {}
         }
     }
 }
