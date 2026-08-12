@@ -24,7 +24,7 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::sync::Arc;
 //!
-//! use aether_bloomery::{BackendObjectId, Correspondence, Digest, SharedCorrespondence};
+//! use aether_bloomery::{BackendObjectId, Digest, SharedCorrespondence};
 //! use aether_chassis_bloomery::store::SqliteCorrespondence;
 //!
 //! let path = "bloomery.sqlite";
@@ -34,7 +34,7 @@
 //! correspondence.record(&digest, &object)?;
 //! drop(correspondence);
 //!
-//! let reopened = SqliteCorrespondence::open(path)?;
+//! let reopened: SharedCorrespondence = Arc::new(SqliteCorrespondence::open(path)?);
 //! assert_eq!(reopened.resolve_backend_object(&digest)?, Some(object.clone()));
 //! assert_eq!(reopened.resolve_digest(&object)?, Some(digest));
 //! # Ok(())
