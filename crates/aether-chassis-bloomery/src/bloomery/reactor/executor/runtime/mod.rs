@@ -1285,16 +1285,27 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
     // missing index row — the same symptom as the wrong-artifacts-root defect
     // (#4705) this tier exists to catch, with the real cause only in a log the
     // test harness discards. So a scripted study that does not record stops the
-    // call and names which of the two it was.
-    if let (Some(cost), Some(artifacts)) = (upload.cost, state.artifacts.as_mut()) {
-        let record = UploadedStudyRecord { nonce: upload.nonce.clone(), subject: upload.subject, cost };
-        match admit_study(store, artifacts, &record) {
-            Ok(StudyAdmitDecision::Admitted(_)) => {}
-            Ok(StudyAdmitDecision::Refused(refusal)) => {
-                return failed(format!("scripted study record refused: {refusal:?}"));
+    // call and names which of the three it was.
+    match (upload.cost, state.artifacts.as_mut()) {
+        (Some(cost), Some(artifacts)) => {
+            let record = UploadedStudyRecord { nonce: upload.nonce.clone(), subject: upload.subject, cost };
+            match admit_study(store, artifacts, &record) {
+                Ok(StudyAdmitDecision::Admitted(_)) => {}
+                Ok(StudyAdmitDecision::Refused(refusal)) => {
+                    return failed(format!("scripted study record refused: {refusal:?}"));
+                }
+                Err(error) => return failed(format!("scripted study record failed: {error}")),
             }
-            Err(error) => return failed(format!("scripted study record failed: {error}")),
         }
+        // The third way a scripted study fails to record: `open_artifacts`
+        // warned and handed back no handle, so a scripted cost has nowhere to be
+        // filed. Passing over that in silence produces exactly the delayed,
+        // mislabelled symptom the policy above rejects — the scenario still
+        // fails, but several steps later at a missing index row.
+        (Some(_), None) => {
+            return failed("scripted study record dropped: the reactor holds no artifacts handle".to_owned());
+        }
+        (None, _) => {}
     }
 
     match admit_uploaded(store, &upload) {
