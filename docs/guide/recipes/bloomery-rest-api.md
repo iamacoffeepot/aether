@@ -359,9 +359,10 @@ and you sign it for the orphan-claim-release door bound to the request's own
 content digest — the digest of the `{ref_kind, expected_holder}` pair the body
 names, which the coordinator recomputes from that body rather than reading out of
 your envelope. That signed binding is what keeps one signature from authorizing a
-second, different release. Set `parents` to the same request digest: it records
-the derivation edge, and being outside the signature it is a readable claim about
-provenance rather than the thing the coordinator trusts.
+second, different release. `parents` must still name that same request digest —
+the coordinator refuses the request otherwise — but it now records the derivation
+edge alongside a binding the signature already covers, rather than carrying the
+authorization on its own.
 
 ```bash
 curl -s -X POST localhost:8080/claims/releases -d @- <<'JSON' | jq
