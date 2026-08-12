@@ -21,7 +21,7 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 /// pair every other cursor move emits.
 ///
 /// **Which counter it hands back depends on the stage.** A wedge at `Verify` is
-/// not spent `attempts` — the Verify/Refine loop wedges on the cursor-carried
+/// not spent `attempts` — repeated verifier failures spend cursor-carried
 /// `repair_rolls`, which the per-stage `attempts` reset cannot clear — so a
 /// Verify grant lowers `repair_rolls` and resumes at `Refine`, the re-entry the
 /// wedge denied. Resuming at `Verify` instead would re-run the mechanical gate
@@ -98,9 +98,21 @@ pub(super) fn reduce_grant_attempts(
     // counts repair rolls and resumes at `Refine`; every other stage counts
     // attempts and resumes in place.
     let progress = if stage == StageId::Verify {
-        StageProgress { stage: StageId::Refine, attempts: 1, candidate, repair_rolls: budget - attempts }
+        StageProgress {
+            stage: StageId::Refine,
+            attempts: 1,
+            candidate,
+            repair_rolls: budget - attempts,
+            seen_verify_failures: cursor.seen_verify_failures,
+        }
     } else {
-        StageProgress { stage, attempts: budget + 1 - attempts, candidate, repair_rolls: cursor.repair_rolls }
+        StageProgress {
+            stage,
+            attempts: budget + 1 - attempts,
+            candidate,
+            repair_rolls: cursor.repair_rolls,
+            seen_verify_failures: cursor.seen_verify_failures,
+        }
     };
     let effects = move_effects(
         *bloom,

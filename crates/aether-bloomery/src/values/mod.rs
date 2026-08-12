@@ -111,12 +111,12 @@ impl Evidence {
 /// Why a member stopped dispatching for good (ADR-0149 §The line).
 ///
 /// A member that exhausts a stage's `retry_budget` wedges: the reducer stops
-/// dispatching it deliberately — never an extra roll, never a silent integrate —
-/// and a supersession is the only escape. Wedging is as terminal as landing, so
-/// it is recorded rather than merely decided: the stage cursor cannot express it
-/// (a member sitting at `Verify` one roll below the ceiling is mid-flight and
-/// looks identical), and without a record the outward view reports a wedged
-/// member exactly as it reports a working one.
+/// dispatching it deliberately — never an extra roll, never a silent integrate.
+/// An explicit attempt grant or a successor cursor can re-enter the line.
+/// Wedging is recorded rather than merely decided: the stage cursor cannot
+/// express it (a member sitting at `Verify` one roll below the ceiling is
+/// mid-flight and looks identical), and without a record the outward view
+/// reports a wedged member exactly as it reports a working one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Wedge {
     /// The stage whose retry budget the member exhausted.
@@ -125,6 +125,10 @@ pub struct Wedge {
     /// `detail` of the evidence the wedging attempt returned, so a reader can
     /// go straight to what went wrong rather than replaying the line.
     pub evidence: Digest,
+    /// The verifier identities from the terminal verdict that this member had
+    /// already failed before. Nonempty only when repeated Verify failures spent
+    /// the terminal repair roll; every other stage wedges with the empty set.
+    pub repeated_verifiers: VerifyFailureSet,
 }
 
 /// The class of an [`Evidence`] artifact.

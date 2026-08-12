@@ -20,7 +20,7 @@ use aether_bloomery::{
     BloomId, BloomStatus, CandidateRef, CatalogError, Decision, Digest, Event, Evidence, EvidenceKind, Fact,
     GrantAttemptsError, KeyId, LandError, LandingRejectedError, Observation, Outcome, Provenance, Question,
     ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId, StageProgress,
-    Statement, SupersedeError, Unproducible, reduce,
+    Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure, VerifyFailureSet, reduce,
 };
 use aether_data::Kind;
 use aether_data::wire::to_vec;
@@ -1437,6 +1437,29 @@ fn attempt_evidence() -> Evidence {
     Evidence { subject: digest(70), kind: EvidenceKind::VerificationResult, detail: digest(80) }
 }
 
+fn verifier_set(failures: &[VerifyFailure]) -> VerifyFailureSet {
+    failures.iter().copied().collect()
+}
+
+fn verify_failed(
+    key: &str,
+    bloom: BloomId,
+    member: &str,
+    subject: Digest,
+    detail: u8,
+    failed_verifiers: VerifyFailureSet,
+) -> Event {
+    event(
+        key,
+        Fact::VerifyFailed {
+            bloom,
+            workpiece: workpiece(member),
+            evidence: Evidence { subject, kind: EvidenceKind::VerificationResult, detail: digest(detail) },
+            failed_verifiers,
+        },
+    )
+}
+
 // ADR-0149 §The line — a seal seeds each member's cursor at the entry stage
 // (`Construct`, attempt 1) and dispatches its first attempt. Tripwire: the seal
 // decision carries exactly one `DispatchAttempt` per member at the entry stage,
@@ -1573,7 +1596,13 @@ fn a_failing_attempt_retries_within_budget_then_wedges() {
         effects: vec![Decision::AdvanceStage {
             bloom,
             workpiece: workpiece("wp"),
-            progress: StageProgress { stage: StageId::Construct, attempts: 1, candidate: None, repair_rolls: 0 },
+            progress: StageProgress {
+                stage: StageId::Construct,
+                attempts: 1,
+                candidate: None,
+                repair_rolls: 0,
+                seen_verify_failures: VerifyFailureSet::EMPTY,
+            },
         }],
     };
     let revived = after2.apply(&event("revive", fail("ignored").fact), &advance, &ResolvedConfigs::default());
@@ -1656,13 +1685,11 @@ fn a_failing_capture_is_discarded_and_the_retry_targets_the_prior_candidate() {
         &snapshot,
         &event(
             "v-fail",
-            Fact::AttemptCompleted {
+            Fact::VerifyFailed {
                 bloom,
                 workpiece: workpiece("wp"),
-                stage: StageId::Verify,
-                passed: false,
-                evidence: attempt_evidence(),
-                candidate: None,
+                evidence: Evidence { subject: first.tree, kind: EvidenceKind::VerificationResult, detail: digest(80) },
+                failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
             },
         ),
     );
@@ -1703,76 +1730,203 @@ fn a_failing_capture_is_discarded_and_the_retry_targets_the_prior_candidate() {
     assert_eq!(progress.candidate, Some(first), "the cursor keeps the last passing candidate");
 }
 
-// ADR-0153 — Tripwire: the completion gate applies across the whole member
-// line, the terminal `Verify` included. A *failing* `Verify` re-enters the
-// repair-only `Refine` within Verify's budget (3) and wedges on exhaustion —
-// it is never silently integrated; only a *passing* `Verify` leaves this path
-// (through `Fact::Integrate`).
+// ADR-0178 — first failures are forgiven per member; a verdict containing any
+// repeated identity spends one roll for the whole set, and the terminal wedge
+// reports only the identities that were repeated in that verdict.
 #[test]
-fn a_failing_verify_reenters_refine_then_wedges_at_the_ceiling() {
+fn verifier_failure_accounting_uses_per_member_union_and_intersection() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let pass = |key: &str, member: &str, stage: StageId, subject: Digest| {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece(member),
+                stage,
+                passed: true,
+                evidence: Evidence { subject, kind: EvidenceKind::VerificationResult, detail: digest(90) },
+                candidate: None,
+            },
+        )
+    };
+
+    let (mut snapshot, _) = step(&snapshot, &pass("alpha-construct", "alpha", StageId::Construct, digest(10)));
+    let (next, _) = step(&snapshot, &pass("beta-construct", "beta", StageId::Construct, digest(11)));
+    snapshot = next;
+
+    // Three distinct first failures grow alpha's set without spending a roll.
+    for (index, failure) in [VerifyFailure::Fmt, VerifyFailure::Clippy, VerifyFailure::Docs].into_iter().enumerate() {
+        let (next, decided) = step(
+            &snapshot,
+            &verify_failed(
+                &format!("alpha-new-{index}"),
+                bloom,
+                "alpha",
+                digest(10),
+                u8::try_from(80 + index).expect("three fixture failures fit in u8"),
+                VerifyFailureSet::one(failure),
+            ),
+        );
+        assert!(matches!(decided.outcome, Outcome::RefineReentered { rolls: 0, .. }));
+        snapshot = step(&next, &pass(&format!("alpha-refine-{index}"), "alpha", StageId::Refine, digest(10))).0;
+    }
+    let alpha = snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("alpha")).unwrap();
+    assert_eq!(alpha.repair_rolls, 0);
+    assert_eq!(
+        alpha.seen_verify_failures,
+        verifier_set(&[VerifyFailure::Fmt, VerifyFailure::Clippy, VerifyFailure::Docs]),
+    );
+
+    // Beta's first clippy failure is independently novel even though alpha has
+    // already seen it.
+    let (beta_failed, beta_decided) = step(
+        &snapshot,
+        &verify_failed("beta-clippy", bloom, "beta", digest(11), 84, VerifyFailureSet::one(VerifyFailure::Clippy)),
+    );
+    assert!(matches!(beta_decided.outcome, Outcome::RefineReentered { rolls: 0, .. }));
+    assert_eq!(beta_failed.blooms.get(&bloom).unwrap().progress.get(&workpiece("beta")).unwrap().repair_rolls, 0,);
+
+    // A mixed verdict spends exactly one roll because clippy is repeated while
+    // test is new. The union remembers both.
+    let mixed = verifier_set(&[VerifyFailure::Clippy, VerifyFailure::Test]);
+    let (snapshot, mixed_decided) =
+        step(&snapshot, &verify_failed("alpha-mixed", bloom, "alpha", digest(10), 85, mixed));
+    assert!(matches!(mixed_decided.outcome, Outcome::RefineReentered { rolls: 1, .. }));
+    let alpha = snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("alpha")).unwrap();
+    assert_eq!(alpha.repair_rolls, 1, "one umbrella verdict spends at most one roll");
+    assert_eq!(
+        alpha.seen_verify_failures,
+        verifier_set(&[VerifyFailure::Fmt, VerifyFailure::Clippy, VerifyFailure::Docs, VerifyFailure::Test]),
+    );
+}
+
+#[test]
+fn verify_failed_refuses_invalid_state_set_and_binding_without_effects() {
     let base = Snapshot::new(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (mut snapshot, _) = step(
+        &snapshot,
+        &event(
+            "construct",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: attempt_evidence(),
+                candidate: None,
+            },
+        ),
+    );
 
-    let completion = |key: &str, stage: StageId, passed: bool| {
+    let empty = reduce(
+        &snapshot,
+        &verify_failed("empty", bloom, "wp", digest(10), 81, VerifyFailureSet::EMPTY),
+        &ResolvedConfigs::default(),
+    );
+    assert!(matches!(empty.outcome, Outcome::VerifyFailedRejected(VerifyFailedError::EmptyFailures)));
+    assert!(empty.effects.is_empty());
+
+    let unbound = reduce(
+        &snapshot,
+        &verify_failed("unbound", bloom, "wp", digest(99), 82, VerifyFailureSet::one(VerifyFailure::Fmt)),
+        &ResolvedConfigs::default(),
+    );
+    assert!(matches!(
+        unbound.outcome,
+        Outcome::VerifyFailedRejected(VerifyFailedError::EvidenceNotBound {
+            expected,
+            got,
+        }) if expected == digest(10) && got == digest(99)
+    ));
+    assert!(unbound.effects.is_empty());
+
+    let stranger = reduce(
+        &snapshot,
+        &verify_failed("stranger", bloom, "ghost", digest(10), 83, VerifyFailureSet::one(VerifyFailure::Fmt)),
+        &ResolvedConfigs::default(),
+    );
+    assert!(matches!(stranger.outcome, Outcome::VerifyFailedRejected(VerifyFailedError::NotAMember(_))));
+
+    snapshot.blooms.get_mut(&bloom).unwrap().progress.remove(&workpiece("wp"));
+    let no_cursor = reduce(
+        &snapshot,
+        &verify_failed("no-cursor", bloom, "wp", digest(10), 84, VerifyFailureSet::one(VerifyFailure::Fmt)),
+        &ResolvedConfigs::default(),
+    );
+    assert!(matches!(no_cursor.outcome, Outcome::VerifyFailedRejected(VerifyFailedError::NotDispatched(_))));
+
+    let unknown = reduce(
+        &base,
+        &verify_failed("unknown", bloom, "wp", digest(10), 84, VerifyFailureSet::one(VerifyFailure::Fmt)),
+        &ResolvedConfigs::default(),
+    );
+    assert!(matches!(unknown.outcome, Outcome::VerifyFailedRejected(VerifyFailedError::UnknownOrInactiveBloom)));
+}
+
+#[test]
+fn repeated_verify_failure_wedges_at_budget_with_exact_terminal_set() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let pass = |key: &str, stage: StageId| {
         event(
             key,
             Fact::AttemptCompleted {
                 bloom,
                 workpiece: workpiece("wp"),
                 stage,
-                passed,
-                evidence: attempt_evidence(),
+                passed: true,
+                evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(90) },
                 candidate: None,
             },
         )
     };
+    let (mut snapshot, _) = step(&snapshot, &pass("construct", StageId::Construct));
 
-    let (snapshot, _) = step(&snapshot, &completion("c-pass", StageId::Construct, true));
-    assert_eq!(
-        snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap().stage,
-        StageId::Verify,
-        "the member advanced to the terminal Verify stage",
-    );
-
-    // The first failing Verify re-enters Refine (ADR-0153) — never a same-stage
-    // Verify retry (re-running the mechanical gate on an unchanged candidate),
-    // never an Integrate of the failing verdict.
-    let (after1, d1) = step(&snapshot, &completion("v-fail-1", StageId::Verify, false));
-    match d1.outcome {
-        Outcome::RefineReentered { rolls, .. } => assert_eq!(rolls, 1),
-        other => panic!("expected RefineReentered, got {other:?}"),
+    // First clippy is novel; three later verdicts containing clippy spend the
+    // compiled Verify budget. The terminal verdict also contains new docs, which
+    // is remembered but is not named as responsible for the terminal roll.
+    for index in 0u8..3 {
+        let (next, decided) = step(
+            &snapshot,
+            &verify_failed(
+                &format!("clippy-{index}"),
+                bloom,
+                "wp",
+                digest(10),
+                80 + index,
+                VerifyFailureSet::one(VerifyFailure::Clippy),
+            ),
+        );
+        assert!(matches!(decided.outcome, Outcome::RefineReentered { rolls, .. } if rolls == u32::from(index)));
+        snapshot = step(&next, &pass(&format!("refine-{index}"), StageId::Refine)).0;
     }
-    assert!(
-        d1.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { stage: StageId::Refine, .. })),
-        "a failing terminal Verify dispatches the Refine re-entry",
-    );
-    let progress = after1.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
-    assert_eq!(progress.stage, StageId::Refine);
-    assert_eq!(progress.repair_rolls, 1, "the roll count survives the stage move");
 
-    // The re-entered Refine passes — back to Verify for the delta-confirm, with
-    // the roll count intact (the per-stage attempts reset must not clear it).
-    let (after2, _) = step(&after1, &completion("refine-pass-1", StageId::Refine, true));
-    let progress = after2.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
-    assert_eq!(progress.stage, StageId::Verify);
-    assert_eq!(progress.repair_rolls, 1, "the delta-confirm carries the ceiling cursor");
-
-    // A second failing verdict still re-enters (Verify's budget is 3), and the
-    // repaired member returns for one more delta-confirm.
-    let (after3, d2) = step(&after2, &completion("v-fail-2", StageId::Verify, false));
-    assert!(matches!(d2.outcome, Outcome::RefineReentered { rolls: 2, .. }));
-    let (after4, _) = step(&after3, &completion("refine-pass-2", StageId::Refine, true));
-
-    // The third failing Verify verdict hits the ceiling: the member wedges — no
-    // further roll, no re-entry, and no ResolutionClaim from the failing verdict.
-    let (_after5, d3) = step(&after4, &completion("v-fail-3", StageId::Verify, false));
-    assert!(matches!(d3.outcome, Outcome::AttemptWedged { stage: StageId::Verify, .. }));
-    assert!(
-        !d3.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. })),
-        "a wedged terminal Verify stops dispatching",
-    );
+    let terminal_set = verifier_set(&[VerifyFailure::Clippy, VerifyFailure::Docs]);
+    let (wedged, decided) = step(&snapshot, &verify_failed("terminal", bloom, "wp", digest(10), 89, terminal_set));
+    assert!(matches!(
+        decided.outcome,
+        Outcome::AttemptWedged {
+            stage: StageId::Verify,
+            repeated_verifiers,
+            ..
+        } if repeated_verifiers == VerifyFailureSet::one(VerifyFailure::Clippy)
+    ));
+    assert!(!decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })));
+    let record = wedged.blooms.get(&bloom).unwrap();
+    let wedge = record.wedged.get(&workpiece("wp")).unwrap();
+    assert_eq!(wedge.evidence, digest(89));
+    assert_eq!(wedge.repeated_verifiers, VerifyFailureSet::one(VerifyFailure::Clippy));
+    let progress = record.progress.get(&workpiece("wp")).unwrap();
+    assert_eq!(progress.repair_rolls, 3);
+    assert!(progress.seen_verify_failures.contains(VerifyFailure::Docs), "the terminal union is durable");
 }
 
 // #4708 — Tripwire: a grant resumes a wedged member on the bloom it already
@@ -1852,29 +2006,44 @@ fn a_grant_on_a_verify_wedge_resumes_at_refine_with_its_candidate() {
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
 
-    let completion = |key: &str, stage: StageId, passed: bool, candidate: Option<CandidateRef>| {
+    let completion = |key: &str, stage: StageId, candidate: Option<CandidateRef>| {
         event(
             key,
             Fact::AttemptCompleted {
                 bloom,
                 workpiece: workpiece("wp"),
                 stage,
-                passed,
+                passed: true,
                 evidence: attempt_evidence(),
                 candidate,
             },
         )
     };
 
-    // Construct passes with a capture, then Verify spends its whole repair
-    // ceiling (budget 3) and the member wedges holding that candidate.
+    // Construct passes with a capture. The first clippy failure is forgiven;
+    // three repeats spend the whole repair ceiling and wedge holding that
+    // candidate and seen-history.
     let captured = CandidateRef { tree: digest(21), checkout: digest(22) };
-    let (snapshot, _) = step(&snapshot, &completion("c-pass", StageId::Construct, true, Some(captured)));
-    let (snapshot, _) = step(&snapshot, &completion("v-fail-1", StageId::Verify, false, None));
-    let (snapshot, _) = step(&snapshot, &completion("refine-pass-1", StageId::Refine, true, None));
-    let (snapshot, _) = step(&snapshot, &completion("v-fail-2", StageId::Verify, false, None));
-    let (snapshot, _) = step(&snapshot, &completion("refine-pass-2", StageId::Refine, true, None));
-    let (wedged, d) = step(&snapshot, &completion("v-fail-3", StageId::Verify, false, None));
+    let (mut snapshot, _) = step(&snapshot, &completion("c-pass", StageId::Construct, Some(captured)));
+    for index in 0..3 {
+        snapshot = step(
+            &snapshot,
+            &verify_failed(
+                &format!("v-fail-{index}"),
+                bloom,
+                "wp",
+                captured.tree,
+                81 + index,
+                VerifyFailureSet::one(VerifyFailure::Clippy),
+            ),
+        )
+        .0;
+        snapshot = step(&snapshot, &completion(&format!("refine-pass-{index}"), StageId::Refine, None)).0;
+    }
+    let (wedged, d) = step(
+        &snapshot,
+        &verify_failed("v-fail-terminal", bloom, "wp", captured.tree, 89, VerifyFailureSet::one(VerifyFailure::Clippy)),
+    );
     assert!(matches!(d.outcome, Outcome::AttemptWedged { stage: StageId::Verify, .. }));
 
     let grant =
@@ -1902,9 +2071,71 @@ fn a_grant_on_a_verify_wedge_resumes_at_refine_with_its_candidate() {
     // the delta-confirm fails, and the member wedges again rather than looping.
     let progress = granted.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
     assert_eq!(progress.stage, StageId::Refine);
-    let (snapshot, _) = step(&granted, &completion("refine-pass-3", StageId::Refine, true, None));
-    let (_, d) = step(&snapshot, &completion("v-fail-4", StageId::Verify, false, None));
+    assert!(progress.seen_verify_failures.contains(VerifyFailure::Clippy), "the grant preserves seen history");
+    let (snapshot, _) = step(&granted, &completion("refine-pass-granted", StageId::Refine, None));
+    let (_, d) = step(
+        &snapshot,
+        &verify_failed(
+            "v-fail-after-grant",
+            bloom,
+            "wp",
+            captured.tree,
+            90,
+            VerifyFailureSet::one(VerifyFailure::Clippy),
+        ),
+    );
     assert!(matches!(d.outcome, Outcome::AttemptWedged { .. }), "one granted roll, then wedged again");
+}
+
+#[test]
+fn a_successor_starts_with_fresh_verifier_history() {
+    let base = Snapshot::new(digest(1));
+    let predecessor_spec = draft(1, vec![membership("wp", 10)]).seal();
+    let predecessor = predecessor_spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(predecessor_spec)));
+    let construct = event(
+        "construct",
+        Fact::AttemptCompleted {
+            bloom: predecessor,
+            workpiece: workpiece("wp"),
+            stage: StageId::Construct,
+            passed: true,
+            evidence: attempt_evidence(),
+            candidate: None,
+        },
+    );
+    let (snapshot, _) = step(&snapshot, &construct);
+    let (snapshot, _) = step(
+        &snapshot,
+        &verify_failed(
+            "predecessor-clippy",
+            predecessor,
+            "wp",
+            digest(10),
+            81,
+            VerifyFailureSet::one(VerifyFailure::Clippy),
+        ),
+    );
+    assert!(
+        snapshot
+            .blooms
+            .get(&predecessor)
+            .unwrap()
+            .progress
+            .get(&workpiece("wp"))
+            .unwrap()
+            .seen_verify_failures
+            .contains(VerifyFailure::Clippy),
+    );
+
+    let successor_spec = draft(1, vec![membership("wp", 11)]).seal();
+    let successor = successor_spec.id();
+    let (snapshot, decided) =
+        step(&snapshot, &event("supersede", Fact::Supersede { predecessor, successor: successor_spec }));
+    assert!(matches!(decided.outcome, Outcome::Superseded { successor: id, .. } if id == successor));
+    let cursor = snapshot.blooms.get(&successor).unwrap().progress.get(&workpiece("wp")).unwrap();
+    assert_eq!(cursor.stage, StageId::Construct);
+    assert!(cursor.seen_verify_failures.is_empty(), "successor seal owns a fresh per-member set");
 }
 
 // #4708 — the grant's refusals. A running member is not grantable (two workers
@@ -2008,30 +2239,15 @@ fn attempt_completion_refuses_mismatch_terminal_non_member_and_unknown() {
         )
     };
 
-    // The cursor is at Construct; a *failing* completion naming Verify is a
-    // stage mismatch (the passing case is the terminal mis-route below, which
-    // is caught first).
+    // The cursor is at Construct; a typed Verify failure is a stage mismatch.
     let mismatch = reduce(
         &snapshot,
-        &event(
-            "m",
-            Fact::AttemptCompleted {
-                bloom,
-                workpiece: workpiece("wp"),
-                stage: StageId::Verify,
-                passed: false,
-                evidence: attempt_evidence(),
-                candidate: None,
-            },
-        ),
+        &verify_failed("m", bloom, "wp", digest(10), 80, VerifyFailureSet::one(VerifyFailure::Clippy)),
         &ResolvedConfigs::default(),
     );
     assert!(matches!(
         mismatch.outcome,
-        Outcome::AttemptCompletedRejected(AttemptCompletedError::StageMismatch {
-            expected: StageId::Construct,
-            got: StageId::Verify,
-        }),
+        Outcome::VerifyFailedRejected(VerifyFailedError::StageMismatch { expected: StageId::Construct }),
     ));
 
     // A passing terminal Verify never completes here — it integrates through
@@ -2080,17 +2296,28 @@ proptest! {
 
         for (i, passed) in passes.into_iter().enumerate() {
             let cursor = snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).copied().unwrap();
-            let ev = event(
-                &format!("a-{i}"),
-                Fact::AttemptCompleted {
+            let ev = if cursor.stage == StageId::Verify && !passed {
+                verify_failed(
+                    &format!("a-{i}"),
                     bloom,
-                    workpiece: workpiece("wp"),
-                    stage: cursor.stage,
-                    passed,
-                    evidence: attempt_evidence(),
-                    candidate: None,
-                },
-            );
+                    "wp",
+                    digest(10),
+                    80,
+                    VerifyFailureSet::one(VerifyFailure::Clippy),
+                )
+            } else {
+                event(
+                    &format!("a-{i}"),
+                    Fact::AttemptCompleted {
+                        bloom,
+                        workpiece: workpiece("wp"),
+                        stage: cursor.stage,
+                        passed,
+                        evidence: attempt_evidence(),
+                        candidate: None,
+                    },
+                )
+            };
             let (next, decided) = step(&snapshot, &ev);
             snapshot = next;
 
@@ -2107,8 +2334,12 @@ proptest! {
                     prop_assert_eq!(cursor.stage, StageId::Verify, "only a failing Verify re-enters");
                     prop_assert_eq!(new.stage, StageId::Refine);
                 }
-                Outcome::AttemptRetried { .. } | Outcome::AttemptWedged { .. } => {
-                    prop_assert_eq!(new.stage, cursor.stage, "a retry or wedge holds the cursor in place");
+                Outcome::AttemptRetried { .. } => {
+                    prop_assert_eq!(new.stage, cursor.stage, "a retry holds the cursor in place");
+                }
+                Outcome::AttemptWedged { .. } => {
+                    prop_assert_eq!(new.stage, cursor.stage, "a wedge holds the cursor in place");
+                    break;
                 }
                 Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(_)) => {
                     prop_assert!(passed && cursor.stage == StageId::Verify);
@@ -2303,7 +2534,7 @@ mod sealed_config {
 mod sealed_catalog {
     use aether_bloomery::{
         Decision, Evidence, EvidenceKind, Fact, Harness, Outcome, ReasoningEffort, StageCatalog, StageId, ToolPolicy,
-        reduce,
+        VerifyFailure, VerifyFailureSet, reduce,
     };
 
     use crate::common::{
@@ -2408,13 +2639,11 @@ mod sealed_catalog {
 
         let verify_failed = event(
             "verify-failed",
-            Fact::AttemptCompleted {
+            Fact::VerifyFailed {
                 bloom,
                 workpiece: workpiece("wp"),
-                stage: StageId::Verify,
-                passed: false,
                 evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(71) },
-                candidate: None,
+                failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
             },
         );
         let decided = reduce(&snapshot, &verify_failed, &configs);

@@ -16,7 +16,7 @@ use crate::digest::Digest;
 use crate::ids::BloomId;
 use crate::values::{
     BloomSpec, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, EvidenceKind, MemberCandidate, Membership,
-    ModelOverride, ResolvedConfigs, StageCatalog, Transformation, Unproducible,
+    ModelOverride, ResolvedConfigs, StageCatalog, Transformation, Unproducible, VerifyFailureSet,
 };
 
 /// Build the seal-time entry-stage dispatch effects for one member: seed its
@@ -42,7 +42,13 @@ fn entry_dispatch_effects(
         Decision::AdvanceStage {
             bloom,
             workpiece: member.workpiece.clone(),
-            progress: StageProgress { stage, attempts: 1, candidate: None, repair_rolls: 0 },
+            progress: StageProgress {
+                stage,
+                attempts: 1,
+                candidate: None,
+                repair_rolls: 0,
+                seen_verify_failures: VerifyFailureSet::EMPTY,
+            },
         },
         Decision::DispatchAttempt {
             bloom,

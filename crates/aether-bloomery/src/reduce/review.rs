@@ -8,7 +8,7 @@ use super::attempt::{DispatchTargets, SealedLine, move_effects};
 use super::{AggregateReviewError, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{ConfigRegistry, Evidence, ResolvedBloom};
+use crate::values::{ConfigRegistry, Evidence, ResolvedBloom, VerifyFailureSet};
 
 /// Reduce a whole-bloom aggregate-review verdict (ADR-0153). A passing verdict
 /// resolves the bloom from its held fold — [`Decision::SetResolved`] plus the
@@ -142,6 +142,7 @@ pub(super) fn reenter_members(
             attempts: 1,
             candidate: cursor.and_then(|progress| progress.candidate),
             repair_rolls: cursor.map_or(0, |progress| progress.repair_rolls),
+            seen_verify_failures: cursor.map_or(VerifyFailureSet::EMPTY, |progress| progress.seen_verify_failures),
         };
         // The dispatch targets re-resolve like a member-line move (ADR-0152):
         // the claimed candidate tree binds the evidence and its capture commit

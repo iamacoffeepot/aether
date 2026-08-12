@@ -81,15 +81,14 @@ pub enum IntakeRefusal {
 }
 
 /// An accepted attempt result: the reducer [`Event`] the upload normalized to
-/// (a [`Fact::Integrate`] for a resolving verdict, or a [`Fact::AdmitEvidence`]
-/// carrying a `Question` for a parked one) and the [`Admit`] wire payload for
-/// #3497's `aether.bloomery.admit` ingress.
+/// (an integrating pass, typed Verify failure, ordinary member completion,
+/// or parked question) and the [`Admit`] wire payload for #3497's
+/// `aether.bloomery.admit` ingress.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Admission {
     /// The `aether.bloomery.admit` payload to send to the control core.
     pub admit: Admit,
-    /// The decoded event the admit carries — a [`Fact::Integrate`] or a
-    /// [`Fact::AdmitEvidence`] (parked).
+    /// The decoded event the admit carries.
     pub event: Event,
 }
 
@@ -334,10 +333,9 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     //   member's ResolutionClaim through Fact::Integrate (the existing integrate
     //   path) — the verification evidence binds the exact candidate tree, which
     //   is what reduce_integrate re-checks; a *failing* one admits as
-    //   Fact::AttemptCompleted so the reducer routes the member into the Refine
-    //   repair re-entry within the repair ceiling and wedges on exhaustion — the
-    //   completion gate applies across the whole member line, so a failing
-    //   verify is never silently integrated.
+    //   Fact::VerifyFailed with the validated typed set so the reducer can
+    //   distinguish a new identity from a repeated defect and account the
+    //   member's repair roll deterministically.
     // - Any other dispatched member stage (Construct — one with a successor in
     //   the member line — or the repair-only Refine) admits as
     //   Fact::AttemptCompleted: the reducer advances the member's cursor on a
@@ -371,16 +369,12 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             }
         } else {
             Event {
-                idempotency_key: IdempotencyKey(format!("aether.bloomery.attempt:{}", record.nonce.0)),
-                fact: Fact::AttemptCompleted {
+                idempotency_key: IdempotencyKey(format!("aether.bloomery.verify_failed:{}", record.nonce.0)),
+                fact: Fact::VerifyFailed {
                     bloom: record.bloom,
                     workpiece: record.workpiece.clone(),
-                    stage: record.stage,
-                    passed: false,
                     evidence,
-                    // Threaded for the journal's completeness; the reducer never
-                    // adopts a failing attempt's capture (ADR-0152).
-                    candidate: upload.candidate,
+                    failed_verifiers: upload.failed_verifiers,
                 },
             }
         }

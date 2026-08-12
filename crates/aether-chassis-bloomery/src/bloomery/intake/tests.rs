@@ -522,12 +522,10 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
 }
 
 #[test]
-fn a_failing_terminal_verify_admits_attempt_completed_not_integrate() {
-    // Tripwire: the completion gate applies across the whole member line, the
-    // terminal Verify included (ADR-0153). A *failing* Verify upload admits as a
-    // Fact::AttemptCompleted { passed: false } — never a Fact::Integrate — so the
-    // reducer routes it into the Refine repair re-entry rather than recording a
-    // failing verify as resolved.
+fn a_failing_terminal_verify_admits_typed_verify_failed_not_integrate() {
+    // ADR-0178: a failing Verify upload admits through its dedicated appended
+    // fact with the exact typed set — never Integrate or the stage-polymorphic
+    // AttemptCompleted path.
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let workpiece = WorkpieceId("wp-verify".to_owned());
@@ -550,11 +548,11 @@ fn a_failing_terminal_verify_admits_attempt_completed_not_integrate() {
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching failing-verify upload is admitted (the gate decides its fate, not the broker)");
     };
-    let Fact::AttemptCompleted { stage, passed, .. } = &admission.event.fact else {
-        panic!("a failing terminal Verify admits AttemptCompleted, not Integrate");
+    let Fact::VerifyFailed { failed_verifiers, evidence, .. } = &admission.event.fact else {
+        panic!("a failing terminal Verify admits VerifyFailed, not Integrate");
     };
-    assert_eq!(*stage, StageId::Verify);
-    assert!(!*passed, "a VerificationFailed verdict fails the gate");
+    assert_eq!(*failed_verifiers, VerifyFailureSet::one(VerifyFailure::Clippy));
+    assert_eq!(evidence.subject, candidate, "the fact retains the intake-validated evidence binding");
 
     // The order is consumed on accept, like any admitted result.
     assert!(matches!(

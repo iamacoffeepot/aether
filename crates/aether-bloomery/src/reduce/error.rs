@@ -255,10 +255,10 @@ pub enum AttemptCompletedError {
         /// The stage the completion named.
         got: StageId,
     },
-    /// The named stage is the terminal `Verify` with a passing verdict (or a
-    /// passing stage otherwise off the dispatched member line): a passing
-    /// `Verify` integrates the member through [`Fact::Integrate`](crate::Fact::Integrate) and never
-    /// completes here, so such a completion is mis-routed.
+    /// The named stage is terminal `Verify` (or otherwise off the dispatched
+    /// member line): passing Verify integrates through
+    /// [`Fact::Integrate`](crate::Fact::Integrate), while failing Verify uses
+    /// [`Fact::VerifyFailed`](crate::Fact::VerifyFailed), so neither completes here.
     TerminalStage(StageId),
     /// The member holds no stage cursor — it never entered the dispatched line
     /// (a successor member that arrived already integrated as an inherited
@@ -267,6 +267,31 @@ pub enum AttemptCompletedError {
     /// at the entry stage (#3663). Appended so the prior variants' wire
     /// discriminants are unchanged.
     NotDispatched(WorkpieceId),
+}
+
+/// Why a typed terminal-Verify failure was refused (ADR-0178).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum VerifyFailedError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The fact names a workpiece that is not a member of the bloom.
+    NotAMember(WorkpieceId),
+    /// The member holds no dispatched cursor.
+    NotDispatched(WorkpieceId),
+    /// The member is not currently waiting at terminal Verify.
+    StageMismatch {
+        /// The stage the member is actually waiting at.
+        expected: StageId,
+    },
+    /// A failed Verify verdict must name at least one closed verifier identity.
+    EmptyFailures,
+    /// The evidence does not bind the member's current Verify subject.
+    EvidenceNotBound {
+        /// The candidate tree, or scope revision before a candidate exists.
+        expected: Digest,
+        /// The subject the evidence actually names.
+        got: Digest,
+    },
 }
 
 /// Why an attempt grant was refused (#4708).
