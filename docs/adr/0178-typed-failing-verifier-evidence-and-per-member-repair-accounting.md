@@ -27,7 +27,7 @@ Introduce `VerifyFailure` as a closed typed vocabulary with seven V1 identities,
 6. `verify.dup`
 7. `verify.deps`
 
-`verify.preflight` represents failure of the umbrella's prerequisite check before any verifier member runs. Missing program and target names remain diagnostic detail; they do not become unbounded accounting keys. A failed member preparation step belongs to that member's identity. New verifier identities require another ADR because the vocabulary size changes the maximum number of forgiven rounds.
+`verify.preflight` represents failure of the umbrella's prerequisite check before any verifier member runs. Missing program and target names remain diagnostic detail; they do not become unbounded accounting keys. A failed member preparation step belongs to that member's identity. New verifier identities require another ADR because the vocabulary size changes the maximum number of forgiven rounds. [ADR-0181](0181-suppression-verifier-identity-and-vocabulary-saturation.md) is that decision for an eighth identity, `verify.suppress`, appended to the canonical order; it also records that the eighth exhausts the mask byte.
 
 `VerifyFailureSet` is a deduplicated set ordered by the list above. Its canonical serde form is an array of canonical identity strings. Internally it may use a validated seven-bit mask, but unknown bits, unknown strings, duplicates, an empty set on a failed Verify result, and an out-of-order encoded set are refused at the trust boundary. The empty set is valid only for cursor initialization and non-Verify wedge projection. Human findings remain independent diagnostic prose and are never an accounting input.
 
