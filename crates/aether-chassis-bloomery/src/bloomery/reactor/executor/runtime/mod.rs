@@ -66,8 +66,14 @@ use crate::bloomery::dispatch_model;
 use crate::bloomery::intake::{
     Admission, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims, dispatch_and_record, run_intake_cycle,
 };
+#[cfg(any(test, feature = "testing"))]
+use crate::bloomery::intake::{AdmitDecision, admit_uploaded};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
+#[cfg(any(test, feature = "testing"))]
+use crate::bloomery::study::{UploadedStudyRecord, admit_study};
+#[cfg(any(test, feature = "testing"))]
+use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload};
 use crate::bloomery::{CoordinatorConfig, ExecutorReactorSetup};
 use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend, StoreConfigError, resolve_config};
@@ -1010,9 +1016,19 @@ fn push_admitted_candidates(
     }
 }
 
+/// Whether the reactor has no backend to mount for this pair of configs — the
+/// predicate `actor_setups` decides the mount by, spelled here so it is testable
+/// without a boot.
+///
+/// A selected fixture (#4732) is a usable Actions backend even though it names
+/// no token, owner, or repo: the in-memory double answers every dispatch and
+/// artifact call. Reading it as unconfigured would mount a fixture-backed
+/// coordinator disabled the moment its local lane is off — which is exactly the
+/// shape the in-process scenarios boot (#4711), so the whole fixture tier would
+/// silently never dispatch.
 #[cfg(test)]
 fn is_disabled_mount(connection: &GithubConnectionConfig, coordinator: &CoordinatorConfig) -> bool {
-    !connection.missing_connection_knobs().is_empty() && !coordinator.local_lane_enabled
+    !connection.uses_fixture() && !connection.missing_connection_knobs().is_empty() && !coordinator.local_lane_enabled
 }
 
 /// The restart recovery set (issue #3641): one [`WorkHandle`] per nonce still
@@ -1127,6 +1143,55 @@ fn pull_and_admit(
     push_admitted_candidates(&sink.0, correspondence, pusher);
 
     sink.0.into_iter().map(|admission| admission.admit).collect()
+}
+
+/// Admit one scripted lane verdict against this reactor's own stores, returning
+/// the scenario's reply and the [`Admit`] to forward (#4711).
+///
+/// The factored-out intake side of [`on_scripted_evidence`], mirroring
+/// [`pull_and_admit`]: everything that touches the two durable stores lives
+/// here, and the ctx send stays in the handler.
+///
+/// The verdict travels the production path. The study lane writes through
+/// *this reactor's* boot-opened artifacts handle — so a reactor that opened the
+/// wrong root files costs where nothing reads them, and the scenario that reads
+/// them back fails (#4705) — and the verdict itself goes through
+/// [`admit_uploaded`], which refuses a nonce naming no live order and a subject
+/// the order did not display. A scenario therefore cannot script an attempt the
+/// coordinator never ordered.
+///
+/// [`on_scripted_evidence`]: ExecutorReactorCapability
+#[cfg(any(test, feature = "testing"))]
+fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (ScriptedEvidenceResult, Option<Admit>) {
+    let failed = |error: String| (ScriptedEvidenceResult::Err { error }, None);
+    let Some(store) = state.store.as_mut() else {
+        return failed("the executor reactor mounted disabled".to_owned());
+    };
+    let upload = match from_bytes::<ScriptedUpload>(encoded) {
+        Ok(upload) => upload.into_upload(),
+        Err(error) => return failed(format!("scripted upload did not decode: {error}")),
+    };
+
+    // Study before the verdict, for the reason the intake cycle documents:
+    // `admit_study` matches the order without consuming it while the admit below
+    // consumes, so the other order records nothing.
+    if let (Some(cost), Some(artifacts)) = (upload.cost, state.artifacts.as_mut()) {
+        let record = UploadedStudyRecord { nonce: upload.nonce.clone(), subject: upload.subject, cost };
+        if let Err(error) = admit_study(store, artifacts, &record) {
+            return failed(format!("scripted study record failed: {error}"));
+        }
+    }
+
+    match admit_uploaded(store, &upload) {
+        Ok(AdmitDecision::Admitted(admission)) => (
+            ScriptedEvidenceResult::Admitted { idempotency_key: admission.event.idempotency_key.0.clone() },
+            Some(admission.admit.clone()),
+        ),
+        Ok(AdmitDecision::Refused(refusal)) => {
+            (ScriptedEvidenceResult::Refused { refusal: format!("{refusal:?}") }, None)
+        }
+        Err(error) => failed(error.to_string()),
+    }
 }
 
 /// Whether the reactor has no backend to mount for `config` — GitHub
@@ -1359,6 +1424,44 @@ impl NativeActor for ExecutorReactorCapability {
             // handle is not needed here.
             let _ = ctx.send_envelope_detached(control_mailbox, Admit::ID, &admit.encode_into_bytes());
         }
+    }
+
+    /// Admit one scripted lane verdict for an order this reactor really
+    /// dispatched (#4711) — the in-process fixture tier's stand-in for the model
+    /// a lane would have run, and nothing else.
+    ///
+    /// Everything the verdict then travels through is the production path: the
+    /// study lane writes through *this reactor's* boot-opened artifacts handle
+    /// (so a reactor that opened the wrong root fails the scenario rather than
+    /// filing costs where nothing reads them, #4705), and the verdict itself
+    /// goes through [`admit_uploaded`] — which refuses a nonce naming no live
+    /// order and a subject the order did not display. A scenario therefore
+    /// cannot script an attempt the coordinator never ordered.
+    ///
+    /// The `Admit` rides **tracked** rather than detached, unlike the pull
+    /// side's: a scenario's call must settle only once the control core has
+    /// reduced and committed the fact, which is what lets a scenario step the
+    /// bloom instead of sleeping on it.
+    ///
+    #[cfg(any(test, feature = "testing"))]
+    // The `#[handler::single]` contract requires the mail by value; this handler
+    // only borrows the encoded upload out of it, so clippy sees a by-ref
+    // opportunity the macro signature cannot take — the same allow the source
+    // capability's handlers carry.
+    #[allow(clippy::needless_pass_by_value)]
+    #[handler::single]
+    fn on_scripted_evidence(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: ScriptedEvidence,
+    ) -> ScriptedEvidenceResult {
+        let control_mailbox = state.control_mailbox;
+        let (result, admit) = admit_scripted(state, &mail.upload);
+
+        if let Some(admit) = admit {
+            let _ = ctx.send_envelope_tracked(control_mailbox, Admit::ID, &admit.encode_into_bytes());
+        }
+        result
     }
 }
 

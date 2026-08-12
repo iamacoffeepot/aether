@@ -23,6 +23,8 @@ mod reactor;
 mod source;
 #[cfg(feature = "github")]
 mod study;
+#[cfg(all(feature = "github", any(test, feature = "testing")))]
+mod testing;
 
 pub use approve::{
     AdmissionRequest, AdrTouch, ApprovalPolicy, Completeness, Decision, Gate, Incompleteness, PolicyError,
@@ -63,3 +65,5 @@ pub use study::{
     StudyAdmission, StudyAdmitDecision, StudyIntakeError, StudyRefusal, UploadedStudyRecord, admit_study,
     rebuild_study_index,
 };
+#[cfg(all(feature = "github", any(test, feature = "testing")))]
+pub use testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, ScriptedVerdict};

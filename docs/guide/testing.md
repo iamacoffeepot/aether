@@ -151,6 +151,31 @@ wedge, aggregate, and liveness contracts; it is not a model-quality evaluation
 or proof that the real transform program, live credentials, or GitHub transport
 work. See [SubstrateHarness, FleetHarness, and LaneHarness](testing/substrateharness-and-fleetharness.md#laneharness-topology).
 
+Beside it sits the **fixture harness** (`crates/aether-chassis-bloomery/tests/fixture/`),
+which boots the same production chassis inside the test process and steps it one
+explicit reactor tick at a time. Its reason for existing is the handoff *between*
+reactors: each reactor's own unit tests hand-place the outbox row its upstream would
+have produced, so a producer that emits a payload its consumer cannot act on passes
+both sides and stalls only in production. Here every row comes from the real reducer's
+decisions committed by the real control core, and the boot-constructed reactor that
+owns the topic drains it. Nothing in a scenario enqueues a topic.
+
+| | LaneHarness | fixture harness |
+| --- | --- | --- |
+| Coordinator | forked `bloomery` process | booted in the test process |
+| Substituted | the lane program at the end of the argv | the verdict a model would have uploaded |
+| Progress comes from | the coordinator's own poll cadence | explicit `DispatchTick` / `IntegrateTick` / `LandTick` calls |
+| Reads | the projection and the journal over the wire | those, plus the store and artifact roots on disk |
+| Proves | the whole dispatch below the lane: `git worktree add`, the child process, its `evidence.json`, the candidate capture | the reactor-to-reactor handoff, and that a boot-constructed reactor resolved the roots it was configured with |
+| Cannot prove | that a stage transition produced the next reactor's input, since a lane failure and a missing handoff both read as a stall | anything about the lane subprocess, which it never spawns |
+
+Two constraints follow from the fixture tier's in-process boot, and both are structural
+rather than incidental. The in-memory GitHub double is a process-global `OnceLock`, so
+each behavior gets its **own test binary** — two scenarios in one process would share a
+repository and a mainline. And no reactor's poll interval can be set to "never"
+(`poll_interval_secs.max(1)`, where `0` polls fastest), so a scenario sets a cadence far
+enough out that the timer never fires inside it and drives every step by hand.
+
 For overlay rendering, split structural and raster proof deliberately. Assert exact
 rectangle geometry, clips, texture coordinates, tint, texture identity, projection
 space, and submission order through `SubstrateHarness::committed_overlay_snapshot`; then use
