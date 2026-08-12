@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use super::{FoldedIntegration, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
+use crate::port::ProjectedReceipt;
 use crate::values::{
-    AgentProfile, ConfigRegistry, Evidence, LandingReceipt, MemberCandidate, ResolutionClaim, ResolvedBloom,
-    Transformation, Wedge,
+    AgentProfile, ConfigRegistry, Evidence, MemberCandidate, ResolutionClaim, ResolvedBloom, Transformation, Wedge,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -84,8 +84,11 @@ pub enum Decision {
         /// The new mainline head.
         to: Digest,
     },
-    /// Emit a landing receipt to the outbox.
-    EmitReceipt(LandingReceipt),
+    /// Emit a landing receipt to the outbox, carrying the landed bloom's
+    /// membership alongside it (ADR-0149 §The receipt carries its members): the
+    /// receipt value names no members, and the outward projection has no other
+    /// route to the objects the receipt belongs on.
+    EmitReceipt(ProjectedReceipt),
     /// Release a member's pending-decision hold (from an adopted answer) —
     /// removes the named question digest from the bloom's open holds so the
     /// bloom can resolve once every member is integrated. Appended so the prior

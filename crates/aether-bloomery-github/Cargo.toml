@@ -33,9 +33,11 @@ serde = { workspace = true, features = ["derive", "std"] }
 # same content is a byte-stable marker and the reconcile no-ops.
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-# The token custody warns when GitHub reports an installation-token expiry it
-# cannot parse, so the adapter emits its own diagnostics rather than swallowing
-# a malformed expiry silently.
+# The adapter emits its own diagnostics rather than swallowing what it absorbs:
+# the token custody warns on an installation-token expiry it cannot parse, and
+# the projection traces every target it skips — a permanent condition returns
+# `Ok` so at-least-once outbox delivery is not stalled, which leaves the trace
+# as the only record that the skip happened.
 tracing = { workspace = true, features = ["std"] }
 
 [features]

@@ -29,7 +29,9 @@ mod projection;
 mod source;
 
 pub use executor::{Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
-pub use projection::{BloomView, LandingBlock, MemberView, PendingDecisionView, ProjectionBackend, ViewDocument};
+pub use projection::{
+    BloomView, LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, ViewDocument,
+};
 pub use source::{
     Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, IntegrateOutcome, IntegrationPosition,
     LandOutcome, LandProposal, SourceBackend, SourceSnapshot,

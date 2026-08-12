@@ -84,8 +84,8 @@ pub use manifest::{
 pub use port::{
     BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, Conclusion, EvidenceRef,
     ExecutionStatus, ExecutorBackend, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal, LandingBlock,
-    MemberView, PendingDecisionView, ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument, WorkHandle,
-    WorkOrder,
+    MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument,
+    WorkHandle, WorkOrder,
 };
 pub use reduce::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError,

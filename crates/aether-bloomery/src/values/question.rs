@@ -40,7 +40,8 @@ pub struct Question {
     /// question back from its digest.
     pub workpiece: WorkpieceId,
     /// The decision to be made, in plain language (the load-bearing "why"
-    /// first), rendered outward to the shadow issue where a person sees it.
+    /// first), rendered outward onto the held member's own object where a
+    /// person already looks.
     pub prompt: String,
     /// The options considered, each with its consequence, for the owner to
     /// choose among.

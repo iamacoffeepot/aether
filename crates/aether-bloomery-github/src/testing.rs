@@ -1,17 +1,21 @@
 //! An in-process fake GitHub (#3459 step 4).
 //!
-//! Models the projection's object store — issues and their comments — with
-//! enough fidelity to drive the projection end-to-end with no token and no
-//! network: create returns a fresh number, find scans marker keys exactly as
-//! the real client does, update overwrites in place, and [`delete_issue`]
-//! models an operator deleting a projection so the rebuild property (delete →
-//! reappear) is exercisable.
+//! Models the projection's object store — the objects a repository already
+//! holds and the comments hanging off them — with enough fidelity to drive the
+//! projection end-to-end with no token and no network: [`seed_issue`] and
+//! [`seed_pull_request`] present pre-existing targets (the projection opens
+//! none), find scans marker keys exactly as the real client does, a comment on
+//! an unknown number answers the same 404-shaped refusal the real surface
+//! does, and [`delete_comment`] models an operator deleting a projection so the
+//! rebuild property (delete → reappear) is exercisable.
 //!
 //! Compiled for this crate's own tests unconditionally and, behind the
 //! `testing` feature, exported so the host demo (#3459 step 7) drives the same
 //! double.
 //!
-//! [`delete_issue`]: FakeGithub::delete_issue
+//! [`seed_issue`]: FakeGithub::seed_issue
+//! [`seed_pull_request`]: FakeGithub::seed_pull_request
+//! [`delete_comment`]: FakeGithub::delete_comment
 
 // The fake holds its `Mutex` guard to the end of each short method rather than
 // dropping it a line early: this is an in-memory test double with no
@@ -28,9 +32,9 @@ use aether_bloomery::{BackendObjectId, BloomId, Correspondence, CorrespondenceEr
 use sha2::{Digest as _, Sha256};
 
 use crate::client::{
-    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, Issue,
-    MergeResult, NewComment, NewIssue, NewPullRequest, PullRequest, PullRequestApi, PullRequestState, RunConclusion,
-    RunStatus, WorkflowRun, strip_heads,
+    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, MergeResult,
+    NewComment, NewPullRequest, PullRequest, PullRequestApi, PullRequestState, RunConclusion, RunStatus, WorkflowRun,
+    strip_heads,
 };
 use crate::correspondence::GitObjectId;
 use crate::executor::INPUT_NONCE;
@@ -40,7 +44,8 @@ use crate::source::{EMPTY_TREE, digest_from_hex, render_claim_message, render_to
 #[derive(Clone)]
 struct StoredIssue {
     number: u64,
-    title: String,
+    /// The object's own body — human-authored, and never written by the
+    /// projection. Held so a test can prove it comes back unchanged.
     body: String,
 }
 
@@ -104,7 +109,6 @@ impl StoredPullRequest {
 
 #[derive(Default)]
 struct State {
-    next_issue: u64,
     next_comment: u64,
     issues: Vec<StoredIssue>,
     comments: Vec<StoredComment>,
@@ -147,7 +151,7 @@ struct State {
 ///
 /// Cloning shares one backing store (an `Arc<Mutex<…>>`), so a demo can hand a
 /// clone to a [`GithubProjection`](crate::GithubProjection) and keep another to
-/// introspect the objects the projection created.
+/// introspect what the projection wrote.
 #[derive(Default, Clone)]
 pub struct FakeGithub {
     state: Arc<Mutex<State>>,
@@ -192,7 +196,35 @@ impl FakeGithub {
         self.lock().object_repo.clone()
     }
 
-    /// How many issues currently exist — the carbon-copy count a demo asserts.
+    /// Present an issue the repository already holds, numbered `number` and
+    /// carrying the human-authored `body` — the target a workpiece named
+    /// `issue-<number>` addresses. The projection opens no object, so a test
+    /// that wants one places it here.
+    pub fn seed_issue(&self, number: u64, body: &str) {
+        self.lock().issues.push(StoredIssue { number, body: body.to_owned() });
+    }
+
+    /// Present a pull request the repository already holds, numbered `number`
+    /// and proposing `head` (the short `bloom/…` branch form). Findable by head
+    /// like an opened one, and commentable like an issue — GitHub numbers both
+    /// from one sequence and shares the comment route.
+    pub fn seed_pull_request(&self, number: u64, head: &str) {
+        let mut state = self.lock();
+        // Keep the generator ahead of anything seeded, so a later
+        // `create_pull_request` cannot mint a number that already exists.
+        state.next_pull_request = state.next_pull_request.max(number);
+        state.pull_requests.push(StoredPullRequest {
+            number,
+            head: head.to_owned(),
+            head_sha: String::new(),
+            base: "main".to_owned(),
+            state: PullRequestState::Open,
+            merged: false,
+            merge_commit_sha: None,
+        });
+    }
+
+    /// How many issues currently exist — what a projection must never move.
     #[must_use]
     pub fn issue_count(&self) -> usize {
         self.lock().issues.len()
@@ -218,8 +250,33 @@ impl FakeGithub {
         self.lock().issues.iter().find(|issue| issue.number == number).map(|issue| issue.body.clone())
     }
 
-    /// Delete issue `number` and its comments — an operator removing a
-    /// projection. The next reconcile finds no marker and recreates it.
+    /// The bodies of the comments on `number`, in creation order.
+    #[must_use]
+    pub fn comments_on(&self, number: u64) -> Vec<String> {
+        self.lock()
+            .comments
+            .iter()
+            .filter(|comment| comment.issue_number == number)
+            .map(|comment| comment.body.clone())
+            .collect()
+    }
+
+    /// The ids of the comments on `number`, in creation order — what a delete →
+    /// reappear test names its victim by.
+    #[must_use]
+    pub fn comment_ids_on(&self, number: u64) -> Vec<u64> {
+        self.lock().comments.iter().filter(|comment| comment.issue_number == number).map(|comment| comment.id).collect()
+    }
+
+    /// Delete comment `id` — an operator removing a projection. The next
+    /// reconcile finds no marker and writes it again.
+    pub fn delete_comment(&self, id: u64) {
+        self.lock().comments.retain(|comment| comment.id != id);
+    }
+
+    /// Delete issue `number` and its comments — the object going away entirely,
+    /// which the projection reads as a target it must skip rather than
+    /// recreate.
     pub fn delete_issue(&self, number: u64) {
         let mut state = self.lock();
         state.issues.retain(|issue| issue.number != number);
@@ -507,7 +564,7 @@ impl FakeGithub {
     /// # Panics
     /// If `run_id` names no seeded run — an unknown id is a test-setup bug, so
     /// it panics rather than silently no-op'ing, matching the file's other
-    /// id-lookup mutators (`update_issue` / `cancel_run` return `Err(404)`).
+    /// id-lookup mutators (`update_comment` / `cancel_run` return `Err(404)`).
     pub fn seed_run_artifacts(&self, run_id: u64, artifacts: Vec<Artifact>) {
         let mut state = self.lock();
         let run = state
@@ -925,39 +982,11 @@ impl PullRequestApi for FakeGithub {
 }
 
 impl GithubApi for FakeGithub {
-    fn find_issue(&self, key: &str) -> Result<Option<Issue>, GithubError> {
-        let state = self.lock();
-        Ok(state.issues.iter().find_map(|issue| {
-            let marker = parse_marker(&issue.body);
-            match &marker {
-                Some(m) if m.key == key => {
-                    Some(Issue { number: issue.number, title: issue.title.clone(), body: issue.body.clone(), marker })
-                }
-                _ => None,
-            }
-        }))
-    }
-
-    fn create_issue(&self, new: &NewIssue) -> Result<Issue, GithubError> {
-        let mut state = self.lock();
-        state.next_issue += 1;
-        let number = state.next_issue;
-        state.issues.push(StoredIssue { number, title: new.title.clone(), body: new.body.clone() });
-        Ok(Issue { number, title: new.title.clone(), body: new.body.clone(), marker: parse_marker(&new.body) })
-    }
-
-    fn update_issue(&self, number: u64, title: &str, body: &str) -> Result<(), GithubError> {
-        let mut state = self.lock();
-        let Some(issue) = state.issues.iter_mut().find(|issue| issue.number == number) else {
-            return Err(GithubError::Status { status: 404, body: format!("no issue {number}") });
-        };
-        title.clone_into(&mut issue.title);
-        body.clone_into(&mut issue.body);
-        Ok(())
-    }
-
     fn find_comment(&self, issue_number: u64, key: &str) -> Result<Option<Comment>, GithubError> {
         let state = self.lock();
+        if !comment_target_exists(&state, issue_number) {
+            return Err(absent_target(issue_number));
+        }
         Ok(state.comments.iter().filter(|comment| comment.issue_number == issue_number).find_map(|comment| {
             let marker = parse_marker(&comment.body);
             match &marker {
@@ -969,6 +998,9 @@ impl GithubApi for FakeGithub {
 
     fn create_comment(&self, new: &NewComment) -> Result<Comment, GithubError> {
         let mut state = self.lock();
+        if !comment_target_exists(&state, new.issue_number) {
+            return Err(absent_target(new.issue_number));
+        }
         state.next_comment += 1;
         let id = state.next_comment;
         state.comments.push(StoredComment { id, issue_number: new.issue_number, body: new.body.clone() });
@@ -983,6 +1015,23 @@ impl GithubApi for FakeGithub {
         body.clone_into(&mut comment.body);
         Ok(())
     }
+}
+
+/// Whether `number` names an object that can carry a comment. Issues and pull
+/// requests both can: GitHub numbers them from one sequence and the comment
+/// route is shared, so a landing receipt reaches a pull request through exactly
+/// the path a member issue is reached by.
+fn comment_target_exists(state: &State, number: u64) -> bool {
+    state.issues.iter().any(|issue| issue.number == number)
+        || state.pull_requests.iter().any(|pull| pull.number == number)
+}
+
+/// The refusal the real surface answers for a comment on a number it does not
+/// hold. Modelled because it is the condition the projection has to classify as
+/// a skip rather than an error — an unmodelled 404 would let a silently-stalling
+/// projection pass.
+fn absent_target(number: u64) -> GithubError {
+    GithubError::Status { status: 404, body: format!("no object {number}") }
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! The projection port (ADR-0149 §The boundary): push a self-contained view
 //! document outward. The projection's direction is *outward* — Bloomery's
-//! internals are the truth and the adapter maintains a shadow copy; a
-//! projection never drives the reducer.
+//! internals are the truth and the adapter mirrors them onto the objects the
+//! repository already holds; a projection never drives the reducer.
 //!
 //! The port hands the adapter a whole typed [`ViewDocument`], not opaque ids.
 //! ADR-0149 §The boundary (as amended by [#3471]) requires the reconcile push
@@ -117,10 +117,27 @@ pub struct PendingDecisionView {
     pub blocked: String,
 }
 
-/// The outward mirror. The implementation does the I/O (writes issues,
-/// checks, comments); this trait is the contract — every projection carries
-/// internal ids and digests in stable metadata and is rebuildable from the
-/// journal.
+/// A landing receipt together with the landed bloom's membership — the whole
+/// render input a receipt projection needs.
+///
+/// [`LandingReceipt`] names a bloom, a previous base, and a new head, and no
+/// membership, so a receipt drained from the outbox after a restart could not
+/// reach the objects it belongs on. The reducer holds the landed bloom's
+/// members at the moment it mints the receipt, so it carries them here rather
+/// than leaving an adapter to read them back out of the store — the
+/// self-contained-document rule this port is built on.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ProjectedReceipt {
+    /// The receipt itself, unchanged.
+    pub receipt: LandingReceipt,
+    /// The landed bloom's members, in the sealed spec's canonical order.
+    pub members: Vec<WorkpieceId>,
+}
+
+/// The outward mirror. The implementation does the I/O (writes comments on the
+/// objects the repository already holds); this trait is the contract — every
+/// projection carries internal ids and digests in stable metadata and is
+/// rebuildable from the journal.
 pub trait ProjectionBackend {
     /// The backend's error type.
     type Error;
@@ -133,9 +150,10 @@ pub trait ProjectionBackend {
     /// Backend-defined — e.g. the projection surface is unreachable.
     fn reconcile_view(&self, view: &ViewDocument) -> Result<(), Self::Error>;
 
-    /// Project a landing receipt outward.
+    /// Project a landing receipt outward, onto every object the landed bloom's
+    /// membership reaches.
     ///
     /// # Errors
     /// Backend-defined — e.g. the projection surface is unreachable.
-    fn project_receipt(&self, receipt: &LandingReceipt) -> Result<(), Self::Error>;
+    fn project_receipt(&self, receipt: &ProjectedReceipt) -> Result<(), Self::Error>;
 }
