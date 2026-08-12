@@ -42,7 +42,8 @@ mod mirror;
 pub use claim_release::{
     ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick,
 };
-pub(crate) use executor::default_candidate_push;
+// `pub` because `reactor` is a private module — see the note in `executor`.
+pub use executor::default_candidate_push;
 pub use executor::{
     CandidatePush, DispatchTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState,
 };

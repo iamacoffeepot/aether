@@ -31,7 +31,10 @@ use aether_actor::actor;
 use aether_bloomery::SharedCorrespondence;
 use aether_bloomery::Topic;
 
-pub(crate) use runtime::default_candidate_push;
+// `pub` rather than `pub(crate)` because this module is itself private: the
+// crate-only restriction is applied once, where the chain reaches the public
+// `bloomery` module, and repeating it here is the redundancy clippy flags.
+pub use runtime::default_candidate_push;
 pub use runtime::{CandidatePush, DispatchTick, ExecutorReactorState};
 
 pub struct ExecutorReactorSetup {
@@ -44,7 +47,8 @@ pub struct ExecutorReactorSetup {
     pub repository: Option<(String, String)>,
     pub disabled_missing: Vec<&'static str>,
     /// The candidate-ref push seam (ADR-0152); chosen at boot by
-    /// [`default_candidate_push`].
+    /// `default_candidate_push`, which is crate-private and so is named here
+    /// rather than linked.
     pub pusher: Arc<dyn CandidatePush>,
 }
 

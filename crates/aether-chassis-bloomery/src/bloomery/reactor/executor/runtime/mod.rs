@@ -224,10 +224,11 @@ impl ExecutorReactorState {
     /// drives the loop by feeding a [`DispatchTick`] into the handler directly.
     ///
     /// This constructor exists only for tests, so it is by definition a fixture
-    /// boot: its `pusher` resolves through [`default_candidate_push`]'s fixture
-    /// arm (refusing) rather than hand-picking a default here, so the boot-time
-    /// selector stays the one policy site. Chain [`Self::with_pusher`] to
-    /// substitute a recording seam.
+    /// boot: its `pusher` resolves through `default_candidate_push`'s refusing
+    /// arm rather than hand-picking a default here, so the boot-time selector
+    /// stays the one policy site. (That selector is crate-private, so it is
+    /// named rather than linked.) Chain [`Self::with_pusher`] to substitute a
+    /// recording seam.
     #[must_use]
     pub fn with_parts(
         executor: Option<ExecutorShell>,
@@ -1019,12 +1020,19 @@ impl CandidatePush for RefusingCandidatePush {
 /// `testing`-featured binary that names no backend, so it resolved to the real
 /// pusher with its cwd inside the real checkout (#4842).
 ///
-/// Crate-private on purpose. `CandidatePush` has to stay public — it types the
+/// Crate-only on purpose. `CandidatePush` has to stay public — it types the
 /// `pub pusher` field — but the selector handing out a live `GitCandidatePush`
 /// does not, and leaving it public put one within reach of every out-of-crate
 /// integration-test binary, which is exactly the reach this seam exists to deny.
+///
+/// Declared `pub` because every module between here and `bloomery` is private,
+/// so this is already unreachable from outside; the `pub(crate)` that actually
+/// restricts it sits on the re-export in `bloomery`, the one public module in
+/// the chain. Writing `pub(crate)` at each hop instead would be the redundancy
+/// `clippy::redundant_pub_crate` flags, and it would state the restriction in
+/// four places while only one of them enforces it.
 #[must_use]
-pub(crate) fn default_candidate_push(refuse: bool) -> Arc<dyn CandidatePush> {
+pub fn default_candidate_push(refuse: bool) -> Arc<dyn CandidatePush> {
     if refuse {
         Arc::new(RefusingCandidatePush)
     } else {
