@@ -1,9 +1,10 @@
 //! Directed tests for the pre-seal approve gate (#3571).
 //!
-//! Two surfaces: the ported tier resolver (the security core — its fail-closed
-//! semantics must be exact, mirroring `scripts/test-surface-match.py`'s `--tier`
-//! cases), and the gate + membership-approval forming (ADR hard gate,
-//! completeness, tier branch, auto vs signed-statement approval).
+//! The gate + membership-approval forming: the ADR hard gate, completeness, the
+//! tier branch, and auto versus signed-statement approval. The tier *resolver*
+//! itself is `aether-bloomery`'s (#4616) and is tested beside the value there;
+//! what stays here is the host's file fallback and everything the gate decides
+//! on top of a resolved policy.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -14,140 +15,22 @@ use ed25519_dalek::{Signer, SigningKey};
 
 use super::{
     AdmissionRequest, AdrTouch, ApprovalPolicy, Completeness, Decision, Gate, Incompleteness, StatementRejected, Tier,
-    approval_from_statement, precheck_statement, verified_statement_approval,
+    approval_from_statement, load_policy, precheck_statement, verified_statement_approval,
 };
 
-/// The test tier policy — the same shape `test-surface-match.py`'s `POLICY` uses,
-/// so the ported resolver is checked against the same cases.
+/// The test tier policy the gate cases decide over: `docs/guide/**` advances on
+/// its own, `crates/aether-data/**` stops at the owner, and anything else takes
+/// the `judge` default.
 const POLICY: &str = r#"default: judge
 rules:
-  - glob: "/Cargo.toml"
-    tier: human
-  - glob: "crates/*/Cargo.toml"
-    tier: human
-  - glob: "crates/aether-data/**"
-    tier: human
-  - glob: "docs/adr/**"
-    tier: human
-  - glob: ".agents/**"
-    tier: human
   - glob: "docs/guide/**"
     tier: auto
-  - glob: "crates/aether-kit/**"
-    tier: auto
-  - glob: "crates/aether-chassis-desktop/**"
-    tier: judge
-  - glob: "scripts/surface-match.py"
+  - glob: "crates/aether-data/**"
     tier: human
 "#;
 
 fn policy() -> ApprovalPolicy {
     ApprovalPolicy::parse(POLICY).expect("test policy parses")
-}
-
-/// Resolve one surface glob to its tier through the public surface reducer.
-fn tier(surface: &str) -> Tier {
-    policy().resolve_surface(&[surface.to_owned()])
-}
-
-#[test]
-fn exact_paths_resolve_their_rule_tier() {
-    assert_eq!(tier("docs/guide/page.md"), Tier::Auto);
-    assert_eq!(tier("Cargo.toml"), Tier::Human);
-    assert_eq!(tier("new-top/file.txt"), Tier::Judge);
-}
-
-#[test]
-fn an_exact_path_respects_directory_tail_semantics() {
-    // A bare `crates/aether-kit` is set-sound: `crates/*/Cargo.toml` (human) can
-    // match `crates/aether-kit/Cargo.toml` beneath it, so the tier is human even
-    // though `crates/aether-kit/**` is auto.
-    assert_eq!(tier("crates/aether-kit"), Tier::Human);
-}
-
-#[test]
-fn literal_subtrees_are_set_sound() {
-    let cases = [
-        ("docs/guide/**", Tier::Auto),
-        ("crates/aether-kit/src/**", Tier::Auto),
-        ("crates/aether-kit/**", Tier::Human),
-        ("docs/**", Tier::Human),
-        ("crates/aether-chassis-desktop/new/**", Tier::Judge),
-        ("new-top/**", Tier::Judge),
-    ];
-    for (surface, expected) in cases {
-        assert_eq!(tier(surface), expected, "{surface}");
-    }
-}
-
-#[test]
-fn complex_surface_wildcards_fail_closed() {
-    for surface in ["**", "docs/*", "crates/aether-*/future/**", "docs/[ag]uide/**"] {
-        assert_eq!(tier(surface), Tier::Human, "{surface} must fail closed to human");
-    }
-}
-
-#[test]
-fn out_of_grammar_surface_resolves_human() {
-    for surface in ["docs/guide/../adr/0001-x.md", "/docs/guide/page.md", "docs//guide/page.md"] {
-        assert_eq!(tier(surface), Tier::Human, "{surface}");
-    }
-}
-
-#[test]
-fn a_surface_past_the_segment_cap_folds_to_human_not_deep_recursion() {
-    // Tripwire: a declared surface deeper than the grammar's segment cap drives
-    // the intersects matcher, whose recursion is bounded by segment count; the
-    // cap must refuse it at the grammar boundary (→ Human, fail-closed) rather
-    // than recurse per path segment. A 4000-segment path would overflow the
-    // stack if the cap were removed.
-    let deep = vec!["a"; 4000].join("/");
-    assert_eq!(tier(&deep), Tier::Human, "an over-cap surface must fold to human");
-
-    // The same ceiling gates the policy side: an over-cap policy glob fails the
-    // parse closed rather than becoming a rule the matcher recurses over.
-    let deep_rule = vec!["a"; 4000].join("/");
-    let policy_text = format!("default: judge\nrules:\n  - glob: {deep_rule}\n    tier: auto\n");
-    assert!(ApprovalPolicy::parse(&policy_text).is_none(), "an over-cap policy glob must fail the parse");
-}
-
-#[test]
-fn most_restrictive_across_the_declared_surface_wins() {
-    let surface = vec!["docs/guide/**".to_owned(), "crates/aether-data/src/lib.rs".to_owned()];
-    assert_eq!(policy().resolve_surface(&surface), Tier::Human);
-}
-
-#[test]
-fn an_empty_surface_resolves_the_policy_default() {
-    assert_eq!(policy().resolve_surface(&[]), Tier::Judge);
-}
-
-#[test]
-fn malformed_policy_fails_closed() {
-    let malformed = [
-        "default: judge\nrules:\n  - glob: \"docs/**\"\n    tier: owner\n",
-        "default: judge\nrules:\n  - glob: \"docs//**\"\n    tier: auto\n",
-        "default: judge\nrules:\n  - glob: \"docs***\"\n    tier: auto\n",
-        "default: judge\nrules:\n  - glob: \"../**\"\n    tier: auto\n",
-        "default: judge\nrules:\n- glob: docs/guide/**\ntier: auto\n",
-        "default: judge\nrules:\n  - glob: docs/guide/**\n  tier: auto\n",
-        "default: judge\ndefault: auto\nrules:\n  - glob: docs/**\n    tier: auto\n",
-        "rules:\n  - glob: docs/**\n    tier: auto\n",
-        "default: judge\nrules:\n",
-        "",
-    ];
-    for text in malformed {
-        assert!(ApprovalPolicy::parse(text).is_none(), "must fail closed: {text:?}");
-    }
-}
-
-#[test]
-fn well_formed_policy_with_single_star_and_default_parses() {
-    let policy = policy();
-    // The `crates/*/Cargo.toml` single-star segment resolves a nested manifest to
-    // human, and an unmatched top-level surface takes the judge default.
-    assert_eq!(policy.resolve_surface(&["crates/aether-behavior/Cargo.toml".to_owned()]), Tier::Human);
-    assert_eq!(policy.resolve_surface(&["unknown-top/thing.rs".to_owned()]), Tier::Judge);
 }
 
 /// The repository's real seeded policy artifact.
@@ -161,7 +44,7 @@ fn the_seeded_repository_policy_parses_and_guards_itself() {
     // policy file would refuse every admission — this test is where that failure
     // is loud. The guarded paths pin the constitutional carve-outs (including the
     // policy file's own self-listing) against an accidental edit.
-    let policy = ApprovalPolicy::load(&seeded_policy_path()).expect("seeded policy parses");
+    let policy = load_policy(&seeded_policy_path()).expect("seeded policy parses");
     for guarded in [
         "approval-policy.yml",
         ".github/workflows/ci.yml",

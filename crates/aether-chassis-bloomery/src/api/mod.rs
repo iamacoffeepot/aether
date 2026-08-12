@@ -23,7 +23,7 @@ use aether_actor::actor;
 // and the settlement-notice safety net. The request-ingress kinds are the
 // per-route kinds `#[http::router]` mints in `runtime.rs`, registered by the
 // generated glue rather than a bare `HttpServerRequest` handler (#3672).
-use aether_bloomery::{AdmitResult, QueryResult, ReplayJournalResult};
+use aether_bloomery::{AdmitResult, LoadConfigsResult, QueryResult, ReplayJournalResult};
 use aether_kinds::trace::Settled;
 
 use crate::artifacts::GetResult;

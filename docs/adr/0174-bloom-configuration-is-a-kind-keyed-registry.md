@@ -74,6 +74,18 @@ The host resolves the kind name to its schema through the descriptor inventory, 
 
 That split moves model choice out from under the approval binding, which today covers it by accident — changing the override changes the revision digest and invalidates the approval. Losing that would be a real regression, so the approval's binding widens from `scope_revision` alone to the member's configuration set as well. An operator still cannot change which model runs for an approved workpiece without re-approval.
 
+### The approval policy is bloom-wide only (amended, #4616)
+
+The tier policy the pre-seal approve gate resolves is a registry entry like any other — `aether.bloomery.approval_policy`, authored through `POST /configs`, sealed into the draft's registry — with two departures from the general rule above, both forced by what this particular configuration decides.
+
+**Its scope chain is the bloom's registry alone.** Every other kind resolves member-then-bloom. This one does not, because the gate's question is whether a *member* may be admitted at all: a member sealing its own policy entry would choose the tier that admits it, which is self-authorization at the one door built to prevent it. Ignoring a member-scoped entry was the other candidate and is worse — it leaves a sealed configuration nothing reads, which is the attested-but-inert divergence this record exists to remove. So a member-scoped entry **refuses the seal** rather than resolving or being ignored.
+
+**It resolves from a cache, at the point of use, without going to the store.** The gate runs pre-seal on a draft and is synchronous over in-memory state; making it async would put a store round trip inside an admission decision. The api capability instead keeps its own `ResolvedConfigs`, filled by the same bulk `LoadConfigs` read the control core does at boot and topped up from every successful `POST /configs` write, and the gate resolves against that. Cache readiness is tracked: a seal arriving before the boot read lands cannot tell an unsealed policy from unfetched content — the two decide opposite tiers — so it is refused rather than gated against the fallback, and a failed or corrupt boot read aborts rather than coming up on a partial cache.
+
+Absence still selects the caller's default, which here is the file the host loaded (`approval-policy.yml`). That keeps a coordinator that has authored no policy working unchanged, and keeps the file's own git history readable as the delegation ladder it has always been. Every `ConfigResolveError` is fail-closed: a sealed address that is missing, misfiled, or undecodable refuses the seal rather than falling through to the file, since falling through would admit the bloom at a tier its own receipt contradicts.
+
+The signing-key policy — *who* may sign an above-`auto` member's statement — stays a separate host-side reader. Only the tier policy moved.
+
 ### What this does not decide
 
 Per-stage granularity within a single configuration is a separate question and stays with #4601. The scope chain answers *where* a lookup finds a value; it says nothing about how finely one value discriminates. A `ModelOverride` that distinguishes Construct from Refine keeps the whole model decision in one attested value, which is better for a system whose product is a receipt, and the registry neither helps nor hinders it.
@@ -90,7 +102,7 @@ The wrapper-kind route is available if that map ever proves awkward — `Constru
 - A string key costs more bytes per entry than a fixed-width id would, and it is the one string in a structure whose other identities are typed. Sealed registry bytes are legible to anyone reading them without the binaries that produced them, which is the compensating property.
 - Follow-on work, each its own change: the registry types and their sealing (#4602); the generic `POST /configs` route (#4602); migrating the scope revision's override into the member registry and widening the approval binding (#4606); resolving or deleting each of the three inert fields (#4607 deleted `toolchain` and `policy`, #4587 resolved `stage_catalog`).
 - One follow-on this record did not anticipate: **a configuration the reducer must read needs the content handed to it** (#4618). The retry budgets in the stage catalog are read inside `reduce`, which has no store handle, so `reduce` takes a `ResolvedConfigs` the caller fills — at boot from a bulk read, at runtime from a deferred re-read when an admit names an address the control core has not seen. The seal door refuses a spec naming content it was not given, since a sealed address is immutable and would otherwise fail later at a dispatch that parks.
-- `policy` was deleted rather than resolved, and reinstating it as a registry entry the pre-seal gate resolves is #4616. It is a design change, not a wiring one: the gate is synchronous over in-memory state and runs pre-seal, and whether a member may seal the policy that admits it is an open question.
+- `policy` was deleted rather than resolved, and #4616 reinstated it as the `aether.bloomery.approval_policy` registry entry — bloom-wide only, resolved from an api-side cache at the point of use, with the host's file as the unsealed fallback. See §The approval policy is bloom-wide only above for the two departures that took.
 
 ## Alternatives considered
 

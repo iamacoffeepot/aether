@@ -26,13 +26,16 @@ the store (`/journal`) and artifacts (`/artifacts/{digest}`) answer from those
 capabilities alone; the seal / supersede / live-read routes (`/blooms`,
 `/view`) go through the control core.
 
-Sealing consults the tier policy the pre-seal approve gate loads at boot from
-`AETHER_APPROVAL_POLICY_FILE` — `approval-policy.yml` by default,
-resolved against the working directory, so launch from the repository root. The
-startup line `bloomery REST control api mounted policy_loaded=true` confirms the
-gate has it. A policy the gate cannot read leaves it with nothing to decide
-over, and every seal is refused with `approval policy unavailable; seal fails
-closed`.
+Sealing consults a tier policy, and the draft chooses which one. A draft that
+seals an `aether.bloomery.approval_policy` entry in its bloom-wide registry is
+gated against that value, so the tier its members were admitted at is part of
+what the bloom attests. A draft that seals none falls back to the file the
+pre-seal approve gate loads at boot from `AETHER_APPROVAL_POLICY_FILE` —
+`approval-policy.yml` by default, resolved against the working directory, so
+launch from the repository root. The startup line `bloomery REST control api
+mounted policy_loaded=true` confirms the gate has that fallback. Without it, a
+draft sealing no policy of its own has nothing to be decided over and its seal is
+refused with `approval policy unavailable; seal fails closed`.
 
 ## The route table
 
@@ -65,9 +68,12 @@ representation notes carry from those types:
   it before addressing the bloom by path.
 - **Configuration registries** map a kind name to the content address returned
   by `POST /configs`. A draft with no stage-catalog entry uses the compiled
-  default line; an entry names the authored catalog the bloom runs. A present
-  entry whose kind or content the host cannot resolve fails loudly rather than
-  silently falling back.
+  default line; an entry names the authored catalog the bloom runs. The same
+  registry carries the approval policy under `aether.bloomery.approval_policy`,
+  and that one is **bloom-wide only**: a member sealing its own entry would pick
+  the tier deciding whether that member may be admitted, so the seal is refused
+  outright rather than resolving or ignoring it. A present entry whose kind or
+  content the host cannot resolve fails loudly rather than silently falling back.
 
 ## A curl walkthrough
 
@@ -170,9 +176,10 @@ A projection is matched to its proposal by `{workpiece, scope_revision}`, and
 both halves have to equal the proposal's exactly. The rest of the entry is the
 evidence the gate rules on:
 
-- `declared_surface` — the paths the change touches. The tier policy resolves
-  them most-restrictive-match-wins; an `auto` surface (`docs/guide/**` among
-  them) lets the gate form the approval itself.
+- `declared_surface` — the paths the change touches. The tier policy the draft
+  resolves (its sealed entry, else the file fallback) resolves them
+  most-restrictive-match-wins; an `auto` surface (`docs/guide/**` among them in
+  the shipped file) lets the gate form the approval itself.
 - `completeness` — the nine facts the gate fails closed on. Every boolean must
   hold, `blocked` must be false, and `model_routing_count` must be exactly `1`.
 - `adr_touch` — `"None"`, `"ProposedOnly"`, or `"NewOrEstablished"`. The last
@@ -187,6 +194,35 @@ The gate fails closed at every branch, so a `422` names what fell short —
 `member wp-1 has no scope projection; seal fails closed` for a proposal the
 `projections` list does not cover, and a seal carrying an empty list refuses any
 draft that has members.
+
+### Sealing the tier policy
+
+To have the bloom carry the policy it was admitted under rather than inherit the
+coordinator's file, author one through the same generic route the stage catalog
+uses and name it bloom-wide:
+
+```bash
+policy=$(curl -s -X POST localhost:8910/configs \
+  -H 'content-type: application/json' \
+  -d '{"kind":"aether.bloomery.approval_policy","value":{"default":"Judge","rules":[{"glob":"docs/guide/**","tier":"Auto"}]}}' | jq '.digest')
+
+curl -s -X PATCH localhost:8910/drafts/1 -H 'content-type: application/json' \
+  -d "{\"configs\":{\"entries\":{\"aether.bloomery.approval_policy\":$policy}}}"
+```
+
+`default` and each rule's `tier` are `"Auto"`, `"Judge"`, or `"Human"` — the JSON
+spelling of the tier enum, not the lowercase words the fallback file uses. Rules
+are unordered; resolution is most-restrictive-wins over the declared surface, the
+same semantics the file has.
+
+Four ways a seal is refused on this axis, all `422` and all before any admit:
+
+| Response | Cause |
+|---|---|
+| `member wp-1 seals its own approval policy; the tier policy is bloom-wide only, seal fails closed` | The entry sits in a member's registry rather than the draft's. |
+| `sealed approval policy unresolvable: …` | The bloom-wide address names content that is missing, filed under another kind, or no longer decodes. |
+| `configuration set not yet read; seal fails closed` | The seal arrived before the coordinator finished its boot configuration read. Retry. |
+| `approval policy unavailable; seal fails closed` | The draft seals no policy and the fallback file did not load. |
 
 `descriptions` is the one advisory field on the body: per-member work-order
 text, keyed by workpiece id, which the construct lane's prompt names as its
