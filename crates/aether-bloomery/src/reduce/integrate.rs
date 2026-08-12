@@ -1,7 +1,7 @@
 //! Integration and resolution: recording one member's resolution claim, and
 //! folding a complete claim set into the bloom's one artifact (ADR-0152).
 
-use super::attempt::stage_profile;
+use super::attempt::stage_binding;
 use super::{BloomStatus, Decision, Decisions, FoldedIntegration, IntegrateError, Outcome, ResolveError, Snapshot};
 use crate::digest::Digest;
 use crate::ids::BloomId;
@@ -106,15 +106,17 @@ pub(super) fn reduce_resolve(
         }));
     }
     let integration = FoldedIntegration { tree: *tree, head: *head, lineage: lineage.to_vec() };
+    let binding = stage_binding(&record.stage_catalog, StageId::AggregateVerify);
+
     Decisions {
         outcome: Outcome::AggregateVerifyDispatched { bloom: *bloom, roll },
         effects: alloc::vec![
             Decision::RecordIntegration { bloom: *bloom, integration: Some(integration) },
             Decision::DispatchAggregateVerify {
                 bloom: *bloom,
-                transformation: Transformation::for_aggregate_verify(*tree, *head),
+                transformation: Transformation::for_aggregate_verify(&binding, *tree, *head),
                 roll,
-                profile: stage_profile(&record.stage_catalog, StageId::AggregateVerify),
+                profile: binding.profile,
             },
         ],
     }

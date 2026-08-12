@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
-    BloomDraft, BloomId, BloomRecord, BloomStatus, Budget, ConfigRegistry, Decision, Digest, Event, Evidence,
-    EvidenceKind, EvidenceRef, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce,
+    BloomDraft, BloomId, BloomRecord, BloomStatus, ConfigRegistry, Decision, Digest, Event, Evidence, EvidenceKind,
+    EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce,
     Outcome, ResolvedConfigs, Snapshot, StageCatalog, StageId, StageVerdict, Transformation, VerifyFailure,
     VerifyFailureSet, WorkHandle, WorkpieceId, reduce,
 };
@@ -53,7 +53,7 @@ fn transformation() -> Transformation {
         diff_base: None,
         outputs: Vec::new(),
         image: "iama/verify:1".to_owned(),
-        limits: Budget::default(),
+        limits: ExecutionLimits { wall_clock_secs: 3_600 },
         network: NetworkProfile::None,
         description: None,
         model: None,
@@ -108,7 +108,6 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
         proposals: vec![member],
         base: Digest::default(),
         configs: ConfigRegistry::default(),
-        budget: Budget::default(),
         forecast: Forecast::default(),
     }
     .seal();
@@ -126,6 +125,7 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
             holds: BTreeSet::new(),
             progress: BTreeMap::new(),
             wedged: BTreeMap::new(),
+            dispatches: BTreeMap::new(),
             integration: None,
             aggregate_rolls: 0,
             aggregate_verify_rolls: 0,

@@ -4,8 +4,7 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 
-use aether_bloomery::Nonce;
-use aether_bloomery_github::CorrespondenceError;
+use aether_bloomery::{CorrespondenceError, Nonce};
 
 /// A local-process executor-port fault. Its own type because the port needs an
 /// arm the value vocabulary does not carry — a message asked to act on a run

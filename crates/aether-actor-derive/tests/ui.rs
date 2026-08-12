@@ -144,4 +144,11 @@ fn ui() {
     t.compile_fail("tests/ui/rejects_bare_handler_wasm.rs");
     t.compile_fail("tests/ui/rejects_bare_handler_native.rs");
     t.compile_fail("tests/ui/rejects_bare_mail_variant_native.rs");
+    // iamacoffeepot/aether#4811: a `#[cfg]` on a handler governs every artifact
+    // the expansion derives from it. Each fixture compiles for the host with one
+    // handler gated in and one gated out, so a leaked dispatch arm, marker impl,
+    // manifest record, or retention static names a type and a method that do not
+    // exist in that configuration and fails the build.
+    t.pass("tests/ui/accepts_cfg_gated_handler_wasm.rs");
+    t.pass("tests/ui/accepts_cfg_gated_handler_native.rs");
 }

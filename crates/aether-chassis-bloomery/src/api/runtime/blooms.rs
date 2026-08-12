@@ -14,7 +14,7 @@ use aether_substrate::actor::native::NativeCtx;
 
 use super::hex::{digest_from_hex, hex_encode};
 use super::response::{error_response, json};
-use super::state::{ApiCapabilityState, Routed, VerifyPending};
+use super::state::{ApiCapabilityState, Routed, VerifyPending, admit};
 use crate::api::dto::{GrantRequest, OutcomeView, SupersedeRequest};
 use crate::control::ControlCore;
 use crate::signing::{SigningCapability, Verify, VerifyResult};
@@ -59,7 +59,7 @@ impl ApiCapabilityState {
     /// successor doing real work. Admitting it needs no approve gate — a grant
     /// seals nothing, claims nothing, and alters no field the members' approvals
     /// bind — so unlike the supersede route it admits straight through.
-    pub(super) fn grant(&self, ctx: &NativeCtx<'_, Manual>, id: &str, body: &[u8]) -> Routed {
+    pub(super) fn grant(id: &str, body: &[u8]) -> Routed {
         let bloom = match digest_from_hex(id) {
             Some(digest) => BloomId(digest),
             None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
@@ -73,13 +73,10 @@ impl ApiCapabilityState {
             format!("aether.bloomery.grant:{}:{}:{stage:?}:{attempts}", hex_encode(bloom.0.as_bytes()), workpiece.0)
         });
 
-        self.admit(
-            ctx,
-            &Event {
-                idempotency_key: IdempotencyKey(key),
-                fact: Fact::GrantAttempts { bloom, workpiece, stage, attempts },
-            },
-        )
+        admit(&Event {
+            idempotency_key: IdempotencyKey(key),
+            fact: Fact::GrantAttempts { bloom, workpiece, stage, attempts },
+        })
     }
 
     /// `POST /blooms/{id}/answer` — adopt an answer to a parked question,
@@ -145,15 +142,15 @@ impl ApiCapabilityState {
     }
 
     /// `GET /blooms` and `GET /view` — read the whole live projection.
-    pub(super) fn query(&self, ctx: &NativeCtx<'_, Manual>, bloom: Option<Vec<u8>>) -> Routed {
-        Routed::Deferred(self.send_tracked(ctx.actor::<ControlCore>(), &Query { bloom }))
+    pub(super) fn query(bloom: Option<Vec<u8>>) -> Routed {
+        Routed::Query(Query { bloom })
     }
 
     /// `GET /blooms/{id}` — read one bloom's live view by hex id.
-    pub(super) fn query_bloom(&self, ctx: &NativeCtx<'_, Manual>, id: &str) -> Routed {
+    pub(super) fn query_bloom(id: &str) -> Routed {
         digest_from_hex(id).map_or_else(
             || Routed::Reply(error_response(400, "bloom id is not a 32-byte hex digest")),
-            |digest| self.query(ctx, Some(digest.as_bytes().to_vec())),
+            |digest| Self::query(Some(digest.as_bytes().to_vec())),
         )
     }
 }

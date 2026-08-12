@@ -39,6 +39,13 @@
 //! inspect / cancel / stream-evidence onto the Actions run + artifacts API. The
 //! fake GitHub double models each surface for token- and network-free tests.
 //!
+//! Authentication is a [`TokenSource`] every port's client resolves its bearer
+//! from, and both implementations live here because both speak GitHub: the
+//! static PAT ([`StaticTokenSource`]) and the GitHub-App installation-token
+//! minter ([`AppTokenSource`], migration step 3). The embedder reads the App's
+//! host-local private key and hands the bytes in, so the key's custody stays on
+//! the host (ADR-0150) while the JWT signing and token exchange stay here.
+//!
 //! [#3465]: https://github.com/iamacoffeepot/aether/issues/3465
 //! [#3500]: https://github.com/iamacoffeepot/aether/issues/3500
 //!
@@ -69,6 +76,7 @@ pub fn short_hex(digest: &Digest) -> String {
     out
 }
 
+mod app_auth;
 mod client;
 mod config;
 mod correspondence;
@@ -81,6 +89,7 @@ mod source;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
+pub use app_auth::{AppTokenSource, InstallationTokenExchange};
 pub use client::{
     ActionsApi, Artifact, CheckConclusion, CheckRun, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError,
     HttpRequest, HttpResponse, HttpTransport, InstallationToken, MergeResult, Method, NewCheckRun, NewComment,
@@ -88,7 +97,7 @@ pub use client::{
     RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
 };
 pub use config::GithubConfig;
-pub use correspondence::{Correspondence, CorrespondenceError, GitObjectFormat, GitObjectId, SharedCorrespondence};
+pub use correspondence::{GitObjectFormat, GitObjectId};
 pub use executor::{ActionsExecutor, ExecutorError, LaneWorkflows};
 pub use inward::{
     InwardError, StageResult, StageVerdict, StudyRecordError, StudyResult, normalize_stage_result,

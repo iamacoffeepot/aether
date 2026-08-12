@@ -67,8 +67,6 @@
 //! republish, acking each topic's delivered prefix only after the GitHub write
 //! succeeds (at-least-once with idempotent reconcile).
 
-#[cfg(feature = "github")]
-pub mod app_auth;
 pub mod artifacts;
 pub mod control;
 pub mod session;

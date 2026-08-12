@@ -317,10 +317,9 @@ pub enum GrantAttemptsError {
     },
     /// The grant asks for no attempts, or for more than the member could spend.
     ///
-    /// The counters a grant writes are read against the stage's own retry budget,
-    /// so a larger request could not be spent even if it were admitted; the
-    /// bloom's sealed [`Budget::retry_cap`](crate::Budget::retry_cap) narrows the
-    /// ceiling further when the bloom states one. Zero is refused for the
+    /// The counters a grant writes are read against the stage's own
+    /// [`retry_budget`](crate::StageBinding::retry_budget), so a larger request
+    /// could not be spent even if it were admitted. Zero is refused for the
     /// opposite reason: it would move the cursor and dispatch an attempt while
     /// granting nothing, so the member would wedge again on the same verdict.
     BeyondCap {

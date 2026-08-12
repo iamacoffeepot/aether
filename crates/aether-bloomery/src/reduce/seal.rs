@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use serde::de::DeserializeOwned;
 
-use super::attempt::stage_profile;
+use super::attempt::stage_binding;
 use super::{
     BloomStatus, Decision, Decisions, Outcome, SealConflict, SealError, Snapshot, StageProgress, SupersedeError,
 };
@@ -38,6 +38,8 @@ fn entry_dispatch_effects(
     catalog: &StageCatalog,
 ) -> [Decision; 2] {
     let stage = StageCatalog::entry_stage();
+    let binding = stage_binding(catalog, stage);
+
     [
         Decision::AdvanceStage {
             bloom,
@@ -54,10 +56,10 @@ fn entry_dispatch_effects(
             bloom,
             workpiece: member.workpiece.clone(),
             stage,
-            transformation: Transformation::for_member_stage(stage, member.scope_revision, checkout),
+            transformation: Transformation::for_member_stage(&binding, member.scope_revision, checkout),
             scope_revision: member.scope_revision,
             candidate: None,
-            profile: stage_profile(catalog, stage),
+            profile: binding.profile,
             configs: member.configs.layered_over(bloom_configs),
         },
     ]
