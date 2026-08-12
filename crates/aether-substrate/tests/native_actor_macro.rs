@@ -579,6 +579,83 @@ fn a_task_handler_is_measured_but_not_advertised() {
     }
 }
 
+/// iamacoffeepot/aether#4811: a handler's `#[cfg]` governs the artifacts the
+/// macro derives from it.
+///
+/// `syn` does not evaluate `cfg`, so `#[actor]` sees all three handlers below
+/// whichever configuration it expands in. An integration test compiles with
+/// `cfg(test)` set, so `on_stripped` and its `CfgStripped` kind are absent here
+/// while `on_present` and `on_kept` survive. The dispatch arm, the
+/// `HandlerCapability` row, and the `measured_kinds` id derived from a stripped
+/// handler each name a type and a method that do not exist in this build, so
+/// leaking any one of them fails compilation before this test can run.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
+#[kind(name = "test.macro_native_actor.cfg_kept")]
+struct CfgKept {
+    tag: u32,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
+#[kind(name = "test.macro_native_actor.cfg_present")]
+struct CfgPresent {
+    tag: u32,
+}
+
+#[cfg(not(test))]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
+#[kind(name = "test.macro_native_actor.cfg_stripped")]
+struct CfgStripped {
+    tag: u32,
+}
+
+struct CfgGatedCap;
+
+#[aether_actor::actor]
+impl NativeActor for CfgGatedCap {
+    type Config = ();
+    const NAMESPACE: &'static str = "test.macro_native_actor.cfg_gated";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[aether_actor::handler::single]
+    fn on_kept(&self, _ctx: &mut NativeCtx<'_>, _mail: CfgKept) {}
+
+    #[aether_actor::handler::single]
+    #[cfg(test)]
+    fn on_present(&self, _ctx: &mut NativeCtx<'_>, _mail: CfgPresent) {}
+
+    #[aether_actor::handler::single]
+    #[cfg(not(test))]
+    fn on_stripped(&self, _ctx: &mut NativeCtx<'_>, _mail: CfgStripped) {}
+}
+
+/// Tripwire: a `#[cfg]`-stripped handler contributes no measured kind and no
+/// advertised capability, while a `#[cfg]`-satisfied one contributes both, and
+/// the survivors keep their declaration order.
+///
+/// The ids are content-derived — `Kind::ID` hashes the kind's declared name —
+/// and the cost table keys rows on `(MailboxId, KindId)`, so a stripped handler
+/// removes exactly its own row rather than shifting its siblings. Pinning the
+/// exact vector is what would catch a future change that renumbered or reordered
+/// them per configuration, which would silently mislabel cost data compared
+/// across builds.
+#[test]
+fn a_cfg_gated_handler_leaves_no_dispatch_artifact() {
+    use aether_data::Kind;
+    use aether_substrate::actor::native::Dispatch;
+
+    let measured = <CfgGatedCap as Dispatch<CfgGatedCap>>::measured_kinds();
+    let advertised: Vec<_> =
+        <CfgGatedCap as Dispatch<CfgGatedCap>>::capabilities().handlers.iter().map(|h| h.id).collect();
+
+    let expected = vec![<CfgKept as Kind>::ID, <CfgPresent as Kind>::ID];
+    assert_eq!(measured, expected, "a stripped handler contributes no measured kind and reorders no survivor");
+    assert_eq!(advertised, expected, "a stripped handler contributes no advertised capability either");
+}
+
 /// An actor with no task handler measures exactly what it advertises, so the
 /// wider set is not a blanket widening.
 #[test]

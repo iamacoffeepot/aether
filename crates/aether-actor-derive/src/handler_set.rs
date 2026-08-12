@@ -248,7 +248,12 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
             sig: f.sig.clone(),
             block: syn::parse_quote!({}),
         };
-        handlers.push(HandlerFn { method, kind_ty, agent_doc, reply, class, multi_kind });
+        // iamacoffeepot/aether#4811 covers `#[actor]`. A set's markers travel to
+        // its adopters through a `#[macro_export] macro_rules!` bridge that
+        // expands in the adopter's crate, where a `feature = "…"` predicate would
+        // resolve against the adopter's features — a separate decision, so the
+        // set's artifacts stay ungated for now.
+        handlers.push(HandlerFn { method, kind_ty, agent_doc, reply, class, multi_kind, cfgs: Vec::new() });
     }
 
     if handlers.is_empty() {
