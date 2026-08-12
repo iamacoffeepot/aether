@@ -947,6 +947,24 @@ struct GitCandidatePush;
 
 impl CandidatePush for GitCandidatePush {
     fn push(&self, commit_hex: &str, target_ref: &str) -> Result<(), String> {
+        // A source sha that is all-zero — or empty — is not a sha git resolves;
+        // both are its ref-delete sentinels (#4841). `git push --force origin
+        // 0000…:<ref>` and `git push --force origin :<ref>` each exit 0 and
+        // report `- [deleted]`, so this seam's success test (`status.success()`)
+        // reads a destroyed candidate ref as a published one. Every *other*
+        // unresolvable sha exits 1 with `bad object`, which is why only these
+        // two values need naming.
+        //
+        // `GitObjectId` refuses the null oid at construction, so a correspondence
+        // record cannot deliver one here. This guard covers the gap that leaves:
+        // the trait takes `&str`, so nothing in the type system stops a future
+        // caller that formats a sha some other way.
+        if commit_hex.bytes().all(|byte| byte == b'0') {
+            return Err(format!(
+                "refusing to push `{commit_hex}` to {target_ref}: git reads an all-zero or empty source sha as a ref deletion, not a commit",
+            ));
+        }
+
         let refspec = format!("{commit_hex}:{target_ref}");
         let output = Command::new("git")
             .args(["push", "--force", "origin"])

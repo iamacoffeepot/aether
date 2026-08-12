@@ -50,17 +50,33 @@ pub struct GitObjectId {
 
 impl GitObjectId {
     /// Build an object id from its `format` tag and raw `bytes`, or `None` when
-    /// the byte length does not match the format (`sha1`/20, `sha256`/32) — the
-    /// tripwire that keeps a mis-tagged id out of the store.
+    /// the byte length does not match the format (`sha1`/20, `sha256`/32), or
+    /// when every byte is zero — the two tripwires that keep an id git will not
+    /// resolve to an object out of the store.
+    ///
+    /// The all-zero id is refused because it is not an object id at all: it is
+    /// git's null-oid sentinel, and git reads it positionally rather than
+    /// resolving it. A push whose *source* is the null oid is a ref **deletion**
+    /// (#4841) — `git push --force origin 0000…:<ref>` exits 0 and reports
+    /// `- [deleted]` — where every other unresolvable sha exits 1 with
+    /// `bad object`. Refusing at construction means a zeroed or
+    /// default-initialized correspondence record cannot become a `GitObjectId`,
+    /// so no downstream caller has to know the sentinel exists.
     #[must_use]
     pub fn new(format: GitObjectFormat, bytes: Vec<u8>) -> Option<Self> {
-        (bytes.len() == format.byte_len()).then_some(Self { format, bytes })
+        let resolvable = bytes.len() == format.byte_len() && bytes.iter().any(|byte| *byte != 0);
+        resolvable.then_some(Self { format, bytes })
     }
 
     /// Parse a git object sha rendered as lowercase (or uppercase) hex, inferring
     /// the format from its length: 40 hex → `sha1`, 64 hex → `sha256`. Any other
-    /// length, or a non-hex character, is `None` (git never hands back such a
-    /// string, so a `None` here is a malformed sha, not an expected miss).
+    /// length, a non-hex character, or the all-zero null oid is `None` (git never
+    /// hands back such a string as an object, so a `None` here is a malformed
+    /// sha, not an expected miss).
+    ///
+    /// Constructs through [`Self::new`] rather than assembling the struct
+    /// directly, so the null-oid refusal holds on this path too — the parsing
+    /// path is the one a zeroed record actually arrives by.
     #[must_use]
     pub fn from_hex(sha: &str) -> Option<Self> {
         let format = match sha.len() {
@@ -73,7 +89,7 @@ impl GitObjectId {
         for (i, byte) in bytes.iter_mut().enumerate() {
             *byte = (hex_nibble(raw[i * 2])? << 4) | hex_nibble(raw[i * 2 + 1])?;
         }
-        Some(Self { format, bytes })
+        Self::new(format, bytes)
     }
 
     /// Render the object id as the lowercase-hex git object sha — the form the
@@ -202,6 +218,42 @@ mod tests {
             assert!(
                 GitObjectId::try_from(BackendObjectId::new(vec![0; length])).is_err(),
                 "an opaque {length}-byte id is not a Git object id",
+            );
+        }
+    }
+
+    // Tripwire: the null oid is refused on every construction path (#4841). It
+    // is the one value whose consequence is *destructive* rather than merely
+    // wrong: git reads an all-zero source sha positionally, as its ref-delete
+    // sentinel, so `git push --force origin 0000…:<ref>` exits 0 and deletes the
+    // ref — where any other unresolvable sha exits 1 with `bad object`. A zeroed
+    // or default-initialized correspondence record is exactly what produces it,
+    // so the refusal has to sit at construction rather than at the push.
+    //
+    // The correct-length case is what makes this a real assertion: an all-zero
+    // sha1 is 20 bytes and an all-zero sha256 is 32, so the pre-existing
+    // length-and-format check passes it through. Only the zero check refuses it.
+    #[test]
+    fn the_null_object_id_is_refused_on_every_construction_path() {
+        for (hex_len, byte_len, format) in [(40, 20, GitObjectFormat::Sha1), (64, 32, GitObjectFormat::Sha256)] {
+            let zero_hex = "0".repeat(hex_len);
+            assert!(GitObjectId::from_hex(&zero_hex).is_none(), "the {hex_len}-hex null oid does not parse");
+            assert!(
+                GitObjectId::new(format, vec![0u8; byte_len]).is_none(),
+                "the {byte_len}-byte null oid is not constructible, though its length matches the format",
+            );
+            assert!(
+                GitObjectId::try_from(BackendObjectId::new(vec![0u8; byte_len])).is_err(),
+                "a zeroed {byte_len}-byte backend record does not convert",
+            );
+
+            // A single non-zero nibble is enough to make it an object id again,
+            // so the refusal is the null oid specifically and not "leading zeros".
+            let mut nearly_zero = "0".repeat(hex_len - 1);
+            nearly_zero.push('1');
+            assert!(
+                GitObjectId::from_hex(&nearly_zero).is_some(),
+                "a sha that merely starts with zeros is an ordinary object id",
             );
         }
     }
