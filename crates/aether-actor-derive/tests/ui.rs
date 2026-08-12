@@ -160,6 +160,10 @@ fn ui() {
     // bridge is a native-set artifact, and its gate pair is asserted over the
     // emitted tokens in `handler_set::tests` — a native set's expansion names
     // `aether_substrate` types, and `aether-substrate` depends transitively on
-    // this crate, so the real types cannot be reached from a fixture here.
+    // this crate. A dev-dependency can close that cycle, so what rules a fixture
+    // out here is cost, not the dependency graph: it would pull the wasmtime and
+    // cranelift tree into these UI tests, and hand-mocking the substrate types to
+    // avoid that proves less than the token assertion does. The real types are in
+    // scope on the substrate side of the edge if the pair is wanted against them.
     t.pass("tests/ui/accepts_cfg_gated_handler_set_wasm.rs");
 }

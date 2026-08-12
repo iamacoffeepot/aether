@@ -7,8 +7,12 @@
 //! fixture covers the whole of what a wasm set produces. The bridge belongs to
 //! native sets, and its gate pair is asserted over the emitted tokens in
 //! `handler_set::tests`: a native set's expansion names `aether_substrate`
-//! types, and `aether-substrate` depends transitively on the crate under test,
-//! so the real types cannot be reached from a fixture here.
+//! types, and `aether-substrate` depends transitively on the crate under test.
+//! A dev-dependency can close that cycle, so what rules a fixture out here is
+//! cost, not the dependency graph: it would pull the wasmtime and cranelift tree
+//! into these UI tests, and hand-mocking the substrate types to avoid that proves
+//! less than the token assertion does. The real types are in scope on the
+//! substrate side of the edge if the pair is wanted against them.
 //!
 //! trybuild compiles a fixture as a plain binary, so `test` is off here:
 //! `on_test_only` is stripped and `on_not_test` survives. Both directions are

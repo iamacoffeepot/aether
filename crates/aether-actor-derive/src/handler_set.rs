@@ -577,9 +577,16 @@ mod tests {
     /// The bridge half of ADR-0183 is the one artifact family this crate's
     /// trybuild fixtures do not cover: a native set's expansion names
     /// `aether_substrate` types in the trait it emits, and `aether-substrate`
-    /// depends on `aether-actor`, which depends on this crate — so the real
-    /// types cannot be brought in here at any dependency level. These read the
-    /// emitted tokens instead, which is where the gate decision is made.
+    /// depends on `aether-actor`, which depends on this crate. Cargo allows a
+    /// dev-dependency to close that cycle, so what rules a fixture out here is
+    /// cost, not the dependency graph: dev-depending on `aether-substrate` from
+    /// a proc-macro crate pulls the wasmtime and cranelift tree into its UI
+    /// tests, and the cheaper substitute — a hand-written substrate mock —
+    /// proves less than the same assertion against the real types would, while
+    /// leaving a mock nobody maintains. These read the emitted tokens instead,
+    /// which is where the gate decision is made; the other option is to assert
+    /// the pair against the real types from the substrate side of the edge,
+    /// where they are already in scope.
     fn native_set(handlers: &proc_macro2::TokenStream) -> String {
         expand_handler_set(syn::parse_quote! {
             trait Set {
