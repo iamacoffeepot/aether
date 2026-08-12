@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{LandingReceipt, ProjectionBackend, ViewDocument};
+use aether_bloomery::{ProjectedReceipt, ProjectionBackend, ViewDocument};
 use aether_bloomery_github::{GithubError, GithubProjection};
 
 use super::GithubConnectionConfig;
@@ -39,11 +39,12 @@ impl ProjectionShell {
         self.backend.reconcile_view(view)
     }
 
-    /// Project a landing receipt outward.
+    /// Project a landing receipt outward, onto the objects its membership
+    /// reaches.
     ///
     /// # Errors
     /// The projection surface is unreachable or returned an error status.
-    pub fn project_receipt(&self, receipt: &LandingReceipt) -> Result<(), GithubError> {
+    pub fn project_receipt(&self, receipt: &ProjectedReceipt) -> Result<(), GithubError> {
         self.backend.project_receipt(receipt)
     }
 }

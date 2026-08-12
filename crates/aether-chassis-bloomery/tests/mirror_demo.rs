@@ -1,13 +1,14 @@
 #![cfg(feature = "github")]
 
-//! The ADR-0149 outward-mirror demo (#3459 step 7 coverage).
+//! The ADR-0149 outward-mirror demo (#3459 step 7 coverage, narrowed by #4663).
 //!
 //! Drives a synthetic bloom through the real journal (`SqliteStore`) and the
 //! pure reducer, assembles the view document, and projects it through the host
 //! projection cap shell onto a fake GitHub — the "Done" the issue names:
 //!
-//! - a carbon copy appears (an umbrella issue plus a workpiece issue per
-//!   member);
+//! - the mirror appears on the objects the repository already holds (one
+//!   comment per member on the issue that member addresses), and the object
+//!   count never moves;
 //! - deleting a projection and re-projecting rebuilds it from the journal
 //!   alone (delete → reappear).
 //!
@@ -26,6 +27,10 @@ use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
 use aether_chassis_bloomery::bloomery::ProjectionShell;
 use aether_chassis_bloomery::store::{SqliteStore, StoreBackend};
 use aether_data::wire::{from_bytes, to_vec};
+
+/// The two issues the synthetic bloom's members address — objects the
+/// repository already holds. The projection opens none of its own.
+const MEMBER_ISSUES: [u64; 2] = [4628, 4629];
 
 fn digest(seed: u8) -> Digest {
     Digest::from_bytes([seed; 32])
@@ -50,7 +55,10 @@ fn membership(name: &str, revision: u8) -> Membership {
 fn synthetic_bloom_snapshot() -> Snapshot {
     let base = digest(0);
     let spec = BloomDraft {
-        proposals: vec![membership("reactor-core", 10), membership("coolant-loop", 20)],
+        proposals: vec![
+            membership(&format!("issue-{}", MEMBER_ISSUES[0]), 10),
+            membership(&format!("issue-{}", MEMBER_ISSUES[1]), 20),
+        ],
         base,
         ..BloomDraft::default()
     }
@@ -77,30 +85,41 @@ fn synthetic_bloom_snapshot() -> Snapshot {
 }
 
 #[test]
-fn a_synthetic_bloom_projects_a_carbon_copy_and_rebuilds_after_deletion() {
+fn a_synthetic_bloom_projects_onto_existing_objects_and_rebuilds_after_deletion() {
     let snapshot = synthetic_bloom_snapshot();
     let view = view_of(&snapshot, |_| None);
 
-    // Mount the projection cap shell over a fake GitHub; keep a handle to
-    // introspect what the shell projects.
+    // Mount the projection cap shell over a fake GitHub already holding the two
+    // member issues; keep a handle to introspect what the shell projects.
     let fake = FakeGithub::new();
+    for number in MEMBER_ISSUES {
+        fake.seed_issue(number, "a person wrote this issue");
+    }
     let shell = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
 
-    // Carbon copy: 1 umbrella issue + 2 workpiece issues.
+    // The mirror: one folded comment per member, on the issue that member
+    // addresses. Nothing is opened.
     shell.reconcile_view(&view).unwrap();
-    assert_eq!(fake.issue_count(), 3, "an umbrella issue plus one issue per workpiece");
-    let full = fake.issue_numbers();
+    assert_eq!(fake.issue_count(), MEMBER_ISSUES.len(), "the mirror opens no object of its own");
+    for number in MEMBER_ISSUES {
+        assert_eq!(fake.comments_on(number).len(), 1, "one folded comment per member");
+    }
 
-    // Idempotent: a second reconcile of the same view creates nothing new.
+    // Idempotent: a second reconcile of the same view writes nothing new.
+    let after_first = fake.comment_ids_on(MEMBER_ISSUES[0]);
     shell.reconcile_view(&view).unwrap();
-    assert_eq!(fake.issue_numbers(), full, "reconcile is idempotent");
+    assert_eq!(fake.comment_count(), MEMBER_ISSUES.len(), "reconcile is idempotent");
+    assert_eq!(fake.comment_ids_on(MEMBER_ISSUES[0]), after_first);
 
     // Delete → reappear: an operator deletes a projection; re-projecting from
     // the same journal-derived view rebuilds it.
-    let victim = full[1];
-    fake.delete_issue(victim);
-    assert_eq!(fake.issue_count(), 2);
+    let victim = after_first[0];
+    fake.delete_comment(victim);
+    assert!(fake.comments_on(MEMBER_ISSUES[0]).is_empty());
+
     shell.reconcile_view(&view).unwrap();
-    assert_eq!(fake.issue_count(), 3, "the deleted projection was rebuilt from the journal");
-    assert!(!fake.issue_numbers().contains(&victim), "the rebuilt issue is a fresh object");
+    let rebuilt = fake.comment_ids_on(MEMBER_ISSUES[0]);
+    assert_eq!(rebuilt.len(), 1, "the deleted projection was rebuilt from the journal");
+    assert_ne!(rebuilt[0], victim, "the rebuilt comment is a fresh object");
+    assert_eq!(fake.issue_count(), MEMBER_ISSUES.len(), "the rebuild opened nothing either");
 }

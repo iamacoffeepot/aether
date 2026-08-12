@@ -131,6 +131,22 @@ fn candidate_ref(bloom: &BloomId, workpiece: &str) -> String {
     format!("heads/bloom/{}/candidate/{safe}", short_hex(&bloom.0))
 }
 
+/// The branch a bloom's landing is proposed from — a sibling of `integration`
+/// in the same per-bloom namespace, so a landing branch is swept by the same
+/// namespace cleanup and reads as part of the bloom rather than a parallel
+/// invention. Returned in the `bloom/…` form a pull request's `head` wants (no
+/// `heads/` prefix); the source port's `landing_ref` is the same name as a ref.
+///
+/// Public and crate-level for the same reason [`candidate_ref_name`] is: both
+/// ends of the name live outside one module. `land` proposes the branch, and
+/// the outward projection locates that same proposal to comment a landing
+/// receipt on it. One spelling, so the two cannot drift — a mismatch here does
+/// not fail loudly, it looks up a pull request that is not there.
+#[must_use]
+pub fn landing_branch(bloom: &BloomId) -> String {
+    format!("bloom/{}/landing", short_hex(&bloom.0))
+}
+
 /// A source-port fault, distinct from the clean [`IntegrateOutcome`] /
 /// [`LandOutcome`] refusals (which are not errors). Its own type because the
 /// port needs a variant the value vocabulary does not carry — the gated-land
@@ -468,20 +484,8 @@ impl<C: GitDataApi + PullRequestApi> GitSource<C> {
         format!("{}{}", Self::checkpoint_prefix(bloom), to_hex(tree))
     }
 
-    /// The branch a bloom's landing is proposed from — a sibling of
-    /// `integration` in the same per-bloom namespace, so a landing branch is
-    /// swept by the same namespace cleanup and reads as part of the bloom
-    /// rather than a parallel invention. Returned in the `bloom/…` form a pull
-    /// request's `head` wants (no `heads/` prefix); [`landing_ref`] is the same
-    /// name as a ref.
-    ///
-    /// [`landing_ref`]: Self::landing_ref
-    fn landing_branch(bloom: &BloomId) -> String {
-        format!("bloom/{}/landing", short_hex(&bloom.0))
-    }
-
     fn landing_ref(bloom: &BloomId) -> String {
-        format!("heads/{}", Self::landing_branch(bloom))
+        format!("heads/{}", landing_branch(bloom))
     }
 
     // Point the bloom's landing branch at `sha`, creating it or moving it. The
@@ -962,7 +966,7 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
         // re-deciding it here would abandon the bloom the moment mainline moved —
         // including when it moved *because this very proposal merged*, which is
         // the one outcome the watch exists to observe.
-        let branch = Self::landing_branch(bloom);
+        let branch = landing_branch(bloom);
         if let Some(existing) = self.client.find_pull_request_for_head(&branch)? {
             return Ok(LandOutcome::Proposed { number: existing.number });
         }
@@ -1220,7 +1224,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        ADMISSION_REF, EMPTY_TREE, GitSource, SourceError, parse_bloom_line, render_claim_message,
+        ADMISSION_REF, EMPTY_TREE, GitSource, SourceError, landing_branch, parse_bloom_line, render_claim_message,
         render_tombstone_message, to_hex,
     };
     use crate::client::{GitDataApi, PullRequestApi};
@@ -1599,7 +1603,7 @@ mod tests {
             other @ LandOutcome::BaseMoved { .. } => panic!("expected Proposed, got {other:?}"),
         };
         assert_eq!(
-            fake.ref_target(&format!("heads/bloom/{}/landing", short_hex(&bloom.0))),
+            fake.ref_target(&format!("heads/{}", landing_branch(&bloom))),
             Some(to_hex(&new_head)),
             "the landing branch points at the resolved head",
         );
@@ -1650,7 +1654,7 @@ mod tests {
             other @ LandOutcome::Proposed { .. } => panic!("expected BaseMoved, got {other:?}"),
         }
         assert_eq!(
-            fake.find_pull_request_for_head(&format!("bloom/{}/landing", short_hex(&bloom.0))).unwrap(),
+            fake.find_pull_request_for_head(&landing_branch(&bloom)).unwrap(),
             None,
             "a moved base proposes nothing",
         );
