@@ -467,6 +467,10 @@ impl NativeActor for BloomeryApiCapability {
     #[handler::manual]
     fn on_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_, Manual>, mail: Settled) {
         if let Some(inbound) = state.pending.remove(&mail.root.correlation_id) {
+            // A release admit holds a second entry keyed by the same correlation;
+            // drop it here too, or a control core that stops replying leaves one
+            // digest per request behind forever.
+            state.release_admits.remove(&mail.root.correlation_id);
             inbound.reply(&error_response(504, "control-plane request settled without a reply"));
         } else if let Some(VerifyPending { inbound, .. }) = state.verifying.remove(&mail.root.correlation_id) {
             inbound.reply(&error_response(504, "signature verification settled without a reply"));
