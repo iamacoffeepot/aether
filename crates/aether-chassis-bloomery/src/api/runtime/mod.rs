@@ -348,15 +348,19 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
-    /// `POST /blooms/{id}/answer` — adopt a signed answer to a parked question.
-    #[http::route(Post, "/blooms/{id}/answer")]
+    /// `POST /blooms/{id}/answer/{question}` — adopt a signed answer to the
+    /// parked question `{question}` names. The question is a path segment
+    /// because the signature is bound to it (ADR-0182).
+    #[http::route(Post, "/blooms/{id}/answer/{question}")]
     fn on_answer(
         state: &mut ApiCapabilityState,
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         id: http::Path<String>,
+        question: http::Path<String>,
     ) -> http::Outcome {
         let id = id.0;
-        let routed = state.answer_bloom(&ctx, &id, &ctx.request().body);
+        let question = question.0;
+        let routed = state.answer_bloom(&ctx, &id, &question, &ctx.request().body);
         finish(state, ctx, routed)
     }
 

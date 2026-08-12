@@ -35,7 +35,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
-use crate::sign::KeyProvider;
+use crate::sign::{AuthorityDoor, KeyProvider};
 use crate::values::Statement;
 
 /// The maximum number of derivation nodes [`assemble_manifest`]'s closure walk
@@ -94,6 +94,22 @@ pub trait ProvenanceIndex {
     /// never trusted for grounding. A known artifact with no parents returns
     /// `Some(empty)`; an unknown one returns `None` (a broken derivation edge).
     fn parents(&self, digest: &Digest) -> Option<Vec<Digest>>;
+
+    /// The authority the host recorded a statement as having been verified
+    /// against when it admitted the statement — the door it was signed for and
+    /// the request digest it was bound to (ADR-0182).
+    ///
+    /// The closure walk asks whether a person signed something in an artifact's
+    /// derivation, so it has no request of its own to bind against and cannot
+    /// invent one: a binding it chose would verify nothing the signer agreed to.
+    /// It recovers the host's record here instead and re-runs the same
+    /// cryptographic check with it, which keeps the check cryptographic rather
+    /// than downgrading it to a structural one.
+    ///
+    /// `None` for an artifact the index cannot answer for, which leaves the node
+    /// ungrounded — the walk is fail-closed, so an unrecorded authority refuses
+    /// exactly as a failing signature does.
+    fn authority_binding(&self, digest: &Digest) -> Option<(AuthorityDoor, Digest)>;
 }
 
 /// Why manifest assembly refused. Every variant names the exact slot that
@@ -113,7 +129,10 @@ pub enum ClosureViolation {
         slot: Digest,
     },
     /// An instruction slot's statement is instruction-capable but its
-    /// signature did not verify.
+    /// signature did not verify against the authority the index recorded for it
+    /// — including the case where the index recorded no authority at all
+    /// ([`ProvenanceIndex::authority_binding`] answered `None`), which is a
+    /// signature that cannot be checked rather than one that passed.
     UnverifiedSignature {
         /// The offending slot's artifact digest.
         slot: Digest,
@@ -139,7 +158,8 @@ enum Advance {
     Ungrounded,
     /// Reached a statement that is not instruction-capable.
     NonAuthor,
-    /// Reached an instruction-capable statement whose signature did not verify.
+    /// Reached an instruction-capable statement whose signature did not verify
+    /// against its recorded authority, or for which the index recorded none.
     Unverified,
 }
 
@@ -233,9 +253,16 @@ fn ground_instruction(
             return Ok(traced);
         }
         if let Some(statement) = index.statement(&node) {
+            // A statement the index records no authority for is refused at the
+            // same level a failing signature is: the walk has no request of its
+            // own to bind against, so an unrecorded binding is a missing ground,
+            // never a reason to verify over the words alone (ADR-0182).
             if !statement.is_instruction_capable() {
                 most_advanced = most_advanced.max(Advance::NonAuthor);
-            } else if statement.verify_authority(keys) {
+            } else if index
+                .authority_binding(&node)
+                .is_some_and(|(door, binding)| statement.verify_authority(keys, door, binding))
+            {
                 traced.sort_unstable();
                 return Ok(traced);
             } else {

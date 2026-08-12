@@ -89,7 +89,11 @@ pub enum Fact {
     /// hold; the cryptographic `verify_authority` gate is the host answer
     /// route's, before admission (the reducer holds no key material), mirroring
     /// how the intake broker is the trust gate for evidence the reducer only
-    /// re-checks for binding.
+    /// re-checks for binding. That gate binds the signature to the question the
+    /// request named ([`AuthorityDoor::Answer`](crate::AuthorityDoor),
+    /// ADR-0182), so the parent scan re-checks a signed binding — `parents` is
+    /// outside the signature and a captured answer would otherwise re-point at
+    /// any open hold whose question drew the same words.
     ///
     /// Appended to the closed [`Fact`] enum past ADR-0151's evidence-admission
     /// variant to realize the ADR's answer path ("releases the hold and

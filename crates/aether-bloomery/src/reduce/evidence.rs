@@ -65,10 +65,20 @@ pub(super) fn reduce_admit_evidence(snapshot: &Snapshot, bloom: &BloomId, eviden
 /// instruction-capable (an author signature — only that provenance becomes
 /// intent), and its `parents` name a digest that is an open hold on the bloom.
 /// On admit it releases that hold and re-dispatches the held stage with the
-/// answer digest in the attempt's input closure. The cryptographic
-/// `verify_authority` check is the host answer route's, upstream of admission
-/// (the reducer holds no key material) — the same trust split the intake broker
-/// uses for evidence, where the reducer re-checks binding but not the signature.
+/// answer digest in the attempt's input closure.
+///
+/// The cryptographic `verify_authority` check is the host answer route's,
+/// upstream of admission (the reducer holds no key material) — the same trust
+/// split the intake broker uses for evidence. What that route now verifies is
+/// the signature *bound to the question digest the request named*
+/// ([`AuthorityDoor::Answer`](crate::AuthorityDoor), ADR-0182), so the parent
+/// scan below re-checks a binding the signature already fixed rather than being
+/// the only thing establishing it. That ordering is what closes the replay:
+/// `parents` sits outside the signature, so before the binding was signed, two
+/// questions answered with the same text shared signed bytes and the first
+/// envelope could be re-parented onto the second hold. The scan stays because
+/// the reducer is key-free — on replay it is the only binding evaluable here,
+/// and dropping it would trade a structural check for nothing.
 ///
 /// An answer whose parents name several open holds releases the first one in
 /// digest order; a parked question raises one hold per member, so the common

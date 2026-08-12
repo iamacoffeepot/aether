@@ -50,7 +50,7 @@ refused with `approval policy unavailable; seal fails closed`.
 | `POST /drafts/{id}/seal` | Run the approve gate over every proposal (the body carries one scope projection per member), freeze the draft to a `BloomSpec`, and admit `Fact::Seal`; returns the reducer outcome. |
 | `POST /blooms/{id}/supersede` | Seal the named successor draft and admit `Fact::Supersede` against the `{id}` predecessor. |
 | `POST /blooms/{id}/grant` | Hand a wedged member more attempts and resume it on the `{id}` bloom, without sealing anything. |
-| `POST /blooms/{id}/answer` | Adopt an owner-signed answer statement to a parked question, releasing the hold it took. |
+| `POST /blooms/{id}/answer/{question}` | Adopt an owner-signed answer to the parked question `{question}` names, releasing the hold it took. |
 | `GET /blooms` · `GET /view` | The whole live view document. |
 | `GET /blooms/{id}` | One bloom's live view (`{id}` is the bloom's hex digest). |
 | `GET /claims` | Every live claim ref and the bloom holding it. |
@@ -192,6 +192,18 @@ evidence the gate rules on:
 - `signed_statement` — the owner-signed statement an above-`auto` member needs.
   The seal defers on an `aether.signing` verification of it and admits only once
   every such member verifies.
+
+What the owner signs is not the statement's `words` on their own. Every signed
+door verifies against the digest of an *authorization*: which door the signature
+is for, the exact request digest it is good for, and the words together
+(ADR-0182). So an approve statement is signed for the approve door bound to the
+member's `scope_revision`, and an answer is signed for the answer door bound to
+the question digest the route names. A signature therefore authorizes one
+request at one door — re-pointing an envelope at a different question, revision,
+or ref produces no verifying signature, where a statement's `parents` alone
+never could, being outside the signature and rewritable by whoever holds it.
+Statements signed against the older words-only message do not verify and must be
+re-signed.
 
 The gate fails closed at every branch, so a `422` names what fell short —
 `member wp-1 has no scope projection; seal fails closed` for a proposal the

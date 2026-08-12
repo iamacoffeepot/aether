@@ -24,9 +24,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    AgentProfile, ApprovalPolicy, ApprovalRule, BloomDraft, ConfigKind, ConfigRegistry, Digest, DispatchPayload,
-    Evidence, EvidenceKind, Harness, KeyId, Membership, Provenance, ReasoningEffort, SignatureEnvelope, StageCatalog,
-    StageId, Statement, Tier, ToolPolicy, Topic, Workpiece, WorkpieceId,
+    AgentProfile, ApprovalPolicy, ApprovalRule, AuthorityDoor, BloomDraft, ConfigKind, ConfigRegistry, Digest,
+    DispatchPayload, Evidence, EvidenceKind, Harness, KeyId, Membership, Provenance, ReasoningEffort,
+    SignatureEnvelope, StageCatalog, StageId, Statement, Tier, ToolPolicy, Topic, Workpiece, WorkpieceId,
+    authorization_message,
 };
 use aether_chassis_bloomery::api::{MemberProjection, SealRequest};
 use aether_chassis_bloomery::bloomery::{AdrTouch, Completeness, TopicOutbox};
@@ -108,16 +109,23 @@ fn member(workpiece: &str, revision: Digest, detail: Digest) -> Membership {
 
 /// An author-signed statement over `subject`'s bytes by the allowlisted `owner`
 /// — the above-auto member's owner approval the seal path verifies through the
-/// `aether.signing` capability.
+/// `aether.signing` capability. Signed at [`AuthorityDoor::Approve`] bound to
+/// the same scope revision the words name (ADR-0182).
 fn owner_signed_statement(subject: Digest) -> Statement {
-    let words = subject.as_bytes().to_vec();
+    owner_signed_at(AuthorityDoor::Approve, subject, subject.as_bytes().to_vec(), vec![])
+}
+
+/// An author-signed statement by the allowlisted `owner` over `words`, signed as
+/// authority for `door` bound to `binding`, naming `parents` (ADR-0182).
+fn owner_signed_at(door: AuthorityDoor, binding: Digest, words: Vec<u8>, parents: Vec<Digest>) -> Statement {
+    let message = authorization_message(door, binding, &words);
     Statement {
-        words: words.clone(),
+        words,
         provenance: Provenance::AuthorSignature(SignatureEnvelope {
             signer: KeyId("owner".to_owned()),
-            signature: owner_signing_key().sign(&words).to_bytes().to_vec(),
+            signature: owner_signing_key().sign(message.as_bytes()).to_bytes().to_vec(),
         }),
-        parents: vec![],
+        parents,
     }
 }
 
@@ -257,6 +265,12 @@ fn bloom_hex(bloom_id: &Value) -> String {
         .collect()
 }
 
+/// Hex-encode a [`Digest`] for a path segment that names one — the answer
+/// route's `{question}` and the release route's `{digest}`.
+fn hex_of(digest: &Digest) -> String {
+    digest.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// A valid single-workpiece draft the reducer admits: the member's approval
 /// evidence binds its own scope revision, and the stage catalog is the one line
 /// the reducer requires (`StageCatalog::line_digest`, not the zero default).
@@ -384,13 +398,18 @@ fn rest_api_drives_a_bloom_end_to_end() {
     let (status, _) = try_http(http_port, "GET", &format!("/artifacts/{}", "0".repeat(64)), None).unwrap();
     assert_eq!(status, 404, "missing artifact");
 
-    // The answer route (ADR-0151). A malformed statement body is a clean 400,
-    // not a panic; a malformed bloom id is a 400.
+    // The answer route (ADR-0151, ADR-0182). The question rides the path, so
+    // every malformed segment is a clean 400 rather than a panic.
+    let question = Digest::from_bytes([222; 32]);
+    let question_hex = hex_of(&question);
     let (status, _) =
-        try_http(http_port, "POST", &format!("/blooms/{bloom_id}/answer"), Some(b"not a statement")).unwrap();
+        try_http(http_port, "POST", &format!("/blooms/{bloom_id}/answer/{question_hex}"), Some(b"not a statement"))
+            .unwrap();
     assert_eq!(status, 400, "malformed answer body");
-    let (status, _) = try_http(http_port, "POST", "/blooms/xyz/answer", Some(b"{}")).unwrap();
+    let (status, _) = try_http(http_port, "POST", &format!("/blooms/xyz/answer/{question_hex}"), Some(b"{}")).unwrap();
     assert_eq!(status, 400, "malformed bloom id");
+    let (status, _) = try_http(http_port, "POST", &format!("/blooms/{bloom_id}/answer/xyz"), Some(b"{}")).unwrap();
+    assert_eq!(status, 400, "malformed question digest");
 
     // An author-signed answer whose signature does NOT verify against the
     // configured allowlist is rejected at the gate — a 400, never admitted.
@@ -404,28 +423,45 @@ fn rest_api_drives_a_bloom_end_to_end() {
             signer: KeyId("owner".to_owned()),
             signature: vec![],
         }),
-        parents: vec![Digest::from_bytes([222; 32])],
+        parents: vec![question],
     };
-    let (status, _) =
-        send_json(http_port, "POST", &format!("/blooms/{bloom_id}/answer"), &serde_json::to_value(&unsigned).unwrap());
+    let (status, _) = send_json(
+        http_port,
+        "POST",
+        &format!("/blooms/{bloom_id}/answer/{question_hex}"),
+        &serde_json::to_value(&unsigned).unwrap(),
+    );
     assert_eq!(status, 400, "an answer with an unverifiable signature is rejected at the gate");
 
-    // A genuine author signature by the allowlisted `owner` verifies and
-    // admits; adopting no held question reduces to a clean rejection outcome
-    // — the sealed bloom carries no parked hold — 200 carrying the reducer's
-    // refusal, mirroring how seal rejections surface. This is the real
-    // custody path: the answer verified against the host-local allowlist, not
-    // the retired always-valid stub.
-    let answer = Statement {
-        words: words.clone(),
-        provenance: Provenance::AuthorSignature(SignatureEnvelope {
-            signer: KeyId("owner".to_owned()),
-            signature: owner_signing_key().sign(&words).to_bytes().to_vec(),
-        }),
-        parents: vec![Digest::from_bytes([222; 32])],
-    };
-    let (status, answered) =
-        send_json(http_port, "POST", &format!("/blooms/{bloom_id}/answer"), &serde_json::to_value(&answer).unwrap());
+    // The replay ADR-0182 closes. This answer is genuinely signed by the
+    // allowlisted owner and carries the same words as the one below — but it was
+    // signed for a *different* question, and re-parenting it onto this one does
+    // not move the signature. Before the binding was signed this admitted,
+    // because the only thing tying an envelope to a question was `parents`.
+    let other_question = Digest::from_bytes([223; 32]);
+    let mut replayed = owner_signed_at(AuthorityDoor::Answer, other_question, words.clone(), vec![other_question]);
+    replayed.parents = vec![question];
+    let (status, _) = send_json(
+        http_port,
+        "POST",
+        &format!("/blooms/{bloom_id}/answer/{question_hex}"),
+        &serde_json::to_value(&replayed).unwrap(),
+    );
+    assert_eq!(status, 400, "an answer signed for another question does not verify when re-parented onto this one");
+
+    // A genuine author signature by the allowlisted `owner`, bound to the
+    // question the path names, verifies and admits; adopting no held question
+    // reduces to a clean rejection outcome — the sealed bloom carries no parked
+    // hold — 200 carrying the reducer's refusal, mirroring how seal rejections
+    // surface. This is the real custody path: the answer verified against the
+    // host-local allowlist, not the retired always-valid stub.
+    let answer = owner_signed_at(AuthorityDoor::Answer, question, words, vec![question]);
+    let (status, answered) = send_json(
+        http_port,
+        "POST",
+        &format!("/blooms/{bloom_id}/answer/{question_hex}"),
+        &serde_json::to_value(&answer).unwrap(),
+    );
     assert_eq!(status, 200, "answer admitted: {answered:?}");
     assert_eq!(answered["outcome"]["AdoptAnswerRejected"], "NoMatchingHold", "no parked hold to adopt");
 }

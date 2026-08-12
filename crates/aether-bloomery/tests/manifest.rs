@@ -12,8 +12,8 @@ use std::collections::{HashMap, HashSet};
 use std::collections::BTreeMap;
 
 use aether_bloomery::{
-    ClosureViolation, Digest, Ed25519KeyProvider, KeyProvider, MANIFEST_CLOSURE_BUDGET, Provenance, ProvenanceIndex,
-    SignatureEnvelope, Slot, SlotRole, Statement, assemble_manifest,
+    AuthorityDoor, ClosureViolation, Digest, Ed25519KeyProvider, KeyProvider, MANIFEST_CLOSURE_BUDGET, Provenance,
+    ProvenanceIndex, SignatureEnvelope, Slot, SlotRole, Statement, assemble_manifest, authorization_message,
 };
 use aether_bloomery::{KeyId, Observation};
 use ed25519_dalek::{Signer, SigningKey};
@@ -36,6 +36,10 @@ struct TestIndex {
     statements: HashMap<Digest, Statement>,
     policies: HashSet<Digest>,
     parents: HashMap<Digest, Vec<Digest>>,
+    /// Statement digests the index deliberately records no authority for — the
+    /// `authority_binding` → `None` case the fail-closed walk must refuse
+    /// (ADR-0182).
+    unbound: HashSet<Digest>,
 }
 
 impl ProvenanceIndex for TestIndex {
@@ -49,6 +53,13 @@ impl ProvenanceIndex for TestIndex {
 
     fn parents(&self, digest: &Digest) -> Option<Vec<Digest>> {
         self.parents.get(digest).cloned()
+    }
+
+    fn authority_binding(&self, digest: &Digest) -> Option<(AuthorityDoor, Digest)> {
+        // A host grounds a statement at the artifact digest it recorded it
+        // under, so that is what it recorded and what the walk recovers here.
+        (self.statements.contains_key(digest) && !self.unbound.contains(digest))
+            .then_some((AuthorityDoor::Ground, *digest))
     }
 }
 
@@ -76,9 +87,13 @@ fn real_provider() -> Ed25519KeyProvider {
     Ed25519KeyProvider::new(BTreeMap::from([(KeyId("owner".into()), owner_key().verifying_key())]))
 }
 
-fn signed_statement() -> Statement {
+/// A statement genuinely signed as authority to ground the artifact stored at
+/// `at` — the message [`TestIndex::authority_binding`] reports for that node, so
+/// the walk's recovered binding and the signed one agree (ADR-0182).
+fn signed_statement(at: Digest) -> Statement {
     let words = b"do the thing".to_vec();
-    let signature = owner_key().sign(&words).to_bytes().to_vec();
+    let signature =
+        owner_key().sign(authorization_message(AuthorityDoor::Ground, at, &words).as_bytes()).to_bytes().to_vec();
     Statement {
         words,
         provenance: Provenance::AuthorSignature(SignatureEnvelope { signer: KeyId("owner".into()), signature }),
@@ -101,7 +116,7 @@ fn instruction(artifact: Digest) -> Slot {
 #[test]
 fn instruction_slot_grounded_by_signed_statement_is_admissible() {
     let mut statements = HashMap::new();
-    statements.insert(digest(1), signed_statement());
+    statements.insert(digest(1), signed_statement(digest(1)));
     let index = TestIndex { statements, policies: HashSet::new(), ..Default::default() };
 
     let manifest = assemble_manifest(vec![instruction(digest(1))], &index, &real_provider()).unwrap();
@@ -139,11 +154,28 @@ fn observation_backed_instruction_slot_is_rejected() {
 #[test]
 fn unverified_signature_instruction_slot_is_rejected() {
     let mut statements = HashMap::new();
-    statements.insert(digest(5), signed_statement());
+    statements.insert(digest(5), signed_statement(digest(5)));
     let index = TestIndex { statements, policies: HashSet::new(), ..Default::default() };
 
     let violation = assemble_manifest(vec![instruction(digest(5))], &index, &RejectingKeyProvider).unwrap_err();
     assert_eq!(violation, ClosureViolation::UnverifiedSignature { slot: digest(5) });
+}
+
+#[test]
+fn a_statement_the_index_records_no_authority_for_is_rejected() {
+    // ADR-0182: verification needs a binding, and the walk has no request of its
+    // own to supply one. When the index cannot say what the host verified a
+    // statement against, the walk refuses rather than falling back to checking
+    // the signature over the words alone — which is the unbound path this change
+    // exists to remove. The signature itself is genuine and the provider is the
+    // real one, so only the missing record can produce this refusal.
+    let mut statements = HashMap::new();
+    statements.insert(digest(7), signed_statement(digest(7)));
+    let index = TestIndex { statements, unbound: HashSet::from([digest(7)]), ..Default::default() };
+
+    let violation = assemble_manifest(vec![instruction(digest(7))], &index, &real_provider()).unwrap_err();
+
+    assert_eq!(violation, ClosureViolation::UnverifiedSignature { slot: digest(7) });
 }
 
 #[test]
@@ -164,7 +196,7 @@ fn derived_instruction_chain_is_admissible_and_authors_its_closure() {
     // ground and admits, and rewrites the slot's parent_closure to the ancestors
     // it actually traced — not whatever the caller declared.
     let mut statements = HashMap::new();
-    statements.insert(digest(12), signed_statement());
+    statements.insert(digest(12), signed_statement(digest(12)));
     let mut parents = HashMap::new();
     parents.insert(digest(10), vec![digest(11)]);
     parents.insert(digest(11), vec![digest(12)]);
@@ -190,7 +222,7 @@ fn a_redispatched_attempt_grounds_on_the_answer_and_its_closure_names_the_questi
     let question = digest(21);
     let prompt = digest(22);
     let mut statements = HashMap::new();
-    statements.insert(answer, signed_statement());
+    statements.insert(answer, signed_statement(answer));
     let mut parents = HashMap::new();
     parents.insert(prompt, vec![answer, question]);
     let index = TestIndex { statements, parents, ..Default::default() };
@@ -219,7 +251,7 @@ proptest! {
         prop_assume!(!forged.contains(&artifact_seed));
         let mut statements = HashMap::new();
         for &seed in &forged {
-            statements.insert(digest(seed), signed_statement());
+            statements.insert(digest(seed), signed_statement(digest(seed)));
         }
         let index = TestIndex { statements, ..Default::default() };
 

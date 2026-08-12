@@ -2,7 +2,7 @@
 //! signed [`Statement`] must pass, and the evidence-formation that populates a
 //! membership `approval` from a verified statement.
 
-use aether_bloomery::{Digest, Evidence, EvidenceKind, KeyProvider, Statement, digest_of};
+use aether_bloomery::{AuthorityDoor, Digest, Evidence, EvidenceKind, KeyProvider, Statement, digest_of};
 
 /// Why an above-auto approval's signed statement was rejected.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -76,6 +76,14 @@ pub fn verified_statement_approval(subject: Digest, statement: &Statement) -> Ev
 /// → [`verified_statement_approval`]; the deferred-verify seal path splits the
 /// same three steps across the async `aether.signing` boundary.
 ///
+/// The `scope_revision` binds this approval twice, and both bindings are kept.
+/// It is the signed `binding` under [`AuthorityDoor::Approve`] (ADR-0182), and
+/// it remains the words [`precheck_statement`] compares byte-for-byte. This door
+/// is the shape ADR-0182 generalized from — its binding was already inside the
+/// signed bytes as the words themselves — so the door check is what it gains: an
+/// approve envelope cannot be presented at the answer or release door even
+/// though its words are a digest either could name.
+///
 /// # Errors
 /// [`StatementRejected`] if the statement's subject, provenance, or signature
 /// does not hold.
@@ -85,7 +93,7 @@ pub fn approval_from_statement(
     keys: &dyn KeyProvider,
 ) -> Result<Evidence, StatementRejected> {
     precheck_statement(scope_revision, statement)?;
-    if !statement.verify_authority(keys) {
+    if !statement.verify_authority(keys, AuthorityDoor::Approve, scope_revision) {
         return Err(StatementRejected::Unverified);
     }
     Ok(verified_statement_approval(scope_revision, statement))
