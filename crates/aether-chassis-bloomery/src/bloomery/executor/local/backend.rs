@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::digest::ContentAddressed;
 use aether_bloomery::{
-    CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, StageVerdict, StudyCost,
-    VerifyFailureSet, WorkHandle, WorkOrder, digest_of, is_model_lane,
+    BackendObjectId, CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce,
+    SharedCorrespondence, StageVerdict, StudyCost, VerifyFailureSet, WorkHandle, WorkOrder, digest_of, is_model_lane,
 };
-use aether_bloomery_github::{GitObjectId, SharedCorrespondence, parse_study_cost};
+use aether_bloomery_github::parse_study_cost;
 use serde::Serialize;
 use std::fs;
 
@@ -110,8 +110,8 @@ impl LocalExecutor {
     }
 
     // Capture a passed construct-lane run's candidate (ADR-0152): commit the run
-    // worktree's changes through the runner seam, then record both produced git
-    // objects as correspondence rows under their content-derived digests. Every
+    // worktree's changes through the runner seam, then record both produced
+    // backend objects as correspondence rows under their content-derived digests. Every
     // shortfall — a shell fault, a clean worktree (contradicting the passed
     // substantive-conclusion gate), a store write fault — folds to `None` with a
     // warn; the caller downgrades the verdict, so a lost capture reads as a
@@ -150,9 +150,9 @@ impl LocalExecutor {
 }
 
 /// The content-derived digest of a captured candidate tree: a domain-tagged
-/// address over the git tree object id, so the digest changes exactly when the
-/// captured content does — ADR-0152's supersession property falls out of the
-/// identity choice.
+/// address over the backend tree object's raw bytes, so the digest changes
+/// exactly when the captured content does — ADR-0152's supersession property
+/// falls out of the identity choice.
 #[derive(Serialize)]
 struct CandidateTreeAddress<'a> {
     object: &'a [u8],
@@ -162,8 +162,8 @@ impl ContentAddressed for CandidateTreeAddress<'_> {
     const DOMAIN: &'static str = "aether.bloomery.candidate.tree";
 }
 
-fn candidate_tree_digest(tree: &GitObjectId) -> Digest {
-    digest_of(&CandidateTreeAddress { object: tree.bytes() })
+fn candidate_tree_digest(tree: &BackendObjectId) -> Digest {
+    digest_of(&CandidateTreeAddress { object: tree.as_bytes() })
 }
 
 /// The content-derived digest of a capture commit — the [`CandidateRef::checkout`]
@@ -178,8 +178,23 @@ impl ContentAddressed for CaptureCommitAddress<'_> {
     const DOMAIN: &'static str = "aether.bloomery.candidate.checkout";
 }
 
-fn capture_commit_digest(commit: &GitObjectId) -> Digest {
-    digest_of(&CaptureCommitAddress { object: commit.bytes() })
+fn capture_commit_digest(commit: &BackendObjectId) -> Digest {
+    digest_of(&CaptureCommitAddress { object: commit.as_bytes() })
+}
+
+/// Render a resolved backend object as the lowercase hex sha the `git` argv
+/// takes. The only place this backend spells a backend object in Git's own
+/// notation — the correspondence, the digests, and the runner seam all carry
+/// opaque bytes, and the rendering exists solely because the subprocess boundary
+/// below is text.
+fn render_object_hex(object: &BackendObjectId) -> String {
+    let bytes = object.as_bytes();
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        hex.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        hex.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
+    }
+    hex
 }
 
 impl ExecutorBackend for LocalExecutor {
@@ -197,14 +212,16 @@ impl ExecutorBackend for LocalExecutor {
         // to exist (unlike `canonicalize`).
         let worktree_dir = absolute(self.base_dir.join(&nonce)).map_err(LocalExecutorError::Io)?;
         let evidence_dir = absolute(self.base_dir.join(format!("{nonce}-evidence"))).map_err(LocalExecutorError::Io)?;
-        // Resolve the sealed checkout digest to its real git object sha through the
+        // Resolve the sealed checkout digest to its real backend object through the
         // correspondence store (ADR-0150) — the `git worktree add` target — rather
-        // than hex-punning the digest into a name git cannot resolve.
-        let checkout_hex = self
-            .correspondence
-            .resolve_git(&order.transformation.checkout)?
-            .ok_or_else(|| LocalExecutorError::UnresolvedCheckout(order.nonce.clone()))?
-            .to_hex();
+        // than hex-punning the digest into a name git cannot resolve. The opaque
+        // bytes become Git text only here, at the argv the runner shells out with.
+        let checkout_hex = render_object_hex(
+            &self
+                .correspondence
+                .resolve_backend_object(&order.transformation.checkout)?
+                .ok_or_else(|| LocalExecutorError::UnresolvedCheckout(order.nonce.clone()))?,
+        );
         // The diff source rides the work order (#4723) and resolves the same way:
         // an order that names one is judged over the range `base..checkout`, one
         // that does not is judged over the working tree. Refused when it does not
@@ -215,9 +232,9 @@ impl ExecutorBackend for LocalExecutor {
             .diff_base
             .map(|base| {
                 self.correspondence
-                    .resolve_git(&base)?
+                    .resolve_backend_object(&base)?
                     .ok_or_else(|| LocalExecutorError::UnresolvedDiffBase(order.nonce.clone()))
-                    .map(|object| object.to_hex())
+                    .map(|object| render_object_hex(&object))
             })
             .transpose()?;
         // The subject the returning evidence binds to is the order's subject input

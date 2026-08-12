@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use aether_bloomery_github::GitObjectId;
+use aether_bloomery::BackendObjectId;
 
 use super::error::LocalExecutorError;
 
@@ -107,13 +107,17 @@ pub trait TransformRunner: Send + Sync {
 }
 
 /// What [`TransformRunner::capture`] produced: the capture commit wrapping the
-/// run's tree, and that tree itself — the git side of ADR-0152's two-digest
-/// [`CandidateRef`](aether_bloomery::CandidateRef) (`checkout` ↔ commit, `tree` ↔
-/// tree).
+/// run's tree, and that tree itself — the backend-object side of ADR-0152's
+/// two-digest [`CandidateRef`](aether_bloomery::CandidateRef) (`checkout` ↔
+/// commit, `tree` ↔ tree).
+///
+/// Both identifiers stay opaque here. Which byte shapes are well-formed object
+/// ids is the Git adapter's question, not the host capture path's; this seam only
+/// carries the bytes the runner produced through to the correspondence.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CapturedObjects {
     /// The capture commit's object id (parent = the run's checkout).
-    pub commit: GitObjectId,
+    pub commit: BackendObjectId,
     /// The captured tree's object id — the candidate's content identity.
-    pub tree: GitObjectId,
+    pub tree: BackendObjectId,
 }

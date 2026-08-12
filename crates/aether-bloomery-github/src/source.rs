@@ -1189,12 +1189,12 @@ mod tests {
     use std::slice::from_ref;
 
     use crate::client::ChecksState;
-    use crate::correspondence::{CorrespondenceError, GitObjectId};
+    use crate::correspondence::GitObjectId;
 
     use aether_bloomery::{
         BackendObjectId, BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState,
-        Correspondence as DomainCorrespondence, Digest, IntegrateOutcome, LandOutcome, LandProposal, SourceBackend,
-        WorkpieceId,
+        Correspondence as DomainCorrespondence, CorrespondenceError, Digest, IntegrateOutcome, LandOutcome,
+        LandProposal, SourceBackend, WorkpieceId,
     };
 
     use std::sync::Arc;
@@ -1204,12 +1204,18 @@ mod tests {
         render_tombstone_message, to_hex,
     };
     use crate::client::{GitDataApi, PullRequestApi};
-    use crate::correspondence::Correspondence;
     use crate::short_hex;
     use crate::testing::FakeGithub;
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
+    }
+
+    // The Git-object view of a recorded correspondence — the same forward
+    // resolution plus adapter-edge conversion the port itself performs, so an
+    // assertion below can name the git object a digest resolves to.
+    fn resolve_git(fake: &FakeGithub, digest: &Digest) -> Option<GitObjectId> {
+        fake.resolve_backend_object(digest).unwrap().map(|object| GitObjectId::try_from(object).unwrap())
     }
 
     // A `GitSource` over `fake` as both its git-data client and its correspondence
@@ -1346,7 +1352,7 @@ mod tests {
         };
         assert_ne!(after_first, base_tree, "the fold advanced the branch off the base");
         assert!(
-            fake.resolve_git(&after_first).unwrap().is_some(),
+            resolve_git(&fake, &after_first).is_some(),
             "the merged tree is recorded, so the next snapshot can reverse-resolve the branch",
         );
         assert_ne!(head, after_first, "the landable head stays a distinct digest from the artifact tree");
@@ -1430,10 +1436,8 @@ mod tests {
         // object — recording `head ↔ commit` does not clobber `tree ↔ tree`
         // (issue #3615).
         assert_ne!(head, tree, "the integrated head is a distinct digest from the artifact tree");
-        let head_object =
-            fake.resolve_git(&head).unwrap().expect("the integrated head resolves to the produced commit");
-        let tree_object =
-            fake.resolve_git(&tree).unwrap().expect("the artifact tree still resolves to its own git object");
+        let head_object = resolve_git(&fake, &head).expect("the integrated head resolves to the produced commit");
+        let tree_object = resolve_git(&fake, &tree).expect("the artifact tree still resolves to its own git object");
         assert_ne!(head_object, tree_object, "head and tree resolve to distinct git objects — no clobber");
 
         // The branch has advanced; the same (now stale) checkpoint is refused,
@@ -1486,7 +1490,7 @@ mod tests {
             panic!("the retry must integrate, got {outcome:?}");
         };
         assert!(
-            fake.resolve_git(&head).unwrap().is_some(),
+            resolve_git(&fake, &head).is_some(),
             "the retried head resolves — the state the fault left is recoverable",
         );
     }
@@ -1515,7 +1519,7 @@ mod tests {
         // mainline would fault `UnresolvedCorrespondence` — the coordinator
         // wedged on a base it named itself.
         let (fake, _, base) = seeded();
-        let tree_sha = fake.resolve_git(&digest(10)).unwrap().unwrap().to_hex();
+        let tree_sha = resolve_git(&fake, &digest(10)).unwrap().to_hex();
         let foreign = fake.seed_commit_with_message("someone else's merge", &tree_sha);
         fake.seed_ref("heads/main", &foreign);
 
@@ -1523,7 +1527,7 @@ mod tests {
 
         assert_ne!(observed, base, "a moved head is a different digest from the one mainline sat at");
         assert_eq!(
-            fake.resolve_git(&observed).unwrap().expect("the minted digest was recorded").to_hex(),
+            resolve_git(&fake, &observed).expect("the minted digest was recorded").to_hex(),
             foreign,
             "and it forward-resolves to the commit that was actually observed",
         );
@@ -1774,7 +1778,7 @@ mod tests {
         assert_eq!(receipt.previous_base, base);
         assert_ne!(receipt.new_head, new_head, "the landed head is the squash commit, not the proposed head");
         assert_eq!(
-            fake.resolve_git(&receipt.new_head).unwrap().map(|object| object.to_hex()),
+            resolve_git(&fake, &receipt.new_head).map(|object| object.to_hex()),
             Some(squashed),
             "the landed head's correspondence is recorded, so the next bloom's base check resolves",
         );

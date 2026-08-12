@@ -8,19 +8,13 @@
 //! this module owns the checked conversion between those bytes and the
 //! **format-tagged** [`GitObjectId`] consumed by Git APIs.
 //!
-//! The compatibility [`Correspondence`] facade retains the Git-shaped API used
-//! by the local executor and lane callers assigned to #4744. It delegates to a
-//! domain correspondence and performs the checked conversion; new source and
-//! Actions code use the domain port directly.
+//! Every consumer holds the domain correspondence directly; the conversion below
+//! is the only Git-specific step, applied where a Git API is actually called.
 //!
 //! [#3590]: https://github.com/iamacoffeepot/aether/issues/3590
 //! [#3603]: https://github.com/iamacoffeepot/aether/issues/3603
 
-use std::sync::Arc;
-
-use aether_bloomery::{BackendObjectId, Correspondence as DomainCorrespondence, Digest};
-
-pub use aether_bloomery::CorrespondenceError;
+use aether_bloomery::{BackendObjectId, CorrespondenceError};
 
 /// The object format a [`GitObjectId`]'s bytes are in — the format tag ADR-0150
 /// requires so the correspondence schema survives a SHA-256 object-format
@@ -154,53 +148,6 @@ fn hex_nibble(byte: u8) -> Option<u8> {
         _ => None,
     }
 }
-
-/// The temporary Git-shaped view of a domain correspondence retained for the
-/// local executor and lane callers migrated by #4744.
-pub trait Correspondence {
-    /// Record that git object `git` carries bloom value `digest` (both
-    /// directions). Last-writer-wins on the digest key, so re-recording the same
-    /// digest is idempotent and a rebuild that re-inserts is a no-op.
-    ///
-    /// # Errors
-    /// The durable store could not be written.
-    fn record(&self, digest: &Digest, git: &GitObjectId) -> Result<(), CorrespondenceError>;
-
-    /// The real git object recorded for `digest` (the forward direction), or
-    /// `None` when no correspondence was ever recorded.
-    ///
-    /// # Errors
-    /// The durable store could not be read.
-    fn resolve_git(&self, digest: &Digest) -> Result<Option<GitObjectId>, CorrespondenceError>;
-
-    /// The bloom digest recorded for git object `git` (the reverse direction), or
-    /// `None` when no correspondence was ever recorded.
-    ///
-    /// # Errors
-    /// The durable store could not be read.
-    fn resolve_digest(&self, git: &GitObjectId) -> Result<Option<Digest>, CorrespondenceError>;
-}
-
-impl<T> Correspondence for T
-where
-    T: DomainCorrespondence + ?Sized,
-{
-    fn record(&self, digest: &Digest, git: &GitObjectId) -> Result<(), CorrespondenceError> {
-        DomainCorrespondence::record(self, digest, &BackendObjectId::from(git))
-    }
-
-    fn resolve_git(&self, digest: &Digest) -> Result<Option<GitObjectId>, CorrespondenceError> {
-        DomainCorrespondence::resolve_backend_object(self, digest)?.map(GitObjectId::try_from).transpose()
-    }
-
-    fn resolve_digest(&self, git: &GitObjectId) -> Result<Option<Digest>, CorrespondenceError> {
-        DomainCorrespondence::resolve_digest(self, &BackendObjectId::from(git))
-    }
-}
-
-/// A shared Git-facing compatibility view retained until #4744 migrates the
-/// remaining local executor and lane callers to the domain contract.
-pub type SharedCorrespondence = Arc<dyn Correspondence + Send + Sync>;
 
 #[cfg(test)]
 mod tests {
