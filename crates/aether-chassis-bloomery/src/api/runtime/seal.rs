@@ -25,7 +25,7 @@ use super::hex::hex_encode;
 use super::response::error_response;
 use super::state::{
     ApiCapabilityState, MAX_OPEN_SEALS, MAX_SEAL_MEMBERS, PendingSeal, PendingSealSetup, PendingVerify, Routed,
-    SealVerify,
+    SealVerify, admit,
 };
 use crate::api::dto::{MemberProjection, SealRequest};
 use crate::bloomery::{AdmissionRequest, Decision, Gate, precheck_statement, verified_statement_approval};
@@ -144,8 +144,7 @@ impl ApiCapabilityState {
             // seal, and a member with none simply dispatches subject-only.
             Self::persist_descriptions(ctx, &spec, &descriptions);
             let key = idempotency_key.unwrap_or_else(|| hex_encode(spec.id().0.as_bytes()));
-            return self
-                .admit(ctx, &Event { idempotency_key: IdempotencyKey(key), fact: admission_fact(predecessor, spec) });
+            return admit(&Event { idempotency_key: IdempotencyKey(key), fact: admission_fact(predecessor, spec) });
         }
         // Deferred path only: cap the outstanding `seals` map before dispatching any
         // `Verify`, so a flood of above-auto seals cannot grow the in-flight seal /

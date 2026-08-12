@@ -256,7 +256,15 @@ fn author_config<K: ConfigKind>(stream: &mut TcpStream, cid: u64, value: &K) -> 
         RecordConfig { digest: address.as_bytes().to_vec(), kind: K::NAME.to_owned(), bytes: to_vec(value).unwrap() };
     let store = mailbox_id_from_path("aether.store");
     match call::<_, RecordConfigResult>(stream, cid, store, &record) {
-        RecordConfigResult::Ok => address,
+        // Tripwire: `POST /configs` renders its whole response from this echo
+        // rather than from a held correlation entry (#3694), so an echo that
+        // does not reproduce the request's address hands a caller a digest that
+        // resolves to nothing — the ADR-0174 divergence the write exists to close.
+        RecordConfigResult::Ok { digest, kind } => {
+            assert_eq!(digest, address.as_bytes(), "the write echoes the address it stored under");
+            assert_eq!(kind, K::NAME, "the write echoes the kind it stored under");
+            address
+        }
         RecordConfigResult::Err { error } => panic!("config write failed: {error}"),
     }
 }

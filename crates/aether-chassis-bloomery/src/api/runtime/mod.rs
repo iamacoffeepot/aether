@@ -11,33 +11,36 @@
 //! the segment dispatch and path-capture binding the hand-rolled
 //! method-plus-path `match` used to carry (#3672).
 //!
-//! # The two route shapes
+//! # The three route shapes
 //!
 //! Pre-seal shaping is pure in-memory state (ADR-0149 §The bloom: drafts
-//! "claim nothing"), so those routes reply synchronously. The routes that read
-//! or write durable state forward a mail to a peer cap and reply only on its
-//! reply — the control-core actor (`aether.bloomery.admit` / `aether.bloomery.query`),
-//! the store (`aether.store.replay_journal`), or the artifacts cap
-//! (`aether.artifacts.get`). An HTTP handler cannot block on a mail reply, so
-//! the deferral rides the request→dispatch→reply correlation the RPC and HTTP
-//! server caps use:
+//! "claim nothing"), so those routes reply synchronously.
 //!
-//! - [`take_inbound`](NativeCtx::take_inbound) moves the request's reply
-//!   obligation into a guard that keeps its causal chain open across the async
-//!   boundary — without it the chain settles when the handler returns and the
-//!   HTTP server's own `502` safety net fires.
-//! - The downstream mail is dispatched as a fresh root via
-//!   [`send_envelope_detached`](NativeCtx::send_envelope_detached); the returned
-//!   [`MailId`](aether_data::MailId)'s `correlation_id` keys the held guard in `pending`.
-//! - The downstream reply's `sender.correlation_id` is auto-echoed to that same
-//!   id (ADR-0042), so a **typed** reply handler recovers the guard via
-//!   `ctx.reply_target().correlation_id` and answers through it. The reply
-//!   correlation deliberately does *not* go through a `#[fallback]`: a fallback
-//!   would widen the actor's accept-set to every kind — including the request-
-//!   stream kinds — and the HTTP server would then route each request down the
-//!   streaming path instead of delivering a buffered `HttpServerRequest`.
-//! - A settlement subscription answers `504` for a request whose downstream
-//!   chain settles without ever replying (a dropped or unloaded control core).
+//! A route that reads or writes durable state forwards one request to a peer cap
+//! and answers its one reply. Those are **deferred routes** over the ADR-0154
+//! relay: the route returns `ctx.defer(&request).to::<Peer>()` and a paired
+//! `#[http::reply]` method maps the peer's reply into the response. The send
+//! inherits the request's causal chain (ADR-0080 §7), so the request stays in
+//! flight across the round-trip without anything being held here, and the
+//! requester's reply target rides the ADR-0139 request-context table rather than
+//! a correlation map of ours. A peer that settles without replying is answered
+//! by the HTTP server's own `502`; one that never settles, by its request
+//! timeout. Neither needs machinery in this cap.
+//!
+//! Two routes are genuinely **multi-hop** and keep an explicit obligation,
+//! because their next hop is not the answer: `POST /blooms/{id}/answer` verifies
+//! a signature before it admits, and `POST /drafts/{id}/seal` joins N member
+//! verifications before admitting once (the ADR-0154 §2 scatter/gather
+//! exclusion). Their terminal `Admit` is dispatched from a reply handler, which
+//! holds no route obligation to defer, so it goes out as a tracked fresh root
+//! and is answered by hand from [`state::ApiCapabilityState::pending`]; a
+//! settlement subscription answers `504` if that chain never replies.
+//!
+//! A reply is delivered to a **typed** handler and deliberately not to a
+//! `#[fallback]`: a fallback would widen the actor's accept-set to every kind —
+//! including the request-stream kinds — and the HTTP server would then route each
+//! request down the streaming path instead of delivering a buffered
+//! `HttpServerRequest`.
 //!
 //! # The module tree
 //!
@@ -65,6 +68,7 @@ use std::path::Path;
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{AdmitResult, QueryResult, ReplayJournal, ReplayJournalResult};
 use aether_http as http;
+use aether_http::HttpServerResponse;
 use aether_kinds::trace::Settled;
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -73,16 +77,17 @@ pub use aether_substrate::chassis::error::BootError;
 pub use state::ApiCapabilityState;
 
 use blooms::{admit_response, query_response};
+use configs::config_response;
 use reads::{artifact_response, journal_response};
 use response::{error_response, json};
 use state::{Routed, SealVerify, VerifyPending, finish};
 
 use super::BloomeryApiCapability;
 use super::dto::WorkpiecesView;
-use crate::artifacts::{ArtifactsCapability, Get, GetResult};
+use crate::artifacts::{Get, GetResult};
 use crate::bloomery::ApprovalPolicy;
 use crate::signing::VerifyResult;
-use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult, StoreCapability};
+use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult};
 
 /// Composer-supplied params for the REST control api cap (ADR-0156 §3 `Params`
 /// channel): the tier-policy file the pre-seal approve gate loads at init (issue
@@ -141,7 +146,6 @@ impl NativeActor for BloomeryApiCapability {
             pending: HashMap::new(),
             verifying: HashMap::new(),
             seals: HashMap::new(),
-            configs: HashMap::new(),
             next_seal: 1,
             seal_verifications: HashMap::new(),
         })
@@ -164,7 +168,7 @@ impl NativeActor for BloomeryApiCapability {
     /// route for every configuration kind: adding a kind adds no route.
     #[http::route(Post, "/configs")]
     fn on_post_configs(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = state.author_config(&ctx, &ctx.request().body);
+        let routed = configs::author_config(&ctx.request().body);
         finish(state, ctx, routed)
     }
 
@@ -229,14 +233,14 @@ impl NativeActor for BloomeryApiCapability {
     /// `GET /blooms` — read the whole live projection.
     #[http::route(Get, "/blooms")]
     fn on_get_blooms(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = state.query(&ctx, None);
+        let routed = ApiCapabilityState::query(None);
         finish(state, ctx, routed)
     }
 
     /// `GET /view` — read the whole live projection (the `GET /blooms` alias).
     #[http::route(Get, "/view")]
     fn on_get_view(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = state.query(&ctx, None);
+        let routed = ApiCapabilityState::query(None);
         finish(state, ctx, routed)
     }
 
@@ -248,7 +252,7 @@ impl NativeActor for BloomeryApiCapability {
         id: http::Path<String>,
     ) -> http::Outcome {
         let id = id.0;
-        let routed = state.query_bloom(&ctx, &id);
+        let routed = ApiCapabilityState::query_bloom(&id);
         finish(state, ctx, routed)
     }
 
@@ -274,7 +278,7 @@ impl NativeActor for BloomeryApiCapability {
         id: http::Path<String>,
     ) -> http::Outcome {
         let id = id.0;
-        let routed = state.grant(&ctx, &id, &ctx.request().body);
+        let routed = ApiCapabilityState::grant(&id, &ctx.request().body);
         finish(state, ctx, routed)
     }
 
@@ -293,8 +297,7 @@ impl NativeActor for BloomeryApiCapability {
     /// `GET /journal` — read the durable event journal from the store.
     #[http::route(Get, "/journal")]
     fn on_get_journal(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
-        let routed = Routed::Deferred(state.send_tracked(ctx.actor::<StoreCapability>(), &ReplayJournal));
-        finish(state, ctx, routed)
+        finish(state, ctx, Routed::ReplayJournal(ReplayJournal))
     }
 
     /// `GET /artifacts/{digest}` — fetch a content-addressed artifact.
@@ -304,34 +307,57 @@ impl NativeActor for BloomeryApiCapability {
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         digest: http::Path<String>,
     ) -> http::Outcome {
-        let routed =
-            Routed::Deferred(state.send_tracked(ctx.actor::<ArtifactsCapability>(), &Get { digest: digest.0 }));
-        finish(state, ctx, routed)
+        finish(state, ctx, Routed::Get(Get { digest: digest.0 }))
     }
 
-    /// The control core's reply to a `Fact::Seal` / `Fact::Supersede` admit —
-    /// the reducer outcome, or an admit error.
+    /// The control core's reply to an admit — the reducer outcome, or an admit
+    /// error.
+    ///
+    /// The one reply kind two different flows produce, so it is the one reply
+    /// handler still written by hand. A direct admit route (grant, and the
+    /// all-auto seal / supersede fast path) relayed its request, so its
+    /// requester is recovered from the deferred-source context; the answer and
+    /// seal flows dispatched their terminal admit from a reply handler, so
+    /// theirs is held in `pending`. The two stores are mutually exclusive — the
+    /// recovery that does not match this reply is a no-op — so calling both is
+    /// how one handler serves both without needing to know which flow it is
+    /// answering.
     #[handler::manual]
     fn on_admit_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: AdmitResult) {
-        state.answer(ctx, &admit_response(mail));
+        let response = admit_response(mail);
+
+        http::answer_deferred(ctx, &response);
+        state.answer(ctx, &response);
     }
 
     /// The control core's reply to a live projection read.
-    #[handler::manual]
-    fn on_query_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: QueryResult) {
-        state.answer(ctx, &query_response(mail));
+    #[http::reply]
+    fn on_query_result(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: QueryResult,
+    ) -> HttpServerResponse {
+        query_response(mail)
     }
 
     /// The store's reply to a journal read.
-    #[handler::manual]
-    fn on_replay_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: ReplayJournalResult) {
-        state.answer(ctx, &journal_response(mail));
+    #[http::reply]
+    fn on_replay_result(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: ReplayJournalResult,
+    ) -> HttpServerResponse {
+        journal_response(mail)
     }
 
     /// The artifacts cap's reply to an artifact fetch.
-    #[handler::manual]
-    fn on_get_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: GetResult) {
-        state.answer(ctx, &artifact_response(mail));
+    #[http::reply]
+    fn on_get_result(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: GetResult,
+    ) -> HttpServerResponse {
+        artifact_response(mail)
     }
 
     /// The `aether.signing` capability's reply to an answer-gate verify. A
@@ -355,14 +381,15 @@ impl NativeActor for BloomeryApiCapability {
     /// The store's reply to an authored configuration's write (ADR-0174). The
     /// authoring route deferred its caller on this, so the reply answers with the
     /// address on a durable write and a `500` on a failed one — a caller never
-    /// gets an address it could seal against a row that is not there.
-    #[handler::manual]
-    fn on_record_config_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: RecordConfigResult) {
-        let error = match mail {
-            RecordConfigResult::Ok => None,
-            RecordConfigResult::Err { error } => Some(error),
-        };
-        state.resolve_config_write(ctx, error.as_deref());
+    /// gets an address it could seal against a row that is not there. The address
+    /// is the reply's own echo, so the route holds nothing across the write.
+    #[http::reply]
+    fn on_record_config_result(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: RecordConfigResult,
+    ) -> HttpServerResponse {
+        config_response(mail)
     }
 
     /// The store's reply to a fire-and-forget dispatch-description write (#3595).
@@ -380,10 +407,14 @@ impl NativeActor for BloomeryApiCapability {
         }
     }
 
-    /// A downstream chain settled. If its request is still pending, the
-    /// downstream produced no reply (a dropped or unloaded control core, or a
-    /// dropped signing capability) — answer `504` rather than leave the client
-    /// hung.
+    /// A multi-hop chain settled. If its request is still held, the downstream
+    /// produced no reply (a dropped or unloaded control core, or a dropped
+    /// signing capability) — answer `504` rather than leave the client hung.
+    ///
+    /// Only the multi-hop hops subscribe here. A deferred route's downstream is
+    /// sent on the request's own inherited chain, so a silent peer is answered
+    /// by the HTTP server's `502` net and a hung one by its request timeout —
+    /// neither reaches this handler (ADR-0154 §3).
     #[handler::manual]
     fn on_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_, Manual>, mail: Settled) {
         if let Some(inbound) = state.pending.remove(&mail.root.correlation_id) {

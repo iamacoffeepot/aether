@@ -890,7 +890,7 @@ impl NativeActor for StoreCapability {
     fn on_record_config(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: RecordConfig) -> RecordConfigResult {
         let RecordConfig { digest, kind, bytes } = mail;
         match state.backend.record_config(&digest, &kind, &bytes) {
-            Ok(()) => RecordConfigResult::Ok,
+            Ok(()) => RecordConfigResult::Ok { digest, kind },
             Err(error) => RecordConfigResult::Err { error: error.to_string() },
         }
     }

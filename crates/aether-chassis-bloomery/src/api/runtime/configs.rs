@@ -27,18 +27,17 @@
 //! same kind addresses to the same digest and rewrites the same row — so the
 //! route is safely repeatable.
 
-use aether_actor::Manual;
 use aether_bloomery::{Digest, config_address};
 use aether_codec::encode_schema;
 use aether_data::schema::SchemaType;
+use aether_http::HttpServerResponse;
 use aether_kinds::descriptors;
-use aether_substrate::actor::native::NativeCtx;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::response::{error_response, json};
-use super::state::{ApiCapabilityState, Routed};
-use crate::store::{RecordConfig, StoreCapability};
+use super::state::Routed;
+use crate::store::{RecordConfig, RecordConfigResult};
 
 /// The request: which kind the value is, and the value itself as JSON.
 #[derive(Deserialize)]
@@ -69,47 +68,43 @@ fn schema_of(kind: &str) -> Option<SchemaType> {
     descriptors::all().into_iter().find(|entry| entry.name == kind).map(|entry| entry.schema)
 }
 
-impl ApiCapabilityState {
-    /// `POST /configs` — encode a configuration through its kind's schema,
-    /// address it, store it under that address, and reply with both once the
-    /// write lands.
-    pub(super) fn author_config(&mut self, ctx: &NativeCtx<'_, Manual>, body: &[u8]) -> Routed {
-        let request: ConfigRequest = match serde_json::from_slice(body) {
-            Ok(request) => request,
-            Err(error) => return Routed::Reply(error_response(400, &format!("invalid config body: {error}"))),
-        };
+/// `POST /configs` — encode a configuration through its kind's schema, address
+/// it, and relay the store write; [`config_response`] answers once it lands.
+pub(super) fn author_config(body: &[u8]) -> Routed {
+    let request: ConfigRequest = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(error) => return Routed::Reply(error_response(400, &format!("invalid config body: {error}"))),
+    };
 
-        let Some(schema) = schema_of(&request.kind) else {
-            return Routed::Reply(error_response(400, &format!("unknown config kind `{}`", request.kind)));
-        };
-        let bytes = match encode_schema(&request.value, &schema) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return Routed::Reply(error_response(
-                    400,
-                    &format!("config does not match `{}`: {error}", request.kind),
-                ));
-            }
-        };
+    let Some(schema) = schema_of(&request.kind) else {
+        return Routed::Reply(error_response(400, &format!("unknown config kind `{}`", request.kind)));
+    };
+    let bytes = match encode_schema(&request.value, &schema) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Routed::Reply(error_response(400, &format!("config does not match `{}`: {error}", request.kind)));
+        }
+    };
 
-        let digest = config_address(&request.kind, &bytes);
-        let record = RecordConfig { digest: digest.as_bytes().to_vec(), kind: request.kind.clone(), bytes };
-        let correlation = self.send_tracked(ctx.actor::<StoreCapability>(), &record);
-        // Held across the write rather than rebuilt from the store's reply,
-        // which carries only success or failure — the address is this route's to
-        // report.
-        self.configs.insert(correlation, ConfigView { digest, kind: request.kind });
-        Routed::Deferred(correlation)
-    }
+    let digest = config_address(&request.kind, &bytes);
+    Routed::RecordConfig(RecordConfig { digest: digest.as_bytes().to_vec(), kind: request.kind, bytes })
+}
 
-    /// Answer a held authoring request from the store's write reply: `200` with
-    /// the address on a durable write, `500` on a failed one — never an address
-    /// the caller could seal against nothing.
-    pub(super) fn resolve_config_write(&mut self, ctx: &NativeCtx<'_, Manual>, error: Option<&str>) -> Option<()> {
-        let view = self.configs.remove(&ctx.reply_target().correlation_id)?;
-        let response = error
-            .map_or_else(|| json(200, &view), |error| error_response(500, &format!("config write failed: {error}")));
-        self.answer(ctx, &response);
-        Some(())
+/// Render the store's write reply into the authoring response: `200` with the
+/// address on a durable write, `500` on a failed one — never an address the
+/// caller could seal against nothing.
+///
+/// The address comes from the reply's own echo rather than from state held
+/// across the write, which is what lets this route ride the plain relay
+/// (ADR-0154 §3) instead of keeping a correlation map. A digest that is not 32
+/// bytes is the store contradicting its own contract, so it is a `500` rather
+/// than a silently truncated address.
+pub(super) fn config_response(result: RecordConfigResult) -> HttpServerResponse {
+    match result {
+        RecordConfigResult::Ok { digest, kind } => <[u8; 32]>::try_from(digest.as_slice()).map_or_else(
+            |_| error_response(500, &format!("config write echoed a {}-byte address", digest.len())),
+            |bytes| json(200, &ConfigView { digest: Digest::from_bytes(bytes), kind }),
+        ),
+        RecordConfigResult::Err { error } => error_response(500, &format!("config write failed: {error}")),
     }
 }

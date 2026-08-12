@@ -302,11 +302,24 @@ pub struct RecordConfig {
 /// Reply to [`RecordConfig`]. The authoring route answers its caller from this,
 /// so a `200` means the configuration is durable and a later seal naming the
 /// address will actually resolve it.
+///
+/// `Ok` echoes the request's `digest` and `kind` so the authoring route can
+/// render its whole response from the reply. Without the echo the route would
+/// have to hold the address in a correlation map across the write, which is the
+/// bookkeeping the ADR-0154 relay exists to retire — the reply is the only thing
+/// the paired `#[http::reply]` route receives, so anything the response needs
+/// must travel in it.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.store.record_config_result")]
 pub enum RecordConfigResult {
     /// The configuration is stored under its address.
-    Ok,
+    Ok {
+        /// The stored configuration's content address, echoed from the request.
+        #[serde(with = "aether_data::bytes")]
+        digest: Vec<u8>,
+        /// The kind the bytes decode as, echoed from the request.
+        kind: String,
+    },
     /// The write failed.
     Err {
         /// A human-readable failure reason.
