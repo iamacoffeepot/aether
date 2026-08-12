@@ -176,11 +176,15 @@ mod tests {
         // Tripwire: the format tag ↔ byte length invariant (`sha1` is 20 bytes,
         // `sha256` is 32) — a mis-tagged id must never construct, or a sha1 sha
         // would be mistaken for a sha256 one across the object-format transition.
-        assert!(GitObjectId::new(GitObjectFormat::Sha1, vec![0u8; 20]).is_some(), "sha1 accepts 20 bytes");
-        assert!(GitObjectId::new(GitObjectFormat::Sha256, vec![0u8; 32]).is_some(), "sha256 accepts 32 bytes");
-        assert!(GitObjectId::new(GitObjectFormat::Sha1, vec![0u8; 32]).is_none(), "sha1 rejects 32 bytes");
-        assert!(GitObjectId::new(GitObjectFormat::Sha256, vec![0u8; 20]).is_none(), "sha256 rejects 20 bytes");
-        assert!(GitObjectId::new(GitObjectFormat::Sha1, vec![0u8; 19]).is_none(), "sha1 rejects a short id");
+        //
+        // The filler is `0xAB` rather than zero so this stays a test of *length*
+        // alone: `new` also refuses the all-zero id (#4841), so zero-filled bytes
+        // would make the accept cases fail for a reason this test is not about.
+        assert!(GitObjectId::new(GitObjectFormat::Sha1, vec![0xABu8; 20]).is_some(), "sha1 accepts 20 bytes");
+        assert!(GitObjectId::new(GitObjectFormat::Sha256, vec![0xABu8; 32]).is_some(), "sha256 accepts 32 bytes");
+        assert!(GitObjectId::new(GitObjectFormat::Sha1, vec![0xABu8; 32]).is_none(), "sha1 rejects 32 bytes");
+        assert!(GitObjectId::new(GitObjectFormat::Sha256, vec![0xABu8; 20]).is_none(), "sha256 rejects 20 bytes");
+        assert!(GitObjectId::new(GitObjectFormat::Sha1, vec![0xABu8; 19]).is_none(), "sha1 rejects a short id");
     }
 
     #[test]
