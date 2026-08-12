@@ -124,7 +124,7 @@ pub enum CatalogError {
 /// [`StageCatalog`]: every [`StageBinding`] states its stage's limit and each
 /// [`Transformation`] constructor copies the resolved binding's value, so the
 /// dispatched bound is a function of the catalog the bloom attested.
-#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ExecutionLimits {
     /// How long one dispatched attempt may run, in whole seconds.
     ///
@@ -357,9 +357,12 @@ impl StageCatalog {
     /// binding (ADR-0149 §The line). The binding references the stage's
     /// calibrated [`AgentProfile`] by digest via [`profile_of`](Self::profile_of).
     ///
-    /// Public so a caller resolving a sealed catalog has the compiled line's
-    /// binding to fall back on when that catalog binds no such stage — the same
-    /// totality [`profile_of`](Self::profile_of) gives the profile axis.
+    /// The in-crate consumer is `reduce::attempt::stage_binding`, which falls
+    /// back to this compiled-line binding when a sealed catalog binds no such
+    /// stage — the same totality [`profile_of`](Self::profile_of) gives the
+    /// profile axis. It is `pub` rather than `pub(crate)` because
+    /// `aether-chassis-bloomery` constructs compiled-line bindings directly in
+    /// its executor, reactor-runtime, and study fixtures.
     ///
     /// Every arm calibrates `wall_clock_secs` at one hour. That is the initial
     /// calibration, refinable per stage without an ADR like the tag/gate strings
@@ -731,9 +734,22 @@ impl Transformation {
     /// nothing else.
     ///
     /// `binding` is the sealed catalog's `AggregateVerify` binding, carrying the
-    /// authored wall-clock limit this fan-out runs under.
+    /// authored wall-clock limit this fan-out runs under. That pairing is
+    /// asserted rather than assumed: the sibling `for_member_stage` gets it
+    /// structurally from an exhaustive `match binding.stage`, and a debug
+    /// assertion is what gives this constructor the same guarantee.
+    ///
+    /// # Panics
+    ///
+    /// In a debug build, when `binding` is not the `AggregateVerify` binding.
     #[must_use]
     pub fn for_aggregate_verify(binding: &StageBinding, subject: Digest, checkout: Digest) -> Self {
+        debug_assert_eq!(
+            binding.stage,
+            StageId::AggregateVerify,
+            "the dispatched limit must come from the stage being dispatched",
+        );
+
         Self {
             command: String::from(VERIFY_CHECK_COMMAND),
             inputs: alloc::vec![subject],
@@ -773,9 +789,22 @@ impl Transformation {
     /// build.
     ///
     /// `binding` is the sealed catalog's `AggregateReview` binding, carrying the
-    /// authored wall-clock limit this critic runs under.
+    /// authored wall-clock limit this critic runs under. That pairing is
+    /// asserted rather than assumed: the sibling `for_member_stage` gets it
+    /// structurally from an exhaustive `match binding.stage`, and a debug
+    /// assertion is what gives this constructor the same guarantee.
+    ///
+    /// # Panics
+    ///
+    /// In a debug build, when `binding` is not the `AggregateReview` binding.
     #[must_use]
     pub fn for_aggregate_review(binding: &StageBinding, subject: Digest, checkout: Digest, base: Digest) -> Self {
+        debug_assert_eq!(
+            binding.stage,
+            StageId::AggregateReview,
+            "the dispatched limit must come from the stage being dispatched",
+        );
+
         Self {
             command: String::from(REVIEW_CRITIC_COMMAND),
             inputs: alloc::vec![subject],
@@ -1106,6 +1135,15 @@ mod tests {
     fn every_dispatch_constructor_copies_the_limit_off_the_binding_it_was_handed() {
         let mut shortened = binding(StageId::Verify);
         shortened.wall_clock_secs = 900;
+        // Each aggregate binding keeps its own `stage` and re-authors only the
+        // limit, to a value the compiled line never produces and distinct from
+        // the member half's — so a constructor reaching for a hard-coded 3_600
+        // fails here, and the two stages cannot pass by reading each other.
+        let mut shortened_aggregate_verify = binding(StageId::AggregateVerify);
+        shortened_aggregate_verify.wall_clock_secs = 1_200;
+        let mut shortened_aggregate_review = binding(StageId::AggregateReview);
+        shortened_aggregate_review.wall_clock_secs = 1_500;
+
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
         let base = Digest::from_bytes([3; 32]);
@@ -1121,16 +1159,16 @@ mod tests {
             "an untouched sibling keeps the compiled calibration"
         );
         assert_eq!(
-            Transformation::for_aggregate_verify(&binding(StageId::AggregateVerify), subject, checkout)
-                .limits
-                .wall_clock_secs,
-            3_600
+            Transformation::for_aggregate_verify(&shortened_aggregate_verify, subject, checkout).limits.wall_clock_secs,
+            1_200,
+            "the aggregate-verify fan-out copies the binding it was handed, not the compiled calibration"
         );
         assert_eq!(
-            Transformation::for_aggregate_review(&binding(StageId::AggregateReview), subject, checkout, base)
+            Transformation::for_aggregate_review(&shortened_aggregate_review, subject, checkout, base)
                 .limits
                 .wall_clock_secs,
-            3_600
+            1_500,
+            "the aggregate-review critic copies the binding it was handed, not the compiled calibration"
         );
     }
 
