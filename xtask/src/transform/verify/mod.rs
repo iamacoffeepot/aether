@@ -1,5 +1,7 @@
 mod nextest;
 mod tools;
+#[cfg(test)]
+mod workflow;
 
 use std::fs;
 use std::process::{self, Command};
@@ -72,7 +74,9 @@ impl VerifyInvocation {
 ///
 /// Tripwire: these argv + env pins are CI-parity invariants — a drift here
 /// means this entrypoint no longer proves the laptop/Actions invocation
-/// symmetry ADR-0149 §Execution requires.
+/// symmetry ADR-0149 §Execution requires. The `workflow` module reads
+/// `.github/workflows/ci.yml` so the comparison is against the command the
+/// gate runs rather than against a second literal in this file (#4843).
 fn verify_command(id: &str) -> Option<VerifyInvocation> {
     match id {
         "verify.fmt" => Some(VerifyInvocation {
@@ -582,51 +586,119 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_FINDING_LINES, VERIFY_CHECK, all_passed, clippy_verdict, distil_diagnostics, effective_exit_code,
-        failed_verifiers, preflight_tools, prepare_failure_log, render_diagnostics, required_targets, required_tools,
-        verify_check_members, verify_command, verify_findings,
+        MAX_FINDING_LINES, VERIFY_CHECK, VerifyInvocation, all_passed, clippy_verdict, distil_diagnostics,
+        effective_exit_code, failed_verifiers, preflight_tools, prepare_failure_log, render_diagnostics,
+        required_targets, required_tools, verify_check_members, verify_command, verify_findings, workflow,
     };
+    use std::iter;
+
     use crate::cargo::WASM_TARGET;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
     use crate::transform::review::REVIEW_CRITIC;
     use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 
-    #[test]
-    fn known_ids_map_to_ci_parity_argv() {
-        let fmt = verify_command("verify.fmt").expect("verify.fmt mapped");
-        assert_eq!(fmt.args, &["fmt", "--all", "--", "--check"]);
+    /// The full command line an invocation dispatches, program first, in the
+    /// shape a workflow `run:` line is read into.
+    fn argv(invocation: &VerifyInvocation) -> Vec<String> {
+        iter::once(invocation.program).chain(invocation.args.iter().copied()).map(str::to_owned).collect()
+    }
 
-        // Tripwire: clippy must NOT deny (#4706). Denying makes a lint a
-        // compile error, so a lib that trips one is never built and nothing
-        // depending on it is ever linted — the repair loop then gets one layer
-        // per round and wedges on a budget of three while genuinely converging.
-        // `clippy_verdict` applies the same fail-on-any-warning predicate over
-        // the complete list this run produces.
+    fn owned(tokens: &[&str]) -> Vec<String> {
+        tokens.iter().map(|token| (*token).to_owned()).collect()
+    }
+
+    fn owned_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())).collect()
+    }
+
+    #[test]
+    fn ci_parity_argv_matches_the_command_the_workflow_runs() {
+        // Tripwire: every argv here is a second spelling of a command Actions
+        // runs, and only `.github/workflows/ci.yml` is the copy the gate
+        // executes. Comparing the two Rust literals proved nothing about that
+        // — the workflow could be trimmed back to default features, or lose a
+        // flag, with the whole suite still green (#4843). Each assertion below
+        // reads the workflow, so drift on either side fails here.
+        let fmt = verify_command("verify.fmt").expect("verify.fmt mapped");
+        assert_eq!(argv(&fmt), workflow::gate_step("fmt", &["cargo", "fmt"]).run);
+
+        let dup = verify_command("verify.dup").expect("verify.dup mapped");
+        assert_eq!(argv(&dup), workflow::gate_step("dup-check", &["npx"]).run);
+
+        // The lane asks cargo for JSON diagnostics and deliberately does not
+        // deny (#4706); `clippy_verdict` applies the same fail-on-any-warning
+        // predicate over the complete list a non-denying run produces. That
+        // trailing `-- -D warnings` is the whole permitted divergence —
+        // everything before it is the shared invocation.
         let clippy = verify_command("verify.clippy").expect("verify.clippy mapped");
-        assert_eq!(clippy.args, &["clippy", "--workspace", "--all-targets", "--keep-going", "--message-format=json"],);
+        let ci_clippy = workflow::gate_step("clippy", &["cargo", "clippy"]).run;
+        let (shared, deny) = ci_clippy.split_at(ci_clippy.len() - 3);
+        assert_eq!(
+            deny,
+            owned(&["--", "-D", "warnings"]),
+            "CI's clippy gate denies through a trailing `-- -D warnings`"
+        );
+        assert_eq!(argv(&clippy), [shared.to_vec(), owned(&["--message-format=json"])].concat());
+
+        // Docs is a straight mirror, env included: RUSTDOCFLAGS is what
+        // escalates the tracked lints to failures, so a lint denied on one
+        // side and not the other is a gate the lane cannot predict.
+        let docs = verify_command("verify.docs").expect("verify.docs mapped");
+        let ci_docs = workflow::gate_step("docs", &["cargo", "doc"]);
+        assert_eq!(argv(&docs), ci_docs.run);
+        assert_eq!(owned_pairs(docs.env), ci_docs.env);
+
+        // cargo-machete is invoked as the binary rather than through `cargo
+        // machete`, which hands the subcommand its own name as argv[1] and
+        // walks a nonexistent `machete/` alongside `crates/` (#4706). The
+        // directories it scans are still CI's, and they are not optional.
+        let deps = verify_command("verify.deps").expect("verify.deps mapped");
+        let ci_deps = workflow::gate_step("unused-deps", &["cargo", "machete"]).run;
+        assert_eq!(deps.program, "cargo-machete", "going through `cargo machete` re-adds the bogus path");
+        assert_eq!(owned(deps.args), ci_deps[2..].to_vec());
+
+        // The test member drops CI's shard partition — the lane runs the suite
+        // whole — and keeps every flag before it, `--all-features` above all: a
+        // lane running fewer tests than the gate it predicts is a false green
+        // that surfaces at the landing pull request. The wasm pre-build its
+        // scenario tests load is CI's own step, in the same job.
+        let test = verify_command("verify.test").expect("verify.test mapped");
+        let ci_test = workflow::named_step("test", "Run tests (workspace, parallel)");
+        let partition = ci_test.run.iter().position(|token| token == "--partition").expect("CI shards the full suite");
+        assert_eq!(argv(&test), [ci_test.run[..partition].to_vec(), owned(&["--no-fail-fast"])].concat());
+        assert_eq!(
+            owned(test.prepare.expect("scenario tests need the component wasm built")),
+            workflow::gate_step("test", &["cargo", "xtask", "dist"]).run[1..].to_vec(),
+        );
+        for pair in &ci_test.env {
+            assert!(owned_pairs(test.env).contains(pair), "CI sets {pair:?} for the gate, so the lane must too");
+        }
+    }
+
+    #[test]
+    fn lane_only_details_pin_what_the_workflow_does_not_state() {
+        // Tripwire: the rest of each invocation, where the lane is deliberately
+        // not a copy of a workflow step. Nothing here is derivable from
+        // ci.yml, so each pin has to carry the reason it diverges.
+
+        // Denying makes a lint a compile error, so a lib that trips one is
+        // never built and nothing depending on it is ever linted — the repair
+        // loop then gets one layer per round and wedges on a budget of three
+        // while genuinely converging (#4706).
+        let clippy = verify_command("verify.clippy").expect("verify.clippy mapped");
         assert!(!clippy.args.contains(&"-D"), "denying re-creates the cascade the verdict change removed");
 
-        // Tripwire: the test member must match CI's own invocation, including
-        // the wasm pre-build its scenario tests load and the env that makes a
-        // missing one loud. A lane running fewer tests than the gate it
-        // predicts is a false green that surfaces at the landing pull request.
+        // `AETHER_STORE_PATH` pins what a CI runner gets for free: nothing
+        // there names a store, so the suite falls to the `":memory:"` default.
+        // Off Actions the gate can be reached from a coordinator whose
+        // environment names the live journal (#4714).
         let test = verify_command("verify.test").expect("verify.test mapped");
-        assert_eq!(test.args, &["nextest", "run", "--all-features", "--profile", "ci", "--no-fail-fast"]);
-        assert_eq!(test.prepare, Some(&["xtask", "dist"][..]), "scenario tests need the component wasm built");
-        assert_eq!(
-            test.env,
-            &[("AETHER_REQUIRE_RUNTIME", "1"), ("AETHER_STORE_PATH", ":memory:")],
-            "a missing wasm must fail rather than skip, and the suite must never inherit a store to open",
-        );
+        assert!(test.env.contains(&("AETHER_STORE_PATH", ":memory:")), "the suite must never inherit a store to open");
 
-        // Tripwire: `crates` is the path, and it is not optional — cargo-machete
-        // reads its own subcommand name as the directory to walk without it and
-        // fails on every candidate for a reason that has nothing to do with the
-        // candidate. Caught by running the umbrella for real (#4706).
-        let deps = verify_command("verify.deps").expect("verify.deps mapped");
-        assert_eq!(deps.program, "cargo-machete", "going through `cargo machete` re-adds the bogus path");
-        assert_eq!(deps.args, &["crates"]);
-
+        // The suppressions job copies the scanner to a runner temp path and
+        // invokes it with pull-request shas, so its argv has no lane
+        // counterpart at all; what must hold is that the scanner roots the
+        // host running these tests resolves are the ones it declares.
         let suppress = verify_command("verify.suppress").expect("verify.suppress mapped");
         assert_eq!(suppress.program, "python3");
         assert_eq!(suppress.args, &["scripts/check-suppressions.py"]);
@@ -638,14 +710,6 @@ mod tests {
             preflight_tools().iter().all(|missing| missing.requirement != "git" && missing.requirement != "python3"),
             "the host running the verifier tests must satisfy the scanner roots",
         );
-
-        let docs = verify_command("verify.docs").expect("verify.docs mapped");
-        assert_eq!(
-            docs.args,
-            &["doc", "--workspace", "--no-deps", "--document-private-items", "--all-features", "--keep-going"]
-        );
-        assert_eq!(docs.env.len(), 1);
-        assert_eq!(docs.env[0].0, "RUSTDOCFLAGS");
     }
 
     // One cargo JSON line per diagnostic level, plus the build-progress noise
