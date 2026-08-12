@@ -461,22 +461,12 @@ jobs:
         if: always() && github.event_name == 'pull_request'
         run: sccache --show-stats
 
-  # Token-based duplicate-code detection (jscpd). The gate — minTokens
-  # and the duplicated-line percentage threshold — lives in .jscpd.json,
-  # the single source of truth this job reads; jscpd exits non-zero when
-  # the tree exceeds it. Whole-tree scan of crates/ (not a diff-scoped
-  # run): jscpd only finds clones among the files it scans, so scanning
-  # just the PR's changed files would miss a changed file duplicating an
-  # unchanged one. node-only, so it needs no Rust toolchain.
-  #
-  # Run through scripts/check-duplication.mjs rather than jscpd directly
-  # (#4856). jscpd exits 0 whether it analyzed every file or none, so a
-  # malformed .jscpd.json — which it answers with one stderr warning and
-  # a silent fall back to defaults, threshold included — or a scan path
-  # that no longer exists both report a clean tree. The wrapper parses
-  # the config strictly, checks the scan paths, and refuses a report
-  # naming zero analyzed files, so this gate goes red when the scan did
-  # not happen instead of green because it did not.
+  # Token-based duplicate-code detection (jscpd). The gate — min-tokens and
+  # the duplicated-line percentage threshold — is the argv below; jscpd exits
+  # non-zero when the tree exceeds it. Whole-tree scan of crates/ (not a
+  # diff-scoped run): jscpd only finds clones among the files it scans, so
+  # scanning just the PR's changed files would miss a changed file
+  # duplicating an unchanged one. node-only, so it needs no Rust toolchain.
   dup-check:
     name: Duplicate code
     needs: changes
@@ -487,13 +477,13 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      # Settings on the command line, not in a `.jscpd.json` (#4856): jscpd
-      # answers a malformed config file with one stderr warning and a silent
-      # fall back to built-in defaults — threshold included — so the gate
-      # went green at exactly the moment its configuration broke. It rejects
-      # a bad flag outright (exit 2), so stating the settings here is what
-      # makes a broken gate loud.
-      # No ignore flag: jscpd honours .gitignore, which already covers target/.
+      # Settings here rather than in a `.jscpd.json`, and the repository has
+      # no such file (#4856): jscpd answers a malformed config with one stderr
+      # warning and a silent fall back to built-in defaults — threshold
+      # included — so the gate went green at the moment its configuration
+      # broke. A bad flag it rejects outright (exit 2). No ignore flag is
+      # needed: jscpd honours .gitignore, which already covers target/.
+      # Mirror any change into `verify.dup` so the lane predicts the gate.
       - run: npx --yes jscpd@5.0.12 -f rust -k 150 -t 0.5 -r consoleFull crates
 
   # Unused-dependency detection (cargo-machete). Scoped to crates/ to
