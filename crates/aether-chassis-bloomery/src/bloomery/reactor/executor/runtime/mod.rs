@@ -1009,12 +1009,23 @@ impl CandidatePush for RefusingCandidatePush {
     }
 }
 
-/// Select the [`CandidatePush`] seam for boot: a fixture boot (`uses_fixture`)
-/// refuses every push rather than shelling git against a real `origin` a
-/// fixture has no business touching; a real boot shells `git push`.
+/// Select the [`CandidatePush`] seam for boot: a boot that must not touch a real
+/// `origin` refuses every push, and any other boot shells `git push`.
+///
+/// `refuse` is the caller's answer to "could this process's `origin` be a live
+/// repository?", and the boot site answers it from **build shape first**
+/// (`cfg!(any(test, feature = "testing"))`) and configuration second
+/// (`uses_fixture`). Configuration alone was not enough: `cargo test` forks a
+/// `testing`-featured binary that names no backend, so it resolved to the real
+/// pusher with its cwd inside the real checkout (#4842).
+///
+/// Crate-private on purpose. `CandidatePush` has to stay public — it types the
+/// `pub pusher` field — but the selector handing out a live `GitCandidatePush`
+/// does not, and leaving it public put one within reach of every out-of-crate
+/// integration-test binary, which is exactly the reach this seam exists to deny.
 #[must_use]
-pub fn default_candidate_push(uses_fixture: bool) -> Arc<dyn CandidatePush> {
-    if uses_fixture {
+pub(crate) fn default_candidate_push(refuse: bool) -> Arc<dyn CandidatePush> {
+    if refuse {
         Arc::new(RefusingCandidatePush)
     } else {
         Arc::new(GitCandidatePush)

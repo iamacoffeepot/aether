@@ -31,7 +31,8 @@ use aether_actor::actor;
 use aether_bloomery::SharedCorrespondence;
 use aether_bloomery::Topic;
 
-pub use runtime::{CandidatePush, DispatchTick, ExecutorReactorState, default_candidate_push};
+pub(crate) use runtime::default_candidate_push;
+pub use runtime::{CandidatePush, DispatchTick, ExecutorReactorState};
 
 pub struct ExecutorReactorSetup {
     pub executor: Option<ExecutorShell>,

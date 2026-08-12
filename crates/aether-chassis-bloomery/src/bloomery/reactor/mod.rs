@@ -42,9 +42,9 @@ mod mirror;
 pub use claim_release::{
     ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick,
 };
+pub(crate) use executor::default_candidate_push;
 pub use executor::{
     CandidatePush, DispatchTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState,
-    default_candidate_push,
 };
 pub use integrate::{IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick};
 pub use land::{LandReactorCapability, LandReactorSetup, LandReactorState, LandTick};
