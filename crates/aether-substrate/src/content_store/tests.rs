@@ -294,6 +294,32 @@ fn a_peer_pointed_name_resolves_through_an_older_handle() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// Tripwire: the two selectors agree on the resolved entry's name. The
+/// hash path adopts on a miss and the name path re-reads `names.json`, so
+/// an adopt that took the entry without its name would make
+/// `Resolved::name` depend on which selector happened to reach it —
+/// `None` by hash, `Some` by name, for one entry at one instant. That is
+/// a wrong answer rather than a stale one, and it reaches a caller:
+/// `aether-fleet` hands `Resolved::name` straight out as a resolved
+/// component's name.
+#[test]
+fn both_selectors_resolve_a_peer_pointed_name_the_same_way() {
+    let root = temp_root("peer-name-agreement");
+    let (mut first, mut second) = two_handles(&root);
+
+    let hash = second.upload(b"named-by-the-peer", meta("peer"), Some("svc".to_owned())).expect("upload lands");
+
+    // The hash path reaches the entry first, so it is the one that adopts.
+    let by_hash = first.get(&Selector::Hash(hash.clone())).expect("the entry resolves by hash");
+    assert_eq!(by_hash.name.as_deref(), Some("svc"), "an entry adopted by hash carries the name the root records");
+    assert_eq!(first.name_for(&hash).as_deref(), Some("svc"));
+
+    let by_name = first.get(&Selector::Name("svc".to_owned())).expect("the entry resolves by name");
+    assert_eq!(by_name.name, by_hash.name, "both selectors agree on the resolved name");
+    assert_eq!(by_name.hash, by_hash.hash);
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// Tripwire: `refresh` is the enumeration-side counterpart of the
 /// miss-path adopt. `entries` / `entry_count` answer from the index with
 /// no disk read of their own, so a projection rebuild over a shared root

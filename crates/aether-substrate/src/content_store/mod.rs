@@ -305,6 +305,15 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
     /// writes to disk — while its `uploaded_seq` comes from the sidecar,
     /// so the peer's ingest order survives and this handle's `next_seq`
     /// advances past it rather than reissuing a sequence already spent.
+    ///
+    /// Adopting takes the name map with it. The same peer `upload` that
+    /// wrote the entry may have pointed a name at it, and that name is
+    /// part of what the entry *is* — [`Resolved::name`] and
+    /// [`name_for`](Self::name_for) would otherwise answer `None` for a
+    /// named entry reached by hash while answering `Some` for the same
+    /// entry reached by name, which is a wrong answer rather than a stale
+    /// one. A name also protects its target from eviction, so leaving it
+    /// behind would under-protect an entry the root says is named.
     fn adopt_from_disk(&mut self, hash: &str) -> bool {
         if self.entries.contains_key(hash) {
             return false;
@@ -317,7 +326,16 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
         self.entries.insert(hash.to_owned(), Entry { metadata, bytes_len, pinned: false, last_access, uploaded_seq });
         self.total_bytes = self.total_bytes.saturating_add(bytes_len);
         self.next_seq = self.next_seq.max(uploaded_seq.saturating_add(1));
+        self.merge_names_from_disk();
         true
+    }
+
+    /// Take the `names.json` mappings this handle lacks. Only missing
+    /// mappings are taken; one this handle already holds wins.
+    fn merge_names_from_disk(&mut self) {
+        for (name, hash) in read_names(&self.root) {
+            self.names.entry(name).or_insert(hash);
+        }
     }
 
     /// Resolve a name to the hash it points at, re-reading `names.json`
@@ -335,9 +353,7 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
         if let Some(hash) = self.names.get(name) {
             return Some(hash.clone());
         }
-        for (disk_name, disk_hash) in read_names(&self.root) {
-            self.names.entry(disk_name).or_insert(disk_hash);
-        }
+        self.merge_names_from_disk();
         self.names.get(name).cloned()
     }
 
