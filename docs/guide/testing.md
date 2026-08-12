@@ -151,6 +151,48 @@ wedge, aggregate, and liveness contracts; it is not a model-quality evaluation
 or proof that the real transform program, live credentials, or GitHub transport
 work. See [SubstrateHarness, FleetHarness, and LaneHarness](testing/substrateharness-and-fleetharness.md#laneharness-topology).
 
+Beside it sits the **fixture harness** (`crates/aether-chassis-bloomery/tests/fixture/`),
+which boots the same production chassis inside the test process and steps it one
+explicit reactor tick at a time. Its reason for existing is the handoff *between*
+reactors: each reactor's own unit tests hand-place the outbox row its upstream would
+have produced, so a producer that emits a payload its consumer cannot act on passes
+both sides and stalls only in production. Here every row comes from the real reducer's
+decisions committed by the real control core, and the boot-constructed reactor that
+owns the topic drains it. Nothing in a scenario enqueues a topic.
+
+Under both sits the oldest of the three, the **cross-process tests**
+(`crates/aether-chassis-bloomery/tests/`: `rest_api.rs`, `control_loop.rs`,
+`recovery.rs`). Each boots the real `bloomery` binary over a socket and drives it the
+way an operator or a crash would — `curl` against the HTTP ingress, typed mail over
+RPC, `kill -9` and restart against the same database file. They are the only tier that
+kills and restarts its coordinator, which is exactly what they are for.
+
+| | LaneHarness | fixture harness | cross-process |
+| --- | --- | --- | --- |
+| Coordinator | forked `bloomery` process | booted in the test process | forked `bloomery` process, killable |
+| Substituted | the lane program at the end of the argv | the model's verdict, and the ADR-0152 candidate push | nothing below the wire; the bloom's own evidence is synthetic |
+| Progress comes from | the coordinator's own poll cadence | explicit `DispatchTick` / `IntegrateTick` / `LandTick` calls | the coordinator's own poll cadence |
+| Reads | the projection and the journal over the wire | those, plus the store and artifact roots on disk | HTTP responses, typed mail replies, and the database file across a restart |
+| Proves | the whole dispatch below the lane: `git worktree add`, the child process, its `evidence.json`, the candidate capture | the reactor-to-reactor handoff, and that a boot-constructed reactor resolved the roots it was configured with | that state survives a process boundary — journal replay, outbox republish, a losing concurrent seal, the REST surface an operator actually types at |
+| Cannot prove | that a stage transition produced the next reactor's input, since a lane failure and a missing handoff both read as a stall | anything about the lane subprocess, which it never spawns; the candidate push, which it substitutes; or the coordinator code an uploaded verdict would have travelled through. `ExecutorShell::inspect` does run here, on every dispatch tick, but the in-memory GitHub records a dispatch and never a run, so it only ever answers `Unknown`; its completion branch therefore never opens, and `ExecutorShell::stream_evidence` and the `NameEvidenceClaims::claim_for` decode paired with `attempt_artifact_name` that produces `verdict` and `failed_verifiers` never run — `admit_scripted` builds an `UploadedEvidence` directly instead | that a bloom advances, since nothing supplies a lane verdict |
+
+**Where a new test goes.** A crash, a replay, a restart, or a race between two
+concurrently running loops has to be cross-process: neither of the other two tiers can
+kill and restart its coordinator, and the fixture tier steps its reactors one at a time
+by construction, which removes the interleaving a race needs. Anything about the lane
+subprocess or the candidate push belongs to LaneHarness, which runs both for real.
+Everything else about how the coordinator's own parts fit together — a reactor drains
+what its upstream projected, a boot-constructed reactor opened the configured root —
+belongs to the fixture tier, which is the fastest of the three and should carry the
+bulk.
+
+Two constraints follow from the fixture tier's in-process boot, and both are structural
+rather than incidental. The in-memory GitHub double is a process-global `OnceLock`, so
+each behavior gets its **own test binary** — two scenarios in one process would share a
+repository and a mainline. And no reactor's poll interval can be set to "never"
+(`poll_interval_secs.max(1)`, where `0` polls fastest), so a scenario sets a cadence far
+enough out that the timer never fires inside it and drives every step by hand.
+
 For overlay rendering, split structural and raster proof deliberately. Assert exact
 rectangle geometry, clips, texture coordinates, tint, texture identity, projection
 space, and submission order through `SubstrateHarness::committed_overlay_snapshot`; then use
