@@ -6,11 +6,37 @@ use alloc::vec::Vec;
 
 use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate, stage_binding};
 use super::{
-    AggregateReviewError, AggregateReviewFault, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress,
+    AggregateReviewError, AggregateReviewFault, BloomRecord, BloomStatus, Decision, Decisions, FoldedIntegration,
+    Outcome, Snapshot, StageProgress,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{ConfigRegistry, Evidence, ResolvedBloom, Transformation, VerifyFailureSet};
+
+/// The bloom record and the integration fold a fold-bound aggregate-review
+/// result may act on, or the refusal it earns.
+///
+/// The three refusals every aggregate-review result makes, in one place: an
+/// unknown or inactive bloom, no held integration, and evidence naming a tree
+/// other than the held fold's. The last is the load-bearing one — a stale result
+/// from a superseded fold must not act on a newer integration, whether it
+/// carries a verdict or an executor fault.
+fn held_fold_under_review<'a>(
+    snapshot: &'a Snapshot,
+    bloom: &BloomId,
+    evidence: &Evidence,
+) -> Result<(&'a BloomRecord, FoldedIntegration), AggregateReviewError> {
+    let record = snapshot
+        .blooms
+        .get(bloom)
+        .filter(|record| record.status == BloomStatus::Sealed)
+        .ok_or(AggregateReviewError::UnknownOrInactiveBloom)?;
+    let integration = record.integration.clone().ok_or(AggregateReviewError::NoPendingIntegration)?;
+    if !evidence.validates(&integration.tree) {
+        return Err(AggregateReviewError::SubjectMismatch { expected: integration.tree, got: evidence.subject });
+    }
+    Ok((record, integration))
+}
 
 /// Reduce a whole-bloom aggregate-review verdict (ADR-0153). A passing verdict
 /// resolves the bloom from its held fold — [`Decision::SetResolved`] plus the
@@ -29,23 +55,10 @@ pub(super) fn reduce_aggregate_review_completed(
     evidence: &Evidence,
     implicated: &[WorkpieceId],
 ) -> Decisions {
-    let Some(record) = snapshot.blooms.get(bloom) else {
-        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::UnknownOrInactiveBloom));
+    let (record, integration) = match held_fold_under_review(snapshot, bloom, evidence) {
+        Ok(held) => held,
+        Err(refusal) => return Decisions::rejected(Outcome::AggregateReviewRejected(refusal)),
     };
-    if record.status != BloomStatus::Sealed {
-        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::UnknownOrInactiveBloom));
-    }
-    let Some(integration) = record.integration.clone() else {
-        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::NoPendingIntegration));
-    };
-    // The verdict must bind the exact tree the held fold produced — a stale
-    // verdict from a superseded fold cannot act on a newer integration.
-    if !evidence.validates(&integration.tree) {
-        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::SubjectMismatch {
-            expected: integration.tree,
-            got: evidence.subject,
-        }));
-    }
     let rolls = record.aggregate_rolls + 1;
     let mut effects = alloc::vec![
         Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() },
@@ -139,21 +152,10 @@ pub(super) fn reduce_aggregate_review_executor_fault(
     bloom: &BloomId,
     evidence: &Evidence,
 ) -> Decisions {
-    let Some(record) = snapshot.blooms.get(bloom) else {
-        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::UnknownOrInactiveBloom));
+    let (record, integration) = match held_fold_under_review(snapshot, bloom, evidence) {
+        Ok(held) => held,
+        Err(refusal) => return Decisions::rejected(Outcome::AggregateReviewRejected(refusal)),
     };
-    if record.status != BloomStatus::Sealed {
-        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::UnknownOrInactiveBloom));
-    }
-    let Some(integration) = record.integration.clone() else {
-        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::NoPendingIntegration));
-    };
-    if !evidence.validates(&integration.tree) {
-        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::SubjectMismatch {
-            expected: integration.tree,
-            got: evidence.subject,
-        }));
-    }
 
     // The same rule the `RecordEvidence` fold applies, read here so the ceiling
     // decides against the count the record will actually reach.
@@ -194,7 +196,7 @@ pub(super) fn reduce_aggregate_review_executor_fault(
 /// fresh one. `fold` is the fold's tree, used only as the last-resort subject
 /// for a member carrying neither a cursor candidate nor a claim.
 pub(super) fn reenter_members(
-    record: &super::BloomRecord,
+    record: &BloomRecord,
     bloom: &BloomId,
     members: &[WorkpieceId],
     fold: Digest,
