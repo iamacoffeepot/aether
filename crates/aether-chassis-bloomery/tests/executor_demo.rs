@@ -1,3 +1,5 @@
+#![cfg(feature = "github")]
+
 //! The ADR-0149 Actions executor-port demo (#3500 step 5 coverage).
 //!
 //! Drives a synthetic work order through the executor cap shell against the

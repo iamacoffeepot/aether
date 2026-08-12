@@ -1,3 +1,5 @@
+#![cfg(feature = "github")]
+
 //! Lane-boundary scenarios (#4727): a real coordinator driven through a real
 //! `git worktree add` and a real lane subprocess, with the mock lane binary as
 //! the only substitution.

@@ -1,3 +1,5 @@
+#![cfg(feature = "github")]
+
 //! The claim-ref interposition and boot-reconcile convergence suite (#3547,
 //! ADR-0150 §The claim registry).
 //!

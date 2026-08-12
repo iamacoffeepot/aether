@@ -1,3 +1,5 @@
+#![cfg(feature = "github")]
+
 //! Producer/reactor pairing tripwire for the bloomery outbox topics.
 //!
 //! Every bloomery outbox topic ([`Topic::ALL`](aether_bloomery::Topic::ALL)) —
