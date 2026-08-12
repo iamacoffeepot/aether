@@ -111,8 +111,8 @@ The workflow derives progress from concrete artifacts:
 | Owned issue worktree or branch | Implementation is in progress or paused |
 | Open draft pull request | Reviewable implementation exists |
 | Draft current head with pending/red required checks | Build/test proof is incomplete |
-| Green current head without direct-inspection/thread/dogfood facts | QA evidence is incomplete |
-| Green, contained current head with direct inspection complete, clear threads, and required dogfood | Landable draft; explicit landing authority is still required |
+| Green current head without a trusted current-fact direct-review record or clear thread/dogfood facts | QA evidence is incomplete |
+| Green, contained current head with hidden direct review accepted, native reviews and threads clear, and required dogfood current | Landable draft; explicit landing authority is still required |
 | Named pull request merged and closing issue closed | Done |
 
 Never infer one row from another. Each consumer re-reads the exact facts it
@@ -151,9 +151,25 @@ Local checks support this evidence but do not replace it.
 ### Direct review and native blockers
 
 The implementer directly inspects the complete current-head diff against the
-approved Plan, repairs every defect, reruns the applicable proof, and records an
-ordinary human-readable handoff naming the exact head. This direct-drive review
-does not post JSON or HTML machine markers in PR reviews or comments.
+approved Plan, repairs every defect, and reruns the applicable proof. Its
+semantic verdict is one canonical hidden record in the closing issue body's
+unmanaged evidence history immediately before `## Problem statement`:
+
+```text
+<!-- aether-direct-review:v2 {"head_sha":"<40 lowercase hex>","issue":123,"plan_sha256":"<64 lowercase hex>","pull_request":456,"verdict":"APPROVE"} -->
+```
+
+The wrapper, compact sorted key order, types, and verdict enum are strict. Trust
+comes from the effective issue-body editor being the repository owner, member,
+or collaborator. The last valid record matching the exact issue, pull request,
+head, and current Plan digest is authoritative; a push or managed-Plan change
+makes older records stale history. Writers preserve older approval and review
+records, use a file-backed full-body edit with a byte-for-byte concurrent-change
+guard, and re-read the body and provenance after mutation.
+
+PR reviews, comments, and handoffs remain ordinary human prose and do not carry
+machine JSON/HTML review markers. Landing never treats a legacy pull-request
+machine marker as semantic authority.
 
 Native decisions remain separate: each reviewer's latest active
 `CHANGES_REQUESTED` blocks until that reviewer approves or GitHub reports it
@@ -187,8 +203,8 @@ second PR, or land.
 
 Landing is separately authorized. Immediately before mutation it independently
 revalidates issue identity and digest, approval and ancestry, actual diff and
-surface, current-head checks, semantic and native reviews, threads, dogfood,
-branch ownership, and merge prediction.
+surface, current-head checks, hidden semantic review, native reviews, threads,
+dogfood, branch ownership, and merge prediction.
 
 An eligible landing clears draft state, performs an ordinary squash merge, and
 continues only after GitHub confirms the named PR is merged. Done additionally

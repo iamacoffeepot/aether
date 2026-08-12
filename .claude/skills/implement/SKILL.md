@@ -5,7 +5,7 @@ description: "Implement a currently approved Aether issue in an issue worktree, 
 
 # /implement — approved Plan to reviewed draft
 
-Read [review](../review/SKILL.md) completely before acting. This is the only issue-to-reviewed-draft path. It never lands a pull request.
+Read the shared [GitHub workflow contract](../../../.agents/skills/_shared/github-workflow.md) completely before acting. This is the only issue-to-reviewed-draft path. It never lands a pull request.
 
 ## Invocation
 
@@ -47,7 +47,7 @@ Resume at the first incomplete observable fact:
 - a dirty worktree continues only remaining Plan work;
 - a committed branch without a pull request proceeds through parent diff review and local checks;
 - an open draft with pending or red current-head checks resumes CI repair;
-- a green draft without a trusted current-head direct-review approval runs direct review;
+- a green draft without a trusted current-head hidden direct-review approval runs direct review;
 - actionable findings, a native change request, or unresolved threads enter integrated repair;
 - accepted current-head review, clear dogfood, and resolved threads are complete and ready for `/land <pr>`.
 
@@ -138,16 +138,17 @@ For each code fix rerun format, full clippy, focused verification, containment, 
 
 ## Direct review
 
-When current-head CI is green, invoke [review](../review/SKILL.md) directly for the pull request. The review engine is independent and read-only; this loop owns the resulting edits and GitHub writes. Do not dispatch a hosted review action.
+When current-head CI is green, capture the pull-request head and freshly recomputed Plan digest, then directly inspect the complete diff against every Plan step, the declared surface, current code, and applicable tests and conventions. The implementer owns both judgment and repair; do not dispatch a hosted or separate formal review pass.
 
-Post actionable findings as tight current-head inline comments. Post exactly one semantic COMMENT review artifact for the captured head with this strict marker and compact JSON:
+Post actionable findings, when a durable handoff is useful, as tight current-head inline comments written in ordinary human prose. Record the semantic verdict only as the closing issue's canonical single-line hidden record:
 
 ```text
-<!-- aether-direct-review:v1 -->
-{"head_sha":"<sha>","plan_sha256":"<digest>","pull_request":<pr>,"verdict":"APPROVE|REQUEST_CHANGES"}
+<!-- aether-direct-review:v2 {"head_sha":"<40 lowercase hex>","issue":<issue>,"plan_sha256":"<64 lowercase hex>","pull_request":<pr>,"verdict":"APPROVE|REQUEST_CHANGES"} -->
 ```
 
-Re-read the review and current head before accepting it. A semantic artifact is separate from native GitHub review decisions: an active native `CHANGES_REQUESTED` remains a blocker until that reviewer approves or GitHub reports it dismissed. A head or Plan change invalidates the semantic artifact.
+Append it to the issue body's unmanaged hidden evidence history immediately before `## Problem statement`, after all earlier approval and direct-review records. Build the complete candidate body in a temporary file, re-read the issue body immediately before `PATCH`, and require it to equal the source snapshot byte-for-byte. If it changed, rebuild from the fresh body rather than overwriting either edit. Send the file as the request body, then re-read the body and effective editor and require the canonical record, current issue/pull request/head/digest fields, and owner/member/collaborator provenance to validate. If the last valid current-fact record already has the desired verdict, do not duplicate it.
+
+Never put machine JSON/HTML into a pull-request review or comment. The hidden semantic record is separate from native GitHub review decisions: read paginated PR reviews only for those decisions, and keep an active native `CHANGES_REQUESTED` blocked until that reviewer approves or GitHub reports it dismissed. A head or managed-Plan change makes the hidden record stale.
 
 ## Integrated repair loop
 
@@ -159,15 +160,15 @@ For every actionable review or dogfood finding:
 4. rerun local checks, containment, and current-head CI;
 5. reply to the anchored thread with the fix commit or justification;
 6. resolve a thread only after its item is addressed;
-7. run `/review <pr> --confirm <last-reviewed-sha>` over prior findings plus the delta and post a new current-head semantic artifact.
+7. directly confirm every prior finding against the delta, then append the new head's hidden semantic record when needed under the same idempotency and concurrency rules.
 
-Never waive a finding silently. A root-level or out-of-scope result stops with the review engine's explicit Define, Design, or Plan rescope recommendation. Allow at most three repair iterations; preserve externally visible replies and resolutions before waiting again.
+Never waive a finding silently. A root-level or out-of-scope result stops with an explicit Define, Design, or Plan rescope recommendation. Allow at most three repair iterations; preserve externally visible replies and resolutions before waiting again.
 
 ## Dogfood and completion
 
-If Dogfood brief is a specific N/A statement, record the exemption. Otherwise invoke [dogfood](../dogfood/SKILL.md) directly for the same head. Require a durable rollup naming head, medium, surface, artifact result, cleanup, and no actionable finding. Repair any finding through the same loop, then rerun review and dogfood for the new head.
+If Dogfood brief is a specific N/A statement, record the exemption. Otherwise invoke [dogfood](../dogfood/SKILL.md) directly for the same head. Require a durable rollup naming head, medium, surface, artifact result, cleanup, and no actionable finding. Repair any finding through the same loop, then repeat direct inspection, hidden verdict recording, and dogfood for the new head.
 
-Implementation succeeds only when the same current head has a matching trusted approval, approval-base ancestry, clean contained diff, green required checks, trusted semantic `APPROVE`, no active native change request, all threads resolved, and clear required dogfood. The pull request remains draft and unmerged; branch and worktree remain present.
+Implementation succeeds only when the same current head has a matching trusted approval, approval-base ancestry, clean contained diff, green required checks, a trusted hidden semantic `APPROVE` for the exact issue/pull request/head/digest, no active native change request, all threads resolved, and clear required dogfood. The pull request remains draft and unmerged; branch and worktree remain present.
 
 Report all evidence and point to `/land <pr>`.
 

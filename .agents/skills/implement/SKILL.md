@@ -5,7 +5,7 @@ description: "Implement a currently approved Aether issue in an issue-specific w
 
 # Implement
 
-Read [Codex harness](../_shared/codex-harness.md), [GitHub workflow](../_shared/github-workflow.md), and [review](../review/SKILL.md) completely before acting. This is the only issue-to-reviewed-draft path. It never lands a pull request.
+Read [Codex harness](../_shared/codex-harness.md) and [GitHub workflow](../_shared/github-workflow.md) completely before acting. This is the only issue-to-reviewed-draft path. It never lands a pull request.
 
 ## Inputs
 
@@ -47,9 +47,9 @@ Reconstruct progress from observable facts:
 - dirty worktree: continue only the remaining Plan within the declared surface;
 - committed branch without a pull request: review the diff and continue at local verification;
 - open draft with pending or red current-head checks: continue the CI loop;
-- green draft without a trusted current-head direct-review `APPROVE` artifact: run direct review;
-- a current semantic `REQUEST_CHANGES`, native change request, finding, or unresolved thread: continue the integrated repair loop;
-- trusted semantic `APPROVE`, no native review blocker, resolved threads, and clear required dogfood: implementation is complete and ready for `$land <PR>`.
+- green draft without a trusted current-head hidden direct-review `APPROVE` record: run direct review;
+- a current hidden semantic `REQUEST_CHANGES`, native change request, finding, or unresolved thread: continue the integrated repair loop;
+- trusted hidden semantic `APPROVE`, no native review blocker, resolved threads, and clear required dogfood: implementation is complete and ready for `$land <PR>`.
 
 On resume, require the current body digest and route to match the trusted approval and require the approval base to be an ancestor of the branch head. Do not require remote-tracking main to remain equal to the approval base after work started. Refuse `--quick --resume`.
 
@@ -127,13 +127,13 @@ For every fix, re-run local format/clippy, containment, and worker-result cleanl
 
 ## Direct review
 
-After the current head is green, invoke the repository [review skill](../review/SKILL.md) directly against the pull request and current head. The review is independent and read-only; this implementation loop owns all resulting GitHub writes.
+After the current head is green, the implementer captures the pull-request head and freshly recomputed Plan digest, then directly inspects the complete current-head diff against every Plan step, the declared surface, current code, and applicable tests and conventions. The implementer owns both the judgment and every repair; do not dispatch a hosted or separate formal review pass.
 
-Post actionable findings as current-head inline comments and post exactly one semantic verdict as the shared workflow's strict `<!-- aether-direct-review:v1 -->` `COMMENT` review artifact. Never request a native self-approval, treat a native `APPROVED` review as that artifact, or put self-declared authority in its payload. Re-read and validate the created review before using it. A restart-level recommendation stops the loop, records its evidence, and hands the issue to the recommended Define, Design, or Plan artifact. Otherwise:
+Post actionable findings, when a durable handoff is useful, as tight current-head inline comments written in ordinary human prose. Record the semantic verdict only as the shared workflow's canonical hidden issue-body direct-review record, using its file-backed, byte-for-byte concurrency guard and post-mutation provenance validation. Never put machine JSON/HTML in a pull-request review or comment, request a native self-approval, or treat a native `APPROVED` review as the semantic record. A restart-level recommendation stops the loop, records human-readable evidence, and hands the issue to the recommended Define, Design, or Plan artifact. Otherwise:
 
-- a trusted current-head semantic `APPROVE` with no actionable findings or independent native/thread blocker proceeds to dogfood;
+- a trusted current-head hidden semantic `APPROVE` with no actionable findings or independent native/thread blocker proceeds to dogfood;
 - semantic `REQUEST_CHANGES`, a native change request, or actionable findings enter the integrated repair loop;
-- a head change invalidates the verdict and requires a new review of the new head.
+- a head or managed-Plan change invalidates the verdict and requires fresh direct inspection of the new facts.
 
 ## Integrated finding repair
 
@@ -145,13 +145,13 @@ For each actionable review or dogfood finding on the current head:
 4. rerun local checks, containment, and current-head CI;
 5. reply to the anchored thread with the fix commit or justification;
 6. resolve a thread only after its item is actually addressed;
-7. run a fresh-context confirm review over prior findings plus the delta and post one new current-head COMMENT artifact when its verdict differs or the head changed; do not duplicate an already-current identical artifact.
+7. directly confirm every prior finding against the delta, then append the new head's hidden semantic record when needed under the shared idempotency rule.
 
 Never silently waive a finding. A change requiring new scope or design stops with a rescope recommendation. Allow at most three repair iterations; a fourth requested-change result returns to Plan with the ordered history. Finish externally visible replies and resolutions before waiting again.
 
 ## Dogfood
 
-If Dogfood brief is `N/A`, record that no consumer trial is required. Otherwise run `$dogfood <PR>` directly for the current head after review acceptance. Require its durable rollup to name the current head, expected surface, cleanup result, and no actionable finding. Repair findings through the same integrated loop, then rerun review and dogfood for the new head. An engine or harness outage preserves the draft and reports the retry point.
+If Dogfood brief is `N/A`, record that no consumer trial is required. Otherwise run `$dogfood <PR>` directly for the current head after review acceptance. Require its durable rollup to name the current head, expected surface, cleanup result, and no actionable finding. Repair findings through the same integrated loop, then repeat direct inspection, hidden verdict recording, and dogfood for the new head. An engine or harness outage preserves the draft and reports the retry point.
 
 ## Success state
 
@@ -162,7 +162,7 @@ Implementation succeeds when all of these are true for the same current head:
 - worktree and branch are present and clean;
 - diff is entirely within Declared surface;
 - required checks are green;
-- the newest trusted direct-review artifact for the current head and digest says `APPROVE`, no active per-reviewer native `CHANGES_REQUESTED` decision remains under the shared contract, and every review thread is resolved;
+- the newest trusted hidden direct-review record for the current issue, pull request, head, and digest says `APPROVE`, no active per-reviewer native `CHANGES_REQUESTED` decision remains under the shared contract, and every review thread is resolved;
 - required dogfood is clear;
 - pull request remains draft and unmerged.
 

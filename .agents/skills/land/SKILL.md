@@ -49,9 +49,9 @@ Require every repository-required check for the current head to be completed suc
 
 ### Review and threads
 
-Read every pull-request review over paginated REST and validate direct-review bodies with the shared workflow's strict `<!-- aether-direct-review:v1 -->` contract. Require the newest trusted artifact matching the current pull-request number, head SHA, and freshly recomputed Plan digest to say `APPROVE`. A native self-approval is impossible and is never this gate; a marker or payload from an untrusted association is not authority, and an earlier-head or earlier-digest artifact is stale.
+Read the closing issue body and effective editor and validate its canonical hidden direct-review records under the shared workflow contract. Require the last trusted record matching the issue number, current pull-request number, head SHA, and freshly recomputed Plan digest to say `APPROVE`. A native self-approval is impossible and is never this gate; a payload from an untrusted effective body editor is not authority, and an earlier-head or earlier-digest record is stale. Never accept a machine-formatted pull-request review or comment as semantic review authority.
 
-Evaluate native review blockers separately. For each reviewer, take their newest non-dismissed native decision review (`APPROVED` or `CHANGES_REQUESTED`) across the pull request and require none to be `CHANGES_REQUESTED`; the request remains active across later commits until that reviewer approves or GitHub reports it dismissed, and a semantic COMMENT artifact cannot clear it. Enumerate threads through GraphQL and require every review thread resolved. A failed or truncated review/thread read is ineligible, never an empty set.
+Read paginated pull-request reviews only to evaluate native blockers separately. For each reviewer, take their newest non-dismissed native decision review (`APPROVED` or `CHANGES_REQUESTED`) across the pull request and require none to be `CHANGES_REQUESTED`; the request remains active across later commits until that reviewer approves or GitHub reports it dismissed, and a hidden semantic record cannot clear it. Enumerate threads through GraphQL and require every review thread resolved. A failed or truncated body-provenance/review/thread read is ineligible, never an empty set.
 
 ### Dogfood
 
@@ -80,13 +80,13 @@ Because a rebase rewrites reviewed commits, show the exact branch, old head, cur
 4. run `cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`;
 5. push with `--force-with-lease`, never plain force;
 6. wait for the new head's CI;
-7. require a new trusted direct-review COMMENT artifact for the rewritten head, new dogfood evidence when applicable, no native review blocker, resolved threads, fresh containment, and every landing gate again.
+7. run fresh direct inspection and append a new trusted hidden issue-body direct-review record for the rewritten head through the shared file-backed, concurrent-edit-safe procedure; require new dogfood evidence when applicable, no native review blocker, resolved threads, fresh containment, and every landing gate again.
 
 Do not run full local tests or distributions unless the user explicitly asks; CI is the full build engine.
 
 ## Clear draft and merge
 
-Immediately before mutation, re-read the pull request, issue body and editor provenance, migration-only comments when needed, head, checks, reviews, threads, dogfood, merge prediction, and every gate. Abort on any change.
+Immediately before mutation, re-read the pull request, issue body and editor provenance, migration-only approval comments when needed, head, checks, native reviews, threads, dogfood, merge prediction, and every gate. Abort on any change.
 
 1. Read the pull request node id.
 2. Use GraphQL `markPullRequestReadyForReview` and verify draft is false.
