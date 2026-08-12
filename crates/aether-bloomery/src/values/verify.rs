@@ -12,8 +12,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 ///
 /// The order is append-only and independent of the umbrella's run order: each
 /// identity's bit is its position, so a new identity goes on the end or every
-/// deployed mask shifts. All eight bits of the mask byte are now assigned, so a
-/// ninth identity needs a `u16` set and a four-hex-digit token (ADR-0181).
+/// deployed mask shifts. Every bit of the mask byte carries an identity, so a
+/// ninth one needs a `u16` set and a four-hex-digit token (ADR-0181).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum VerifyFailure {
     /// The umbrella could not satisfy its tool/target prerequisites.
@@ -182,11 +182,11 @@ impl VerifyFailureSet {
 
     /// Decode an exact two-lowercase-hex-digit artifact token.
     ///
-    /// Refuses wrong length, uppercase, and non-hex text. The eighth identity
-    /// assigns the last bit, so every well-formed token now names a valid set
-    /// and there is no unknown-bit refusal left to make (ADR-0181); the
-    /// workflow's own canonical-order and duplicate checks, plus the evidence
-    /// digest, carry the semantic validation on the Actions path.
+    /// Refuses wrong length, uppercase, and non-hex text. Every bit of the byte
+    /// carries an identity, so any well-formed token names a valid set and the
+    /// decode makes no unknown-bit refusal (ADR-0181); the workflow's own
+    /// canonical-order and duplicate checks, plus the evidence digest, carry the
+    /// semantic validation on the Actions path.
     #[must_use]
     pub fn from_mask(mask: &str) -> Option<Self> {
         let bytes = mask.as_bytes();
@@ -321,10 +321,19 @@ mod tests {
         assert_eq!(VerifyFailureSet::from_mask("7f").map(VerifyFailureSet::to_mask).as_deref(), Some("7f"));
 
         // Tripwire: the whole vocabulary must still fit the two-hex-digit token
-        // the attempt-artifact grammar reserves for it. A ninth identity masks
-        // past 0xff and truncates here rather than being silently dropped.
+        // the attempt-artifact grammar reserves for it. A ninth identity shifts
+        // `bit()` by 8, and with overflow checks on — the profile `cargo test`
+        // and CI run — that panics here before the comparison is reached. The
+        // panic is the signal, not the compared mask: with overflow checks off
+        // the shift wraps to bit 0, the mask still reads `ff`, and this line
+        // passes, so a release-profile run does not catch the ninth identity.
         assert_eq!(VerifyFailure::ALL.into_iter().collect::<VerifyFailureSet>().to_mask(), "ff");
         assert_eq!(VerifyFailureSet::one(VerifyFailure::Suppress).to_mask(), "80");
+        assert_eq!(VerifyFailureSet::from_mask("80"), Some(VerifyFailureSet::one(VerifyFailure::Suppress)));
+        assert_eq!(
+            VerifyFailureSet::from_mask("ff"),
+            Some(VerifyFailure::ALL.into_iter().collect::<VerifyFailureSet>())
+        );
 
         for invalid in ["0", "000", "0A", "GG", "g0", "-1"] {
             assert!(VerifyFailureSet::from_mask(invalid).is_none(), "`{invalid}` must be refused");

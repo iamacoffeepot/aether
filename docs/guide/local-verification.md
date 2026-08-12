@@ -70,9 +70,11 @@ python3 scripts/check-suppressions.py
 It defaults to the merge base of `origin/main` and `HEAD`; `--base` and
 `--head` select explicit refs. The `verify.suppress` transform runs that exact
 command, and it is a member of `verify.check`. A finding is a typed
-`verify.suppress` verifier failure like any other member: forgiven on its first
-occurrence for a candidate, charged a repair roll when it repeats, and wedging
-the member with `repeated_verifiers = {verify.suppress}` if it keeps repeating.
+`verify.suppress` verifier failure like any other member, and the accounting is
+per member: forgiven the first time a member sees it, charged a repair roll on
+every later occurrence for that same member, and wedging the member with
+`repeated_verifiers = {verify.suppress}` if it keeps repeating. Replacing the
+candidate does not reset that memory (ADR-0178).
 Bloomery has no pull-request owner context, so the sign-off path below is
 closed to it and the lane re-enters `Refine` — the only way a candidate clears
 the finding is to remove the suppression.
