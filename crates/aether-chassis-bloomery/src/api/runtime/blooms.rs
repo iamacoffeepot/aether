@@ -204,10 +204,12 @@ pub(super) fn query_response(result: QueryResult) -> HttpServerResponse {
         },
         QueryResult::NotFound => error_response(404, "no bloom with that id"),
         QueryResult::Err { error } => error_response(500, &error),
-        // The shared `#[http::reply]` sends every `Release` variant to
-        // `release_status_response` before it reaches here, so one arriving is a
-        // routing bug rather than an answer to render.
-        QueryResult::Release { .. } => error_response(500, "projection read answered with a release record"),
+        // The shared `#[http::reply]` sends both release variants to
+        // `release_status_response` before either reaches here, so one arriving
+        // is a routing bug rather than an answer to render.
+        QueryResult::Release { .. } | QueryResult::ReleaseNotFound => {
+            error_response(500, "projection read answered with a release record")
+        }
     }
 }
 

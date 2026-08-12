@@ -703,7 +703,7 @@ pub enum QueryResult {
         #[serde(with = "aether_data::bytes")]
         view: Vec<u8>,
     },
-    /// No bloom (or release request) with the requested id is known.
+    /// No bloom with the requested id is known.
     NotFound,
     /// Encoding the requested projection into wire bytes failed — the read
     /// could not be served rather than being answered with an empty payload.
@@ -721,6 +721,17 @@ pub enum QueryResult {
         #[serde(with = "aether_data::bytes")]
         record: Vec<u8>,
     },
+    /// No orphan-claim release request with the requested digest is known
+    /// (ADR-0179).
+    ///
+    /// Its own variant rather than a second meaning for [`NotFound`](Self::NotFound)
+    /// for the same reason [`Query::release`] is its own field: the reply is what
+    /// the reader renders, so collapsing the two makes an unrecognised digest
+    /// name the wrong resource — a missing release would report "no bloom". The
+    /// [`Query`] doc already refuses that ambiguity on the request side; this
+    /// keeps the answer side honest too. Appended so the prior variants' wire
+    /// discriminants are unchanged.
+    ReleaseNotFound,
 }
 
 /// The `aether.source.*` claim transact-mail kinds the control core sends to

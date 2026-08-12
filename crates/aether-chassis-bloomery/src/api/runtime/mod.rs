@@ -441,7 +441,7 @@ impl NativeActor for BloomeryApiCapability {
         mail: QueryResult,
     ) -> HttpServerResponse {
         match mail {
-            QueryResult::Release { .. } => release_status_response(mail),
+            QueryResult::Release { .. } | QueryResult::ReleaseNotFound => release_status_response(mail),
             mail => query_response(mail),
         }
     }

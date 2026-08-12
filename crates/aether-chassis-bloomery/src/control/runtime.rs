@@ -695,13 +695,15 @@ impl ControlCoreState {
 
 /// Answer an orphan-claim release-status read from the snapshot's record map
 /// (ADR-0179). A digest that is not 32 bytes, or names no admitted request, is
-/// [`QueryResult::NotFound`] — the same shape an unknown bloom id gets.
+/// [`QueryResult::ReleaseNotFound`] — a release-shaped miss, not the bloom-shaped
+/// [`QueryResult::NotFound`], so the reader can name the resource the caller
+/// actually asked for.
 fn release_response(snapshot: &Snapshot, request: &[u8]) -> QueryResult {
     let Some(request) = Digest::from_slice(request) else {
-        return QueryResult::NotFound;
+        return QueryResult::ReleaseNotFound;
     };
     let Some(record) = snapshot.orphan_releases.get(&request) else {
-        return QueryResult::NotFound;
+        return QueryResult::ReleaseNotFound;
     };
     match to_vec(record) {
         Ok(record) => QueryResult::Release { record },
@@ -867,10 +869,26 @@ fn lowercase_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::lowercase_hex;
+    use aether_bloomery::{QueryResult, Snapshot};
+
+    use super::{lowercase_hex, release_response};
 
     #[test]
     fn observe_mainline_key_uses_lowercase_hex() {
         assert_eq!(lowercase_hex(&[0, 15, 160, 255]), "000fa0ff");
+    }
+
+    // Tripwire: a release read that misses must answer the release-shaped miss,
+    // never the bloom-shaped `NotFound`. The reply variant is the only thing
+    // that tells the two reads apart — the route holds no correlation — so
+    // collapsing them makes `GET /claims/releases/{digest}` answer "no bloom
+    // with that id", naming a resource the caller never asked for on the very
+    // route the REST recipe tells an operator to poll.
+    #[test]
+    fn a_release_read_that_misses_is_release_shaped_not_bloom_shaped() {
+        let snapshot = Snapshot::default();
+
+        assert_eq!(release_response(&snapshot, &[7; 32]), QueryResult::ReleaseNotFound);
+        assert_eq!(release_response(&snapshot, b"not a digest"), QueryResult::ReleaseNotFound);
     }
 }

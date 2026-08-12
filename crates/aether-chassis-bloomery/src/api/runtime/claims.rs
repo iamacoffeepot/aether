@@ -114,18 +114,19 @@ pub(super) fn claims_response(result: EnumerateClaimsResult) -> HttpServerRespon
 }
 
 /// Render a release-status read. A `Release` reply carries the record; a
-/// `NotFound` means no such request was ever admitted here.
+/// `ReleaseNotFound` means no such request was ever admitted here.
 pub(super) fn release_status_response(result: QueryResult) -> HttpServerResponse {
     match result {
         QueryResult::Release { record } => match from_bytes::<OrphanClaimReleaseRecord>(&record) {
             Ok(record) => json(200, &record),
             Err(error) => error_response(500, &format!("release record decode failed: {error}")),
         },
-        QueryResult::NotFound => error_response(404, "no orphan claim release with that request digest"),
+        QueryResult::ReleaseNotFound => error_response(404, "no orphan claim release with that request digest"),
         QueryResult::Err { error } => error_response(500, &error),
-        // A release read asks for one record; the document / bloom variants
-        // answer a different question and cannot arrive on this reply.
-        QueryResult::Document { .. } | QueryResult::Bloom { .. } => {
+        // A release read asks for one record; the projection variants — including
+        // the bloom-shaped `NotFound` — answer a different question and cannot
+        // arrive on this reply.
+        QueryResult::Document { .. } | QueryResult::Bloom { .. } | QueryResult::NotFound => {
             error_response(500, "release read answered with a projection")
         }
     }
