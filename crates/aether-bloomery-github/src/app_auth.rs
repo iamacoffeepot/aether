@@ -1,12 +1,15 @@
 //! The GitHub-App installation-token minter (ADR-0149 §Migration step 3,
 //! ADR-0150 host-locality).
 //!
-//! [`AppTokenSource`] is the in-process [`TokenSource`] the port shells' client
-//! resolves each request's bearer from. It holds the App private key host-local
-//! (read once at construction, never echoed), mints a short-lived RS256 App JWT
-//! from it, exchanges the JWT for an installation access token, caches the
-//! token, and re-mints once the cached token is within the refresh skew of
-//! expiry — so tokens are minted on a refresh cadence, never per request.
+//! [`AppTokenSource`] is the in-process [`TokenSource`] a client resolves each
+//! request's bearer from. It takes the App private key as PEM bytes, mints a
+//! short-lived RS256 App JWT from it, exchanges the JWT for an installation
+//! access token, caches the token, and re-mints once the cached token is within
+//! the refresh skew of expiry — so tokens are minted on a refresh cadence, never
+//! per request. It sits here beside [`StaticTokenSource`] because both are
+//! [`TokenSource`] implementations over the GitHub protocol; the embedder reads
+//! the host-local key file and hands the bytes in, so the key's custody stays on
+//! the host (ADR-0150) while the protocol stays in this adapter.
 //!
 //! The JWT→installation-token exchange is a network hop, so it sits behind the
 //! [`InstallationTokenExchange`] seam: production drives the real
@@ -14,17 +17,15 @@
 //! inject a counting fake to assert the caching/refresh behavior with no
 //! network.
 
-use std::fs;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aether_bloomery_github::{GithubError, InstallationToken, ReqwestGithub, StaticTokenSource, TokenSource};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;
 
-use crate::bloomery::GithubConnectionConfig;
+use crate::client::{GithubError, InstallationToken, ReqwestGithub, StaticTokenSource, TokenSource};
 
-/// The default refresh skew when `app_token_skew_secs` resolves to `0` — re-mint
+/// The default refresh skew when the caller's skew resolves to `0` — re-mint
 /// five minutes before the GitHub-reported expiry.
 const DEFAULT_SKEW_SECS: u64 = 300;
 
@@ -83,8 +84,8 @@ struct Cached {
 }
 
 /// The in-process installation-token custody: mints, caches, and refreshes the
-/// bearer the port shells' client authenticates with (ADR-0149 §Migration
-/// step 3). Holds the App private key host-local (ADR-0150).
+/// bearer a client authenticates with (ADR-0149 §Migration step 3). The App
+/// private key is parsed once at construction and never echoed (ADR-0150).
 pub struct AppTokenSource {
     app_id: u64,
     installation_id: u64,
@@ -95,26 +96,32 @@ pub struct AppTokenSource {
 }
 
 impl AppTokenSource {
-    /// Build the source from resolved config: read the host-local private-key
-    /// PEM, parse the RSA key, and wire the production exchange. A missing or
-    /// malformed key fails fast here (ADR-0150 — no silent fallback to an
-    /// ambient secret).
+    /// Build the source over plain values: parse the App's RSA private-key PEM
+    /// and wire the production exchange against `api_base`. A malformed key
+    /// fails fast here (ADR-0150 — no silent fallback to an ambient secret).
+    /// `skew_secs` is how many seconds before the reported expiry to re-mint;
+    /// `0` resolves to the 300-second default.
+    ///
+    /// The caller owns reading the key file, so the host-local path never
+    /// crosses into this adapter.
     ///
     /// # Errors
-    /// The private-key file is unreadable, or its bytes are not a valid RSA PEM.
-    pub fn from_config(config: &GithubConnectionConfig) -> Result<Self, GithubError> {
-        let pem = fs::read(&config.app_private_key_path).map_err(|error| {
-            GithubError::Transport(format!("reading GitHub App private key '{}': {error}", config.app_private_key_path))
-        })?;
-        let key = EncodingKey::from_rsa_pem(&pem)
+    /// The bytes are not a valid RSA PEM.
+    pub fn new(
+        app_id: u64,
+        installation_id: u64,
+        private_key_pem: &[u8],
+        skew_secs: u64,
+        api_base: String,
+    ) -> Result<Self, GithubError> {
+        let key = EncodingKey::from_rsa_pem(private_key_pem)
             .map_err(|error| GithubError::Transport(format!("parsing GitHub App private-key PEM: {error}")))?;
-        let exchanger = Arc::new(HttpExchange { api_base: config.api_base.clone() });
         Ok(Self::with_exchange(
-            config.app_id,
-            config.app_installation_id,
+            app_id,
+            installation_id,
             key,
-            skew_secs(config.app_token_skew_secs),
-            exchanger,
+            resolve_skew_secs(skew_secs),
+            Arc::new(HttpExchange { api_base }),
         ))
     }
 
@@ -132,8 +139,8 @@ impl AppTokenSource {
         Self { app_id, installation_id, key, skew_secs, exchanger, cache: Mutex::new(None) }
     }
 
-    /// Sign a fresh App JWT from the host-local key (RS256, `iss` = App id,
-    /// `iat` backdated for clock skew, `exp` under GitHub's ten-minute ceiling).
+    /// Sign a fresh App JWT from the private key (RS256, `iss` = App id, `iat`
+    /// backdated for clock skew, `exp` under GitHub's ten-minute ceiling).
     ///
     /// # Errors
     /// The system clock is before the Unix epoch, or JWT signing failed.
@@ -180,7 +187,7 @@ impl TokenSource for AppTokenSource {
 }
 
 /// Resolve the refresh skew in seconds, defaulting `0` to [`DEFAULT_SKEW_SECS`].
-fn skew_secs(secs: u64) -> u64 {
+fn resolve_skew_secs(secs: u64) -> u64 {
     if secs == 0 {
         DEFAULT_SKEW_SECS
     } else {
@@ -197,7 +204,7 @@ fn skew_secs(secs: u64) -> u64 {
 fn refresh_deadline(expires_at: &str, skew_secs: u64) -> u64 {
     let Some(expiry) = parse_rfc3339_to_unix(expires_at) else {
         tracing::warn!(
-            target: "aether_chassis_bloomery::app_auth",
+            target: "aether_bloomery_github::app_auth",
             expires_at,
             "installation token expiry did not parse; forcing a re-mint next call"
         );
@@ -277,9 +284,164 @@ fn now_unix() -> Result<u64, GithubError> {
         .map_err(|error| GithubError::Transport(format!("system clock is before the Unix epoch: {error}")))
 }
 
+/// Unit tests for the App-token custody (ADR-0149 §Migration step 3).
+///
+/// The JWT minting and the cache/refresh logic are this module's own — a fixture
+/// RSA keypair signs a real JWT (verified with the public key), and a counting
+/// fake exchange stands in for the network so the refresh-before-expiry cadence
+/// is asserted with no live GitHub. Tripwire: mint-once-then-cache vs
+/// re-mint-when-stale is the behavior the design turns on, not a passthrough.
 #[cfg(test)]
 mod tests {
-    use super::{parse_rfc3339_to_unix, refresh_deadline};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Validation, decode};
+    use serde::Deserialize;
+
+    use super::{AppTokenSource, InstallationTokenExchange, parse_rfc3339_to_unix, refresh_deadline};
+    use crate::client::{GithubError, InstallationToken, TokenSource};
+
+    // A throwaway 2048-bit RSA keypair (never a real credential) — the fixture the
+    // JWT-signing test signs with and verifies against.
+    const TEST_PRIVATE_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----
+MIIEpQIBAAKCAQEAv2JzVEAUCyxtdyoUeFfFzydL9W9BOwO5W1fKkGhQ9dfgid5c
+1dJwUR/jWb5KHXZ2cAvZ5j6wK8PaKG5WSxtSqO5ingxHJA7SzxX6kQseXLUHamAv
+OZ6i3iiNDY3xuO9MdEd8BVT0iNpSm3eQN10+Ug1kXfw9rnIqNp7g/xwSYllKG9o8
+rISa26Huo/WQ+PB/aKRHgVQ3Un8ajKnIc0UBTUa95t1kg1a1S5w2meBLb/sh2y3n
+Wy1V4yMjVO70x2sWgoVTn2s7PAyzTpc0CmQ78/5Y/XxEZlK27VFOP3W4xdlPWC0S
+pggjNDzSt+Q7bur8qzf20HeZOpeTyVCN3croVwIDAQABAoIBAD89sQ5t/jGTBLkT
+1p/NoTfKrHb1xIBTwrREVlNRpS8XnsLwD404dJTaDK5jCuqhcpGj2OUUYfKUTUp+
+61T2OmJII55GQFvR6ic0BBBZtDa+Oy0Ti4dmvDrc+383IGET8heaZ4j7gbKXMiTd
+ZXJmBWnnsvq7l0ZFw105MvAZvplwhHczkq+CjfwypM0VRV9XKxUfuQdiFG377jjZ
+LARbtN7kWxtm2iwL2ZtfKQPbYjxCUrYWVN1q9e3kcL+bITf3GwK34k7umuYy1+rw
+zanpQ0L+F5sU6XCu+3G3XNhM76kKXoi9SCwlhLp4r6T+Wkk6yvBl2nBRtB90qeHE
+ONM1FYECgYEA+sieSVEvvRPc7oH4na/P6JVKdoxCtf4oHHHm5uAltmjF30169R2V
+a2mdQ8pPlLx2WeN9tzM/dEuDCR1f0Gb/04IZBJBlirj1G1yG85GxQqB34C246MlP
++nlc/wCgZi8I79RZ7Hp8OSY86M+h0gZWc6njWzEhyQ+BO4h9KB21cU8CgYEAw12K
+tG53ml3wTTXSvkWrS07rkePR6MmyTBFn8TU3xYTI0Do5a6zM2pViqub3cFh9IhZp
+Odox7onKS+mut/aXfDHZScba0+s9cZOUc/rW8Z2m4Os6vvCa8cguxUW3P/uZ5/Ey
+XrSzJnwb+dKINnC/a6ag/JPwGSmQm4LDYnJ3hnkCgYEA6HZAazvLYZvg5mEp4JlQ
+wopoTL01NVfTPJLEc2yA6LXz/Urn2ABFOhzbPzRwUjHkDuyV4tSpVBaO70sAPsDL
+EPb+U8G5rj5GTceV/H8nbdgrZm1bgsTg0w/eiS2+gRnGUfFoLZFYRu1P9opIuNNR
+HcPz0NsZMzOhGlspkJ8BSncCgYEAv8nHzgOYNJm9uv54qcPZOi/6wJjHS+EdwOFh
+igD1hFkrjodqMVNNM9RtLVtaVBb6mQkpOdsDI6pvRwDcPcq9wfVp26x0zI/mHOaF
+WSpJ8p4S4kDqxeGMKombqJwdHpnP6Ev3Z9O6/6/dAu50PAWJVZQZ/Hr6vKj6RkAj
+sTSwM/kCgYEA+J08Bt+2+HDSw8Grsc3WOiPJTuIMaX3uhEjxwlozq36GPah6T8+d
+q9nQWTzvE1G118enh8FoJE0/v3x+IGXpLXoseASCSkOuJvIZB4LIuz/sndc6QcDX
+xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
+-----END RSA PRIVATE KEY-----";
+
+    const TEST_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv2JzVEAUCyxtdyoUeFfF
+zydL9W9BOwO5W1fKkGhQ9dfgid5c1dJwUR/jWb5KHXZ2cAvZ5j6wK8PaKG5WSxtS
+qO5ingxHJA7SzxX6kQseXLUHamAvOZ6i3iiNDY3xuO9MdEd8BVT0iNpSm3eQN10+
+Ug1kXfw9rnIqNp7g/xwSYllKG9o8rISa26Huo/WQ+PB/aKRHgVQ3Un8ajKnIc0UB
+TUa95t1kg1a1S5w2meBLb/sh2y3nWy1V4yMjVO70x2sWgoVTn2s7PAyzTpc0CmQ7
+8/5Y/XxEZlK27VFOP3W4xdlPWC0SpggjNDzSt+Q7bur8qzf20HeZOpeTyVCN3cro
+VwIDAQAB
+-----END PUBLIC KEY-----";
+
+    // A counting fake exchange: records how many mints it served and hands back a
+    // distinct token each time, so a re-mint is observable by the token changing.
+    struct CountingExchange {
+        calls: AtomicUsize,
+        expires_at: String,
+    }
+
+    impl CountingExchange {
+        fn new(expires_at: &str) -> Self {
+            Self { calls: AtomicUsize::new(0), expires_at: expires_at.to_owned() }
+        }
+    }
+
+    impl InstallationTokenExchange for CountingExchange {
+        fn exchange(&self, _jwt: &str, _installation_id: u64) -> Result<InstallationToken, GithubError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(InstallationToken { token: format!("ghs_minted_{n}"), expires_at: self.expires_at.clone() })
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct TestClaims {
+        iat: u64,
+        exp: u64,
+        iss: String,
+    }
+
+    fn test_key() -> EncodingKey {
+        EncodingKey::from_rsa_pem(TEST_PRIVATE_KEY.as_bytes()).expect("fixture RSA key parses")
+    }
+
+    #[test]
+    fn mint_jwt_signs_a_verifiable_rs256_token_issued_by_the_app() {
+        let source = AppTokenSource::with_exchange(999, 42, test_key(), 300, Arc::new(CountingExchange::new("e")));
+        let jwt = source.mint_jwt().expect("the fixture key signs a JWT");
+
+        // The public key verifies the signature (proving the private key signed it)
+        // and the claims carry the App id as issuer with exp after iat.
+        let decoded = decode::<TestClaims>(
+            &jwt,
+            &DecodingKey::from_rsa_pem(TEST_PUBLIC_KEY.as_bytes()).expect("fixture public key parses"),
+            &Validation::new(Algorithm::RS256),
+        )
+        .expect("the JWT verifies against the public key");
+        assert_eq!(decoded.claims.iss, "999");
+        assert!(decoded.claims.exp > decoded.claims.iat);
+    }
+
+    #[test]
+    fn new_parses_a_pem_into_a_signing_source_and_rejects_a_malformed_one() {
+        // The plain-param constructor the embedder wires: valid PEM bytes yield a
+        // source that signs, and bytes that are not an RSA PEM fail fast here
+        // rather than at the first token request (ADR-0150).
+        let source = AppTokenSource::new(7, 8, TEST_PRIVATE_KEY.as_bytes(), 0, "https://api.github.com".to_owned())
+            .expect("the fixture PEM parses");
+        assert!(source.mint_jwt().is_ok(), "a source built from PEM bytes signs a JWT");
+
+        assert!(AppTokenSource::new(7, 8, b"not a pem", 0, "https://api.github.com".to_owned()).is_err());
+    }
+
+    #[test]
+    fn a_fresh_token_is_cached_and_reused_without_re_minting() {
+        // A token whose GitHub-reported expiry is far in the future is still fresh on
+        // the next call: exactly one exchange, and the same token both times.
+        let exchange = Arc::new(CountingExchange::new("2099-01-01T00:00:00Z"));
+        let source = AppTokenSource::with_exchange(1, 2, test_key(), 300, exchange.clone());
+
+        let first = source.token().expect("first mint");
+        let second = source.token().expect("cached reuse");
+        assert_eq!(first, "ghs_minted_0");
+        assert_eq!(second, "ghs_minted_0");
+        assert_eq!(exchange.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_stale_token_is_re_minted_before_expiry() {
+        // A token already past its GitHub-reported expiry is stale, so every call
+        // re-mints — the cadence driven by the real reported expiry, not an assumed
+        // lifetime. Each call yields a fresh token.
+        let exchange = Arc::new(CountingExchange::new("2000-01-01T00:00:00Z"));
+        let source = AppTokenSource::with_exchange(1, 2, test_key(), 300, exchange.clone());
+
+        assert_eq!(source.token().expect("first mint"), "ghs_minted_0");
+        assert_eq!(source.token().expect("re-mint"), "ghs_minted_1");
+        assert_eq!(exchange.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn an_unparseable_expiry_forces_a_re_mint_rather_than_trusting_it() {
+        // GitHub should always return a strict RFC3339 expiry, but if it ever returns
+        // something unparseable the source must not trust a token of unknown
+        // lifetime: it caches a stale deadline (0) so the next call re-mints —
+        // fail-safe, never fail-open on a malformed expiry.
+        let exchange = Arc::new(CountingExchange::new("not-a-timestamp"));
+        let source = AppTokenSource::with_exchange(1, 2, test_key(), 300, exchange.clone());
+
+        assert_eq!(source.token().expect("first mint"), "ghs_minted_0");
+        assert_eq!(source.token().expect("re-mint"), "ghs_minted_1");
+        assert_eq!(exchange.calls.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn parse_rfc3339_matches_known_epochs() {
