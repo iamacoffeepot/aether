@@ -1,4 +1,4 @@
-# ADR-0180: Signed authorizations bind their request
+# ADR-0182: Signed authorizations bind their request
 
 - **Status:** Proposed
 - **Date:** 2026-08-12
@@ -11,7 +11,7 @@ Every door that admits a signed statement therefore binds it to a request *struc
 
 - **Approve** (`precheck_statement` / `approval_from_statement`, `crates/aether-chassis-bloomery/src/bloomery/approve/statement.rs`) requires `statement.words == subject.as_bytes()` — the member's scope-revision digest. The binding sits *inside* the signed bytes, so a statement signed for one revision cannot approve another. This door is already sound, and it is the existing proof that the shape works.
 - **Answer** (`reduce_adopt_answer`, `crates/aether-bloomery/src/reduce/evidence.rs`) signs the answer text and binds by `answer.parents` naming an open hold. It is sound only while every answer's text is unique across every open hold. Nothing enforces that: two parked questions answered `yes` produce identical signed bytes, so the first envelope re-parents onto the second hold and adopts it without the operator ever seeing the second question.
-- **Orphan-claim release** (ADR-0179, in flight as pull request #4814) signs the fixed constant `release orphan bloomery claim` and binds by `parents.contains(&self.request())`. Its signed bytes never vary, so one author-signed statement verifies forever and can be re-pointed at any `(ref_kind, expected_holder)` pair. This is the most general instance of the class: a captured release authorization becomes a universal release token for that door.
+- **Orphan-claim release** (ADR-0179, in flight as pull request #4814) signs the fixed constant `release orphan bloomery claim` and binds by `parents.contains(&self.request())`. Its signed bytes never vary, so one author-signed statement verifies forever and can be re-pointed at any `(ref_kind, expected_holder)` pair. The independent review on that pull request called this the most general instance of the replay class in the codebase: re-parenting a captured release statement defeats the reducer's parent binding entirely, and a single legitimate release authorization becomes a universal release token for that door.
 
 A fourth consumer of signed statements, the prompt-manifest closure walk (`ground_instruction`, `crates/aether-bloomery/src/manifest.rs`), is not a request door — it grounds an instruction slot rather than authorizing an act, and it already refuses to trust caller-declared parents, walking only `ProvenanceIndex::parents`. It is unaffected.
 
