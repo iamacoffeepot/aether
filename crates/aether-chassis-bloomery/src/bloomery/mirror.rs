@@ -23,12 +23,14 @@ use std::sync::OnceLock;
 
 #[cfg(any(test, feature = "testing"))]
 use aether_bloomery::Digest;
-use aether_bloomery::{LandingReceipt, ProjectionBackend, ViewDocument};
+use aether_bloomery::{LandingReceipt, ProjectionBackend, SharedCorrespondence, ViewDocument};
 #[cfg(any(test, feature = "testing"))]
 use aether_bloomery_github::GitSource;
 #[cfg(any(test, feature = "testing"))]
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GithubConfig, GithubError, GithubProjection, ReqwestGithub, SharedCorrespondence};
+use aether_bloomery_github::{
+    GithubConfig, GithubError, GithubProjection, ReqwestGithub, SharedCorrespondence as GitSharedCorrespondence,
+};
 
 use super::executor::DEFAULT_LANE_PROGRAM;
 #[cfg(any(test, feature = "testing"))]
@@ -428,13 +430,27 @@ impl GithubMirrorConfig {
     /// # Errors
     /// The `SQLite` connection could not be opened or its migration failed.
     pub fn connect_correspondence(&self) -> Result<SharedCorrespondence, GithubError> {
-        let store = SqliteCorrespondence::open(&self.store_path)
-            // The correspondence store faulting at open is a boot-time
-            // configuration failure; surface it through the shell's `GithubError`
-            // bound (a store fault, mapped onto the transport arm) rather than
-            // widening every shell's `connect` signature.
-            .map_err(|error| GithubError::Transport(format!("correspondence store: {error}")))?;
-        Ok(Arc::new(store))
+        self.connect_correspondence_views().map(|(domain, _)| domain)
+    }
+
+    /// Open one concrete correspondence and expose both its domain view and the
+    /// temporary Git compatibility view retained for #4744's local executor.
+    /// Trait-object erasure happens only after both views are created, so the
+    /// source/Actions and local backends drive the same store instance.
+    pub(super) fn connect_correspondence_views(
+        &self,
+    ) -> Result<(SharedCorrespondence, GitSharedCorrespondence), GithubError> {
+        let store = Arc::new(
+            SqliteCorrespondence::open(&self.store_path)
+                // The correspondence store faulting at open is a boot-time
+                // configuration failure; surface it through the shell's `GithubError`
+                // bound (a store fault, mapped onto the transport arm) rather than
+                // widening every shell's `connect` signature.
+                .map_err(|error| GithubError::Transport(format!("correspondence store: {error}")))?,
+        );
+        let domain = Arc::clone(&store) as SharedCorrespondence;
+        let git = store as GitSharedCorrespondence;
+        Ok((domain, git))
     }
 }
 

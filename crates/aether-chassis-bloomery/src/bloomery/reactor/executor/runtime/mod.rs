@@ -44,10 +44,10 @@ use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AggregateReviewPayload, AggregateVerifyPayload, BloomId, ConfigRegistry, ConfigScopes, DispatchPayload,
-    ExecutionStatus, Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, StageId, Topic, WorkHandle,
-    WorkpieceId,
+    ExecutionStatus, Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence, StageId, Topic,
+    WorkHandle, WorkpieceId,
 };
-use aether_bloomery_github::{SharedCorrespondence, candidate_ref_name, short_hex};
+use aether_bloomery_github::{GitObjectId, candidate_ref_name, short_hex};
 use aether_data::wire::from_bytes;
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
@@ -968,8 +968,14 @@ fn push_admitted_candidates(
             );
             continue;
         };
-        let commit = match correspondence.resolve_git(&candidate.checkout) {
-            Ok(Some(commit)) => commit,
+        let commit = match correspondence.resolve_backend_object(&candidate.checkout) {
+            Ok(Some(commit)) => match GitObjectId::try_from(commit) {
+                Ok(commit) => commit,
+                Err(error) => {
+                    tracing::warn!(target: "aether_chassis_bloomery::executor", workpiece = %workpiece.0, %error, "capture correspondence is not a valid git object id");
+                    continue;
+                }
+            },
             Ok(None) => {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::executor",

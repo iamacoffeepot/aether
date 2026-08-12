@@ -30,10 +30,15 @@ required-features = ["runtime"]
 # `default-features = false` and gets only the `aether.store.*` kind
 # identity + markers.
 default = ["runtime"]
+# Durable backend-object correspondence without the Bloomery process, GitHub
+# adapter, or the rest of the native chassis. This is the narrow build-layer
+# surface for a non-Git source/executor adapter.
+correspondence = ["dep:rusqlite"]
 # "this build carries the substrate-side runtime" — pulls aether-substrate,
 # the chassis caps, the SQLite backend, and every native-only dep the
 # `#[runtime] impl NativeActor` and the chassis assembly reference.
 runtime = [
+    "correspondence",
     "dep:aether-substrate",
     "dep:aether-http",
     "dep:aether-component",
@@ -45,7 +50,6 @@ runtime = [
     "dep:ed25519-dalek",
     "dep:aether-bloomery-github",
     "dep:jsonwebtoken",
-    "dep:rusqlite",
     "dep:tracing",
     "dep:clap",
     "dep:confique",
@@ -163,4 +167,3 @@ workspace = true
 # `inventory::submit!`), which cargo-machete's source-only scan cannot see.
 [package.metadata.cargo-machete]
 ignored = ["clap", "confique", "inventory"]
-

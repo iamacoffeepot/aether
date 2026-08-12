@@ -55,6 +55,7 @@
 extern crate alloc;
 
 pub mod control;
+pub mod correspondence;
 pub mod digest;
 pub mod ids;
 pub mod inward;
@@ -72,6 +73,7 @@ pub use control::{
     MembershipMutation, ObserveMainline, ObserveMainlineResult, OutboxPayload, Query, QueryResult, RedispatchPayload,
     ReleaseSeal, ReplayJournal, ReplayJournalResult, ReviewPass, Topic, TransferSeal,
 };
+pub use correspondence::{BackendObjectId, Correspondence, CorrespondenceError, SharedCorrespondence};
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};
 pub use inward::{InwardError, StageResult, StageVerdict, StudyResult, normalize_stage_result, normalize_study_result};

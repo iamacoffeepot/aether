@@ -84,7 +84,7 @@ pub use client::{
     RunConclusion, RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
 };
 pub use config::GithubConfig;
-pub use correspondence::{Correspondence, CorrespondenceError, GitObjectFormat, GitObjectId};
+pub use correspondence::{Correspondence, CorrespondenceError, GitObjectFormat, GitObjectId, SharedCorrespondence};
 pub use executor::{ActionsExecutor, ExecutorError, LaneWorkflows};
 pub use inward::{
     InwardError, StageResult, StageVerdict, StudyRecordError, StudyResult, normalize_stage_result,
@@ -92,4 +92,4 @@ pub use inward::{
 };
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
 pub use projection::GithubProjection;
-pub use source::{GitSource, SharedCorrespondence, SourceError, candidate_ref_name, to_hex};
+pub use source::{GitSource, SourceError, candidate_ref_name, to_hex};
