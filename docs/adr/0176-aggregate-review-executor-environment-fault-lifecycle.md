@@ -1,6 +1,6 @@
 # ADR-0176: Aggregate-review executor environment-fault lifecycle
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-10
 
 ## Context
@@ -31,7 +31,7 @@ The journaled fact and its folded state are replayable. The self-contained `Bloo
 
 - An executor outage can no longer masquerade as a candidate finding or consume a member repair lap.
 - Environment retry is bounded, survives restart, and is independently observable even though it uses the same sealed numeric calibration as the AggregateReview binding.
-- The public verdict, evidence, fact, snapshot, outcome, decision, and projection vocabularies gain appended variants or fields. Trial journal and serialized projection compatibility must be handled explicitly by the implementation.
+- The public verdict, evidence, fact, snapshot, outcome, and projection vocabularies gain appended variants or fields. Trial journal and serialized projection compatibility must be handled explicitly by the implementation. `Decision` is not among them: the fault series folds off the existing `Decision::RecordEvidence` the way an ADR-0151 `Question` folds a hold, so the reducer's decision vocabulary is unchanged.
 - The first implementation is intentionally aggregate-review-specific. Other stages must refuse `ExecutorFault` until a later decision gives them lifecycle semantics.
 - A terminal fault deliberately requires supersession rather than an automatic reset or an ADR-0151 answer. This is conservative: repair of host health is operational authority, not candidate intent.
 - Lane-boundary coverage must prove both redispatch below the ceiling and terminal observation at the ceiling, with no member Refine dispatch and no claim or repair-counter change.
