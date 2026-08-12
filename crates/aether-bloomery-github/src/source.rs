@@ -2102,7 +2102,7 @@ mod tests {
         // redrive ADR-0179 relies on to finish a release whose completion was
         // never admitted.
         assert_eq!(
-            source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(mine.clone())).unwrap(),
+            source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(mine)).unwrap(),
             ClaimReleaseOutcome::AlreadyAbsent
         );
     }
