@@ -17,6 +17,7 @@ mod question;
 mod stage;
 mod statement;
 mod study;
+mod timeout;
 mod verify;
 
 pub use approval::{ApprovalPolicy, ApprovalRule, Tier};
@@ -40,6 +41,7 @@ pub use stage::{
 };
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 pub use study::{StudyCost, StudyRecord};
+pub use timeout::TimeoutRecord;
 pub use verify::{VerifyFailure, VerifyFailureSet};
 
 use alloc::string::String;

@@ -151,6 +151,49 @@ wedge, aggregate, and liveness contracts; it is not a model-quality evaluation
 or proof that the real transform program, live credentials, or GitHub transport
 work. See [SubstrateHarness, FleetHarness, and LaneHarness](testing/substrateharness-and-fleetharness.md#laneharness-topology).
 
+A LaneHarness scenario about a lane that hangs needs the sealed dispatch deadline
+(ADR-0177), not a scenario-side timeout. Every dispatched order carries an
+absolute deadline in Unix milliseconds, computed once when the coordinator
+durably records the order from the `wall_clock_secs` its bloom's stage catalog
+sealed. `LaneHarness::start_with_wall_clock` authors a catalog binding every
+stage at a few seconds and seals its address into the bloom, which is the only
+way in: the limit is deliberately sealed rather than ambient, so two blooms
+sealing the same catalog terminate identically and no coordinator-side override
+exists for a scenario to reach for. Past that deadline the run is cancelled, so a
+child process the coordinator still tracks — and the scratch worktree checked out
+behind it — are reclaimed whatever stage was dispatched. For a member stage or
+`AggregateVerify` the attempt is then recorded as an ordinary failure, so retry
+and wedge assertions read exactly as they do for a lane that failed outright.
+
+`AggregateReview` is the carve-out: its expiry reclaims the run and reports the
+deferral, but records no verdict, and the order stays outstanding rather than
+being consumed. A critic that never answered produced no judgement of the fold,
+and the verdict that states exactly that — ADR-0176's `ExecutorFault` — arrives
+with issue #4738; the nearest available verdict would charge every member a
+repair lap for a critic that never ran. Until then a scenario about an
+aggregate-review lane that hangs can assert the cancellation, and only that: no
+timeout record, no admitted attempt, and no movement of the retry or wedge
+lifecycle follows from the deadline passing.
+
+A restart is part of that contract rather than an escape from it, on the
+accounting side. The deadline is persisted beside the order, so a coordinator
+that stops and reopens reads back the same number: a scenario can restart
+mid-flight and still assert the original expiry, and one that expected a restart
+to renew the allowance is asserting the bug.
+
+Reclamation does not survive that restart, and a scenario must not assert that it
+does. The local backend's map of live children is process memory, rebuilt empty
+at boot and never re-registered from the store, so cancelling an order dispatched
+by an earlier process finds nothing to kill: the expiry still records its failure
+and consumes the order, but that process's child keeps running and its
+`.bloomery/local-worktrees/<nonce>` checkout stays on disk with its `git worktree`
+registration unpruned. The cancel names the nonce at `warn` so the orphan is
+findable, and reaping it is manual. Assert the accounting across a restart; assert
+the reclaim only within one process's lifetime.
+
+The advisory `stale_warn_after_secs` sweep is unrelated to both — it warns about
+an unresolved handle and terminates nothing, so no scenario should wait on it.
+
 Beside it sits the **fixture harness** (`crates/aether-chassis-bloomery/tests/fixture/`),
 which boots the same production chassis inside the test process and steps it one
 explicit reactor tick at a time. Its reason for existing is the handoff *between*

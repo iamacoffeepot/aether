@@ -110,11 +110,11 @@ fn a_config_override_repoints_a_verify_lane_to_local() {
 }
 
 #[test]
-fn a_terminal_message_evicts_the_routing_record() {
+fn streaming_a_consumed_order_evicts_its_routing_record() {
     // `routed` must track in-flight orders, not the process's lifetime total: the
-    // last message for an order drops its lane record. `stream_evidence` is that
-    // last message here, so the following cancel — finding no record — falls back
-    // to the Actions arm instead of re-resolving to the local arm the submit used.
+    // last message for a completed order drops its lane record. `stream_evidence`
+    // is that last message, so a later message for the same nonce falls back to
+    // the Actions arm instead of re-resolving to the local arm the submit used.
     let (router, actions_seen, local_seen) = router(vec!["construct.".to_owned()]);
     let handle = router.submit(&order("construct.implement", "n-c")).unwrap();
 
@@ -123,6 +123,23 @@ fn a_terminal_message_evicts_the_routing_record() {
 
     assert_eq!(*local_seen.lock().unwrap(), vec!["n-c", "n-c"], "submit + stream both routed to the local arm");
     assert_eq!(*actions_seen.lock().unwrap(), vec!["n-c"], "after eviction the cancel falls back to the Actions arm");
+}
+
+#[test]
+fn a_repeated_cancel_re_resolves_to_the_lane_the_order_submitted_to() {
+    // ADR-0177 makes `cancel` idempotent, which only means anything if the repeat
+    // reaches the same backend. The deadline enforcement reissues its cancel every
+    // tick until the expired order is admitted, so a router that dropped the lane
+    // record on the first cancel would spend a GitHub round trip probing both
+    // wrappers for a nonce that only ever existed on the local lane.
+    let (router, actions_seen, local_seen) = router(vec!["construct.".to_owned()]);
+    let handle = router.submit(&order("construct.implement", "n-c")).unwrap();
+
+    router.cancel(&handle).unwrap();
+    router.cancel(&handle).unwrap();
+
+    assert_eq!(*local_seen.lock().unwrap(), vec!["n-c", "n-c", "n-c"], "submit + both cancels stayed on the local arm");
+    assert!(actions_seen.lock().unwrap().is_empty(), "no cancel leaked onto the Actions arm");
 }
 
 #[test]

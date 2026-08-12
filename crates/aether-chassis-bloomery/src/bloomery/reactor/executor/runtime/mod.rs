@@ -36,19 +36,20 @@
 //! drain/ack through the store's `DrainOutbox`/`AckOutbox` mail (as the mirror
 //! reactor does) is a follow-up once the registry ops gain a mail surface.
 
+use std::fmt::Write as _;
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, AggregateReviewPayload, AggregateVerifyPayload, BloomId, ConfigRegistry, ConfigScopes, DispatchPayload,
-    ExecutionStatus, Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence, StageId, Topic,
-    WorkHandle, WorkpieceId,
+    Admit, AggregateReviewPayload, AggregateVerifyPayload, BloomId, ConfigRegistry, ConfigScopes, Digest,
+    DispatchPayload, ExecutionStatus, Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence,
+    StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailure, VerifyFailureSet, WorkHandle, WorkpieceId,
 };
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, short_hex};
-use aether_data::wire::from_bytes;
+use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -57,17 +58,16 @@ use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
 use super::ExecutorReactorCapability;
-use crate::artifacts::{ArtifactsCapabilityState, resolve_root};
+use crate::artifacts::{ArtifactsCapabilityState, PutResult, resolve_root};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::ExecutorShell;
 #[cfg(test)]
 use crate::bloomery::GithubConnectionConfig;
 use crate::bloomery::dispatch_model;
 use crate::bloomery::intake::{
-    Admission, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims, dispatch_and_record, run_intake_cycle,
+    Admission, AdmitDecision, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims, UploadedEvidence,
+    admit_uploaded, dispatch_and_record, run_intake_cycle,
 };
-#[cfg(any(test, feature = "testing"))]
-use crate::bloomery::intake::{AdmitDecision, admit_uploaded};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 #[cfg(any(test, feature = "testing"))]
@@ -135,12 +135,338 @@ struct TrackedHandle {
     handle: WorkHandle,
     first_seen: Instant,
     stale_warned: bool,
+    /// Guards the whole handling of an expired order this build cannot
+    /// terminate, the way `stale_warned` guards the staleness one. Such an order
+    /// stays outstanding, so every later expiry sweep selects it again: without
+    /// a latch its report buries the first one under the poll cadence, and its
+    /// reclaiming cancel is reissued at that same cadence forever.
+    unterminable_reported: bool,
 }
 
 impl TrackedHandle {
     fn new(handle: WorkHandle, first_seen: Instant) -> Self {
-        Self { handle, first_seen, stale_warned: false }
+        Self { handle, first_seen, stale_warned: false, unterminable_reported: false }
     }
+}
+
+/// The current wall clock in Unix milliseconds — the reading one tick compares
+/// every persisted deadline against and stamps every order it records with
+/// (ADR-0177).
+///
+/// Taken once per tick rather than per order, so the dispatches and expiries of
+/// a single tick share one instant and cannot disagree about what "now" was. A
+/// clock before the epoch is not a reading any deadline arithmetic can use, so
+/// it reads as `0` — which defers every expiry rather than terminating anything
+/// on a number that means nothing: `0` is behind every deadline a dispatch under
+/// the same clock would have stamped. Deadlines stop enforcing until the host's
+/// clock is usable again, and no order is cancelled on a fiction in the meantime.
+fn now_unix_millis() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// The verdict a timed-out order of `stage` admits under (ADR-0177), paired with
+/// the typed verifier set the intake's ADR-0178 transport invariant requires for
+/// it. `None` when no verdict in the current vocabulary states the fact.
+///
+/// A member stage and `AggregateVerify` are `VerificationFailed`: the attempt
+/// did not produce the passing evidence its gate wanted, which is the same fact
+/// a failed run states, so it spends the same sealed attempt or repair budget
+/// and reaches the same wedge — no parallel retry authority.
+///
+/// A member `Verify` additionally has to name a failing verifier, because the
+/// intake refuses a failed member Verify carrying an empty set. A timeout cannot
+/// know which verifier would have failed, and the umbrella-level
+/// [`VerifyFailure::Preflight`] is the identity that says exactly that: the
+/// verify umbrella produced no per-verifier verdict at all. Repeated timeouts
+/// therefore accumulate as a repeated `Preflight`, wedging the member with a
+/// terminal set that reads as "the umbrella never answered".
+///
+/// `AggregateReview` is deliberately `None`. ADR-0177 routes it to ADR-0176's
+/// `ExecutorFault` — a review lane that never answered produced no judgement of
+/// the fold, which is the same fact as one that reported an environment failure,
+/// and must charge the same fold-fault ledger rather than reopening members.
+/// That vocabulary is issue #4738's to introduce; synthesising a
+/// `VerificationFailed` here instead would charge every member a repair lap for
+/// a critic that never ran, so this build defers the aggregate-review timeout
+/// rather than recording the wrong thing.
+///
+/// Exhaustive over [`StageId`] rather than wildcarded. `None` here means the
+/// order never terminates, and the stages that reach it split into two very
+/// different reasons for that — one deferred vocabulary and a set of stages no
+/// executor order carries at all. A wildcard reads a stage that later becomes
+/// dispatchable into the second group silently; naming every variant makes it a
+/// compile error instead.
+fn timeout_verdict(stage: StageId) -> Option<(StageVerdict, VerifyFailureSet)> {
+    match stage {
+        StageId::Verify => Some((StageVerdict::VerificationFailed, VerifyFailureSet::one(VerifyFailure::Preflight))),
+        StageId::Construct | StageId::Refine | StageId::AggregateVerify => {
+            Some((StageVerdict::VerificationFailed, VerifyFailureSet::EMPTY))
+        }
+        // No verdict, for two different reasons. `AggregateReview`'s is deferred,
+        // as above. The rest are never dispatched to an executor at all — the
+        // pre-line stages, the per-member `Review` the member walk does not enter
+        // (`StageCatalog::MEMBER_LINE` ends at `Verify`), and the bloom-level
+        // tail the coordinator performs itself — so no order carries one and
+        // none can expire.
+        StageId::AggregateReview
+        | StageId::Sketch
+        | StageId::Scope
+        | StageId::Approve
+        | StageId::Review
+        | StageId::Integrate
+        | StageId::Land
+        | StageId::Study => None,
+    }
+}
+
+/// Render a digest as the lowercase-hex parent string the artifact store records
+/// — the derivation edge from a timeout record to the subject it accounts for.
+fn digest_to_parent(digest: &Digest) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in digest.as_bytes() {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Put a timeout record's canonical bytes into the content store, returning the
+/// address the synthesised evidence details them by — or `None` when the expiry
+/// must leave the order live and retry on the next tick.
+///
+/// The address is sha256 over the record's canonical wire bytes, which is
+/// exactly the key the artifacts store files them under: `put` hashes the same
+/// bytes the same way, so a `detail` minted here resolves against the store a
+/// wedge later reads. It is computed rather than read back out of the reply so
+/// the no-store host below can still name where the bytes belong, and it is
+/// deliberately *not* [`TimeoutRecord::id`] — the value vocabulary's typed
+/// address hashes a length-prefixed domain tag ahead of the same bytes, so an
+/// evidence detail taken from it would point at nothing any store holds. The
+/// local lane mints its evidence detail the same way ([`Digest::of_wire_bytes`]
+/// over the bytes it wrote).
+///
+/// Two "no store" shapes, answered differently on purpose. A host with no
+/// artifacts store configured never had anywhere to put the bytes and never
+/// will, so refusing here would leave the order outstanding forever — which is
+/// the bug being fixed. The address is a pure function of the record, so the
+/// evidence still names where the artifact belongs; the bytes are simply
+/// unretrievable, and the hole is loud in the log (the same trade `record_cost`
+/// makes for study rows). A store that is present and *faults* is transient, so
+/// that one leaves the order live to retry on the next tick.
+fn store_timeout_record(artifacts: Option<&mut ArtifactsCapabilityState>, record: &TimeoutRecord) -> Option<Digest> {
+    let Ok(bytes) = to_vec(record) else {
+        tracing::error!(
+            target: "aether_chassis_bloomery::executor",
+            nonce = %record.nonce.0,
+            "timeout record did not encode; leaving the order live to retry",
+        );
+        return None;
+    };
+    let address = Digest::of_wire_bytes(&bytes);
+
+    let Some(artifacts) = artifacts else {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            nonce = %record.nonce.0,
+            "no artifacts store configured; the timeout terminates the order but its record bytes are unretrievable",
+        );
+        return Some(address);
+    };
+    match artifacts.put(&bytes, &[digest_to_parent(&record.subject)]) {
+        PutResult::Ok { .. } => Some(address),
+        PutResult::Err { error } => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %record.nonce.0,
+                ?error,
+                "timeout record was not stored; leaving the order live to retry",
+            );
+            None
+        }
+    }
+}
+
+/// Terminate every outstanding order whose persisted deadline has passed
+/// (ADR-0177), returning the [`Admit`]s to forward to the control core.
+///
+/// Runs *after* [`run_intake_cycle`], so an order whose evidence arrived at the
+/// boundary has already been admitted and consumed and cannot be selected here.
+/// For each order that is still pending past its deadline: cancel the run
+/// idempotently, store the deterministic [`TimeoutRecord`] the synthesised
+/// evidence details, and put the result through the ordinary intake broker,
+/// which consumes the order exactly once.
+///
+/// Every step before the admission is ordered so a fault leaves the order
+/// durable and the whole expiry retryable on the next tick: the cancel is
+/// idempotent, the record's address is a pure function of the order, and the
+/// broker's consume-once is what makes the retry admit nothing twice. Late
+/// worker evidence for a consumed order refuses as an unknown nonce, which is
+/// the same answer a replay gets.
+///
+/// Retryable is not the same as repeated forever. A fault is retried because the
+/// next sweep may get a different answer; the three ways an expiry ends without
+/// terminating its order — an undecodable row, a deferred stage verdict, an
+/// intake refusal — will get the same answer every time, so each is reported and
+/// reclaimed exactly once per process (see [`reported_unterminable`]).
+fn expire_overdue_orders(
+    stores: Stores<'_>,
+    executor: &ExecutorShell,
+    tracked: &mut Vec<TrackedHandle>,
+    now_unix_millis: u64,
+) -> Vec<Admit> {
+    let Stores { store, mut artifacts } = stores;
+    let expired = match store.list_expired_orders(now_unix_millis) {
+        Ok(expired) => expired,
+        Err(error) => {
+            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "expired-order read failed; deadlines re-check next tick");
+            return Vec::new();
+        }
+    };
+
+    let mut admits = Vec::new();
+    for order in expired {
+        let deadline = order.deadline_unix_millis;
+        let nonce = Nonce(order.nonce.clone());
+        // An order this build already cancelled and then could not terminate is
+        // still outstanding, so every sweep after it selects the same row again.
+        // Idempotence makes a repeat cancel *harmless*, not free: on the Actions
+        // lane each one probes both wrappers over the network for a run that
+        // will never change again, once per poll interval for the life of the
+        // process.
+        if reported_unterminable(tracked, &nonce) {
+            continue;
+        }
+        // Cancel first, verdict second, and before the decode. Whether this
+        // build can *account* for the expiry is a separate question from whether
+        // the run may keep going: an overdue order still has a child burning
+        // wall clock and a scratch worktree checked out behind it, and neither a
+        // stage whose verdict vocabulary has not landed yet nor a row that no
+        // longer decodes is a reason to leave those running until the process
+        // exits. The nonce is a plain column, so the cancel needs none of the
+        // decoding below.
+        if let Err(error) = executor.cancel(&WorkHandle::new(nonce.clone())) {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %nonce.0,
+                %error,
+                "expired order's cancel failed; leaving it live to retry",
+            );
+            continue;
+        }
+        let Some(record) = DispatchRecord::from_stored(&order) else {
+            latch_unterminable(tracked, &nonce);
+            tracing::error!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %nonce.0,
+                "expired order did not decode into a dispatch record; its run was cancelled, but the order cannot be terminated by this build",
+            );
+            continue;
+        };
+        let Some((verdict, failed_verifiers)) = timeout_verdict(record.stage) else {
+            warn_deferred_timeout(tracked, &record, deadline);
+            continue;
+        };
+
+        let timeout = TimeoutRecord {
+            bloom: record.bloom,
+            // A bloom-level lane carries no member axis, and the empty
+            // workpiece the dispatch fills in is that absence, not a member
+            // named "".
+            workpiece: (!record.workpiece.0.is_empty()).then(|| record.workpiece.clone()),
+            stage: record.stage,
+            nonce: record.nonce.clone(),
+            subject: record.displayed_digest,
+            deadline_unix_millis: deadline,
+        };
+        let Some(detail) = store_timeout_record(artifacts.as_deref_mut(), &timeout) else {
+            continue;
+        };
+
+        let upload = UploadedEvidence {
+            nonce: record.nonce.clone(),
+            subject: record.displayed_digest,
+            verdict,
+            detail,
+            candidate: None,
+            findings: None,
+            failed_verifiers,
+            cost: None,
+        };
+        match admit_uploaded(store, &upload) {
+            Ok(AdmitDecision::Admitted(admission)) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    nonce = %record.nonce.0,
+                    workpiece = %record.workpiece.0,
+                    stage = ?record.stage,
+                    deadline_unix_millis = deadline,
+                    "dispatched run outlived its sealed execution limit; cancelled and recorded as a failed attempt",
+                );
+                admits.push(admission.admit);
+                tracked.retain(|tracked_handle| tracked_handle.handle.nonce != record.nonce);
+            }
+            Ok(AdmitDecision::Refused(refusal)) => {
+                // A refusal is a judgement about the order's own stored columns,
+                // so the same order refuses the same way on every later sweep —
+                // latch it with the other two unterminable shapes rather than
+                // re-logging and re-cancelling at the poll cadence.
+                latch_unterminable(tracked, &record.nonce);
+                tracing::error!(
+                    target: "aether_chassis_bloomery::executor",
+                    nonce = %record.nonce.0,
+                    ?refusal,
+                    "the intake refused a timeout for this order; it cannot be terminated by this build",
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    nonce = %record.nonce.0,
+                    %error,
+                    "timeout admission faulted; leaving the order live to retry",
+                );
+            }
+        }
+    }
+    admits
+}
+
+/// Whether the expiry sweep has already cancelled `nonce` and found it could not
+/// terminate the order behind it — a row that no longer decodes, a stage whose
+/// timeout verdict is deferred, or an admission the intake refuses. All three
+/// leave the order outstanding, so every later sweep re-selects it; the latch is
+/// what makes the report and the reclaiming cancel one-shot rather than one per
+/// poll tick.
+///
+/// Kept on the tracked handle rather than in a set of its own because every
+/// outstanding order already has one: a live dispatch tracks its handle, and
+/// [`seed_tracked`] re-seeds one per outstanding nonce after a restart. A nonce
+/// with no handle reads as unlatched, which reports and reclaims rather than
+/// silently skipping an order nothing else is watching.
+fn reported_unterminable(tracked: &[TrackedHandle], nonce: &Nonce) -> bool {
+    tracked.iter().any(|tracked_handle| tracked_handle.handle.nonce == *nonce && tracked_handle.unterminable_reported)
+}
+
+/// Latch `nonce` against [`reported_unterminable`]. A no-op for an untracked
+/// nonce, which cannot be latched and is reported again next sweep.
+fn latch_unterminable(tracked: &mut [TrackedHandle], nonce: &Nonce) {
+    if let Some(tracked_handle) = tracked.iter_mut().find(|tracked_handle| tracked_handle.handle.nonce == *nonce) {
+        tracked_handle.unterminable_reported = true;
+    }
+}
+
+/// Report an expired order this build has no verdict vocabulary for, once per
+/// tracked handle rather than once per tick.
+fn warn_deferred_timeout(tracked: &mut [TrackedHandle], record: &DispatchRecord, deadline_unix_millis: u64) {
+    latch_unterminable(tracked, &record.nonce);
+    tracing::warn!(
+        target: "aether_chassis_bloomery::executor",
+        nonce = %record.nonce.0,
+        stage = ?record.stage,
+        deadline_unix_millis,
+        "expired order's stage has no timeout verdict in this build (issue #4738 owns the aggregate-review one; \
+         any other stage here is a corrupt order, since nothing else is dispatched); \
+         the order stays outstanding rather than being charged the wrong ledger",
+    );
 }
 
 /// Whether a handle first seen at `first_seen` has aged past `threshold` as of
@@ -224,10 +550,11 @@ impl ExecutorReactorState {
     /// drives the loop by feeding a [`DispatchTick`] into the handler directly.
     ///
     /// This constructor exists only for tests, so it is by definition a fixture
-    /// boot: its `pusher` resolves through [`default_candidate_push`]'s fixture
-    /// arm (refusing) rather than hand-picking a default here, so the boot-time
-    /// selector stays the one policy site. Chain [`Self::with_pusher`] to
-    /// substitute a recording seam.
+    /// boot: its `pusher` resolves through `default_candidate_push`'s refusing
+    /// arm rather than hand-picking a default here, so the boot-time selector
+    /// stays the one policy site. (That selector is crate-private, so it is
+    /// named rather than linked.) Chain [`Self::with_pusher`] to substitute a
+    /// recording seam.
     #[must_use]
     pub fn with_parts(
         executor: Option<ExecutorShell>,
@@ -354,6 +681,7 @@ fn overlay_member_advisory(
 fn drain_and_dispatch(
     store: &mut dyn StoreBackend,
     executor: &ExecutorShell,
+    now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     let entries = store.drain_topic(Topic::Dispatch)?;
     let mut handles = Vec::new();
@@ -445,7 +773,7 @@ fn drain_and_dispatch(
             ack_through = Some(entry.sequence);
             continue;
         }
-        match dispatch_and_record(executor, store, &record) {
+        match dispatch_and_record(executor, store, &record, now_unix_millis) {
             Ok(handle) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -562,6 +890,7 @@ fn compose_aggregate_task(
 fn drain_and_dispatch_aggregate(
     store: &mut dyn StoreBackend,
     executor: &ExecutorShell,
+    now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     let entries = store.drain_topic(Topic::AggregateReview)?;
     let mut handles = Vec::new();
@@ -636,7 +965,7 @@ fn drain_and_dispatch_aggregate(
             // review critic's command.
             configs: ConfigRegistry::default(),
         };
-        match dispatch_and_record(executor, store, &record) {
+        match dispatch_and_record(executor, store, &record, now_unix_millis) {
             Ok(handle) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -681,6 +1010,7 @@ fn drain_and_dispatch_aggregate(
 fn drain_and_dispatch_aggregate_verify(
     store: &mut dyn StoreBackend,
     executor: &ExecutorShell,
+    now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     let entries = store.drain_topic(Topic::AggregateVerify)?;
     let mut handles = Vec::new();
@@ -736,7 +1066,7 @@ fn drain_and_dispatch_aggregate_verify(
             transformation: payload.transformation,
             configs: ConfigRegistry::default(),
         };
-        match dispatch_and_record(executor, store, &record) {
+        match dispatch_and_record(executor, store, &record, now_unix_millis) {
             Ok(handle) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -865,6 +1195,7 @@ fn resolve_replay(
 fn drain_and_redispatch(
     store: &mut dyn StoreBackend,
     executor: &ExecutorShell,
+    now_unix_millis: u64,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     let entries = store.drain_topic(Topic::Redispatch)?;
     let mut handles = Vec::new();
@@ -886,7 +1217,7 @@ fn drain_and_redispatch(
             continue;
         };
 
-        match dispatch_and_record(executor, store, &record) {
+        match dispatch_and_record(executor, store, &record, now_unix_millis) {
             Ok(handle) => {
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
@@ -982,6 +1313,24 @@ struct GitCandidatePush;
 
 impl CandidatePush for GitCandidatePush {
     fn push(&self, commit_hex: &str, target_ref: &str) -> Result<(), String> {
+        // A source sha that is all-zero — or empty — is not a sha git resolves;
+        // both are its ref-delete sentinels (#4841). `git push --force origin
+        // 0000…:<ref>` and `git push --force origin :<ref>` each exit 0 and
+        // report `- [deleted]`, so this seam's success test (`status.success()`)
+        // reads a destroyed candidate ref as a published one. Every *other*
+        // unresolvable sha exits 1 with `bad object`, which is why only these
+        // two values need naming.
+        //
+        // `GitObjectId` refuses the null oid at construction, so a correspondence
+        // record cannot deliver one here. This guard covers the gap that leaves:
+        // the trait takes `&str`, so nothing in the type system stops a future
+        // caller that formats a sha some other way.
+        if commit_hex.bytes().all(|byte| byte == b'0') {
+            return Err(format!(
+                "refusing to push `{commit_hex}` to {target_ref}: git reads an all-zero or empty source sha as a ref deletion, not a commit",
+            ));
+        }
+
         let refspec = format!("{commit_hex}:{target_ref}");
         let output = Command::new("git")
             .args(["push", "--force", "origin"])
@@ -1009,12 +1358,30 @@ impl CandidatePush for RefusingCandidatePush {
     }
 }
 
-/// Select the [`CandidatePush`] seam for boot: a fixture boot (`uses_fixture`)
-/// refuses every push rather than shelling git against a real `origin` a
-/// fixture has no business touching; a real boot shells `git push`.
+/// Select the [`CandidatePush`] seam for boot: a boot that must not touch a real
+/// `origin` refuses every push, and any other boot shells `git push`.
+///
+/// `refuse` is the caller's answer to "could this process's `origin` be a live
+/// repository?", and the boot site answers it from **build shape first**
+/// (`cfg!(any(test, feature = "testing"))`) and configuration second
+/// (`uses_fixture`). Configuration alone was not enough: `cargo test` forks a
+/// `testing`-featured binary that names no backend, so it resolved to the real
+/// pusher with its cwd inside the real checkout (#4842).
+///
+/// Crate-only on purpose. `CandidatePush` has to stay public — it types the
+/// `pub pusher` field — but the selector handing out a live `GitCandidatePush`
+/// does not, and leaving it public put one within reach of every out-of-crate
+/// integration-test binary, which is exactly the reach this seam exists to deny.
+///
+/// Declared `pub` because every module between here and `bloomery` is private,
+/// so this is already unreachable from outside; the `pub(crate)` that actually
+/// restricts it sits on the re-export in `bloomery`, the one public module in
+/// the chain. Writing `pub(crate)` at each hop instead would be the redundancy
+/// `clippy::redundant_pub_crate` flags, and it would state the restriction in
+/// four places while only one of them enforces it.
 #[must_use]
-pub fn default_candidate_push(uses_fixture: bool) -> Arc<dyn CandidatePush> {
-    if uses_fixture {
+pub fn default_candidate_push(refuse: bool) -> Arc<dyn CandidatePush> {
+    if refuse {
         Arc::new(RefusingCandidatePush)
     } else {
         Arc::new(GitCandidatePush)
@@ -1160,31 +1527,51 @@ struct Stores<'a> {
     artifacts: Option<&'a mut ArtifactsCapabilityState>,
 }
 
+/// The clock readings one tick works from, taken once so its dispatches,
+/// expiries, and staleness warns all agree about when the tick was.
+struct TickClock {
+    /// Unix milliseconds — what a recorded order's deadline is computed from and
+    /// what every persisted deadline is tested against (ADR-0177).
+    now_unix_millis: u64,
+    /// How long a tracked handle may stay unresolved before the advisory warn
+    /// (#3635); `None` when the sweep is disabled. Advisory only: it warns, and
+    /// the deadline beside it is what terminates.
+    stale_warn_after: Option<Duration>,
+}
+
 /// Pull matched attempt results for the tracked handles and return the [`Admit`]s
 /// to forward to the control core, pruning the handles whose order the broker
-/// consumed (a completed + admitted run). Also runs the staleness sweep
-/// (#3635): a handle still tracked past `stale_warn_after` warns once, naming
-/// its nonce, age, and last observed status — `stale_warn_after: None` disables
-/// it. The factored-out network side, unit-testable like [`drain_and_dispatch`].
+/// consumed (a completed + admitted run).
+///
+/// Three passes, in an order ADR-0177 fixes. Completion first, so evidence that
+/// arrived at the deadline boundary is admitted normally rather than losing to a
+/// clock that has just crossed. Then the deadline sweep, which terminates every
+/// order still pending past its persisted deadline — and which runs only when
+/// the completion pass actually completed, because a faulted cycle has not
+/// looked at every handle and its "still pending" is unearned. Then the advisory
+/// staleness sweep (#3635), which is left exactly as it was: a handle past
+/// `stale_warn_after` warns once, naming its nonce, age, and last observed
+/// status — it reports, and the deadline is what acts.
+///
+/// The factored-out network side, unit-testable like [`drain_and_dispatch`].
 fn pull_and_admit(
     stores: Stores<'_>,
     executor: &ExecutorShell,
     claims: NameEvidenceClaims,
     tracked: &mut Vec<TrackedHandle>,
-    stale_warn_after: Option<Duration>,
+    clock: &TickClock,
     correspondence: Option<&SharedCorrespondence>,
     pusher: &dyn CandidatePush,
 ) -> Vec<Admit> {
-    let Stores { store, artifacts } = stores;
+    let Stores { store, mut artifacts } = stores;
     let mut sink = CollectingSink::default();
     let handles: Vec<WorkHandle> = tracked.iter().map(|tracked_handle| tracked_handle.handle.clone()).collect();
-    let report = match run_intake_cycle(store, executor, &handles, &claims, artifacts, &mut sink) {
-        Ok(report) => report,
-        Err(error) => {
-            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "intake cycle failed; results re-drive next tick");
-            CycleReport::default()
-        }
-    };
+    let cycle = run_intake_cycle(store, executor, &handles, &claims, artifacts.as_deref_mut(), &mut sink);
+    let completion_was_observed = cycle.is_ok();
+    let report = cycle.unwrap_or_else(|error| {
+        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "intake cycle failed; results re-drive next tick");
+        CycleReport::default()
+    });
 
     // Drop the handles whose order was consumed on admit — a still-outstanding
     // order (order lookup Some) stays tracked to poll again; a store fault leaves
@@ -1206,7 +1593,24 @@ fn pull_and_admit(
         }
     });
 
-    for (nonce, age, status) in select_stale_handles(tracked, &report.pending, Instant::now(), stale_warn_after) {
+    // Only now that completion has been observed and consumed: terminate what is
+    // still pending past its sealed deadline.
+    //
+    // And only if it *was* observed. `run_intake_cycle` abandons its loop on the
+    // first handle whose inspect or evidence stream faults, so a failed cycle
+    // leaves the handles behind it uninspected — "still pending" then means
+    // "never asked", not "not finished". Sweeping on that reading cancels a lane
+    // that completed well inside its budget and admits a synthesised failure over
+    // real passing evidence, spending a retry to hide a transport blip. A
+    // deferred sweep costs one poll interval and the transport re-drives; a wrong
+    // sweep destroys the attempt.
+    let timed_out = if completion_was_observed {
+        expire_overdue_orders(Stores { store, artifacts }, executor, tracked, clock.now_unix_millis)
+    } else {
+        Vec::new()
+    };
+
+    for (nonce, age, status) in select_stale_handles(tracked, &report.pending, Instant::now(), clock.stale_warn_after) {
         tracing::warn!(
             target: "aether_chassis_bloomery::executor",
             nonce = %nonce.0,
@@ -1221,7 +1625,7 @@ fn pull_and_admit(
     // stage to a zero-secret Actions runner that must fetch it (ADR-0152).
     push_admitted_candidates(&sink.0, correspondence, pusher);
 
-    sink.0.into_iter().map(|admission| admission.admit).collect()
+    sink.0.into_iter().map(|admission| admission.admit).chain(timed_out).collect()
 }
 
 /// Admit one scripted lane verdict against this reactor's own stores, returning
@@ -1447,12 +1851,18 @@ impl NativeActor for ExecutorReactorCapability {
             return;
         };
 
+        // One clock reading for the whole tick: every order this tick records
+        // takes its deadline from it, and every persisted deadline is tested
+        // against it, so a dispatch and an expiry in the same tick cannot
+        // disagree about when the tick was.
+        let clock = TickClock { now_unix_millis: now_unix_millis(), stale_warn_after: state.stale_warn_after };
+
         // Skip the drain while inside a transient-failure backoff window (#3593) —
         // paces the re-drive instead of hammering GitHub at the flat poll cadence.
         let skip_drain = state.backoff.as_ref().is_some_and(|cursor| cursor.retry_after > Instant::now());
         if !skip_drain {
             // Drain + submit the newly-decided dispatches, acking the submitted prefix.
-            match drain_and_dispatch(store, &executor) {
+            match drain_and_dispatch(store, &executor, clock.now_unix_millis) {
                 Ok((handles, ack_through, transient_failure)) => {
                     if let Some(sequence) = ack_through
                         && let Err(error) = store.ack_topic(Topic::Dispatch, sequence)
@@ -1470,7 +1880,7 @@ impl NativeActor for ExecutorReactorCapability {
             // Drain + submit the whole-bloom aggregate reviews (ADR-0153) the
             // same way — its handles ride the same intake cycle, and a
             // transient failure joins the shared backoff window.
-            match drain_and_dispatch_aggregate(store, &executor) {
+            match drain_and_dispatch_aggregate(store, &executor, clock.now_unix_millis) {
                 Ok((handles, ack_through, transient_failure)) => {
                     if let Some(sequence) = ack_through
                         && let Err(error) = store.ack_topic(Topic::AggregateReview, sequence)
@@ -1489,7 +1899,7 @@ impl NativeActor for ExecutorReactorCapability {
             }
             // Drain + submit the whole-bloom aggregate verifies the same way —
             // the mechanical gate the fold passes before its critic dispatches.
-            match drain_and_dispatch_aggregate_verify(store, &executor) {
+            match drain_and_dispatch_aggregate_verify(store, &executor, clock.now_unix_millis) {
                 Ok((handles, ack_through, transient_failure)) => {
                     if let Some(sequence) = ack_through
                         && let Err(error) = store.ack_topic(Topic::AggregateVerify, sequence)
@@ -1508,7 +1918,7 @@ impl NativeActor for ExecutorReactorCapability {
             }
             // Replay the attempts whose parked questions were answered (#3664),
             // on the same shared handle tracking and backoff window.
-            match drain_and_redispatch(store, &executor) {
+            match drain_and_redispatch(store, &executor, clock.now_unix_millis) {
                 Ok((handles, ack_through, transient_failure)) => {
                     if let Some(sequence) = ack_through
                         && let Err(error) = store.ack_topic(Topic::Redispatch, sequence)
@@ -1528,7 +1938,6 @@ impl NativeActor for ExecutorReactorCapability {
         }
 
         // Pull matched results and forward each admitted attempt to the control core.
-        let stale_warn_after = state.stale_warn_after;
         let correspondence = state.correspondence.clone();
         let pusher = Arc::clone(&state.pusher);
         for admit in pull_and_admit(
@@ -1536,7 +1945,7 @@ impl NativeActor for ExecutorReactorCapability {
             &executor,
             claims,
             &mut state.tracked,
-            stale_warn_after,
+            &clock,
             correspondence.as_ref(),
             pusher.as_ref(),
         ) {
