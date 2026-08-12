@@ -15,8 +15,8 @@ use serde::de::DeserializeOwned;
 
 use aether_actor::Manual;
 use aether_bloomery::{
-    Admit, ApprovalPolicy, BloomDraft, BloomId, BloomSpec, ConfigScopes, Digest, Event, Fact, IdempotencyKey,
-    Membership, Statement,
+    Admit, ApprovalPolicy, AuthorityDoor, BloomDraft, BloomId, BloomSpec, ConfigScopes, Digest, Event, Fact,
+    IdempotencyKey, Membership, Statement,
 };
 use aether_data::wire::to_vec;
 use aether_http::HttpServerResponse;
@@ -31,7 +31,7 @@ use super::state::{
 use crate::api::dto::{MemberProjection, SealRequest};
 use crate::bloomery::{AdmissionRequest, Decision, Gate, precheck_statement, verified_statement_approval};
 use crate::control::ControlCore;
-use crate::signing::{SigningCapability, Verify, VerifyResult};
+use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
 use crate::store::{RecordDispatchDescription, StoreCapability};
 
 /// Which door a completed seal admits through (#4638): a first seal, or a
@@ -179,8 +179,17 @@ impl ApiCapabilityState {
         }
         let mut verifications = Vec::with_capacity(encoded.len());
         for (member_index, scope_revision, statement, statement_bytes) in encoded {
-            let correlation =
-                self.send_tracked(ctx.actor::<SigningCapability>(), &Verify { statement: statement_bytes });
+            // Bound to the member's own scope revision, which this path already
+            // holds and derives from the gated draft rather than from the
+            // envelope — so a statement signed for another revision has no
+            // verifying signature here (ADR-0182).
+            let correlation = self.send_tracked(
+                ctx.actor::<SigningCapability>(),
+                &Verify {
+                    statement: statement_bytes,
+                    authority: authority_bytes(AuthorityDoor::Approve, scope_revision),
+                },
+            );
             verifications.push(PendingVerify { correlation, member_index, scope_revision, statement });
         }
         Routed::DeferredSeal(Box::new(PendingSealSetup {

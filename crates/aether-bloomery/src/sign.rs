@@ -17,6 +17,17 @@
 //!
 //! The fail-closed prompt closure ([`crate::manifest`]) is structural and
 //! enforced from day one regardless of which provider is wired.
+//!
+//! # What a signature covers
+//!
+//! Not the words alone. [`authorization_message`] is the message every author
+//! signature verifies against: the digest of an [`AuthorityDoor`], the request
+//! digest the signature is bound to, and the asserted words together (ADR-0182).
+//! Putting the binding inside the signed bytes is what makes a captured envelope
+//! authorize the one request it was made for — a statement's `parents` sit
+//! outside the signature and can be rewritten by whoever holds it, so a door
+//! that bound structurally alone turned one legitimate authorization into a
+//! standing credential.
 
 #[cfg(not(target_arch = "wasm32"))]
 use alloc::collections::BTreeMap;
@@ -26,7 +37,72 @@ use alloc::vec::Vec;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
+use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::KeyId;
+
+/// Which door an author signature authorizes (ADR-0182).
+///
+/// A closed enum hashed into the signed subject, so an envelope minted for one
+/// door never verifies at another even where the words and the binding coincide.
+/// Adding a door is a variant, and the variant is what keeps its envelopes
+/// separate from every existing door's.
+///
+/// **Variant order is part of the signed subject.** The discriminant is what
+/// serde encodes into the authorization [`authorization_message`] hashes, so
+/// reordering these variants — or inserting one anywhere but the end — silently
+/// changes the message every past signature was minted over and invalidates all
+/// of them, with no compile error and no decode failure to announce it. Append
+/// new doors; never reorder.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum AuthorityDoor {
+    /// Approving a member's scope revision at seal time, bound to that
+    /// revision's digest.
+    Approve,
+    /// Adopting an answer to a parked question, bound to the question's digest.
+    Answer,
+    /// Releasing an orphaned claim ref, bound to the release request's digest
+    /// (ADR-0179).
+    OrphanClaimRelease,
+    /// Grounding a prompt-manifest instruction slot, bound to the artifact the
+    /// signature grounds. Not a request door: nothing acts on it, so it
+    /// authorizes no mutation — the variant exists so the closure walk's
+    /// cryptographic check cannot borrow a request door's envelope, and
+    /// [`ground_instruction`](crate::manifest) enforces that by grounding only
+    /// on a recorded authority whose door is this one.
+    Ground,
+}
+
+/// The subject an author signature actually covers (ADR-0182): the door, the
+/// request it binds, and the asserted words together.
+///
+/// Private because it is a hashing subject rather than a stored value — callers
+/// reach it through [`authorization_message`], which is the only way to produce
+/// the message a [`KeyProvider`] verifies against.
+#[derive(Serialize)]
+struct Authorization<'a> {
+    /// Which door this signature authorizes.
+    door: AuthorityDoor,
+    /// The exact request digest this signature is good for.
+    binding: Digest,
+    /// The asserted bytes.
+    words: &'a [u8],
+}
+
+impl ContentAddressed for Authorization<'_> {
+    const DOMAIN: &'static str = "aether.bloomery.authorization";
+}
+
+/// The message an author signature over `words` at `door` bound to `binding`
+/// must cover (ADR-0182).
+///
+/// The binding is a parameter with no default and there is no verification path
+/// over words alone, so a signature authorizes exactly one request at exactly
+/// one door: rewriting a statement's `parents` changes the artifact's address
+/// without producing a signature that verifies against the new target.
+#[must_use]
+pub fn authorization_message(door: AuthorityDoor, binding: Digest, words: &[u8]) -> Digest {
+    digest_of(&Authorization { door, binding, words })
+}
 
 /// An author signature over exact bytes: the assertion "this signer asserted
 /// these bytes for this purpose". The only provenance that can become
@@ -112,8 +188,14 @@ mod tests {
 
     use ed25519_dalek::{Signer, SigningKey};
 
-    use super::{Ed25519KeyProvider, KeyProvider, SignatureEnvelope};
+    use super::{AuthorityDoor, Ed25519KeyProvider, KeyProvider, SignatureEnvelope, authorization_message};
+    use crate::digest::Digest;
     use crate::ids::KeyId;
+
+    /// A distinct binding digest per seed — two requests to sign for.
+    fn binding(seed: u8) -> Digest {
+        Digest::from_bytes([seed; 32])
+    }
 
     /// A deterministic signing key from a fixed 32-byte seed — no rng, so the
     /// test is reproducible.
@@ -162,6 +244,45 @@ mod tests {
         let key = signing_key(7);
         let signed = envelope("owner", &key, b"answer: choose A");
         assert!(!provider("owner", &key).verify(&signed, b"answer: choose B"));
+    }
+
+    #[test]
+    fn a_signature_minted_for_one_door_does_not_verify_at_another() {
+        // The whole point of hashing AuthorityDoor into the subject (ADR-0182):
+        // an answer envelope must not release an orphaned claim ref, even when
+        // the operator signed the same words for the same request digest.
+        let key = signing_key(7);
+        let words = b"yes";
+        let signed =
+            envelope("owner", &key, authorization_message(AuthorityDoor::Answer, binding(1), words).as_bytes());
+
+        assert!(
+            !provider("owner", &key).verify(
+                &signed,
+                authorization_message(AuthorityDoor::OrphanClaimRelease, binding(1), words).as_bytes()
+            )
+        );
+    }
+
+    #[test]
+    fn a_signature_minted_for_one_binding_does_not_verify_at_another() {
+        // The replay this ADR closes: re-pointing a captured envelope at a
+        // second request digest yields no verifying signature, so the constant
+        // words a release door signs are no longer a standing credential.
+        let key = signing_key(7);
+        let words = b"release orphan bloomery claim";
+        let signed = envelope(
+            "owner",
+            &key,
+            authorization_message(AuthorityDoor::OrphanClaimRelease, binding(1), words).as_bytes(),
+        );
+
+        assert!(
+            !provider("owner", &key).verify(
+                &signed,
+                authorization_message(AuthorityDoor::OrphanClaimRelease, binding(2), words).as_bytes()
+            )
+        );
     }
 
     #[test]

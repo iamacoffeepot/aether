@@ -137,7 +137,7 @@ pub struct ApiCapabilityState {
 /// A request held across a signature-verification round trip: the reply
 /// obligation and the event to admit once (and only if) the signature verifies.
 ///
-/// Two routes hold one: `POST /blooms/{id}/answer` (its event is
+/// Two routes hold one: `POST /blooms/{id}/answer/{question}` (its event is
 /// `Fact::AdoptAnswer`) and `POST /claims/releases` (its event is
 /// `Fact::RequestOrphanClaimRelease`, ADR-0179). They are the same flow —
 /// verify, then admit — so they share the table rather than each keeping a

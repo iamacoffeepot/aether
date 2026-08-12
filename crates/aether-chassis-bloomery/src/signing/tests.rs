@@ -14,11 +14,13 @@
 
 use std::collections::BTreeMap;
 
-use aether_bloomery::{Ed25519KeyProvider, KeyId, Provenance, SignatureEnvelope, Statement};
+use aether_bloomery::{
+    AuthorityDoor, Digest, Ed25519KeyProvider, KeyId, Provenance, SignatureEnvelope, Statement, authorization_message,
+};
 use aether_data::wire::to_vec;
 use ed25519_dalek::{Signer, SigningKey};
 
-use super::kinds::VerifyResult;
+use super::kinds::{VerifyResult, authority_bytes};
 use super::runtime::{SigningCapabilityState, parse_allowlist};
 
 /// A deterministic signing key from a fixed seed.
@@ -32,13 +34,20 @@ fn state(signer: &str, key: &SigningKey) -> SigningCapabilityState {
     SigningCapabilityState::new(Ed25519KeyProvider::new(allowlist))
 }
 
-/// The wire-encoded author-signed statement over `words` by `signer` using `key`.
-fn signed(signer: &str, key: &SigningKey, words: &[u8]) -> Vec<u8> {
+/// A distinct binding digest per seed — a request to sign for.
+fn binding(seed: u8) -> Digest {
+    Digest::from_bytes([seed; 32])
+}
+
+/// The wire-encoded author-signed statement over `words` by `signer` using
+/// `key`, signed as authority for `door` bound to `bound` (ADR-0182).
+fn signed(signer: &str, key: &SigningKey, words: &[u8], door: AuthorityDoor, bound: Digest) -> Vec<u8> {
+    let message = authorization_message(door, bound, words);
     let statement = Statement {
         words: words.to_vec(),
         provenance: Provenance::AuthorSignature(SignatureEnvelope {
             signer: KeyId(signer.to_owned()),
-            signature: key.sign(words).to_bytes().to_vec(),
+            signature: key.sign(message.as_bytes()).to_bytes().to_vec(),
         }),
         parents: vec![],
     };
@@ -53,7 +62,10 @@ fn key_hex(key: &SigningKey) -> String {
 #[test]
 fn an_authorized_signers_genuine_signature_verifies() {
     let key = signing_key(7);
-    let reply = state("owner", &key).verify(&signed("owner", &key, b"answer: choose A"));
+    let statement = signed("owner", &key, b"answer: choose A", AuthorityDoor::Answer, binding(1));
+
+    let reply = state("owner", &key).verify(&statement, &authority_bytes(AuthorityDoor::Answer, binding(1)));
+
     assert_eq!(reply, VerifyResult::Ok { verified: true }, "an allowlisted signer's real signature admits");
 }
 
@@ -62,16 +74,62 @@ fn a_non_allowlisted_signer_is_rejected() {
     // The signature is genuine, but the signer id is not in the allowlist — the
     // fail-closed gate returns `verified: false`, not an error.
     let key = signing_key(7);
-    let reply = state("owner", &key).verify(&signed("intruder", &key, b"do the thing"));
+    let statement = signed("intruder", &key, b"do the thing", AuthorityDoor::Answer, binding(1));
+
+    let reply = state("owner", &key).verify(&statement, &authority_bytes(AuthorityDoor::Answer, binding(1)));
+
     assert_eq!(reply, VerifyResult::Ok { verified: false }, "a signer absent from the allowlist does not verify");
+}
+
+#[test]
+fn a_genuine_signature_presented_under_another_binding_is_rejected() {
+    // The replay this capability now refuses (ADR-0182): the statement, the
+    // signer, and the words are all genuine, and only the request the caller
+    // supplies differs from the one the operator signed for. Before the binding
+    // was signed this verified, and the door's only protection was a `parents`
+    // check over a field the envelope's holder can rewrite.
+    let key = signing_key(7);
+    let statement = signed("owner", &key, b"yes", AuthorityDoor::Answer, binding(1));
+
+    let reply = state("owner", &key).verify(&statement, &authority_bytes(AuthorityDoor::Answer, binding(2)));
+
+    assert_eq!(reply, VerifyResult::Ok { verified: false }, "a signature bound to another request does not verify");
+}
+
+#[test]
+fn a_genuine_signature_presented_at_another_door_is_rejected() {
+    // Domain separation between doors: even at the same binding, an envelope
+    // minted to answer a question must not authorize an orphan-claim release.
+    let key = signing_key(7);
+    let statement = signed("owner", &key, b"yes", AuthorityDoor::Answer, binding(1));
+
+    let reply =
+        state("owner", &key).verify(&statement, &authority_bytes(AuthorityDoor::OrphanClaimRelease, binding(1)));
+
+    assert_eq!(reply, VerifyResult::Ok { verified: false }, "a signature minted for another door does not verify");
 }
 
 #[test]
 fn a_non_statement_body_is_an_error_not_a_false_verdict() {
     // Undecodable bytes are `Err` — distinct from a well-formed statement that
     // simply does not verify, so the gate can tell "malformed" from "rejected".
-    let reply = state("owner", &signing_key(7)).verify(b"not a wire statement");
+    let reply = state("owner", &signing_key(7))
+        .verify(b"not a wire statement", &authority_bytes(AuthorityDoor::Answer, binding(1)));
+
     assert!(matches!(reply, VerifyResult::Err { .. }), "undecodable bytes surface as Err, got {reply:?}");
+}
+
+#[test]
+fn an_undecodable_authority_is_an_error_not_a_false_verdict() {
+    // An authority that does not decode leaves no request to check the signature
+    // against, so it answers exactly as an undecodable statement does rather
+    // than reporting a verdict it never reached.
+    let key = signing_key(7);
+    let statement = signed("owner", &key, b"yes", AuthorityDoor::Answer, binding(1));
+
+    let reply = state("owner", &key).verify(&statement, b"not a wire authority");
+
+    assert!(matches!(reply, VerifyResult::Err { .. }), "an undecodable authority surfaces as Err, got {reply:?}");
 }
 
 #[test]
