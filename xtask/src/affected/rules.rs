@@ -30,7 +30,7 @@ const RUN_ALL_PREFIXES: &[&str] = &[".cargo/", ".config/", "xtask/"];
 /// its reverse closure) changed.
 pub(super) const PATH_RULES_TOML: &str = r#"
 [[path-rule]]
-globs = ["docs/**", "scripts/**", ".claude/**", ".agents/**", ".codex/**", ".github/**", "fuzz/**", ".jscpd.json", ".mcp.json", "CLAUDE.md", "AGENTS.md"]
+globs = ["docs/**", "scripts/**", ".claude/**", ".agents/**", ".codex/**", ".github/**", "fuzz/**", ".mcp.json", "CLAUDE.md", "AGENTS.md"]
 mark-changed = []
 
 [[path-rule]]

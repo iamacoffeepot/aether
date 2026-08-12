@@ -175,26 +175,25 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             finding_exit_codes: &[100, 101],
         }),
         "verify.dup" => Some(VerifyInvocation {
-            // Through the wrapper CI runs, not jscpd directly (#4856). jscpd
-            // exits 0 whether it analyzed every file or none: a malformed
-            // `.jscpd.json` costs the run its threshold and a missing scan path
-            // costs it every file, and both report a clean tree. The wrapper
-            // turns each into a nonzero exit, and running it here is what keeps
-            // the lane predicting the gate rather than a laxer check.
-            program: "node",
-            args: &["scripts/check-duplication.mjs", "crates"],
+            // The settings ride the argv rather than a `.jscpd.json` (#4856).
+            // jscpd answers a malformed config file with one stderr warning
+            // and a silent fall back to built-in defaults — no format list, no
+            // `minTokens`, and above all no threshold — so the gate stopped
+            // failing on duplication at the moment its config broke. A bad
+            // flag it refuses outright (exit 2). This argv is the CI step's,
+            // verbatim, so the lane predicts the gate.
+            program: "npx",
+            args: &["--yes", "jscpd@5.0.12", "-f", "rust", "-k", "150", "-t", "0.5", "-r", "consoleFull", "crates"],
             env: &[],
-            requires: &["node", "npx"],
+            requires: &["npx"],
             requires_targets: &[],
             prepare: None,
-            // jscpd exits 1 when the duplication threshold is exceeded, the
-            // wrapper exits 1 for a scan the tree made impossible, and npx
-            // exits 1 when it cannot fetch the package at all — the one member
-            // whose host fault is genuinely indistinguishable from its finding,
-            // so it keeps the candidate-blaming reading rather than routing
-            // every real duplication report to the host. The tree-side faults
-            // belong on that side of the split regardless: a config the
-            // candidate broke is a defect the candidate can repair.
+            // jscpd exits 1 when the duplication threshold is exceeded, and
+            // npx exits 1 when it cannot fetch the package at all — the one
+            // member whose host fault is genuinely indistinguishable from its
+            // finding, so it keeps the candidate-blaming reading rather than
+            // routing every real duplication report to the host. A bad flag is
+            // exit 2, which lands on the operational side where it belongs.
             finding_exit_codes: &[1],
         }),
         "verify.deps" => Some(VerifyInvocation {
@@ -800,12 +799,13 @@ mod tests {
         let fmt = verify_command("verify.fmt").expect("verify.fmt mapped");
         assert_eq!(argv(&fmt), workflow::gate_step("fmt", &["cargo", "fmt"]).run);
 
-        // The duplicate-code gate runs through its fail-closed wrapper, and the
-        // lane has to run the same one: jscpd invoked directly greens over a
-        // scan that never happened (#4856), so a lane that kept the bare `npx`
-        // spelling would be predicting a laxer check than the gate applies.
+        // The duplicate-code gate states its whole calibration on the argv
+        // (#4856), so the argv is the gate: a lane running a different format,
+        // threshold, or min-tokens predicts a different check than CI applies.
+        // Selected on `npx` alone, since every token that carries calibration
+        // has to stay on the asserted side rather than the selecting side.
         let dup = verify_command("verify.dup").expect("verify.dup mapped");
-        assert_eq!(argv(&dup), workflow::gate_step("dup-check", &["node", "scripts/check-duplication.mjs"]).run);
+        assert_eq!(argv(&dup), workflow::gate_step("dup-check", &["npx"]).run);
 
         // The lane asks cargo for JSON diagnostics and deliberately does not
         // deny (#4706); `clippy_verdict` applies the same fail-on-any-warning

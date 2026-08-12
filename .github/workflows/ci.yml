@@ -59,14 +59,10 @@ jobs:
               # (nightlies, docs, release, ...) cannot change a Rust
               # build's outcome, so their edits skip the Rust suite.
               # ci.yml defines these jobs, so it stays.
+              # ci.yml also carries the dup-check gate's own arguments —
+              # format, threshold, min-tokens — so an edit to them re-runs
+              # the job they configure.
               - '.github/workflows/ci.yml'
-              # jscpd's gate threshold lives in .jscpd.json, so a config
-              # edit must re-run the dup-check job. The wrapper that makes
-              # that job fail closed is listed for the same reason: a gate
-              # whose own edits skip the job it gates is unwitnessed.
-              - '.jscpd.json'
-              - 'scripts/check-duplication.mjs'
-              - 'scripts/check-duplication.test.mjs'
 
   # A suppression makes the tool it targets green by construction, so this
   # check must sit outside the affected-code filter. It scans only additions
@@ -491,11 +487,14 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      # The wrapper's own fail-closed behaviour, gated in the one job that
-      # already has node. An untested gate wrapper is the defect it exists
-      # to fix, one level up.
-      - run: node --test scripts/check-duplication.test.mjs
-      - run: node scripts/check-duplication.mjs crates
+      # Settings on the command line, not in a `.jscpd.json` (#4856): jscpd
+      # answers a malformed config file with one stderr warning and a silent
+      # fall back to built-in defaults — threshold included — so the gate
+      # went green at exactly the moment its configuration broke. It rejects
+      # a bad flag outright (exit 2), so stating the settings here is what
+      # makes a broken gate loud.
+      # No ignore flag: jscpd honours .gitignore, which already covers target/.
+      - run: npx --yes jscpd@5.0.12 -f rust -k 150 -t 0.5 -r consoleFull crates
 
   # Unused-dependency detection (cargo-machete). Scoped to crates/ to
   # match dup-check. False positives (a dep used only through a
