@@ -7,6 +7,8 @@ description: "Resolve a named draft pull request's content conflicts by merging 
 
 `/land` calls this skill directly for a content-conflicted draft. Resolve updates the existing branch and pull request; it neither opens a second pull request nor merges the result.
 
+Read the shared [GitHub workflow contract](../../../.agents/skills/_shared/github-workflow.md) completely before acting.
+
 ## Invocation
 
 ```
@@ -53,9 +55,9 @@ Tie every step to the new current head:
 2. classify and repair deterministic failures inside the approved surface;
 3. commit each repair conventionally and plain-push;
 4. rerun local checks, containment, and CI after every change;
-5. invoke [review](../review/SKILL.md) directly for the current head;
-6. post its strict semantic COMMENT artifact and any tight inline findings;
-7. verify/fix-or-justify findings, reply with the fix commit, resolve addressed threads, and run confirm review over prior findings plus the delta;
+5. directly inspect the complete current-head diff against the Plan, both merge intents, current code, and applicable tests and conventions;
+6. post any tight inline findings in ordinary human prose, then append and re-read the hidden issue-body direct-review record through the shared file-backed, byte-for-byte concurrency guard and post-mutation provenance check; never put machine JSON/HTML in a pull-request review or comment;
+7. verify/fix-or-justify findings, reply with the fix commit, resolve addressed threads, and directly confirm prior findings against the delta before recording the new head's verdict;
 8. run [dogfood](../dogfood/SKILL.md) when the issue brief requires it and repair any finding through the same loop.
 
 Do not dispatch hosted work or review jobs. Do not use a separate finding-handling skill. A head change invalidates old CI, review, and dogfood evidence.
@@ -64,6 +66,6 @@ At most three repair iterations are allowed. A fourth requested-change result, a
 
 ## Return to land
 
-Resolution completes only when the same current head is CI-green, contained, approved by a trusted semantic artifact for the current digest, free of active native change requests, has every review thread resolved, and has clear required dogfood. Leave the pull request draft and unmerged, keep the clean worktree and branch, and report `/land <pr>` as the next action.
+Resolution completes only when the same current head is CI-green, contained, approved by a trusted hidden issue-body semantic record for the exact issue/pull request/head/digest, free of active native change requests, has every review thread resolved, and has clear required dogfood. Leave the pull request draft and unmerged, keep the clean worktree and branch, and report `/land <pr>` as the next action.
 
-Never open a new pull request, clear draft state, merge, edit the issue body, expand Declared surface, rebase, amend, or force-push.
+Never open a new pull request, clear draft state, merge, edit managed Plan sections or any issue-body byte except the canonical hidden direct-review append, expand Declared surface, rebase, amend, or force-push.

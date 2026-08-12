@@ -252,10 +252,13 @@ are not substitutes.
 
 **Direct-review verdict**
 
-The implementer's human-readable handoff that the exact current-head diff was
-inspected against the approved Plan and has no unresolved defect. It is not a
-visible JSON/HTML PR marker, and it is independent of native GitHub review
-decisions and unresolved threads.
+The implementer's semantic result after directly inspecting and repairing the
+exact current-head diff against the approved Plan. Its durable authority is a
+canonical hidden `aether-direct-review:v2` record in the closing issue body,
+bound to the issue, pull request, head, and Plan digest and trusted through the
+effective body editor's repository association. Pull-request reviews, comments,
+and handoffs remain human-readable and carry no machine JSON/HTML marker.
+Native GitHub review decisions and unresolved threads are independent gates.
 
 **Landable draft**
 

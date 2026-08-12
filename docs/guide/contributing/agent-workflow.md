@@ -24,7 +24,7 @@ Use the source that owns the question:
 | What arguments does a live tool accept? | The active tool schema, not a prose copy |
 | What does this running engine contain? | Live introspection such as `describe_kinds` and `describe_component` |
 | What work is approved? | The current managed issue sections plus a trusted matching hidden approval record |
-| Is a draft ready to land? | Its exact head, approval ancestry, actual diff, checks, reviews, threads, dogfood evidence, and merge state |
+| Is a draft ready to land? | Its exact head, approval ancestry, actual diff, checks, hidden direct-review record, native reviews, threads, dogfood evidence, and merge state |
 | What does hosted automation do? | Checked-in workflow YAML plus current repository protection and check state |
 
 The guide is the digested, navigable explanation. When it disagrees with a
@@ -51,7 +51,7 @@ idea or rough issue
   → trusted hidden approval bound to Plan digest + exact base
   → owned issue worktree + branch
   → draft pull request closing the issue
-  → current-head checks + review + threads + required dogfood
+  → current-head checks + hidden direct review + native reviews + threads + required dogfood
   → explicitly authorized landing
   → merged pull request + closed issue + safe local cleanup
 ```
@@ -153,14 +153,26 @@ owns the exact hosted inventory.
 
 ## Review, findings, and dogfood are head-bound
 
-After CI is green, the implementer directly inspects the complete current-head
-diff against the Plan and records the result in the ordinary human-readable
-implementation handoff. The implementer is the reviewer for this loop; it does
-not post JSON or HTML machine markers in PR reviews or comments.
+After CI is green, the implementer directly inspects and repairs the complete
+current-head diff against the Plan. The implementer is the reviewer for this
+loop; it does not dispatch a separate formal review pass. Its durable semantic
+verdict is a canonical hidden `aether-direct-review:v2` record in the closing
+issue body's unmanaged evidence history, immediately before the first managed
+heading. The record binds the issue, pull request, exact head, current Plan
+digest, and `APPROVE` or `REQUEST_CHANGES` verdict. Trust comes from the issue
+body's effective owner/member/collaborator editor provenance, not from a
+payload claim. A later head or managed-Plan change leaves the old line as stale
+history and requires fresh inspection.
+
+PR reviews, comments, finding handoffs, and thread replies contain ordinary
+human prose when they are useful; they never carry machine JSON/HTML review
+markers. Landing reads the hidden issue-body record for the semantic verdict
+and reads paginated PR reviews separately for native GitHub decisions.
 
 Review acceptance has three separate gates:
 
-1. direct inspection of the exact current head found no unresolved defect;
+1. the newest trusted hidden direct-review record for the exact issue, pull
+   request, head, and Plan digest says `APPROVE`;
 2. no reviewer's latest active native decision is changes requested; and
 3. every review thread is resolved.
 
@@ -168,8 +180,9 @@ Actionable findings enter the implementation's integrated repair loop. Verify
 each item, fix it within the approved surface or give a concrete justification,
 push an ordinary commit, rerun local checks and CI, reply to its anchored thread,
 and resolve the thread only after the disposition is visible. The changed head
-then needs fresh direct inspection. A root-level or out-of-scope problem returns
-to the appropriate managed scope artifact instead of being silently waived.
+then needs fresh direct inspection and a new hidden record. A root-level or
+out-of-scope problem returns to the appropriate managed scope artifact instead
+of being silently waived.
 
 The issue's Dogfood brief says either why no consumer trial applies or defines
 the exact consumer task. A required run must identify the current head and
@@ -194,8 +207,8 @@ incompatible product intent returns to scope rather than manufacturing a merge.
 
 A draft can be landable without being authorized to merge. `land` independently
 revalidates the current issue digest and approval, base ancestry, actual diff and
-declared surface, required checks, semantic and native review state, threads,
-dogfood, branch ownership, and predicted merge result.
+declared surface, required checks, hidden semantic review and native review
+state, threads, dogfood, branch ownership, and predicted merge result.
 
 Only then does the explicitly authorized landing clear draft state and perform
 an ordinary squash merge. Cleanup starts only after GitHub confirms that named

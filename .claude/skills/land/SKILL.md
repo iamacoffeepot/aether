@@ -7,6 +7,8 @@ description: "Land an approved Aether draft pull request after independently rev
 
 Landing is serial and requires explicit user authorization for a named pull request or a confirmed sweep. It never waives a gate, rewrites reviewed history, or chooses a content-conflict resolution.
 
+Read the shared [GitHub workflow contract](../../../.agents/skills/_shared/github-workflow.md) completely before acting.
+
 ## Invocation
 
 ```
@@ -43,9 +45,9 @@ Require every repository-required check for the current head to be completed suc
 
 ### Review and threads
 
-Read paginated reviews and validate the strict `<!-- aether-direct-review:v1 -->` COMMENT contract. Require the newest trusted artifact matching the current pull request, head SHA, and freshly computed Plan digest to say `APPROVE`.
+Read the closing issue body and effective editor and validate its canonical hidden direct-review records. Require the last trusted record matching the issue number, current pull request, head SHA, and freshly computed Plan digest to say `APPROVE`. Reject an earlier-head or earlier-digest record, untrusted effective editor, legacy pull-request machine marker, or ordinary human handoff as a substitute.
 
-Evaluate native decisions separately. For each reviewer, take the newest non-dismissed native decision and require none to be `CHANGES_REQUESTED`. A semantic COMMENT cannot clear a native request. Enumerate GraphQL review threads and require every thread resolved.
+Read paginated pull-request reviews only to evaluate native decisions separately. For each reviewer, take the newest non-dismissed native decision and require none to be `CHANGES_REQUESTED`. A hidden semantic record cannot clear a native request. Enumerate GraphQL review threads and require every thread resolved.
 
 ### Dogfood
 
@@ -61,13 +63,13 @@ Fetch exact commits and use `git merge-tree --write-tree origin/main <head>` as 
 
 On content conflict, hand the named draft directly to `/resolve <pr>` and stop. Do not dispatch a hosted job and do not edit the branch from land.
 
-For behind-but-clean with a strict up-to-date requirement, require a clean owned worktree and unchanged remote head, then merge `origin/main` into the branch without rebasing, run format and full clippy, commit the merge, and plain-push. Wait for current-head CI, run direct review, repair any finding, rerun required dogfood, and apply every landing gate again. If that merge produces content conflicts, abort it and hand the pull request to `/resolve <pr>`.
+For behind-but-clean with a strict up-to-date requirement, require a clean owned worktree and unchanged remote head, then merge `origin/main` into the branch without rebasing, run format and full clippy, commit the merge, and plain-push. Wait for current-head CI, directly inspect and repair the new head, then append and re-read its hidden direct-review record through the shared contract's file-backed, byte-for-byte concurrency guard and provenance check. Rerun required dogfood and apply every landing gate again. If that merge produces content conflicts, abort it and hand the pull request to `/resolve <pr>`.
 
 Never rebase or force-push from this skill.
 
 ## Final confirmation and merge
 
-Immediately before mutation, re-read the pull request, issue body and editor provenance, head, approval, ancestry, diff, checks, reviews, threads, dogfood, and merge prediction. Abort on any change.
+Immediately before mutation, re-read the pull request, issue body and editor provenance, head, approval, ancestry, diff, checks, hidden direct-review verdict, native reviews, threads, dogfood, and merge prediction. Abort on any change.
 
 1. Read the pull-request node id.
 2. Clear draft state through GraphQL `markPullRequestReadyForReview`; verify draft is false.
