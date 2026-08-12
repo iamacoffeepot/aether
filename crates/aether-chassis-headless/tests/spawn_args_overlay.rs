@@ -14,26 +14,55 @@
 // `tick_hz` post-resolution (`headless/chassis.rs:235`); that line is
 // the externally-observable end of the chassis-bin's argv overlay,
 // upstream of any wall-clock noise that a cadence-based assertion
-// would otherwise have to tolerate. Each child is given a short
-// settle window, then SIGTERM'd; the assertion is structural —
+// would otherwise have to tolerate. Each child is harvested until that
+// line arrives, then SIGTERM'd; the assertion is structural —
 // "logged tick_hz matches argv" — not timing.
 
 use std::io::{BufRead as _, BufReader};
 use std::process::{Command, Stdio};
+use std::slice;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Drive the headless binary with `args`; harvest stderr for ~`wait`
-/// then SIGTERM and join. Returns every stderr line observed.
-fn run_headless_capture(args: &[&str], wait: Duration) -> Vec<String> {
-    run_headless_capture_with_env(args, &[], wait)
+/// The ceiling on how long a child gets to reach its boot tracing line.
+///
+/// Generous on purpose. The harvest returns as soon as the awaited field
+/// lands, so this bounds only the failure case — a child that never boots —
+/// and never the happy path. A runner executing the whole workspace suite in
+/// parallel schedules and pages in a debug-build child an order of magnitude
+/// slower than the ~300-500 ms an idle one takes, and a deadline sized for the
+/// idle case turns that contention into a red required gate (issue 4860).
+const BOOT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Drive the headless binary with `args` until the boot tracing line reports
+/// `field`, and return that value.
+fn boot_field(args: &[&str], field: &str) -> usize {
+    boot_field_with_env(args, &[], field)
 }
 
-/// Like [`run_headless_capture`] but layers extra `(key, value)` env
-/// pairs onto the child (issue 1990: set `AETHER_ACTOR_TRACE_RING_SIZE`
-/// to observe the chassis-main resolution reaching the boot line).
-fn run_headless_capture_with_env(args: &[&str], extra_env: &[(&str, &str)], wait: Duration) -> Vec<String> {
+/// Like [`boot_field`] but layers extra `(key, value)` env pairs onto the
+/// child (issue 1990: set `AETHER_ACTOR_TRACE_RING_SIZE` to observe the
+/// chassis-main resolution reaching the boot line).
+fn boot_field_with_env(args: &[&str], extra_env: &[(&str, &str)], field: &str) -> usize {
+    let (observed, lines) = run_headless_until_field(args, extra_env, field);
+
+    // The two failure causes are distinguished at their sources: reaching the
+    // deadline with no such field means the child never got that far, which is
+    // a different bug from a field that arrived carrying the wrong value (the
+    // caller's `assert_eq!` reports that one).
+    observed.unwrap_or_else(|| {
+        panic!(
+            "no `{field}` on any boot tracing line within {BOOT_DEADLINE:?}; the child emitted {} line(s):\n{lines:#?}",
+            lines.len()
+        )
+    })
+}
+
+/// Spawn the headless binary and harvest its stderr until `field` is observed
+/// or [`BOOT_DEADLINE`] elapses, then SIGTERM and join. Returns the field's
+/// value alongside every stderr line seen.
+fn run_headless_until_field(args: &[&str], extra_env: &[(&str, &str)], field: &str) -> (Option<usize>, Vec<String>) {
     let bin = env!("CARGO_BIN_EXE_aether-headless");
     let mut cmd = Command::new(bin);
     cmd.args(args)
@@ -62,11 +91,16 @@ fn run_headless_capture_with_env(args: &[&str], extra_env: &[(&str, &str)], wait
         }
     });
 
-    let deadline = Instant::now() + wait;
+    // Wait on the condition rather than on a duration: stop as soon as the
+    // awaited field lands, so a prompt boot costs its own latency and a slow
+    // one is merely slow instead of a failure.
+    let deadline = Instant::now() + BOOT_DEADLINE;
     let mut lines = Vec::new();
-    while Instant::now() < deadline {
+    let mut seen = false;
+    while !seen && Instant::now() < deadline {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(line) => {
+                seen = find_numeric_field(slice::from_ref(&line), field).is_some();
                 lines.push(line);
             }
             Err(_) => {
@@ -79,9 +113,9 @@ fn run_headless_capture_with_env(args: &[&str], extra_env: &[(&str, &str)], wait
     }
 
     // SIGTERM (Unix) / kill (Windows) — graceful shutdown is fine,
-    // the assertion has already locked onto its tick_hz line if the
-    // bin booted correctly. `kill` is the portable surface; the
-    // child's signal handler routes through chassis_root::shutdown.
+    // the harvest has already locked onto its boot line if the bin
+    // booted correctly. `kill` is the portable surface; the child's
+    // signal handler routes through chassis_root::shutdown.
     let _ = child.kill();
     // Drain any straggler lines emitted between SIGTERM and exit.
     while let Ok(line) = rx.recv_timeout(Duration::from_millis(100)) {
@@ -89,26 +123,21 @@ fn run_headless_capture_with_env(args: &[&str], extra_env: &[(&str, &str)], wait
     }
     let _ = child.wait();
     drop(reader_thread.join());
-    lines
+
+    // Scan everything harvested, stragglers included, so the answer does not
+    // depend on which side of the kill the line landed on.
+    (find_numeric_field(&lines, field), lines)
 }
 
-/// Pluck the resolved `tick_hz` off the chassis boot tracing line
-/// emitted at `headless/chassis.rs:235`. The line has the shape
-/// `... tick_hz=NN ...`. Returns the parsed value of the first
-/// match; `None` if no matching line was observed.
+/// Pluck the first `<field>=NN` numeric value off any boot tracing line —
+/// `tick_hz` on the line emitted at `headless/chassis.rs:235`, and the ring
+/// capacities issue 1990 and issue 2076 grep off the same line. Returns the
+/// parsed value of the first match; `None` if no matching line was observed.
 ///
 /// tracing's default formatter wraps each field name and the `=` in
 /// ANSI escapes (`\x1b[3mtick_hz\x1b[0m\x1b[2m=\x1b[0m120`), so we
 /// strip ESC sequences before searching to keep the test robust
 /// against the CLI-color default.
-fn find_tick_hz(lines: &[String]) -> Option<u32> {
-    find_numeric_field(lines, "tick_hz").and_then(|n| u32::try_from(n).ok())
-}
-
-/// Pluck the first `<field>=NN` numeric value off any boot tracing line,
-/// stripping the ANSI escapes tracing's default formatter wraps field
-/// names in. Generalizes [`find_tick_hz`] so issue 1990 can grep
-/// `trace_ring_capacity` on the same boot line.
 fn find_numeric_field(lines: &[String], field: &str) -> Option<usize> {
     fn strip_ansi(s: &str) -> String {
         // ESC `[` ... letter — the common CSI shape `tracing-subscriber`
@@ -144,20 +173,15 @@ fn find_numeric_field(lines: &[String], field: &str) -> Option<usize> {
 
 #[test]
 fn argv_tick_hz_30_reaches_child() {
-    // 1.5 s is well above the chassis boot wall-clock (debug build
-    // headless cold-starts in ~300-500 ms on the supported runners)
-    // and the boot tracing line lands as soon as the chassis builder
-    // finishes, well before the first tick fires.
-    let lines = run_headless_capture(&["--tick-hz", "30"], Duration::from_secs(2));
-    let hz = find_tick_hz(&lines).unwrap_or_else(|| panic!("no tick_hz tracing line observed; stderr was:\n{lines:?}"));
-    assert_eq!(hz, 30, "--tick-hz 30 must reach the child's chassis env");
+    // The boot tracing line lands as soon as the chassis builder finishes,
+    // well before the first tick fires, so this observes the argv overlay and
+    // not a cadence.
+    assert_eq!(boot_field(&["--tick-hz", "30"], "tick_hz"), 30, "--tick-hz 30 must reach the child's chassis env");
 }
 
 #[test]
 fn argv_tick_hz_120_reaches_child() {
-    let lines = run_headless_capture(&["--tick-hz", "120"], Duration::from_secs(2));
-    let hz = find_tick_hz(&lines).unwrap_or_else(|| panic!("no tick_hz tracing line observed; stderr was:\n{lines:?}"));
-    assert_eq!(hz, 120, "--tick-hz 120 must reach the child's chassis env");
+    assert_eq!(boot_field(&["--tick-hz", "120"], "tick_hz"), 120, "--tick-hz 120 must reach the child's chassis env");
 }
 
 #[test]
@@ -166,9 +190,7 @@ fn empty_argv_falls_through_to_env_default() {
     // no-argv `CommonEnv::resolve` path. With `AETHER_TICK_HZ`
     // unset (the env mutator above clears it), the chassis lands on
     // the env-only `DEFAULT_TICK_HZ` (60 Hz).
-    let lines = run_headless_capture(&[], Duration::from_secs(2));
-    let hz = find_tick_hz(&lines).unwrap_or_else(|| panic!("no tick_hz tracing line observed; stderr was:\n{lines:?}"));
-    assert_eq!(hz, 60, "empty argv must fall through to default tick rate");
+    assert_eq!(boot_field(&[], "tick_hz"), 60, "empty argv must fall through to default tick rate");
 }
 
 #[test]
@@ -180,10 +202,11 @@ fn actor_trace_ring_size_env_reaches_chassis_boot() {
     // chassis actors seed their trace rings at this cap (the in-process
     // `SubstrateHarness` tests assert the ring-level eviction behaviour); this
     // test guards the env → chassis-main → builder edge.
-    let lines = run_headless_capture_with_env(&[], &[("AETHER_ACTOR_TRACE_RING_SIZE", "8191")], Duration::from_secs(2));
-    let cap = find_numeric_field(&lines, "trace_ring_capacity")
-        .unwrap_or_else(|| panic!("no trace_ring_capacity tracing line observed; stderr was:\n{lines:?}"));
-    assert_eq!(cap, 8191, "AETHER_ACTOR_TRACE_RING_SIZE must reach the chassis boot");
+    assert_eq!(
+        boot_field_with_env(&[], &[("AETHER_ACTOR_TRACE_RING_SIZE", "8191")], "trace_ring_capacity"),
+        8191,
+        "AETHER_ACTOR_TRACE_RING_SIZE must reach the chassis boot"
+    );
 }
 
 #[test]
@@ -194,10 +217,11 @@ fn actor_trace_ring_capacity_argv_reaches_chassis_boot() {
     // the flattening — a regression that dropped the overlay from the CLI root
     // (or its staging) leaves the flag unrecognized or unresolved, and the boot
     // line reports the default floor (4096) instead of the argv value.
-    let lines = run_headless_capture(&["--actor-trace-ring-capacity", "8191"], Duration::from_secs(2));
-    let cap = find_numeric_field(&lines, "trace_ring_capacity")
-        .unwrap_or_else(|| panic!("no trace_ring_capacity tracing line observed; stderr was:\n{lines:?}"));
-    assert_eq!(cap, 8191, "--actor-trace-ring-capacity must reach the chassis boot");
+    assert_eq!(
+        boot_field(&["--actor-trace-ring-capacity", "8191"], "trace_ring_capacity"),
+        8191,
+        "--actor-trace-ring-capacity must reach the chassis boot"
+    );
 }
 
 #[test]
@@ -208,12 +232,12 @@ fn actor_trace_ring_max_size_env_reaches_chassis_boot() {
     // the same `aether_substrate::boot` tracing line as the floor. The
     // in-process `SubstrateHarness` / `aether-actor` tests assert the ring-level
     // growth behaviour; this guards the env → chassis-main → builder edge.
-    let lines =
-        run_headless_capture_with_env(&[], &[("AETHER_ACTOR_TRACE_RING_MAX_SIZE", "131072")], Duration::from_secs(2));
     // The floor field (`trace_ring_capacity=`) is not a substring of the
     // ceiling field (`trace_ring_max_capacity=`), so the search is
     // unambiguous despite both landing on the same line.
-    let max = find_numeric_field(&lines, "trace_ring_max_capacity")
-        .unwrap_or_else(|| panic!("no trace_ring_max_capacity tracing line observed; stderr was:\n{lines:?}"));
-    assert_eq!(max, 131_072, "AETHER_ACTOR_TRACE_RING_MAX_SIZE must reach the chassis boot");
+    assert_eq!(
+        boot_field_with_env(&[], &[("AETHER_ACTOR_TRACE_RING_MAX_SIZE", "131072")], "trace_ring_max_capacity"),
+        131_072,
+        "AETHER_ACTOR_TRACE_RING_MAX_SIZE must reach the chassis boot"
+    );
 }
