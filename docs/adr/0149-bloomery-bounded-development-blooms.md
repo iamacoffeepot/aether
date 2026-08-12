@@ -103,6 +103,13 @@ but with a single operator there is no second signer to defend against, so envel
 key provider until real key custody (and its rotation, revocation, and signing-console surface) is a
 separate, later arc. The fail-closed prompt closure is structural and is enforced from day one regardless.
 
+**Amended by ADR-0182 (what a signature covers).** An author signature does not cover the statement's words
+alone. It covers the digest of a typed authorization — the door it authorizes, the exact request digest it is
+bound to, and the words together — so one signature authorizes one request at one door. `parents` keeps the
+derivation-DAG meaning above and stays outside the signature, which is precisely why binding a door to it
+structurally was not enough: a holder can rewrite that field without disturbing the signature. See ADR-0182
+for the door enum, the migration, and the alternatives weighed.
+
 ### The line
 
 The pipeline is a closed stage vocabulary compiled into Rust — sketch, scope, approve, construct, verify,

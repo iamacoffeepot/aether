@@ -96,7 +96,7 @@ pub use reduce::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;
-pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
+pub use sign::{AuthorityDoor, FakeKeyProvider, KeyProvider, SignatureEnvelope, authorization_message};
 pub use study_report::{BloomGrade, StudyReport, grade};
 pub use values::{
     AgentProfile, AgentSelection, ApprovalPolicy, ApprovalRule, Artifact, Attempt, BloomDraft, BloomSpec,

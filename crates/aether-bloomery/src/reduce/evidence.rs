@@ -65,14 +65,39 @@ pub(super) fn reduce_admit_evidence(snapshot: &Snapshot, bloom: &BloomId, eviden
 /// instruction-capable (an author signature — only that provenance becomes
 /// intent), and its `parents` name a digest that is an open hold on the bloom.
 /// On admit it releases that hold and re-dispatches the held stage with the
-/// answer digest in the attempt's input closure. The cryptographic
-/// `verify_authority` check is the host answer route's, upstream of admission
-/// (the reducer holds no key material) — the same trust split the intake broker
-/// uses for evidence, where the reducer re-checks binding but not the signature.
+/// answer digest in the attempt's input closure.
 ///
-/// An answer whose parents name several open holds releases the first one in
-/// digest order; a parked question raises one hold per member, so the common
-/// case names exactly one.
+/// The cryptographic `verify_authority` check is the host answer route's,
+/// upstream of admission (the reducer holds no key material) — the same trust
+/// split the intake broker uses for evidence. That route verifies the signature
+/// *bound to the question digest the request named*
+/// ([`AuthorityDoor::Answer`](crate::AuthorityDoor), ADR-0182), and — because
+/// [`Fact::AdoptAnswer`](crate::Fact::AdoptAnswer) carries no question field of
+/// its own — it additionally refuses any answer whose `parents` is not exactly
+/// that one question. Those two checks together are what make the scan below a
+/// re-check: the route has already proved that the only digest this scan can
+/// select is the digest the signature was bound to.
+///
+/// The route-side `parents` refusal is load-bearing, not belt-and-braces. A
+/// signature bound to the path question proves the *envelope* is genuine for
+/// that question; it says nothing about `parents`, which sits outside the
+/// signature. Verifying alone would leave the submitter supplying both halves of
+/// the equality — a genuine envelope signed at `(Answer, Q1)` posted to
+/// `.../answer/{Q1}` verifies, and its rewritten `parents` is what this scan
+/// would then act on, releasing a hold nobody signed for.
+///
+/// The scan itself stays because the reducer is key-free: on replay it is the
+/// only binding evaluable here, and dropping it would trade a structural check
+/// for nothing. It selects the first parent that is an open hold in the
+/// submitter's `parents` order — *not* in digest order; `holds` is a
+/// [`BTreeSet`](alloc::collections::BTreeSet), so the membership test is
+/// deterministic, but the iteration order that picks the winner is the
+/// statement's. That is exactly why the route requires equality with a
+/// single-element list rather than membership: `[Q2, Q1]` contains the path
+/// question and would still release `Q2`. With the route in front, a multi-hold
+/// bloom is unambiguous — a parked question raises one hold per member, so
+/// multi-hold is the normal case, and every admitted answer names exactly one of
+/// them.
 pub(super) fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: &Statement) -> Decisions {
     let Some(record) = snapshot.blooms.get(bloom) else {
         return Decisions::rejected(Outcome::AdoptAnswerRejected(AdoptAnswerError::UnknownOrInactiveBloom));
@@ -86,8 +111,12 @@ pub(super) fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: 
         return Decisions::rejected(Outcome::AdoptAnswerRejected(AdoptAnswerError::NotInstructionCapable));
     }
     // The answer adopts a question by naming its exact digest in its parents;
-    // the first parent that is an open hold is the released question (holds is a
-    // BTreeSet, so the scan is deterministic).
+    // the first parent that is an open hold is the released question, in the
+    // submitter's parents order (`holds` is a BTreeSet, so the membership test
+    // is deterministic; the order that picks the winner is the statement's).
+    // The host route admits only a single-element `parents` equal to the
+    // question its signature is bound to, so there is exactly one candidate
+    // here — see the doc comment above for why membership would not be enough.
     let Some(question) = answer.parents.iter().find(|parent| record.holds.contains(parent)).copied() else {
         return Decisions::rejected(Outcome::AdoptAnswerRejected(AdoptAnswerError::NoMatchingHold));
     };

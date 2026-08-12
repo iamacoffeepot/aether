@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest};
 use crate::ids::StageId;
-use crate::sign::{KeyProvider, SignatureEnvelope};
+use crate::sign::{AuthorityDoor, KeyProvider, SignatureEnvelope, authorization_message};
 
 /// An artifact carrying words plus exactly one provenance claim.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -23,6 +23,12 @@ pub struct Statement {
     /// How these words are grounded.
     pub provenance: Provenance,
     /// The parents in the derivation DAG this statement builds on.
+    ///
+    /// Outside the signature, and deliberately so: whoever holds an envelope can
+    /// rewrite this without disturbing it. Authorization is bound inside the
+    /// signed bytes instead ([`verify_authority`](Self::verify_authority),
+    /// ADR-0182), so a structural check over `parents` is a key-free re-check of
+    /// something the signature already fixed — never the thing establishing it.
     pub parents: Vec<Digest>,
 }
 
@@ -34,14 +40,40 @@ impl Statement {
         matches!(self.provenance, Provenance::AuthorSignature(_))
     }
 
-    /// Verify the statement's provenance. An author signature verifies its
-    /// envelope over the exact `words`; the two non-author claims carry no
-    /// signature and so never verify as *authority* — they are context, not
-    /// command, and this returns `false` for them.
+    /// Verify the statement's provenance as authority for one exact request.
+    ///
+    /// An author signature verifies its envelope over
+    /// [`authorization_message(door, binding, &self.words)`](authorization_message)
+    /// — the door and the request digest are inside the signed bytes alongside
+    /// the words (ADR-0182), so a signature authorizes one request at one door
+    /// and nothing else. The two non-author claims carry no signature and so
+    /// never verify as *authority* — they are context, not command, and this
+    /// returns `false` for them.
+    ///
+    /// `binding` is a required parameter with no default, and this crate offers
+    /// no verification path over the words alone — so a new door cannot reach an
+    /// unbound check through `Statement`, and adding one means writing a door
+    /// and a binding at the call site rather than omitting them. That is a
+    /// compile-time guarantee about *this* entry point, not about signature
+    /// checking in general: [`KeyProvider::verify`] is public and takes an
+    /// arbitrary `&[u8]`, so a caller that goes around this method can still
+    /// verify whatever message it likes — and [`FakeKeyProvider`] accepts every
+    /// message it is given. What is enforced is that nothing reaches a
+    /// `Statement`'s *authority* without naming a door and a binding.
+    ///
+    /// [`FakeKeyProvider`]: crate::FakeKeyProvider
+    ///
+    /// [`parents`](Self::parents) is *not* consulted here. It stays the
+    /// derivation-DAG provenance ADR-0149 gives it, and the structural checks
+    /// callers run over it stand in addition to this one, never in place of it —
+    /// the reducer holds no key material, so its parent scan is the only binding
+    /// it can evaluate on replay.
     #[must_use]
-    pub fn verify_authority(&self, keys: &dyn KeyProvider) -> bool {
+    pub fn verify_authority(&self, keys: &dyn KeyProvider, door: AuthorityDoor, binding: Digest) -> bool {
         match &self.provenance {
-            Provenance::AuthorSignature(envelope) => keys.verify(envelope, &self.words),
+            Provenance::AuthorSignature(envelope) => {
+                keys.verify(envelope, authorization_message(door, binding, &self.words).as_bytes())
+            }
             Provenance::ObservationAttestation(_) | Provenance::StageReceipt(_) => false,
         }
     }
