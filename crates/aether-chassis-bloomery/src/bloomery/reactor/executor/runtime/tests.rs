@@ -985,13 +985,20 @@ fn default_candidate_push_refuses_on_a_fixture_boot() {
     assert!(refusal.contains(&commit_hex), "the refusal names the commit it declined: {refusal}");
 }
 
-// Tripwire: `with_parts` — the fixture-shaped constructor (#4835) — resolves its
-// pusher through `default_candidate_push`'s fixture arm, so a fixture boot that
-// reaches the push seam refuses instead of shelling `git push --force origin`.
-// This reads the constructed field rather than the free function, so restoring
-// the pre-#4835 `pusher: Arc::new(GitCandidatePush)` fails here — which the
-// free-function test above cannot notice. `with_pusher` then overrides that
-// choice, so a harness that wants to observe pushes still can.
+// Tripwire: a state built by `with_parts` — the fixture-shaped constructor
+// (#4835) — refuses at the push seam rather than shelling
+// `git push --force origin`. That claim is scoped to this constructor and goes
+// no wider: the seam keys on backend config rather than on build shape, so a
+// `testing`-featured boot that comes up through `init` still carries the real
+// pusher (#4842). What is asserted here is the refusal itself, not the route to
+// it — `default_candidate_push(true)` and a direct
+// `Arc::new(RefusingCandidatePush)` are indistinguishable through the
+// `CandidatePush` trait, so no assertion here can catch the boot-time selector
+// being bypassed. It does read the constructed field rather than the free
+// function, so restoring the pre-#4835 `pusher: Arc::new(GitCandidatePush)`
+// fails here — which the free-function test above cannot notice. `with_pusher`
+// then overrides that choice, so a harness that wants to observe pushes still
+// can.
 #[test]
 fn with_parts_resolves_the_refusing_pusher_and_with_pusher_substitutes_it() {
     let mailer = || Arc::new(Mailer::new(Arc::new(Registry::new())));
