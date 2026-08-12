@@ -284,7 +284,7 @@ mod tests {
         let failures = set(&[VerifyFailure::Deps, VerifyFailure::Fmt, VerifyFailure::Preflight]);
         let bytes = to_vec(&failures).expect("set serializes");
 
-        assert_eq!(failures.iter().map(VerifyFailure::as_str).collect::<Vec<_>>(), VERIFY_FAILURE_NAMES_FOR_TEST);
+        assert_eq!(failures.iter().map(VerifyFailure::as_str).collect::<Vec<_>>(), MEMBERS_IN_CANONICAL_ORDER);
         assert_eq!(from_bytes::<VerifyFailureSet>(&bytes).expect("set decodes"), failures);
         assert_eq!(VerifyFailure::Clippy.as_str(), "verify.clippy");
     }
@@ -340,5 +340,5 @@ mod tests {
         }
     }
 
-    const VERIFY_FAILURE_NAMES_FOR_TEST: [&str; 3] = ["verify.preflight", "verify.fmt", "verify.deps"];
+    const MEMBERS_IN_CANONICAL_ORDER: [&str; 3] = ["verify.preflight", "verify.fmt", "verify.deps"];
 }
