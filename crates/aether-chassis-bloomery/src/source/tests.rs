@@ -16,7 +16,7 @@ use aether_bloomery_github::GitSource;
 use aether_bloomery_github::testing::FakeGithub;
 use aether_data::wire::{from_bytes, to_vec};
 
-use super::kinds::{ClaimResult, EnumerateClaimsResult, LandResult, SnapshotResult};
+use super::kinds::{ClaimResult, CompleteReleaseResult, EnumerateClaimsResult, LandResult, SnapshotResult};
 use super::runtime::SourceCapabilityState;
 use crate::bloomery::SourceShell;
 
@@ -187,7 +187,7 @@ fn complete_transfer_decodes_the_operands_and_encodes_acquired() {
 }
 
 #[test]
-fn complete_release_decodes_the_operands_and_encodes_acquired() {
+fn complete_release_decodes_the_operands_and_reports_the_terminal_it_reached() {
     let state = claim_state();
     let holder = BloomId(digest(1));
     assert_eq!(
@@ -198,5 +198,10 @@ fn complete_release_decodes_the_operands_and_encodes_acquired() {
     let ref_kind = to_vec(&ClaimRefKind::Workpiece(workpiece("wp-1"))).unwrap();
     let reply = state.complete_release(&to_vec(&holder).unwrap(), &ref_kind);
 
-    assert_eq!(reply, ClaimResult::Acquired, "naming the holder releases exactly its ref");
+    assert_eq!(reply, CompleteReleaseResult::Released, "naming the holder releases exactly its ref");
+    assert_eq!(
+        state.complete_release(&to_vec(&holder).unwrap(), &ref_kind),
+        CompleteReleaseResult::AlreadyAbsent,
+        "re-releasing the same ref is the idempotent terminal a crash-window redrive relies on",
+    );
 }

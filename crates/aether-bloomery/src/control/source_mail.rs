@@ -131,7 +131,7 @@ pub struct CompleteTransfer {
 /// sweep a tombstoned ref or release a ref stranded on a superseded predecessor.
 /// An **empty** `bloom` is the `None` holder — the tombstone-sweep case that
 /// authorizes no live holder; a non-empty `bloom` releases that holder's ref.
-/// Shares the [`ClaimResult`] reply.
+/// Replies [`CompleteReleaseResult`], not the shared [`ClaimResult`].
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.source.complete_release")]
 pub struct CompleteRelease {
@@ -142,6 +142,39 @@ pub struct CompleteRelease {
     /// The `aether_data::wire`-encoded [`ClaimRefKind`](crate::port::ClaimRefKind) to release.
     #[serde(with = "aether_data::bytes")]
     pub ref_kind: Vec<u8>,
+}
+
+/// Reply to [`CompleteRelease`], mirroring
+/// [`aether_bloomery::ClaimReleaseOutcome`](crate::port::ClaimReleaseOutcome).
+///
+/// Its own reply rather than the shared [`ClaimResult`] because the per-ref
+/// release is the one claim operation whose *clean* outcomes are not
+/// interchangeable: `ClaimResult::Acquired` collapses a live expected-holder
+/// deletion, a tombstone sweep, and an already-absent ref into one value, and an
+/// authorized orphan release (ADR-0179) has to journal which of them happened.
+/// The seal / transfer / release-seal operations keep [`ClaimResult`] — they are
+/// all-or-nothing over a ref set, where "every ref reached the target state" is
+/// the whole answer.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.source.complete_release_result")]
+pub enum CompleteReleaseResult {
+    /// The expected holder held the ref and it was released.
+    Released,
+    /// The typed ref was already absent or already tombstoned — the idempotent
+    /// terminal success a crash-after-delete redrive sees.
+    AlreadyAbsent,
+    /// The ref exists under another holder and was spared untouched.
+    Changed {
+        /// The `aether_data::wire`-encoded observed [`BloomId`](crate::ids::BloomId).
+        #[serde(with = "aether_data::bytes")]
+        observed_holder: Vec<u8>,
+    },
+    /// The release failed for an operational reason — retryable, and never a
+    /// terminal result: the request stays pending for a redrive.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
 }
 
 /// Reply to [`ClaimSeal`], [`TransferSeal`], and [`ReleaseSeal`], mirroring

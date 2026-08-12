@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
-use crate::values::{BloomSpec, CandidateRef, ConfigRegistry, Evidence, ResolutionClaim, Statement, VerifyFailureSet};
+use crate::values::{
+    BloomSpec, CandidateRef, ConfigRegistry, Evidence, OrphanClaimRelease, OrphanClaimReleaseCompletion,
+    ResolutionClaim, Statement, VerifyFailureSet,
+};
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -270,6 +273,48 @@ pub enum Fact {
         evidence: Evidence,
         /// The nonempty, canonical verifier identities that failed together.
         failed_verifiers: VerifyFailureSet,
+    },
+    /// An operator authorized releasing one orphaned claim ref (ADR-0179).
+    ///
+    /// A claim ref outlives the journal that created it by design — that is what
+    /// makes it cross-instance — so any journal lifetime shorter than the claim's
+    /// leaves a ref whose holder no surviving snapshot knows. Boot reconcile
+    /// treats such a holder as foreign and report-only, and supersession needs
+    /// the predecessor locally, so one orphaned mainline-admission ref refuses
+    /// every later seal with nothing in-band able to act.
+    ///
+    /// The conservative rule stays: this fact does not loosen it, it *supplies*
+    /// the proof it asks for. The reducer admits the request only while no record
+    /// for `expected_holder` exists locally — a known holder belongs to the
+    /// ordinary lifecycle, never to this escape hatch — and only when the
+    /// authorization is an author signature asserting the exact
+    /// [`ORPHAN_CLAIM_RELEASE_WORDS`](crate::ORPHAN_CLAIM_RELEASE_WORDS) over
+    /// the request's own digest. Appended past [`Fact::VerifyFailed`] so the
+    /// prior facts' wire discriminants are unchanged.
+    RequestOrphanClaimRelease {
+        /// The typed release target; its content digest is the request id.
+        request: OrphanClaimRelease,
+        /// The author-signed statement authorizing it. The cryptographic
+        /// verification is the host route's, upstream of admission (the reducer
+        /// holds no key material); the reducer re-checks the structural binding,
+        /// the same trust split [`Fact::AdoptAnswer`] uses.
+        authorization: Statement,
+    },
+    /// The release reactor finished an authorized request (ADR-0179).
+    ///
+    /// Terminal and journaled, so the crash window between a successful source
+    /// deletion and its completion admit closes on a redrive rather than
+    /// stranding the request pending forever: the redrive observes
+    /// [`AlreadyAbsent`](crate::OrphanClaimReleaseCompletion::AlreadyAbsent) and
+    /// completes idempotently. Appended past
+    /// [`Fact::RequestOrphanClaimRelease`] so the prior facts' wire discriminants
+    /// are unchanged.
+    CompleteOrphanClaimRelease {
+        /// The request digest this completes — refused when it names no admitted
+        /// request, so a completion cannot invent one.
+        request: Digest,
+        /// Which terminal the source reached.
+        completion: OrphanClaimReleaseCompletion,
     },
 }
 

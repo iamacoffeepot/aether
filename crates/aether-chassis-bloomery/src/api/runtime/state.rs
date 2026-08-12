@@ -14,18 +14,21 @@
 //! needs reaping.
 //!
 //! What remains are the genuine **multi-hop** flows, which the 1:1 relay cannot
-//! express: the answer route verifies a signature *before* it admits
-//! ([`VerifyPending`]), and a seal joins N member verifications before admitting
-//! once ([`PendingSeal`]). Both hold the request across a hop whose reply is not
-//! the answer, so both keep an explicit obligation — and because their final
-//! `Admit` is dispatched from a reply handler rather than a route, it re-defers
-//! into [`pending`](ApiCapabilityState::pending) and is answered by hand. Those
-//! tables are domain join state, not correlation bookkeeping.
+//! express: the answer and orphan-claim-release routes verify a signature
+//! *before* they admit ([`VerifyPending`], shared by both), and a seal joins N
+//! member verifications before admitting once ([`PendingSeal`]). Each holds the
+//! request across a hop whose reply is not the answer, so each keeps an explicit
+//! obligation — and because their final `Admit` is dispatched from a reply
+//! handler rather than a route, it re-defers into
+//! [`pending`](ApiCapabilityState::pending) and is answered by hand. Those tables
+//! are domain join state, not correlation bookkeeping.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use aether_actor::{HandlesKind, Manual};
+#[cfg(feature = "github")]
+use aether_bloomery::EnumerateClaims;
 use aether_bloomery::{
     Admit, ApprovalPolicy, BloomDraft, BloomId, Digest, Event, Query, ReplayJournal, ResolvedConfigs, Statement,
     Workpiece,
@@ -45,6 +48,8 @@ use crate::artifacts::{ArtifactsCapability, Get};
 // (`ctx.defer(&request).to::<ControlCore>()`) rather than a `resolve_embedded`
 // component lineage.
 use crate::control::ControlCore;
+#[cfg(feature = "github")]
+use crate::source::SourceCapability;
 use crate::store::{RecordConfig, StoreCapability};
 
 /// Per-process ceilings on the pre-seal shaping maps. Staged workpieces and
@@ -129,13 +134,22 @@ pub struct ApiCapabilityState {
     pub(super) seal_verifications: HashMap<u64, SealVerify>,
 }
 
-/// An answer request held across the signature-verification round trip: the
-/// reply obligation and the adoption event to admit once (and only if) the
-/// signature verifies.
+/// A request held across a signature-verification round trip: the reply
+/// obligation and the event to admit once (and only if) the signature verifies.
+///
+/// Two routes hold one: `POST /blooms/{id}/answer` (its event is
+/// `Fact::AdoptAnswer`) and `POST /claims/releases` (its event is
+/// `Fact::RequestOrphanClaimRelease`, ADR-0179). They are the same flow —
+/// verify, then admit — so they share the table rather than each keeping a
+/// parallel one; `subject` is the only thing that differs, and it differs only
+/// in what a rejection says the operator got wrong.
 pub(super) struct VerifyPending {
     /// The held HTTP reply obligation.
     pub(super) inbound: InboundMail,
-    /// The `Fact::AdoptAnswer` event to admit on a verified signature.
+    /// What the operator submitted, named for the rejection message: an
+    /// `"answer statement"` or a `"release authorization"`.
+    pub(super) subject: &'static str,
+    /// The event to admit on a verified signature.
     pub(super) event: Event,
 }
 
@@ -226,12 +240,18 @@ pub(super) enum Routed {
     Get(Get),
     /// Relay to the store; its `RecordConfigResult` answers.
     RecordConfig(RecordConfig),
+    /// Relay to the source cap; its `EnumerateClaimsResult` answers (ADR-0179).
+    #[cfg(feature = "github")]
+    EnumerateClaims(EnumerateClaims),
     /// Await the `aether.signing` verify reply correlated by this id, then admit
-    /// `event` on a verified signature or answer `400` on a rejection.
+    /// `event` on a verified signature or answer `400` naming `subject` on a
+    /// rejection.
     DeferredVerify {
         /// The verify dispatch correlation the reply will echo.
         correlation: u64,
-        /// The adoption event to admit once the signature verifies.
+        /// What the operator submitted, for the rejection message.
+        subject: &'static str,
+        /// The event to admit once the signature verifies.
         event: Box<Event>,
     },
     /// Await N `aether.signing` verify replies for an above-auto seal (issue
@@ -321,8 +341,10 @@ pub(super) fn finish(
         Routed::ReplayJournal(request) => ctx.defer(&request).to::<StoreCapability>(),
         Routed::Get(request) => ctx.defer(&request).to::<ArtifactsCapability>(),
         Routed::RecordConfig(request) => ctx.defer(&request).to::<StoreCapability>(),
-        Routed::DeferredVerify { correlation, event } => {
-            state.verifying.insert(correlation, VerifyPending { inbound: ctx.take_inbound(), event: *event });
+        #[cfg(feature = "github")]
+        Routed::EnumerateClaims(request) => ctx.defer(&request).to::<SourceCapability>(),
+        Routed::DeferredVerify { correlation, subject, event } => {
+            state.verifying.insert(correlation, VerifyPending { inbound: ctx.take_inbound(), subject, event: *event });
             http::Outcome::Deferred
         }
         Routed::DeferredSeal(setup) => {

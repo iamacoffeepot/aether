@@ -1,6 +1,6 @@
 # ADR-0179: Authorized orphan claim release
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-10
 
 ## Context
@@ -23,7 +23,9 @@ The operator supplies an author-signed `Statement` whose parents include that re
 
 Append a request fact and a completion fact. The request fact is accepted only while no `BloomRecord` for `expected_holder` exists in the local snapshot. A known active, resolved, landed, or superseded holder is refused; existing reconcile and supersede paths remain responsible for known records.
 
-An accepted request records a pending release keyed by request digest and emits a transactional-outbox effect carrying `CompleteRelease(Some(expected_holder), ref_kind)`. A focused reactor executes the existing source-port compare-and-swap operation and admits one completion:
+An accepted request records a pending release keyed by request digest and emits a transactional-outbox effect carrying `CompleteRelease(Some(expected_holder), ref_kind)`. A focused reactor executes the existing source-port compare-and-swap operation and admits one completion.
+
+The per-ref release operation therefore reports its own result type rather than the `ClaimOutcome` the seal / transfer / release-seal operations share. Those three are all-or-nothing over a ref set, where "every ref reached the target state" is the whole answer, so `Acquired` collapses a live expected-holder deletion, a tombstone sweep, and an already-absent ref into one value. A durable release has to journal which of them happened, so `complete_release` returns `ClaimReleaseOutcome::{Released, AlreadyAbsent, Changed { observed_holder }}` and its transact-mail replies `aether.source.complete_release_result` instead of the shared `aether.source.claim_result`. Boot reconciliation treats every clean variant as converged; only a source fault remains an error. The three completions are:
 
 - `Released` when the expected holder was deleted;
 - `AlreadyAbsent` when the typed ref no longer exists;
