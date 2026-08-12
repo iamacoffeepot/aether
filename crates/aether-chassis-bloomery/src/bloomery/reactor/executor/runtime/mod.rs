@@ -68,8 +68,6 @@ use crate::bloomery::intake::{
     Admission, AdmitDecision, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims, UploadedEvidence,
     admit_uploaded, dispatch_and_record, run_intake_cycle,
 };
-#[cfg(any(test, feature = "testing"))]
-use crate::bloomery::intake::{AdmitDecision, admit_uploaded};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 #[cfg(any(test, feature = "testing"))]
