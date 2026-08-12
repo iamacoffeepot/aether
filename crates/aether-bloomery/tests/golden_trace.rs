@@ -15,8 +15,8 @@
 mod common;
 
 use aether_bloomery::{
-    Decisions, Digest, Event, Evidence, EvidenceKind, Fact, Outcome, ResolvedConfigs, Snapshot, StageId, VerifyFailure,
-    VerifyFailureSet, WorkpieceId, reduce,
+    BloomId, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, OrphanClaimReleaseCompletion, Outcome,
+    ResolvedConfigs, Snapshot, StageId, VerifyFailure, VerifyFailureSet, WorkpieceId, reduce,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use common::{claim, digest, draft, event, membership};
@@ -258,6 +258,105 @@ fn decision_stream_matches_pinned_golden() {
     let (decisions, _) = replay(&script());
     let digest = Digest::of_wire_bytes(&to_vec(&decisions).unwrap());
     assert_eq!(*digest.as_bytes(), GOLDEN_DECISION_DIGEST, "decision stream drifted from the pinned golden");
+}
+
+/// The `u32` variant index `aether_data::wire` writes ahead of a sum type's
+/// body, read back off a fact's own encoding.
+fn fact_selector(fact: &Fact) -> u32 {
+    u32::from_le_bytes(to_vec(fact).unwrap()[..4].try_into().unwrap())
+}
+
+// Tripwire: a `Fact` variant's *position* is its wire format, and a journal
+// already on disk is decoded by these numbers. Inserting a variant rather than
+// appending one silently re-points every later fact — a landed bloom's `Land`
+// replays as somebody else's `GrantAttempts` — and nothing else in this suite
+// would notice, because a freshly written journal round-trips against the
+// shifted vocabulary perfectly well. Extend the table when a fact is appended;
+// never renumber it.
+#[test]
+fn appended_facts_leave_every_prior_selector_where_the_journal_left_it() {
+    let bloom = BloomId(digest(2));
+    let evidence = |kind| Evidence { subject: digest(30), kind, detail: digest(60) };
+    let pinned: [(u32, Fact); 8] = [
+        (5, Fact::Land { bloom, new_head: digest(40) }),
+        (
+            8,
+            Fact::AggregateReviewCompleted {
+                bloom,
+                passed: true,
+                evidence: evidence(EvidenceKind::ReviewFinding),
+                implicated: vec![],
+            },
+        ),
+        (9, Fact::ObserveMainline { head: digest(40) }),
+        (
+            10,
+            Fact::AggregateVerifyCompleted {
+                bloom,
+                passed: true,
+                evidence: evidence(EvidenceKind::VerificationResult),
+            },
+        ),
+        (11, Fact::LandingRejected { bloom, evidence: evidence(EvidenceKind::VerificationResult) }),
+        (
+            12,
+            Fact::GrantAttempts { bloom, workpiece: WorkpieceId("alpha".into()), stage: StageId::Verify, attempts: 1 },
+        ),
+        (
+            15,
+            Fact::CompleteOrphanClaimRelease {
+                request: digest(70),
+                completion: OrphanClaimReleaseCompletion::Released,
+            },
+        ),
+        (16, Fact::AggregateReviewExecutorFault { bloom, evidence: evidence(EvidenceKind::ExecutorFault) }),
+    ];
+
+    for (selector, fact) in pinned {
+        assert_eq!(fact_selector(&fact), selector, "wire selector moved for {fact:?}");
+    }
+}
+
+// ADR-0176 — the executor-fault fact goes through the same journal path every
+// other fact does, so it has to survive the encode→decode round trip and decide
+// the same thing on replay. Driven through `replay` rather than an in-memory
+// reduce for exactly that reason: the in-memory value and the decoded one are
+// only the same fact if the appended variant encodes.
+#[test]
+fn an_executor_fault_replays_from_wire_bytes_to_the_same_bounded_retry() {
+    let spec = draft(2, vec![membership("alpha", 10)]).seal();
+    let bloom = spec.id();
+    let fault = |key: &str| {
+        event(
+            key,
+            Fact::AggregateReviewExecutorFault {
+                bloom,
+                evidence: Evidence { subject: digest(30), kind: EvidenceKind::ExecutorFault, detail: digest(60) },
+            },
+        )
+    };
+    let journal = vec![
+        event("seal", Fact::Seal(spec)),
+        event("integrate", Fact::Integrate { bloom, claim: claim("alpha", 10, 20) }),
+        event("resolve", Fact::Resolve { bloom, tree: digest(30), head: digest(40), lineage: vec![digest(20)] }),
+        event(
+            "aggregate-verify",
+            Fact::AggregateVerifyCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: digest(30), kind: EvidenceKind::VerificationResult, detail: digest(51) },
+            },
+        ),
+        fault("fault-1"),
+        fault("fault-2"),
+    ];
+
+    let (decisions, snapshot) = replay(&journal);
+
+    assert!(matches!(decisions[4].outcome, Outcome::AggregateReviewExecutorFaulted { .. }));
+    assert!(matches!(decisions[5].outcome, Outcome::AggregateReviewExecutorWedged { .. }));
+    assert_eq!(snapshot.blooms.get(&bloom).unwrap().aggregate_fault.unwrap().rolls, 2);
+    assert_eq!(replay(&journal).0, decisions, "the fault series replays identically");
 }
 
 #[test]

@@ -143,11 +143,19 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
                 "pillar 2: the candidate reintroduces the bug it claims to fix.\nVERDICT: finding".to_owned(),
             ),
         };
+        // Three statuses, exactly as the real lane stamps them (ADR-0176): an
+        // `environment` run judged no candidate, so it is neither the pass it
+        // cannot claim nor the fail a candidate could repair.
+        let status = match mode {
+            LaneMode::Environment => "environment",
+            _ if passed => "pass",
+            _ => "fail",
+        };
         return Outcome {
             evidence: body(&json!({
                 "command": command,
                 "nonce": evidence_nonce,
-                "status": if passed { "pass" } else { "fail" },
+                "status": status,
                 "findings": findings,
                 "result_record": result_record(false, findings.as_str()),
             })),
@@ -237,14 +245,14 @@ mod tests {
     }
 
     #[test]
-    fn an_environment_verdict_fails_the_review_and_says_why_it_is_not_a_finding() {
-        // Tripwire: an `environment` verdict is a host fault, and folding it to
-        // a pass is what let two live reviews pass on a broken probe. It must
-        // read as a failure, and its findings must not look like a judgement on
-        // the candidate.
+    fn an_environment_verdict_stamps_its_own_status_rather_than_a_review_failure() {
+        // Tripwire: this mock's whole job is to present what production presents.
+        // While it stamped `fail`, the executor could only ever derive a failing
+        // review from it, so every scenario built on this mode would exercise the
+        // candidate-blaming path the fix exists to remove and pass regardless.
         let evidence = decoded(REVIEW_CRITIC_COMMAND, LaneMode::Environment);
 
-        assert_eq!(evidence["status"], Value::String("fail".to_owned()));
+        assert_eq!(evidence["status"], Value::String("environment".to_owned()));
         assert!(evidence["findings"].as_str().unwrap().contains("VERDICT: environment"));
     }
 

@@ -4,11 +4,13 @@
 
 use alloc::vec::Vec;
 
-use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate};
-use super::{AggregateReviewError, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
+use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate, stage_binding};
+use super::{
+    AggregateReviewError, AggregateReviewFault, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress,
+};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{ConfigRegistry, Evidence, ResolvedBloom, VerifyFailureSet};
+use crate::values::{ConfigRegistry, Evidence, ResolvedBloom, Transformation, VerifyFailureSet};
 
 /// Reduce a whole-bloom aggregate-review verdict (ADR-0153). A passing verdict
 /// resolves the bloom from its held fold — [`Decision::SetResolved`] plus the
@@ -114,6 +116,72 @@ pub(super) fn reduce_aggregate_review_completed(
     effects.extend(reenter_members(record, bloom, &implicated, integration.tree));
 
     Decisions { outcome: Outcome::AggregateReviewReentered { bloom: *bloom, members: implicated, rolls }, effects }
+}
+
+/// Reduce an aggregate-review executor environment fault (ADR-0176) — the
+/// dispatched review reporting that it could not judge the fold at all.
+///
+/// A branch entirely separate from [`reduce_aggregate_review_completed`],
+/// because nothing here is a verdict about a candidate: the fold stays held,
+/// every member keeps its claim and its cursor, and no findings are written. The
+/// fault records against the held fold and, while the sealed `AggregateReview`
+/// budget allows, redispatches the *same* tree and head under a fresh order.
+/// At the ceiling it emits no dispatch — the folded record is the terminal
+/// bloom-scoped wedge an operator reads, and recovery is an explicit successor
+/// once the environment is repaired, never a reactor poll that quietly buys
+/// another attempt.
+///
+/// Refused on exactly the three axes a fold-bound aggregate verdict carrying no
+/// implication can be refused on: an unknown or inactive bloom, no held
+/// integration, and a subject that is not the held fold's tree.
+pub(super) fn reduce_aggregate_review_executor_fault(
+    snapshot: &Snapshot,
+    bloom: &BloomId,
+    evidence: &Evidence,
+) -> Decisions {
+    let Some(record) = snapshot.blooms.get(bloom) else {
+        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::UnknownOrInactiveBloom));
+    };
+    if record.status != BloomStatus::Sealed {
+        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::UnknownOrInactiveBloom));
+    }
+    let Some(integration) = record.integration.clone() else {
+        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::NoPendingIntegration));
+    };
+    if !evidence.validates(&integration.tree) {
+        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::SubjectMismatch {
+            expected: integration.tree,
+            got: evidence.subject,
+        }));
+    }
+
+    // The same rule the `RecordEvidence` fold applies, read here so the ceiling
+    // decides against the count the record will actually reach.
+    let fault = AggregateReviewFault::next(record.aggregate_fault.as_ref(), integration.tree, evidence.detail);
+    let budget = record.stage_catalog.retry_budget_of(StageId::AggregateReview).unwrap_or(1);
+    let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
+
+    if fault.rolls >= budget {
+        return Decisions { outcome: Outcome::AggregateReviewExecutorWedged { bloom: *bloom, fault, budget }, effects };
+    }
+
+    let binding = stage_binding(&record.stage_catalog, StageId::AggregateReview);
+    // The same held tree and head, under a fresh order: the fold was never
+    // judged, so re-running the review is the whole retry — not a re-fold, and
+    // not a member lap. The roll stays the critic's own unspent cursor.
+    effects.push(Decision::DispatchAggregateReview {
+        bloom: *bloom,
+        transformation: Transformation::for_aggregate_review(
+            &binding,
+            integration.tree,
+            integration.head,
+            record.spec.base(),
+        ),
+        roll: record.aggregate_rolls + 1,
+        profile: binding.profile,
+    });
+
+    Decisions { outcome: Outcome::AggregateReviewExecutorFaulted { bloom: *bloom, fault, budget }, effects }
 }
 
 /// Clear the stale fold and route every named member back into the repair-only

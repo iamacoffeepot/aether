@@ -188,8 +188,53 @@ pub struct BloomRecord {
     /// the review cycle instead of re-dispatching a member stage. `None` when
     /// the bloom is not parked.
     pub review_park: Option<Digest>,
+    /// The aggregate-review executor faults this bloom has taken on the fold it
+    /// currently holds (ADR-0176); `None` until one arrives.
+    ///
+    /// Counted apart from every other ledger on the record on purpose. An
+    /// executor that could not run judged no candidate, so charging
+    /// [`aggregate_rolls`](Self::aggregate_rolls) would spend the critic's
+    /// budget on a verdict it never gave, and charging a member's
+    /// [`repair_rolls`](StageProgress::repair_rolls) would spend a candidate's
+    /// repair budget on a host outage. Journal-derived and replay-rebuilt like
+    /// the rest of the record: folded from the evidence log, so it survives a
+    /// restart and a redispatch of the same fold continues the series.
+    pub aggregate_fault: Option<AggregateReviewFault>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
+}
+
+/// A bloom's run of aggregate-review executor faults against one held fold
+/// (ADR-0176) — how many times the dispatched review could not judge that exact
+/// tree, and what the latest of them reported.
+///
+/// Keyed to the subject rather than to the bloom: a different fold is a
+/// different subject and begins its own series, so a bloom that re-integrated
+/// after an outage is not carrying the previous fold's spent retries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AggregateReviewFault {
+    /// The fold tree the faults are against — the held integration's tree.
+    pub subject: Digest,
+    /// How many faults this subject has taken, the latest one included.
+    pub rolls: u32,
+    /// The latest fault report's artifact digest.
+    pub evidence: Digest,
+}
+
+impl AggregateReviewFault {
+    /// The series a fault on `subject` reporting `evidence` produces from
+    /// `previous`: one more roll when it names the same subject, a fresh series
+    /// at one when it does not.
+    ///
+    /// The single place the rule lives, because the reducer reads it to decide
+    /// redispatch-or-wedge *before* the fold writes it, and two copies of a
+    /// counting rule drift into a ceiling that decides against a count the
+    /// record never reaches.
+    #[must_use]
+    pub fn next(previous: Option<&Self>, subject: Digest, evidence: Digest) -> Self {
+        let rolls = previous.filter(|fault| fault.subject == subject).map_or(0, |fault| fault.rolls);
+        Self { subject, rolls: rolls.saturating_add(1), evidence }
+    }
 }
 
 /// The integration fold's output — the axes [`Fact::Resolve`] carries, held on
@@ -311,6 +356,19 @@ impl Snapshot {
                     // it.
                     if evidence.kind == EvidenceKind::Question {
                         record.holds.insert(evidence.detail);
+                    }
+                    // An executor-fault admission folds the aggregate-review
+                    // fault series in the same way and for the same reason
+                    // (ADR-0176, no new fact and no new decision): the series is
+                    // derived from the evidence log, so replay rebuilds it and a
+                    // fault on a fresh fold starts over rather than inheriting
+                    // the previous fold's spent retries.
+                    if evidence.kind == EvidenceKind::ExecutorFault {
+                        record.aggregate_fault = Some(AggregateReviewFault::next(
+                            record.aggregate_fault.as_ref(),
+                            evidence.subject,
+                            evidence.detail,
+                        ));
                     }
                 }
             }
@@ -507,6 +565,7 @@ impl BloomRecord {
             landing_rolls: 0,
             resolved_head: None,
             review_park: None,
+            aggregate_fault: None,
             superseded_by: None,
         }
     }

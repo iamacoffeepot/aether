@@ -48,7 +48,14 @@ fn member(number: u64, revision: u8) -> MemberView {
 }
 
 fn one_bloom(id: BloomId, members: Vec<MemberView>) -> ViewDocument {
-    let bloom = BloomView { id, status: BloomStatus::Sealed, superseded_by: None, members, landing_blocked: None };
+    let bloom = BloomView {
+        id,
+        status: BloomStatus::Sealed,
+        superseded_by: None,
+        members,
+        landing_blocked: None,
+        executor_fault: None,
+    };
     ViewDocument { mainline: digest(0), blooms: vec![bloom] }
 }
 

@@ -132,6 +132,7 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
             landing_rolls: 0,
             resolved_head: None,
             review_park: None,
+            aggregate_fault: None,
             superseded_by: None,
         },
     );
@@ -790,6 +791,94 @@ fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
         Some(format!("{findings}\n\n## Delta-confirm findings\n\n[wp-a] Still leaking.").as_str()),
         "the delta-confirm's failure appends under its own label, keeping the frozen head",
     );
+}
+
+// ADR-0176 — an executor-fault verdict on an AggregateReview order admits the
+// fault fact, consumes its order once, and writes no findings at all. The
+// findings side effect is the load-bearing half: a fault carries no judgement of
+// the fold, so persisting one would hand the next Refine re-entry a defect
+// nobody found, and clearing one would lose the frozen set the members were
+// already re-opened against.
+#[test]
+fn an_aggregate_review_executor_fault_admits_its_own_fact_and_touches_no_findings() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let tree = Digest::from_bytes([30; 32]);
+    store.record_review_findings(bloom.0.as_bytes(), "", "pillar 2: the members disagree").unwrap();
+    let mut record = dispatch_record("n-fault", bloom, &WorkpieceId(String::new()), tree, tree);
+    record.stage = StageId::AggregateReview;
+    record_dispatch(&mut store, &record).unwrap();
+
+    let fault = UploadedEvidence {
+        nonce: Nonce("n-fault".to_owned()),
+        subject: tree,
+        verdict: StageVerdict::ExecutorFault,
+        detail: Digest::from_bytes([9; 32]),
+        candidate: None,
+        findings: Some("the sandbox refused to start.\nVERDICT: environment".to_owned()),
+        failed_verifiers: VerifyFailureSet::EMPTY,
+        cost: None,
+    };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &fault).unwrap() else {
+        panic!("a matching aggregate fault is admitted");
+    };
+    let Fact::AggregateReviewExecutorFault { bloom: faulted, evidence } = &admission.event.fact else {
+        panic!("an executor-fault verdict admits its own fact, got {:?}", admission.event.fact);
+    };
+    assert_eq!(*faulted, bloom);
+    assert_eq!(evidence.subject, tree, "the fault binds the tree the order displayed");
+    assert_eq!(evidence.kind, EvidenceKind::ExecutorFault);
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap().as_deref(),
+        Some("pillar 2: the members disagree"),
+        "a fault neither appends to the frozen findings nor clears them",
+    );
+
+    // Consume-once, like every other admitted result: the order is spent, so a
+    // replayed fault refuses rather than buying a second retry.
+    assert!(matches!(
+        admit_uploaded(&mut store, &fault).unwrap(),
+        AdmitDecision::Refused(IntakeRefusal::UnknownNonce(_))
+    ));
+}
+
+// ADR-0176 ratified the fault lifecycle for the aggregate review alone, so every
+// other stage refuses the verdict rather than being handed semantics no decision
+// covers. Tripwire: routing it by verdict alone would send a member-stage fault
+// into `AttemptCompleted` as an ordinary failure — the flattening this issue
+// exists to remove, reintroduced one stage over.
+#[test]
+fn an_executor_fault_on_any_other_stage_is_refused_and_the_order_stays_live() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let subject = Digest::from_bytes([30; 32]);
+
+    for (nonce, stage) in
+        [("n-f-verify", StageId::Verify), ("n-f-construct", StageId::Construct), ("n-f-av", StageId::AggregateVerify)]
+    {
+        let mut record = dispatch_record(nonce, bloom, &WorkpieceId("wp".to_owned()), subject, subject);
+        record.stage = stage;
+        record_dispatch(&mut store, &record).unwrap();
+
+        let upload = UploadedEvidence {
+            nonce: Nonce(nonce.to_owned()),
+            subject,
+            verdict: StageVerdict::ExecutorFault,
+            detail: Digest::from_bytes([9; 32]),
+            candidate: None,
+            findings: None,
+            failed_verifiers: VerifyFailureSet::EMPTY,
+            cost: None,
+        };
+        assert!(
+            matches!(
+                admit_uploaded(&mut store, &upload).unwrap(),
+                AdmitDecision::Refused(IntakeRefusal::ExecutorFaultOutOfStage(refused)) if refused == stage
+            ),
+            "{stage:?} has no ratified fault lifecycle",
+        );
+        assert!(store.lookup_order(nonce).unwrap().is_some(), "`{nonce}` remains live after refusal");
+    }
 }
 
 #[test]

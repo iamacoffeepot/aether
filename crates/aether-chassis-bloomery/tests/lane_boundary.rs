@@ -249,6 +249,58 @@ fn a_failing_aggregate_review_drives_a_repair_lap_that_resolves() {
 }
 
 #[test]
+fn an_aggregate_review_that_cannot_run_retries_the_review_and_never_opens_a_repair_lap() {
+    // ADR-0176, end to end below the spawn seam: the critic lane reports that it
+    // could not execute at all, and the whole chain — the lane's stamped
+    // `environment`, the backend's verdict derivation, the intake's stage
+    // binding, the reducer's fault ledger — has to carry that as a host fault.
+    //
+    // Every assertion below failed before this chain existed: the fault
+    // flattened to `status: fail`, so the member that had already resolved was
+    // re-opened into Refine against a candidate no critic ever read, and a lap
+    // of its bounded repair budget was spent on a broken sandbox.
+    //
+    // Only the critic faults: the member line runs green, so the fold under
+    // review is one every gate before the critic already accepted. Both faults
+    // take that same fold, so the second reaches AggregateReview's sealed budget
+    // of two and the series is terminal.
+    let mut harness = LaneHarness::start(
+        &LaneScript::all_passing()
+            .then(REVIEW_CRITIC_COMMAND, LaneMode::Environment)
+            .then(REVIEW_CRITIC_COMMAND, LaneMode::Environment),
+    );
+
+    harness.settle("the member comes to rest", at_rest);
+    let bloom = harness.settle("the executor-fault series reaches its ceiling", |bloom| {
+        bloom.executor_fault.is_some_and(|fault| fault.terminal)
+    });
+
+    let fault = bloom.executor_fault.expect("the settle predicate held");
+    assert_eq!((fault.rolls, fault.budget), (2, 2), "the series is bounded by the sealed AggregateReview budget");
+    assert_ne!(
+        fault.evidence,
+        aether_bloomery::Digest::default(),
+        "a terminal fault must name the report that produced it, or the halt is unaccountable",
+    );
+    assert_eq!(bloom.status, BloomStatus::Sealed, "a bloom that was never judged neither resolves nor lands");
+
+    // The whole point: no member paid for it.
+    assert!(bloom.members[0].resolution.is_some(), "the member's claim survives an outage it did not cause");
+    assert!(bloom.members[0].wedge.is_none(), "and it is not the one that wedged");
+
+    // One redispatch below the ceiling and none at it: exactly two critic runs,
+    // and no second construct lap, which is what a repair re-entry would leave.
+    let ledger = harness.ledger();
+    let critics = ledger.iter().filter(|run| run.command == REVIEW_CRITIC_COMMAND).count();
+    let constructs = ledger.iter().filter(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND).count();
+    assert_eq!(critics, 2, "one bounded redispatch of the review, then a terminal stop: {ledger:?}");
+    assert_eq!(constructs, 1, "no member re-entered Refine for a fault it did not cause: {ledger:?}");
+
+    // And the stop is an accountable one, not a stall and not a quiet finish.
+    harness.assert_live();
+}
+
+#[test]
 fn every_dispatch_releases_the_scratch_worktree_it_materialized() {
     // A worktree per order, forever, is the leak the release path exists to
     // prevent — and it is invisible to any double mounted above the spawn,

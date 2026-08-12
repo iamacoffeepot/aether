@@ -34,6 +34,16 @@ pub enum StageVerdict {
     /// `Question` artifact, admitted as evidence *about* the attempt, never a
     /// resolution and never a failure.
     Parked,
+    /// The dispatched lane could not judge its displayed subject at all
+    /// (ADR-0176) — the ground step that shows the candidate did not execute, so
+    /// there was nothing to judge.
+    ///
+    /// Asserts nothing about the subject: not a pass, and not the failure a
+    /// candidate could repair. Only `StageId::AggregateReview` has ratified
+    /// lifecycle semantics for it, so intake refuses it on every other stage
+    /// rather than inventing them. Appended past [`StageVerdict::Parked`] so the
+    /// prior verdicts' wire discriminants are unchanged.
+    ExecutorFault,
 }
 
 impl StageVerdict {
@@ -43,6 +53,7 @@ impl StageVerdict {
             Self::VerificationPassed | Self::VerificationFailed => EvidenceKind::VerificationResult,
             Self::ReviewFinding => EvidenceKind::ReviewFinding,
             Self::Parked => EvidenceKind::Question,
+            Self::ExecutorFault => EvidenceKind::ExecutorFault,
         }
     }
 }

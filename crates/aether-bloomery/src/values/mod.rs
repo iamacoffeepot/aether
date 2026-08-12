@@ -156,6 +156,18 @@ pub enum EvidenceKind {
     /// admitting it folds a per-member pending-decision hold that blocks the
     /// bloom from resolving until an adopting answer releases it.
     Question,
+    /// A dispatched lane's report that it could not judge its subject at all
+    /// (ADR-0176) — an executor environment fault, evidence *about* the
+    /// dispatch rather than about the candidate.
+    ///
+    /// Its `detail` names the fault report the lane produced. Admitting it folds
+    /// the bloom's aggregate-review fault series (see
+    /// [`BloomRecord::aggregate_fault`](crate::BloomRecord::aggregate_fault)),
+    /// keyed to the subject it names, the way a
+    /// [`Question`](Self::Question) admission folds a pending-decision hold.
+    /// Appended past [`EvidenceKind::Question`] so the prior kinds' wire
+    /// discriminants are unchanged.
+    ExecutorFault,
 }
 
 /// The sealed forecast of what a bloom's set will spend — what a study report

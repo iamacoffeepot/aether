@@ -306,6 +306,45 @@ scope, membership, and configuration unchanged, is an execution decision — a
 grant. A moved base, or changed scope, membership, or configuration, is a
 successor doing real work — a supersession.
 
+## When the whole-bloom review could not run
+
+A member wedge answers for a member. The bloom-scope counterpart is the
+whole-bloom review reporting that its executor could not judge the fold at all —
+a sandbox that would not start, a checkout the host could not materialize. No
+candidate was read, so this is not a review finding and it opens no member
+repair lap; it lands on the bloom's own view instead:
+
+```json
+"executor_fault": {
+  "subject": [ … ],   // the fold tree the faults are against
+  "rolls": 2,         // faults taken on that fold
+  "budget": 2,        // the sealed AggregateReview retry budget
+  "evidence": [ … ],  // the latest fault report's artifact digest
+  "terminal": true    // the series reached its ceiling
+}
+```
+
+The field is absent on an ordinary bloom. Below the budget the coordinator
+re-dispatches the same review against the same held fold under a fresh order, so
+a transient outage costs nothing but time. At the budget (`terminal: true`) it
+stops: no further dispatch, the fold and every member claim still held, and the
+members exactly where they were.
+
+That stop is deliberate and has no in-band release. Repairing the host is
+operational authority rather than a decision about the work, so there is no
+question to answer and no grant to make — a `terminal: true` bloom recovers by
+repairing the environment and then sealing a successor:
+
+```bash
+curl -s -X POST localhost:8910/blooms/<bloom-hex>/supersede \
+  -H 'content-type: application/json' \
+  -d '{"successor_draft":"2"}'
+```
+
+Fetch the fault report itself the way you fetch any artifact —
+`curl -s localhost:8910/artifacts/<hex-of-evidence>` — to read what the lane
+said it could not do.
+
 ## How it works
 
 The router claims a small set of path prefixes on the HTTP server cap and

@@ -116,8 +116,14 @@ pub fn classify(document: &ViewDocument, outstanding: &[String]) -> Quiescence {
         let statuses: Vec<String> = document.blooms.iter().map(|bloom| format!("{:?}", bloom.status)).collect();
         // A sealed bloom whose every member carries a wedge has stopped for a
         // recorded reason; a bloom that reached a terminal status has stopped
-        // because it is done.
-        let wedged = document.blooms.iter().any(|bloom| bloom.members.iter().any(|member| member.wedge.is_some()));
+        // because it is done. A bloom at its aggregate-review executor-fault
+        // ceiling (ADR-0176) is the first stop of the recorded kind that is not
+        // a *member's*: every member resolved and the fold is still held, so
+        // without this it reads as a bloom that finished.
+        let wedged = document.blooms.iter().any(|bloom| {
+            bloom.members.iter().any(|member| member.wedge.is_some())
+                || bloom.executor_fault.is_some_and(|fault| fault.terminal)
+        });
         let summary = statuses.join(", ");
         return if wedged {
             Quiescence::Wedged(summary)
@@ -136,7 +142,8 @@ pub fn classify(document: &ViewDocument, outstanding: &[String]) -> Quiescence {
 #[cfg(test)]
 mod tests {
     use aether_bloomery::{
-        BloomId, BloomStatus, BloomView, Digest, Evidence, EvidenceKind, MemberView, ViewDocument, Wedge, WorkpieceId,
+        BloomId, BloomStatus, BloomView, Digest, Evidence, EvidenceKind, ExecutorFaultView, MemberView, ViewDocument,
+        Wedge, WorkpieceId,
     };
 
     use super::{Quiescence, classify};
@@ -170,6 +177,7 @@ mod tests {
                 superseded_by: None,
                 members,
                 landing_blocked: None,
+                executor_fault: None,
             }],
         }
     }
@@ -194,6 +202,33 @@ mod tests {
         let stalled = classify(&document(BloomStatus::Resolved, vec![member(true, None)]), &["n-lost".to_owned()]);
 
         assert!(matches!(stalled, Quiescence::Stalled(_)), "an outstanding order outranks a clean projection");
+    }
+
+    #[test]
+    fn a_terminal_executor_fault_is_an_accountable_stop_not_a_finished_bloom() {
+        // Tripwire (ADR-0176): a bloom at its executor-fault ceiling has every
+        // member resolved and its fold still held, so the member-shaped tests
+        // above all pass on it. Classifying that as `Terminal` would let a bloom
+        // stopped dead on a broken host read as one that finished its work.
+        let faulted = ViewDocument {
+            mainline: Digest::default(),
+            blooms: vec![BloomView {
+                id: BloomId(Digest::from_bytes([7; 32])),
+                status: BloomStatus::Sealed,
+                superseded_by: None,
+                members: vec![member(true, None)],
+                landing_blocked: None,
+                executor_fault: Some(ExecutorFaultView {
+                    subject: Digest::from_bytes([3; 32]),
+                    rolls: 2,
+                    budget: 2,
+                    evidence: Digest::from_bytes([9; 32]),
+                    terminal: true,
+                }),
+            }],
+        };
+
+        assert!(matches!(classify(&faulted, &[]), Quiescence::Wedged(_)));
     }
 
     #[test]

@@ -49,7 +49,11 @@ pub enum Decision {
     },
     /// Append non-integrating evidence to a bloom's evidence log (from
     /// admission). A [`EvidenceKind::Question`](crate::EvidenceKind::Question) entry additionally folds its
-    /// `detail` digest into the record's open holds (see [`BloomRecord::holds`](crate::BloomRecord::holds)).
+    /// `detail` digest into the record's open holds (see [`BloomRecord::holds`](crate::BloomRecord::holds)),
+    /// and an [`EvidenceKind::ExecutorFault`](crate::EvidenceKind::ExecutorFault)
+    /// entry folds the bloom's aggregate-review fault series keyed to the
+    /// subject it names (see [`BloomRecord::aggregate_fault`](crate::BloomRecord::aggregate_fault),
+    /// ADR-0176).
     RecordEvidence {
         /// The bloom the evidence is recorded on.
         bloom: BloomId,

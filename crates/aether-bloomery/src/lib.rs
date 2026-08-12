@@ -84,15 +84,16 @@ pub use manifest::{
 };
 pub use port::{
     BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome, Conclusion,
-    EvidenceRef, ExecutionStatus, ExecutorBackend, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal,
-    LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend, SourceBackend, SourceSnapshot,
-    ViewDocument, WorkHandle, WorkOrder,
+    EvidenceRef, ExecutionStatus, ExecutorBackend, ExecutorFaultView, IntegrateOutcome, IntegrationPosition,
+    LandOutcome, LandProposal, LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend,
+    SourceBackend, SourceSnapshot, ViewDocument, WorkHandle, WorkOrder,
 };
 pub use reduce::{
-    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError,
-    BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, FoldedIntegration, GrantAttemptsError,
-    IntegrateError, LandError, LandingRejectedError, OrphanClaimReleaseError, Outcome, ResolveError, SealConflict,
-    SealError, Snapshot, StageProgress, SupersedeError, VerifyFailedError, is_active_unlanded, reduce, view_of,
+    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault, AggregateVerifyError,
+    AttemptCompletedError, BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, FoldedIntegration,
+    GrantAttemptsError, IntegrateError, LandError, LandingRejectedError, OrphanClaimReleaseError, Outcome,
+    ResolveError, SealConflict, SealError, Snapshot, StageProgress, SupersedeError, VerifyFailedError,
+    is_active_unlanded, reduce, view_of,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;

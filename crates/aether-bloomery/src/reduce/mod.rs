@@ -46,7 +46,7 @@ pub use error::{
 pub use event::{Event, Fact};
 pub use outcome::{Decisions, Outcome};
 pub use seal::is_active_unlanded;
-pub use snapshot::{BloomRecord, BloomStatus, FoldedIntegration, Snapshot, StageProgress};
+pub use snapshot::{AggregateReviewFault, BloomRecord, BloomStatus, FoldedIntegration, Snapshot, StageProgress};
 pub use view::view_of;
 
 use crate::values::ResolvedConfigs;
@@ -60,7 +60,7 @@ use land::reduce_land;
 use landing::reduce_landing_rejected;
 use observe::reduce_observe_mainline;
 use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_claim_release};
-use review::reduce_aggregate_review_completed;
+use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
 use seal::{reduce_seal, reduce_supersede};
 use verify::reduce_verify_failed;
 
@@ -113,6 +113,9 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> 
         }
         Fact::CompleteOrphanClaimRelease { request, completion } => {
             reduce_complete_orphan_claim_release(snapshot, request, *completion)
+        }
+        Fact::AggregateReviewExecutorFault { bloom, evidence } => {
+            reduce_aggregate_review_executor_fault(snapshot, bloom, evidence)
         }
     }
 }

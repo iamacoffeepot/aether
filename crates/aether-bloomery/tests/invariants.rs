@@ -1005,6 +1005,163 @@ fn a_failing_aggregate_review_reopens_members_then_parks_at_the_ceiling() {
     ));
 }
 
+// ADR-0176 — an aggregate review whose executor could not run is not a verdict
+// about the candidate, so it must not move one. The fold stays held, every claim
+// stands, no cursor moves, and the retry is a re-dispatch of the *same* review
+// against the *same* tree, bounded by the sealed AggregateReview budget on a
+// ledger of its own.
+//
+// Tripwire for the ledger separation above all: charging `aggregate_rolls` would
+// spend the critic's two passes on judgments it never gave, and re-opening
+// members would spend a candidate's repair budget on a host outage — the exact
+// behaviour that reached the reducer while the fault was flattened to a failing
+// review.
+#[test]
+fn an_aggregate_review_executor_fault_retries_the_review_without_charging_any_other_ledger() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: claim("alpha", 10, 100) }));
+    let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
+
+    let fault = |key: &str, subject: u8, detail: u8| {
+        event(
+            key,
+            Fact::AggregateReviewExecutorFault {
+                bloom,
+                evidence: Evidence {
+                    subject: digest(subject),
+                    kind: EvidenceKind::ExecutorFault,
+                    detail: digest(detail),
+                },
+            },
+        )
+    };
+
+    // A fault bound to a tree other than the held fold's is stale — refused on
+    // the same axis a stale verdict is, so a report from a superseded fold
+    // cannot spend a newer fold's retries.
+    assert!(matches!(
+        reduce(&snapshot, &fault("stale", 99, 60), &ResolvedConfigs::default()).outcome,
+        Outcome::AggregateReviewRejected(AggregateReviewError::SubjectMismatch { .. }),
+    ));
+
+    // The first fault: one redispatch of the same held tree, and nothing else.
+    let (after1, d1) = step(&snapshot, &fault("fault-1", 40, 60));
+    assert!(matches!(
+        d1.outcome,
+        Outcome::AggregateReviewExecutorFaulted { fault, budget: 2, .. } if fault.rolls == 1 && fault.subject == digest(40),
+    ));
+    match d1.effects.iter().find(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })) {
+        Some(Decision::DispatchAggregateReview { transformation, roll, .. }) => {
+            assert_eq!(*roll, 1, "a fault spends no review roll, so the critic's cursor has not moved");
+            assert_eq!(transformation.inputs[0], digest(40), "the retry judges the same held fold");
+            assert_eq!(transformation.checkout, digest(41), "and checks out the same head");
+        }
+        other => panic!("expected a redispatch of the held fold, got {other:?}"),
+    }
+    assert!(
+        !d1.effects.iter().any(|effect| matches!(
+            effect,
+            Decision::DispatchAttempt { .. }
+                | Decision::RevokeResolution { .. }
+                | Decision::RecordAggregateRoll { .. }
+                | Decision::RecordIntegration { .. }
+                | Decision::RecordReviewPark { .. }
+        )),
+        "a fault re-opens no member, revokes no claim, spends no review roll, and clears no fold",
+    );
+    let record = after1.blooms.get(&bloom).unwrap();
+    assert_eq!(record.aggregate_fault.unwrap().rolls, 1);
+    assert_eq!(record.aggregate_rolls, 0, "the critic's ledger is untouched");
+    assert_eq!(record.claims.len(), 2, "both claims stand");
+    assert!(record.integration.is_some(), "the fold stays held for the retry");
+    assert!(record.holds.is_empty(), "a fault raises no pending decision — there is nothing to adopt");
+    for member in ["alpha", "beta"] {
+        assert!(record.progress.get(&workpiece(member)).is_none_or(|cursor| cursor.repair_rolls == 0));
+    }
+
+    // Replaying the admitted fault is a no-op: the series is folded from the
+    // evidence log, so an idempotency-keyed replay must not buy a second roll.
+    let (replayed, d_replay) = step(&after1, &fault("fault-1", 40, 60));
+    assert!(matches!(d_replay.outcome, Outcome::Duplicate));
+    assert_eq!(replayed.blooms.get(&bloom).unwrap().aggregate_fault.unwrap().rolls, 1);
+
+    // The second fault on the same fold reaches the sealed budget: terminal, and
+    // it dispatches nothing at all rather than looping the review forever.
+    let (after2, d2) = step(&after1, &fault("fault-2", 40, 61));
+    assert!(matches!(
+        d2.outcome,
+        Outcome::AggregateReviewExecutorWedged { fault, budget: 2, .. } if fault.rolls == 2 && fault.evidence == digest(61),
+    ));
+    assert_eq!(d2.effects.len(), 1, "the terminal fault records its evidence and decides nothing else");
+    assert!(matches!(d2.effects[0], Decision::RecordEvidence { .. }));
+    let record = after2.blooms.get(&bloom).unwrap();
+    assert_eq!(record.aggregate_rolls, 0, "even the terminal fault charges the critic nothing");
+    assert_eq!(record.claims.len(), 2, "and re-opens no member");
+    assert!(record.review_park.is_none(), "an executor outage is not an ADR-0151 pending decision");
+}
+
+// ADR-0176 — the fault series is keyed to the fold it is against, so a bloom
+// that re-integrated after an outage starts over rather than inheriting spent
+// retries. Tripwire: a bloom-keyed counter would wedge the very next fold on its
+// first fault, permanently, with no route back other than supersession.
+#[test]
+fn a_fault_series_resets_when_a_different_fold_arrives() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&snapshot, &event("i1", Fact::Integrate { bloom, claim: claim("wp", 10, 100) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
+
+    let fault = |key: &str, subject: u8| {
+        event(
+            key,
+            Fact::AggregateReviewExecutorFault {
+                bloom,
+                evidence: Evidence { subject: digest(subject), kind: EvidenceKind::ExecutorFault, detail: digest(60) },
+            },
+        )
+    };
+    let (snapshot, _) = step(&snapshot, &fault("f1", 40));
+    assert_eq!(snapshot.blooms.get(&bloom).unwrap().aggregate_fault.unwrap().rolls, 1);
+
+    // A failing review clears the fold and re-opens the member; the repaired
+    // member re-integrates onto a fresh tree.
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "review-fail",
+            Fact::AggregateReviewCompleted {
+                bloom,
+                passed: false,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::ReviewFinding, detail: digest(50) },
+                implicated: vec![],
+            },
+        ),
+    );
+    let (snapshot, _) = step(&snapshot, &event("i2", Fact::Integrate { bloom, claim: claim("wp", 10, 101) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r2", Fact::Resolve { bloom, tree: digest(44), head: digest(45), lineage: vec![] }));
+    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v2", 44));
+
+    let (after, decisions) = step(&snapshot, &fault("f2", 44));
+    let series = after.blooms.get(&bloom).unwrap().aggregate_fault.unwrap();
+    assert_eq!(series.subject, digest(44), "the series re-keys onto the fold it is against");
+    assert_eq!(series.rolls, 1, "a new fold begins its own series rather than inheriting the last one's");
+    assert!(
+        decisions.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
+        "so the first fault on the new fold still buys its bounded retry",
+    );
+}
+
 // ADR-0153 — the owner's answer to a parked bloom re-arms the review cycle:
 // adopting the park question releases the hold, clears the marker, resets the
 // roll cursor, and dispatches a fresh full review from the still-held fold.

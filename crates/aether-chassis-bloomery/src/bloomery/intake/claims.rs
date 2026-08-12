@@ -123,6 +123,7 @@ fn verdict_token(verdict: StageVerdict) -> &'static str {
         StageVerdict::VerificationFailed => "fail",
         StageVerdict::ReviewFinding => "finding",
         StageVerdict::Parked => "parked",
+        StageVerdict::ExecutorFault => "fault",
     }
 }
 
@@ -134,6 +135,7 @@ fn verdict_from_token(token: &str) -> Option<StageVerdict> {
         "fail" => StageVerdict::VerificationFailed,
         "finding" => StageVerdict::ReviewFinding,
         "parked" => StageVerdict::Parked,
+        "fault" => StageVerdict::ExecutorFault,
         _ => return None,
     })
 }

@@ -325,6 +325,29 @@ pub enum Fact {
         /// Which terminal the source reached.
         completion: OrphanClaimReleaseCompletion,
     },
+    /// A dispatched whole-bloom aggregate review reported that its executor
+    /// could not judge the fold at all (ADR-0176).
+    ///
+    /// Distinct from a failing [`Fact::AggregateReviewCompleted`] because no
+    /// candidate was judged: the reducer records the fault against the held fold
+    /// and retries the same tree under a fresh order while the sealed
+    /// `AggregateReview` budget allows, then records a terminal bloom-scoped
+    /// wedge. It never spends
+    /// [`aggregate_rolls`](crate::BloomRecord::aggregate_rolls), revokes a
+    /// claim, moves a member cursor, or writes review findings — an executor
+    /// outage is not something a member repair lap can fix, and charging one
+    /// makes a bounded ledger lie.
+    ///
+    /// Appended past [`Fact::CompleteOrphanClaimRelease`] so the prior facts'
+    /// wire discriminants are unchanged.
+    AggregateReviewExecutorFault {
+        /// The bloom whose review could not run.
+        bloom: BloomId,
+        /// The fault evidence, bound to the held fold's tree — the reducer
+        /// refuses a fault naming any other subject, so a report from a
+        /// superseded fold cannot spend a newer fold's retries.
+        evidence: Evidence,
+    },
 }
 
 impl Fact {
