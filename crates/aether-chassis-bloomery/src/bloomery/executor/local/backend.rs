@@ -110,8 +110,8 @@ impl LocalExecutor {
     }
 
     // Capture a passed construct-lane run's candidate (ADR-0152): commit the run
-    // worktree's changes through the runner seam, then record both produced
-    // backend objects as correspondence rows under their content-derived digests. Every
+    // worktree's changes through the runner seam, then record both produced backend
+    // objects as correspondence rows under their content-derived digests. Every
     // shortfall — a shell fault, a clean worktree (contradicting the passed
     // substantive-conclusion gate), a store write fault — folds to `None` with a
     // warn; the caller downgrades the verdict, so a lost capture reads as a

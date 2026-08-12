@@ -1,11 +1,11 @@
 //! Git object semantics at the backend-correspondence adapter edge.
 //!
-//! A bloomery [`Digest`](aether_bloomery::Digest) is a pure content-address — a sha256 over a bloom
-//! *value*'s aether-wire bytes — and is **never** the sha of any git object.
-//! Real GitHub repositories are sha1 (20-byte / 40-hex) object format, so the
-//! source port cannot hand a digest to git as an object sha. The domain-owned
-//! [`aether_bloomery::Correspondence`] stores backend object bytes opaquely;
-//! this module owns the checked conversion between those bytes and the
+//! A bloomery [`Digest`](aether_bloomery::Digest) is a pure content-address — a
+//! sha256 over a bloom *value*'s aether-wire bytes — and is **never** the sha of
+//! any git object. Real GitHub repositories are sha1 (20-byte / 40-hex) object
+//! format, so the source port cannot hand a digest to git as an object sha. The
+//! domain-owned [`aether_bloomery::Correspondence`] stores backend object bytes
+//! opaquely; this module owns the checked conversion between those bytes and the
 //! **format-tagged** [`GitObjectId`] consumed by Git APIs.
 //!
 //! Every consumer holds the domain correspondence directly; the conversion below
