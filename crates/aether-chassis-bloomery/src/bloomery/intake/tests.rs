@@ -3,7 +3,9 @@
 //! end-to-end with the reducer as the oracle.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::fmt::{Debug, Write as _};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
     BloomDraft, BloomId, BloomRecord, BloomStatus, Budget, ConfigRegistry, Decision, Digest, Event, Evidence,
@@ -15,6 +17,10 @@ use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
     ActionsExecutor, Artifact, ExecutorError, GithubError, LaneWorkflows, RunConclusion, RunStatus,
 };
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id, Record};
+use tracing::subscriber::with_default;
+use tracing::{Event as TracingEvent, Metadata, Subscriber};
 
 use super::{
     Admission, AdmitDecision, AdmitSink, DispatchError, DispatchRecord, EvidenceClaims, IntakeRefusal,
@@ -147,6 +153,55 @@ impl AdmitSink for Collector {
     fn admit(&mut self, admission: Admission) {
         self.0.push(admission);
     }
+}
+
+struct CapturingSubscriber {
+    events: Arc<Mutex<Vec<String>>>,
+    next_span: AtomicU64,
+}
+
+impl CapturingSubscriber {
+    fn new(events: Arc<Mutex<Vec<String>>>) -> Self {
+        Self { events, next_span: AtomicU64::new(1) }
+    }
+}
+
+#[derive(Default)]
+struct CapturedFields(String);
+
+impl Visit for CapturedFields {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+        write!(&mut self.0, "{}={value:?} ", field.name()).expect("writing to a String cannot fail");
+    }
+}
+
+impl Subscriber for CapturingSubscriber {
+    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _span: &Attributes<'_>) -> Id {
+        Id::from_u64(self.next_span.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+    fn event(&self, event: &TracingEvent<'_>) {
+        let mut fields = CapturedFields::default();
+        event.record(&mut fields);
+        self.events.lock().unwrap().push(format!(
+            "{} {} {}",
+            event.metadata().level(),
+            event.metadata().target(),
+            fields.0
+        ));
+    }
+
+    fn enter(&self, _span: &Id) {}
+
+    fn exit(&self, _span: &Id) {}
 }
 
 #[test]
@@ -398,9 +453,16 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
     let claims = SeededClaims(claims);
     let mut sink = Collector::default();
 
-    let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, None, &mut sink).unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let report = with_default(CapturingSubscriber::new(events.clone()), || {
+        run_intake_cycle(&mut store, &shell, &[handle], &claims, None, &mut sink).unwrap()
+    });
     assert_eq!((report.completed, report.admitted, report.refused), (1, 0, 1));
     assert!(sink.0.is_empty(), "a refused upload never reaches the reducer");
+    let events = events.lock().unwrap().join("\n");
+    assert!(events.contains("aether_chassis_bloomery::intake"), "the refusal uses the intake target: {events}");
+    assert!(events.contains("nonce=n-bad"), "the refusal names the stranded order: {events}");
+    assert!(events.contains("DigestMismatch"), "the refusal explains why intake rejected the upload: {events}");
     // The order stayed live — the mismatch did not consume it.
     assert!(store.lookup_order("n-bad").unwrap().is_some());
 }

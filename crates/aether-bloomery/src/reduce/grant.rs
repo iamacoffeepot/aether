@@ -7,7 +7,7 @@
 //! revision — to express an execution decision, and throws away the candidate
 //! the wedged member had already built. This door expresses it directly.
 
-use super::attempt::{DispatchTargets, SealedLine, move_effects};
+use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate};
 use super::{BloomStatus, Decisions, GrantAttemptsError, Outcome, Snapshot, StageProgress};
 use crate::ids::{BloomId, StageId, WorkpieceId};
 
@@ -114,12 +114,13 @@ pub(super) fn reduce_grant_attempts(
             seen_verify_failures: cursor.seen_verify_failures,
         }
     };
-    let effects = move_effects(
+    let effects = move_effects_with_candidate(
         *bloom,
         workpiece,
         member.scope_revision,
         progress,
         DispatchTargets { subject, checkout },
+        candidate.map(|current| current.tree),
         SealedLine { configs: member.configs.layered_over(record.spec.configs()), catalog: &record.stage_catalog },
     );
     Decisions {

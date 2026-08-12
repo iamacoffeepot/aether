@@ -885,7 +885,15 @@ fn a_failing_aggregate_review_reopens_members_then_parks_at_the_ceiling() {
     let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
     let (snapshot, _) =
         step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
-    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
+    let (mut snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
+
+    // Model claim-only inheritance explicitly: alpha has integrated candidate
+    // 100, but its seeded cursor carries no CandidateRef. Its repair accounting
+    // remains live independently of that absent checkout pair.
+    let alpha_progress = snapshot.blooms.get_mut(&bloom).unwrap().progress.get_mut(&workpiece("alpha")).unwrap();
+    assert_eq!(alpha_progress.candidate, None, "the repair case starts without a candidate-bearing cursor");
+    alpha_progress.repair_rolls = 2;
+    alpha_progress.seen_verify_failures = VerifyFailureSet::one(VerifyFailure::Clippy);
 
     let verdict = |key: &str, passed: bool, subject: u8, implicated: Vec<&str>| {
         event(
@@ -923,17 +931,31 @@ fn a_failing_aggregate_review_reopens_members_then_parks_at_the_ceiling() {
     let (after1, d1) = step(&snapshot, &verdict("fail-1", false, 40, vec!["alpha"]));
     assert!(matches!(&d1.outcome, Outcome::AggregateReviewReentered { members, rolls: 1, .. }
         if members == &vec![workpiece("alpha")]));
-    assert!(
-        d1.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { stage: StageId::Refine, workpiece: wp, .. }
-            if *wp == workpiece("alpha"))),
-        "the re-opened member dispatches into Refine",
-    );
+    match d1.effects.iter().find(|effect| {
+        matches!(effect, Decision::DispatchAttempt { stage: StageId::Refine, workpiece: wp, .. }
+            if *wp == workpiece("alpha"))
+    }) {
+        Some(Decision::DispatchAttempt { transformation, candidate, .. }) => {
+            assert_eq!(*candidate, Some(digest(100)), "the dispatch displays the inherited claim's candidate");
+            assert_eq!(transformation.inputs[0], digest(100), "repair evidence binds the claimed candidate");
+            assert_eq!(transformation.checkout, digest(1), "a claim-only member repairs from the sealed base checkout");
+        }
+        other => panic!("expected alpha's Refine DispatchAttempt, got {other:?}"),
+    }
     let record = after1.blooms.get(&bloom).unwrap();
     assert!(!record.claims.contains_key(&workpiece("alpha")), "the implicated member's claim is revoked");
     assert!(record.claims.contains_key(&workpiece("beta")), "an unimplicated member's claim survives");
     assert!(record.integration.is_none(), "the stale fold is cleared");
     assert_eq!(record.aggregate_rolls, 1);
-    assert_eq!(record.progress.get(&workpiece("alpha")).unwrap().stage, StageId::Refine);
+    let alpha_progress = record.progress.get(&workpiece("alpha")).unwrap();
+    assert_eq!(alpha_progress.stage, StageId::Refine);
+    assert_eq!(alpha_progress.candidate, None, "claim-only re-entry does not invent a checkout pair");
+    assert_eq!(alpha_progress.repair_rolls, 2, "aggregate re-entry preserves repair accounting");
+    assert_eq!(
+        alpha_progress.seen_verify_failures,
+        VerifyFailureSet::one(VerifyFailure::Clippy),
+        "aggregate re-entry preserves verifier history",
+    );
 
     // The bloom cannot resolve while a member is re-open.
     assert!(matches!(
