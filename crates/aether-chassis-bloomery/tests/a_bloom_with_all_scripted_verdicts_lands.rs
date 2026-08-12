@@ -12,18 +12,44 @@
 mod common;
 mod fixture;
 
-use aether_bloomery::{BloomStatus, StudyRecord};
+use aether_bloomery::{BloomStatus, StudyCost, StudyRecord};
 use aether_chassis_bloomery::artifacts::GetResult;
+use aether_chassis_bloomery::bloomery::ScriptedUpload;
 use aether_data::wire::from_bytes;
-use fixture::{FixtureHarness, captured, digest, measured, measured_cost, passed};
+use fixture::{FixtureHarness, captured, digest, passed};
 
 /// The workpiece the single sealed member covers.
 const WORKPIECE: &str = "wp";
+
+/// A measured attempt cost, distinct in every column so the study record read
+/// back at the end cannot be mistaken for a default-constructed one.
+const fn measured_cost() -> StudyCost {
+    StudyCost {
+        // Zero, and not because the attempt was free: pricing is the sealed
+        // table's job, and the default table prices nothing.
+        cost_micro_usd: 0,
+        turns: 4,
+        duration_millis: 90_210,
+        input_tokens: 1_100,
+        cache_write_tokens: 210,
+        cache_write_1h_tokens: 160,
+        cache_write_5m_tokens: 50,
+        cache_read_tokens: 8_100,
+        output_tokens: 910,
+    }
+}
+
+/// The same upload, carrying a measured cost — what a lane that ran under a
+/// usage-recording harness reports alongside its verdict.
+fn measured(upload: ScriptedUpload, cost: StudyCost) -> ScriptedUpload {
+    ScriptedUpload { cost: Some(cost), ..upload }
+}
 
 #[test]
 fn a_bloom_with_all_scripted_verdicts_lands() {
     let mut harness = FixtureHarness::start("all-passing-scenario");
     let scope_revision = digest(0x51);
+    let sealed_on = harness.view().mainline;
     let bloom = harness.seal_member(WORKPIECE, scope_revision);
 
     // Construct. The seal's dispatch decision is already in the outbox; the tick
@@ -59,7 +85,7 @@ fn a_bloom_with_all_scripted_verdicts_lands() {
     // the aggregate gates and the landing follow from it.
     harness.land_the_fold(bloom);
 
-    assert_ne!(harness.view().mainline, harness.base(), "mainline advanced off the base the bloom sealed on");
+    assert_ne!(harness.view().mainline, sealed_on, "mainline advanced off the base the bloom sealed on");
     assert_eq!(harness.bloom(bloom).status, BloomStatus::Landed);
 
     // The study record the Construct attempt's cost produced. The executor

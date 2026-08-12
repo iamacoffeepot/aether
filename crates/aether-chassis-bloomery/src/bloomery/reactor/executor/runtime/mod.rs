@@ -1444,19 +1444,18 @@ impl NativeActor for ExecutorReactorCapability {
     /// bloom instead of sleeping on it.
     ///
     #[cfg(any(test, feature = "testing"))]
-    // The `#[handler::single]` contract requires the mail by value; this handler
-    // only borrows the encoded upload out of it, so clippy sees a by-ref
-    // opportunity the macro signature cannot take — the same allow the source
-    // capability's handlers carry.
-    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_scripted_evidence(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
         mail: ScriptedEvidence,
     ) -> ScriptedEvidenceResult {
+        // Destructured rather than borrowed through: `#[handler::single]` hands
+        // the mail over by value, so taking the payload out of it consumes the
+        // envelope instead of leaving it to be dropped unread.
+        let ScriptedEvidence { upload } = mail;
         let control_mailbox = state.control_mailbox;
-        let (result, admit) = admit_scripted(state, &mail.upload);
+        let (result, admit) = admit_scripted(state, &upload);
 
         if let Some(admit) = admit {
             let _ = ctx.send_envelope_tracked(control_mailbox, Admit::ID, &admit.encode_into_bytes());

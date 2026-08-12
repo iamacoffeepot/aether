@@ -19,11 +19,36 @@
 mod common;
 mod fixture;
 
-use aether_bloomery::{BloomStatus, StageId};
-use fixture::{FixtureHarness, captured, digest, failed, passed};
+use aether_bloomery::{BloomId, BloomStatus, Digest, Fact, Outcome, StageId};
+use aether_chassis_bloomery::bloomery::{ScriptedUpload, ScriptedVerdict};
+use aether_chassis_bloomery::store::OutstandingOrder;
+use fixture::{FixtureHarness, captured, digest, draft, member, passed, verdict};
 
 /// The workpiece the wedged member covers, and the one the successor recovers.
 const WORKPIECE: &str = "wp";
+
+/// A failing verdict for a stage that names no verifiers — every stage but the
+/// terminal member Verify. It captures nothing: a failing attempt's capture is
+/// discarded by the reducer, so uploading one would assert nothing.
+fn failed(order: &OutstandingOrder) -> ScriptedUpload {
+    verdict(order, ScriptedVerdict::VerificationFailed)
+}
+
+/// Supersede `predecessor` with a single-member successor at `scope_revision`,
+/// through the same `Admit` door every external caller uses.
+///
+/// Built here rather than in the harness because supersession is what this
+/// scenario is about, and the spec it needs is three public calls: the base the
+/// coordinator will accept, the member, and the sealed draft.
+fn supersede(harness: &mut FixtureHarness, predecessor: BloomId, scope_revision: Digest) -> BloomId {
+    let successor = draft(harness.view().mainline, &[member(WORKPIECE, scope_revision)]);
+    let id = successor.id();
+
+    match harness.admit("recover-the-wedged-member", Fact::Supersede { predecessor, successor }) {
+        Outcome::Superseded { .. } => id,
+        other => panic!("the recovery must supersede: {other:?}"),
+    }
+}
 
 #[test]
 fn a_successor_recovers_a_wedged_member() {
@@ -46,7 +71,7 @@ fn a_successor_recovers_a_wedged_member() {
 
     // The recovery. A changed scope revision means the successor re-admits the
     // workpiece rather than inheriting a claim the member never earned.
-    let successor = harness.supersede_member(wedged, WORKPIECE, digest(0x52));
+    let successor = supersede(&mut harness, wedged, digest(0x52));
     let predecessor = harness.bloom(wedged);
     assert_eq!(predecessor.status, BloomStatus::Superseded, "the wedged bloom is retired by its successor");
     assert_eq!(predecessor.superseded_by, Some(successor), "and names the successor that replaced it");

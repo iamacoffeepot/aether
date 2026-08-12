@@ -62,36 +62,43 @@
 //! harness.land_the_fold(bloom);
 //! ```
 
-#![allow(dead_code, reason = "each test binary compiles the whole module and uses only the fixtures it needs")]
-#![allow(clippy::unwrap_used, reason = "a fixture that cannot set up its coordinator reports it by panicking")]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "the harness addresses root caps by their rendered runtime name — the RPC Call surface under test"
-)]
+// Three items are used by one scenario and unreachable from the other two, which
+// each compile this whole module: `artifacts_root` and the pair that reads it,
+// `study_index_row` / `artifact`. They are the #4705 tripwire — the study record
+// the executor reactor filed, read back from the root the chassis was configured
+// with — and only the scenario that measures an attempt cost has one to read.
+// They cannot move to that scenario file: both reach private harness state, and
+// exposing the roots through an accessor only relocates the same unreachability
+// onto the accessor. Everything else that was per-scenario now lives with its one
+// caller.
+#![allow(dead_code, reason = "each test binary compiles the whole module; the #4705 study read is scenario-scoped")]
 
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_actor::Addressable;
 use aether_bloomery::{
-    Admit, AdmitResult, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CONTROL_CORE_NAMESPACE, CandidateRef,
-    ConfigRegistry, Correspondence, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Nonce,
-    Outcome, Query, QueryResult, StudyCost, VerifyFailureSet, ViewDocument, WorkpieceId,
+    Admit, AdmitResult, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CandidateRef, ConfigRegistry,
+    Correspondence, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Nonce, Outcome, Query,
+    QueryResult, VerifyFailureSet, ViewDocument, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, to_hex};
+use aether_chassis_bloomery::ControlCore;
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
 use aether_chassis_bloomery::bloomery::{
-    BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, GithubConnectionConfig, IntegrateTick,
-    LandTick, ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, ScriptedVerdict,
+    BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, DispatchTick, ExecutorReactorCapability,
+    GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick, LandReactorCapability, LandTick,
+    ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, ScriptedVerdict,
 };
 use aether_chassis_bloomery::session::SessionConfig;
 use aether_chassis_bloomery::signing::SigningConfig;
 use aether_chassis_bloomery::store::{OutstandingOrder, SqliteStore, StoreBackend, StoreConfig};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::{from_bytes, to_vec};
-use aether_data::{Kind, MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId};
 use aether_rpc::{RpcServerHandle, WireFrame};
 use aether_substrate::chassis::builder::BuiltChassis;
 use serde::Serialize;
@@ -122,13 +129,6 @@ const POLL: Duration = Duration::from_millis(20);
 /// right, and one a proposal-head echo would assert away.
 const SQUASH_COMMIT: &str = "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c";
 
-/// The reactor mailboxes a scenario wakes, each the reactor capability's own
-/// `NAMESPACE`. Named here rather than at every call site so a renamed reactor
-/// breaks in one place instead of silently warn-dropping a tick.
-const EXECUTOR_MAILBOX: &str = "aether.bloomery.executor";
-const INTEGRATE_MAILBOX: &str = "aether.bloomery.integrate";
-const LAND_MAILBOX: &str = "aether.bloomery.land";
-
 /// A live in-process scenario: a booted coordinator, the in-memory repository it
 /// runs against, and the wire connection that drives and observes it.
 pub struct FixtureHarness {
@@ -154,7 +154,7 @@ impl FixtureHarness {
     /// The chassis did not boot, the RPC ingress did not answer, or mainline
     /// never bound to a commit inside [`BOOT_BUDGET`].
     pub fn start(client_name: &str) -> Self {
-        let state = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().expect("a temporary root for the journal and the artifacts store");
         let store_path = state.path().join("bloomery.db").to_string_lossy().into_owned();
         let artifacts_root = state.path().join("artifacts").to_string_lossy().into_owned();
 
@@ -209,16 +209,6 @@ impl FixtureHarness {
         harness
     }
 
-    /// The mainline the coordinator seals on.
-    pub const fn base(&self) -> Digest {
-        self.base
-    }
-
-    /// The in-memory repository the coordinator runs against.
-    pub const fn fake(&self) -> &FakeGithub {
-        &self.fake
-    }
-
     /// The coordinator's mainline, checked to be a base a dispatch can actually
     /// check out.
     ///
@@ -236,7 +226,7 @@ impl FixtureHarness {
         let deadline = Instant::now() + BOOT_BUDGET;
         loop {
             let mainline = self.view().mainline;
-            if self.fake.resolve_backend_object(&mainline).unwrap().is_some() {
+            if self.fake.resolve_backend_object(&mainline).expect("the fixture correspondence reads").is_some() {
                 return mainline;
             }
             assert!(Instant::now() < deadline, "the coordinator's mainline never bound to a checkoutable commit");
@@ -250,7 +240,10 @@ impl FixtureHarness {
     /// The query was refused or its reply did not decode.
     pub fn view(&mut self) -> ViewDocument {
         self.cid += 1;
-        match call::<_, QueryResult>(&mut self.stream, self.cid, control_mailbox(), &Query { bloom: None }) {
+        // `release` reads an orphan-claim release request and takes precedence over
+        // `bloom` when both are set (ADR-0179); both unset is the whole-document read.
+        let query = Query { bloom: None, release: None };
+        match call::<_, QueryResult>(&mut self.stream, self.cid, control_mailbox(), &query) {
             QueryResult::Document { document } => from_bytes(&document).expect("the projection decodes"),
             other => panic!("expected a document reply, got {other:?}"),
         }
@@ -277,7 +270,7 @@ impl FixtureHarness {
         let event = Event { idempotency_key: IdempotencyKey(key.to_owned()), fact };
 
         self.cid += 1;
-        let admit = Admit { event: to_vec(&event).unwrap() };
+        let admit = Admit { event: to_vec(&event).expect("a reducer event encodes") };
         match call::<_, AdmitResult>(&mut self.stream, self.cid, control_mailbox(), &admit) {
             AdmitResult::Ok { outcome } => from_bytes::<Outcome>(&outcome).expect("the outcome decodes"),
             AdmitResult::Err { error } => panic!("the admit was refused: {error}"),
@@ -296,21 +289,6 @@ impl FixtureHarness {
             other => panic!("the fixture seal must seal: {other:?}"),
         }
         bloom
-    }
-
-    /// Supersede `predecessor` with a single-member successor at a fresh scope
-    /// revision, and return the successor's id.
-    ///
-    /// # Panics
-    /// The supersession was refused.
-    pub fn supersede_member(&mut self, predecessor: BloomId, workpiece: &str, scope_revision: Digest) -> BloomId {
-        let successor = draft(self.base, &[member(workpiece, scope_revision)]);
-        let id = successor.id();
-        match self.admit(&format!("fixture-supersede-{workpiece}"), Fact::Supersede { predecessor, successor }) {
-            Outcome::Superseded { .. } => {}
-            other => panic!("the fixture supersession must supersede: {other:?}"),
-        }
-        id
     }
 
     /// Wake the executor reactor until the coordinator holds exactly one
@@ -371,7 +349,7 @@ impl FixtureHarness {
     /// Wake the executor reactor once: drain the dispatch topics, submit each
     /// entry, and record its outstanding order.
     pub fn dispatch_tick(&mut self) {
-        self.tick(EXECUTOR_MAILBOX, &DispatchTick::default());
+        self.tick(<ExecutorReactorCapability as Addressable>::resolve(0, ()), &DispatchTick::default());
     }
 
     /// Wake the integrate reactor once: fold the bloom's claimed candidates.
@@ -380,13 +358,13 @@ impl FixtureHarness {
     /// settled through the control core, so the fold's decision is already in
     /// the outbox when this fires.
     pub fn integrate_tick(&mut self) {
-        self.tick(INTEGRATE_MAILBOX, &IntegrateTick::default());
+        self.tick(<IntegrateReactorCapability as Addressable>::resolve(0, ()), &IntegrateTick::default());
     }
 
     /// Wake the land reactor once: propose the resolved head, or poll the
     /// proposal already open.
     pub fn land_tick(&mut self) {
-        self.tick(LAND_MAILBOX, &LandTick::default());
+        self.tick(<LandReactorCapability as Addressable>::resolve(0, ()), &LandTick::default());
     }
 
     /// Dispatch one reactor's tick and wait for its causal chain to settle.
@@ -395,15 +373,16 @@ impl FixtureHarness {
     /// the reactor's whole drain — the port calls, the store writes, the orders
     /// it records — has happened by the time this returns. A tick carries no
     /// reply, so this drains to `ReplyEnd` rather than decoding one.
-    fn tick<K: Kind + Serialize>(&mut self, mailbox: &str, wake: &K) {
+    fn tick<K: Kind + Serialize>(&mut self, mailbox: MailboxId, wake: &K) {
         self.cid += 1;
-        write_frame(&mut self.stream, &call_frame(self.cid, mailbox_id_from_path(mailbox), wake)).unwrap();
+        write_frame(&mut self.stream, &call_frame(self.cid, mailbox, wake))
+            .expect("the tick reaches the coordinator's RPC ingress");
         loop {
-            match read_frame(&mut self.stream).unwrap() {
+            match read_frame(&mut self.stream).expect("the coordinator answers the tick") {
                 WireFrame::ReplyEvent { cid, .. } => assert_eq!(cid, self.cid, "ReplyEvent cid mismatch"),
                 WireFrame::ReplyEnd { cid, result } => {
                     assert_eq!(cid, self.cid, "ReplyEnd cid mismatch");
-                    result.unwrap();
+                    result.expect("the tick's causal chain settled without a fault");
                     return;
                 }
                 other => panic!("unexpected frame for tick {}: {other:?}", self.cid),
@@ -453,12 +432,12 @@ impl FixtureHarness {
     /// # Panics
     /// The store could not be opened or read.
     pub fn orders(&self) -> Vec<OutstandingOrder> {
-        let mut store = SqliteStore::open(&self.store_path).unwrap();
+        let mut store = SqliteStore::open(&self.store_path).expect("the coordinator's journal opens for reading");
         store
             .list_outstanding_nonces()
-            .unwrap()
+            .expect("the outstanding-order registry reads")
             .into_iter()
-            .filter_map(|nonce| store.lookup_order(&nonce).unwrap())
+            .filter_map(|nonce| store.lookup_order(&nonce).expect("a listed nonce resolves to its order"))
             .collect()
     }
 
@@ -468,8 +447,8 @@ impl FixtureHarness {
     /// The call was refused or its reply did not decode.
     pub fn upload(&mut self, upload: &ScriptedUpload) -> ScriptedEvidenceResult {
         self.cid += 1;
-        let evidence = ScriptedEvidence { upload: to_vec(upload).unwrap() };
-        call(&mut self.stream, self.cid, mailbox_id_from_path(EXECUTOR_MAILBOX), &evidence)
+        let evidence = ScriptedEvidence { upload: to_vec(upload).expect("a scripted upload encodes") };
+        call(&mut self.stream, self.cid, <ExecutorReactorCapability as Addressable>::resolve(0, ()), &evidence)
     }
 
     /// Upload a scripted verdict and assert the broker admitted it, returning
@@ -501,7 +480,10 @@ impl FixtureHarness {
     /// it exactly as the fold does.
     pub fn seed_capture(&self, bloom: BloomId, workpiece: &str, tree: Digest, checkout: Digest) -> CandidateRef {
         let tree_sha = to_hex(&tree);
-        let commit = self.fake.create_commit(&format!("capture {workpiece}"), &tree_sha, &[]).unwrap();
+        let commit = self
+            .fake
+            .create_commit(&format!("capture {workpiece}"), &tree_sha, &[])
+            .expect("the fixture mints the capture commit");
 
         self.fake.seed_ref(candidate_ref_name(&bloom, workpiece).trim_start_matches("refs/"), &commit.sha);
         self.fake.seed_correspondence(&tree, &tree_sha);
@@ -515,7 +497,10 @@ impl FixtureHarness {
     /// # Panics
     /// The store could not be opened or read.
     pub fn study_index_row(&self, bloom: BloomId, attempt: Digest) -> Option<String> {
-        SqliteStore::open(&self.store_path).unwrap().lookup_study(bloom.0.as_bytes(), attempt.as_bytes()).unwrap()
+        SqliteStore::open(&self.store_path)
+            .expect("the coordinator's journal opens for reading")
+            .lookup_study(bloom.0.as_bytes(), attempt.as_bytes())
+            .expect("the study index reads")
     }
 
     /// Fetch one artifact from the store root the chassis was configured with —
@@ -535,7 +520,9 @@ impl FixtureHarness {
     /// # Panics
     /// The configured root could not be opened.
     pub fn artifact(&self, digest: &str) -> GetResult {
-        ArtifactsCapabilityState::open(&self.artifacts_root).unwrap().get(digest.to_owned())
+        ArtifactsCapabilityState::open(&self.artifacts_root)
+            .expect("the configured artifacts root opens")
+            .get(digest.to_owned())
     }
 
     /// The number of the landing proposal open for `bloom`, if the land reactor
@@ -544,13 +531,17 @@ impl FixtureHarness {
     /// # Panics
     /// The fixture's pull-request surface faulted.
     pub fn landing_proposal(&self, bloom: BloomId) -> Option<u64> {
-        self.fake.find_pull_request_for_head(&landing_branch(&bloom)).unwrap().map(|pull| pull.number)
+        self.fake
+            .find_pull_request_for_head(&landing_branch(&bloom))
+            .expect("the fixture pull-request surface answers")
+            .map(|pull| pull.number)
     }
 }
 
-/// The native control core's mailbox, addressed by its lineage path.
+/// The native control core's mailbox, resolved through its own addressing
+/// identity — the same way the reactors resolve it.
 fn control_mailbox() -> MailboxId {
-    mailbox_id_from_path(CONTROL_CORE_NAMESPACE)
+    <ControlCore as Addressable>::resolve(0, ())
 }
 
 /// The nonces of a set of orders — what an unexpected-order-count failure
@@ -631,47 +622,4 @@ pub fn passed(order: &OutstandingOrder) -> ScriptedUpload {
 #[must_use]
 pub fn captured(order: &OutstandingOrder, candidate: CandidateRef) -> ScriptedUpload {
     ScriptedUpload { candidate: Some(candidate), ..passed(order) }
-}
-
-/// A failing verdict for a stage that names no verifiers — every stage but the
-/// terminal member Verify, whose failures carry an identified set
-/// ([`verify_failed`]). It captures nothing: a failing attempt's capture is
-/// discarded by the reducer, so uploading one would assert nothing.
-#[must_use]
-pub fn failed(order: &OutstandingOrder) -> ScriptedUpload {
-    verdict(order, ScriptedVerdict::VerificationFailed)
-}
-
-/// A failing member Verify naming the exact verifiers that failed. The set must
-/// be nonempty — the intake refuses a failing Verify that names none, the same
-/// contract that refuses any other stage that names some (ADR-0178).
-#[must_use]
-pub fn verify_failed(order: &OutstandingOrder, failed: VerifyFailureSet) -> ScriptedUpload {
-    ScriptedUpload { failed_verifiers: failed, ..verdict(order, ScriptedVerdict::VerificationFailed) }
-}
-
-/// The same upload, carrying a measured attempt cost — what a lane that ran
-/// under a usage-recording harness reports alongside its verdict.
-#[must_use]
-pub fn measured(upload: ScriptedUpload, cost: StudyCost) -> ScriptedUpload {
-    ScriptedUpload { cost: Some(cost), ..upload }
-}
-
-/// A measured attempt cost, distinct in every column so a scenario reading the
-/// study artifact back can tell it apart from a default-constructed one.
-#[must_use]
-pub const fn measured_cost() -> StudyCost {
-    StudyCost {
-        // Zero, and not because the attempt was free: pricing is the sealed
-        // table's job, and the default table prices nothing.
-        cost_micro_usd: 0,
-        turns: 4,
-        duration_millis: 90_210,
-        input_tokens: 1_100,
-        cache_write_tokens: 210,
-        cache_write_1h_tokens: 160,
-        cache_write_5m_tokens: 50,
-        cache_read_tokens: 8_100,
-        output_tokens: 910,
-    }
 }

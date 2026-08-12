@@ -22,7 +22,9 @@ mod fixture;
 use core::iter::once;
 
 use aether_bloomery::{BloomStatus, VerifyFailure, VerifyFailureSet};
-use fixture::{FixtureHarness, captured, digest, passed, verify_failed};
+use aether_chassis_bloomery::bloomery::{ScriptedUpload, ScriptedVerdict};
+use aether_chassis_bloomery::store::OutstandingOrder;
+use fixture::{FixtureHarness, captured, digest, passed, verdict};
 
 /// The workpiece the single sealed member covers.
 const WORKPIECE: &str = "wp";
@@ -31,6 +33,13 @@ const WORKPIECE: &str = "wp";
 /// the second failure a repeat rather than a fresh one.
 fn clippy() -> VerifyFailureSet {
     once(VerifyFailure::Clippy).collect()
+}
+
+/// A failing member Verify naming the exact verifiers that failed. The set must
+/// be nonempty — the intake refuses a failing Verify that names none, the same
+/// contract that refuses any other stage that names some (ADR-0178).
+fn verify_failed(order: &OutstandingOrder, failed: VerifyFailureSet) -> ScriptedUpload {
+    ScriptedUpload { failed_verifiers: failed, ..verdict(order, ScriptedVerdict::VerificationFailed) }
 }
 
 #[test]
