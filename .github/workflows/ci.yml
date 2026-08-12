@@ -178,10 +178,13 @@ jobs:
       # is what makes a module behind a non-default feature reach these
       # denied lints at all — without it, cargo never compiles that
       # module, so a broken or private link inside it is never checked.
-      # Two holes remain even under both flags: `#[cfg(test)]` modules
-      # stay undocumented and therefore unchecked, and an item gated
-      # `#[cfg(not(feature = "…"))]` is compiled out by an all-features
-      # build the same way it would be compiled in by a no-features one.
+      # The flag moves that blind spot rather than removing it: with
+      # every feature on, an item gated `#[cfg(not(feature = "…"))]` is
+      # compiled out and goes unchecked instead — the mirror image of
+      # the hole above, over a much smaller surface (fallback stubs).
+      # `#[cfg(test)]` modules sit outside either selection: rustdoc
+      # does not document them at all, so a doc link inside one stays
+      # unchecked under any feature set.
       - name: cargo doc with tracked rustdoc lints denied
         env:
           RUSTDOCFLAGS: >-

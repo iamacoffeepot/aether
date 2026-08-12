@@ -214,11 +214,16 @@ carries `--all-features` because a module behind a non-default feature is
 otherwise never compiled by `cargo doc`, so a broken or private link inside it
 is never resolved either — the feature-gated module has to actually build
 before rustdoc can look at it. CI's `Rustdoc` job runs the same command under
-`RUSTDOCFLAGS='-D rustdoc::…'`, so keep the two identical. Two gaps remain even
-under both flags: `#[cfg(test)]` modules are not documented at all, and an item
-gated `#[cfg(not(feature = "…"))]` is compiled out by an all-features build the
-same way it would be compiled in by a no-features one, so a doc link inside
-either stays unchecked.
+`RUSTDOCFLAGS='-D rustdoc::…'`, so keep the two identical.
+
+`--all-features` moves the feature blind spot rather than removing it. With
+every feature on, an item gated `#[cfg(not(feature = "…"))]` is the one
+compiled out, so its docs are the ones that go unchecked — the mirror image of
+the feature-on modules the flag reaches, over a much smaller surface (fallback
+stubs). A run without the flag has the blind spot on the other side; no single
+feature selection has none. `#[cfg(test)]` modules sit outside the trade
+entirely: rustdoc does not document them at all, so a doc link inside one stays
+unchecked under any feature set.
 
 Do not run the full expensive matrix merely to appear thorough. Do not skip a
 focused boundary test when it is the only proof of the changed contract.
