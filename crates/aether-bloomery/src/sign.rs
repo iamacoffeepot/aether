@@ -46,6 +46,13 @@ use crate::ids::KeyId;
 /// door never verifies at another even where the words and the binding coincide.
 /// Adding a door is a variant, and the variant is what keeps its envelopes
 /// separate from every existing door's.
+///
+/// **Variant order is part of the signed subject.** The discriminant is what
+/// serde encodes into the authorization [`authorization_message`] hashes, so
+/// reordering these variants — or inserting one anywhere but the end — silently
+/// changes the message every past signature was minted over and invalidates all
+/// of them, with no compile error and no decode failure to announce it. Append
+/// new doors; never reorder.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AuthorityDoor {
     /// Approving a member's scope revision at seal time, bound to that
@@ -59,7 +66,9 @@ pub enum AuthorityDoor {
     /// Grounding a prompt-manifest instruction slot, bound to the artifact the
     /// signature grounds. Not a request door: nothing acts on it, so it
     /// authorizes no mutation — the variant exists so the closure walk's
-    /// cryptographic check cannot borrow a request door's envelope.
+    /// cryptographic check cannot borrow a request door's envelope, and
+    /// [`ground_instruction`](crate::manifest) enforces that by grounding only
+    /// on a recorded authority whose door is this one.
     Ground,
 }
 

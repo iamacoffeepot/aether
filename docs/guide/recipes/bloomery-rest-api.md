@@ -205,6 +205,16 @@ never could, being outside the signature and rewritable by whoever holds it.
 Statements signed against the older words-only message do not verify and must be
 re-signed.
 
+A verifying signature is not the whole gate at the answer door. The admitted
+fact carries no question field of its own, so the coordinator picks the hold to
+release out of the answer statement's `parents` — which is outside the signature.
+`POST /blooms/{id}/answer/{question}` therefore also requires `parents` to be
+exactly one digest, the same question the path names, and answers `400` for
+anything else. A list naming a different question is refused, and so is one that
+merely *includes* the path question: the release scan takes the first parent that
+is an open hold in the order you wrote them, so `[other, question]` would release
+`other`. Set `parents` to `[question]` and nothing else.
+
 The gate fails closed at every branch, so a `422` names what fell short —
 `member wp-1 has no scope projection; seal fails closed` for a proposal the
 `projections` list does not cover, and a seal carrying an empty list refuses any
@@ -345,8 +355,13 @@ Once you have satisfied yourself the holder is dead, sign the release. The
 request names one typed ref and one expected holder; there is no ref-path field,
 so no spelling of this body reaches a Git ref outside the claim namespace. The
 authorizing statement's words must be exactly `release orphan bloomery claim`,
-and its `parents` must name the request's own content digest — the parent binding
-is what keeps one signature from authorizing a second, different release.
+and you sign it for the orphan-claim-release door bound to the request's own
+content digest — the digest of the `{ref_kind, expected_holder}` pair the body
+names, which the coordinator recomputes from that body rather than reading out of
+your envelope. That signed binding is what keeps one signature from authorizing a
+second, different release. Set `parents` to the same request digest: it records
+the derivation edge, and being outside the signature it is a readable claim about
+provenance rather than the thing the coordinator trusts.
 
 ```bash
 curl -s -X POST localhost:8080/claims/releases -d @- <<'JSON' | jq

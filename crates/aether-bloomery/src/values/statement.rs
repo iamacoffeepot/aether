@@ -50,9 +50,18 @@ impl Statement {
     /// never verify as *authority* — they are context, not command, and this
     /// returns `false` for them.
     ///
-    /// `binding` is a required parameter with no default, and there is no
-    /// verification path over the words alone: a new door cannot be built
-    /// unbound by forgetting to check something.
+    /// `binding` is a required parameter with no default, and this crate offers
+    /// no verification path over the words alone — so a new door cannot reach an
+    /// unbound check through `Statement`, and adding one means writing a door
+    /// and a binding at the call site rather than omitting them. That is a
+    /// compile-time guarantee about *this* entry point, not about signature
+    /// checking in general: [`KeyProvider::verify`] is public and takes an
+    /// arbitrary `&[u8]`, so a caller that goes around this method can still
+    /// verify whatever message it likes — and [`FakeKeyProvider`] accepts every
+    /// message it is given. What is enforced is that nothing reaches a
+    /// `Statement`'s *authority* without naming a door and a binding.
+    ///
+    /// [`FakeKeyProvider`]: crate::FakeKeyProvider
     ///
     /// [`parents`](Self::parents) is *not* consulted here. It stays the
     /// derivation-DAG provenance ADR-0149 gives it, and the structural checks

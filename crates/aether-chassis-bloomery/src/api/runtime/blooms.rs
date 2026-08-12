@@ -103,6 +103,21 @@ impl ApiCapabilityState {
     /// bytes, so the first envelope could be re-parented onto the second hold.
     /// Naming it here gives the route a binding it derives from the request
     /// instead of from the envelope.
+    ///
+    /// Naming it is not sufficient on its own, which is why the `parents` check
+    /// below is part of the gate rather than a nicety. `Fact::AdoptAnswer` has
+    /// no question field — the wire shape is frozen (ADR-0182 §Migration) — so
+    /// the reducer re-derives its target by scanning `parents` for an open hold.
+    /// A route that only *verified* against the path question would let the
+    /// submitter supply both halves of the equality: a genuine envelope signed
+    /// at `(Answer, Q1)` verifies when posted to `.../answer/{Q1}`, and its
+    /// unsigned `parents` — rewritten to `[Q2]` — is what the reducer then acts
+    /// on, releasing a hold nobody signed for. So the route refuses unless
+    /// `parents` is exactly the one question the path names, which is what makes
+    /// the path binding and the reducer's target provably the same digest.
+    /// Membership (`parents.contains(&question)`) would not do it: the reducer
+    /// takes the first parent that is an open hold in submitter order, so
+    /// `[Q2, Q1]` contains the path question and still releases `Q2`.
     pub(super) fn answer_bloom(&self, ctx: &NativeCtx<'_, Manual>, id: &str, question: &str, body: &[u8]) -> Routed {
         let bloom = match digest_from_hex(id) {
             Some(digest) => BloomId(digest),
@@ -115,6 +130,13 @@ impl ApiCapabilityState {
             Ok(answer) => answer,
             Err(error) => return Routed::Reply(error_response(400, &format!("invalid answer statement: {error}"))),
         };
+        if answer.parents.as_slice() != [question] {
+            return Routed::Reply(error_response(
+                400,
+                "answer parents must name exactly the question the path names, and nothing else",
+            ));
+        }
+
         let statement = match to_vec(&answer) {
             Ok(bytes) => bytes,
             Err(error) => return Routed::Reply(error_response(500, &format!("answer encode failed: {error}"))),

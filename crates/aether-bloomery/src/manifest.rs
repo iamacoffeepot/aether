@@ -106,9 +106,17 @@ pub trait ProvenanceIndex {
     /// cryptographic check with it, which keeps the check cryptographic rather
     /// than downgrading it to a structural one.
     ///
+    /// The walk grounds on [`AuthorityDoor::Ground`] records only. A record
+    /// naming any other door is a record of a *request* door — a signature that
+    /// authorized a mutation — and grounding on it would let an approval or an
+    /// answer be spent a second time as instruction provenance, which is the
+    /// separation the door enum exists to enforce (ADR-0182). So the door here
+    /// is a value the walk checks, not one it obeys; a host that wants a
+    /// statement to ground an artifact records it at `Ground`.
+    ///
     /// `None` for an artifact the index cannot answer for, which leaves the node
-    /// ungrounded — the walk is fail-closed, so an unrecorded authority refuses
-    /// exactly as a failing signature does.
+    /// ungrounded — the walk is fail-closed, so an unrecorded authority, a
+    /// non-`Ground` door, and a failing signature all refuse alike.
     fn authority_binding(&self, digest: &Digest) -> Option<(AuthorityDoor, Digest)>;
 }
 
@@ -256,13 +264,16 @@ fn ground_instruction(
             // A statement the index records no authority for is refused at the
             // same level a failing signature is: the walk has no request of its
             // own to bind against, so an unrecorded binding is a missing ground,
-            // never a reason to verify over the words alone (ADR-0182).
+            // never a reason to verify over the words alone (ADR-0182). A record
+            // at any door other than `Ground` refuses the same way — the walk
+            // will not ground on a signature that authorized a mutation, so a
+            // request door's envelope cannot be borrowed as instruction
+            // provenance however the index reports it.
             if !statement.is_instruction_capable() {
                 most_advanced = most_advanced.max(Advance::NonAuthor);
-            } else if index
-                .authority_binding(&node)
-                .is_some_and(|(door, binding)| statement.verify_authority(keys, door, binding))
-            {
+            } else if index.authority_binding(&node).is_some_and(|(door, binding)| {
+                door == AuthorityDoor::Ground && statement.verify_authority(keys, AuthorityDoor::Ground, binding)
+            }) {
                 traced.sort_unstable();
                 return Ok(traced);
             } else {

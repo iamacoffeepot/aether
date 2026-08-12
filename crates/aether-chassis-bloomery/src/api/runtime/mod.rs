@@ -28,7 +28,7 @@
 //! timeout. Neither needs machinery in this cap.
 //!
 //! Three routes are genuinely **multi-hop** and keep an explicit obligation,
-//! because their next hop is not the answer: `POST /blooms/{id}/answer` and
+//! because their next hop is not the answer: `POST /blooms/{id}/answer/{question}` and
 //! `POST /claims/releases` each verify a signature before they admit, and
 //! `POST /drafts/{id}/seal` joins N member verifications before admitting once
 //! (the ADR-0154 §2 scatter/gather exclusion). Their terminal `Admit` is

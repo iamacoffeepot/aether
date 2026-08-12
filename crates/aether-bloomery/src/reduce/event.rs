@@ -91,9 +91,13 @@ pub enum Fact {
     /// how the intake broker is the trust gate for evidence the reducer only
     /// re-checks for binding. That gate binds the signature to the question the
     /// request named ([`AuthorityDoor::Answer`](crate::AuthorityDoor),
-    /// ADR-0182), so the parent scan re-checks a signed binding — `parents` is
-    /// outside the signature and a captured answer would otherwise re-point at
-    /// any open hold whose question drew the same words.
+    /// ADR-0182) *and* refuses any answer whose `parents` is not exactly that
+    /// one question — this fact carries no question field of its own, so
+    /// without the second refusal the submitter would still choose the reducer's
+    /// target through the unsigned `parents` while the signature attested to a
+    /// different one. With both, the parent scan re-checks a signed binding:
+    /// `parents` is outside the signature, and a captured answer would otherwise
+    /// re-point at any open hold whose question drew the same words.
     ///
     /// Appended to the closed [`Fact`] enum past ADR-0151's evidence-admission
     /// variant to realize the ADR's answer path ("releases the hold and
@@ -104,7 +108,8 @@ pub enum Fact {
         /// The bloom the parked question belongs to.
         bloom: BloomId,
         /// The adopting answer statement — instruction-capable, its parents
-        /// naming the held question digest.
+        /// naming exactly the held question digest the host route bound its
+        /// signature to.
         answer: Statement,
     },
     /// A dispatched per-member attempt completed with evidence (ADR-0149 §The
