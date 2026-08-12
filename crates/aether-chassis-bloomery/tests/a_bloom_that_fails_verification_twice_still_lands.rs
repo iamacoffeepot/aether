@@ -17,7 +17,7 @@
 //! a wedged member is terminal — the bloom can never resolve.
 
 mod common;
-mod fixture;
+pub mod fixture;
 
 use core::iter::once;
 

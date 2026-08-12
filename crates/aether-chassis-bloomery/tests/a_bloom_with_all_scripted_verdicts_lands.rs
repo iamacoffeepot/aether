@@ -10,7 +10,7 @@
 //! sides and stalls only in production.
 
 mod common;
-mod fixture;
+pub mod fixture;
 
 use aether_bloomery::{BloomStatus, StudyCost, StudyRecord};
 use aether_chassis_bloomery::artifacts::GetResult;

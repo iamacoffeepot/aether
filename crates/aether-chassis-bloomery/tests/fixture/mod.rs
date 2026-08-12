@@ -39,6 +39,15 @@
 //! two scenarios in one process would share a repository and a mainline. So each
 //! behavior gets its own binary, and this module is compiled into each.
 //!
+//! Each of them declares it `pub mod fixture;`, which is load-bearing rather
+//! than decorative: the harness surface is one thing, and the scenarios that
+//! consume it are three. A `study_index_row` reachable only from the scenario
+//! that measures an attempt cost is unreachable in the other two binaries, and
+//! a private module would have each of them report it as dead — a signal about
+//! how this tier is split, not about the code. Declaring the module public makes
+//! its surface reachable in every binary, which is what it is: the item is part
+//! of the harness whether or not the binary compiling it happens to call it.
+//!
 //! # The cadence is off, not slow
 //!
 //! Every reactor's timer runs at `poll_interval_secs.max(1)`, so there is no
@@ -61,17 +70,6 @@
 //! harness.upload_admitted(&passed(&verify));
 //! harness.land_the_fold(bloom);
 //! ```
-
-// Three items are used by one scenario and unreachable from the other two, which
-// each compile this whole module: `artifacts_root` and the pair that reads it,
-// `study_index_row` / `artifact`. They are the #4705 tripwire — the study record
-// the executor reactor filed, read back from the root the chassis was configured
-// with — and only the scenario that measures an attempt cost has one to read.
-// They cannot move to that scenario file: both reach private harness state, and
-// exposing the roots through an accessor only relocates the same unreachability
-// onto the accessor. Everything else that was per-scenario now lives with its one
-// caller.
-#![allow(dead_code, reason = "each test binary compiles the whole module; the #4705 study read is scenario-scoped")]
 
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -153,6 +151,7 @@ impl FixtureHarness {
     /// # Panics
     /// The chassis did not boot, the RPC ingress did not answer, or mainline
     /// never bound to a commit inside [`BOOT_BUDGET`].
+    #[must_use]
     pub fn start(client_name: &str) -> Self {
         let state = tempfile::tempdir().expect("a temporary root for the journal and the artifacts store");
         let store_path = state.path().join("bloomery.db").to_string_lossy().into_owned();
@@ -431,6 +430,7 @@ impl FixtureHarness {
     ///
     /// # Panics
     /// The store could not be opened or read.
+    #[must_use]
     pub fn orders(&self) -> Vec<OutstandingOrder> {
         let mut store = SqliteStore::open(&self.store_path).expect("the coordinator's journal opens for reading");
         store
@@ -478,6 +478,10 @@ impl FixtureHarness {
     ///
     /// The ref is addressed through [`candidate_ref_name`] so a scenario names
     /// it exactly as the fold does.
+    ///
+    /// # Panics
+    /// The fixture repository refused to mint the capture commit.
+    #[must_use]
     pub fn seed_capture(&self, bloom: BloomId, workpiece: &str, tree: Digest, checkout: Digest) -> CandidateRef {
         let tree_sha = to_hex(&tree);
         let commit = self
@@ -496,6 +500,7 @@ impl FixtureHarness {
     ///
     /// # Panics
     /// The store could not be opened or read.
+    #[must_use]
     pub fn study_index_row(&self, bloom: BloomId, attempt: Digest) -> Option<String> {
         SqliteStore::open(&self.store_path)
             .expect("the coordinator's journal opens for reading")
@@ -519,6 +524,7 @@ impl FixtureHarness {
     ///
     /// # Panics
     /// The configured root could not be opened.
+    #[must_use]
     pub fn artifact(&self, digest: &str) -> GetResult {
         ArtifactsCapabilityState::open(&self.artifacts_root)
             .expect("the configured artifacts root opens")
@@ -530,6 +536,7 @@ impl FixtureHarness {
     ///
     /// # Panics
     /// The fixture's pull-request surface faulted.
+    #[must_use]
     pub fn landing_proposal(&self, bloom: BloomId) -> Option<u64> {
         self.fake
             .find_pull_request_for_head(&landing_branch(&bloom))

@@ -17,7 +17,7 @@
 //! answer for a member whose work never passed.
 
 mod common;
-mod fixture;
+pub mod fixture;
 
 use aether_bloomery::{BloomId, BloomStatus, Digest, Fact, Outcome, StageId};
 use aether_chassis_bloomery::bloomery::{ScriptedUpload, ScriptedVerdict};
