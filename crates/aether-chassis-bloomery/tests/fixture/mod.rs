@@ -4,19 +4,49 @@
 //!
 //! # What stays real
 //!
-//! Every producer and every consumer. The reducer decides, the control core
-//! commits its decisions into the store's outbox topics, and the
+//! Every outbox row's producer and consumer. The reducer decides, the control
+//! core commits its decisions into the store's outbox topics, and the
 //! boot-constructed reactors drain those exact rows — no scenario ever places
 //! one. That is the whole point: the reactor-to-reactor handoff is the thing
 //! this tier tests, and a fixture that enqueued the row it claims to prove would
 //! test the enqueue and nothing else.
 //!
-//! What is substituted is only the part below the lane: the verdict a model
-//! would have produced. It arrives through
+//! # What is substituted
+//!
+//! Two things, not one.
+//!
+//! The **verdict** a model would have produced arrives through
 //! [`ScriptedEvidence`](aether_chassis_bloomery::bloomery::ScriptedEvidence),
 //! which the executor reactor admits through its own outstanding-order registry
 //! — so a scenario can only answer an order the coordinator really dispatched,
 //! bound to the digest that order really displayed.
+//!
+//! The **candidate push** is substituted too, and less visibly. Production's
+//! pull path ends by resolving an admitted capture's checkout through
+//! correspondence and force-pushing that commit to the bloom's candidate ref
+//! (ADR-0152); the scripted admit path omits that step, and
+//! [`seed_capture`](FixtureHarness::seed_capture) plants the same ref itself
+//! through the same `candidate_ref_name` helper. The omission is forced — the
+//! production pusher shells a real `git push --force origin` — but the cost is
+//! real: a wrong ref name, a dropped push, or a mis-resolved correspondence is
+//! invisible here, because the fold reads a ref this harness wrote. That step
+//! belongs to the lane-boundary tier, which runs a real pusher.
+//!
+//! # Warning: do not seed a completed run here
+//!
+//! The reason no scenario has ever run that production pusher is narrower than
+//! it looks. `on_dispatch_tick` calls `pull_and_admit` unconditionally, dozens
+//! of times per scenario, and `pull_and_admit` ends in the push. What keeps the
+//! push loop empty is that `FakeGithub::dispatch_workflow` records a dispatch
+//! and never a run, so `find_run` answers `None` and the intake cycle matches
+//! nothing.
+//!
+//! One `seed_run(nonce, Completed, Success)` plus `seed_run_artifacts` — the
+//! obvious next step for anyone extending this harness toward the real pull
+//! path — removes that. The correspondence this harness already seeds then
+//! resolves the capture's checkout to a real commit, and the reactor's
+//! hardcoded pusher force-pushes it to the developer's own `origin`. Give the
+//! reactor a recording pusher before writing that scenario.
 //!
 //! # Why it boots in-process rather than forking
 //!
@@ -122,6 +152,18 @@ const STEP_BUDGET: Duration = Duration::from_secs(20);
 /// Between re-wakes inside a waiting step.
 const POLL: Duration = Duration::from_millis(20);
 
+/// This harness's own socket read timeout, set well clear of the two budgets
+/// above.
+///
+/// The shared client sets twenty seconds, which is exactly [`STEP_BUDGET`]. At
+/// equal values a tick slow enough to matter races the budget it is being
+/// measured against, and the socket usually wins — so a loaded runner reports an
+/// io timeout from inside `tick` rather than the budget message that names what
+/// the scenario was waiting for. Widening the socket here leaves the budget as
+/// the thing that fires first, and keeps the socket error meaning what it says:
+/// the coordinator stopped answering.
+const SOCKET_READ_TIMEOUT: Duration = Duration::from_mins(2);
+
 /// The commit a person merges a landing proposal at. A squash, so deliberately
 /// not the head Bloomery proposed — the distinction the land watch has to get
 /// right, and one a proposal-head echo would assert away.
@@ -193,6 +235,7 @@ impl FixtureHarness {
         let chassis = BloomeryChassis::build(env).expect("the fixture coordinator boots");
         let port = chassis.handle::<RpcServerHandle>().expect("the RPC ingress published its port").local_port;
         let stream = connect_and_handshake(port, client_name);
+        stream.set_read_timeout(Some(SOCKET_READ_TIMEOUT)).expect("the fixture socket takes a read timeout");
 
         let mut harness = Self {
             _chassis: chassis,
@@ -565,8 +608,10 @@ pub fn digest(seed: u8) -> Digest {
 }
 
 /// One member, approved. The approval has to bind the member's own subject or
-/// the seal door refuses it (ADR-0174), and the subject is a function of the
-/// rest of the member — so it is set after the member is otherwise built.
+/// the seal door refuses it as an unapproved member (ADR-0149), and the subject
+/// is a function of the rest of the member — its workpiece, its scope revision,
+/// and the configs ADR-0174 folded in — so it is set after the member is
+/// otherwise built.
 #[must_use]
 pub fn member(workpiece: &str, scope_revision: Digest) -> Membership {
     let mut member = Membership {

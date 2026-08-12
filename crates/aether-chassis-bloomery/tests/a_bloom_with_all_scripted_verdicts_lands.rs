@@ -8,13 +8,18 @@
 //! have produced, so a producer that emits a payload its consumer cannot act on
 //! — or a stage transition that produces no next input at all — passes both
 //! sides and stalls only in production.
+//!
+//! This is also where the scripted seam's refusal side is pinned, since a live
+//! outstanding order is what a refusal has to be probed against and the happy
+//! path is where one is cheapest to hold. The two refused uploads sit beside the
+//! Construct verdict and leave the bloom's own progress untouched.
 
 mod common;
 pub mod fixture;
 
-use aether_bloomery::{BloomStatus, StudyCost, StudyRecord};
+use aether_bloomery::{BloomStatus, Nonce, StudyCost, StudyRecord};
 use aether_chassis_bloomery::artifacts::GetResult;
-use aether_chassis_bloomery::bloomery::ScriptedUpload;
+use aether_chassis_bloomery::bloomery::{ScriptedEvidenceResult, ScriptedUpload};
 use aether_data::wire::from_bytes;
 use fixture::{FixtureHarness, captured, digest, passed};
 
@@ -45,6 +50,17 @@ fn measured(upload: ScriptedUpload, cost: StudyCost) -> ScriptedUpload {
     ScriptedUpload { cost: Some(cost), ..upload }
 }
 
+/// Assert the broker refused an upload, and refused it for `reason` — the
+/// rendered [`IntakeRefusal`] variant the scripted reply carries.
+///
+/// [`IntakeRefusal`]: aether_chassis_bloomery::bloomery::IntakeRefusal
+fn assert_refused(result: &ScriptedEvidenceResult, reason: &str) {
+    let ScriptedEvidenceResult::Refused { refusal } = result else {
+        panic!("the intake boundary took an upload it must refuse ({reason}): {result:?}");
+    };
+    assert!(refusal.contains(reason), "expected a {reason} refusal, got {refusal}");
+}
+
 #[test]
 fn a_bloom_with_all_scripted_verdicts_lands() {
     let mut harness = FixtureHarness::start("all-passing-scenario");
@@ -61,6 +77,26 @@ fn a_bloom_with_all_scripted_verdicts_lands() {
         scope_revision.as_bytes().to_vec(),
         "a member with no capture yet is ordered against its sealed scope revision",
     );
+
+    // The trust boundary every scenario rests on, probed once against a live
+    // order. Neither upload perturbs what follows: both refusals are decided
+    // before the reducer is reached, write nothing, and leave the order live for
+    // the honest verdict below.
+    //
+    // Tripwire: the scripted seam is a seam only while it forwards the
+    // scenario's *own* nonce and subject to `admit_uploaded` unexamined. Two
+    // conveniences would quietly turn it into a bypass, and each assertion pins
+    // one. Filling the subject in from the stored order — it is right there, and
+    // the harness has to read it anyway — would make the digest binding `x == x`
+    // and admit the mismatched upload. Resolving the nonce in the handler rather
+    // than routing it through the broker would admit the fabricated one. Under
+    // either, every seal-to-landed assertion in this suite still passes, because
+    // a scenario only ever scripts uploads that are already honest.
+    let fabricated = ScriptedUpload { nonce: Nonce("nonce-that-names-no-order".to_owned()), ..passed(&construct) };
+    assert_refused(&harness.upload(&fabricated), "UnknownNonce");
+
+    let misbound = ScriptedUpload { subject: digest(0xEE), ..passed(&construct) };
+    assert_refused(&harness.upload(&misbound), "DigestMismatch");
 
     let candidate = harness.seed_capture(bloom, WORKPIECE, digest(0xC1), digest(0xC2));
     let cost = measured_cost();

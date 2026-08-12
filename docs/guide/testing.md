@@ -160,14 +160,30 @@ both sides and stalls only in production. Here every row comes from the real red
 decisions committed by the real control core, and the boot-constructed reactor that
 owns the topic drains it. Nothing in a scenario enqueues a topic.
 
-| | LaneHarness | fixture harness |
-| --- | --- | --- |
-| Coordinator | forked `bloomery` process | booted in the test process |
-| Substituted | the lane program at the end of the argv | the verdict a model would have uploaded |
-| Progress comes from | the coordinator's own poll cadence | explicit `DispatchTick` / `IntegrateTick` / `LandTick` calls |
-| Reads | the projection and the journal over the wire | those, plus the store and artifact roots on disk |
-| Proves | the whole dispatch below the lane: `git worktree add`, the child process, its `evidence.json`, the candidate capture | the reactor-to-reactor handoff, and that a boot-constructed reactor resolved the roots it was configured with |
-| Cannot prove | that a stage transition produced the next reactor's input, since a lane failure and a missing handoff both read as a stall | anything about the lane subprocess, which it never spawns |
+Under both sits the oldest of the three, the **cross-process tests**
+(`crates/aether-chassis-bloomery/tests/`: `rest_api.rs`, `control_loop.rs`,
+`recovery.rs`). Each boots the real `bloomery` binary over a socket and drives it the
+way an operator or a crash would — `curl` against the HTTP ingress, typed mail over
+RPC, `kill -9` and restart against the same database file. They are the only tier with
+a real process to lose, which is exactly what they are for.
+
+| | LaneHarness | fixture harness | cross-process |
+| --- | --- | --- | --- |
+| Coordinator | forked `bloomery` process | booted in the test process | forked `bloomery` process, killable |
+| Substituted | the lane program at the end of the argv | the model's verdict, and the ADR-0152 candidate push | nothing below the wire; the bloom's own evidence is synthetic |
+| Progress comes from | the coordinator's own poll cadence | explicit `DispatchTick` / `IntegrateTick` / `LandTick` calls | the coordinator's own poll cadence |
+| Reads | the projection and the journal over the wire | those, plus the store and artifact roots on disk | HTTP responses, typed mail replies, and the database file across a restart |
+| Proves | the whole dispatch below the lane: `git worktree add`, the child process, its `evidence.json`, the candidate capture | the reactor-to-reactor handoff, and that a boot-constructed reactor resolved the roots it was configured with | that state survives a process boundary — journal replay, outbox republish, a losing concurrent seal, the REST surface an operator actually types at |
+| Cannot prove | that a stage transition produced the next reactor's input, since a lane failure and a missing handoff both read as a stall | anything about the lane subprocess, which it never spawns; or the candidate push, which it substitutes | that a bloom advances, since nothing supplies a lane verdict |
+
+**Where a new test goes.** A crash, a replay, a restart, or a race between two
+concurrently running loops has to be cross-process: the other two tiers have no process
+to kill, and the fixture tier steps its reactors one at a time by construction, which
+removes the interleaving a race needs. Anything about the lane subprocess or the
+candidate push belongs to LaneHarness, which runs both for real. Everything else about
+how the coordinator's own parts fit together — a reactor drains what its upstream
+projected, a boot-constructed reactor opened the configured root — belongs to the
+fixture tier, which is the fastest of the three and should carry the bulk.
 
 Two constraints follow from the fixture tier's in-process boot, and both are structural
 rather than incidental. The in-memory GitHub double is a process-global `OnceLock`, so

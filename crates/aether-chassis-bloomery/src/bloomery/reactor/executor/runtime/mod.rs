@@ -71,7 +71,7 @@ use crate::bloomery::intake::{AdmitDecision, admit_uploaded};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 #[cfg(any(test, feature = "testing"))]
-use crate::bloomery::study::{UploadedStudyRecord, admit_study};
+use crate::bloomery::study::{StudyAdmitDecision, UploadedStudyRecord, admit_study};
 #[cfg(any(test, feature = "testing"))]
 use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload};
 use crate::bloomery::{CoordinatorConfig, ExecutorReactorSetup};
@@ -934,6 +934,27 @@ pub trait CandidatePush: Send + Sync {
 /// this same repository, so its object is in the shared object store and
 /// pushable after the worktree is gone; the host's ambient credentials are the
 /// ADR-0150 trust domain (the worker itself never pushes).
+///
+/// # Warning to anyone extending the in-process fixture tier
+///
+/// This is the **only** pusher the reactor is ever constructed with — there is
+/// no injection seam — so an in-process scenario that reaches
+/// [`push_admitted_candidates`] force-pushes against whatever `origin` the
+/// developer's checkout points at. [`on_dispatch_tick`] calls
+/// [`pull_and_admit`] unconditionally, dozens of times per scenario, so the tick
+/// loop is not what holds it back. What holds it back today is one link further
+/// down: `FakeGithub::dispatch_workflow` records a dispatch and never a run, so
+/// `find_run` answers `None`, the intake cycle matches nothing, and the push
+/// loop iterates an empty slice.
+///
+/// That containment is one `seed_run` away from gone. A scenario that seeds a
+/// completed run with artifacts — the natural next step when extending this
+/// harness toward the real pull path — makes an admitted capture reach here,
+/// and the correspondence the fixture already seeds resolves its checkout to a
+/// real commit. Before writing such a scenario, give the reactor a recording
+/// pusher; do not let the default one run under `cargo test`.
+///
+/// [`on_dispatch_tick`]: ExecutorReactorCapability
 struct GitCandidatePush;
 
 impl CandidatePush for GitCandidatePush {
@@ -1016,16 +1037,26 @@ fn push_admitted_candidates(
     }
 }
 
-/// Whether the reactor has no backend to mount for this pair of configs — the
-/// predicate `actor_setups` decides the mount by, spelled here so it is testable
-/// without a boot.
+/// Whether the reactor has no backend to mount for this pair of configs —
+/// GitHub unconfigured *and* the local lane disabled (#4626). Unconfigured alone
+/// is not enough: the local backend needs no credential, so it still dispatches
+/// every lane routed to it.
 ///
-/// A selected fixture (#4732) is a usable Actions backend even though it names
-/// no token, owner, or repo: the in-memory double answers every dispatch and
-/// artifact call. Reading it as unconfigured would mount a fixture-backed
-/// coordinator disabled the moment its local lane is off — which is exactly the
-/// shape the in-process scenarios boot (#4711), so the whole fixture tier would
-/// silently never dispatch.
+/// A `#[cfg(test)]` **mirror** of the expression `actor_setups` mounts by, so
+/// the mount decision is assertable without building a `NativeInitCtx`. Being a
+/// copy rather than the production predicate is its standing weakness: it can
+/// drift, and it had. `actor_setups` already reads a selected fixture (#4732) as
+/// a configured backend — the in-memory double answers every dispatch and
+/// artifact call even though it names no token, owner, or repo — while this copy
+/// still consulted the missing connection knobs alone. The two therefore
+/// disagreed on exactly the configuration the in-process scenarios boot (#4711):
+/// a fixture with the local lane off.
+///
+/// Only the mirror was wrong. No binary mounts on this expression, so nothing
+/// was ever silently disabled in a shipping coordinator; what the repair fixes
+/// is a test that would have vouched for the wrong answer, and
+/// `a_selected_fixture_mounts_even_with_the_local_lane_off` pins the copy back
+/// against `actor_setups`.
 #[cfg(test)]
 fn is_disabled_mount(connection: &GithubConnectionConfig, coordinator: &CoordinatorConfig) -> bool {
     !connection.uses_fixture() && !connection.missing_connection_knobs().is_empty() && !coordinator.local_lane_enabled
@@ -1152,13 +1183,31 @@ fn pull_and_admit(
 /// [`pull_and_admit`]: everything that touches the two durable stores lives
 /// here, and the ctx send stays in the handler.
 ///
-/// The verdict travels the production path. The study lane writes through
+/// The store-side steps are the production ones. The study lane writes through
 /// *this reactor's* boot-opened artifacts handle — so a reactor that opened the
 /// wrong root files costs where nothing reads them, and the scenario that reads
 /// them back fails (#4705) — and the verdict itself goes through
 /// [`admit_uploaded`], which refuses a nonce naming no live order and a subject
 /// the order did not display. A scenario therefore cannot script an attempt the
-/// coordinator never ordered.
+/// coordinator never ordered. The one deliberate departure inside them is the
+/// study lane's fault policy, which fails the call instead of swallowing —
+/// reasoned at the call site.
+///
+/// # What is substituted besides the verdict
+///
+/// [`pull_and_admit`] ends by calling [`push_admitted_candidates`], which
+/// resolves an admitted capture's `checkout` through the correspondence store
+/// and publishes that commit at [`candidate_ref_name`]. This function does
+/// neither, because the only pusher the reactor is ever built with shells a real
+/// `git push --force origin` (`GitCandidatePush`) and a scenario must not run
+/// one. The fixture harness plants the candidate ref itself, through the same
+/// `candidate_ref_name` helper.
+///
+/// So the ADR-0152 candidate push is substituted as surely as the verdict is,
+/// and that is a coverage hole rather than a detail: a wrong ref name, a dropped
+/// push, or a mis-resolved correspondence is invisible to every scenario built
+/// on this seam, because the fold reads a ref the harness wrote. Proving that
+/// step needs the lane-boundary tier, which runs a real pusher.
 ///
 /// [`on_scripted_evidence`]: ExecutorReactorCapability
 #[cfg(any(test, feature = "testing"))]
@@ -1175,10 +1224,25 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
     // Study before the verdict, for the reason the intake cycle documents:
     // `admit_study` matches the order without consuming it while the admit below
     // consumes, so the other order records nothing.
+    //
+    // The *fault* policy deliberately diverges from that cycle's, which swallows
+    // a refusal or a store fault (warn, admit the verdict anyway) because the
+    // study lane grades attempts and must never gate them: on a live
+    // coordinator, trading a missing ledger row for a stalled bloom is never
+    // worth it. Here there is no bloom to stall and nobody reading warns. A
+    // swallowed study fault would instead surface several steps later as a
+    // missing index row — the same symptom as the wrong-artifacts-root defect
+    // (#4705) this tier exists to catch, with the real cause only in a log the
+    // test harness discards. So a scripted study that does not record stops the
+    // call and names which of the two it was.
     if let (Some(cost), Some(artifacts)) = (upload.cost, state.artifacts.as_mut()) {
         let record = UploadedStudyRecord { nonce: upload.nonce.clone(), subject: upload.subject, cost };
-        if let Err(error) = admit_study(store, artifacts, &record) {
-            return failed(format!("scripted study record failed: {error}"));
+        match admit_study(store, artifacts, &record) {
+            Ok(StudyAdmitDecision::Admitted(_)) => {}
+            Ok(StudyAdmitDecision::Refused(refusal)) => {
+                return failed(format!("scripted study record refused: {refusal:?}"));
+            }
+            Err(error) => return failed(format!("scripted study record failed: {error}")),
         }
     }
 
@@ -1194,11 +1258,6 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
     }
 }
 
-/// Whether the reactor has no backend to mount for `config` — GitHub
-/// unconfigured *and* the local lane disabled (#4626). Unconfigured alone is not
-/// enough: the local backend needs no credential, so it still dispatches every
-/// lane routed to it. Pure so the mount decision is testable without a
-/// `NativeInitCtx`.
 #[runtime]
 impl NativeActor for ExecutorReactorCapability {
     type State = ExecutorReactorState;
@@ -1428,21 +1487,26 @@ impl NativeActor for ExecutorReactorCapability {
 
     /// Admit one scripted lane verdict for an order this reactor really
     /// dispatched (#4711) — the in-process fixture tier's stand-in for the model
-    /// a lane would have run, and nothing else.
+    /// a lane would have run.
     ///
-    /// Everything the verdict then travels through is the production path: the
-    /// study lane writes through *this reactor's* boot-opened artifacts handle
-    /// (so a reactor that opened the wrong root fails the scenario rather than
-    /// filing costs where nothing reads them, #4705), and the verdict itself
-    /// goes through [`admit_uploaded`] — which refuses a nonce naming no live
-    /// order and a subject the order did not display. A scenario therefore
-    /// cannot script an attempt the coordinator never ordered.
+    /// The store-side steps are the production ones: the study lane writes
+    /// through *this reactor's* boot-opened artifacts handle (so a reactor that
+    /// opened the wrong root fails the scenario rather than filing costs where
+    /// nothing reads them, #4705), and the verdict itself goes through
+    /// [`admit_uploaded`] — which refuses a nonce naming no live order and a
+    /// subject the order did not display. A scenario therefore cannot script an
+    /// attempt the coordinator never ordered.
+    ///
+    /// The verdict is not the only substitution, and the other one is easy to
+    /// forget: [`admit_scripted`] omits [`push_admitted_candidates`], the tail
+    /// [`pull_and_admit`] runs, so the ADR-0152 candidate push does not happen
+    /// on this path and the fixture plants the candidate ref itself. See
+    /// [`admit_scripted`] for what that leaves uncovered.
     ///
     /// The `Admit` rides **tracked** rather than detached, unlike the pull
     /// side's: a scenario's call must settle only once the control core has
     /// reduced and committed the fact, which is what lets a scenario step the
     /// bloom instead of sleeping on it.
-    ///
     #[cfg(any(test, feature = "testing"))]
     #[handler::single]
     fn on_scripted_evidence(

@@ -2,11 +2,18 @@
 //! would have uploaded, for an order it really dispatched.
 //!
 //! The in-process fixture scenarios drive a whole bloom reactor-to-reactor with
-//! no model and no lane subprocess. Everything below the lane stays production:
-//! the reducer decides, [`project`](crate::control) writes the outbox row, the
+//! no model and no lane subprocess. The decision path stays production: the
+//! reducer decides, [`project`](crate::control) writes the outbox row, the
 //! boot-constructed executor reactor drains it and records a real outstanding
-//! order. What the scenarios substitute is only the part a model would have
-//! produced — the verdict, and the candidate a construct run captured.
+//! order. What the scenarios substitute is the part a model would have produced
+//! — the verdict, and the candidate a construct run captured.
+//!
+//! One production step is substituted alongside it, and it is not a detail. The
+//! real pull path ends by pushing an admitted capture to its bloom candidate ref
+//! (ADR-0152); the scripted path omits that push, because the only pusher the
+//! reactor is built with shells a real `git push --force origin`. The fixture
+//! harness plants the candidate ref itself instead, so nothing in this tier can
+//! catch a wrong ref name, a dropped push, or a mis-resolved correspondence.
 //!
 //! The substitution rides the same trust boundary a real upload does. A
 //! scripted verdict names a nonce and a subject; [`admit_uploaded`] looks the
@@ -16,10 +23,12 @@
 //! a tree the order never showed — which is exactly what makes the fixture a
 //! test of the handoff rather than a way around it.
 //!
-//! Compiled only under `cfg(any(test, feature = "testing"))`, beside the
-//! [`FakeGithub`](aether_bloomery_github::testing::FakeGithub) fixture the same
-//! feature gates, so a production binary carries neither the kinds nor the
-//! handler that admits them.
+//! Compiled only under `cfg(all(feature = "github", any(test, feature =
+//! "testing")))` — the `github` half because the order registry and the fixture
+//! it scripts against are both that feature's, the `testing` half beside the
+//! [`FakeGithub`](aether_bloomery_github::testing::FakeGithub) fixture it gates,
+//! so a production binary carries neither the kinds nor the handler that admits
+//! them.
 //!
 //! [`admit_uploaded`]: crate::bloomery::admit_uploaded
 
@@ -66,8 +75,8 @@ impl ScriptedVerdict {
 }
 
 /// What a scenario uploads on a lane's behalf — the fields
-/// [`UploadedEvidence`](crate::bloomery::UploadedEvidence) carries, in their
-/// wire-carryable spelling.
+/// [`crate::bloomery::UploadedEvidence`] carries, in their wire-carryable
+/// spelling.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ScriptedUpload {
     /// The nonce the upload answers. Must name a live outstanding order.
