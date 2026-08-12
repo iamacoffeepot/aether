@@ -581,12 +581,19 @@ mod tests {
     /// dev-dependency to close that cycle, so what rules a fixture out here is
     /// cost, not the dependency graph: dev-depending on `aether-substrate` from
     /// a proc-macro crate pulls the wasmtime and cranelift tree into its UI
-    /// tests, and the cheaper substitute — a hand-written substrate mock —
-    /// proves less than the same assertion against the real types would, while
-    /// leaving a mock nobody maintains. These read the emitted tokens instead,
-    /// which is where the gate decision is made; the other option is to assert
-    /// the pair against the real types from the substrate side of the edge,
-    /// where they are already in scope.
+    /// tests. The pair is asserted against the real types from the substrate
+    /// side of the edge instead, where they are already in scope and already
+    /// built, by `a_cfg_gated_set_handler_leaves_no_dispatch_artifact_in_an_adopter`
+    /// in `aether-substrate/tests/native_actor_macro.rs`.
+    ///
+    /// These read the emitted tokens, which is the other half of the question
+    /// and is only answerable here. That test compiles one configuration of one
+    /// set and reports which artifacts survived it; these see the gate pair
+    /// itself — that a handler's predicate guards the pass-through arm and its
+    /// exact negation the empty one, that several `#[cfg]`s conjoin before they
+    /// are negated, and that a gate's index is its handler's declaration
+    /// position. Those hold across every configuration at once, and no single
+    /// compiled one exhibits them.
     fn native_set(handlers: &proc_macro2::TokenStream) -> String {
         expand_handler_set(syn::parse_quote! {
             trait Set {

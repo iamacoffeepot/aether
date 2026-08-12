@@ -664,6 +664,131 @@ fn a_cfg_gated_handler_leaves_no_dispatch_artifact() {
     assert_eq!(advertised, expected, "a stripped handler contributes no advertised capability either");
 }
 
+/// ADR-0183: the same contract on the sibling macro. A `#[handler_set]`
+/// handler's `#[cfg]` governs every artifact the set derives from it, and the
+/// crate that *defines* the set is the one whose configuration decides.
+///
+/// A native set produces one family more than the `#[actor]` block above: past
+/// the dispatch arm and the `HandlerCapability` row, it hands each adopter an
+/// `impl HandlesKind<K>` through a `#[macro_export] macro_rules!` bridge that
+/// expands in the adopter's crate. A `#[cfg]` replayed into that body would be
+/// read against the adopter's features while the other two answered to the
+/// definer's, so the bridge resolves its gate here at definition time instead.
+/// The two halves have to agree: `HandlesKind<K>` is the permission that lets a
+/// typed send compile, so a marker without a matching arm is mail that compiles
+/// and is dropped.
+///
+/// This is where that pair is provable. A native set's expansion names
+/// `::aether_substrate` types, so asserting it from `aether-actor-derive`'s
+/// trybuild fixtures would mean dev-depending on the substrate from a
+/// proc-macro crate and pulling the wasmtime and cranelift tree into its UI
+/// tests. This file already builds the substrate and already hosts the
+/// `#[actor]` half of the contract, so the set half is checked against the real
+/// types beside it.
+///
+/// The configuration is the same one: an integration test compiles with
+/// `cfg(test)` set, so `on_set_stripped` and its `SetCfgStripped` kind are
+/// absent from this build while `on_set_present` and `on_set_kept` survive.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
+#[kind(name = "test.macro_native_actor.set_cfg_kept")]
+struct SetCfgKept {
+    tag: u32,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
+#[kind(name = "test.macro_native_actor.set_cfg_present")]
+struct SetCfgPresent {
+    tag: u32,
+}
+
+#[cfg(not(test))]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
+#[kind(name = "test.macro_native_actor.set_cfg_stripped")]
+struct SetCfgStripped {
+    tag: u32,
+}
+
+#[aether_actor::handler_set]
+trait CfgGatedSet {
+    fn seen(&self) -> &AtomicU32;
+
+    #[aether_actor::handler::single]
+    fn on_set_kept(&self, _ctx: &mut NativeCtx<'_>, mail: SetCfgKept) {
+        self.seen().fetch_add(mail.tag, AtomicOrdering::SeqCst);
+    }
+
+    #[aether_actor::handler::single]
+    #[cfg(test)]
+    fn on_set_present(&self, _ctx: &mut NativeCtx<'_>, mail: SetCfgPresent) {
+        self.seen().fetch_add(mail.tag, AtomicOrdering::SeqCst);
+    }
+
+    #[aether_actor::handler::single]
+    #[cfg(not(test))]
+    fn on_set_stripped(&self, _ctx: &mut NativeCtx<'_>, mail: SetCfgStripped) {
+        self.seen().fetch_add(mail.tag, AtomicOrdering::SeqCst);
+    }
+}
+
+struct CfgGatedSetAdopter {
+    seen: AtomicU32,
+}
+
+impl CfgGatedSet for CfgGatedSetAdopter {
+    fn seen(&self) -> &AtomicU32 {
+        &self.seen
+    }
+}
+
+#[aether_actor::actor(handler_set(CfgGatedSet))]
+impl NativeActor for CfgGatedSetAdopter {
+    type Config = ();
+    const NAMESPACE: &'static str = "test.macro_native_actor.cfg_gated_set";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { seen: AtomicU32::new(0) })
+    }
+}
+
+/// Reads the marker the set's bridge handed the adopter. The bound is
+/// satisfiable only if the bridge emitted `impl HandlesKind<K> for A`, so
+/// naming a pair here is an assertion that the marker exists, checked where a
+/// typed send would check it.
+fn adopter_holds_set_marker<K: Kind, A: aether_actor::HandlesKind<K>>() {}
+
+/// Tripwire: a `#[cfg]`-stripped set handler leaves no dispatch artifact in an
+/// adopter — no arm, no capability row, no marker — and a `#[cfg]`-satisfied
+/// one still contributes all three.
+///
+/// The two directions are caught by different mechanisms, and both are needed.
+/// *Leaking* is a compile error: an arm, a capability row, or a marker built
+/// from `on_set_stripped` names `SetCfgStripped` and a method, neither of which
+/// exists in this configuration, so it fails the build before this test runs.
+/// *Over-stripping* is not, and is what the two assertions below catch — a gate
+/// whose predicate and negation did not partition the configurations, or an
+/// attribute list applied to the wrong artifact, would quietly drop a handler
+/// the set should have kept, and the set's contribution to an adopter's
+/// `capabilities()` and `measured_kinds()` would silently narrow. The
+/// `adopter_holds_set_marker` calls are the same check for the bridge, whose
+/// output has no run-time value to compare: a swallowed marker is a set member
+/// an adopter can no longer be sent, and nothing else would report it.
+#[test]
+fn a_cfg_gated_set_handler_leaves_no_dispatch_artifact_in_an_adopter() {
+    use aether_substrate::actor::native::Dispatch;
+
+    let measured = <CfgGatedSetAdopter as Dispatch<CfgGatedSetAdopter>>::measured_kinds();
+    let advertised: Vec<_> =
+        <CfgGatedSetAdopter as Dispatch<CfgGatedSetAdopter>>::capabilities().handlers.iter().map(|h| h.id).collect();
+
+    let expected = vec![<SetCfgKept as Kind>::ID, <SetCfgPresent as Kind>::ID];
+    assert_eq!(measured, expected, "an adopter measures the set's surviving kinds and nothing the set stripped");
+    assert_eq!(advertised, expected, "and advertises exactly those, in the set's declaration order");
+
+    adopter_holds_set_marker::<SetCfgKept, CfgGatedSetAdopter>();
+    adopter_holds_set_marker::<SetCfgPresent, CfgGatedSetAdopter>();
+}
+
 /// An actor with no task handler measures exactly what it advertises, so the
 /// wider set is not a blanket widening.
 #[test]

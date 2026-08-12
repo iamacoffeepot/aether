@@ -157,13 +157,14 @@ fn ui() {
     // artifact names a type that is not there, and the surviving records are
     // compared byte-for-byte against an ungated set declaring exactly the
     // handlers that outlive `#[cfg(test)]`, so over-stripping fails too. The
-    // bridge is a native-set artifact, and its gate pair is asserted over the
-    // emitted tokens in `handler_set::tests` — a native set's expansion names
-    // `aether_substrate` types, and `aether-substrate` depends transitively on
+    // bridge is a native-set artifact, and it is asserted twice elsewhere: its
+    // gate pair over the emitted tokens in `handler_set::tests`, and its effect
+    // on a real adopter in `aether-substrate/tests/native_actor_macro.rs`.
+    // Neither belongs here, because a native set's expansion names
+    // `aether_substrate` types and `aether-substrate` depends transitively on
     // this crate. A dev-dependency can close that cycle, so what rules a fixture
     // out here is cost, not the dependency graph: it would pull the wasmtime and
-    // cranelift tree into these UI tests, and hand-mocking the substrate types to
-    // avoid that proves less than the token assertion does. The real types are in
-    // scope on the substrate side of the edge if the pair is wanted against them.
+    // cranelift tree into these UI tests, which the substrate side of the edge
+    // builds anyway.
     t.pass("tests/ui/accepts_cfg_gated_handler_set_wasm.rs");
 }
