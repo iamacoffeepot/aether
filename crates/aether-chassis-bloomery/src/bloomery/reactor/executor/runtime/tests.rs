@@ -959,16 +959,21 @@ fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
 
 // Tripwire: every fixture-shaped construction — `with_parts` (#4835) included —
 // resolves its pusher through `default_candidate_push`'s fixture arm, which
-// declines to push rather than shelling git. If either `default_candidate_push`
-// or `with_parts` is switched back to the real `GitCandidatePush`, this fails
-// instead of a fixture harness silently shelling a real push.
+// declines to push rather than shelling git. The assertion is on the refusal
+// message, not merely `is_err`: `GitCandidatePush` would also answer `Err` here
+// (there is no such commit to push), so an `is_err` check would stay green while
+// shelling the real push this seam exists to prevent. Only the refusing arm
+// names the ref and commit it declined without touching a remote.
 #[test]
 fn default_candidate_push_refuses_on_a_fixture_boot() {
     let target_ref = "refs/heads/bloom/…/candidate/wp";
+    let commit_hex = "0".repeat(40);
 
-    let outcome = default_candidate_push(true).push(&"0".repeat(40), target_ref);
+    let refusal = default_candidate_push(true).push(&commit_hex, target_ref).expect_err("the fixture arm declines");
 
-    assert!(outcome.is_err(), "the fixture arm declines instead of shelling git");
+    assert!(refusal.contains("refusing to push"), "the fixture arm declines by name, not by a failed git shell-out");
+    assert!(refusal.contains(target_ref), "the refusal names the ref it declined: {refusal}");
+    assert!(refusal.contains(&commit_hex), "the refusal names the commit it declined: {refusal}");
 }
 
 // #3656 / ADR-0153 — persisted findings from the failing verdict compose onto
