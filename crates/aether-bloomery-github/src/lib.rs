@@ -9,17 +9,20 @@
 //!
 //! # Direction is outward
 //!
-//! GitHub is a **shadow copy of Bloomery's internals** — a carbon-copy
-//! tracking surface, never a source of intent. The adapter consumes a
-//! self-contained [`ViewDocument`](aether_bloomery::ViewDocument) (the pure
-//! projection of the journal that [`aether_bloomery::view_of`] assembles) and
-//! projects it: each workpiece to an issue, each bloom to its aggregate
-//! umbrella issue, and evidence to comments. Every projection carries the internal
-//! Bloomery id plus a content digest in stable metadata (an HTML-comment
-//! [`Marker`] in issue/comment bodies, the native `external_id` on
+//! GitHub is a **tracking surface for Bloomery's internals**, never a source of
+//! intent. The adapter consumes a self-contained
+//! [`ViewDocument`](aether_bloomery::ViewDocument) (the pure projection of the
+//! journal that [`aether_bloomery::view_of`] assembles) and mirrors it onto the
+//! objects the repository already holds: each member becomes one marker-keyed
+//! comment on the issue its workpiece addresses, and a landing receipt becomes
+//! one comment per member issue plus one on the landing pull request. No object
+//! is ever opened, closed, retitled, or rewritten — the projection owns its own
+//! comments and nothing else (ADR-0149, amended by [#4663]). Every projection
+//! carries the internal Bloomery id plus a content digest in stable metadata (an
+//! HTML-comment [`Marker`] in comment bodies, the native `external_id` on
 //! check-runs), so the projection is **idempotent** — reconciling the same
 //! document twice is a no-op — and **rebuildable from the journal** after a
-//! deletion: a deleted projection leaves no marker to find, so the reconcile
+//! deletion: a deleted comment leaves no marker to find, so the reconcile
 //! recreates it. The projector reads only its own markers; it never
 //! interprets free-form platform content as intent.
 //!
@@ -27,8 +30,8 @@
 //!
 //! What ships here has grown one port per sibling slice, each adapter over the
 //! same thin HTTP client and fake double: the outward **projection mirror**
-//! (issues / comments, [#3459]) with its stable-metadata marker and the inward
-//! stage-result normalizer; the **git source port** (snapshot / branch
+//! (marker-keyed comments, [#3459]) with its stable-metadata marker and the
+//! inward stage-result normalizer; the **git source port** (snapshot / branch
 //! namespace / integrate / CAS land, [#3465]) over the Git Data API; and the
 //! **Actions executor port** ([`ActionsExecutor`], migration step 2 [#3500]) —
 //! the four-message [`ExecutorBackend`](aether_bloomery::ExecutorBackend) that
@@ -41,12 +44,13 @@
 //!
 //! [#3459]: https://github.com/iamacoffeepot/aether/issues/3459
 //! [#3460]: https://github.com/iamacoffeepot/aether/issues/3460
+//! [#4663]: https://github.com/iamacoffeepot/aether/issues/4663
 
 use aether_bloomery::Digest;
 
 /// A digest's first six bytes as hex — the short form every human-facing
-/// surface names a bloom by: projection issue titles, the branch namespace, and
-/// a landing proposal's subject.
+/// surface names a bloom by: projected comment bodies, the branch namespace,
+/// and a landing proposal's subject.
 ///
 /// Twelve hex characters is git's own short-sha convention and reads at a
 /// glance where sixty-four does not. It is a *name*, never an identity: the
@@ -79,9 +83,9 @@ pub mod testing;
 
 pub use client::{
     ActionsApi, Artifact, CheckConclusion, CheckRun, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError,
-    HttpRequest, HttpResponse, HttpTransport, InstallationToken, Issue, MergeResult, Method, NewCheckRun, NewComment,
-    NewIssue, NewPullRequest, PullRequest, PullRequestApi, PullRequestState, ReqwestGithub, ReqwestTransport,
-    RunConclusion, RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
+    HttpRequest, HttpResponse, HttpTransport, InstallationToken, MergeResult, Method, NewCheckRun, NewComment,
+    NewPullRequest, PullRequest, PullRequestApi, PullRequestState, ReqwestGithub, ReqwestTransport, RunConclusion,
+    RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
 };
 pub use config::GithubConfig;
 pub use correspondence::{Correspondence, CorrespondenceError, GitObjectFormat, GitObjectId, SharedCorrespondence};
@@ -92,4 +96,4 @@ pub use inward::{
 };
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
 pub use projection::GithubProjection;
-pub use source::{GitSource, SourceError, candidate_ref_name, to_hex};
+pub use source::{GitSource, SourceError, candidate_ref_name, landing_branch, to_hex};

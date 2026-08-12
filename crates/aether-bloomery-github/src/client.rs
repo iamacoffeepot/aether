@@ -10,13 +10,16 @@
 //! # Endpoint surface
 //!
 //! This is the **outward projection mirror** slice, so the client wraps only
-//! the endpoints a projection-only reconcile touches: issues (create / update
-//! / find) and issue comments (create / update / find). Check-runs and the Git
-//! Data blob/tree/commit/ref surface belong to the **git source port** — a
-//! separate sibling slice (ADR-0149 amendment [#3460]) — and are intentionally
-//! absent: a check-run cannot attach without a commit the source port
-//! produces, so shipping it here would be an endpoint that cannot work
-//! projection-only.
+//! the endpoints a projection-only reconcile touches: issue comments (create /
+//! update / find on one named object). There is no issue create, overwrite, or
+//! find-by-marker verb, and that absence is the projection's bound rather than
+//! an omission — with no such method on [`GithubApi`], nothing reachable from a
+//! projection can address a human-authored title or body (ADR-0149 §The write
+//! surface). Check-runs and the Git Data blob/tree/commit/ref surface belong to
+//! the **git source port** — a separate sibling slice (ADR-0149 amendment
+//! [#3460]) — and are intentionally absent: a check-run cannot attach without a
+//! commit the source port produces, so shipping it here would be an endpoint
+//! that cannot work projection-only.
 //!
 //! # Testability
 //!
@@ -39,31 +42,6 @@ use reqwest::blocking::Client as BlockingClient;
 use serde::Deserialize;
 
 use crate::marker::{Marker, parse_marker};
-
-/// An issue projection: its number, current title/body, and the parsed marker
-/// (`None` when the body carries no well-formed marker — a deleted-and-
-/// recreated or hand-authored issue).
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Issue {
-    /// The issue number.
-    pub number: u64,
-    /// The current title.
-    pub title: String,
-    /// The current body (contains the marker when projected).
-    pub body: String,
-    /// The parsed marker, if the body carries one.
-    pub marker: Option<Marker>,
-}
-
-/// The fields to open a new issue with. `body` already carries its rendered
-/// marker.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct NewIssue {
-    /// The issue title.
-    pub title: String,
-    /// The issue body, marker included.
-    pub body: String,
-}
 
 /// A comment projection: its id, current body, and parsed marker.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -228,31 +206,22 @@ pub struct GitCommit {
 /// The GitHub client contract the projection depends on. Both the real
 /// [`ReqwestGithub`] and the test `FakeGithub` implement it,
 /// so the projection logic is exercised without a token or network.
+///
+/// **Comments only.** There is deliberately no verb here that writes an issue
+/// or pull-request title or body, opens an object, or closes one: a projection
+/// owns the marker-keyed comments it wrote and nothing else, and that bound
+/// holds by absence rather than by discipline (ADR-0149 §The write surface).
+/// Every lookup is scoped to one named object's comment list, so no path here
+/// enumerates repository-wide issue history either.
 pub trait GithubApi {
-    /// Find the issue whose marker carries `key`, if any. The projection's
-    /// idempotency lookup: a match with the desired digest is a no-op, a
-    /// mismatch an update, `None` a create.
-    ///
-    /// # Errors
-    /// The projection surface is unreachable or returned an error status.
-    fn find_issue(&self, key: &str) -> Result<Option<Issue>, GithubError>;
-
-    /// Open a new issue.
-    ///
-    /// # Errors
-    /// The projection surface is unreachable or returned an error status.
-    fn create_issue(&self, new: &NewIssue) -> Result<Issue, GithubError>;
-
-    /// Overwrite an issue's title and body.
-    ///
-    /// # Errors
-    /// The projection surface is unreachable or returned an error status.
-    fn update_issue(&self, number: u64, title: &str, body: &str) -> Result<(), GithubError>;
-
     /// Find the comment on `issue_number` whose marker carries `key`, if any.
+    /// The projection's idempotency lookup: a match with the desired digest is
+    /// a no-op, a mismatch an update, `None` a create.
     ///
     /// # Errors
-    /// The projection surface is unreachable or returned an error status.
+    /// The projection surface is unreachable or returned an error status — a
+    /// `Status { status: 404, .. }` is the object being absent, which the
+    /// projection records and skips rather than re-driving.
     fn find_comment(&self, issue_number: u64, key: &str) -> Result<Option<Comment>, GithubError>;
 
     /// Add a comment to an issue.
@@ -772,17 +741,6 @@ struct GhInstallationToken {
 }
 
 #[derive(Deserialize)]
-struct GhIssue {
-    number: u64,
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    body: Option<String>,
-    #[serde(default)]
-    pull_request: Option<serde_json::Value>,
-}
-
-#[derive(Deserialize)]
 struct GhComment {
     id: u64,
     #[serde(default)]
@@ -1139,49 +1097,6 @@ fn decode<D: for<'de> Deserialize<'de>>(response: &HttpResponse) -> Result<D, Gi
 }
 
 impl<T: HttpTransport> GithubApi for ReqwestGithub<T> {
-    fn find_issue(&self, key: &str) -> Result<Option<Issue>, GithubError> {
-        // No search-by-external-metadata endpoint exists, so list-and-scan.
-        // The shadow repo's issue set is small; the page cap bounds the walk.
-        for page in 1..=MAX_LIST_PAGES {
-            let url = format!("{}?state=all&per_page={PER_PAGE}&page={page}", self.issues_url());
-            let response = self.request(Method::Get, url, None)?;
-            let issues: Vec<GhIssue> = decode(&response)?;
-            let count = issues.len();
-            for gh in issues {
-                if gh.pull_request.is_some() {
-                    continue; // the issues endpoint also returns PRs.
-                }
-                let body = gh.body.unwrap_or_default();
-                let marker = parse_marker(&body);
-                if marker.as_ref().is_some_and(|m| m.key == key) {
-                    return Ok(Some(Issue { number: gh.number, title: gh.title, body, marker }));
-                }
-            }
-            // A short page is the end of the list — searched to the end, not
-            // found. Falling off the page cap instead means the walk truncated,
-            // so a still-unsearched issue must not be reported as absent.
-            if count < PER_PAGE as usize {
-                return Ok(None);
-            }
-        }
-        Err(GithubError::PaginationExhausted { what: "issues".to_owned() })
-    }
-
-    fn create_issue(&self, new: &NewIssue) -> Result<Issue, GithubError> {
-        let body = serde_json::json!({ "title": new.title, "body": new.body }).to_string();
-        let response = self.request(Method::Post, self.issues_url(), Some(body))?;
-        let gh: GhIssue = decode(&response)?;
-        let issue_body = gh.body.unwrap_or_else(|| new.body.clone());
-        let marker = parse_marker(&issue_body);
-        Ok(Issue { number: gh.number, title: gh.title, body: issue_body, marker })
-    }
-
-    fn update_issue(&self, number: u64, title: &str, body: &str) -> Result<(), GithubError> {
-        let payload = serde_json::json!({ "title": title, "body": body }).to_string();
-        self.request(Method::Patch, format!("{}/{number}", self.issues_url()), Some(payload))?;
-        Ok(())
-    }
-
     fn find_comment(&self, issue_number: u64, key: &str) -> Result<Option<Comment>, GithubError> {
         for page in 1..=MAX_LIST_PAGES {
             let url = format!("{}/{issue_number}/comments?per_page={PER_PAGE}&page={page}", self.issues_url());
@@ -1259,7 +1174,7 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         // matching-refs is paginated (100/page), so a bloom with more than one
         // page of checkpoints must be walked to the end — a single GET would
         // silently truncate the enumeration and drop reusable checkpoints. Same
-        // page-walk as find_issue / find_comment: stop when a page is short.
+        // page-walk as find_comment / find_run: stop when a page is short.
         let base = self.git_url(&format!("matching-refs/{prefix}"));
         let mut out = Vec::new();
         for page in 1..=MAX_LIST_PAGES {
@@ -1445,7 +1360,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        GithubApi, GithubError, HttpRequest, HttpResponse, HttpTransport, Method, NewIssue, ReqwestGithub,
+        GithubApi, GithubError, HttpRequest, HttpResponse, HttpTransport, Method, NewComment, ReqwestGithub,
         StaticTokenSource, TokenSource,
     };
 
@@ -1515,11 +1430,11 @@ mod tests {
             "octo/shadow",
         );
 
-        github.update_issue(1, "t", "b").expect("2xx patch");
+        github.update_comment(1, "b").expect("2xx patch");
         assert_eq!(bearer(&github.transport.last.borrow().clone().unwrap()), "Bearer first");
 
         *source.value.lock().unwrap() = "second".to_owned();
-        github.update_issue(1, "t", "b").expect("2xx patch");
+        github.update_comment(1, "b").expect("2xx patch");
         assert_eq!(bearer(&github.transport.last.borrow().clone().unwrap()), "Bearer second");
     }
 
@@ -1538,27 +1453,33 @@ mod tests {
     }
 
     #[test]
-    fn create_issue_shapes_a_post_to_the_repo_issues_route() {
-        let github = client(201, r#"{"number":42,"title":"t","body":"b"}"#);
-        let issue = github.create_issue(&NewIssue { title: "t".into(), body: "b".into() }).expect("2xx create decodes");
+    fn create_comment_shapes_a_post_to_the_named_object_comments_route() {
+        // Tripwire: the comment route is scoped to one object number. A slip to
+        // the bare issues route would open an object instead of commenting on
+        // one — the write the projection is bounded away from.
+        let github = client(201, r#"{"id":42,"body":"b"}"#);
+        let comment =
+            github.create_comment(&NewComment { issue_number: 7, body: "b".into() }).expect("2xx create decodes");
 
-        assert_eq!(issue.number, 42);
+        assert_eq!(comment.id, 42);
         let request = github.transport.last.borrow().clone().expect("a request was sent");
         assert_eq!(request.method, Method::Post);
-        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/issues");
-        // The body carries the title and body fields.
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/issues/7/comments");
         let sent: serde_json::Value = serde_json::from_str(&request.body.unwrap()).unwrap();
-        assert_eq!(sent["title"], "t");
         assert_eq!(sent["body"], "b");
+        assert!(sent.get("title").is_none(), "a comment write carries no title field");
     }
 
     #[test]
-    fn update_issue_patches_the_numbered_route() {
+    fn update_comment_patches_the_repository_wide_comment_route() {
+        // Tripwire: an issue comment is edited on `issues/comments/{id}` — the
+        // repository-wide route with no object number in it — not under the
+        // object it hangs off. The wrong route 404s only against real GitHub.
         let github = client(200, "{}");
-        github.update_issue(42, "nt", "nb").expect("2xx patch");
+        github.update_comment(42, "nb").expect("2xx patch");
         let request = github.transport.last.borrow().clone().unwrap();
         assert_eq!(request.method, Method::Patch);
-        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/issues/42");
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/issues/comments/42");
     }
 
     #[test]
@@ -1566,7 +1487,7 @@ mod tests {
         // Tripwire: a 422 must surface as `Status`, never a silent success or a
         // decode of the error body into a model.
         let github = client(422, r#"{"message":"Validation Failed"}"#);
-        let error = github.create_issue(&NewIssue { title: "t".into(), body: "b".into() }).unwrap_err();
+        let error = github.create_comment(&NewComment { issue_number: 7, body: "b".into() }).unwrap_err();
         match error {
             GithubError::Status { status, body } => {
                 assert_eq!(status, 422);
@@ -1577,15 +1498,15 @@ mod tests {
     }
 
     #[test]
-    fn find_issue_signals_pagination_exhaustion_rather_than_a_false_not_found() {
+    fn find_comment_signals_pagination_exhaustion_rather_than_a_false_not_found() {
         // Tripwire: when every page is full to the cap and none matches, the walk
         // truncated — it must surface `PaginationExhausted`, never fold a
-        // not-yet-searched issue into a `Ok(None)` "absent".
-        let full_page: Vec<String> =
-            (0..100).map(|i| format!(r#"{{"number":{i},"title":"t","body":"no marker"}}"#)).collect();
+        // not-yet-searched comment into a `Ok(None)` "absent", which the
+        // projection would answer by writing a duplicate.
+        let full_page: Vec<String> = (0..100).map(|i| format!(r#"{{"id":{i},"body":"no marker"}}"#)).collect();
         let github = client(200, &format!("[{}]", full_page.join(",")));
-        match github.find_issue("never-present").unwrap_err() {
-            GithubError::PaginationExhausted { what } => assert_eq!(what, "issues"),
+        match github.find_comment(7, "never-present").unwrap_err() {
+            GithubError::PaginationExhausted { what } => assert_eq!(what, "issue comments"),
             other => panic!("expected PaginationExhausted, got {other:?}"),
         }
     }

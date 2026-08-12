@@ -692,8 +692,12 @@ fn project(
                 releases
                     .push(MembershipMutation { workpiece: workpiece.0.clone(), bloom: bloom.0.as_bytes().to_vec() });
             }
-            Decision::EmitReceipt(receipt) => {
-                outbox.push(OutboxPayload::new(Topic::LandingReceipt, to_vec(receipt)?));
+            // The landing-receipt topic carries the receipt *and* the landed
+            // bloom's membership: the receipt value names no members, so a
+            // payload without them cannot reach the objects it belongs on after
+            // a restart drains it (ADR-0149 §The receipt carries its members).
+            Decision::EmitReceipt(projected) => {
+                outbox.push(OutboxPayload::new(Topic::LandingReceipt, to_vec(projected)?));
             }
             Decision::RedispatchStage { bloom, question, answer, words } => {
                 let payload =

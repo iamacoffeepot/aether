@@ -367,8 +367,8 @@ impl Snapshot {
             Decision::RecordObservation { head } => {
                 self.observed = *head;
             }
-            Decision::EmitReceipt(receipt) => {
-                if let Some(record) = self.blooms.get_mut(&receipt.bloom) {
+            Decision::EmitReceipt(projected) => {
+                if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;
                 }
             }

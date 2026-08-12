@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use aether_actor::{MailSender, runtime};
-use aether_bloomery::{LandingReceipt, Topic, ViewDocument};
+use aether_bloomery::{ProjectedReceipt, Topic, ViewDocument};
 use aether_data::wire::from_bytes;
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
@@ -137,7 +137,7 @@ fn deliver(projection: &ProjectionShell, entry: &OutboxEntry) -> Result<(), Stri
         let view: ViewDocument = from_bytes(&entry.payload).map_err(|e| e.to_string())?;
         projection.reconcile_view(&view).map_err(|e| e.to_string())
     } else if entry.topic == Topic::LandingReceipt {
-        let receipt: LandingReceipt = from_bytes(&entry.payload).map_err(|e| e.to_string())?;
+        let receipt: ProjectedReceipt = from_bytes(&entry.payload).map_err(|e| e.to_string())?;
         projection.project_receipt(&receipt).map_err(|e| e.to_string())
     } else {
         Err(format!("unknown outbox topic {:?}", entry.topic))
@@ -332,7 +332,7 @@ mod tests {
 
     use aether_bloomery::{
         BloomDraft, BloomId, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey,
-        LandingReceipt, Membership, ResolvedConfigs, Snapshot, Topic, WorkpieceId, reduce, view_of,
+        LandingReceipt, Membership, ProjectedReceipt, ResolvedConfigs, Snapshot, Topic, WorkpieceId, reduce, view_of,
     };
     use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
     use aether_data::wire::{from_bytes, to_vec};
@@ -373,14 +373,18 @@ mod tests {
         got
     }
 
+    /// The issue the encoded view's sole member addresses — an object the
+    /// repository already holds, which a test seeds before projecting.
+    const MEMBER_ISSUE: u64 = 4628;
+
     /// A sealed single-member bloom's view document, encoded as the outbox
     /// payload the producer enqueues (the real journal-then-reduce-then-view
-    /// path, not a hand-built value). One member → one umbrella issue plus one
-    /// workpiece issue when reconciled.
+    /// path, not a hand-built value). One member → one folded comment on the
+    /// issue it addresses when reconciled.
     fn encoded_view() -> Vec<u8> {
         let scope_revision = digest(10);
         let mut member = Membership {
-            workpiece: WorkpieceId("reactor-core".into()),
+            workpiece: WorkpieceId(format!("issue-{MEMBER_ISSUE}")),
             scope_revision,
             configs: ConfigRegistry::default(),
             approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
@@ -410,6 +414,7 @@ mod tests {
         let db = db.to_str().unwrap();
 
         let fake = FakeGithub::new();
+        fake.seed_issue(MEMBER_ISSUE, "the workpiece's own issue");
         let shell = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
 
         // Phase 1 — steady projection: enqueue a view document, drain its topic,
@@ -422,7 +427,8 @@ mod tests {
             assert_eq!(entries.len(), 1, "the enqueued view is drainable on its topic");
 
             let acks = project_batch(&shell, &entries);
-            assert_eq!(fake.issue_count(), 2, "the carbon copy: one umbrella issue plus one workpiece issue");
+            assert_eq!(fake.issue_count(), 1, "the mirror opens no object of its own");
+            assert_eq!(fake.comments_on(MEMBER_ISSUE).len(), 1, "the member's folded comment on the issue it names");
             assert_eq!(acks.len(), 1);
             assert!(
                 acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::ViewDocument),
@@ -451,7 +457,7 @@ mod tests {
             assert_eq!(republished.len(), 1, "the unacked entry survived the restart and re-drains");
 
             let acks = project_batch(&shell, &republished);
-            assert_eq!(fake.issue_count(), 2, "idempotent reconcile converges to the same carbon copy");
+            assert_eq!(fake.comments_on(MEMBER_ISSUE).len(), 1, "idempotent reconcile converges to the same comment");
             assert_eq!(acks.len(), 1);
 
             restarted.ack_outbox(acks[0].topic.as_deref(), acks[0].through_sequence).unwrap();
@@ -460,24 +466,30 @@ mod tests {
     }
     #[test]
     fn a_landing_receipt_projects_a_comment_on_its_topic() {
-        // ADR-0149 migration step 3: a gate-enabled land emits a `LandingReceipt`
-        // the control actor enqueues under the receipt topic, which the mirror
-        // reactor drains and projects as a comment on the bloom's umbrella issue.
-        // This pins the receipt path — and that the reactor topic matches the
-        // producer's, the mismatch step 3 reconciled (a stranded receipt would
-        // drain nothing and project no comment).
+        // ADR-0149 migration step 3: a gate-enabled land emits a receipt the
+        // control actor enqueues under the receipt topic, which the mirror
+        // reactor drains and projects as a comment on each landed member's own
+        // issue. This pins the receipt path — that the reactor topic matches the
+        // producer's (the mismatch step 3 reconciled), and that the topic's
+        // payload is the membership-carrying envelope rather than the bare
+        // receipt, which would decode into a projection that reaches nothing.
         let fake = FakeGithub::new();
+        fake.seed_issue(MEMBER_ISSUE, "the workpiece's own issue");
         let shell = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
         let mut store = SqliteStore::open(":memory:").unwrap();
 
-        let receipt = LandingReceipt { bloom: BloomId(digest(1)), previous_base: digest(10), new_head: digest(20) };
-        store.enqueue_topic(Topic::LandingReceipt, &to_vec(&receipt).unwrap()).unwrap();
+        let projected = ProjectedReceipt {
+            receipt: LandingReceipt { bloom: BloomId(digest(1)), previous_base: digest(10), new_head: digest(20) },
+            members: vec![WorkpieceId(format!("issue-{MEMBER_ISSUE}"))],
+        };
+        store.enqueue_topic(Topic::LandingReceipt, &to_vec(&projected).unwrap()).unwrap();
 
         let entries = store.drain_topic(Topic::LandingReceipt).unwrap();
         assert_eq!(entries.len(), 1, "the enqueued receipt is drainable on the receipt topic");
 
         let acks = project_batch(&shell, &entries);
-        assert_eq!(fake.comment_count(), 1, "the receipt projects one landing comment on the umbrella issue");
+        assert_eq!(fake.comments_on(MEMBER_ISSUE).len(), 1, "the receipt lands on the member's own issue");
+        assert_eq!(fake.issue_count(), 1, "a receipt opens nothing");
         assert_eq!(acks.len(), 1);
         assert!(
             acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::LandingReceipt),
@@ -499,6 +511,7 @@ mod tests {
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), self_mailbox));
 
         let fake = FakeGithub::new();
+        fake.seed_issue(MEMBER_ISSUE, "the workpiece's own issue");
         let shell = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
         let mut state = MirrorReactorState::with_shells(Some(shell), None, Arc::clone(&mailer), self_mailbox);
 
@@ -530,7 +543,7 @@ mod tests {
             );
         }
         let acks = collect_sends::<AckOutbox>(&rx, 1);
-        assert_eq!(fake.issue_count(), 2, "the worker reconciled the carbon copy before acking");
+        assert_eq!(fake.comments_on(MEMBER_ISSUE).len(), 1, "the worker reconciled the mirror before acking");
         assert!(
             acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::ViewDocument),
             "the ack covers the view-document topic",
@@ -540,12 +553,12 @@ mod tests {
 
     #[test]
     fn a_tick_during_a_running_cycle_does_not_re_drain_the_same_entry() {
-        // The incident this guards: one landing receipt opened seven umbrella
-        // issues. A projection slower than the poll interval left its entry
+        // The incident this guards: one landing receipt projected seven times
+        // over. A projection slower than the poll interval left its entry
         // undelivered, every tick in that window re-drained it, and the
         // overlapping workers each read "absent" from find-then-create and each
-        // created its own copy. A cycle must run alone — and must release, or
-        // the reactor wedges at permanently-busy and nothing ever mirrors.
+        // wrote its own copy. A cycle must run alone — and must release, or the
+        // reactor wedges at permanently-busy and nothing ever mirrors.
         let (mailer, rx) = test_mailer_and_rx();
         let self_mailbox = MailboxId(0);
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), self_mailbox));
