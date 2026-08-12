@@ -324,26 +324,11 @@ impl Snapshot {
                     record.wedged.insert(workpiece.clone(), *wedge);
                 }
             }
-            // The five dispatch decisions carry an outbox row the store projects
-            // and republishes, and additionally count their slot in the bloom's
-            // dispatch ledger (ADR-0180) — the outbox row is untouched, only the
-            // fold is new. A dispatch's paired cursor still rides its sibling
-            // AdvanceStage.
-            Decision::DispatchAttempt { bloom, workpiece, stage, .. } => {
-                self.count_dispatch(bloom, DispatchKey::Member { workpiece: workpiece.clone(), stage: *stage });
-            }
-            Decision::DispatchIntegration { bloom, .. } => {
-                self.count_dispatch(bloom, DispatchKey::Bloom { stage: StageId::Integrate });
-            }
-            Decision::DispatchAggregateVerify { bloom, .. } => {
-                self.count_dispatch(bloom, DispatchKey::Bloom { stage: StageId::AggregateVerify });
-            }
-            Decision::DispatchAggregateReview { bloom, .. } => {
-                self.count_dispatch(bloom, DispatchKey::Bloom { stage: StageId::AggregateReview });
-            }
-            Decision::DispatchLand { bloom, .. } => {
-                self.count_dispatch(bloom, DispatchKey::Bloom { stage: StageId::Land });
-            }
+            Decision::DispatchAttempt { .. }
+            | Decision::DispatchIntegration { .. }
+            | Decision::DispatchAggregateVerify { .. }
+            | Decision::DispatchAggregateReview { .. }
+            | Decision::DispatchLand { .. } => self.apply_dispatch_effect(effect),
             // Wholly snapshot-inert, like EmitReceipt's outbox row: a re-dispatch
             // replays a held work order host-side under a fresh nonce rather than
             // deciding a dispatch, so ADR-0151's "parking consumes no retry" holds
@@ -407,15 +392,35 @@ impl Snapshot {
         }
     }
 
-    /// Count one dispatch of `key` against a bloom's ledger (ADR-0180).
+    /// Count one dispatch in the bloom's ledger (ADR-0180) — the fold the five
+    /// dispatch decisions share. Their outbox rows are the store's and are
+    /// untouched here; only the slot count is this fold's.
     ///
-    /// A function of the dispatch decision itself rather than a second effect
-    /// emitted beside it, so the ledger cannot desynchronize from the dispatches
-    /// it counts and a dispatch site added later is counted without being told
-    /// to. An unknown bloom is ignored for the same reason every other
-    /// record-scoped arm ignores one: the decision named a record that is not
-    /// there to fold into.
-    fn count_dispatch(&mut self, bloom: &BloomId, key: DispatchKey) {
+    /// Split out of [`apply_effect`](Self::apply_effect) for the same reason
+    /// [`apply_landing_effect`](Self::apply_landing_effect) is: the five arms
+    /// read as one group, differing only in which [`DispatchKey`] they resolve
+    /// to, and that shape is only visible when they sit together. Deriving the
+    /// key from the dispatch decision itself, rather than from a second effect
+    /// emitted beside it, is what keeps the ledger from desynchronizing — a
+    /// dispatch site added later is counted the moment its decision joins the
+    /// match. Any other decision is a no-op here, and an unknown bloom is
+    /// ignored exactly as every other record-scoped arm ignores one.
+    fn apply_dispatch_effect(&mut self, effect: &Decision) {
+        let (bloom, key) = match effect {
+            Decision::DispatchAttempt { bloom, workpiece, stage, .. } => {
+                (bloom, DispatchKey::Member { workpiece: workpiece.clone(), stage: *stage })
+            }
+            Decision::DispatchIntegration { bloom, .. } => (bloom, DispatchKey::Bloom { stage: StageId::Integrate }),
+            Decision::DispatchAggregateVerify { bloom, .. } => {
+                (bloom, DispatchKey::Bloom { stage: StageId::AggregateVerify })
+            }
+            Decision::DispatchAggregateReview { bloom, .. } => {
+                (bloom, DispatchKey::Bloom { stage: StageId::AggregateReview })
+            }
+            Decision::DispatchLand { bloom, .. } => (bloom, DispatchKey::Bloom { stage: StageId::Land }),
+            _ => return,
+        };
+
         if let Some(record) = self.blooms.get_mut(bloom) {
             let count = record.dispatches.entry(key).or_insert(0);
             *count = count.saturating_add(1);
