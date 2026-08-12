@@ -76,8 +76,11 @@ impl ExecutorBackend for UnconfiguredActionsBackend {
         Ok(ExecutionStatus::Unknown)
     }
 
-    fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
-        Err(ExecutorError::NoRunForNonce(handle.nonce.clone()))
+    fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
+        // Nothing was ever dispatched through this stub, so there is nothing
+        // left running — the "already absent" success ADR-0177's idempotent
+        // cancel contract names.
+        Ok(())
     }
 
     fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
@@ -267,10 +270,13 @@ impl ExecutorShell {
         self.backend.inspect(handle)
     }
 
-    /// Cancel the run the handle resolves to.
+    /// Cancel the run the handle resolves to. Idempotent (ADR-0177): a run that
+    /// is already terminal or already gone is a clean success, so a repeated
+    /// cancel of the same expired order never turns retryable into refused.
     ///
     /// # Errors
-    /// No run resolves for the nonce, or the cancel surface is unreachable.
+    /// The cancel surface is unreachable, or the backend faulted — both
+    /// retryable. A nonce that resolves no run is not an error.
     pub fn cancel(&self, handle: &WorkHandle) -> Result<(), ExecutorPortError> {
         self.backend.cancel(handle)
     }

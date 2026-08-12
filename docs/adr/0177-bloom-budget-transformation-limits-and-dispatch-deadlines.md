@@ -1,6 +1,6 @@
 # ADR-0177: Bloom budget, transformation limits, and dispatch deadlines
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-10
 
 ## Context
@@ -39,7 +39,7 @@ This is one coordinated pre-1.0 wire break. BloomSpec, StageCatalog, Transformat
 - Bloomery stops claiming a hard bloom-wide token or elapsed-time ceiling that it cannot meter.
 - Every dispatched lane has a finite sealed timeout, and restart cannot renew it.
 - A never-exiting member lane becomes one deterministic failed attempt and reaches the existing bounded retry/wedge lifecycle.
-- AggregateReview timeouts remain distinct from candidate findings through ADR-0176.
+- AggregateReview timeouts remain distinct from candidate findings through ADR-0176. That arm waits on ADR-0176's vocabulary: until ExecutorFault exists, an expired aggregate-review order is reported and left outstanding rather than recorded as a member-charging verification failure, because the wrong ledger is worse than a deferred one.
 - Operator attempt grants remain bounded by the same sealed stage catalog the reducer already uses; removing retry_cap changes only nondefault drafts that used it to narrow a grant.
 - Forecast and study wire names become accurate, and #3666 must add the missing execution-key axes before retry grading is correct.
 - Upgrading a nonempty pre-1.0 Bloomery store requires explicit trial-state recreation. The refusal is deliberate: preserving old identities while inventing limits or dispatch times would be false compatibility.

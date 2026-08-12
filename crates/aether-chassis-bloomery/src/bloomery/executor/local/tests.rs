@@ -196,6 +196,10 @@ fn cancel_evicts_the_tracked_run() {
         ExecutionStatus::Unknown,
         "a cancelled run is evicted, so it reports Unknown rather than its exit"
     );
+    // And the eviction does not make the next cancel a fault (ADR-0177): the
+    // deadline enforcement reissues its cancel on every tick until the expired
+    // order is admitted, so a refusal here would make one store fault permanent.
+    exec.cancel(&handle).expect("a repeat cancel of an already-evicted run is a clean success");
 }
 
 #[test]
@@ -287,17 +291,17 @@ fn construct_gate_fails_unparseable_evidence() {
 }
 
 #[test]
-fn cancel_and_stream_with_no_tracked_run_are_the_no_run_error() {
+fn an_untracked_nonce_cancels_cleanly_and_streams_the_no_run_error() {
+    // The two messages part company at ADR-0177: `cancel` is idempotent, so a
+    // nonce with nothing running is already cancelled, while `stream_evidence`
+    // still has to refuse rather than report an attempt produced no evidence.
     let base = TempDir::new().unwrap();
     let exec = executor(&base, "{}", RunLifecycle::Running);
     let ghost = WorkHandle::new(Nonce("ghost".to_owned()));
 
-    match exec.cancel(&ghost) {
-        Err(LocalExecutorError::NoRunForNonce(nonce)) => assert_eq!(nonce, Nonce("ghost".to_owned())),
-        other => panic!("expected NoRunForNonce, got {other:?}"),
-    }
+    exec.cancel(&ghost).expect("a nonce this backend never ran has nothing left to cancel");
     match exec.stream_evidence(&ghost) {
-        Err(LocalExecutorError::NoRunForNonce(_)) => {}
+        Err(LocalExecutorError::NoRunForNonce(nonce)) => assert_eq!(nonce, Nonce("ghost".to_owned())),
         other => panic!("expected NoRunForNonce, got {other:?}"),
     }
 }

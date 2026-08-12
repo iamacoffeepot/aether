@@ -60,6 +60,10 @@ fn transformation() -> Transformation {
     }
 }
 
+/// A fixed Unix-millisecond clock reading the dispatch fixtures record against,
+/// so a deadline assertion never depends on when the suite ran.
+const NOW_UNIX_MILLIS: u64 = 1_700_000_000_000;
+
 // A record whose `candidate == displayed_digest` (a well-formed order): the
 // digest Bloomery displayed is the candidate the evidence must bind to.
 fn dispatch_record(
@@ -353,7 +357,7 @@ fn dispatch_and_record_submits_then_writes_the_order_row() {
     let candidate = Digest::from_bytes([5; 32]);
     let record = dispatch_record("n-dispatch", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
 
-    let handle = dispatch_and_record(&shell, &mut store, &record).unwrap();
+    let handle = dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS).unwrap();
     assert_eq!(handle, WorkHandle::new(Nonce("n-dispatch".to_owned())));
     // The dispatch reached the executor surface...
     assert_eq!(fake.dispatched_nonces(), vec!["n-dispatch".to_owned()]);
@@ -363,6 +367,39 @@ fn dispatch_and_record_submits_then_writes_the_order_row() {
     assert_eq!(stored.bloom, bloom.0.as_bytes().to_vec());
     assert_eq!(stored.candidate, candidate.as_bytes().to_vec());
     assert_eq!(stored.displayed_digest, candidate.as_bytes().to_vec());
+    // Tripwire: the deadline is the record instant plus the *sealed* limit the
+    // order's own transformation carries (ADR-0177), in Unix milliseconds. A
+    // coordinator-local or defaulted number here would let two blooms sealing
+    // the same catalog terminate differently, which is the property the sealed
+    // catalog exists to deny.
+    assert_eq!(stored.deadline_unix_millis, NOW_UNIX_MILLIS + 3_600_000);
+}
+
+#[test]
+fn a_dispatch_deadline_is_absolute_and_a_re_record_does_not_move_it() {
+    // Restart recovery re-records nothing, but a transient redrive can re-reach
+    // the same nonce. The order's allowance is spent from its first record, so
+    // the second one must change nothing — an extension per redrive is how a
+    // hung order outlives every restart.
+    let fake = FakeGithub::new();
+    let shell = shell(fake);
+    let mut store = store();
+    let record = dispatch_record(
+        "n-redrive",
+        BloomId(Digest::from_bytes([1; 32])),
+        &WorkpieceId("wp-return".to_owned()),
+        Digest::from_bytes([2; 32]),
+        Digest::from_bytes([5; 32]),
+    );
+
+    dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS).unwrap();
+    dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS + 600_000).unwrap();
+
+    assert_eq!(
+        store.lookup_order("n-redrive").unwrap().expect("the order is outstanding").deadline_unix_millis,
+        NOW_UNIX_MILLIS + 3_600_000,
+        "the redrive kept the deadline the first record computed",
+    );
 }
 
 #[test]
@@ -380,7 +417,7 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
     let shell = shell(fake.clone());
     let mut store = store();
     let record = dispatch_record("n-e2e", bloom, &workpiece, scope_revision, candidate);
-    let handle = dispatch_and_record(&shell, &mut store, &record).unwrap();
+    let handle = dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS).unwrap();
 
     // The worker's run completed and uploaded one nonce-named evidence artifact.
     let run_id = fake.seed_run("n-e2e", RunStatus::Completed, Some(RunConclusion::Success));
@@ -431,7 +468,7 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let record = dispatch_record("n-bad", bloom, &workpiece, scope_revision, candidate);
-    let handle = dispatch_and_record(&shell, &mut store, &record).unwrap();
+    let handle = dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS).unwrap();
 
     let run_id = fake.seed_run("n-bad", RunStatus::Completed, Some(RunConclusion::Success));
     fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name: "evidence-n-bad-log".to_owned(), size_bytes: 10 }]);
@@ -481,7 +518,7 @@ fn a_pending_handle_is_reported_and_neither_completed_nor_admitted() {
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let record = dispatch_record("n-pending", bloom, &workpiece, scope_revision, candidate);
-    let handle = dispatch_and_record(&shell, &mut store, &record).unwrap();
+    let handle = dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS).unwrap();
 
     let _ = fake.seed_run("n-pending", RunStatus::InProgress, None);
 
@@ -1072,7 +1109,7 @@ fn a_measured_attempt_writes_one_priced_study_row_and_an_unmeasured_one_writes_n
         model: "muse-spark-1.2-contributor".to_owned(),
         effort: ReasoningEffort::Medium,
     });
-    let handle = dispatch_and_record(&shell, &mut store, &record).unwrap();
+    let handle = dispatch_and_record(&shell, &mut store, &record, NOW_UNIX_MILLIS).unwrap();
 
     let run_id = fake.seed_run("n-study", RunStatus::Completed, Some(RunConclusion::Success));
     fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name: "evidence-n-study".to_owned(), size_bytes: 10 }]);
@@ -1175,7 +1212,7 @@ fn second_attempt(
 ) -> (WorkHandle, SeededClaims) {
     let candidate = Digest::from_bytes([5; 32]);
     let record = dispatch_record(nonce, bloom, workpiece, scope_revision, candidate);
-    let handle = dispatch_and_record(shell, store, &record).unwrap();
+    let handle = dispatch_and_record(shell, store, &record, NOW_UNIX_MILLIS).unwrap();
     let run_id = fake.seed_run(nonce, RunStatus::Completed, Some(RunConclusion::Success));
     fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name: format!("evidence-{nonce}"), size_bytes: 10 }]);
 

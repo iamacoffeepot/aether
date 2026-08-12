@@ -306,7 +306,15 @@ fn reopen_converges_via_journal_replay_and_outbox_republish() {
     assert_eq!(store.append_event("seal-1", b"anything").unwrap(), AppendOutcome::Duplicate);
 }
 
+/// A fixed Unix-millisecond reading the deadline fixtures sit around, so an
+/// expiry assertion never depends on when the suite ran.
+const NOW_UNIX_MILLIS: u64 = 1_700_000_000_000;
+
 fn order(nonce: &str) -> OutstandingOrder {
+    order_due_at(nonce, NOW_UNIX_MILLIS + 60_000)
+}
+
+fn order_due_at(nonce: &str, deadline_unix_millis: u64) -> OutstandingOrder {
     OutstandingOrder {
         profile: Vec::new(),
         nonce: nonce.to_owned(),
@@ -318,6 +326,7 @@ fn order(nonce: &str) -> OutstandingOrder {
         stage: vec![9],
         transformation: vec![7, 7],
         configs: vec![3, 3],
+        deadline_unix_millis,
     }
 }
 
@@ -350,6 +359,106 @@ fn recording_a_replayed_nonce_is_an_idempotent_no_op() {
     assert_eq!(store.record_order(&second).unwrap(), RecordOutcome::Duplicate);
     // The original row is untouched (the duplicate's `workpiece` never applied).
     assert_eq!(store.lookup_order("dup").unwrap().unwrap().workpiece, "wp-return");
+}
+
+#[test]
+fn a_re_recorded_nonce_keeps_the_deadline_its_first_record_computed() {
+    // Tripwire: the ADR-0177 deadline is absolute and set once. A redrive that
+    // re-recorded the same nonce with a fresh now-plus-limit would renew the
+    // allowance of an order already in flight, which is the property that let a
+    // hung order outlive every restart in the first place.
+    let mut store = memory();
+    let first = order_due_at("dup", NOW_UNIX_MILLIS + 1_000);
+    store.record_order(&first).unwrap();
+
+    store.record_order(&order_due_at("dup", NOW_UNIX_MILLIS + 999_000)).unwrap();
+
+    assert_eq!(store.lookup_order("dup").unwrap().unwrap().deadline_unix_millis, NOW_UNIX_MILLIS + 1_000);
+}
+
+#[test]
+fn expired_orders_are_the_ones_whose_persisted_deadline_has_arrived() {
+    // The selection the executor reactor terminates on (ADR-0177). At-or-before
+    // `now`, so an order due exactly on the boundary is expired — the completion
+    // pull that runs before the sweep is what gives evidence arriving at that
+    // same instant the right of way.
+    let mut store = memory();
+    store.record_order(&order_due_at("future", NOW_UNIX_MILLIS + 1)).unwrap();
+    store.record_order(&order_due_at("boundary", NOW_UNIX_MILLIS)).unwrap();
+    store.record_order(&order_due_at("past", NOW_UNIX_MILLIS - 60_000)).unwrap();
+
+    let expired = store.list_expired_orders(NOW_UNIX_MILLIS).unwrap();
+
+    let nonces: Vec<&str> = expired.iter().map(|order| order.nonce.as_str()).collect();
+    assert_eq!(nonces, vec!["boundary", "past"], "the future order is not selected, and the boundary one is");
+    assert!(store.list_expired_orders(NOW_UNIX_MILLIS - 60_001).unwrap().is_empty(), "nothing is due before them all");
+}
+
+#[test]
+fn an_empty_legacy_store_migrates_and_one_holding_orders_is_refused() {
+    // ADR-0177's coordinated pre-1.0 break, from both sides. A legacy row has
+    // neither a dispatch deadline nor decodable `transformation` bytes (#4697
+    // re-typed `Transformation.limits`), and inventing either would attest a
+    // limit no bloom sealed — so the store refuses rather than migrating a lie.
+    // An empty legacy store has nothing to lie about and migrates mechanically.
+    let dir = tempfile::tempdir().unwrap();
+    let empty = temp_db(&dir);
+    write_legacy_schema(&empty, false);
+    let mut migrated = SqliteStore::open(&empty).expect("an empty legacy store migrates");
+    assert_eq!(migrated.record_order(&order("n-1")).unwrap(), RecordOutcome::Recorded);
+
+    let held = dir.path().join("legacy-with-orders.db").to_str().unwrap().to_owned();
+    write_legacy_schema(&held, true);
+    let refusal = match SqliteStore::open(&held) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("a legacy store still holding orders must be refused"),
+    };
+    assert!(refusal.contains("1 outstanding order(s)"), "the refusal names the rows that block it: {refusal}");
+    assert!(refusal.contains("ADR-0177"), "and the decision that requires it: {refusal}");
+}
+
+/// Write a pre-ADR-0177 store at `path`: the order-bearing tables without their
+/// `deadline_unix_millis` column, at schema version zero, optionally holding one
+/// outstanding order.
+fn write_legacy_schema(path: &str, with_order: bool) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE outstanding_orders (
+             nonce            TEXT PRIMARY KEY,
+             bloom            BLOB NOT NULL,
+             workpiece        TEXT NOT NULL,
+             scope_revision   BLOB NOT NULL,
+             candidate        BLOB NOT NULL,
+             displayed_digest BLOB NOT NULL,
+             stage            BLOB NOT NULL,
+             transformation   BLOB NOT NULL,
+             configs          BLOB NOT NULL,
+             profile          BLOB NOT NULL
+         );
+         CREATE TABLE parked_question (
+             bloom            BLOB NOT NULL,
+             question         BLOB NOT NULL,
+             nonce            TEXT NOT NULL,
+             workpiece        TEXT NOT NULL,
+             scope_revision   BLOB NOT NULL,
+             candidate        BLOB NOT NULL,
+             displayed_digest BLOB NOT NULL,
+             stage            BLOB NOT NULL,
+             transformation   BLOB NOT NULL,
+             configs          BLOB NOT NULL,
+             profile          BLOB NOT NULL,
+             PRIMARY KEY (bloom, question)
+         );",
+    )
+    .unwrap();
+    if with_order {
+        conn.execute(
+            "INSERT INTO outstanding_orders VALUES ('dispatch-11', x'01', 'issue-4626', x'02', x'03', x'03', x'04', \
+             x'05', x'06', x'07')",
+            [],
+        )
+        .unwrap();
+    }
 }
 
 #[test]

@@ -2,6 +2,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
     AgentProfile, BloomId, ConfigRegistry, Digest, Nonce, StageId, Transformation, WorkHandle, WorkOrder, WorkpieceId,
@@ -67,8 +68,9 @@ impl DispatchRecord {
         WorkOrder { transformation: self.transformation.clone(), nonce: self.nonce.clone() }
     }
 
-    fn to_stored(&self) -> OutstandingOrder {
+    fn to_stored(&self, deadline_unix_millis: u64) -> OutstandingOrder {
         OutstandingOrder {
+            deadline_unix_millis,
             nonce: self.nonce.0.clone(),
             bloom: self.bloom.0.as_bytes().to_vec(),
             workpiece: self.workpiece.0.clone(),
@@ -91,13 +93,49 @@ impl DispatchRecord {
     }
 }
 
+/// The current wall clock in Unix milliseconds — the one clock a dispatch
+/// deadline can be written in and read back after a restart (ADR-0177).
+///
+/// A clock before the epoch is not a time any deadline arithmetic can use, so it
+/// reads as `0`; the resulting order expires on its first tick rather than
+/// running unbounded under a host whose clock is unusable.
+pub(super) fn now_unix_millis() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// The absolute deadline an order recorded at `now_unix_millis` runs to, from
+/// the sealed limit its transformation carries (ADR-0177).
+///
+/// Saturating rather than wrapping: `wall_clock_secs` is validated at or below
+/// [`ExecutionLimits::MAX_WALL_CLOCK_SECS`](aether_bloomery::ExecutionLimits::MAX_WALL_CLOCK_SECS)
+/// so the product is nowhere near the ceiling for any catalog a seal admits, and
+/// saturating a hypothetical foreign one at [`u64::MAX`] is the arm a checked
+/// conversion would have to pick anyway.
+fn deadline_from(record: &DispatchRecord, now_unix_millis: u64) -> u64 {
+    now_unix_millis.saturating_add(record.transformation.limits.wall_clock_secs.saturating_mul(1_000))
+}
+
 /// Record an outstanding order's reducer context at dispatch time — the
-/// registry write side (#3502). Idempotent on the nonce.
+/// registry write side (#3502). Idempotent on the nonce, deadline included: a
+/// re-recorded nonce keeps the deadline its first record computed.
 ///
 /// # Errors
 /// The durable store faulted.
 pub fn record_dispatch(store: &mut dyn StoreBackend, record: &DispatchRecord) -> rusqlite::Result<RecordOutcome> {
-    store.record_order(&record.to_stored())
+    record_dispatch_at(store, record, now_unix_millis())
+}
+
+/// [`record_dispatch`] against an explicit clock reading — the seam a test drives
+/// so a deadline assertion does not depend on when the suite ran.
+///
+/// # Errors
+/// The durable store faulted.
+pub(super) fn record_dispatch_at(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    now_unix_millis: u64,
+) -> rusqlite::Result<RecordOutcome> {
+    store.record_order(&record.to_stored(deadline_from(record, now_unix_millis)))
 }
 
 /// A dispatch that both submitted and recorded its context, or the step that
@@ -153,6 +191,12 @@ impl DispatchError {
 /// propagating — the order would otherwise run untracked, with no registry row
 /// to resolve its evidence against.
 ///
+/// `now_unix_millis` is the clock reading the order's ADR-0177 deadline is
+/// computed from — taken by the caller once per tick, and injected rather than
+/// read here so a scenario can place a dispatch anywhere relative to it. The
+/// deadline starts at the *record*, not the submit: a slow registry write must
+/// not spend the sealed allowance before the order is recoverable at all.
+///
 /// # Errors
 /// [`DispatchError::Submit`] if the executor refused the dispatch, or
 /// [`DispatchError::Store`] if the registry write faulted after submit (the
@@ -161,9 +205,10 @@ pub fn dispatch_and_record(
     shell: &ExecutorShell,
     store: &mut dyn StoreBackend,
     record: &DispatchRecord,
+    now_unix_millis: u64,
 ) -> Result<WorkHandle, DispatchError> {
     let handle = shell.submit(&record.to_order()).map_err(DispatchError::Submit)?;
-    if let Err(store_error) = record_dispatch(store, record) {
+    if let Err(store_error) = record_dispatch_at(store, record, now_unix_millis) {
         // The order reached the worker lane but its reducer context never
         // landed, so it is untracked either way; best-effort cancel the run
         // rather than leak an untracked dispatch, then surface the store fault.

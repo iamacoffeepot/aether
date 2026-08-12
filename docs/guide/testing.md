@@ -151,6 +151,25 @@ wedge, aggregate, and liveness contracts; it is not a model-quality evaluation
 or proof that the real transform program, live credentials, or GitHub transport
 work. See [SubstrateHarness, FleetHarness, and LaneHarness](testing/substrateharness-and-fleetharness.md#laneharness-topology).
 
+A LaneHarness scenario about a lane that hangs needs the sealed dispatch deadline
+(ADR-0177), not a scenario-side timeout. Every dispatched order carries an
+absolute deadline in Unix milliseconds, computed once when the coordinator
+durably records the order from the `wall_clock_secs` its bloom's stage catalog
+sealed. `LaneHarness::start_with_wall_clock` authors a catalog binding every
+stage at a few seconds and seals its address into the bloom, which is the only
+way in: the limit is deliberately sealed rather than ambient, so two blooms
+sealing the same catalog terminate identically and no coordinator-side override
+exists for a scenario to reach for. Past that deadline the run is cancelled and
+the attempt is recorded as an ordinary failure, so retry and wedge assertions
+read exactly as they do for a lane that failed outright.
+
+A restart is part of that contract rather than an escape from it. The deadline is
+persisted beside the order, so a coordinator that stops and reopens reads back
+the same number: a scenario can restart mid-flight and still assert the original
+expiry, and one that expected a restart to renew the allowance is asserting the
+bug. The advisory `stale_warn_after_secs` sweep is unrelated — it warns about an
+unresolved handle and terminates nothing, so no scenario should wait on it.
+
 For overlay rendering, split structural and raster proof deliberately. Assert exact
 rectangle geometry, clips, texture coordinates, tint, texture identity, projection
 space, and submission order through `SubstrateHarness::committed_overlay_snapshot`; then use

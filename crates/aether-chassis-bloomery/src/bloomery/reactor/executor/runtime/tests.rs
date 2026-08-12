@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 use std::collections::BTreeMap;
 
 use aether_bloomery::{
-    AgentSelection, AggregateReviewPayload, BloomId, ConfigKind, ConfigRegistry, DispatchPayload, EvidenceRef,
+    Admit, AgentSelection, AggregateReviewPayload, BloomId, ConfigKind, ConfigRegistry, DispatchPayload, EvidenceRef,
     ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce, ReasoningEffort, RedispatchPayload,
-    ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride, Topic, Transformation, WorkHandle,
-    WorkOrder, WorkpieceId,
+    ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride, Topic, Transformation, VerifyFailure,
+    VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -24,9 +24,9 @@ use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::{
-    BACKOFF_CAP, CandidatePush, NameEvidenceClaims, Stores, TrackedHandle, backoff_delay, drain_and_dispatch,
-    drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_stale, next_backoff, pull_and_admit,
-    push_admitted_candidates, seed_tracked, select_stale_handles,
+    BACKOFF_CAP, CandidatePush, NameEvidenceClaims, Stores, TickClock, TrackedHandle, backoff_delay,
+    drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_stale, next_backoff,
+    pull_and_admit, push_admitted_candidates, seed_tracked, select_stale_handles, timeout_verdict,
 };
 use crate::bloomery::executor::local::testing::FixedRunner;
 use crate::bloomery::intake::{
@@ -159,6 +159,22 @@ fn track(handles: Vec<WorkHandle>) -> Vec<TrackedHandle> {
     handles.into_iter().map(|handle| TrackedHandle::new(handle, now)).collect()
 }
 
+/// A fixed Unix-millisecond reading every dispatch in these tests records
+/// against, so a deadline assertion never depends on when the suite ran. Well
+/// short of the compiled line's one-hour limit, so an order recorded here is
+/// live at [`NOW_UNIX_MILLIS`] and expires only when a test says so.
+const NOW_UNIX_MILLIS: u64 = 1_700_000_000_000;
+
+/// The tick clock a `pull_and_admit` call runs under: at [`NOW_UNIX_MILLIS`],
+/// with the advisory staleness sweep disabled unless a test wants it.
+fn tick_clock() -> TickClock {
+    tick_clock_at(NOW_UNIX_MILLIS)
+}
+
+fn tick_clock_at(now_unix_millis: u64) -> TickClock {
+    TickClock { now_unix_millis, stale_warn_after: None }
+}
+
 // Enqueue one per-member Construct dispatch on the dispatch topic (the bytes the
 // reducer's `DispatchAttempt` projection would enqueue), returning its outbox
 // sequence and the subject digest the attempt runs against.
@@ -245,7 +261,7 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
 
-    let (handles, ack_through, _transient) = drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
+    let (handles, ack_through, _transient) = drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
     assert_eq!(handles.len(), 1);
     assert_eq!(ack_through, Some(sequence));
 
@@ -296,7 +312,7 @@ fn the_second_aggregate_roll_frames_a_delta_confirm_against_the_frozen_findings(
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
 
-    let (handles, _ack, _transient) = drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
+    let (handles, _ack, _transient) = drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
     assert_eq!(handles.len(), 1);
 
     let orders = backend.orders();
@@ -340,7 +356,7 @@ fn a_fresh_roll_one_aggregate_dispatch_clears_the_stale_frozen_row() {
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
 
-    drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
+    drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     assert_eq!(
         store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap(),
@@ -373,7 +389,7 @@ fn a_superseded_blooms_queued_dispatch_is_retired_rather_than_run() {
     // the successor, which is what retires its queued order.
     store.supersede(predecessor.0.as_bytes(), successor.0.as_bytes(), &["wp-line".to_owned()]).unwrap();
 
-    let (handles, ack_through, _transient) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (handles, ack_through, _transient) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     assert_eq!(handles.len(), 1, "only the live bloom's order is submitted");
     assert_eq!(
@@ -397,7 +413,7 @@ fn drain_and_dispatch_submits_each_dispatch_and_records_its_order() {
     let bloom = BloomId(digest(1));
     let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
 
-    let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     // One dispatch submitted, its order recorded, and the ack prefix covers it.
     assert_eq!(handles.len(), 1);
@@ -442,7 +458,7 @@ fn drain_dispatches_the_construct_lane_under_its_calibrated_profile() {
     enqueue_dispatch_at(&mut store, bloom, "wp-construct", 5, StageId::Construct);
     enqueue_dispatch_at(&mut store, bloom, "wp-refine", 6, StageId::Refine);
 
-    drain_and_dispatch(&mut store, &shell).unwrap();
+    drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     let orders = backend.orders();
     let construct = StageCatalog::profile_of(StageId::Construct);
@@ -479,7 +495,7 @@ fn drain_dispatches_the_review_lane_under_its_own_calibrated_profile() {
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
 
-    drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
+    drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     let orders = backend.orders();
     let dispatched = orders[0].transformation.model.clone().expect("a model lane names its profile");
@@ -503,7 +519,7 @@ fn drain_threads_the_persisted_description_onto_the_construct_order() {
     store.record_dispatch_description(bloom.0.as_bytes(), "wp-line", "thread the work order into the prompt").unwrap();
     enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
 
-    drain_and_dispatch(&mut store, &shell).unwrap();
+    drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     let orders = backend.orders();
     assert_eq!(orders.len(), 1, "the construct dispatch submitted");
@@ -526,7 +542,7 @@ fn drain_leaves_the_description_none_and_still_dispatches_when_none_persisted() 
     let bloom = BloomId(digest(1));
     enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
 
-    let (handles, _, _) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (handles, _, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     assert_eq!(handles.len(), 1, "a member with no description still dispatches, never dropped");
     let orders = backend.orders();
@@ -565,7 +581,7 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
     store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
     enqueue_construct_dispatch(&mut store, bloom, "wp-c", 7);
 
-    let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     // Only the first entry submitted; the drain broke at the subject-less entry, so
     // the ack prefix stops there rather than jumping past it to the third entry.
@@ -590,7 +606,7 @@ fn pull_and_admit_admits_a_matching_construct_result_as_attempt_completed() {
     let bloom = BloomId(digest(1));
     let (sequence, subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
 
-    let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
     store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
     let mut tracked = track(handles);
     let nonce = format!("dispatch-{sequence}");
@@ -607,7 +623,7 @@ fn pull_and_admit_admits_a_matching_construct_result_as_attempt_completed() {
         &shell,
         NameEvidenceClaims,
         &mut tracked,
-        None,
+        &tick_clock(),
         None,
         &NopPush,
     );
@@ -628,6 +644,211 @@ fn pull_and_admit_admits_a_matching_construct_result_as_attempt_completed() {
     assert!(StageCatalog::next_member_stage(StageId::Construct).is_some());
 }
 
+/// The instant every order dispatched at [`NOW_UNIX_MILLIS`] under the compiled
+/// line's one-hour calibration comes due.
+const AT_THE_DEADLINE: u64 = NOW_UNIX_MILLIS + 3_600_000;
+
+/// Dispatch one Construct order for `workpiece` at [`NOW_UNIX_MILLIS`] and
+/// return its tracked handle — the shared setup for the deadline scenarios,
+/// whose whole point is a lane that then never resolves.
+fn dispatch_one(store: &mut SqliteStore, shell: &ExecutorShell, workpiece: &str) -> Vec<TrackedHandle> {
+    enqueue_construct_dispatch(store, BloomId(digest(1)), workpiece, 5);
+    let (handles, ack_through, _transient_failure) = drain_and_dispatch(store, shell, NOW_UNIX_MILLIS).unwrap();
+    store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
+    track(handles)
+}
+
+fn tick(store: &mut SqliteStore, shell: &ExecutorShell, tracked: &mut Vec<TrackedHandle>, now: u64) -> Vec<Admit> {
+    pull_and_admit(
+        Stores { store, artifacts: None },
+        shell,
+        NameEvidenceClaims,
+        tracked,
+        &tick_clock_at(now),
+        None,
+        &NopPush,
+    )
+}
+
+#[test]
+fn an_order_that_outlives_its_sealed_limit_is_cancelled_and_admits_a_failed_attempt() {
+    // The bug this whole change exists for: a lane that never resolves left its
+    // nonce in `outstanding_orders` forever, so no completion arrived, no retry
+    // counter advanced, no ceiling was reached, and no wedge was recorded. Past
+    // the sealed deadline it must become one ordinary failed attempt.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let shell = shell(FakeGithub::new());
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-hung");
+    // No run is ever seeded, so every inspect reports Unknown: the lane is
+    // dispatched and silent, exactly like one parked forever.
+
+    let admits = tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE);
+
+    assert_eq!(admits.len(), 1, "the expired order yields exactly one admitted result");
+    match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
+        Fact::AttemptCompleted { workpiece, stage, passed, .. } => {
+            assert!(!passed, "a timeout is a failed attempt, so the member's ordinary retry accounting advances");
+            assert_eq!(workpiece, WorkpieceId("wp-hung".to_owned()));
+            assert_eq!(stage, StageId::Construct);
+        }
+        other => panic!("expected a Fact::AttemptCompleted, got {other:?}"),
+    }
+    assert!(store.list_outstanding_nonces().unwrap().is_empty(), "the expired order was consumed");
+    assert!(tracked.is_empty(), "and its handle is pruned rather than polled forever");
+}
+
+#[test]
+fn a_second_tick_after_a_timeout_admits_nothing_further() {
+    // Consume-once is what makes the whole expiry safe to retry: every fault
+    // downstream of the cancel leaves the order live, so the sweep re-runs it —
+    // and that is only harmless if a completed expiry cannot admit twice.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let shell = shell(FakeGithub::new());
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-hung");
+
+    assert_eq!(tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE).len(), 1);
+    assert!(
+        tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE + 60_000).is_empty(),
+        "the consumed order cannot expire a second time",
+    );
+}
+
+#[test]
+fn evidence_that_arrived_by_the_deadline_is_admitted_rather_than_cancelled() {
+    // The ordering ADR-0177 fixes: completion is observed before expiry, so a
+    // lane that finished just inside its allowance is admitted normally even
+    // when the tick that notices runs at the deadline. Reversed, a run that beat
+    // its budget would be cancelled for being late to be *observed*.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let fake = FakeGithub::new();
+    let shell = shell(fake.clone());
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-line");
+
+    let nonce = tracked[0].handle.nonce.0.clone();
+    let run_id = fake.seed_run(&nonce, RunStatus::Completed, Some(RunConclusion::Success));
+    let name = attempt_artifact_name(&Nonce(nonce), &digest(5), StageVerdict::VerificationPassed, &digest(9));
+    fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name, size_bytes: 20 }]);
+
+    let admits = tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE);
+
+    assert_eq!(admits.len(), 1, "one result, not a completion plus a timeout");
+    match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
+        Fact::AttemptCompleted { passed, .. } => assert!(passed, "the run's own passing verdict is what admitted"),
+        other => panic!("expected a Fact::AttemptCompleted, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_restart_neither_extends_nor_resets_a_deadline() {
+    // The property that made the original bug survive every restart: the
+    // reactor's only age was a process-local `Instant`, re-seeded at `init`. The
+    // persisted deadline must be read back unchanged, so an order dispatched
+    // before a restart is already overdue after one.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bloomery.db").to_str().unwrap().to_owned();
+    let shell = shell(FakeGithub::new());
+
+    {
+        let mut store = SqliteStore::open(&path).unwrap();
+        dispatch_one(&mut store, &shell, "wp-hung");
+        // The process stops here, with the order dispatched and unresolved.
+    }
+
+    let mut store = SqliteStore::open(&path).unwrap();
+    let mut tracked: Vec<TrackedHandle> = seed_tracked(&mut store)
+        .unwrap()
+        .into_iter()
+        .map(|handle| TrackedHandle::new(handle, Instant::now()))
+        .collect();
+
+    assert!(
+        tick(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + 60_000).is_empty(),
+        "a restart inside the allowance does not bring the deadline forward",
+    );
+    assert_eq!(
+        tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE).len(),
+        1,
+        "and it does not push the deadline back either — the re-tracked order expires on the original number",
+    );
+}
+
+#[test]
+fn a_cancel_that_faults_leaves_the_expired_order_live_to_retry() {
+    // The cancel is the one step before the order is spent, so a transport fault
+    // there must leave the whole expiry retryable rather than consuming a nonce
+    // whose child is still running.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let working = shell(FakeGithub::new());
+    let mut tracked = dispatch_one(&mut store, &working, "wp-hung");
+
+    let refusing = ExecutorShell::new(Arc::new(CancelRefusingExecutor));
+    assert!(
+        tick(&mut store, &refusing, &mut tracked, AT_THE_DEADLINE).is_empty(),
+        "nothing admits behind a failed cancel"
+    );
+    assert_eq!(store.list_outstanding_nonces().unwrap().len(), 1, "the order is still live");
+
+    assert_eq!(tick(&mut store, &working, &mut tracked, AT_THE_DEADLINE).len(), 1, "the next tick terminates it");
+    assert!(store.list_outstanding_nonces().unwrap().is_empty());
+}
+
+#[test]
+fn a_member_verify_timeout_names_the_umbrella_rather_than_no_verifier_at_all() {
+    // Tripwire: the intake refuses a failed member `Verify` carrying an empty
+    // verifier set (ADR-0178), so a timeout that named none would be refused and
+    // the hung order would never terminate. A timeout cannot know which verifier
+    // would have failed, and `Preflight` is the umbrella-level identity that says
+    // exactly that.
+    assert_eq!(
+        timeout_verdict(StageId::Verify),
+        Some((StageVerdict::VerificationFailed, VerifyFailureSet::one(VerifyFailure::Preflight))),
+    );
+    assert_eq!(
+        timeout_verdict(StageId::Construct),
+        Some((StageVerdict::VerificationFailed, VerifyFailureSet::EMPTY)),
+        "every other dispatched member stage carries no set, which is what the same invariant requires of them",
+    );
+}
+
+#[test]
+fn an_aggregate_review_timeout_is_deferred_rather_than_charged_a_member_ledger() {
+    // ADR-0177 routes an aggregate-review timeout to ADR-0176's `ExecutorFault`,
+    // which issue #4738 introduces. Until it lands there is no verdict that
+    // states "the critic produced no judgement of the fold", and the nearest
+    // available one — `VerificationFailed` — would charge every member a repair
+    // lap for a critic that never ran. Deferring records nothing; recording the
+    // wrong thing would be worse than recording nothing.
+    assert_eq!(timeout_verdict(StageId::AggregateReview), None);
+    assert!(
+        timeout_verdict(StageId::AggregateVerify).is_some(),
+        "the mechanical aggregate gate is unaffected: its timeout is an ordinary verification failure",
+    );
+}
+
+/// A backend whose `cancel` always faults — the transport failure that must
+/// leave an expired order live rather than spending its nonce.
+struct CancelRefusingExecutor;
+
+impl ExecutorBackend for CancelRefusingExecutor {
+    type Error = ExecutorError;
+
+    fn submit(&self, _order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        Err(ExecutorError::Github(GithubError::Status { status: 500, body: "unused".to_owned() }))
+    }
+
+    fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+        Ok(ExecutionStatus::Unknown)
+    }
+
+    fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
+        Err(ExecutorError::Github(GithubError::Status { status: 502, body: "cancel unreachable".to_owned() }))
+    }
+
+    fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+        Ok(Vec::new())
+    }
+}
+
 #[test]
 fn seed_tracked_recovers_a_dispatched_order_across_a_restart() {
     // The restart-shaped bug (#3641): a work order that was submitted and
@@ -644,7 +865,8 @@ fn seed_tracked_recovers_a_dispatched_order_across_a_restart() {
     let nonce = {
         let mut store = SqliteStore::open(&path).unwrap();
         let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
-        let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
+        let (handles, ack_through, _transient_failure) =
+            drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
         assert_eq!(handles.len(), 1, "the order dispatched and was recorded before the simulated crash");
         store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
         format!("dispatch-{sequence}")
@@ -677,7 +899,7 @@ fn seed_tracked_recovers_a_dispatched_order_across_a_restart() {
         &shell,
         NameEvidenceClaims,
         &mut tracked,
-        None,
+        &tick_clock(),
         None,
         &NopPush,
     );
@@ -714,7 +936,7 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
     let routing = RoutingExecutor::new(actions, local, vec!["construct.".to_owned()]);
     let shell = ExecutorShell::new(Arc::new(routing));
 
-    let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
     store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
     assert_eq!(handles.len(), 1, "the construct order dispatched to the local backend");
     assert_eq!(handles[0].nonce.0, format!("dispatch-{sequence}"), "the handle carries the dispatch nonce");
@@ -725,7 +947,7 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
         &shell,
         NameEvidenceClaims,
         &mut tracked,
-        None,
+        &tick_clock(),
         None,
         &NopPush,
     );
@@ -749,7 +971,7 @@ fn drain_and_dispatch_parks_a_permanent_refusal_instead_of_re_driving() {
     let bloom = BloomId(digest(1));
     let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-wrong-workflow", 5);
 
-    let (handles, ack_through, transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (handles, ack_through, transient_failure) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     // The permanent refusal is acked past (parked), not left to re-drive, and it
     // carries no transient-failure sequence for the backoff cursor to key off.
@@ -768,7 +990,7 @@ fn drain_and_dispatch_leaves_a_transient_refusal_undrained_to_retry() {
     let bloom = BloomId(digest(1));
     let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-flaky", 5);
 
-    let (handles, ack_through, transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (handles, ack_through, transient_failure) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     assert!(handles.is_empty(), "the refused entry never dispatched");
     assert_eq!(ack_through, None, "a transient refusal stops the ack prefix so the entry re-drains");
@@ -896,7 +1118,7 @@ fn drain_stamps_the_record_axes_from_the_payload() {
     store.claim_seal(bloom.0.as_bytes(), &["wp-cand".to_owned()]).unwrap();
     let sequence = store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
 
-    drain_and_dispatch(&mut store, &shell).unwrap();
+    drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     let order = store.lookup_order(&format!("dispatch-{sequence}")).unwrap().expect("the order recorded");
     assert_eq!(order.scope_revision, digest(5).as_bytes().to_vec(), "the true scope revision survives");
@@ -934,7 +1156,7 @@ fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
             candidate,
         };
         let event = Event { idempotency_key: IdempotencyKey("k".to_owned()), fact };
-        Admission { admit: aether_bloomery::Admit { event: to_vec(&event).unwrap() }, event }
+        Admission { admit: Admit { event: to_vec(&event).unwrap() }, event }
     };
 
     let pusher = RecordingPush::default();
@@ -972,7 +1194,7 @@ fn drain_threads_persisted_findings_onto_the_construct_order() {
     store.record_review_findings(bloom.0.as_bytes(), "wp-line", "clippy: off-by-one in the loop bound").unwrap();
     enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
 
-    drain_and_dispatch(&mut store, &shell).unwrap();
+    drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     let orders = backend.orders();
     let description = orders[0].transformation.description.as_deref().unwrap();
@@ -997,7 +1219,7 @@ fn park_and_answer(
     words: &str,
 ) -> u64 {
     let (dispatched, subject) = enqueue_construct_dispatch(store, bloom, workpiece, 5);
-    drain_and_dispatch(store, shell).unwrap();
+    drain_and_dispatch(store, shell, NOW_UNIX_MILLIS).unwrap();
     store.ack_topic(Topic::Dispatch, dispatched).unwrap();
 
     let upload = UploadedEvidence {
@@ -1007,7 +1229,7 @@ fn park_and_answer(
         detail: question,
         candidate: None,
         findings: None,
-        failed_verifiers: aether_bloomery::VerifyFailureSet::EMPTY,
+        failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
     };
     assert!(matches!(admit_uploaded(store, &upload).unwrap(), AdmitDecision::Admitted(_)), "the parked upload admits");
@@ -1041,7 +1263,7 @@ fn an_answered_park_replays_the_held_lane_carrying_the_decision() {
     store.record_dispatch_description(bloom.0.as_bytes(), "wp-held", "build the widget").unwrap();
 
     let sequence = park_and_answer(&mut store, &shell, bloom, "wp-held", question, "drop the cache; ship it");
-    let (handles, ack_through, transient) = drain_and_redispatch(&mut store, &shell).unwrap();
+    let (handles, ack_through, transient) = drain_and_redispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     assert_eq!(handles.len(), 1, "the released question re-dispatches its held attempt");
     assert_eq!(ack_through, Some(sequence), "the replay acks its outbox entry");
@@ -1081,14 +1303,15 @@ fn a_failed_replay_leaves_the_held_order_re_dispatchable() {
         park_and_answer(&mut store, &ExecutorShell::new(Arc::clone(&backend)), bloom, "wp-held", question, "ship it");
 
     // A 500 is transient, so the drain stops its ack prefix rather than parking.
-    let (handles, ack_through, transient) = drain_and_redispatch(&mut store, &failing_shell(500)).unwrap();
+    let (handles, ack_through, transient) =
+        drain_and_redispatch(&mut store, &failing_shell(500), NOW_UNIX_MILLIS).unwrap();
     assert!(handles.is_empty(), "nothing submitted");
     assert_eq!(ack_through, None, "the failed entry is not acked past");
     assert_eq!(transient, Some(sequence), "the failure re-drives on a backoff");
 
     // Unacked, the entry re-drains — and the held order is still there to replay.
     let (handles, ack_through, _) =
-        drain_and_redispatch(&mut store, &ExecutorShell::new(Arc::clone(&backend))).unwrap();
+        drain_and_redispatch(&mut store, &ExecutorShell::new(Arc::clone(&backend)), NOW_UNIX_MILLIS).unwrap();
     assert_eq!(handles.len(), 1, "the retry replays the still-held order");
     assert_eq!(ack_through, Some(sequence));
 }
@@ -1111,7 +1334,7 @@ fn a_redispatch_with_no_held_order_acks_past_instead_of_wedging_the_topic() {
     store.record_dispatch_description(bloom.0.as_bytes(), "wp-held", "build the widget").unwrap();
     let live = park_and_answer(&mut store, &shell, bloom, "wp-held", digest(0x9B), "ship it");
 
-    let (handles, ack_through, _) = drain_and_redispatch(&mut store, &shell).unwrap();
+    let (handles, ack_through, _) = drain_and_redispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     assert_eq!(handles.len(), 1, "the entry behind the unresolvable one still dispatches");
     assert_eq!(ack_through, Some(live), "the ack prefix covers both, not just up to the orphan");
@@ -1159,7 +1382,7 @@ fn a_sealed_model_override_beats_the_calibrated_profile_for_its_member_alone() {
     enqueue_dispatch_with_configs(&mut store, bloom, "wp-pinned", digest(5), StageId::Construct, configs);
     enqueue_dispatch_at(&mut store, bloom, "wp-default", 6, StageId::Construct);
 
-    drain_and_dispatch(&mut store, &shell).unwrap();
+    drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     let orders = backend.orders();
     let dispatched = |index: usize| orders[index].transformation.model.clone().expect("a model lane names its profile");
@@ -1213,7 +1436,7 @@ fn one_members_construct_and_refine_dispatch_under_different_agents() {
         enqueue_dispatch_with_configs(&mut store, bloom, "wp-escalating", digest(5), stage, configs.clone());
     }
 
-    drain_and_dispatch(&mut store, &shell).unwrap();
+    drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     let orders = backend.orders();
     let dispatched = |index: usize| orders[index].transformation.model.clone().expect("a model lane names its profile");
@@ -1235,7 +1458,7 @@ fn a_member_sealing_no_override_dispatches_the_calibrated_profile() {
     let shell = ExecutorShell::new(Arc::clone(&backend));
     enqueue_dispatch_at(&mut store, BloomId(digest(1)), "wp-bare", 0x77, StageId::Construct);
 
-    let (handles, _, _) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (handles, _, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     assert_eq!(handles.len(), 1, "the member dispatches");
     let calibrated = StageCatalog::profile_of(StageId::Construct);
@@ -1265,7 +1488,7 @@ fn a_sealed_config_with_no_content_parks_rather_than_running_the_default() {
         enqueue_dispatch_with_configs(&mut store, bloom, "wp-orphan", digest(5), StageId::Construct, configs);
     enqueue_dispatch_at(&mut store, bloom, "wp-after", 6, StageId::Construct);
 
-    let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
 
     assert_eq!(handles.len(), 1, "only the member behind the parked one dispatches");
     assert_eq!(backend.orders()[0].transformation.inputs[0], digest(6), "and it is the sibling, not the parked member");

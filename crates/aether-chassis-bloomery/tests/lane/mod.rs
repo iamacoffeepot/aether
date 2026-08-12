@@ -55,14 +55,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    Admit, AdmitResult, BackendObjectId, BloomDraft, BloomView, CONTROL_CORE_NAMESPACE, ConfigRegistry, Correspondence,
-    Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Outcome, Query, QueryResult, Snapshot,
-    ViewDocument, WorkpieceId,
+    Admit, AdmitResult, BackendObjectId, BloomDraft, BloomView, CONTROL_CORE_NAMESPACE, ConfigKind, ConfigRegistry,
+    Correspondence, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Outcome, Query,
+    QueryResult, Snapshot, StageCatalog, ViewDocument, WorkpieceId,
 };
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneRun, LaneScript, read_ledger};
 use aether_chassis_bloomery::store::{SqliteCorrespondence, SqliteStore, StoreBackend};
 use aether_data::wire::{from_bytes, to_vec};
-use aether_data::{MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 use tempfile::TempDir;
 
 use crate::common::client::{call, connect_and_handshake};
@@ -114,6 +114,25 @@ impl LaneHarness {
     /// # Panics
     /// As [`start`](Self::start).
     pub fn start_with(script: &LaneScript, workpiece: &str) -> Self {
+        Self::start_sealing(script, workpiece, None)
+    }
+
+    /// [`start`](Self::start) over a bloom that seals a stage catalog binding
+    /// every stage's execution limit at `wall_clock_secs` (ADR-0177).
+    ///
+    /// The knob is sealed rather than ambient on purpose, and the harness has to
+    /// go the same way the operator does: two blooms sealing the same catalog
+    /// must terminate identically, so there is no coordinator-side override for
+    /// a scenario to reach for. Seconds, so a scenario about a lane that never
+    /// exits does not have to wait out the compiled line's one-hour calibration.
+    ///
+    /// # Panics
+    /// As [`start`](Self::start).
+    pub fn start_with_wall_clock(script: &LaneScript, wall_clock_secs: u64) -> Self {
+        Self::start_sealing(script, "wp", Some(wall_clock_secs))
+    }
+
+    fn start_sealing(script: &LaneScript, workpiece: &str, wall_clock_secs: Option<u64>) -> Self {
         let repo = ScratchRepo::create();
         let runs = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
@@ -127,6 +146,11 @@ impl LaneHarness {
         // it the very first submit refuses with an unresolved checkout.
         let base = Snapshot::GENESIS_MAINLINE;
         SqliteCorrespondence::open(&store_path).unwrap().record(&base, &backend_object(repo.head())).unwrap();
+        // An authored catalog is content in the store plus an address in the
+        // sealed registry — the same two halves `POST /configs` and a draft
+        // patch produce, written directly here because this tier drives the
+        // control core over the wire rather than through the REST api.
+        let configs = wall_clock_secs.map_or_else(ConfigRegistry::default, |secs| author_catalog(&store_path, secs));
 
         let rpc_port = free_port();
         let coordinator = Coordinator::spawn_in(
@@ -162,7 +186,7 @@ impl LaneHarness {
         let stream = connect_and_handshake(rpc_port, "lane-boundary-harness");
 
         let mut harness = Self { repo, runs, state, store_path, _coordinator: coordinator, stream, cid: 1, base };
-        harness.seal(workpiece);
+        harness.seal(workpiece, configs);
         harness
     }
 
@@ -274,8 +298,8 @@ impl LaneHarness {
         }
     }
 
-    /// Seal a single-member bloom on the harness's base.
-    fn seal(&mut self, workpiece: &str) {
+    /// Seal a single-member bloom on the harness's base, under `configs`.
+    fn seal(&mut self, workpiece: &str, configs: ConfigRegistry) {
         let mut member = Membership {
             workpiece: WorkpieceId(workpiece.to_owned()),
             scope_revision: Digest::from_bytes([1; 32]),
@@ -288,7 +312,7 @@ impl LaneHarness {
         };
         // The approval binds the member's own subject (ADR-0174).
         member.approval.subject = member.subject();
-        let spec = BloomDraft { proposals: vec![member], base: self.base, ..BloomDraft::default() }.seal();
+        let spec = BloomDraft { proposals: vec![member], base: self.base, configs, ..BloomDraft::default() }.seal();
         let event = Event { idempotency_key: IdempotencyKey("lane-seal".to_owned()), fact: Fact::Seal(spec) };
 
         self.cid += 1;
@@ -304,6 +328,30 @@ impl LaneHarness {
 /// The native control core's mailbox, addressed by its lineage path.
 fn control_mailbox() -> MailboxId {
     mailbox_id_from_path(CONTROL_CORE_NAMESPACE)
+}
+
+/// Author a stage catalog binding every stage's execution limit at
+/// `wall_clock_secs` into the store at `store_path`, and return the registry
+/// that seals its address.
+///
+/// Written before the coordinator forks, the way the correspondence row is: the
+/// control core resolves a sealed address by reading this table, and a seal
+/// naming an address with no content behind it is refused rather than defaulted.
+///
+/// # Panics
+/// The store could not be opened or written.
+fn author_catalog(store_path: &str, wall_clock_secs: u64) -> ConfigRegistry {
+    let mut catalog = StageCatalog::line();
+    for binding in &mut catalog.bindings {
+        binding.wall_clock_secs = wall_clock_secs;
+    }
+    let bytes = to_vec(&catalog).unwrap();
+    let address = catalog.address();
+    SqliteStore::open(store_path).unwrap().record_config(address.as_bytes(), StageCatalog::NAME, &bytes).unwrap();
+
+    let mut configs = ConfigRegistry::default();
+    configs.insert::<StageCatalog>(address);
+    configs
 }
 
 /// The scratch repository's real HEAD sha as the opaque backend object the

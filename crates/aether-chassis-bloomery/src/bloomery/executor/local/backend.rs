@@ -308,7 +308,13 @@ impl ExecutorBackend for LocalExecutor {
         let worktree_dir = {
             let mut runs = self.lock();
             let Some(run) = runs.get_mut(&handle.nonce.0) else {
-                return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
+                // Idempotent (ADR-0177): no tracked run means the order was
+                // never submitted to this backend or a prior cancel already
+                // evicted it, and both are the "already absent" success the port
+                // contract names. The deadline enforcement reissues its cancel
+                // until the expired order is admitted, so refusing here would
+                // make one store fault permanent.
+                return Ok(());
             };
             run.process.kill()?;
             let worktree_dir = run.worktree_dir.clone();

@@ -248,8 +248,9 @@ impl<C: ActionsApi> ActionsExecutor<C> {
     }
 
     // Resolve the run for a handle's nonce, or the port-specific
-    // no-run-for-nonce error — the shared resolution `cancel` and
-    // `stream_evidence` both need before they can act on a run.
+    // no-run-for-nonce error — the resolution `stream_evidence` needs before it
+    // can act on a run. `cancel` deliberately does not go through this: it is
+    // idempotent (ADR-0177), so an unresolvable nonce is a clean success there.
     fn resolve(&self, handle: &WorkHandle) -> Result<WorkflowRun, ExecutorError> {
         self.find_run(&handle.nonce.0)?.ok_or_else(|| ExecutorError::NoRunForNonce(handle.nonce.clone()))
     }
@@ -371,10 +372,25 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
     }
 
     fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
-        let run = self.resolve(handle)?;
-        self.client.cancel_run(run.id)?;
+        // Idempotent (ADR-0177): a nonce that resolves no run has nothing left
+        // to cancel — the dispatch never became a run, or a prior cancel already
+        // ended it — so that is the "already absent" success the port contract
+        // names, not a fault. A `find_run` transport failure still propagates,
+        // because *unknown* is not *absent*.
+        let Some(run) = self.find_run(&handle.nonce.0)? else {
+            self.lock().remove(&handle.nonce.0);
+            return Ok(());
+        };
+        // An already-terminal run is the contract's second success arm, and
+        // asking GitHub to cancel one answers 409 — so the terminal check is
+        // what makes idempotence hold against the real API, not only the fake.
+        if run.status != RunStatus::Completed {
+            self.client.cancel_run(run.id)?;
+        }
         // A cancel is terminal — drop the wrapper record so `dispatched` tracks
-        // in-flight orders rather than the lifetime total.
+        // in-flight orders rather than the lifetime total. The wrapper is only a
+        // resolution hint; dropping it costs a repeat cancel the both-wrappers
+        // probe, which then answers `Ok` through the absent arm above.
         self.lock().remove(&handle.nonce.0);
         Ok(())
     }
@@ -636,13 +652,28 @@ mod tests {
     }
 
     #[test]
-    fn cancel_with_no_resolvable_run_is_the_no_run_error() {
+    fn cancelling_the_same_run_twice_succeeds_both_times() {
+        // The ADR-0177 idempotency contract. The deadline enforcement reissues
+        // the cancel on every tick until the expired order's evidence is stored
+        // and its result admitted, so a second cancel that refused would turn a
+        // recoverable store fault into an order nothing can ever terminate.
+        let fake = FakeGithub::new();
+        let exec = executor(fake.clone());
+        let handle = exec.submit(&order("n-3")).unwrap();
+        let _ = fake.seed_run("n-3", RunStatus::InProgress, None);
+
+        exec.cancel(&handle).unwrap();
+        assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Cancelled);
+        exec.cancel(&handle).expect("a repeat cancel of an already-cancelled run is not a fault");
+    }
+
+    #[test]
+    fn cancel_with_no_resolvable_run_succeeds() {
+        // A dispatch that never became a run is already absent, which the port
+        // contract counts as cancelled — the same success a repeat cancel gets.
         let exec = executor(FakeGithub::new());
         let handle = WorkHandle::new(Nonce("n-missing".to_owned()));
-        match exec.cancel(&handle) {
-            Err(ExecutorError::NoRunForNonce(nonce)) => assert_eq!(nonce, Nonce("n-missing".to_owned())),
-            other => panic!("expected NoRunForNonce, got {other:?}"),
-        }
+        exec.cancel(&handle).expect("an unresolvable nonce has nothing left to cancel");
     }
 
     #[test]
