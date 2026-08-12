@@ -19,7 +19,8 @@ mod lane;
 use std::path::Path;
 
 use aether_bloomery::{
-    BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND,
+    BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure,
+    VerifyFailureSet,
 };
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneScript};
 use lane::LaneHarness;
@@ -114,7 +115,16 @@ fn a_member_whose_verification_never_passes_wedges_with_recorded_evidence() {
     // *accountably* — a wedge naming the evidence that produced it, which is
     // what separates a recorded halt from the silent one this harness exists to
     // catch.
-    let mut harness = LaneHarness::start(&LaneScript::all_passing().with_default(LaneMode::Fail));
+    // Four Clippy failures reach Verify's three-repeat ceiling: the first is
+    // novel and free, then each recurrence spends one repair roll. Keep every
+    // Refine run passing so this wedges at Verify, not at the repair stage.
+    let mut harness = LaneHarness::start(
+        &LaneScript::all_passing()
+            .then(VERIFY_CHECK_COMMAND, LaneMode::Fail)
+            .then(VERIFY_CHECK_COMMAND, LaneMode::Fail)
+            .then(VERIFY_CHECK_COMMAND, LaneMode::Fail)
+            .then(VERIFY_CHECK_COMMAND, LaneMode::Fail),
+    );
 
     let bloom =
         harness.settle("the member wedges", |bloom| bloom.members.first().is_some_and(|member| member.wedge.is_some()));
@@ -124,6 +134,11 @@ fn a_member_whose_verification_never_passes_wedges_with_recorded_evidence() {
         wedge.evidence,
         aether_bloomery::Digest::default(),
         "a wedge must name the evidence that produced it, or the halt is unaccountable",
+    );
+    assert_eq!(
+        wedge.repeated_verifiers,
+        VerifyFailureSet::one(VerifyFailure::Clippy),
+        "the fixture's repeated clippy failures are the exact terminal accounting set",
     );
     harness.assert_live();
 }

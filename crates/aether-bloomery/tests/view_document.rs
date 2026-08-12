@@ -10,7 +10,8 @@
 mod common;
 
 use aether_bloomery::{
-    Evidence, EvidenceKind, Fact, Question, ResolvedConfigs, Snapshot, StageId, WorkpieceId, reduce, view_of,
+    Evidence, EvidenceKind, Fact, Question, ResolvedConfigs, Snapshot, StageId, VerifyFailure, VerifyFailureSet,
+    WorkpieceId, reduce, view_of,
 };
 use common::{digest, draft, event, membership, sealed_and_resolved};
 use proptest::collection::btree_set;
@@ -81,6 +82,89 @@ fn a_held_member_surfaces_its_pending_decision_only_when_resolvable() {
         unresolved.blooms[0].members.iter().all(|m| m.pending_decision.is_none()),
         "an unresolvable hold surfaces no pending decision, exactly as an unresolvable study record contributes nothing",
     );
+}
+
+#[test]
+fn a_verify_wedge_projects_only_terminal_repeated_identities() {
+    let spec = draft(0, vec![membership("wp", 1)]).seal();
+    let bloom = spec.id();
+    let mut snapshot = Snapshot::new(digest(0));
+    let seal = event("seal", Fact::Seal(spec));
+    snapshot =
+        snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()), &ResolvedConfigs::default());
+
+    let construct = event(
+        "construct",
+        Fact::AttemptCompleted {
+            bloom,
+            workpiece: WorkpieceId("wp".into()),
+            stage: StageId::Construct,
+            passed: true,
+            evidence: Evidence { subject: digest(1), kind: EvidenceKind::VerificationResult, detail: digest(70) },
+            candidate: None,
+        },
+    );
+    snapshot = snapshot.apply(
+        &construct,
+        &reduce(&snapshot, &construct, &ResolvedConfigs::default()),
+        &ResolvedConfigs::default(),
+    );
+
+    // First clippy is novel. Three repeats spend the compiled Verify budget;
+    // docs appears only in the terminal verdict and therefore is not responsible
+    // for that roll.
+    for index in 0u8..4 {
+        let failed_verifiers = if index == 3 {
+            [VerifyFailure::Clippy, VerifyFailure::Docs].into_iter().collect()
+        } else {
+            VerifyFailureSet::one(VerifyFailure::Clippy)
+        };
+        let failed = event(
+            &format!("verify-{index}"),
+            Fact::VerifyFailed {
+                bloom,
+                workpiece: WorkpieceId("wp".into()),
+                evidence: Evidence {
+                    subject: digest(1),
+                    kind: EvidenceKind::VerificationResult,
+                    detail: digest(80 + index),
+                },
+                failed_verifiers,
+            },
+        );
+        snapshot = snapshot.apply(
+            &failed,
+            &reduce(&snapshot, &failed, &ResolvedConfigs::default()),
+            &ResolvedConfigs::default(),
+        );
+        if index < 3 {
+            let refine = event(
+                &format!("refine-{index}"),
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    stage: StageId::Refine,
+                    passed: true,
+                    evidence: Evidence {
+                        subject: digest(1),
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(90 + index),
+                    },
+                    candidate: None,
+                },
+            );
+            snapshot = snapshot.apply(
+                &refine,
+                &reduce(&snapshot, &refine, &ResolvedConfigs::default()),
+                &ResolvedConfigs::default(),
+            );
+        }
+    }
+
+    let view = view_of(&snapshot, |_| None);
+    let wedge = view.blooms[0].members[0].wedge.as_ref().expect("the repeated failures wedge the member");
+    assert_eq!(wedge.evidence, digest(83));
+    assert_eq!(wedge.repeated_verifiers, VerifyFailureSet::one(VerifyFailure::Clippy));
 }
 
 proptest! {

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
-use crate::values::{BloomSpec, CandidateRef, ConfigRegistry, Evidence, ResolutionClaim, Statement};
+use crate::values::{BloomSpec, CandidateRef, ConfigRegistry, Evidence, ResolutionClaim, Statement, VerifyFailureSet};
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -102,16 +102,16 @@ pub enum Fact {
     },
     /// A dispatched per-member attempt completed with evidence (ADR-0149 §The
     /// line, ADR-0153). Admitted when a nonce/digest-matched attempt result
-    /// arrives from evidence intake (#3502) for `Construct`, a failing
-    /// `Verify`, or the repair-only `Refine`. The reducer evaluates the stage's
+    /// arrives from evidence intake (#3502) for `Construct` or the repair-only
+    /// `Refine`. The reducer evaluates the stage's
     /// completion gate against `passed` and the member's cursor: a passing gate
     /// advances the cursor and dispatches the next stage (a passing `Refine`
     /// returns to `Verify` for the delta-confirm); a failing `Construct` or
     /// `Refine` re-dispatches the same stage while the `retry_budget` allows
-    /// and wedges the member once it is exhausted; a failing `Verify` re-enters
-    /// `Refine` under the repair ceiling. The terminal `Verify` stage's passing
-    /// result integrates the member through [`Fact::Integrate`] instead — the
-    /// intake is stage-aware and never routes a passing `Verify` result here.
+    /// and wedges the member once it is exhausted. The terminal `Verify` stage
+    /// never routes through this fact: a pass integrates through
+    /// [`Fact::Integrate`], while a failure carrying typed verifier identities
+    /// routes through [`Fact::VerifyFailed`].
     ///
     /// `passed` is the completion gate's outcome as the intake broker read it from
     /// the worker's verdict — the reducer owns the *advance* decision the gate
@@ -257,6 +257,19 @@ pub enum Fact {
         /// bloom's sealed [`Budget::retry_cap`](crate::Budget::retry_cap) when
         /// it states one.
         attempts: u32,
+    },
+    /// A dispatched member Verify returned a typed failing-verifier set
+    /// (ADR-0178). Appended so every prior fact retains its wire discriminant.
+    VerifyFailed {
+        /// The bloom whose member failed verification.
+        bloom: BloomId,
+        /// The member whose current cursor must be terminal Verify.
+        workpiece: WorkpieceId,
+        /// The failure evidence, bound to the member's current candidate tree
+        /// (or its scope revision before a candidate exists).
+        evidence: Evidence,
+        /// The nonempty, canonical verifier identities that failed together.
+        failed_verifiers: VerifyFailureSet,
     },
 }
 

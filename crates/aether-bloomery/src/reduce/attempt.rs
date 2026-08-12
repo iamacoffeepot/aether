@@ -6,7 +6,9 @@ use alloc::vec::Vec;
 use super::{AttemptCompletedError, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{AgentProfile, CandidateRef, ConfigRegistry, Evidence, StageCatalog, Transformation, Wedge};
+use crate::values::{
+    AgentProfile, CandidateRef, ConfigRegistry, Evidence, StageCatalog, Transformation, VerifyFailureSet, Wedge,
+};
 
 /// The move-and-dispatch effect pair every cursor move of
 /// [`reduce_attempt_completed`] emits — an advance, a Refine re-entry, and a
@@ -83,17 +85,10 @@ pub(super) fn stage_profile(catalog: &StageCatalog, stage: StageId) -> AgentProf
 /// A passing gate advances the cursor to the next member stage and dispatches it
 /// (a passing repair-only `Refine` returns to `Verify` for the delta-confirm,
 /// ADR-0153); a failing gate re-dispatches the same stage while the stage's
-/// `retry_budget` allows and wedges the member once it is exhausted (a wedged
-/// member stops dispatching — a supersession is the escape). The attempt's
-/// evidence is recorded in the bloom's evidence log either way. The terminal
-/// `Verify` is the exception to same-stage retry: a *passing* `Verify` integrates
-/// the member through [`Fact::Integrate`](crate::Fact::Integrate) and never completes here (a passing
-/// terminal completion is a mis-route,
-/// [`AttemptCompletedError::TerminalStage`]); a *failing* `Verify` re-enters
-/// `Refine` — the findings-directed fix, since re-running the mechanical gate on
-/// an unchanged candidate changes nothing — bounded by Verify's `retry_budget`
-/// over the cursor-carried `repair_rolls`, wedging once the budget's worth of
-/// failing verdicts is consumed.
+/// `retry_budget` allows and wedges the member once it is exhausted. The
+/// terminal `Verify` never completes here: a pass integrates through
+/// [`Fact::Integrate`](crate::Fact::Integrate), while a failure carries its typed
+/// identities through [`Fact::VerifyFailed`](crate::Fact::VerifyFailed).
 pub(super) fn reduce_attempt_completed(
     snapshot: &Snapshot,
     bloom: &BloomId,
@@ -114,11 +109,8 @@ pub(super) fn reduce_attempt_completed(
             workpiece.clone(),
         )));
     };
-    // A *passing* terminal `Verify` is a mis-route — a passing Verify integrates
-    // through `Fact::Integrate` and never completes here, so a passing completion
-    // whose stage has no successor is rejected. A *failing* `Verify` does complete
-    // here (the Refine re-entry below), so the guard fires only on the passing
-    // terminal case; a mis-routed passing terminal is caught before the cursor
+    // Terminal `Verify` is a mis-route in either direction: passes integrate and
+    // failures use the typed VerifyFailed fact. It is caught before the cursor
     // check so it reads as `TerminalStage` rather than a `StageMismatch`. The
     // repair-only `Refine` sits off the standing line (ADR-0153) with an explicit
     // successor: its pass returns the member to `Verify` for the delta-confirm.
@@ -127,7 +119,7 @@ pub(super) fn reduce_attempt_completed(
     } else {
         StageCatalog::next_member_stage(stage)
     };
-    if passed && next.is_none() {
+    if next.is_none() {
         return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(stage)));
     }
     // The completion must name the member's current cursor stage. A member with
@@ -170,8 +162,9 @@ pub(super) fn reduce_attempt_completed(
     // it. `next` is `Some` on this branch — a passing terminal completion was
     // rejected above, so a passing stage always has a successor.
     let repair_rolls = cursor.repair_rolls;
+    let seen_verify_failures = cursor.seen_verify_failures;
     if let Some(next) = next.filter(|_| passed) {
-        let progress = StageProgress { stage: next, attempts: 1, candidate, repair_rolls };
+        let progress = StageProgress { stage: next, attempts: 1, candidate, repair_rolls, seen_verify_failures };
         effects.extend(move_effects(
             *bloom,
             workpiece,
@@ -185,44 +178,13 @@ pub(super) fn reduce_attempt_completed(
             effects,
         };
     }
-    // A failing terminal Verify re-enters Refine instead of re-running the
-    // mechanical gate on an unchanged candidate (ADR-0153): only a
-    // findings-directed fix changes the next verdict, so the member routes back
-    // to the repair stage that can produce one (the host threads the persisted
-    // failure findings onto the dispatch, #3656). The ceiling is Verify's retry
-    // budget over `repair_rolls` — the cursor-carried count the per-stage
-    // `attempts` reset cannot clear — so once the budget's worth of failing
-    // verdicts is consumed the member wedges: never an extra roll, never a
-    // silent integrate.
-    if stage == StageId::Verify {
-        let rolls = repair_rolls + 1;
-        if rolls < record.stage_catalog.retry_budget_of(StageId::Verify).unwrap_or(1) {
-            let progress = StageProgress { stage: StageId::Refine, attempts: 1, candidate, repair_rolls: rolls };
-            effects.extend(move_effects(
-                *bloom,
-                workpiece,
-                member.scope_revision,
-                progress,
-                DispatchTargets { subject, checkout },
-                SealedLine {
-                    configs: member.configs.layered_over(record.spec.configs()),
-                    catalog: &record.stage_catalog,
-                },
-            ));
-            return Decisions {
-                outcome: Outcome::RefineReentered { bloom: *bloom, workpiece: workpiece.clone(), rolls },
-                effects,
-            };
-        }
-        return wedged(*bloom, workpiece, stage, evidence, effects);
-    }
     // A failing gate re-dispatches the same stage while its retry budget allows;
     // an exhausted budget wedges the member — it stops dispatching rather than
     // looping (the tripwire).
     let budget = record.stage_catalog.retry_budget_of(stage).unwrap_or(1);
     if attempts < budget {
         let attempt = attempts + 1;
-        let progress = StageProgress { stage, attempts: attempt, candidate, repair_rolls };
+        let progress = StageProgress { stage, attempts: attempt, candidate, repair_rolls, seen_verify_failures };
         effects.extend(move_effects(
             *bloom,
             workpiece,
@@ -257,7 +219,15 @@ fn wedged(
     effects.push(Decision::RecordWedge {
         bloom,
         workpiece: workpiece.clone(),
-        wedge: Wedge { stage, evidence: evidence.detail },
+        wedge: Wedge { stage, evidence: evidence.detail, repeated_verifiers: VerifyFailureSet::EMPTY },
     });
-    Decisions { outcome: Outcome::AttemptWedged { bloom, workpiece: workpiece.clone(), stage }, effects }
+    Decisions {
+        outcome: Outcome::AttemptWedged {
+            bloom,
+            workpiece: workpiece.clone(),
+            stage,
+            repeated_verifiers: VerifyFailureSet::EMPTY,
+        },
+        effects,
+    }
 }

@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 use super::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError, Decision,
     GrantAttemptsError, IntegrateError, LandError, LandingRejectedError, ResolveError, SealError, SupersedeError,
+    VerifyFailedError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{LandingReceipt, ResolvedBloom};
+use crate::values::{LandingReceipt, ResolvedBloom, VerifyFailureSet};
 
 /// The result of reducing one event: an outcome plus the ordered effects that
 /// enter the transactional outbox.
@@ -118,6 +119,9 @@ pub enum Outcome {
         workpiece: WorkpieceId,
         /// The stage that exhausted its retry budget.
         stage: StageId,
+        /// The verifier identities in the terminal verdict that had already
+        /// failed for this member. Empty for every non-Verify wedge.
+        repeated_verifiers: VerifyFailureSet,
     },
     /// An attempt completion was refused (unknown bloom, non-member, or a stage
     /// that is not the member's current cursor).
@@ -131,8 +135,8 @@ pub enum Outcome {
         bloom: BloomId,
         /// The re-entered member.
         workpiece: WorkpieceId,
-        /// The count of failing Verify verdicts consumed, this one included —
-        /// the repair ceiling's cursor (wedges at Verify's retry budget).
+        /// The count of repeat repair rolls spent. A wholly novel failure set
+        /// re-enters with zero rolls; any repeated identity spends exactly one.
         rolls: u32,
     },
     /// A verified integration fold dispatched the whole-bloom aggregate review
@@ -279,4 +283,6 @@ pub enum Outcome {
     },
     /// An attempt grant was refused.
     GrantAttemptsRejected(GrantAttemptsError),
+    /// A typed member-Verify failure was refused.
+    VerifyFailedRejected(VerifyFailedError),
 }

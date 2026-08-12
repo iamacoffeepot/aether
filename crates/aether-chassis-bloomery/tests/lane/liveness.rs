@@ -198,7 +198,11 @@ mod tests {
 
     #[test]
     fn a_wedge_is_a_legitimate_stop_and_a_resolution_is_a_terminal_one() {
-        let wedge = Wedge { stage: aether_bloomery::StageId::Verify, evidence: Digest::from_bytes([9; 32]) };
+        let wedge = Wedge {
+            stage: aether_bloomery::StageId::Verify,
+            evidence: Digest::from_bytes([9; 32]),
+            repeated_verifiers: aether_bloomery::VerifyFailureSet::EMPTY,
+        };
 
         assert!(matches!(
             classify(&document(BloomStatus::Sealed, vec![member(false, Some(wedge))]), &[]),

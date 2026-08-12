@@ -15,7 +15,8 @@
 mod common;
 
 use aether_bloomery::{
-    Decisions, Digest, Event, Evidence, EvidenceKind, Fact, Outcome, ResolvedConfigs, Snapshot, reduce,
+    Decisions, Digest, Event, Evidence, EvidenceKind, Fact, Outcome, ResolvedConfigs, Snapshot, StageId, VerifyFailure,
+    VerifyFailureSet, WorkpieceId, reduce,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use common::{claim, digest, draft, event, membership};
@@ -30,6 +31,37 @@ fn script() -> Vec<Event> {
     let bloom = spec.id();
     vec![
         event("seal", Fact::Seal(spec)),
+        event(
+            "construct-alpha",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: WorkpieceId("alpha".into()),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(48) },
+                candidate: None,
+            },
+        ),
+        event(
+            "verify-alpha-fmt",
+            Fact::VerifyFailed {
+                bloom,
+                workpiece: WorkpieceId("alpha".into()),
+                evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(49) },
+                failed_verifiers: VerifyFailureSet::one(VerifyFailure::Fmt),
+            },
+        ),
+        event(
+            "refine-alpha",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: WorkpieceId("alpha".into()),
+                stage: StageId::Refine,
+                passed: true,
+                evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(50) },
+                candidate: None,
+            },
+        ),
         event("integrate-alpha", Fact::Integrate { bloom, claim: claim("alpha", 10, 20) }),
         event("integrate-beta", Fact::Integrate { bloom, claim: claim("beta", 11, 21) }),
         event(
@@ -78,18 +110,21 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
     let (decisions, snapshot) = replay(&script());
 
     assert!(matches!(decisions[0].outcome, Outcome::Sealed(_)));
-    assert!(matches!(decisions[1].outcome, Outcome::Integrated { .. }));
-    assert!(matches!(decisions[2].outcome, Outcome::Integrated { .. }));
+    assert!(matches!(decisions[1].outcome, Outcome::AttemptAdvanced { to: StageId::Verify, .. }));
+    assert!(matches!(decisions[2].outcome, Outcome::RefineReentered { rolls: 0, .. }));
+    assert!(matches!(decisions[3].outcome, Outcome::AttemptAdvanced { to: StageId::Verify, .. }));
+    assert!(matches!(decisions[4].outcome, Outcome::Integrated { .. }));
+    assert!(matches!(decisions[5].outcome, Outcome::Integrated { .. }));
     // The fold dispatches the compiler, not the critic: a fold that does not
     // build must never reach a model lane, and the review is what a *passing*
     // verify hands off to.
-    assert!(matches!(decisions[3].outcome, Outcome::AggregateVerifyDispatched { roll: 1, .. }));
-    assert!(matches!(decisions[4].outcome, Outcome::AggregateVerifyPassed { rolls: 1, .. }));
-    match &decisions[5].outcome {
+    assert!(matches!(decisions[6].outcome, Outcome::AggregateVerifyDispatched { roll: 1, .. }));
+    assert!(matches!(decisions[7].outcome, Outcome::AggregateVerifyPassed { rolls: 1, .. }));
+    match &decisions[8].outcome {
         Outcome::Resolved(resolved) => assert_eq!(resolved.resolution_claims.len(), 2),
         other => panic!("expected Resolved, got {other:?}"),
     }
-    assert!(matches!(decisions[6].outcome, Outcome::Landed(_)));
+    assert!(matches!(decisions[9].outcome, Outcome::Landed(_)));
     assert_eq!(snapshot.mainline, digest(40));
 }
 
@@ -199,9 +234,12 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // aggregate review — can be shown one at all. Every dispatch decision gains the
 // field, `None` on the working-tree lanes and the sealed base on the review, an
 // intended, coordinated break, recomputed.
+// Repinned for ADR-0178 (#4780): `StageProgress` gained per-member seen
+// verifier history, and the canonical journal now exercises the appended
+// `VerifyFailed` fact through a forgiven first failure and Refine return.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0x05, 0x39, 0x2b, 0x96, 0x61, 0xf3, 0x5b, 0xcb, 0x4b, 0x18, 0xd2, 0xe1, 0x4c, 0x90, 0xcf, 0x6b, 0xae, 0x3c, 0x1e,
-    0xd6, 0x9f, 0x0c, 0x93, 0xd4, 0xa4, 0xcc, 0xaf, 0x6f, 0x22, 0xe6, 0xc2, 0x01,
+    0xf9, 0x18, 0x50, 0xb8, 0x17, 0xa0, 0x36, 0x23, 0x02, 0xc2, 0xe2, 0x82, 0x0d, 0x4f, 0x3e, 0xa3, 0x6b, 0x3a, 0x41,
+    0x0a, 0x71, 0x10, 0xe8, 0x8e, 0x01, 0xce, 0x2c, 0x54, 0x93, 0x34, 0xf1, 0xf5,
 ];
 
 #[test]

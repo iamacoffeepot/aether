@@ -14,7 +14,7 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     BloomSpec, CandidateRef, ConfigScopes, Evidence, EvidenceKind, ResolutionClaim, ResolvedConfigs, StageCatalog,
-    Wedge,
+    VerifyFailureSet, Wedge,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -198,13 +198,16 @@ pub struct StageProgress {
     /// base). Later dispatches re-target from it: evidence binds `tree`, the
     /// worker checks out `checkout`.
     pub candidate: Option<CandidateRef>,
-    /// How many failing terminal-Verify verdicts this member has consumed
-    /// (ADR-0153) — the repair ceiling's counter, carried across the Refine
-    /// re-entry a failing Verify routes into (the `attempts` reset on every
-    /// stage advance, so the ceiling needs its own cursor field). A failing
-    /// Verify at `repair_rolls >= retry_budget_of(Verify)` wedges instead of
-    /// re-entering.
+    /// How many repeated terminal-Verify verdicts this member has consumed
+    /// (ADR-0178) — a wholly novel failure set costs no roll, while any
+    /// intersection with `seen_verify_failures` costs exactly one. The counter
+    /// is carried across Refine re-entry because `attempts` resets on each stage
+    /// advance. A repeat at the Verify retry budget wedges instead of re-entering.
     pub repair_rolls: u32,
+    /// Every verifier identity this member has failed in an admitted terminal
+    /// Verify verdict (ADR-0178). Carried across repair transitions and grants;
+    /// a successor gets a fresh cursor and therefore an empty set.
+    pub seen_verify_failures: VerifyFailureSet,
 }
 
 /// A bloom's position in the one-way lifecycle.

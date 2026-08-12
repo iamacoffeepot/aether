@@ -33,13 +33,14 @@ mod outcome;
 mod review;
 mod seal;
 mod snapshot;
+mod verify;
 mod view;
 
 pub use decision::Decision;
 pub use error::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError,
     BaseMismatch, GrantAttemptsError, IntegrateError, LandError, LandingRejectedError, ResolveError, SealConflict,
-    SealError, SupersedeError,
+    SealError, SupersedeError, VerifyFailedError,
 };
 pub use event::{Event, Fact};
 pub use outcome::{Decisions, Outcome};
@@ -59,6 +60,7 @@ use landing::reduce_landing_rejected;
 use observe::reduce_observe_mainline;
 use review::reduce_aggregate_review_completed;
 use seal::{reduce_seal, reduce_supersede};
+use verify::reduce_verify_failed;
 
 /// Reduce one event against a snapshot into decisions. Pure: reads the
 /// snapshot, returns decisions, mutates nothing (ADR-0149 §The control core).
@@ -100,6 +102,9 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> 
         Fact::ObserveMainline { head } => reduce_observe_mainline(snapshot, head),
         Fact::GrantAttempts { bloom, workpiece, stage, attempts } => {
             reduce_grant_attempts(snapshot, bloom, workpiece, *stage, *attempts)
+        }
+        Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers } => {
+            reduce_verify_failed(snapshot, bloom, workpiece, evidence, *failed_verifiers)
         }
     }
 }
