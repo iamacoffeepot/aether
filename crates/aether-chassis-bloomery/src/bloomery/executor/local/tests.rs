@@ -9,13 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
-    Conclusion, Digest, ExecutionStatus, ExecutorBackend, Harness, Nonce, ReasoningEffort, ResolvedModel, StageCatalog,
-    StageId, StageVerdict, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle,
+    BackendObjectId, Conclusion, Correspondence, CorrespondenceError, Digest, ExecutionStatus, ExecutorBackend,
+    Harness, Nonce, ReasoningEffort, ResolvedModel, StageCatalog, StageId, StageVerdict, Transformation, VerifyFailure,
+    VerifyFailureSet, WorkHandle,
 };
 use tempfile::TempDir;
 
-use aether_bloomery_github::Correspondence as _;
 use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::to_hex;
 
 use super::runner::CapturedObjects;
 use super::testing::{FixedRunner, canned_capture};
@@ -363,6 +364,7 @@ struct SeenSpec {
     harness: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    checkout: Option<String>,
     diff_base: Option<String>,
 }
 
@@ -380,6 +382,7 @@ impl TransformRunner for CapturingRunner {
             harness: spec.harness.map(str::to_owned),
             model: spec.model.map(str::to_owned),
             effort: spec.effort.map(str::to_owned),
+            checkout: Some(spec.checkout_hex.to_owned()),
             diff_base: spec.diff_base_hex.map(str::to_owned),
         };
         Ok(Box::new(RecordingProcess { lifecycle: RunLifecycle::Running }))
@@ -471,6 +474,11 @@ fn submit_names_no_model_when_the_order_carries_no_profile() {
 // which its own instructions make a mandatory finding, and no bloom can ever pass
 // its aggregate review (#4723). The member lane is asserted alongside it: naming a
 // range there would judge the sealed base's own history instead of the candidate.
+//
+// Both resolved objects are also asserted as the exact lowercase hex git resolves,
+// which is the whole reason the backend renders opaque correspondence bytes at all:
+// a mis-rendered sha (uppercase, or a swapped nibble) names an object `git worktree
+// add` refuses, and every dispatch fails on a target that looks plausible in a log.
 #[test]
 fn an_aggregate_review_spawn_names_the_range_a_member_spawn_does_not() {
     let seen = Arc::new(Mutex::new(SeenSpec::default()));
@@ -493,11 +501,18 @@ fn an_aggregate_review_spawn_names_the_range_a_member_spawn_does_not() {
     };
     exec.submit(&review).unwrap();
 
-    let sealed_base = store.resolve_git(&digest(0xBA)).unwrap().expect("the sealed base resolves").to_hex();
+    // `seed_git_object` records each digest against its own hex rendering, so
+    // that rendering is the sha the spawn must name.
+    let SeenSpec { checkout, diff_base, .. } = seen.lock().unwrap().clone();
     assert_eq!(
-        seen.lock().unwrap().diff_base.as_deref(),
-        Some(sealed_base.as_str()),
+        diff_base.as_deref(),
+        Some(to_hex(&digest(0xBA)).as_str()),
         "the spawn names the sealed base as the range the integration is judged over",
+    );
+    assert_eq!(
+        checkout.as_deref(),
+        Some(to_hex(&digest(0xC0)).as_str()),
+        "the checkout target is the resolved object, rendered as the lowercase hex git takes",
     );
 
     exec.submit(&construct_order(digest(5), &test_nonce("member"))).unwrap();
@@ -634,12 +649,12 @@ fn a_passing_construct_run_captures_its_candidate() {
     let candidate = refs[0].candidate.expect("a passed construct run reports its capture");
     let captured = canned_capture();
     assert_eq!(
-        store.resolve_git(&candidate.tree).unwrap().as_ref(),
+        store.resolve_backend_object(&candidate.tree).unwrap().as_ref(),
         Some(&captured.tree),
         "the tree digest resolves to the captured tree object",
     );
     assert_eq!(
-        store.resolve_git(&candidate.checkout).unwrap().as_ref(),
+        store.resolve_backend_object(&candidate.checkout).unwrap().as_ref(),
         Some(&captured.commit),
         "the checkout digest resolves to the capture commit",
     );
@@ -670,4 +685,50 @@ fn a_passing_construct_run_with_nothing_to_capture_fails_closed() {
     assert!(refs[0].candidate.is_none());
     let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
     assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "a lost capture is a failed attempt");
+}
+
+// A correspondence whose reads work — so the submit resolves its checkout — but
+// whose `record` always faults, standing in for a durable store that goes
+// unwritable between the dispatch and the capture.
+struct RecordFaults(FakeGithub);
+
+impl Correspondence for RecordFaults {
+    fn record(&self, _digest: &Digest, _object: &BackendObjectId) -> Result<(), CorrespondenceError> {
+        Err(CorrespondenceError::new("store fault"))
+    }
+
+    fn resolve_backend_object(&self, digest: &Digest) -> Result<Option<BackendObjectId>, CorrespondenceError> {
+        self.0.resolve_backend_object(digest)
+    }
+
+    fn resolve_digest(&self, object: &BackendObjectId) -> Result<Option<Digest>, CorrespondenceError> {
+        self.0.resolve_digest(object)
+    }
+}
+
+// ADR-0152 — the other capture shortfall: the run committed real work, but the
+// correspondence write faulted, so nothing can ever resolve the captured objects
+// back. Fail-closed like a clean worktree, because a pass carrying a candidate
+// the integrate path cannot resolve wedges the bloom one stage later with no
+// trace of why. Catches a `record` fault folded to a warn while the verdict sails
+// through on the child's own claim.
+#[test]
+fn a_capture_whose_correspondence_write_faults_fails_closed() {
+    let base = TempDir::new().unwrap();
+    let store = FakeGithub::new();
+    store.seed_git_object(&digest(0xC0));
+    let evidence = r#"{"command":"construct.implement","nonce":"n-fault","produced_candidate":true,"result_record":{"schema":1,"is_error":false,"result":{"num_turns":3}}}"#;
+    let runner = FixedRunner {
+        evidence: evidence.to_owned(),
+        lifecycle: RunLifecycle::Exited { success: true },
+        captures: true,
+    };
+    let exec = LocalExecutor::new(Arc::new(runner), Arc::new(RecordFaults(store)), base.path());
+
+    let handle = exec.submit(&construct_order(digest(5), "n-fault")).unwrap();
+    let refs = exec.stream_evidence(&handle).unwrap();
+
+    assert!(refs[0].candidate.is_none(), "an unrecordable capture carries no candidate");
+    let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
+    assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "an unrecordable capture is a failed attempt");
 }
