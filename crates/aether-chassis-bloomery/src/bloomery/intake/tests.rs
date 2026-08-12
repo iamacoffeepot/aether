@@ -922,9 +922,6 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         };
         assert!(claims.claim_for(&malformed).is_none(), "mask `{malformed_mask}` must not become an upload");
     }
-    let mismatched = EvidenceRef { failed_verifiers: VerifyFailureSet::EMPTY, ..reference };
-    assert!(claims.claim_for(&mismatched).is_none(), "body/name projections must agree");
-
     // A non-attempt artifact name (a study record, a stray log) is skipped, not
     // mis-decoded into a bogus attempt result.
     let stray = EvidenceRef {

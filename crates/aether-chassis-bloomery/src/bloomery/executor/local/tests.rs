@@ -126,7 +126,7 @@ fn a_verify_status_field_drives_the_verdict() {
     assert_eq!(upload.subject, subject);
     let expected = [VerifyFailure::Fmt, VerifyFailure::Test].into_iter().collect::<VerifyFailureSet>();
     assert_eq!(refs[0].failed_verifiers, expected, "the reference carries the body-derived canonical set");
-    assert_eq!(upload.failed_verifiers, expected, "the name decode agrees with the body-derived reference");
+    assert_eq!(upload.failed_verifiers, expected, "the body-derived set reaches the upload through the name");
 }
 
 #[test]

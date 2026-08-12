@@ -114,6 +114,12 @@ pub struct EvidenceRef {
     /// local backend decodes this from the evidence body; the name-only Actions
     /// backend decodes the equivalent mask from the artifact name. Empty on a
     /// pass and on every non-Verify lane.
+    ///
+    /// On both transports this is the same value the reference's `name` carries
+    /// — the local backend composes that mask from what it reports here, the
+    /// Actions backend reads this out of that mask — so it is a second
+    /// rendering of the name channel, never an independent one. Intake reads
+    /// the set off the name and has nothing here to cross-check it against.
     pub failed_verifiers: VerifyFailureSet,
     /// What the attempt cost (#4679) — reported by a backend that reads the
     /// run's evidence bytes itself (the local executor, from the result

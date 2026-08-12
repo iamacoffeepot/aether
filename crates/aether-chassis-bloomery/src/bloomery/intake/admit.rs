@@ -36,9 +36,11 @@ pub struct UploadedEvidence {
     /// reference like the candidate. Persisted keyed by the order's member on a
     /// failing review so a Refine re-entry is directed by it.
     pub findings: Option<String>,
-    /// The exact failed `verify.check` members (ADR-0178), decoded by the
-    /// executor backend and cross-checked against the artifact name before this
-    /// claim exists. Nonempty only for a failed member Verify.
+    /// The exact failed `verify.check` members (ADR-0178), decoded from the
+    /// artifact name's mask — the same value the backend projected onto the
+    /// port reference, which either composes that mask (local) or reads it
+    /// (Actions). Nonempty only for a failed member Verify — the invariant
+    /// `verifier_failure_refusal` below is what enforces that.
     pub failed_verifiers: VerifyFailureSet,
     /// What the attempt cost (#4679), authoritative from the port reference like
     /// the candidate. The study lane admits it against the same order — but
