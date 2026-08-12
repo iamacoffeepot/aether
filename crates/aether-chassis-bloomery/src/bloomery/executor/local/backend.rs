@@ -572,12 +572,17 @@ impl ExecutorBackend for LocalExecutor {
         // zero). The verify lane stamps a `status` ("pass"/"fail"); the raw
         // `exited_success` fallback survives only for a non-construct evidence shape
         // that stamps no status.
+        let status = parse_status(&bytes);
+        // An absent or unrecognized status still falls back to the child's
+        // terminal exit; a recognized one is authoritative, and only `pass`
+        // concludes.
+        let status_passed = status.map_or(exited_success, |status| status == LaneStatus::Pass);
         let concluded = if is_construct {
             nonce_matches && construct_conclusion(&bytes)
         } else if is_verify {
-            nonce_matches && failed_verifiers.is_some() && parse_status(&bytes).unwrap_or(exited_success)
+            nonce_matches && failed_verifiers.is_some() && status_passed
         } else {
-            nonce_matches && parse_status(&bytes).unwrap_or(exited_success)
+            nonce_matches && status_passed
         };
         // A passed construct-lane run's work is captured while its worktree still
         // exists (ADR-0152) — commit + tree recorded as correspondence rows, the
@@ -597,8 +602,16 @@ impl ExecutorBackend for LocalExecutor {
         // keeping both the registry entry and the worktree for a later retry.)
         self.lock().remove(&handle.nonce.0);
         self.release_worktree(&worktree_dir);
+        // A lane that stamped `environment` claims it judged nothing (ADR-0176),
+        // so it reports an executor fault rather than a failing verdict against
+        // the subject. Gated on the nonce binding like every other body-derived
+        // claim, and on the lane actually stamping a status — the construct lane
+        // stamps none, and its gate is `construct_conclusion`, never this.
+        let faulted = nonce_matches && !is_construct && status == Some(LaneStatus::Environment);
         let verdict = if passed {
             StageVerdict::VerificationPassed
+        } else if faulted {
+            StageVerdict::ExecutorFault
         } else {
             StageVerdict::VerificationFailed
         };
@@ -693,15 +706,27 @@ fn evidence_nonce_matches(bytes: &[u8], expected: &Nonce) -> bool {
     serde_json::from_value::<Nonce>(nonce.clone()).is_ok_and(|actual| actual == *expected)
 }
 
-/// Read the verify lane's `status` field from an `evidence.json` byte string:
-/// `Some(true)` for `"pass"`, `Some(false)` for `"fail"`, `None` when the field
-/// is absent (the construct lane's record carries no status) or the bytes are
-/// not a decodable object.
-fn parse_status(bytes: &[u8]) -> Option<bool> {
+/// What a lane's stamped `status` claims. Three-valued rather than a boolean
+/// because `environment` is not a verdict on the subject at all (ADR-0176): the
+/// lane is reporting that it could not judge one, and collapsing that into
+/// `Fail` is what charged a member repair lap for a host outage.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LaneStatus {
+    Pass,
+    Fail,
+    Environment,
+}
+
+/// Read a lane's `status` field from an `evidence.json` byte string. `None` when
+/// the field is absent (the construct lane's record carries no status), carries
+/// an unrecognized token, or the bytes are not a decodable object — the caller
+/// falls back to the child's terminal exit, which is fail-closed.
+fn parse_status(bytes: &[u8]) -> Option<LaneStatus> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     match value.get("status").and_then(serde_json::Value::as_str)? {
-        "pass" => Some(true),
-        "fail" => Some(false),
+        "pass" => Some(LaneStatus::Pass),
+        "fail" => Some(LaneStatus::Fail),
+        "environment" => Some(LaneStatus::Environment),
         _ => None,
     }
 }

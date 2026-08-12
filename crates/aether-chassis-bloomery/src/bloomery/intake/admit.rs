@@ -93,6 +93,11 @@ pub enum IntakeRefusal {
         /// The set that violated the stage/verdict contract.
         failed_verifiers: VerifyFailureSet,
     },
+    /// An executor-fault verdict arrived against a stage that has no
+    /// environment-fault lifecycle. Only `AggregateReview` has one (ADR-0176);
+    /// every other stage refuses rather than being given unratified semantics
+    /// by admission.
+    ExecutorFaultOutOfStage(StageId),
 }
 
 /// An accepted attempt result: the reducer [`Event`] the upload normalized to
@@ -313,6 +318,21 @@ fn aggregate_review_event(
     Ok((event, decomposition))
 }
 
+/// The admission event for an aggregate review whose executor could not judge
+/// the fold (ADR-0176) — the sibling of [`aggregate_review_event`] for the one
+/// verdict that is not a verdict.
+///
+/// No findings are decomposed and none are persisted: there is nothing to
+/// attribute, because no candidate was read. The idempotency key is its own, so
+/// a replayed fault is a no-op against the journal rather than colliding with
+/// the completion key a later real verdict on the same order would carry.
+fn aggregate_review_executor_fault_event(record: &DispatchRecord, evidence: Evidence) -> Event {
+    Event {
+        idempotency_key: IdempotencyKey(format!("aether.bloomery.aggregate_review_executor_fault:{}", record.nonce.0)),
+        fact: Fact::AggregateReviewExecutorFault { bloom: record.bloom, evidence },
+    }
+}
+
 pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -> Result<AdmitDecision, IntakeError> {
     let Some(stored) = store.lookup_order(&upload.nonce.0)? else {
         // Fabricated, or the order was already consumed (a replay).
@@ -323,6 +343,13 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     };
     if let Some(refusal) = verifier_failure_refusal(record.stage, upload) {
         return Ok(AdmitDecision::Refused(refusal));
+    }
+    // ADR-0176 ratified the executor-fault lifecycle for the aggregate review
+    // alone. A fault claimed against any other stage is refused here rather than
+    // routed — the refusal precedes the consume, so the order stays live and an
+    // honest result on it can still land.
+    if upload.verdict == StageVerdict::ExecutorFault && record.stage != StageId::AggregateReview {
+        return Ok(AdmitDecision::Refused(IntakeRefusal::ExecutorFaultOutOfStage(record.stage)));
     }
     let observed = StageResult { subject: upload.subject, verdict: upload.verdict, detail: upload.detail };
     let evidence = match normalize_stage_result(&record.displayed_digest, &observed) {
@@ -406,9 +433,13 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             },
         }
     } else if record.stage == StageId::AggregateReview {
-        let (event, decomposition) = aggregate_review_event(store, &record, upload, evidence)?;
-        aggregate_findings = decomposition;
-        event
+        if upload.verdict == StageVerdict::ExecutorFault {
+            aggregate_review_executor_fault_event(&record, evidence)
+        } else {
+            let (event, decomposition) = aggregate_review_event(store, &record, upload, evidence)?;
+            aggregate_findings = decomposition;
+            event
+        }
     } else if record.stage == StageId::AggregateVerify {
         // The whole-bloom mechanical verdict — a bloom-level order, no member
         // axis and no implication: a compiler names no owners, so the reducer
@@ -455,7 +486,10 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
         } else if let Some(findings) = &upload.findings {
             store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, findings)?;
         }
-    } else if record.stage == StageId::AggregateReview {
+    } else if record.stage == StageId::AggregateReview && upload.verdict != StageVerdict::ExecutorFault {
+        // A fault writes no findings and clears none: the frozen set belongs to
+        // the last verdict that actually judged the fold, and a host outage is
+        // not a reason to lose it or to add to it.
         persist_aggregate_findings(store, &record, upload, aggregate_findings.as_ref())?;
     }
     Ok(AdmitDecision::Admitted(Box::new(Admission { admit, event })))

@@ -58,6 +58,33 @@ pub struct BloomView {
     /// were indistinguishable in this document, which is why a red landing
     /// branch could sit unnoticed while the reactor polled it.
     pub landing_blocked: Option<LandingBlock>,
+    /// The bloom's aggregate-review executor-fault series, once one has been
+    /// recorded (ADR-0176); `None` for an ordinary bloom.
+    ///
+    /// The only outward evidence that a bloom is stalled on its *host* rather
+    /// than on its work. Without it a terminal executor fault is
+    /// indistinguishable from a bloom sitting quietly between dispatches —
+    /// which is the shape an operator has no reason to look at.
+    pub executor_fault: Option<ExecutorFaultView>,
+}
+
+/// A bloom's aggregate-review executor-fault standing, rendered once its review
+/// has reported that it could not judge the fold (ADR-0176).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ExecutorFaultView {
+    /// The fold tree the faults are against.
+    pub subject: Digest,
+    /// Faults taken on that fold so far.
+    pub rolls: u32,
+    /// The `AggregateReview` binding's retry budget from the sealed catalog —
+    /// the bound stated rather than left for a reader to know.
+    pub budget: u32,
+    /// The latest fault report's artifact digest.
+    pub evidence: Digest,
+    /// Whether the series has reached its ceiling. `true` is terminal: the
+    /// bloom dispatches nothing further and recovery is an explicit successor
+    /// after the environment is repaired, not another poll.
+    pub terminal: bool,
 }
 
 /// A bloom's landing-gate standing, rendered when its landing has been refused.

@@ -180,6 +180,64 @@ fn a_malformed_body_failure_set_fails_closed() {
 }
 
 #[test]
+fn an_environment_status_yields_an_executor_fault_rather_than_a_failing_review() {
+    // Tripwire (ADR-0176): the whole defect is here. While `parse_status` was
+    // two-valued, an `environment` body took the `_ => None` arm, fell back to
+    // the child's exit, and produced `VerificationFailed` — a verdict about a
+    // candidate the critic never read. Intake then admitted a failing review and
+    // the reducer re-opened members that had done nothing wrong.
+    let base = TempDir::new().unwrap();
+    let subject = digest(7);
+    let evidence = r#"{"command":"review.critic","nonce":"n-env","status":"environment","findings":"the sandbox refused to start.\nVERDICT: environment"}"#;
+    let exec = executor(&base, evidence, RunLifecycle::Exited { success: false });
+
+    let order = aether_bloomery::WorkOrder {
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            subject,
+            digest(0xC0),
+            digest(0xC0),
+        ),
+        nonce: Nonce("n-env".to_owned()),
+    };
+    let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
+    let upload = NameEvidenceClaims.claim_for(&reference).expect("the fault name round-trips through the claim seam");
+
+    assert_eq!(upload.verdict, StageVerdict::ExecutorFault);
+    assert_eq!(upload.subject, subject, "a fault still binds the exact digest the order displayed");
+    assert!(upload.failed_verifiers.is_empty(), "a fault names no verifier identity — nothing was verified");
+}
+
+#[test]
+fn an_unrecognized_or_absent_status_still_fails_closed_on_the_exit() {
+    // The other half of the three-valued parse: widening the recognized set must
+    // not widen what *counts*. A body claiming a status nobody stamps, or none at
+    // all, falls back to the child's terminal exit exactly as before — and a
+    // failed exit is a failing verdict, never a fault a bloom would retry.
+    let base = TempDir::new().unwrap();
+    let order = |nonce: &str| aether_bloomery::WorkOrder {
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(7),
+            digest(0xC0),
+            digest(0xC0),
+        ),
+        nonce: Nonce(nonce.to_owned()),
+    };
+
+    for (label, body) in [
+        ("an invented token", r#"{"command":"review.critic","nonce":"n-odd","status":"environmental"}"#),
+        ("no status at all", r#"{"command":"review.critic","nonce":"n-odd"}"#),
+    ] {
+        let exec = executor(&base, body, RunLifecycle::Exited { success: false });
+        let reference = exec.stream_evidence(&exec.submit(&order("n-odd")).unwrap()).unwrap().remove(0);
+        let upload = NameEvidenceClaims.claim_for(&reference).expect("a well-formed local name decodes");
+
+        assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "{label} must not become a host-fault claim");
+    }
+}
+
+#[test]
 fn inspect_is_unknown_for_an_untracked_nonce() {
     let base = TempDir::new().unwrap();
     let exec = executor(&base, "{}", RunLifecycle::Running);

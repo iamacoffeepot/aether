@@ -4,7 +4,7 @@
 use super::Snapshot;
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
-use crate::port::{BloomView, LandingBlock, MemberView, PendingDecisionView, ViewDocument};
+use crate::port::{BloomView, ExecutorFaultView, LandingBlock, MemberView, PendingDecisionView, ViewDocument};
 use crate::values::Question;
 
 /// Assemble a self-contained [`ViewDocument`] from a snapshot — the pure
@@ -82,12 +82,24 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                 budget: record.stage_catalog.retry_budget_of(StageId::Land).unwrap_or(1),
             });
 
+            // Rendered only once a review has actually failed to run, so an
+            // ordinary bloom's view is unchanged here too.
+            let review_budget = record.stage_catalog.retry_budget_of(StageId::AggregateReview).unwrap_or(1);
+            let executor_fault = record.aggregate_fault.map(|fault| ExecutorFaultView {
+                subject: fault.subject,
+                rolls: fault.rolls,
+                budget: review_budget,
+                evidence: fault.evidence,
+                terminal: fault.rolls >= review_budget,
+            });
+
             BloomView {
                 id: record.spec.id(),
                 status: record.status,
                 superseded_by: record.superseded_by,
                 members,
                 landing_blocked,
+                executor_fault,
             }
         })
         .collect();

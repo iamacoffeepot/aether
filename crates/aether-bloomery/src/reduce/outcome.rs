@@ -6,9 +6,9 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError, Decision,
-    GrantAttemptsError, IntegrateError, LandError, LandingRejectedError, OrphanClaimReleaseError, ResolveError,
-    SealError, SupersedeError, VerifyFailedError,
+    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault, AggregateVerifyError,
+    AttemptCompletedError, Decision, GrantAttemptsError, IntegrateError, LandError, LandingRejectedError,
+    OrphanClaimReleaseError, ResolveError, SealError, SupersedeError, VerifyFailedError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -302,4 +302,33 @@ pub enum Outcome {
     },
     /// An orphan-claim release request or completion was refused.
     OrphanClaimReleaseRejected(OrphanClaimReleaseError),
+    /// An aggregate review could not run and the same held fold was redispatched
+    /// (ADR-0176) — a bounded retry of the *review*, not a repair of anything.
+    ///
+    /// Nothing about the bloom's work moved: the fold is still held, every claim
+    /// still stands, and no member left its cursor. Appended so the prior
+    /// outcomes' wire discriminants are unchanged, like the variant below.
+    AggregateReviewExecutorFaulted {
+        /// The bloom whose review could not run.
+        bloom: BloomId,
+        /// The fault series this fault produced, keyed to the held fold.
+        fault: AggregateReviewFault,
+        /// The sealed `AggregateReview` retry budget the series is bounded by.
+        budget: u32,
+    },
+    /// An aggregate review's executor faults reached the sealed budget: the
+    /// bloom carries a terminal executor-fault wedge and dispatches nothing
+    /// further (ADR-0176).
+    ///
+    /// Not an ADR-0151 park — there is no pending product decision to adopt, so
+    /// no question is raised and no answer releases it. Recovery is an explicit
+    /// successor after an operator repairs the environment.
+    AggregateReviewExecutorWedged {
+        /// The wedged bloom.
+        bloom: BloomId,
+        /// The terminal fault series.
+        fault: AggregateReviewFault,
+        /// The sealed budget the series exhausted.
+        budget: u32,
+    },
 }
