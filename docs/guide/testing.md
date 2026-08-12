@@ -177,13 +177,14 @@ a real process to lose, which is exactly what they are for.
 | Cannot prove | that a stage transition produced the next reactor's input, since a lane failure and a missing handoff both read as a stall | anything about the lane subprocess, which it never spawns; or the candidate push, which it substitutes | that a bloom advances, since nothing supplies a lane verdict |
 
 **Where a new test goes.** A crash, a replay, a restart, or a race between two
-concurrently running loops has to be cross-process: the other two tiers have no process
-to kill, and the fixture tier steps its reactors one at a time by construction, which
-removes the interleaving a race needs. Anything about the lane subprocess or the
-candidate push belongs to LaneHarness, which runs both for real. Everything else about
-how the coordinator's own parts fit together — a reactor drains what its upstream
-projected, a boot-constructed reactor opened the configured root — belongs to the
-fixture tier, which is the fastest of the three and should carry the bulk.
+concurrently running loops has to be cross-process: neither of the other two tiers can
+kill and restart its coordinator, and the fixture tier steps its reactors one at a time
+by construction, which removes the interleaving a race needs. Anything about the lane
+subprocess or the candidate push belongs to LaneHarness, which runs both for real.
+Everything else about how the coordinator's own parts fit together — a reactor drains
+what its upstream projected, a boot-constructed reactor opened the configured root —
+belongs to the fixture tier, which is the fastest of the three and should carry the
+bulk.
 
 Two constraints follow from the fixture tier's in-process boot, and both are structural
 rather than incidental. The in-memory GitHub double is a process-global `OnceLock`, so
