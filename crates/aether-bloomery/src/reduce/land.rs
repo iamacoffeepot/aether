@@ -47,7 +47,6 @@ pub(super) fn reduce_land(snapshot: &Snapshot, bloom: &BloomId, new_head: &Diges
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::reduce_land;
     use crate::digest::Digest;
@@ -93,7 +92,8 @@ mod tests {
         let mut snapshot = Snapshot::new(base);
         snapshot =
             snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()), &ResolvedConfigs::default());
-        snapshot.blooms.get_mut(&bloom).unwrap().status = BloomStatus::Resolved;
+        snapshot.blooms.get_mut(&bloom).expect("the seal recorded the bloom under its own spec id").status =
+            BloomStatus::Resolved;
 
         let decisions = reduce_land(&snapshot, &bloom, &digest(40));
 
