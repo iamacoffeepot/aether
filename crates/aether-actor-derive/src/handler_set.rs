@@ -412,6 +412,7 @@ fn build_native_capability_rows(handlers: &[HandlerFn]) -> TokenStream2 {
 ///
 /// The name is derived from the trait ident, so two sets sharing an ident in
 /// one crate collide — the same collision `#[macro_export]` itself would raise.
+///
 /// ADR-0183: a handler carrying a `#[cfg]` also earns a pair of gate macros,
 /// emitted beside the bridge and invoked from inside it, so the predicate is
 /// resolved here rather than wherever the bridge body lands.
