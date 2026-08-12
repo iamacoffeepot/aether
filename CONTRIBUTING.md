@@ -37,5 +37,12 @@ cargo test <name>
 
 See [Local checks and CI](docs/guide/local-verification.md) for verification and
 [Agent and contributor workflow](docs/guide/contributing/agent-workflow.md) for
-the issue/PR lifecycle. Codex uses `AGENTS.md` and `.agents/skills/`; other agent
-surfaces follow their own checked-in contracts.
+the issue/PR lifecycle. Planned work records its scoped Plan, declared surface,
+and size/model route in the issue body; approval is a hidden trusted record
+bound to that Plan digest and base commit. Implementation stays in an owned
+issue worktree and draft PR until current-head checks, direct review, threads,
+and required dogfood are clear. Landing is separately authorized.
+
+Codex uses `AGENTS.md` and `.agents/skills/`; Claude Code uses `CLAUDE.md` and
+`.claude/skills/`. The checked-in skill for the active surface owns exact
+mutations and pause boundaries.

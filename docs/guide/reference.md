@@ -14,9 +14,9 @@ workflow state at once.
 | What arguments does an MCP tool accept now? | the active tool schema |
 | What does this engine expose now? | engine-scoped reads plus bounded probes; honor each tool's cache/freshness contract |
 | How must Codex work in this repository? | nearest `AGENTS.md`, active tool schema, `.agents/skills/` |
-| How must Claude/headless automation work? | `CLAUDE.md`, `.claude/skills/`, `.claude/workflows/` |
+| How must Claude Code work? | `CLAUDE.md`, `.claude/skills/`, and the active Claude tools |
 | What does CI currently run? | checked-in workflows and current check state |
-| What phase is an issue/PR in? | current GitHub object, labels, checks and review threads |
+| What workflow state is durable now? | issue-body artifacts; owned worktree/branch/PR; current checks, reviews, threads, and dogfood |
 
 This guide is the shared explanatory layer. Fix it when it drifts, but do not use
 old prose to override a live schema or current implementation.
@@ -53,7 +53,7 @@ the [operating chapter](operating/index.md) explains safe use.
 - [Repository map](orientation/repository-map.md): crates and change routing.
 - [Glossary](reference/glossary.md): exact project terminology.
 - [ADR map](reference/adr-map.md): decisions grouped by topic and status.
-- [Agent workflow](contributing/agent-workflow.md): issue/PR lifecycle and skill
+- [Agent workflow](contributing/agent-workflow.md): issue/PR artifacts and skill
   routing.
 - [Local checks and CI](local-verification.md): current verification tiers.
 - `rust-toolchain.toml`: pinned Rust/tool components/targets.

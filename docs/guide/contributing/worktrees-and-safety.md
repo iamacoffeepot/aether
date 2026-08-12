@@ -111,7 +111,7 @@ can currently see it.
 |---|---|---|
 | Issue worktree and branch | The issue workflow and verified issue/PR association | Clean and GitHub-confirmed merged, or an explicitly confirmed cleanup |
 | Detached session worktree | The current session identity or per-path user confirmation | Never remove the current one; preserve uncertain or dirty sessions |
-| Pull request state | The coordinating main thread and the named workflow authorization | Re-read current head, checks, phase, and authorization immediately before mutation |
+| Pull request state | The coordinating main thread and the named workflow authorization | Re-read current head, checks, review, threads, dogfood, and authorization immediately before mutation |
 | Live engine | The exact engine id returned to the creating owner or deliberately handed off | The recorded owner terminates that exact id |
 | Child-agent result | The assigned task, path, and return contract | Parent re-reads important evidence before acting |
 | Temporary credential or token | The process that obtained it | Never print, persist, or hand it to an unrelated worker |
@@ -168,7 +168,7 @@ The coordinating main thread keeps:
 - product and scope decisions;
 - confirmation and authorization gates;
 - GitHub mutations;
-- phase and result rollups;
+- workflow and result rollups;
 - user communication;
 - cleanup decisions over shared resources.
 
@@ -194,8 +194,8 @@ an interactive Codex session. A destructive or consequential batch must show
 the exact proposed actions and pause when its contract requires confirmation.
 
 When state changes between validation and action, stop and re-evaluate. Do not
-force the old plan through a new head, new phase, newly dirty worktree, or
-concurrent edit.
+force the old plan through a new issue digest, new head, newly dirty worktree,
+or concurrent edit.
 
 ## Hooks are defense in depth
 

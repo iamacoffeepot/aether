@@ -11,13 +11,14 @@ It works by re-implementing recently-landed issues **blind** and scoring the
 result against what actually merged. The local manual harness selects samples,
 runs a fresh agent against each one with no access to the merged solution, and
 judges each blind candidate diff against the landed "ground truth" diff. Its
-output is a verdict-rate table grouped by `size:*` and `model:*` — the axes a
-routing change moves. It runs off the merge critical path and never gates a PR.
+output is a verdict-rate table grouped by the managed Plan's `Size` and
+`Implementation model` values — the axes a routing change moves. It runs off
+the merge critical path and never gates a PR.
 
 The probe arc this productizes (2026-07-13/14) already found that effort level
-barely moves correctness below `size:l`, that Opus-medium beats Sonnet-xhigh on
-`size:l`, and that the failure class is invisible to CI. The eval turns that
-one-off finding into a repeatable measurement.
+barely moves correctness below large work, that Opus-medium beats Sonnet-xhigh
+on large work, and that the failure class is invisible to CI. The eval turns
+that one-off finding into a repeatable measurement.
 
 ## What "ground truth" means
 
@@ -40,18 +41,19 @@ Enumerates merged PRs from the trailing window (`QUALITY_EVAL_WINDOW_DAYS`,
 default 7) that closed a **code-bearing** issue (the squash commit touched a
 crate source file). For each, it resolves the closing squash commit and its
 **parent SHA** — the pre-merge trunk tip the blind run clones at — and captures,
-*at selection time*, the closing issue's `size:*` / `model:*` labels and its body.
-It then deterministically samples `QUALITY_EVAL_SAMPLE_SIZE` (default 5) and emits
-one record per line:
+*at selection time*, the closing issue body plus the `Size` and `Implementation
+model` values parsed from its valid managed Plan. It then deterministically
+samples `QUALITY_EVAL_SAMPLE_SIZE` (default 5) and emits one record per line:
 
 ```json
-{"issue":123,"pr":456,"squash_sha":"…","parent_sha":"…","model_label":"model:opus","size_label":"size:l","issue_body":"…"}
+{"issue":123,"pr":456,"squash_sha":"…","parent_sha":"…","model":"opus","size":"l","issue_body":"…"}
 ```
 
-The sample is deterministic (ordered by a stable hash of each candidate's SHA) so
-a re-run over the same candidate set reproduces the same sample. The body is the
-runner's task input and the labels feed the judge's aggregation — neither is
-produced by any later stage, so both are captured here.
+The sample is deterministic (ordered by a stable hash of each candidate's SHA)
+so a re-run over the same candidate set reproduces the same sample. The body is
+the runner's task input and the normalized routing values feed the judge's
+aggregation. They are captured together so a later issue edit cannot change the
+meaning of a selected sample.
 
 ### 2. Run — `scripts/quality-eval-run.sh`
 
@@ -60,7 +62,7 @@ isolated coding agent against the issue body, then harvests the candidate diff
 beside the landed ground-truth diff, emitting:
 
 ```json
-{"issue":123,"candidate_diff":"…","landed_diff":"…","model":"opus","model_label":"model:opus","size_label":"size:l"}
+{"issue":123,"candidate_diff":"…","landed_diff":"…","model":"opus","size":"l"}
 ```
 
 Blindness is **structural**, not a matter of trusting the agent:
@@ -89,7 +91,7 @@ Drives a judge model over each record, comparing the candidate diff to the lande
 diff under a fixed known-failure-mode checklist (semantic-invariant, boundary,
 error-handling, incomplete, wrong-default, regression). It parses a structured
 per-sample verdict (`correct` / `defect`, with a defect class) and aggregates
-verdict rates **grouped by `size_label` and `model_label`**, printing the rollup
+verdict rates **grouped by `size` and `model`**, printing the rollup
 markdown. The defect rate is computed over *scored* (correct + defect) samples —
 an unparseable verdict is counted but never scores as correct.
 
@@ -101,8 +103,8 @@ contamination assert at runtime rather than by a test.
 
 ## Running it manually
 
-Current `main` has no scheduled quality-eval workflow or manual workflow dispatch.
-Run the local harness instead (needs `git ≥2.49`, `node`, `jq`, and a
+Quality evaluation is a local manual harness, not a hosted merge gate. Run it
+with `git ≥2.49`, `node`, `jq`, and a
 `CLAUDE_CODE_OAUTH_TOKEN`):
 
 ```bash
@@ -113,11 +115,11 @@ node scripts/quality-eval-judge.mjs judged.jsonl        # prints the rollup
 
 ## Reading the verdict rates
 
-The rollup reports, per `size` × `model` cell and overall, how many blind
+The rollup reports, per managed-Plan `size` × `model` cell and overall, how many blind
 re-implementations were judged, how many were correct, how many carried a defect,
 and the defect rate over the scored samples, followed by a per-defect list naming
 the issue and its defect class. A defect rate that climbs after a routing / effort
-/ model change — especially on `size:l`, where the probe arc found the model
+/ model change — especially on large work, where the probe arc found the model
 choice matters most — is the signal that the change degraded correctness in a way
 no other check would surface. A single five-sample run is noisy; repeat runs using
 the same sampling method over time before treating movement as a trend.

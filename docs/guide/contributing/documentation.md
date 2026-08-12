@@ -12,7 +12,7 @@ code, and decision records should remain single-sourced.
 | [This guide](../introduction.md) | Digested architecture, subsystem models, contributor orientation, and worked recipes |
 | [ADR log](https://github.com/iamacoffeepot/aether/tree/main/docs/adr) | Durable reasoning for load-bearing decisions |
 | [`AGENTS.md`](https://github.com/iamacoffeepot/aether/blob/main/AGENTS.md) | Concise Codex repository constraints and routing |
-| [`CLAUDE.md`](https://github.com/iamacoffeepot/aether/blob/main/CLAUDE.md) | Claude Code and headless-Claude operational context |
+| [`CLAUDE.md`](https://github.com/iamacoffeepot/aether/blob/main/CLAUDE.md) | Claude Code operational context |
 | `.agents/skills/` | Executable Codex workflow contracts |
 | Public Rust documentation and source | Current static API and implementation |
 | Live MCP schemas and introspection | Current tool arguments and running-engine vocabulary |
@@ -156,10 +156,10 @@ Do not copy REST calls, label-replacement algorithms, GraphQL queries, or
 subagent schemas out of the skills. Those details change with the harness and
 belong in one executable source. The guide owns the journey and the invariants.
 
-For the canonical phase model, link the
-[release phase schema](https://github.com/iamacoffeepot/aether/blob/main/docs/release/schema.md) and summarize only what the
+For the canonical artifact model, link the
+[contributor workflow schema](https://github.com/iamacoffeepot/aether/blob/main/docs/release/schema.md) and summarize only what the
 reader needs. For Codex execution, link the matching skill under
-`.agents/skills/`. Keep Claude/headless mechanics explicitly identified as a
+`.agents/skills/`. Keep Claude Code mechanics explicitly identified as a
 different surface.
 
 ## Documenting architecture
@@ -187,7 +187,7 @@ Keep these concepts separate:
 
 - local formatting and lint feedback;
 - full CI build and test proof;
-- contracted review and dogfood QA, whether or not hosted entry points exist;
+- direct review, thread resolution, and dogfood evidence;
 - landing a pull request;
 - packaging with `cargo xtask dist` or `cargo xtask package`;
 - publishing a versioned release.
@@ -195,15 +195,15 @@ Keep these concepts separate:
 Do not infer a hosted workflow from a skill, script, historical workflow name,
 or prose description. Confirm that its `.github/workflows/*.yml` entry point is
 present in the checked-in tree, then verify current branch protection before
-calling it a merge gate. Current `main` has no hosted Reconciler, Review,
-Dogfood, or quality-evaluation workflow; only `CI pass` and `Lint title` are
-required status checks, and required pull-request reviews are not configured.
+calling it a merge gate. Contributor lifecycle skills run directly and persist
+their own body, pull-request, review, thread, and dogfood facts. Only `CI pass`
+and `Lint title` are required status checks, and required pull-request reviews
+are not configured.
 
 The checked-in [Release workflow](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/release.yml)
 currently builds a manually dispatched Windows `loco-motion` package artifact.
-The `release-init` skill initializes lifecycle labels; it does not publish a
-release. Do not infer an undocumented tag, version, or release-branch procedure
-from either name.
+Do not infer an undocumented tag, version, or release-branch procedure from
+that workflow name.
 
 ## Verification checklist
 
@@ -216,7 +216,7 @@ Before submitting a documentation change:
 - Executable snippets use the current public API.
 - Pseudocode is labeled `text` and cannot be mistaken for a command.
 - Proposed ADRs are not presented as accepted policy.
-- Codex and Claude/headless instructions are not conflated.
+- Codex and Claude Code instructions are not conflated.
 - The page links an executable workflow rather than duplicating it.
 - `mdbook build docs` succeeds.
 - Rendered headings, tables, code blocks, and navigation are readable.

@@ -127,8 +127,8 @@ Keep these operations distinct:
 - **version/tag/publication policy**: not comprehensively specified today.
 
 ADR-0092 proposes a release-branch workflow but remains Proposed; it is not
-current repository policy. The `release-init` skill initializes lifecycle label
-vocabulary and does not publish a software release.
+current repository policy. Contributor lifecycle skills do not publish a
+software release.
 
 ## Verification and cleanup
 
