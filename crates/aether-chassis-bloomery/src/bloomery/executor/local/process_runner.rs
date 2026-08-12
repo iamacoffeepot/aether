@@ -2,7 +2,7 @@
 //! `cargo xtask transform` in that worktree — the same two steps the wrapper
 //! workflow runs, performed natively on the operator's machine.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::{fs, io};
 
@@ -157,6 +157,18 @@ impl TransformRunner for ProcessTransformRunner {
             return Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&removed.stderr), 1000)));
         }
         Ok(())
+    }
+
+    fn registered_worktrees(&self) -> Result<Vec<PathBuf>, LocalExecutorError> {
+        // `--porcelain` is the stable machine format: one stanza per worktree, each
+        // opening with a `worktree <absolute path>` line. Everything else in the
+        // stanza (HEAD, branch, detached, locked, prunable) says nothing about
+        // which checkout the path is, so only that line is read.
+        Ok(git_in(Path::new("."), &["worktree", "list", "--porcelain"])?
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .map(PathBuf::from)
+            .collect())
     }
 
     fn capture(&self, worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError> {

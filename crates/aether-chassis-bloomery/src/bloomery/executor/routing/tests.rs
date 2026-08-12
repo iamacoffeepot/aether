@@ -13,6 +13,7 @@ use aether_bloomery_github::ExecutorError;
 
 use super::RoutingExecutor;
 use crate::bloomery::executor::local::LocalExecutorError;
+use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes, ReconcileReport};
 
 /// The shared record of nonces a recorder backend was asked to submit.
 type Seen = Arc<Mutex<Vec<String>>>;
@@ -22,19 +23,35 @@ type Seen = Arc<Mutex<Vec<String>>>;
 struct Recorder<E> {
     seen: Seen,
     evidence: Vec<EvidenceRef>,
+    // What this arm claims to have re-adopted at boot, when the router asks it to
+    // reconcile — the local arm's observed footprint, which is what the router
+    // rebuilds its routing map from.
+    readopted: Vec<Nonce>,
     _marker: PhantomData<fn() -> E>,
 }
 
 impl<E> Recorder<E> {
     fn new() -> (Self, Seen) {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        (Self { seen: Arc::clone(&seen), evidence: Vec::new(), _marker: PhantomData }, seen)
+        (Self { seen: Arc::clone(&seen), evidence: Vec::new(), readopted: Vec::new(), _marker: PhantomData }, seen)
     }
 
     fn returning(evidence: Vec<EvidenceRef>) -> (Self, Seen) {
         let (mut recorder, seen) = Self::new();
         recorder.evidence = evidence;
         (recorder, seen)
+    }
+
+    fn readopting(readopted: Vec<Nonce>) -> (Self, Seen) {
+        let (mut recorder, seen) = Self::new();
+        recorder.readopted = readopted;
+        (recorder, seen)
+    }
+}
+
+impl<E: Send + Sync> ReconcileLanes for Recorder<E> {
+    fn reconcile(&self, _live: &[OutstandingDispatch]) -> ReconcileReport {
+        ReconcileReport { readopted: self.readopted.clone(), reclaimed: 0 }
     }
 }
 
@@ -110,11 +127,11 @@ fn a_config_override_repoints_a_verify_lane_to_local() {
 }
 
 #[test]
-fn a_terminal_message_evicts_the_routing_record() {
+fn streaming_a_consumed_order_evicts_its_routing_record() {
     // `routed` must track in-flight orders, not the process's lifetime total: the
-    // last message for an order drops its lane record. `stream_evidence` is that
-    // last message here, so the following cancel — finding no record — falls back
-    // to the Actions arm instead of re-resolving to the local arm the submit used.
+    // last message for a completed order drops its lane record. `stream_evidence`
+    // is that last message, so a later message for the same nonce falls back to
+    // the Actions arm instead of re-resolving to the local arm the submit used.
     let (router, actions_seen, local_seen) = router(vec!["construct.".to_owned()]);
     let handle = router.submit(&order("construct.implement", "n-c")).unwrap();
 
@@ -123,6 +140,23 @@ fn a_terminal_message_evicts_the_routing_record() {
 
     assert_eq!(*local_seen.lock().unwrap(), vec!["n-c", "n-c"], "submit + stream both routed to the local arm");
     assert_eq!(*actions_seen.lock().unwrap(), vec!["n-c"], "after eviction the cancel falls back to the Actions arm");
+}
+
+#[test]
+fn a_repeated_cancel_re_resolves_to_the_lane_the_order_submitted_to() {
+    // ADR-0177 makes `cancel` idempotent, which only means anything if the repeat
+    // reaches the same backend. The deadline enforcement reissues its cancel every
+    // tick until the expired order is admitted, so a router that dropped the lane
+    // record on the first cancel would spend a GitHub round trip probing both
+    // wrappers for a nonce that only ever existed on the local lane.
+    let (router, actions_seen, local_seen) = router(vec!["construct.".to_owned()]);
+    let handle = router.submit(&order("construct.implement", "n-c")).unwrap();
+
+    router.cancel(&handle).unwrap();
+    router.cancel(&handle).unwrap();
+
+    assert_eq!(*local_seen.lock().unwrap(), vec!["n-c", "n-c", "n-c"], "submit + both cancels stayed on the local arm");
+    assert!(actions_seen.lock().unwrap().is_empty(), "no cancel leaked onto the Actions arm");
 }
 
 #[test]
@@ -153,4 +187,31 @@ fn stream_preserves_the_backend_failure_set_unchanged() {
     let handle = router.submit(&order("verify.check", "n-v")).unwrap();
 
     assert_eq!(router.stream_evidence(&handle).unwrap(), vec![reference]);
+}
+
+#[test]
+fn reconcile_re_routes_a_readopted_nonce_to_the_local_arm() {
+    // Issue #4847's compounding gap: the routing map is process memory, so after a
+    // restart every outstanding nonce misses and takes the Actions fallback — a
+    // local-lane order's cancel goes to GitHub, probes both run wrappers, and
+    // returns Ok without ever reaching the arm that holds the run. The lane is
+    // recovered from what the local arm can still see of the dispatch, not by
+    // re-deriving it from the prefix set (which is config, and may have been
+    // flipped since the dispatch it would be re-deciding).
+    let (actions, actions_seen) = Recorder::<ExecutorError>::new();
+    let (local, local_seen) = Recorder::<LocalExecutorError>::readopting(vec![Nonce("n-c".to_owned())]);
+    let router = RoutingExecutor::new(Arc::new(actions), Arc::new(local), vec!["construct.".to_owned()]);
+
+    let report = router.reconcile(&[]);
+
+    assert_eq!(report.readopted, vec![Nonce("n-c".to_owned())], "the router reports what the local arm recovered");
+    router.cancel(&WorkHandle::new(Nonce("n-c".to_owned()))).unwrap();
+    router.cancel(&WorkHandle::new(Nonce("n-untouched".to_owned()))).unwrap();
+
+    assert_eq!(*local_seen.lock().unwrap(), vec!["n-c".to_owned()], "the recovered nonce cancels on the local arm");
+    assert_eq!(
+        *actions_seen.lock().unwrap(),
+        vec!["n-untouched".to_owned()],
+        "a nonce with no local footprint keeps the Actions fallback",
+    );
 }

@@ -26,7 +26,7 @@ use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle,
 use aether_bloomery_github::ExecutorError;
 
 use super::ExecutorPortError;
-use super::local::LocalExecutorError;
+use super::reconcile::{LocalLane, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 
 /// Which backend an order routed to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -42,7 +42,7 @@ enum Lane {
 /// arm's fault surfaces through one type.
 pub struct RoutingExecutor {
     actions: Arc<dyn ExecutorBackend<Error = ExecutorError> + Send + Sync>,
-    local: Arc<dyn ExecutorBackend<Error = LocalExecutorError> + Send + Sync>,
+    local: Arc<dyn LocalLane>,
     local_prefixes: Vec<String>,
     routed: Mutex<HashMap<String, Lane>>,
 }
@@ -54,7 +54,7 @@ impl RoutingExecutor {
     #[must_use]
     pub fn new(
         actions: Arc<dyn ExecutorBackend<Error = ExecutorError> + Send + Sync>,
-        local: Arc<dyn ExecutorBackend<Error = LocalExecutorError> + Send + Sync>,
+        local: Arc<dyn LocalLane>,
         local_prefixes: Vec<String>,
     ) -> Self {
         Self { actions, local, local_prefixes, routed: Mutex::new(HashMap::new()) }
@@ -69,8 +69,9 @@ impl RoutingExecutor {
     }
 
     // The lane a submitted nonce routed to, or Actions for a nonce this router
-    // never submitted (the dispatch reactor always submits before it inspects, so
-    // a miss is only the fallback path, never the normal one).
+    // never submitted and boot reconciliation did not recover (the dispatch reactor
+    // always submits before it inspects, so a miss is only the fallback path, never
+    // the normal one).
     fn lane_of(&self, nonce: &str) -> Lane {
         self.lock().get(nonce).copied().unwrap_or(Lane::Actions)
     }
@@ -101,13 +102,18 @@ impl ExecutorBackend for RoutingExecutor {
     }
 
     fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
+        // The routing record is deliberately *kept* across a cancel (ADR-0177).
+        // `cancel` is idempotent, which means a second one has to reach the same
+        // backend as the first — and the deadline enforcement reissues it on
+        // every tick until the expired order is admitted. Dropping the record
+        // here would send the repeat to the Actions fallback, spending a GitHub
+        // round trip probing both wrappers for a nonce that only ever existed on
+        // the local lane. The retained entry is one small row per cancelled
+        // order, which timeouts produce rarely by construction.
         match self.lane_of(&handle.nonce.0) {
             Lane::Actions => self.actions.cancel(handle)?,
             Lane::Local => self.local.cancel(handle)?,
         }
-        // A cancel is terminal — drop the routing record so `routed` tracks
-        // in-flight orders, not the lifetime total.
-        self.lock().remove(&handle.nonce.0);
         Ok(())
     }
 
@@ -124,6 +130,42 @@ impl ExecutorBackend for RoutingExecutor {
         // record there would misroute that stream to the Actions fallback.
         self.lock().remove(&handle.nonce.0);
         Ok(refs)
+    }
+}
+
+impl ReconcileLanes for RoutingExecutor {
+    /// Rebuild the routing map for orders a previous process dispatched (issue
+    /// #4847), from what the local arm can still see of them.
+    ///
+    /// The routing record is process memory, so after a restart every outstanding
+    /// nonce misses and takes the Actions fallback — a local-lane order's cancel
+    /// is routed to GitHub, probes both run wrappers, and returns `Ok` without
+    /// ever reaching the arm that holds the run. Seeding the map closes that.
+    ///
+    /// The lane is read from the **local arm's observed footprint** rather than
+    /// re-derived by running the persisted command back through the prefix set
+    /// `submit` selects with. Re-derivation looks equivalent
+    /// and is not: the prefix set is config, so an operator who flips a lane
+    /// between restarts — the release valve the prefixes exist for — would have
+    /// every order dispatched under the old setting re-routed to the arm it never
+    /// went to, which is precisely the orders the flip touched. The scratch
+    /// directory is the dispatch's own record of where it went, and it does not
+    /// move when config does.
+    ///
+    /// An order the local arm did not recover keeps the Actions fallback, which is
+    /// where it went if it left no local footprint at all. Existing records are
+    /// never overwritten: a nonce this process submitted itself already carries the
+    /// lane it actually used.
+    fn reconcile(&self, live: &[OutstandingDispatch]) -> ReconcileReport {
+        let report = self.local.reconcile(live);
+
+        let mut routed = self.lock();
+        for nonce in &report.readopted {
+            routed.entry(nonce.0.clone()).or_insert(Lane::Local);
+        }
+        drop(routed);
+
+        report
     }
 }
 

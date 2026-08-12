@@ -177,7 +177,15 @@ fn actor_setups(
             stale_warn_after_secs: coordinator.stale_warn_after_secs,
             repository: repository.clone(),
             disabled_missing: github.missing_connection_knobs(),
-            pusher: default_candidate_push(github.uses_fixture()),
+            // Build shape first, configuration second (#4842). A `testing`-featured
+            // binary must never reach a real `git push` whatever backend it names —
+            // `cargo test` forks exactly such a binary, and five cross-process tests
+            // boot it with no backend env and a cwd inside the real checkout, whose
+            // `origin` is the live repository. Keying on `uses_fixture()` alone left
+            // the guarantee resting on those scenarios happening not to produce an
+            // admitted capture. The `testing` feature is dev-only (no shipping
+            // manifest enables it), so this cannot refuse a real deployment's push.
+            pusher: default_candidate_push(cfg!(any(test, feature = "testing")) || github.uses_fixture()),
         },
         land: LandReactorSetup {
             source: configured.then(|| source.clone()),
@@ -467,10 +475,42 @@ mod tests {
 
     use super::{
         ArtifactsConfig, BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, GithubConnectionConfig,
-        SessionConfig, mounted_correspondence,
+        SessionConfig, actor_setups, mounted_correspondence,
     };
     use crate::signing::SigningConfig;
     use crate::store::StoreConfig;
+
+    // Tripwire: the boot site selects the push seam by **build shape**, not by
+    // backend configuration (#4842). The configs here are the ones `cargo test`
+    // actually forks with — `GithubConnectionConfig::default()` names no backend,
+    // so `uses_fixture()` is false — which is exactly the case the previous
+    // `default_candidate_push(github.uses_fixture())` resolved to a live
+    // `GitCandidatePush`, in a process whose cwd is the real checkout and whose
+    // `origin` is the live repository.
+    //
+    // So this fails if anyone drops the `cfg!` term, and it cannot pass for the
+    // wrong reason: with `uses_fixture()` false, the build-shape term is the only
+    // thing that can produce a refusal. What makes the regression worth a
+    // tripwire rather than a comment is the consequence — an errant push here
+    // carries an all-zero source sha, which git reads as a ref *deletion* that
+    // exits 0 and logs as a successful capture (#4841).
+    #[test]
+    fn the_boot_seam_refuses_a_push_in_a_testing_build_that_names_no_fixture() {
+        let github = GithubConnectionConfig::default();
+        assert!(
+            !github.uses_fixture(),
+            "the default config names no fixture backend; configuration alone would not refuse"
+        );
+
+        let setups = actor_setups(&github, &CoordinatorConfig::default()).expect("actor setups resolve under defaults");
+        let refusal = setups
+            .executor
+            .pusher
+            .push(&"0".repeat(40), "refs/heads/bloom/x/candidate/wp")
+            .expect_err("a testing build's boot seam declines to push");
+
+        assert!(refusal.contains("refusing to push"), "the boot seam resolved the refusing arm: {refusal}");
+    }
 
     #[test]
     fn every_mounted_executor_retains_the_shared_correspondence() {

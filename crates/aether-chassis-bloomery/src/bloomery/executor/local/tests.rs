@@ -4,9 +4,15 @@
 //! round-trips through [`NameEvidenceClaims`], so an admitted local run binds
 //! exactly as a wrapper-uploaded one would.
 
+use std::fmt::{Debug, Write as _};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id, Record};
+use tracing::subscriber::with_default;
+use tracing::{Event, Metadata, Subscriber};
 
 use aether_bloomery::{
     BackendObjectId, Conclusion, Correspondence, CorrespondenceError, Digest, ExecutionStatus, ExecutorBackend,
@@ -21,6 +27,7 @@ use aether_bloomery_github::to_hex;
 use super::runner::CapturedObjects;
 use super::testing::{FixedRunner, canned_capture};
 use super::{LocalExecutor, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner};
+use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes};
 use crate::bloomery::intake::{EvidenceClaims, NameEvidenceClaims};
 
 fn digest(seed: u8) -> Digest {
@@ -126,7 +133,7 @@ fn a_verify_status_field_drives_the_verdict() {
     assert_eq!(upload.subject, subject);
     let expected = [VerifyFailure::Fmt, VerifyFailure::Test].into_iter().collect::<VerifyFailureSet>();
     assert_eq!(refs[0].failed_verifiers, expected, "the reference carries the body-derived canonical set");
-    assert_eq!(upload.failed_verifiers, expected, "the name decode agrees with the body-derived reference");
+    assert_eq!(upload.failed_verifiers, expected, "the body-derived set reaches the upload through the name");
 }
 
 #[test]
@@ -254,6 +261,10 @@ fn cancel_evicts_the_tracked_run() {
         ExecutionStatus::Unknown,
         "a cancelled run is evicted, so it reports Unknown rather than its exit"
     );
+    // And the eviction does not make the next cancel a fault (ADR-0177): the
+    // deadline enforcement reissues its cancel on every tick until the expired
+    // order is admitted, so a refusal here would make one store fault permanent.
+    exec.cancel(&handle).expect("a repeat cancel of an already-evicted run is a clean success");
 }
 
 #[test]
@@ -344,18 +355,90 @@ fn construct_gate_fails_unparseable_evidence() {
     assert_eq!(construct_verdict("not json at all"), StageVerdict::VerificationFailed);
 }
 
+// A `tracing` sink that renders each event as "LEVEL field=value …" into a shared
+// buffer. Local to this module because the only observable a cancel that reclaims
+// nothing leaves behind is the line it logs, and asserting on that needs the
+// events, not the return value.
+#[derive(Default)]
+struct RecordedEvents(Mutex<Vec<String>>);
+
+impl RecordedEvents {
+    fn rendered(&self) -> String {
+        self.0.lock().unwrap().join("\n")
+    }
+}
+
+struct EventRecorder(Arc<RecordedEvents>);
+
+struct RenderedEvent(String);
+
+// `%`-sigil fields arrive as `record_debug` over a `format_args!`, so one arm
+// renders every field this module logs.
+impl Visit for RenderedEvent {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+        let _ = write!(self.0, " {}={value:?}", field.name());
+    }
+}
+
+impl Subscriber for EventRecorder {
+    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _attributes: &Attributes<'_>) -> Id {
+        // Nothing under test opens a span; one fixed id keeps the sink trivial.
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+    fn event(&self, event: &Event<'_>) {
+        let mut rendered = RenderedEvent(event.metadata().level().to_string());
+        event.record(&mut rendered);
+        self.0.0.lock().unwrap().push(rendered.0);
+    }
+
+    fn enter(&self, _span: &Id) {}
+
+    fn exit(&self, _span: &Id) {}
+}
+
 #[test]
-fn cancel_and_stream_with_no_tracked_run_are_the_no_run_error() {
+fn cancelling_an_untracked_nonce_reports_that_it_reclaimed_nothing() {
+    // Answering `Ok` for a nonce this backend never tracked is the port's
+    // idempotence, not evidence of a reclaim — and the two are not
+    // distinguishable from the return value. The registry is process memory that
+    // boot does not rebuild, so an order dispatched before a restart takes
+    // exactly this arm while its child and its scratch worktree are still live.
+    // The nonce in the log is then the only thread an operator has to the orphan,
+    // so the arm must not be silent.
+    let base = TempDir::new().unwrap();
+    let exec = executor(&base, "{}", RunLifecycle::Running);
+    let events = Arc::new(RecordedEvents::default());
+
+    with_default(EventRecorder(Arc::clone(&events)), || {
+        exec.cancel(&WorkHandle::new(Nonce(test_nonce("restarted")))).unwrap();
+    });
+
+    let rendered = events.rendered();
+    assert!(rendered.contains("WARN"), "a cancel that reclaimed nothing is advisory, not silent: {rendered}");
+    assert!(rendered.contains("nonce=wo-restarted"), "and it names the orphan so it can be found: {rendered}");
+}
+
+#[test]
+fn an_untracked_nonce_cancels_cleanly_and_streams_the_no_run_error() {
+    // The two messages part company at ADR-0177: `cancel` is idempotent, so a
+    // nonce with nothing running is already cancelled, while `stream_evidence`
+    // still has to refuse rather than report an attempt produced no evidence.
     let base = TempDir::new().unwrap();
     let exec = executor(&base, "{}", RunLifecycle::Running);
     let ghost = WorkHandle::new(Nonce("ghost".to_owned()));
 
-    match exec.cancel(&ghost) {
-        Err(LocalExecutorError::NoRunForNonce(nonce)) => assert_eq!(nonce, Nonce("ghost".to_owned())),
-        other => panic!("expected NoRunForNonce, got {other:?}"),
-    }
+    exec.cancel(&ghost).expect("a nonce this backend never ran has nothing left to cancel");
     match exec.stream_evidence(&ghost) {
-        Err(LocalExecutorError::NoRunForNonce(_)) => {}
+        Err(LocalExecutorError::NoRunForNonce(nonce)) => assert_eq!(nonce, Nonce("ghost".to_owned())),
         other => panic!("expected NoRunForNonce, got {other:?}"),
     }
 }
@@ -369,6 +452,9 @@ struct RecordingRunner {
     evidence: Option<String>,
     lifecycle: RunLifecycle,
     released: Arc<Mutex<Vec<PathBuf>>>,
+    // What the backing repository reports as registered scratch checkouts — the
+    // boot sweep's discriminator, which the stub otherwise has no way to have.
+    registered: Vec<PathBuf>,
 }
 
 impl TransformRunner for RecordingRunner {
@@ -383,6 +469,10 @@ impl TransformRunner for RecordingRunner {
     fn release(&self, worktree_dir: &Path) -> Result<(), LocalExecutorError> {
         self.released.lock().unwrap().push(worktree_dir.to_owned());
         Ok(())
+    }
+
+    fn registered_worktrees(&self) -> Result<Vec<PathBuf>, LocalExecutorError> {
+        Ok(self.registered.clone())
     }
 
     fn capture(&self, _worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError> {
@@ -410,7 +500,26 @@ fn recording_executor(
     lifecycle: RunLifecycle,
 ) -> (LocalExecutor, Arc<Mutex<Vec<PathBuf>>>) {
     let released = Arc::new(Mutex::new(Vec::new()));
-    let runner = RecordingRunner { evidence: evidence.map(str::to_owned), lifecycle, released: Arc::clone(&released) };
+    let runner = RecordingRunner {
+        evidence: evidence.map(str::to_owned),
+        lifecycle,
+        released: Arc::clone(&released),
+        registered: Vec::new(),
+    };
+    (LocalExecutor::new(Arc::new(runner), correspondence(), base.path()), released)
+}
+
+// The same seam with the repository reporting `registered` as its scratch
+// checkouts — what the boot sweep reads to tell this backend's own worktrees from
+// anything else living under the configured root.
+fn sweeping_executor(base: &TempDir, registered: Vec<PathBuf>) -> (LocalExecutor, Arc<Mutex<Vec<PathBuf>>>) {
+    let released = Arc::new(Mutex::new(Vec::new()));
+    let runner = RecordingRunner {
+        evidence: None,
+        lifecycle: RunLifecycle::Running,
+        released: Arc::clone(&released),
+        registered,
+    };
     (LocalExecutor::new(Arc::new(runner), correspondence(), base.path()), released)
 }
 
@@ -448,6 +557,10 @@ impl TransformRunner for CapturingRunner {
 
     fn release(&self, _worktree_dir: &Path) -> Result<(), LocalExecutorError> {
         Ok(())
+    }
+
+    fn registered_worktrees(&self) -> Result<Vec<PathBuf>, LocalExecutorError> {
+        Ok(Vec::new())
     }
 
     fn capture(&self, _worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError> {
@@ -789,4 +902,184 @@ fn a_capture_whose_correspondence_write_faults_fails_closed() {
     assert!(refs[0].candidate.is_none(), "an unrecordable capture carries no candidate");
     let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
     assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "an unrecordable capture is a failed attempt");
+}
+
+// The scratch root as a previous coordinator process would have left it: the
+// run's worktree, its evidence dir, and — when the run got that far — the
+// `evidence.json` it wrote there. Reconciliation reads exactly this.
+fn seed_scratch(base: &TempDir, nonce: &str, evidence: Option<&str>) {
+    fs::create_dir_all(base.path().join(nonce)).unwrap();
+    let evidence_dir = base.path().join(format!("{nonce}-evidence"));
+    fs::create_dir_all(&evidence_dir).unwrap();
+    if let Some(body) = evidence {
+        fs::write(evidence_dir.join("evidence.json"), body).unwrap();
+    }
+}
+
+fn outstanding(subject: Digest, nonce: &str) -> OutstandingDispatch {
+    OutstandingDispatch {
+        nonce: Nonce(nonce.to_owned()),
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Construct),
+            subject,
+            digest(0xC0),
+        ),
+    }
+}
+
+#[test]
+fn reconcile_readopts_a_run_whose_evidence_landed_while_the_coordinator_was_down() {
+    // Issue #4847: the registry is process memory, so before this the port had no
+    // entry for an order a previous process dispatched — `inspect` answered
+    // `Unknown` forever and the attempt never admitted, however cleanly the child
+    // finished. The re-adopted run has to bind its evidence exactly as the
+    // dispatching process would have: same subject axis, same lane gate.
+    let base = TempDir::new().unwrap();
+    let subject = digest(5);
+    let nonce = test_nonce("readopt");
+    let evidence = format!(
+        r#"{{"command":"construct.implement","nonce":"{nonce}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"result":{{"num_turns":3}}}}}}"#
+    );
+    seed_scratch(&base, &nonce, Some(&evidence));
+    let (exec, released) = recording_executor(&base, None, RunLifecycle::Running);
+
+    let report = exec.reconcile(&[outstanding(subject, &nonce)]);
+
+    assert_eq!(report.readopted, vec![Nonce(nonce.clone())], "the live order's surviving scratch is re-adopted");
+    let handle = WorkHandle::new(Nonce(nonce.clone()));
+    assert!(
+        matches!(exec.inspect(&handle).unwrap(), ExecutionStatus::Completed { .. }),
+        "a run whose evidence has landed reads as finished, not as an untracked Unknown",
+    );
+
+    let refs = exec.stream_evidence(&handle).unwrap();
+    let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the re-adopted run's evidence decodes as an attempt");
+    assert_eq!(upload.nonce, Nonce(nonce.clone()));
+    assert_eq!(upload.subject, subject, "the re-adopted run binds the order's subject input, not the checkout");
+    assert_eq!(
+        upload.verdict,
+        StageVerdict::VerificationPassed,
+        "the construct gate reads the recovered body, so a substantive conclusion still passes",
+    );
+    assert_eq!(
+        *released.lock().unwrap(),
+        vec![base.path().join(&nonce)],
+        "consuming the recovered evidence releases the checkout it survived on",
+    );
+}
+
+#[test]
+fn a_readopted_run_whose_evidence_has_not_landed_reads_as_running() {
+    // The complement, and the dangerous direction. A restart is not evidence that
+    // the child died: reading an unfinished orphan as exited would send
+    // `stream_evidence` down its terminal arm, synthesize a fail-closed attempt,
+    // and release the worktree out from under a model lane that was still working
+    // — turning every coordinator restart into destroyed in-flight work. The order
+    // rides on its dispatch deadline instead, which is the mechanism for it.
+    let base = TempDir::new().unwrap();
+    let nonce = test_nonce("still-going");
+    seed_scratch(&base, &nonce, None);
+    let (exec, released) = recording_executor(&base, None, RunLifecycle::Running);
+
+    exec.reconcile(&[outstanding(digest(5), &nonce)]);
+
+    assert_eq!(exec.inspect(&WorkHandle::new(Nonce(nonce))).unwrap(), ExecutionStatus::Running);
+    assert!(released.lock().unwrap().is_empty(), "an unfinished run keeps its checkout");
+}
+
+#[test]
+fn cancelling_a_readopted_run_reclaims_its_checkout() {
+    // The reclaim half of issue #4847. Before reconciliation the port held no
+    // entry for a pre-restart order, so a cancel took the already-absent arm: the
+    // expiry recorded its timeout and consumed the order while the scratch
+    // checkout and its `git worktree` registration survived for the life of the
+    // host. The child itself is out of reach either way, but the checkout is not.
+    let base = TempDir::new().unwrap();
+    let nonce = test_nonce("cancelled-orphan");
+    seed_scratch(&base, &nonce, None);
+    let (exec, released) = recording_executor(&base, None, RunLifecycle::Running);
+    exec.reconcile(&[outstanding(digest(5), &nonce)]);
+
+    let handle = WorkHandle::new(Nonce(nonce.clone()));
+    exec.cancel(&handle).unwrap();
+
+    assert_eq!(*released.lock().unwrap(), vec![base.path().join(&nonce)], "the cancel releases the orphan's checkout");
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Unknown,
+        "the cancelled orphan is evicted like any other terminal run",
+    );
+}
+
+#[test]
+fn reconcile_reclaims_the_scratch_of_an_order_that_is_no_longer_outstanding() {
+    // The leak the sweep exists to end, and — in the same assertion — the far worse
+    // inverse. The sweep's only input beyond the registrations is the live set the
+    // re-adoption already read, so a checkout it removes is provably one no order is
+    // waiting on; getting that backwards would delete a running lane's worktree.
+    let base = TempDir::new().unwrap();
+    let live = test_nonce("live");
+    let consumed = test_nonce("consumed");
+    seed_scratch(&base, &live, None);
+    seed_scratch(&base, &consumed, Some("{}"));
+    let registered = vec![base.path().join(&live), base.path().join(&consumed)];
+    let (exec, released) = sweeping_executor(&base, registered);
+
+    let report = exec.reconcile(&[outstanding(digest(5), &live)]);
+
+    assert_eq!(report.reclaimed, 1, "the one abandoned checkout is reclaimed");
+    assert_eq!(
+        *released.lock().unwrap(),
+        vec![base.path().join(&consumed)],
+        "only the abandoned checkout goes through the release seam",
+    );
+    assert!(!base.path().join(format!("{consumed}-evidence")).exists(), "its evidence dir goes with it");
+    assert!(base.path().join(&live).exists(), "the live order's checkout is untouched");
+    assert!(base.path().join(format!("{live}-evidence")).exists(), "so is its evidence dir");
+}
+
+#[test]
+fn the_sweep_leaves_alone_what_this_backend_did_not_register() {
+    // The scratch root is a configured path, and a deployment is entitled to keep
+    // its own files under it — a scenario harness writes its lane script beside the
+    // run directories. Reading the root's directory listing as "everything here is
+    // mine and no order claims it" deletes those on the strength of where they sit;
+    // a `git worktree` registration under the root is what the backend can actually
+    // prove it created.
+    let base = TempDir::new().unwrap();
+    let stranger = base.path().join("not-a-run");
+    fs::create_dir_all(&stranger).unwrap();
+    fs::write(base.path().join("lane-script.json"), "{}").unwrap();
+    let (exec, released) = sweeping_executor(&base, Vec::new());
+
+    let report = exec.reconcile(&[]);
+
+    assert_eq!(report.reclaimed, 0, "an unregistered path is not this backend's to reclaim");
+    assert!(released.lock().unwrap().is_empty(), "nothing was released");
+    assert!(stranger.exists(), "a directory the backend never registered survives");
+    assert!(base.path().join("lane-script.json").exists(), "so does a plain file under the root");
+}
+
+#[test]
+fn reconcile_never_replaces_a_run_this_process_owns() {
+    // Reconciliation runs against a shared backend behind an `Arc`, so nothing
+    // structurally stops a second call while runs are live. An owned run's
+    // `RunProcess` is the only handle on its child; swapping it for an orphan would
+    // silently retire the ability to kill that child and downgrade its lifecycle to
+    // whatever the output directory happens to show. Here the owned process reports
+    // a finished run while its evidence file is absent — precisely the reading an
+    // orphan replacement could not produce.
+    let base = TempDir::new().unwrap();
+    let nonce = test_nonce("owned");
+    let (exec, _released) = recording_executor(&base, None, RunLifecycle::Exited { success: true });
+    let handle = exec.submit(&construct_order(digest(5), &nonce)).unwrap();
+
+    let report = exec.reconcile(&[outstanding(digest(5), &nonce)]);
+
+    assert!(report.readopted.is_empty(), "a tracked run is not re-adopted");
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Completed { conclusion: Conclusion::Success },
+        "the owned child's own lifecycle still answers, not one inferred from the output dir",
+    );
 }

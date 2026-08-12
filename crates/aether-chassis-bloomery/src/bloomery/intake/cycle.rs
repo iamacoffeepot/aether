@@ -77,9 +77,21 @@ impl Error for CycleError {
 /// to the `sink`. A run that is not yet complete is skipped; a refused upload
 /// never reaches the sink (and so never touches the reducer).
 ///
+/// Runs *before* the caller's deadline sweep, and the order is load-bearing
+/// (ADR-0177): evidence that arrived at or just before the deadline boundary is
+/// admitted normally and consumes its order, so the sweep that follows never
+/// sees it and a lane that finished in time is never cancelled for being late to
+/// be observed. Only an order still pending after this cycle can expire.
+///
 /// # Errors
 /// [`CycleError`] if inspecting a run, streaming its evidence, or the broker
 /// faulted; a clean broker refusal is counted, not an error.
+///
+/// An error abandons the loop, so the handles after the faulting one were never
+/// inspected at all. That makes the returned error load-bearing to the caller's
+/// sweep and not merely something to log: a caller must not read "no completion
+/// observed" off a failed cycle and cancel on it, because the run it would
+/// cancel may have finished inside its budget and simply not been asked.
 pub fn run_intake_cycle(
     store: &mut dyn StoreBackend,
     shell: &ExecutorShell,

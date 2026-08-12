@@ -717,14 +717,13 @@ fn behavior_mirror_kinds() -> Vec<u64> {
 }
 
 /// Spawn a [`WidgetKind::BehaviorHost`] slot (issue 2687): decode the
-/// [`BehaviorHostSpec`], map the wrapped widget kind to its type tag, build the
-/// `aether-behavior` `HostConfig`, and spawn the host by tag (#2692) — the host
-/// then spawns the wrapped widget as its own inline child and interposes on the
-/// slot's mail. Returns the named [`SpawnedChild`] profile the other arms
-/// produce; `None`
-/// (slot skipped) on an unsupported wrapped kind, a decode failure, or a spawn
-/// error. The panel's per-frame `Collect` is handed to the host as its FRAME
-/// trigger.
+/// [`BehaviorHostSpec`](crate::BehaviorHostSpec), map the wrapped widget kind
+/// to its type tag, build the `aether-behavior` `HostConfig`, and spawn the
+/// host by tag (#2692) — the host then spawns the wrapped widget as its own
+/// inline child and interposes on the slot's mail. Returns the named
+/// [`SpawnedChild`] profile the other arms produce; `None` (slot skipped) on
+/// an unsupported wrapped kind, a decode failure, or a spawn error. The
+/// panel's per-frame `Collect` is handed to the host as its FRAME trigger.
 #[cfg(feature = "behavior")]
 fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
     use crate::{BehaviorHostSpec, ScriptRef};
