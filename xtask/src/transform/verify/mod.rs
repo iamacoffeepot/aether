@@ -34,6 +34,31 @@ struct VerifyInvocation {
     /// pre-builds it for the same reason. Everything else here is independent
     /// and always runs, so a failure in one never suppresses another.
     prepare: Option<&'static [&'static str]>,
+    /// The exit codes with which this member's program reports a **finding
+    /// about the candidate**, as distinct from every other nonzero exit, which
+    /// says the member could not compute a verdict at all (#4845).
+    ///
+    /// The distinction is the difference between blaming the work and blaming
+    /// the host. `verify.suppress` exits 2 for an `OperationalError` — an
+    /// unreadable blob, a malformed `.jscpd.json`, a git invocation that would
+    /// not run — and `cargo-machete` exits 2 for a path it cannot walk. Read as
+    /// a finding, either one is forgiven once and then charges a repair roll
+    /// against a candidate that did nothing wrong, eventually wedging the
+    /// member on `repeated_verifiers` it could never clear.
+    ///
+    /// Stated per member because the codes are each program's own contract, not
+    /// a shared convention: nextest reports test failures with 100 and a failed
+    /// build with 101, cargo reports "could not compile" with 101, and the
+    /// exit-1 members have no other code to say anything with. A code absent
+    /// here — and a child that died on a signal, which has no code at all — is
+    /// attributed to [`VerifyFailure::Preflight`] instead, so an unrecognized
+    /// exit fails towards the host rather than towards the work.
+    ///
+    /// Tripwire: these are the observed codes of the programs
+    /// [`verify_command`] pins. A member whose list drifts off its program's
+    /// contract mis-files every one of its failures in one direction or the
+    /// other.
+    finding_exit_codes: &'static [i32],
 }
 
 impl VerifyInvocation {
@@ -78,6 +103,10 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             requires: &["cargo", "rustfmt"],
             requires_targets: &[],
             prepare: None,
+            // rustfmt exits 1 for a diff under `--check`, and cargo fmt
+            // forwards it. It has no second code: a manifest it cannot read
+            // exits 1 too, so that conflation survives this change unresolved.
+            finding_exit_codes: &[1],
         }),
         "verify.clippy" => Some(VerifyInvocation {
             program: "cargo",
@@ -86,6 +115,9 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             requires: &["cargo", "cargo-clippy"],
             requires_targets: &[],
             prepare: None,
+            // A lint is a finding this run derives from the JSON stream at exit
+            // zero; 101 is cargo's "could not compile", which is a finding too.
+            finding_exit_codes: &[101],
         }),
         "verify.docs" => Some(VerifyInvocation {
             program: "cargo",
@@ -97,6 +129,10 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             requires: &["cargo"],
             requires_targets: &[],
             prepare: None,
+            // A denied rustdoc lint reaches cargo as a failed build, so the
+            // documentation findings arrive on the same 101 a compile error
+            // does.
+            finding_exit_codes: &[101],
         }),
         "verify.test" => Some(VerifyInvocation {
             program: "cargo",
@@ -123,6 +159,12 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // drift onto different triples.
             requires_targets: &[WASM_TARGET],
             prepare: Some(&["xtask", "dist"]),
+            // nextest states its own codes rather than cargo's: 100 is a test
+            // run with failures, 101 is a build that did not produce the
+            // binaries to run. Its other codes are about nextest itself — an
+            // unusable profile exits 96, an unparsable argv exits 2 — and none
+            // of those is a statement about the candidate.
+            finding_exit_codes: &[100, 101],
         }),
         "verify.dup" => Some(VerifyInvocation {
             program: "npx",
@@ -131,6 +173,12 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             requires: &["npx"],
             requires_targets: &[],
             prepare: None,
+            // jscpd exits 1 when the duplication threshold is exceeded, and
+            // npx exits 1 when it cannot fetch the package at all — the one
+            // member whose host fault is genuinely indistinguishable from its
+            // finding, so it keeps the candidate-blaming reading rather than
+            // routing every real duplication report to the host.
+            finding_exit_codes: &[1],
         }),
         "verify.deps" => Some(VerifyInvocation {
             // Invoked as the binary rather than through `cargo machete`, which
@@ -146,6 +194,10 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             requires: &["cargo", "cargo-machete"],
             requires_targets: &[],
             prepare: None,
+            // cargo-machete exits 1 for unused dependencies it found and 2 for
+            // a path it could not walk — the same split the suppression
+            // scanner draws, from a different program.
+            finding_exit_codes: &[1],
         }),
         "verify.suppress" => Some(VerifyInvocation {
             program: "python3",
@@ -154,6 +206,11 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             requires: &["git", "python3"],
             requires_targets: &[],
             prepare: None,
+            // The scanner prints its suppressions and exits 1; every
+            // `OperationalError` it raises — and python3's own 2 for a script
+            // it cannot open — leaves by the 2 that says it never reached a
+            // verdict. This is the split #4845 was filed for.
+            finding_exit_codes: &[1],
         }),
         _ => None,
     }
@@ -217,9 +274,73 @@ fn all_passed(statuses: &[bool]) -> bool {
     statuses.iter().all(|&passed| passed)
 }
 
+/// What one umbrella member's run said.
+///
+/// The third case is the one that has to exist (#4845): a member that could not
+/// compute a verdict has said nothing about the candidate, and folding it into
+/// `Failed` charges the candidate for a broken scanner config or an unreadable
+/// blob.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MemberOutcome {
+    /// The member ran and found nothing.
+    Passed,
+    /// The member ran and reported a defect in the candidate.
+    Failed,
+    /// The member could not reach a verdict — a host or tooling fault.
+    Operational,
+}
+
+impl MemberOutcome {
+    /// Whether this outcome contributes to an all-pass umbrella. Only a real
+    /// verdict does: an operational fault leaves the check unperformed, and
+    /// reporting an unperformed check as a pass is the false-green direction.
+    fn passed(self) -> bool {
+        matches!(self, Self::Passed)
+    }
+
+    /// The ADR-0178 identity this outcome contributes to `failed_verifiers`.
+    ///
+    /// A finding is the member's own. A fault that stopped the member reaching
+    /// one is [`VerifyFailure::Preflight`] — the umbrella's synthetic identity
+    /// for a prerequisite the host did not meet, which is exactly what an
+    /// unreadable input or a scanner that could not run is. Routing it there
+    /// keeps the failure visible and accountable without attributing it to a
+    /// candidate that could never repair it, and adds no identity, so
+    /// ADR-0178's `N + B` bound is unchanged.
+    fn failure(self, id: &str) -> Option<VerifyFailure> {
+        match self {
+            Self::Passed => None,
+            Self::Failed => VerifyFailure::from_name(id),
+            Self::Operational => Some(VerifyFailure::Preflight),
+        }
+    }
+}
+
+/// Classify one member's run from the code it exited with and, for a member
+/// whose verdict this lane derives rather than reads, that derived verdict.
+///
+/// A zero exit is the member speaking: it either found nothing or — clippy's
+/// case — emitted diagnostics the run was not asked to deny. Every other exit
+/// is read against the codes the member states its findings with.
+fn member_outcome(invocation: &VerifyInvocation, derived_pass: bool, code: Option<i32>) -> MemberOutcome {
+    if code == Some(0) {
+        return if derived_pass {
+            MemberOutcome::Passed
+        } else {
+            MemberOutcome::Failed
+        };
+    }
+
+    if code.is_some_and(|code| invocation.finding_exit_codes.contains(&code)) {
+        MemberOutcome::Failed
+    } else {
+        MemberOutcome::Operational
+    }
+}
+
 /// Project failed member outcomes onto ADR-0178's closed canonical set.
-fn failed_verifiers<'a>(members: impl IntoIterator<Item = (&'a str, bool)>) -> VerifyFailureSet {
-    members.into_iter().filter_map(|(id, passed)| (!passed).then(|| VerifyFailure::from_name(id)).flatten()).collect()
+fn failed_verifiers<'a>(members: impl IntoIterator<Item = (&'a str, MemberOutcome)>) -> VerifyFailureSet {
+    members.into_iter().filter_map(|(id, outcome)| outcome.failure(id)).collect()
 }
 
 /// Every program the umbrella's members need — the roots
@@ -288,24 +409,56 @@ fn prepare_failure_log(id: &str, prepare: &[&str], captured: &str) -> String {
     )
 }
 
-/// Run one umbrella member and reduce its output to `(passed, log, exit_code)`.
-fn run_member(id: &str, invocation: &VerifyInvocation) -> Result<(bool, Vec<u8>, i32)> {
+/// The line a member's log opens with when it could not reach a verdict, in
+/// place of the finding it never produced.
+///
+/// The same work `prepare_failure_log`'s opening line does, for the other way a
+/// member can fail without saying anything about the candidate. A `Refine` is
+/// handed these logs to repair, and an unframed host fault reads as a defect —
+/// the model then edits working code until the scanner it cannot see stops
+/// being broken. Naming the identity the run is accounted to also lets an
+/// operator match the log against the `failed_verifiers` set without inferring
+/// the mapping.
+fn operational_failure_notice(id: &str, invocation: &VerifyInvocation, code: Option<i32>) -> String {
+    let exited = code.map_or_else(|| String::from("died on a signal"), |code| format!("exited {code}"));
+    let stated = invocation.finding_exit_codes.iter().map(i32::to_string).collect::<Vec<String>>().join(", ");
+    format!(
+        "error: {id} reported nothing about the candidate — `{}` {exited}, which is not one of the codes it \
+         states a finding with ({stated}). A verdict it could not reach is a host or tooling fault, so this \
+         run is accounted to {} rather than to {id}.\n",
+        invocation.program,
+        VerifyFailure::Preflight,
+    )
+}
+
+/// Run one umbrella member and reduce its output to `(outcome, log,
+/// exit_code)`.
+fn run_member(id: &str, invocation: &VerifyInvocation) -> Result<(MemberOutcome, Vec<u8>, i32)> {
     let output = run_captured(invocation.command())
         .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
 
     // A JSON-format member's verdict is ours to derive: its exit status is
     // success even with lints present, because the run was not asked to deny
-    // them. Everything else mirrors its own exit.
+    // them. Everything else has nothing to derive and passes its zero exit
+    // through.
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let (passed, rendered) = if id == "verify.clippy" {
-        (output.status.success() && clippy_verdict(&stdout), render_diagnostics(&stdout))
+    let (derived_pass, rendered) = if id == "verify.clippy" {
+        (clippy_verdict(&stdout), render_diagnostics(&stdout))
     } else {
-        (output.status.success(), stdout)
+        (true, stdout)
     };
 
-    let mut log = rendered.into_bytes();
+    let code = output.status.code();
+    let outcome = member_outcome(invocation, derived_pass, code);
+
+    let mut log = Vec::new();
+    if outcome == MemberOutcome::Operational {
+        log.extend_from_slice(operational_failure_notice(id, invocation, code).as_bytes());
+    }
+    log.extend_from_slice(rendered.as_bytes());
     log.extend_from_slice(&output.stderr);
-    Ok((passed, log, effective_exit_code(passed, output.status.code())))
+
+    Ok((outcome, log, effective_exit_code(outcome.passed(), code)))
 }
 
 // A derived verdict (currently clippy's structured warning predicate) may fail
@@ -353,23 +506,31 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
 
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let derived_pass = args.command != "verify.clippy" || clippy_verdict(&stdout);
+    let code = output.status.code();
+    let outcome = member_outcome(&invocation, derived_pass, code);
+
     let log_name = format!("{}.log", args.command);
     let log_path = args.out.join(&log_name);
-    let mut log_bytes = output.stdout.clone();
+    let mut log_bytes = Vec::new();
+    if outcome == MemberOutcome::Operational {
+        log_bytes.extend_from_slice(operational_failure_notice(&args.command, &invocation, code).as_bytes());
+    }
+    log_bytes.extend_from_slice(&output.stdout);
     log_bytes.extend_from_slice(&output.stderr);
     fs::write(&log_path, &log_bytes).with_context(|| format!("write {}", log_path.display()))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let passed = output.status.success() && (args.command != "verify.clippy" || clippy_verdict(&stdout));
-    let exit_code = effective_exit_code(passed, output.status.code());
+    let passed = outcome.passed();
+    let exit_code = effective_exit_code(passed, code);
 
     // A failing single verify contributes its own diagnostics on the same
     // channel the umbrella uses, so a lane run alone directs a Refine too.
     let findings = (!passed)
-        .then(|| verify_findings(&[(args.command.as_str(), false, String::from_utf8_lossy(&log_bytes).into_owned())]))
+        .then(|| verify_findings(&[(args.command.as_str(), outcome, String::from_utf8_lossy(&log_bytes).into_owned())]))
         .flatten();
 
-    let failures = (!passed).then(|| VerifyFailure::from_name(&args.command).map(VerifyFailureSet::one)).flatten();
+    let failures = outcome.failure(&args.command).map(VerifyFailureSet::one);
     let evidence =
         build_evidence(&args.command, args.nonce.clone(), passed, Some(exit_code), log_name, findings, failures);
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
@@ -478,10 +639,10 @@ fn tail_lines(log: &str) -> Vec<&str> {
 /// — which already implements it. Without an explicit statement that the
 /// candidate failed and why, the model correctly answers that there is nothing
 /// to do, and the loop cannot converge.
-fn verify_findings(members: &[(&str, bool, String)]) -> Option<String> {
+fn verify_findings(members: &[(&str, MemberOutcome, String)]) -> Option<String> {
     let failed: Vec<String> = members
         .iter()
-        .filter(|(_, passed, _)| !passed)
+        .filter(|(_, outcome, _)| !outcome.passed())
         .filter_map(|(id, _, log)| distil_member(id, log).map(|body| format!("### {id}\n\n{body}")))
         .collect();
     if failed.is_empty() {
@@ -534,8 +695,8 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         // once up front: it belongs to this member, and a member that is one day
         // removed should take its prepare step with it. A failed prepare fails
         // the member without running it — see `prepare_failure_log`.
-        let (member_passed, log_bytes, exit_code) = match run_prepare(id, &invocation)? {
-            Some((log, code)) => (false, log.into_bytes(), code),
+        let (outcome, log_bytes, exit_code) = match run_prepare(id, &invocation)? {
+            Some((log, code)) => (MemberOutcome::Failed, log.into_bytes(), code),
             None => run_member(id, &invocation)?,
         };
 
@@ -543,16 +704,16 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         let log_path = args.out.join(&log_name);
         fs::write(&log_path, &log_bytes).with_context(|| format!("write {}", log_path.display()))?;
 
-        if !member_passed && first_failure_code.is_none() {
+        if !outcome.passed() && first_failure_code.is_none() {
             first_failure_code = Some(exit_code);
         }
-        outcomes.push((id, member_passed, String::from_utf8_lossy(&log_bytes).into_owned()));
+        outcomes.push((id, outcome, String::from_utf8_lossy(&log_bytes).into_owned()));
         log_names.push(log_name);
-        passed.push(member_passed);
+        passed.push(outcome.passed());
     }
 
     let all_pass = all_passed(&passed);
-    let failures = failed_verifiers(outcomes.iter().map(|(id, passed, _)| (*id, *passed)));
+    let failures = failed_verifiers(outcomes.iter().map(|(id, outcome, _)| (*id, *outcome)));
     let evidence = Evidence {
         findings: verify_findings(&outcomes),
         failed_verifiers: (!failures.is_empty()).then_some(failures),
@@ -578,9 +739,10 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_FINDING_LINES, VERIFY_CHECK, all_passed, clippy_verdict, distil_diagnostics, effective_exit_code,
-        failed_verifiers, preflight_tools, prepare_failure_log, render_diagnostics, required_targets, required_tools,
-        verify_check_members, verify_command, verify_findings,
+        MAX_FINDING_LINES, MemberOutcome, VERIFY_CHECK, all_passed, clippy_verdict, distil_diagnostics,
+        effective_exit_code, failed_verifiers, member_outcome, operational_failure_notice, preflight_tools,
+        prepare_failure_log, render_diagnostics, required_targets, required_tools, verify_check_members,
+        verify_command, verify_findings,
     };
     use crate::cargo::WASM_TARGET;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
@@ -799,8 +961,8 @@ mod tests {
     #[test]
     fn only_failing_members_contribute_findings() {
         let members = [
-            ("verify.fmt", true, String::from("error[E0001]: from a lane that passed")),
-            ("verify.clippy", false, String::from("error[E0308]: mismatched types")),
+            ("verify.fmt", MemberOutcome::Passed, String::from("error[E0001]: from a lane that passed")),
+            ("verify.clippy", MemberOutcome::Failed, String::from("error[E0308]: mismatched types")),
         ];
 
         let findings = verify_findings(&members).expect("a failing member yields findings");
@@ -813,7 +975,8 @@ mod tests {
     fn a_suppression_location_survives_findings_distillation() {
         let log = "scanning diff\ncrates/demo/src/lib.rs:17 — allow(clippy::all) — #[allow(clippy::all)]\ndone";
 
-        let findings = verify_findings(&[("verify.suppress", false, log.to_owned())]).expect("findings");
+        let findings =
+            verify_findings(&[("verify.suppress", MemberOutcome::Failed, log.to_owned())]).expect("findings");
 
         assert!(findings.contains("### verify.suppress"));
         assert!(findings.contains("crates/demo/src/lib.rs:17 — allow(clippy::all)"));
@@ -838,7 +1001,7 @@ AETHER_REQUIRE_RUNTIME=1 but aether_test_fixtures_bundle wasm not pre-built
 error: test run failed
 ";
 
-        let findings = verify_findings(&[("verify.test", false, log.to_owned())]).expect("findings");
+        let findings = verify_findings(&[("verify.test", MemberOutcome::Failed, log.to_owned())]).expect("findings");
 
         assert!(findings.contains("### verify.test"));
         assert!(findings.contains("asset_rides_a_named_custom_section_byte_exact"), "the test is named");
@@ -860,7 +1023,7 @@ error[E0308]: mismatched types
 error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previous error
 ";
 
-        let findings = verify_findings(&[("verify.test", false, log.to_owned())]).expect("findings");
+        let findings = verify_findings(&[("verify.test", MemberOutcome::Failed, log.to_owned())]).expect("findings");
 
         assert!(findings.contains("error[E0308]: mismatched types"));
         assert!(findings.contains("--> crates/aether-actor/tests/asset_sections.rs:85:9"));
@@ -871,7 +1034,10 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // Tripwire: findings must be absent on a pass, or a Refine that never
         // happens would still carry a stale row, and `parse_findings` is
         // presence-driven with no lane flag to disambiguate.
-        let members = [("verify.fmt", true, String::new()), ("verify.clippy", true, String::new())];
+        let members = [
+            ("verify.fmt", MemberOutcome::Passed, String::new()),
+            ("verify.clippy", MemberOutcome::Passed, String::new()),
+        ];
 
         assert!(verify_findings(&members).is_none(), "a clean run stamps no findings");
     }
@@ -882,7 +1048,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // previous candidate, so a prompt that only says "implement the work
         // order" invites the correct-but-useless "already carries it" answer
         // that wedged both real runs.
-        let members = [("verify.clippy", false, String::from("error[E0308]: mismatched types"))];
+        let members = [("verify.clippy", MemberOutcome::Failed, String::from("error[E0308]: mismatched types"))];
 
         let findings = verify_findings(&members).expect("findings");
 
@@ -937,18 +1103,120 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     #[test]
     fn failed_member_projection_is_exact_canonical_and_empty_on_pass() {
         let multi = failed_verifiers([
-            ("verify.fmt", false),
-            ("verify.clippy", true),
-            ("verify.docs", false),
-            ("verify.test", false),
+            ("verify.fmt", MemberOutcome::Failed),
+            ("verify.clippy", MemberOutcome::Passed),
+            ("verify.docs", MemberOutcome::Failed),
+            ("verify.test", MemberOutcome::Failed),
         ]);
         assert_eq!(
             multi,
             [VerifyFailure::Fmt, VerifyFailure::Docs, VerifyFailure::Test].into_iter().collect(),
             "every failed command contributes its closed identity",
         );
-        assert_eq!(failed_verifiers([("verify.test", false)]), VerifyFailureSet::one(VerifyFailure::Test));
-        assert!(failed_verifiers([("verify.fmt", true), ("verify.deps", true)]).is_empty());
+        assert_eq!(
+            failed_verifiers([("verify.test", MemberOutcome::Failed)]),
+            VerifyFailureSet::one(VerifyFailure::Test)
+        );
+        assert!(
+            failed_verifiers([("verify.fmt", MemberOutcome::Passed), ("verify.deps", MemberOutcome::Passed)])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_exit_the_member_does_not_find_with_is_charged_to_preflight() {
+        // Tripwire for #4845, at both halves of the seam. The suppression
+        // scanner exits 2 for an `OperationalError` — an unreadable blob, a
+        // malformed .jscpd.json, a git call that would not run — and read as a
+        // finding it is forgiven once, charges a repair roll on repeat, and
+        // wedges the member with repeated_verifiers = {verify.suppress}
+        // against a candidate that did nothing wrong. cargo-machete draws the
+        // same 1-vs-2 split, and every member shares the signal-death case: a
+        // child with no exit code at all said nothing about the candidate.
+        let suppress = verify_command("verify.suppress").expect("verify.suppress mapped");
+        assert_eq!(
+            member_outcome(&suppress, true, Some(1)),
+            MemberOutcome::Failed,
+            "a printed suppression is a finding"
+        );
+        assert_eq!(member_outcome(&suppress, true, Some(2)), MemberOutcome::Operational);
+        assert_eq!(
+            member_outcome(&suppress, true, None),
+            MemberOutcome::Operational,
+            "a signal death is not a verdict"
+        );
+
+        let deps = verify_command("verify.deps").expect("verify.deps mapped");
+        assert_eq!(member_outcome(&deps, true, Some(1)), MemberOutcome::Failed, "an unused dependency is a finding");
+        assert_eq!(member_outcome(&deps, true, Some(2)), MemberOutcome::Operational, "a path it cannot walk is not");
+
+        assert_eq!(
+            failed_verifiers([("verify.suppress", MemberOutcome::Operational)]),
+            VerifyFailureSet::one(VerifyFailure::Preflight),
+            "a host fault reaches the ledger as the umbrella's synthetic identity, never the member's own",
+        );
+        assert_eq!(
+            failed_verifiers([("verify.suppress", MemberOutcome::Failed)]),
+            VerifyFailureSet::one(VerifyFailure::Suppress),
+            "and a real finding still lands on the member, or the repair ledger stops measuring stuckness",
+        );
+    }
+
+    #[test]
+    fn a_members_finding_exits_are_its_own_programs_codes() {
+        // Tripwire: these lists decide, per member, which failures blame the
+        // candidate. nextest is the one that matters most — its codes are its
+        // own rather than cargo's, and a list narrowed to cargo's 101 would
+        // route every genuine test failure to verify.preflight, forgiving the
+        // exact defect the loop exists to charge for.
+        let test = verify_command("verify.test").expect("verify.test mapped");
+        assert_eq!(test.finding_exit_codes, &[100, 101], "100 is a failing test run, 101 a failing build");
+        assert_eq!(member_outcome(&test, true, Some(100)), MemberOutcome::Failed);
+        assert_eq!(
+            member_outcome(&test, true, Some(96)),
+            MemberOutcome::Operational,
+            "an unusable profile is nextest's"
+        );
+
+        for id in verify_check_members() {
+            let invocation = verify_command(id).expect("every umbrella member resolves");
+            assert!(!invocation.finding_exit_codes.is_empty(), "{id} states no finding exit, so nothing can blame it");
+            assert!(!invocation.finding_exit_codes.contains(&0), "{id} claims a clean exit as a finding");
+        }
+    }
+
+    #[test]
+    fn a_derived_clippy_failure_at_a_clean_exit_is_still_the_candidates() {
+        // Tripwire: clippy is the one member whose failure arrives at exit
+        // zero, because the run is deliberately not asked to deny warnings.
+        // Classifying by exit code alone would read that as a pass; routing it
+        // through the operational branch would read it as a host fault. Both
+        // stop lints being charged to the candidate that wrote them.
+        let clippy = verify_command("verify.clippy").expect("verify.clippy mapped");
+
+        assert_eq!(member_outcome(&clippy, false, Some(0)), MemberOutcome::Failed);
+        assert_eq!(member_outcome(&clippy, true, Some(0)), MemberOutcome::Passed);
+        assert_eq!(member_outcome(&clippy, true, Some(101)), MemberOutcome::Failed, "could not compile is a finding");
+    }
+
+    #[test]
+    fn an_operational_log_says_the_member_reported_nothing_and_names_where_it_landed() {
+        // Tripwire: a Refine is handed these logs to repair. Unframed, a
+        // scanner traceback reads as a defect and the model edits working code
+        // until a broken host stops complaining — the same failure
+        // `prepare_failure_log` exists to prevent, for the other way a member
+        // can fail without saying anything about the candidate.
+        let suppress = verify_command("verify.suppress").expect("verify.suppress mapped");
+        let log = format!(
+            "{}suppression scan error: malformed .jscpd.json: Expecting value",
+            operational_failure_notice("verify.suppress", &suppress, Some(2)),
+        );
+
+        let findings = verify_findings(&[("verify.suppress", MemberOutcome::Operational, log)]).expect("findings");
+
+        assert!(findings.contains("reported nothing about the candidate"), "the member's silence is stated");
+        assert!(findings.contains("exited 2"), "with the code that said so");
+        assert!(findings.contains("verify.preflight"), "and the identity the run was accounted to");
     }
 
     #[test]
