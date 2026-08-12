@@ -6,8 +6,8 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
-    Budget, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, NetworkProfile, Nonce, Transformation, WorkHandle,
-    WorkOrder,
+    Budget, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, NetworkProfile, Nonce, Transformation,
+    VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder,
 };
 use aether_bloomery_github::ExecutorError;
 
@@ -21,13 +21,20 @@ type Seen = Arc<Mutex<Vec<String>>>;
 // which arm an order routed to. Never errors, so its error type is a phantom.
 struct Recorder<E> {
     seen: Seen,
+    evidence: Vec<EvidenceRef>,
     _marker: PhantomData<fn() -> E>,
 }
 
 impl<E> Recorder<E> {
     fn new() -> (Self, Seen) {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        (Self { seen: Arc::clone(&seen), _marker: PhantomData }, seen)
+        (Self { seen: Arc::clone(&seen), evidence: Vec::new(), _marker: PhantomData }, seen)
+    }
+
+    fn returning(evidence: Vec<EvidenceRef>) -> (Self, Seen) {
+        let (mut recorder, seen) = Self::new();
+        recorder.evidence = evidence;
+        (recorder, seen)
     }
 }
 
@@ -50,7 +57,7 @@ impl<E: Send + Sync> ExecutorBackend for Recorder<E> {
 
     fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, E> {
         self.seen.lock().unwrap().push(handle.nonce.0.clone());
-        Ok(Vec::new())
+        Ok(self.evidence.clone())
     }
 }
 
@@ -125,4 +132,25 @@ fn inspect_resolves_a_handle_to_the_lane_its_order_submitted_to() {
     let (router, _actions_seen, _local_seen) = router(vec!["construct.".to_owned()]);
     let handle = router.submit(&order("construct.implement", "n-c")).unwrap();
     assert_eq!(router.inspect(&handle).unwrap(), ExecutionStatus::Unknown);
+}
+
+#[test]
+fn stream_preserves_the_backend_failure_set_unchanged() {
+    let failures = [VerifyFailure::Fmt, VerifyFailure::Test].into_iter().collect::<VerifyFailureSet>();
+    let reference = EvidenceRef {
+        name: "attempt.fail.12.subject.detail.n-v".to_owned(),
+        nonce: Nonce("n-v".to_owned()),
+        artifact_id: 1,
+        size_bytes: 10,
+        candidate: None,
+        findings: None,
+        failed_verifiers: failures,
+        cost: None,
+    };
+    let (actions, _actions_seen) = Recorder::<ExecutorError>::new();
+    let (local, _local_seen) = Recorder::<LocalExecutorError>::returning(vec![reference.clone()]);
+    let router = RoutingExecutor::new(Arc::new(actions), Arc::new(local), vec!["verify.".to_owned()]);
+    let handle = router.submit(&order("verify.check", "n-v")).unwrap();
+
+    assert_eq!(router.stream_evidence(&handle).unwrap(), vec![reference]);
 }
