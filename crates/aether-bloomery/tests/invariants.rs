@@ -17,10 +17,10 @@ use aether_bloomery::ConfigKind;
 use aether_bloomery::Decisions;
 use aether_bloomery::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, Artifact, AttemptCompletedError,
-    BloomId, BloomStatus, CandidateRef, CatalogError, Decision, Digest, Event, Evidence, EvidenceKind, Fact,
-    GrantAttemptsError, KeyId, LandError, LandingRejectedError, Observation, Outcome, Provenance, Question,
+    BloomId, BloomStatus, CandidateRef, CatalogError, Decision, Digest, DispatchKey, Event, Evidence, EvidenceKind,
+    Fact, GrantAttemptsError, KeyId, LandError, LandingRejectedError, Observation, Outcome, Provenance, Question,
     ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId, StageProgress,
-    Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure, VerifyFailureSet, reduce,
+    Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure, VerifyFailureSet, grade, reduce,
 };
 use aether_data::Kind;
 use aether_data::wire::to_vec;
@@ -2158,6 +2158,175 @@ fn a_successor_starts_with_fresh_verifier_history() {
     let cursor = snapshot.blooms.get(&successor).unwrap().progress.get(&workpiece("wp")).unwrap();
     assert_eq!(cursor.stage, StageId::Construct);
     assert!(cursor.seen_verify_failures.is_empty(), "successor seal owns a fresh per-member set");
+}
+
+/// The graded retry actual for one bloom (ADR-0180). Read through the public
+/// `grade` rather than off the record, so these cases pin the number an operator
+/// sees rather than the field behind it. No study artifact resolves — the retry
+/// axis does not read them.
+fn graded_retries(snapshot: &Snapshot, bloom: &BloomId) -> u32 {
+    grade(snapshot, |_: &Digest| None)
+        .blooms
+        .iter()
+        .find(|graded| graded.bloom == *bloom)
+        .expect("the snapshot grades every bloom it holds")
+        .actual_retries
+}
+
+/// One member's `Construct` slot — the ledger key the entry dispatch and every
+/// in-budget `Construct` retry land on.
+fn construct_slot(member: &str) -> DispatchKey {
+    DispatchKey::Member { workpiece: workpiece(member), stage: StageId::Construct }
+}
+
+// ADR-0180 — a granted attempt is a retry, and the grant does not lower the
+// ledger. `Fact::GrantAttempts` deliberately rewrites the member's headroom
+// cursors downward to leave exactly the allowance the operator bought, so a
+// retry axis derived from `StageProgress::attempts` would report *fewer* retries
+// after paying for more execution. Tripwire for reading the grade out of a
+// budget cursor rather than the dispatch ledger.
+#[test]
+fn a_granted_attempt_counts_a_retry_the_grant_cannot_lower() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let fail = |key: &str| {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: false,
+                evidence: attempt_evidence(),
+                candidate: None,
+            },
+        )
+    };
+    let (snapshot, _) = step(&snapshot, &fail("c-fail-1"));
+    let (wedged, _) = step(&snapshot, &fail("c-fail-2"));
+    let wedged_record = wedged.blooms.get(&bloom).unwrap();
+    assert_eq!(wedged_record.dispatches.get(&construct_slot("wp")), Some(&2), "the entry dispatch plus one retry");
+    assert_eq!(graded_retries(&wedged, &bloom), 1);
+
+    let grant = event(
+        "grant",
+        Fact::GrantAttempts { bloom, workpiece: workpiece("wp"), stage: StageId::Construct, attempts: 2 },
+    );
+    let (granted, _) = step(&wedged, &grant);
+
+    let record = granted.blooms.get(&bloom).unwrap();
+    assert_eq!(
+        record.progress.get(&workpiece("wp")).unwrap().attempts,
+        1,
+        "the grant rewrites the headroom cursor downward to leave the allowance it bought",
+    );
+    assert_eq!(record.dispatches.get(&construct_slot("wp")), Some(&3), "while the ledger records the third dispatch");
+    assert_eq!(graded_retries(&granted, &bloom), 2, "so the grade rises with the spend rather than falling with it");
+}
+
+// ADR-0180 — only a successor resets the ledger. A successor is a distinct id
+// with its own record and its own sealed forecast, so it is graded against what
+// it dispatched, while the predecessor keeps its own history rather than having
+// it carried forward or erased.
+#[test]
+fn a_successor_starts_a_fresh_ledger_and_its_predecessor_keeps_one() {
+    let base = Snapshot::new(digest(1));
+    let predecessor_spec = draft(1, vec![membership("wp", 10)]).seal();
+    let predecessor = predecessor_spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(predecessor_spec)));
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "c-fail",
+            Fact::AttemptCompleted {
+                bloom: predecessor,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: false,
+                evidence: attempt_evidence(),
+                candidate: None,
+            },
+        ),
+    );
+    assert_eq!(graded_retries(&snapshot, &predecessor), 1, "the predecessor re-dispatched its member once");
+
+    let successor_spec = draft(1, vec![membership("wp", 11)]).seal();
+    let successor = successor_spec.id();
+    let (superseded, _) =
+        step(&snapshot, &event("supersede", Fact::Supersede { predecessor, successor: successor_spec }));
+
+    assert_eq!(
+        superseded.blooms.get(&successor).unwrap().dispatches.get(&construct_slot("wp")),
+        Some(&1),
+        "the successor holds only the entry dispatch its own supersession decided",
+    );
+    assert_eq!(graded_retries(&superseded, &successor), 0, "so it is graded against what it dispatched");
+    assert_eq!(graded_retries(&superseded, &predecessor), 1, "and the predecessor's own spend still stands");
+}
+
+// ADR-0180 — an owner's answer that re-arms a bloom-scope review park buys a
+// real review execution, so it counts, even though the answer resets
+// `aggregate_rolls` to zero to re-arm the budget. A retry axis derived from that
+// cursor would report the re-armed cycle as *fewer* retries than the spent cycle
+// it replaced, which is the second shape of the headroom-versus-history
+// confusion the ledger exists to keep apart.
+#[test]
+fn a_rearmed_review_cycle_counts_a_retry_though_the_roll_cursor_resets() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let verdict = |key: &str, subject: u8, detail: u8| {
+        event(
+            key,
+            Fact::AggregateReviewCompleted {
+                bloom,
+                passed: false,
+                evidence: Evidence {
+                    subject: digest(subject),
+                    kind: EvidenceKind::ReviewFinding,
+                    detail: digest(detail),
+                },
+                implicated: vec![],
+            },
+        )
+    };
+
+    // Two whole review cycles: each folds, passes the compiler, reaches the
+    // critic, and comes back failing. The second failure parks the bloom at the
+    // two-pass ceiling with the review slot dispatched twice.
+    let (snapshot, _) = step(&snapshot, &event("i1", Fact::Integrate { bloom, claim: claim("wp", 10, 100) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
+    let (snapshot, _) = step(&snapshot, &verdict("f1", 40, 50));
+    let (snapshot, _) = step(&snapshot, &event("i2", Fact::Integrate { bloom, claim: claim("wp", 10, 101) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r2", Fact::Resolve { bloom, tree: digest(42), head: digest(43), lineage: vec![] }));
+    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v2", 42));
+    let (parked, decided) = step(&snapshot, &verdict("f2", 42, 51));
+    assert!(matches!(decided.outcome, Outcome::AggregateReviewParked { rolls: 2, .. }));
+
+    let review_slot = DispatchKey::Bloom { stage: StageId::AggregateReview };
+    let parked_record = parked.blooms.get(&bloom).unwrap();
+    assert_eq!(parked_record.dispatches.get(&review_slot), Some(&2), "two spent review passes");
+    assert_eq!(parked_record.aggregate_rolls, 2, "and a roll cursor at the ceiling");
+    let parked_retries = graded_retries(&parked, &bloom);
+
+    let (rearmed, _) = step(&parked, &event("ans", Fact::AdoptAnswer { bloom, answer: answer_adopting(digest(51)) }));
+
+    let record = rearmed.blooms.get(&bloom).unwrap();
+    assert_eq!(record.aggregate_rolls, 0, "the answer resets the roll cursor to re-arm the budget");
+    assert_eq!(record.dispatches.get(&review_slot), Some(&3), "while the ledger records the review it dispatched");
+    assert_eq!(
+        graded_retries(&rearmed, &bloom),
+        parked_retries + 1,
+        "so the owner-bought cycle adds exactly one retry rather than erasing two",
+    );
 }
 
 // #4708 — the grant's refusals. A running member is not grantable (two workers

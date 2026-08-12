@@ -13,8 +13,8 @@ use super::{Decision, Decisions, Event, Fact, Outcome};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    BloomSpec, CandidateRef, ConfigScopes, Evidence, EvidenceKind, ResolutionClaim, ResolvedConfigs, StageCatalog,
-    VerifyFailureSet, Wedge,
+    BloomSpec, CandidateRef, ConfigScopes, DispatchKey, Evidence, EvidenceKind, ResolutionClaim, ResolvedConfigs,
+    StageCatalog, VerifyFailureSet, Wedge,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -115,6 +115,22 @@ pub struct BloomRecord {
     /// whether its next verdict is still pending or has already come back
     /// failing, so the cursor cannot distinguish mid-flight from wedged.
     pub wedged: BTreeMap<WorkpieceId, Wedge>,
+    /// How many times each execution slot has been dispatched — the bloom's
+    /// dispatch ledger, and the source of the study grade's retry axis
+    /// (ADR-0180). Journal-derived and replay-rebuilt like the rest of the
+    /// record: every dispatch decision the reducer emits increments its own
+    /// [`DispatchKey`], so replaying the same facts rebuilds the same counts and
+    /// a bloom journaled before the ledger existed gets one for free.
+    ///
+    /// A record of what was *spent*, never headroom that may be handed back.
+    /// [`StageProgress::attempts`] resets at each stage advance, a grant lowers
+    /// `attempts` / `repair_rolls` to leave the granted allowance, and an
+    /// adopted answer zeroes [`aggregate_rolls`](Self::aggregate_rolls) — all
+    /// correct as budget cursors and all wrong as history, which is why the
+    /// ledger sits beside them rather than being read out of one. Nothing inside
+    /// a bloom's life clears it; only a successor, being a distinct id with its
+    /// own record, starts a fresh one.
+    pub dispatches: BTreeMap<DispatchKey, u32>,
     /// The integration fold's output held while the bloom's aggregate review
     /// runs (ADR-0153): set when [`Fact::Resolve`] verifies the claim set and
     /// dispatches the review, consumed by a passing
@@ -308,16 +324,32 @@ impl Snapshot {
                     record.wedged.insert(workpiece.clone(), *wedge);
                 }
             }
-            // Snapshot-inert outbox effects the store projects and republishes,
-            // rebuilt on replay from the journaled fact — they carry no in-snapshot
-            // state, like EmitReceipt's outbox row. A dispatch's paired cursor rides
-            // its sibling AdvanceStage; a re-dispatch's hold release rides ReleaseHold.
-            Decision::RedispatchStage { .. }
-            | Decision::DispatchAttempt { .. }
-            | Decision::DispatchLand { .. }
-            | Decision::DispatchIntegration { .. }
-            | Decision::DispatchAggregateReview { .. }
-            | Decision::DispatchAggregateVerify { .. } => {}
+            // The five dispatch decisions carry an outbox row the store projects
+            // and republishes, and additionally count their slot in the bloom's
+            // dispatch ledger (ADR-0180) — the outbox row is untouched, only the
+            // fold is new. A dispatch's paired cursor still rides its sibling
+            // AdvanceStage.
+            Decision::DispatchAttempt { bloom, workpiece, stage, .. } => {
+                self.count_dispatch(bloom, DispatchKey::Member { workpiece: workpiece.clone(), stage: *stage });
+            }
+            Decision::DispatchIntegration { bloom, .. } => {
+                self.count_dispatch(bloom, DispatchKey::Bloom { stage: StageId::Integrate });
+            }
+            Decision::DispatchAggregateVerify { bloom, .. } => {
+                self.count_dispatch(bloom, DispatchKey::Bloom { stage: StageId::AggregateVerify });
+            }
+            Decision::DispatchAggregateReview { bloom, .. } => {
+                self.count_dispatch(bloom, DispatchKey::Bloom { stage: StageId::AggregateReview });
+            }
+            Decision::DispatchLand { bloom, .. } => {
+                self.count_dispatch(bloom, DispatchKey::Bloom { stage: StageId::Land });
+            }
+            // Wholly snapshot-inert, like EmitReceipt's outbox row: a re-dispatch
+            // replays a held work order host-side under a fresh nonce rather than
+            // deciding a dispatch, so ADR-0151's "parking consumes no retry" holds
+            // structurally — the ledger never sees it. Its hold release rides
+            // ReleaseHold.
+            Decision::RedispatchStage { .. } => {}
             Decision::RecordIntegration { bloom, integration } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.integration.clone_from(integration);
@@ -375,6 +407,21 @@ impl Snapshot {
         }
     }
 
+    /// Count one dispatch of `key` against a bloom's ledger (ADR-0180).
+    ///
+    /// A function of the dispatch decision itself rather than a second effect
+    /// emitted beside it, so the ledger cannot desynchronize from the dispatches
+    /// it counts and a dispatch site added later is counted without being told
+    /// to. An unknown bloom is ignored for the same reason every other
+    /// record-scoped arm ignores one: the decision named a record that is not
+    /// there to fold into.
+    fn count_dispatch(&mut self, bloom: &BloomId, key: DispatchKey) {
+        if let Some(record) = self.blooms.get_mut(bloom) {
+            let count = record.dispatches.entry(key).or_insert(0);
+            *count = count.saturating_add(1);
+        }
+    }
+
     /// Fold the three decisions that move a bloom across the land boundary
     /// (#4689) — resolving onto a head, returning off one when its landing was
     /// refused, and the attempt counter that bounds the round trip.
@@ -428,6 +475,7 @@ impl BloomRecord {
             holds: BTreeSet::new(),
             progress: BTreeMap::new(),
             wedged: BTreeMap::new(),
+            dispatches: BTreeMap::new(),
             integration: None,
             aggregate_rolls: 0,
             aggregate_verify_rolls: 0,

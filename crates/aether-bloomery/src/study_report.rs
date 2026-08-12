@@ -1,13 +1,21 @@
-//! The forecast-grading study report (ADR-0151, issue #3525).
+//! The forecast-grading study report (ADR-0151 / ADR-0180, issues #3525, #3666).
 //!
 //! [`grade`] is a pure read over a [`Snapshot`]: per bloom, it folds the
 //! admitted [`EvidenceKind::StudyRecord`] entries in the bloom's evidence log
-//! into actual cost / wall-clock / retries and grades them against the sealed
-//! [`Forecast`]. It resolves each study evidence's `detail` digest to its
-//! [`StudyRecord`] bytes through a read-only resolver — the evidence log holds
-//! digests, not the cost columns, so a snapshot-only signature could not read
-//! actuals; resolving content-addressed bytes is a read, inside ADR-0151's
-//! "pure read / no side effects" envelope.
+//! into actual cost and wall-clock, reads the retry axis off the bloom's
+//! dispatch ledger, and grades all three against the sealed [`Forecast`]. It
+//! resolves each study evidence's `detail` digest to its [`StudyRecord`] bytes
+//! through a read-only resolver — the evidence log holds digests, not the cost
+//! columns, so a snapshot-only signature could not read actuals; resolving
+//! content-addressed bytes is a read, inside ADR-0151's "pure read / no side
+//! effects" envelope.
+//!
+//! The two sources are deliberately separate (ADR-0180). Study records are
+//! per-attempt artifacts, so counting them conflates independent members and
+//! independent stages with retries; the ledger counts dispatches per execution
+//! slot, so a clean multi-member bloom grades zero. Keeping retries off the
+//! resolver also means a study artifact the resolver cannot read costs the
+//! grade its cost and time columns and nothing else.
 //!
 //! It mutates nothing and opens no port: the report is a projection any
 //! consumer (the REST control surface, the outward mirror, the study stage's
@@ -22,10 +30,10 @@ use crate::ids::BloomId;
 use crate::reduce::Snapshot;
 use crate::values::{EvidenceKind, Forecast, StudyRecord};
 
-/// A forecast grade for one bloom: the summed actuals from its admitted study
-/// records, the sealed forecast they are graded against, and the per-axis
-/// over/under delta (`actual − predicted`, so a positive delta overshot the
-/// forecast).
+/// A forecast grade for one bloom: the cost and wall-clock actuals summed from
+/// its admitted study records, the retry actual read off its dispatch ledger,
+/// the sealed forecast they are graded against, and the per-axis over/under
+/// delta (`actual − predicted`, so a positive delta overshot the forecast).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BloomGrade {
     /// The graded bloom.
@@ -39,10 +47,17 @@ pub struct BloomGrade {
     /// Actual wall-clock time in whole seconds, summed over the study records'
     /// durations.
     pub actual_secs: u64,
-    /// Actual retries — study-record attempts beyond the first (a single
-    /// attempt is zero retries, matching `Budget::retry_cap`'s beyond-the-first
-    /// semantics). Derived from the journal's evidence log, so it stands even
-    /// for a record whose bytes the resolver cannot read.
+    /// Actual retries — dispatches of an execution slot beyond its first,
+    /// summed over the bloom's dispatch ledger (ADR-0180). A slot dispatched
+    /// once contributes zero, matching `Budget::retry_cap`'s beyond-the-first
+    /// semantics, and independent slots never contribute to one another: two
+    /// members each constructing once is zero retries, and so is one member
+    /// walking `Construct → Verify` cleanly.
+    ///
+    /// A granted attempt counts, because the operator bought real execution. A
+    /// parked attempt's release does not, because replaying the held work order
+    /// mints no dispatch. Read off the journal-derived ledger rather than the
+    /// study records, so no artifact the resolver cannot read can move it.
     pub actual_retries: u32,
     /// `actual_cost − predicted_cost` (positive overshot the forecast).
     pub cost_delta: i64,
@@ -72,15 +87,15 @@ pub struct StudyReport {
     pub blooms: Vec<BloomGrade>,
 }
 
-/// Grade every bloom's admitted study records against its sealed forecast
-/// (ADR-0151). Pure: reads the snapshot and resolves study-record bytes through
+/// Grade every bloom's actuals against its sealed forecast (ADR-0151,
+/// ADR-0180). Pure: reads the snapshot and resolves study-record bytes through
 /// `source`, mutates nothing.
 ///
 /// `source` resolves a study evidence's `detail` digest to its [`StudyRecord`]
 /// bytes, returning `None` when the artifact is unavailable — an unresolvable
-/// record still counts toward the retry axis (that count is journal-derived) but
-/// contributes no cost or time. A bloom with no study evidence grades to zero
-/// actuals against its forecast.
+/// record contributes no cost or time and cannot touch the retry axis, which is
+/// the dispatch ledger's. A bloom with no study evidence grades to zero cost and
+/// time; its retries are whatever it dispatched.
 #[must_use]
 pub fn grade(snapshot: &Snapshot, source: impl Fn(&Digest) -> Option<StudyRecord>) -> StudyReport {
     let blooms = snapshot
@@ -90,12 +105,10 @@ pub fn grade(snapshot: &Snapshot, source: impl Fn(&Digest) -> Option<StudyRecord
             let forecast = record.spec.forecast();
             let mut actual_cost = 0u64;
             let mut actual_millis = 0u64;
-            let mut attempts = 0u32;
             for evidence in &record.evidence {
                 if evidence.kind != EvidenceKind::StudyRecord {
                     continue;
                 }
-                attempts = attempts.saturating_add(1);
                 if let Some(study) = source(&evidence.detail) {
                     let cost = &study.cost;
                     actual_cost = actual_cost
@@ -107,7 +120,11 @@ pub fn grade(snapshot: &Snapshot, source: impl Fn(&Digest) -> Option<StudyRecord
                 }
             }
             let actual_secs = actual_millis / 1000;
-            let actual_retries = attempts.saturating_sub(1);
+            // One retry is one dispatch of a slot beyond its first, so each
+            // ledger entry contributes its count minus one and a slot dispatched
+            // once contributes nothing (ADR-0180).
+            let actual_retries =
+                record.dispatches.values().fold(0u32, |retries, count| retries.saturating_add(count.saturating_sub(1)));
             BloomGrade {
                 bloom: *id,
                 forecast,

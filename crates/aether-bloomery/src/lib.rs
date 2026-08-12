@@ -40,8 +40,9 @@
 //! - [`mod@reduce`] — the pure control core: [`reduce`](reduce::reduce) owns
 //!   every state transition, with no I/O, no engine boot, no GitHub types.
 //! - [`study_report`] — the pure forecast grade: [`grade`] folds a bloom's
-//!   admitted study records into actual cost / time / retries and grades them
-//!   against the sealed [`Forecast`] (ADR-0151).
+//!   admitted study records into actual cost and time, reads its retries off the
+//!   dispatch ledger, and grades all three against the sealed [`Forecast`]
+//!   (ADR-0151, ADR-0180).
 //! - [`port`] — the [`SourceBackend`] / [`ProjectionBackend`] /
 //!   [`ExecutorBackend`] trait shapes adapters implement and the host mounts.
 //!   Kept here so adapters depend inward on this crate, cycle-free (ADR-0149
@@ -98,10 +99,11 @@ pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
 pub use study_report::{BloomGrade, StudyReport, grade};
 pub use values::{
     AgentProfile, AgentSelection, Artifact, Attempt, BloomDraft, BloomSpec, Budget, CONSTRUCT_IMPLEMENT_COMMAND,
-    CandidateRef, CatalogError, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, Evidence, EvidenceKind,
-    Forecast, Harness, LandingReceipt, MemberCandidate, MemberSubject, Membership, ModelOverride, NetworkProfile,
-    Observation, OverrideError, PriceRow, PriceTable, Provenance, Question, REVIEW_CRITIC_COMMAND, ReasoningEffort,
-    ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel, StageBinding, StageCatalog, StageOverride,
-    StageReceipt, Statement, StudyCost, StudyRecord, ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND,
-    VerifyFailure, VerifyFailureSet, Wedge, Workpiece, config_address, decode_config, is_model_lane,
+    CandidateRef, CatalogError, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, DispatchKey, Evidence,
+    EvidenceKind, Forecast, Harness, LandingReceipt, MemberCandidate, MemberSubject, Membership, ModelOverride,
+    NetworkProfile, Observation, OverrideError, PriceRow, PriceTable, Provenance, Question, REVIEW_CRITIC_COMMAND,
+    ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel, StageBinding, StageCatalog,
+    StageOverride, StageReceipt, Statement, StudyCost, StudyRecord, ToolPolicy, Transformation, Unproducible,
+    VERIFY_CHECK_COMMAND, VerifyFailure, VerifyFailureSet, Wedge, Workpiece, config_address, decode_config,
+    is_model_lane,
 };

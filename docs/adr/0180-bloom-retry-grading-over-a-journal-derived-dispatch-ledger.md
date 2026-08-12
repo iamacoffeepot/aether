@@ -1,6 +1,6 @@
 # ADR-0180: Bloom retry grading over a journal-derived dispatch ledger
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-11
 
 ## Context
