@@ -5,7 +5,7 @@ use syn::{FnArg, ImplItem, ItemImpl, Type};
 use crate::diagnostics::extract_agent_doc;
 use crate::handler_parse::{
     FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler,
-    classify_handler_reply, extract_handler_kind_type, handler_cfgs, multi_kind_or_return_error, parse_handler_class,
+    classify_handler_reply, extract_handler_kind_type, multi_kind_or_return_error, parse_handler_class,
     parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks, validate_addressable_consts,
     validate_fallback_sig,
 };
@@ -134,12 +134,8 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     // must return `()` (the emissions are the reply, not a
                     // return value); `K` rides its `Multi<K>` ctx marker.
                     let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig)?;
-                    // iamacoffeepot/aether#4811: the method keeps its own `#[cfg]`s
-                    // (only the marker attribute is removed), so clone them for
-                    // the artifacts derived from it.
-                    let cfgs = handler_cfgs(&f.attrs);
                     f.attrs.remove(idx);
-                    handlers.push(HandlerFn { method: f, kind_ty, agent_doc, reply, class, multi_kind, cfgs });
+                    handlers.push(HandlerFn { method: f, kind_ty, agent_doc, reply, class, multi_kind });
                 } else if let Some(idx) = fallback_attr_idx {
                     if fallback.is_some() {
                         return Err(syn::Error::new_spanned(&f, "at most one #[fallback] method per component"));
@@ -419,9 +415,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // updates senders' compile-time checks.
     let handles_kind_impls = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
-        let cfgs = &h.cfgs;
         quote! {
-            #(#cfgs)*
             impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
                 for #self_ty #where_clause {}
         }
@@ -717,28 +711,20 @@ fn build_dispatch_body(
         };
         // `Mail::kind()` and `Kind::ID` are both the typed `KindId`
         // newtype (`KindId: PartialEq`), so they compare directly.
-        // iamacoffeepot/aether#4811: the arm rides the handler's own `#[cfg]`s,
-        // carried by a statement attribute over the block — the arm names both
-        // the kind type and the method, neither of which exists in a
-        // configuration that strips the handler.
-        let cfgs = &h.cfgs;
         quote! {
-            #(#cfgs)*
-            {
-                if __aether_kind == <#k as ::aether_actor::__macro_internals::Kind>::ID {
-                    if let ::core::option::Option::Some(__aether_decoded) =
-                        __aether_mail.decode_kind::<#k>()
-                    {
-                        #call
-                        return ::aether_actor::DISPATCH_HANDLED;
-                    }
-                    // A recognized kind id whose payload fails to decode falls
-                    // through to the tail (the `#[fallback]`, else
-                    // `DISPATCH_UNKNOWN_KIND`), mirroring the native arm's
-                    // `return Option::None` rather than reporting HANDLED for a
-                    // handler that never ran (iamacoffeepot/aether#2455). No later
-                    // arm matches, since the id already matched this one.
+            if __aether_kind == <#k as ::aether_actor::__macro_internals::Kind>::ID {
+                if let ::core::option::Option::Some(__aether_decoded) =
+                    __aether_mail.decode_kind::<#k>()
+                {
+                    #call
+                    return ::aether_actor::DISPATCH_HANDLED;
                 }
+                // A recognized kind id whose payload fails to decode falls
+                // through to the tail (the `#[fallback]`, else
+                // `DISPATCH_UNKNOWN_KIND`), mirroring the native arm's
+                // `return Option::None` rather than reporting HANDLED for a
+                // handler that never ran (iamacoffeepot/aether#2455). No later
+                // arm matches, since the id already matched this one.
             }
         }
     });

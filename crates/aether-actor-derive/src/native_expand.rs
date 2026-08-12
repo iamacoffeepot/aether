@@ -8,10 +8,9 @@ use syn::{Expr, ImplItem, ItemImpl, ItemStruct, Type};
 use crate::handler_parse::{
     HandlerClass, HandlerReply, HandlerVariant, NativeActorHandlerFn, NativeActorTaskHandlerFn, NativeFallbackFn,
     TaskReplyMode, attr_is_fallback, attr_is_handler, classify_handler_reply, classify_task_reply_mode,
-    ctx_names_actor, extract_native_actor_handler_kind, extract_task_handler_types, handler_cfgs,
-    multi_kind_or_return_error, parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds,
-    rename_lifecycle_hooks, rewrite_self_state_first_param, types_token_eq, validate_addressable_consts,
-    validate_native_fallback_sig,
+    ctx_names_actor, extract_native_actor_handler_kind, extract_task_handler_types, multi_kind_or_return_error,
+    parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks,
+    rewrite_self_state_first_param, types_token_eq, validate_addressable_consts, validate_native_fallback_sig,
 };
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
 
@@ -173,10 +172,6 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     // path. A task handler always receives the downgraded
                     // `Single` ctx, so it carries no class field.
                     let class = parse_handler_class(&f.attrs[idx], variant)?;
-                    // iamacoffeepot/aether#4811: the method keeps its own `#[cfg]`s
-                    // (only the marker attribute is removed), so clone them for
-                    // the artifacts derived from it.
-                    let cfgs = handler_cfgs(&f.attrs);
                     f.attrs.remove(idx);
                     match variant {
                         HandlerVariant::Mail => {
@@ -188,7 +183,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                             // by inference off the signature, so the extracted
                             // kind itself is not retained here.
                             multi_kind_or_return_error(class, &reply, &f.sig)?;
-                            handlers.push(NativeActorHandlerFn { method: f, kind_ty, is_slice, reply, class, cfgs });
+                            handlers.push(NativeActorHandlerFn { method: f, kind_ty, is_slice, reply, class });
                         }
                         HandlerVariant::Task => {
                             // A task handler always dispatches with the `Single`
@@ -361,14 +356,8 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         NativeEmit::Full => {
             // Mail handlers only — task completions get no `HandlesKind` /
             // name-inventory entry (a completion is not inbound mail).
-            let handler_kinds: Vec<HandlerMarker> = handlers
-                .iter()
-                .map(|h| HandlerMarker {
-                    kind: h.kind_ty.clone(),
-                    reply: h.reply.manifest_kind().cloned(),
-                    cfgs: h.cfgs.clone(),
-                })
-                .collect();
+            let handler_kinds: Vec<HandlerMarker> =
+                handlers.iter().map(|h| (h.kind_ty.clone(), h.reply.manifest_kind().cloned())).collect();
             let identity = emit_native_identity_markers(
                 self_ty,
                 generics,
@@ -467,25 +456,28 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                 #self_ty::#method_ident(__aether_state, __aether_ctx.as_multi() #erase, __aether_decoded);
             },
         };
-        let decode = if h.is_slice {
+        if h.is_slice {
             // Slice handler — payload is `count * size_of::<K>()`
             // contiguous bytes (ADR-0019 batch wire). Cast to `&[K]`
             // for the handler. Only meaningful for cast-shape kinds;
             // structured kinds have no batched wire shape.
-            quote! { ::aether_data::__derive_runtime::decode_cast_slice::<#kind_ty>(__aether_payload) }
-        } else {
-            quote! { <#kind_ty as ::aether_data::Kind>::decode_from_bytes(__aether_payload) }
-        };
-        // iamacoffeepot/aether#4811: the arm rides the handler's own `#[cfg]`s. A
-        // statement attribute is what carries them — the arm names both the kind
-        // type and the method, neither of which exists in a configuration that
-        // strips the handler.
-        let cfgs = &h.cfgs;
-        quote! {
-            #(#cfgs)*
-            {
+            quote! {
                 if __aether_kind.0 == <#kind_ty as ::aether_data::Kind>::ID.0 {
-                    if let Some(__aether_decoded) = #decode {
+                    if let Some(__aether_decoded) =
+                        ::aether_data::__derive_runtime::decode_cast_slice::<#kind_ty>(__aether_payload)
+                    {
+                        #call
+                        return ::core::option::Option::Some(());
+                    }
+                    return ::core::option::Option::None;
+                }
+            }
+        } else {
+            quote! {
+                if __aether_kind.0 == <#kind_ty as ::aether_data::Kind>::ID.0 {
+                    if let Some(__aether_decoded) =
+                        <#kind_ty as ::aether_data::Kind>::decode_from_bytes(__aether_payload)
+                    {
                         #call
                         return ::core::option::Option::Some(());
                     }
@@ -629,25 +621,19 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     // design — handlers promise nothing about replies. The handler
     // `doc` is dropped (the registry only needs ids + fallback flag),
     // so this is independent of rustdoc extraction.
-    // iamacoffeepot/aether#4811: each entry is pushed under the handler's own
-    // `#[cfg]`s rather than listed inside a `vec![…]` — a `#[cfg]` cannot gate an
-    // element of a `vec!` element list, and a stripped handler must contribute no
-    // row rather than name a kind type that no longer exists.
     let capability_handler_entries = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
-        let cfgs = &h.cfgs;
         // ADR-0109 §5 / ADR-0112: native chassis caps don't yet surface a
         // per-handler reply contract — that needs a native handler
         // manifest (a follow-on). Report `ReplyContract::None` until then;
         // the wasm `describe_component` path carries the real class today.
         quote! {
-            #(#cfgs)*
-            __aether_handlers.push(::aether_substrate::actor::native::HandlerCapability {
+            ::aether_substrate::actor::native::HandlerCapability {
                 id: <#kind_ty as ::aether_data::Kind>::ID,
                 name: <#kind_ty as ::aether_data::Kind>::NAME.to_owned(),
                 doc: ::core::option::Option::None,
                 reply: ::aether_data::ReplyContract::None,
-            });
+            }
         }
     });
     let capability_fallback = if fallback.is_some() {
@@ -677,17 +663,9 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         }
     });
     let measured_kinds_override = {
-        // The ids are content-derived (`Kind::ID` hashes the kind's declared
-        // name) and the cost table keys rows on `(MailboxId, KindId)`, so a
-        // stripped handler drops exactly its own row and every surviving id is
-        // unchanged across configurations (iamacoffeepot/aether#4811).
         let handler_ids = handlers.iter().map(|h| {
             let kind_ty = &h.kind_ty;
-            let cfgs = &h.cfgs;
-            quote! {
-                #(#cfgs)*
-                __aether_kinds.push(<#kind_ty as ::aether_data::Kind>::ID);
-            }
+            quote! { <#kind_ty as ::aether_data::Kind>::ID }
         });
         let set_ids = opts.handler_set.as_ref().map(|set| {
             quote! {
@@ -709,9 +687,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         };
         quote! {
             fn measured_kinds() -> ::std::vec::Vec<::aether_substrate::mail::KindId> {
-                let mut __aether_kinds: ::std::vec::Vec<::aether_substrate::mail::KindId> =
-                    ::std::vec::Vec::new();
-                #(#handler_ids)*
+                let mut __aether_kinds = ::std::vec![#(#handler_ids),*];
                 #set_ids
                 #task_completion_id
                 __aether_kinds
@@ -721,10 +697,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
 
     let capabilities_override = quote! {
         fn capabilities() -> ::aether_substrate::actor::native::ComponentCapabilities {
-            let mut __aether_handlers: ::std::vec::Vec<
-                ::aether_substrate::actor::native::HandlerCapability,
-            > = ::std::vec::Vec::new();
-            #(#capability_handler_entries)*
+            let mut __aether_handlers = ::std::vec![#(#capability_handler_entries),*];
             #set_capabilities
             ::aether_substrate::actor::native::ComponentCapabilities {
                 handlers: __aether_handlers,
@@ -896,15 +869,9 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     })
 }
 
-/// One mail handler's marker payload: its inbound kind type, the manifest reply
-/// kind read off the handler's return type (`None` for `-> ()`), and the
-/// `#[cfg]`s the handler method carries, so a configuration that strips the
-/// method strips its marker impl and inventory row with it.
-struct HandlerMarker {
-    kind: Type,
-    reply: Option<Type>,
-    cfgs: Vec<syn::Attribute>,
-}
+/// One mail handler's marker payload: its inbound kind type plus the manifest
+/// reply kind read off the handler's return type (`None` for `-> ()`).
+type HandlerMarker = (Type, Option<Type>);
 
 /// ADR-0169: invoke the adopted set's generated marker bridge, which pastes one
 /// `impl HandlesKind<K> for #self_ty {}` and one `HandlerEntry` inventory row
@@ -1061,11 +1028,8 @@ fn emit_native_identity_markers(
     } else {
         handler_kinds
             .iter()
-            .map(|marker| {
-                let kind_ty = &marker.kind;
-                let cfgs = &marker.cfgs;
+            .map(|(kind_ty, _)| {
                 quote! {
-                    #(#cfgs)*
                     impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
                         for #self_ty #where_clause {}
                 }
@@ -1115,16 +1079,13 @@ fn emit_native_identity_markers(
     // `<Self as Addressable>::NAMESPACE` wouldn't const-resolve in the
     // non-generic inventory static.
     let handler_inventory = if generics.params.is_empty() {
-        let submissions = handler_kinds.iter().map(|marker| {
-            let kind_ty = &marker.kind;
-            let cfgs = &marker.cfgs;
-            let reply_expr = if let Some(reply_ty) = &marker.reply {
+        let submissions = handler_kinds.iter().map(|(kind_ty, reply)| {
+            let reply_expr = if let Some(reply_ty) = reply {
                 quote! { ::core::option::Option::Some(<#reply_ty as ::aether_data::Kind>::ID) }
             } else {
                 quote! { ::core::option::Option::None }
             };
             quote! {
-                #(#cfgs)*
                 #[cfg(not(target_family = "wasm"))]
                 ::aether_data::name_inventory::inventory::submit! {
                     ::aether_data::name_inventory::HandlerEntry {
@@ -1380,7 +1341,7 @@ fn harvest_native_actor_impl(
     // read the same declaration.
     let handler_set = harvest_runtime_handler_set(imp).map_err(remap)?;
 
-    let mut handler_kinds: Vec<HandlerMarker> = Vec::new();
+    let mut handler_kinds: Vec<(Type, Option<Type>)> = Vec::new();
     let mut has_fallback = false;
     let mut saw_handler = false;
     for impl_item in &imp.items {
@@ -1399,12 +1360,9 @@ fn harvest_native_actor_impl(
         if matches!(parse_handler_variant(handler_attr).map_err(remap)?, HandlerVariant::Task) {
             continue;
         }
-        let (kind, _is_slice) = extract_native_actor_handler_kind(&f.sig, true).map_err(remap)?;
+        let (kind_ty, _is_slice) = extract_native_actor_handler_kind(&f.sig, true).map_err(remap)?;
         let reply = classify_handler_reply(&f.sig.output).manifest_kind().cloned();
-        // iamacoffeepot/aether#4811: the harvest is cfg-blind, so a gated handler
-        // in the runtime module is read here regardless. Carry its `#[cfg]`s onto
-        // the markers this identity emits so both halves strip together.
-        handler_kinds.push(HandlerMarker { kind, reply, cfgs: handler_cfgs(&f.attrs) });
+        handler_kinds.push((kind_ty, reply));
     }
 
     // A `NativeActor` impl with no `#[handler]`, no `#[fallback]`, and no

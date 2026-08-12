@@ -1,28 +1,10 @@
 use quote::quote;
 use syn::{Attribute, Expr, FnArg, GenericArgument, Meta, PathArguments, ReturnType, Signature, Type};
 
-/// The `#[cfg(...)]` attributes a handler method carries, cloned at collection
-/// time so every artifact the expansion derives from that handler can be gated
-/// the same way the method itself is (iamacoffeepot/aether#4811).
-///
-/// `syn` does not evaluate `cfg`, so a derived artifact that omits these is
-/// emitted unconditionally while the compiler strips the method and the kind
-/// type it names — the crate then fails to build in exactly the configuration
-/// the author gated the handler out of. `#[cfg_attr]` is deliberately not
-/// collected: it rewrites an item's attributes rather than deciding whether the
-/// item exists, so it has no bearing on which artifacts must survive.
-pub fn handler_cfgs(attrs: &[Attribute]) -> Vec<Attribute> {
-    attrs.iter().filter(|attr| attr.path().is_ident("cfg")).cloned().collect()
-}
-
 pub struct HandlerFn {
     pub method: syn::ImplItemFn,
     pub kind_ty: Type,
     pub agent_doc: Option<String>,
-    /// The handler method's `#[cfg]` attributes (see [`handler_cfgs`]), replayed
-    /// onto its dispatch arm, marker impl, manifest record, and retention
-    /// statics.
-    pub cfgs: Vec<Attribute>,
     /// ADR-0109: the handler's reply contract, classified from its
     /// return type. Drives the auto-emitted `ctx.reply` and the reply
     /// kind id on the inputs manifest record.
@@ -461,10 +443,6 @@ pub struct NativeActorHandlerFn {
     /// signature by inference, and the native reply manifest is the
     /// inventory `HandlerEntry`, not the wasm `ReplyContract` record.
     pub class: HandlerClass,
-    /// The handler method's `#[cfg]` attributes (see [`handler_cfgs`]), replayed
-    /// onto its dispatch arm, capability entry, measured-kind id, marker impl,
-    /// and inventory submission.
-    pub cfgs: Vec<Attribute>,
 }
 
 /// A `#[handler(task)]` completion handler (ADR-0093 §3). Its third
