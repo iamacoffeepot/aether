@@ -1032,33 +1032,42 @@ mod tests {
         assert_eq!(catalog_with_wall_clock(StageId::Verify, 900).validate(), Ok(()));
     }
 
-    // A dispatch carries the limit its *own* stage authored — never a default
-    // and never a sibling's. The catalog is the authority, so an operator who
-    // shortens one lane must see that lane's dispatch shorten while every other
-    // stage keeps its compiled calibration; a constructor that reached for a
-    // bloom-wide or hard-coded value would pass every other assertion here.
+    // Every dispatch constructor copies the limit off the binding it was handed
+    // — never a default, never a hard-coded one. An operator who shortens one
+    // lane in an authored catalog must see that lane's dispatch shorten while
+    // every other stage keeps its compiled calibration; a constructor that
+    // reached for a whole-bloom or hard-coded value would pass every other
+    // assertion in this module.
     #[test]
-    fn a_dispatch_carries_its_own_stages_authored_wall_clock_limit() {
-        let catalog = catalog_with_wall_clock(StageId::Verify, 900);
+    fn every_dispatch_constructor_copies_the_limit_off_the_binding_it_was_handed() {
+        let mut shortened = binding(StageId::Verify);
+        shortened.wall_clock_secs = 900;
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
+        let base = Digest::from_bytes([3; 32]);
 
-        let verify = Transformation::for_member_stage(catalog.binding(StageId::Verify).unwrap(), subject, checkout);
-        let construct =
-            Transformation::for_member_stage(catalog.binding(StageId::Construct).unwrap(), subject, checkout);
-        let aggregate_verify =
-            Transformation::for_aggregate_verify(catalog.binding(StageId::AggregateVerify).unwrap(), subject, checkout);
-        let aggregate_review = Transformation::for_aggregate_review(
-            catalog.binding(StageId::AggregateReview).unwrap(),
-            subject,
-            checkout,
-            Digest::from_bytes([3; 32]),
+        assert_eq!(
+            Transformation::for_member_stage(&shortened, subject, checkout).limits.wall_clock_secs,
+            900,
+            "the re-authored binding's limit reaches the dispatch"
         );
-
-        assert_eq!(verify.limits.wall_clock_secs, 900, "the re-authored stage dispatches the authored limit");
-        assert_eq!(construct.limits.wall_clock_secs, 3_600, "an untouched sibling keeps the compiled calibration");
-        assert_eq!(aggregate_verify.limits.wall_clock_secs, 3_600);
-        assert_eq!(aggregate_review.limits.wall_clock_secs, 3_600);
+        assert_eq!(
+            Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout).limits.wall_clock_secs,
+            3_600,
+            "an untouched sibling keeps the compiled calibration"
+        );
+        assert_eq!(
+            Transformation::for_aggregate_verify(&binding(StageId::AggregateVerify), subject, checkout)
+                .limits
+                .wall_clock_secs,
+            3_600
+        );
+        assert_eq!(
+            Transformation::for_aggregate_review(&binding(StageId::AggregateReview), subject, checkout, base)
+                .limits
+                .wall_clock_secs,
+            3_600
+        );
     }
 
     // The checkout target is a separate axis from the evidence-binding subject:
