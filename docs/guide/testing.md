@@ -159,9 +159,21 @@ sealed. `LaneHarness::start_with_wall_clock` authors a catalog binding every
 stage at a few seconds and seals its address into the bloom, which is the only
 way in: the limit is deliberately sealed rather than ambient, so two blooms
 sealing the same catalog terminate identically and no coordinator-side override
-exists for a scenario to reach for. Past that deadline the run is cancelled and
-the attempt is recorded as an ordinary failure, so retry and wedge assertions
-read exactly as they do for a lane that failed outright.
+exists for a scenario to reach for. Past that deadline the run is cancelled, so
+the child process and its scratch worktree are reclaimed whatever stage was
+dispatched. For a member stage or `AggregateVerify` the attempt is then recorded
+as an ordinary failure, so retry and wedge assertions read exactly as they do for
+a lane that failed outright.
+
+`AggregateReview` is the carve-out: its expiry reclaims the run and reports the
+deferral, but records no verdict, and the order stays outstanding rather than
+being consumed. A critic that never answered produced no judgement of the fold,
+and the verdict that states exactly that — ADR-0176's `ExecutorFault` — arrives
+with issue #4738; the nearest available verdict would charge every member a
+repair lap for a critic that never ran. Until then a scenario about an
+aggregate-review lane that hangs can assert the cancellation, and only that: no
+timeout record, no admitted attempt, and no movement of the retry or wedge
+lifecycle follows from the deadline passing.
 
 A restart is part of that contract rather than an escape from it. The deadline is
 persisted beside the order, so a coordinator that stops and reopens reads back

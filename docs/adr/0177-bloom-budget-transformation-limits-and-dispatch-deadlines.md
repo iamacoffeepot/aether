@@ -1,6 +1,6 @@
 # ADR-0177: Bloom budget, transformation limits, and dispatch deadlines
 
-- **Status:** Accepted
+- **Status:** Proposed
 - **Date:** 2026-08-10
 
 ## Context
