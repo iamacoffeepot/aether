@@ -41,13 +41,15 @@ fn shell() -> SourceShell {
 // admitted.
 fn enqueue_release(store: &mut SqliteStore, target: &OrphanClaimRelease) -> u64 {
     let payload = OrphanClaimReleasePayload { request: target.request(), target: target.clone() };
-    store.enqueue_topic(Topic::OrphanClaimRelease, &to_vec(&payload).unwrap()).unwrap()
+    store
+        .enqueue_topic(Topic::OrphanClaimRelease, &to_vec(&payload).expect("the payload encodes"))
+        .expect("the enqueue lands")
 }
 
 // The completion an admit carries, so a test asserts the journaled terminal
 // rather than the opaque bytes.
 fn admitted_completion(admit: &aether_bloomery::Admit) -> (Digest, OrphanClaimReleaseCompletion) {
-    let event: Event = from_bytes(&admit.event).unwrap();
+    let event: Event = from_bytes(&admit.event).expect("the admit carries an event");
     match event.fact {
         Fact::CompleteOrphanClaimRelease { request, completion } => (request, completion),
         other => panic!("expected a release completion, got {other:?}"),
@@ -55,7 +57,12 @@ fn admitted_completion(admit: &aether_bloomery::Admit) -> (Digest, OrphanClaimRe
 }
 
 fn holder_of(source: &SourceShell, ref_kind: &ClaimRefKind) -> Option<ClaimHolder> {
-    source.enumerate_claims().unwrap().into_iter().find(|state| state.ref_kind == *ref_kind).map(|state| state.holder)
+    source
+        .enumerate_claims()
+        .expect("the enumeration succeeds")
+        .into_iter()
+        .find(|state| state.ref_kind == *ref_kind)
+        .map(|state| state.holder)
 }
 
 #[test]
@@ -68,14 +75,14 @@ fn an_orphaned_ref_is_released_and_its_completion_admitted() {
     let source = shell();
     let orphan = bloom(7);
     let admission = ClaimRefKind::MainlineAdmission;
-    assert_eq!(source.claim_seal(&orphan, &[]).unwrap(), ClaimOutcome::Acquired);
+    assert_eq!(source.claim_seal(&orphan, &[]).expect("the acquire succeeds"), ClaimOutcome::Acquired);
     assert_eq!(holder_of(&source, &admission), Some(ClaimHolder::Held(orphan)), "the orphan holds the admission ref");
 
-    let mut store = SqliteStore::open(":memory:").unwrap();
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
     let target = OrphanClaimRelease { ref_kind: admission.clone(), expected_holder: orphan };
     enqueue_release(&mut store, &target);
 
-    let (admits, ack_through) = drain_and_release(&mut store, &source).unwrap();
+    let (admits, ack_through) = drain_and_release(&mut store, &source).expect("the drain succeeds");
 
     assert_eq!(admits.len(), 1, "one authorized release admits one completion");
     assert_eq!(admitted_completion(&admits[0]), (target.request(), OrphanClaimReleaseCompletion::Released));
@@ -94,13 +101,13 @@ fn a_ref_a_live_holder_owns_is_spared_and_completes_as_changed() {
     let (authorized, live) = (bloom(7), bloom(9));
     let held = workpiece("wp-live");
     let ref_kind = ClaimRefKind::Workpiece(held.clone());
-    assert_eq!(source.claim_seal(&live, &[held]).unwrap(), ClaimOutcome::Acquired);
+    assert_eq!(source.claim_seal(&live, &[held]).expect("the acquire succeeds"), ClaimOutcome::Acquired);
 
-    let mut store = SqliteStore::open(":memory:").unwrap();
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
     let target = OrphanClaimRelease { ref_kind: ref_kind.clone(), expected_holder: authorized };
     enqueue_release(&mut store, &target);
 
-    let (admits, _) = drain_and_release(&mut store, &source).unwrap();
+    let (admits, _) = drain_and_release(&mut store, &source).expect("the drain succeeds");
 
     assert_eq!(
         admitted_completion(&admits[0]),
@@ -118,12 +125,12 @@ fn a_release_whose_ref_is_already_gone_completes_idempotently() {
     // leave the same authorized request permanently uncompletable — the exact
     // shape of unrecoverable state this work exists to retire.
     let source = shell();
-    let mut store = SqliteStore::open(":memory:").unwrap();
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
     let target =
         OrphanClaimRelease { ref_kind: ClaimRefKind::Workpiece(workpiece("wp-gone")), expected_holder: bloom(7) };
     enqueue_release(&mut store, &target);
 
-    let (admits, ack_through) = drain_and_release(&mut store, &source).unwrap();
+    let (admits, ack_through) = drain_and_release(&mut store, &source).expect("the drain succeeds");
 
     assert_eq!(admitted_completion(&admits[0]), (target.request(), OrphanClaimReleaseCompletion::AlreadyAbsent));
     assert!(ack_through.is_some(), "an absent ref is a terminal success, not a redrive");

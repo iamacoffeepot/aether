@@ -43,5 +43,4 @@ impl ClaimReleaseReactorCapability {
 mod runtime;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests;
