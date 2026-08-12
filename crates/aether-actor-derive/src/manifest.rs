@@ -53,7 +53,7 @@ struct RecordTerms {
 
 /// Wrap a raw length expression and copy block in the statement forms
 /// [`RecordTerms`] carries, gated by `cfgs`.
-fn record_terms(cfgs: &[syn::Attribute], len_expr: &TokenStream2, copy_block: TokenStream2) -> RecordTerms {
+fn record_terms(cfgs: &[syn::Attribute], len_expr: &TokenStream2, copy_block: &TokenStream2) -> RecordTerms {
     RecordTerms {
         len_stmt: quote! {
             #(#cfgs)*
@@ -116,7 +116,7 @@ fn handler_record_terms(h: &HandlerFn, section_version: &TokenStream2) -> Record
             )
         },
     );
-    record_terms(&h.cfgs, &quote! { (1 + #record_len) }, copy_block)
+    record_terms(&h.cfgs, &quote! { (1 + #record_len) }, &copy_block)
 }
 
 /// ADR-0169: the `&'static [u8]` manifest bytes for a handler set's own
@@ -173,7 +173,7 @@ pub fn build_inputs_manifest_consts(
 
     // The fallback, component-doc, and config records belong to the actor rather
     // than to any one handler, so they carry no `#[cfg]` of their own.
-    let mut push_ungated = |len_expr: &TokenStream2, copy_block: TokenStream2| {
+    let mut push_ungated = |len_expr: &TokenStream2, copy_block: &TokenStream2| {
         let terms = record_terms(&[], len_expr, copy_block);
         len_stmts.push(terms.len_stmt);
         copy_blocks.push(terms.copy_block);
@@ -186,7 +186,7 @@ pub fn build_inputs_manifest_consts(
         };
         push_ungated(
             &quote! { (1 + #record_len) },
-            emit_record_copy_block(
+            &emit_record_copy_block(
                 &section_version,
                 &record_len,
                 &quote! {
@@ -203,7 +203,7 @@ pub fn build_inputs_manifest_consts(
         };
         push_ungated(
             &quote! { (1 + #record_len) },
-            emit_record_copy_block(
+            &emit_record_copy_block(
                 &section_version,
                 &record_len,
                 &quote! {
@@ -227,7 +227,7 @@ pub fn build_inputs_manifest_consts(
         };
         push_ungated(
             &quote! { (1 + #record_len) },
-            emit_record_copy_block(
+            &emit_record_copy_block(
                 &section_version,
                 &record_len,
                 &quote! {
@@ -250,7 +250,7 @@ pub fn build_inputs_manifest_consts(
     if let Some((set, self_ty)) = handler_set {
         push_ungated(
             &quote! { <#self_ty as #set>::__AETHER_HANDLER_SET_MANIFEST.len() },
-            quote! {
+            &quote! {
                 {
                     const SET_BYTES: &'static [u8] = <#self_ty as #set>::__AETHER_HANDLER_SET_MANIFEST;
                     let mut index = 0;

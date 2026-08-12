@@ -49,7 +49,6 @@ struct Gated {
 
 pub struct CfgNativeCap;
 
-#[allow(dead_code)]
 struct CfgNativeCapState {
     seen: u32,
 }
@@ -92,4 +91,10 @@ fn main() {
     // The ungated handler keeps its marker; the gated one has none to name.
     fn handles<K: aether_data::Kind, A: aether_actor::HandlesKind<K>>() {}
     handles::<Always, CfgNativeCap>();
+
+    // The runtime impls that would construct the state are gated out by the
+    // absent `gated-native` feature, so name it here rather than suppressing the
+    // dead-code lint the fixture would otherwise trip.
+    let state = CfgNativeCapState { seen: 0 };
+    assert_eq!(state.seen, 0);
 }
