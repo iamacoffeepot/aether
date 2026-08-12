@@ -40,13 +40,15 @@ pub struct BloomGrade {
     pub bloom: BloomId,
     /// The bloom's sealed forecast — the promise the actuals are graded against.
     pub forecast: Forecast,
-    /// Actual total tokens, summed over every resolved study record (uncached
-    /// input + cache-write + cache-read + output; the cache-write TTL splits are
-    /// already summed in cache-write and are not re-added).
+    /// Actual total tokens, summed over every resolved study record that grades
+    /// its evidence's subject and belongs to this bloom (uncached input +
+    /// cache-write + cache-read + output; the cache-write TTL splits are already
+    /// summed in cache-write and are not re-added).
     pub actual_tokens: u64,
-    /// Actual worker time in whole seconds, summed over the study records' own
-    /// durations — not the bloom's elapsed wall-clock time, which concurrent
-    /// members make a different quantity.
+    /// Actual worker time in whole seconds, summed over the durations of the
+    /// study records that grade their evidence's subject and belong to this
+    /// bloom — not the bloom's elapsed wall-clock time, which concurrent members
+    /// make a different quantity.
     pub actual_worker_secs: u64,
     /// Actual retries — dispatches of an execution slot beyond its first,
     /// summed over the bloom's dispatch ledger (ADR-0180). A slot dispatched
@@ -97,8 +99,10 @@ pub struct StudyReport {
 /// `source` resolves a study evidence's `detail` digest to its [`StudyRecord`]
 /// bytes, returning `None` when the artifact is unavailable — an unresolvable
 /// record contributes no cost or time and cannot touch the retry axis, which is
-/// the dispatch ledger's. A bloom with no study evidence grades to zero cost and
-/// time; its retries are whatever it dispatched.
+/// the dispatch ledger's. A resolved record that does not grade its evidence's
+/// subject, or that names a different bloom, takes the same posture: it
+/// contributes no cost or time either. A bloom with no study evidence grades to
+/// zero cost and time; its retries are whatever it dispatched.
 #[must_use]
 pub fn grade(snapshot: &Snapshot, source: impl Fn(&Digest) -> Option<StudyRecord>) -> StudyReport {
     let blooms = snapshot
@@ -112,7 +116,16 @@ pub fn grade(snapshot: &Snapshot, source: impl Fn(&Digest) -> Option<StudyRecord
                 if evidence.kind != EvidenceKind::StudyRecord {
                     continue;
                 }
-                if let Some(study) = source(&evidence.detail) {
+                // A resolved record that does not grade this evidence's subject, or
+                // that names a different bloom, is skipped rather than summed:
+                // ADR-0151's pure read has no refusal channel to reject a mismatched
+                // artifact, and ADR-0180 already spends an unreadable record's cost
+                // and time columns and nothing else, so an unbound record takes the
+                // same posture as an unresolvable one.
+                if let Some(study) = source(&evidence.detail)
+                    && study.grades(&evidence.subject)
+                    && study.bloom == *id
+                {
                     let cost = &study.cost;
                     actual_tokens = actual_tokens
                         .saturating_add(cost.input_tokens)

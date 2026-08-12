@@ -21,10 +21,10 @@ use aether_bloomery::{
 };
 use common::{digest, draft, event, membership, step, workpiece};
 
-/// A study record carrying the graded cost columns (the `bloom` / `subject`
-/// fields are immaterial to the grade — it reads only `cost`).
-fn study(cost: StudyCost) -> StudyRecord {
-    StudyRecord { bloom: BloomId(digest(0)), subject: digest(0), cost }
+/// A study record carrying the graded cost columns, bound to the given bloom
+/// and subject.
+fn study(bloom: BloomId, subject: Digest, cost: StudyCost) -> StudyRecord {
+    StudyRecord { bloom, subject, cost }
 }
 
 /// A cost with the token columns and duration the grade sums; the cache-write
@@ -94,8 +94,8 @@ fn independent_members_and_stages_are_not_retries() {
     );
 
     let mut records = BTreeMap::new();
-    records.insert(digest(80), study(cost(100, 50, 200, 30, 1500))); // 380 tokens, 1500 ms
-    records.insert(digest(81), study(cost(200, 0, 100, 20, 800))); //   320 tokens,  800 ms
+    records.insert(digest(80), study(bloom, digest(70), cost(100, 50, 200, 30, 1500))); // 380 tokens, 1500 ms
+    records.insert(digest(81), study(bloom, digest(71), cost(200, 0, 100, 20, 800))); //   320 tokens,  800 ms
 
     let mut snapshot = snapshot;
     for (member, index) in [("wp-a", 0u8), ("wp-b", 1u8)] {
@@ -132,6 +132,48 @@ fn a_re_dispatched_stage_grades_exactly_one_retry() {
     let graded = grade(&snapshot, |_: &Digest| None).blooms[0];
     assert_eq!(graded.actual_retries, 1, "one slot dispatched twice is one retry");
     assert_eq!(graded.retries_delta, 1, "1 actual over 0 predicted");
+}
+
+// ADR-0151 / ADR-0180 — a resolved study record that does not grade this
+// evidence's subject, or that names a different bloom, must contribute nothing:
+// the fold used to sum a record's cost as soon as `source` returned `Some`,
+// with no check that the resolved bytes were actually bound to the evidence
+// that named them. An artifact store keyed only by content digest can return
+// bytes for an unrelated attempt or an unrelated bloom under a colliding or
+// stale `detail` digest, and that must take the same zero-contribution posture
+// as an unresolvable record, not be silently summed in.
+//
+// Tripwire for the defect this closes: the two failure modes are pinned
+// separately (wrong `subject`, wrong `bloom`), each with a cost two orders of
+// magnitude past the honest record's, so either one leaking through the guard
+// is unmistakable in `actual_tokens` / `actual_worker_secs`.
+#[test]
+fn an_unbound_study_record_is_not_summed_into_the_grade() {
+    let (snapshot, bloom) = sealed_with(Forecast::default(), vec![membership("wp", 10)]);
+
+    let mut snapshot = snapshot;
+    for (subject, detail) in [(70u8, 80u8), (71, 81), (72, 82)] {
+        snapshot = step(&snapshot, &event(&format!("study-{detail}"), study_admitted(bloom, subject, detail))).0;
+    }
+
+    let mut records = BTreeMap::new();
+    // Honest: correct bloom, correct subject, a small cost.
+    records.insert(digest(80), study(bloom, digest(70), cost(100, 50, 200, 30, 1200)));
+    // Wrong subject: correct bloom, but bound to an unrelated attempt digest.
+    records.insert(digest(81), study(bloom, digest(200), cost(10_000, 10_000, 10_000, 10_000, 60_000)));
+    // Wrong bloom: correct subject, but bound to an unrelated bloom.
+    records.insert(digest(82), study(BloomId(digest(201)), digest(72), cost(10_000, 10_000, 10_000, 10_000, 60_000)));
+
+    let graded = grade(&snapshot, |d: &Digest| records.get(d).copied()).blooms[0];
+    assert_eq!(
+        graded.actual_tokens, 380,
+        "only the honest record's 380 tokens count; the subject- and bloom-mismatched records must not be summed"
+    );
+    assert_eq!(
+        graded.actual_worker_secs, 1,
+        "only the honest record's 1200ms counts; the unbound records' 60s each must not be summed"
+    );
+    assert_eq!(graded.actual_retries, 0, "the ledger's retry axis is untouched by the resolver's records");
 }
 
 // ADR-0180 — the retry axis is the ledger's, so a study artifact the resolver
