@@ -157,8 +157,9 @@ fn ui() {
     // artifact names a type that is not there, and the surviving records are
     // compared byte-for-byte against an ungated set declaring exactly the
     // handlers that outlive `#[cfg(test)]`, so over-stripping fails too. The
-    // bridge half is covered by the `handler_set::tests` unit tests — a native
-    // set's expansion names `aether_substrate` types in the trait it emits, and
-    // this crate carries no substrate dev-dependency.
+    // bridge is a native-set artifact, and its gate pair is asserted over the
+    // emitted tokens in `handler_set::tests` — a native set's expansion names
+    // `aether_substrate` types, and `aether-substrate` depends transitively on
+    // this crate, so the real types cannot be reached from a fixture here.
     t.pass("tests/ui/accepts_cfg_gated_handler_set_wasm.rs");
 }

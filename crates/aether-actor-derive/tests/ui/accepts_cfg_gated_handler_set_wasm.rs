@@ -4,8 +4,11 @@
 //!
 //! A wasm set emits two artifact families — the dispatch chain's arms and the
 //! `aether.kinds.inputs` manifest records — and no marker bridge, so this
-//! fixture carries the replay half of the contract and
-//! `accepts_cfg_gated_handler_set_native.rs` carries the bridge half.
+//! fixture covers the whole of what a wasm set produces. The bridge belongs to
+//! native sets, and its gate pair is asserted over the emitted tokens in
+//! `handler_set::tests`: a native set's expansion names `aether_substrate`
+//! types, and `aether-substrate` depends transitively on the crate under test,
+//! so the real types cannot be reached from a fixture here.
 //!
 //! trybuild compiles a fixture as a plain binary, so `test` is off here:
 //! `on_test_only` is stripped and `on_not_test` survives. Both directions are
@@ -25,6 +28,12 @@
 //! the way they were before ADR-0183. The dispatch arms ride the same collected
 //! attribute list as the records, so pinning the records pins which handlers the
 //! set believes it owns.
+//!
+//! **Stripped to nothing.** `AllStripped` is a set whose only handler is gated
+//! off here — the empty end of the range, newly reachable now that a set's
+//! `#[cfg]`s survive collection. Its manifest writer runs with every one of its
+//! length and copy statements removed, and the assertion below pins the result
+//! at no records rather than one empty one.
 
 use aether_actor::{actor, handler_set};
 
@@ -125,6 +134,21 @@ trait Surviving {
     }
 }
 
+/// Every handler gated off in this configuration. Nothing survives to compare
+/// against a reference, so what this set pins is the degenerate case: a set can
+/// still be declared, adopted, and asked for its manifest when the answer is
+/// nothing at all.
+#[handler_set]
+trait AllStripped {
+    fn seen(&mut self) -> &mut u32;
+
+    #[handler::single]
+    #[cfg(test)]
+    fn on_test_only(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, test_only: TestOnly) {
+        *self.seen() += test_only.seq;
+    }
+}
+
 struct Adopter {
     seen: u32,
 }
@@ -140,6 +164,16 @@ struct Reference {
 }
 
 impl Surviving for Reference {
+    fn seen(&mut self) -> &mut u32 {
+        &mut self.seen
+    }
+}
+
+struct Stripped {
+    seen: u32,
+}
+
+impl AllStripped for Stripped {
     fn seen(&mut self) -> &mut u32 {
         &mut self.seen
     }
@@ -179,7 +213,18 @@ const _: () = assert!(same_bytes(
     <Reference as Surviving>::__AETHER_HANDLER_SET_MANIFEST,
 ));
 
+// The boundary the comparison above cannot express: a set with nothing left
+// carries no records, not one empty record and not the record of the handler it
+// was told to strip.
+const _: () = assert!(<Stripped as AllStripped>::__AETHER_HANDLER_SET_MANIFEST.is_empty());
+
 fn main() {
-    let reference = Reference { seen: 0 };
-    assert_eq!(reference.seen, 0);
+    // Both witness types exist to name their set's manifest in the assertions
+    // above, which are compile-time and hold whether or not either is ever
+    // built. Constructing them is what puts each set's required accessor — the
+    // method its handler bodies reach through — into the compile as well.
+    let mut reference = Reference { seen: 0 };
+    let mut stripped = Stripped { seen: 0 };
+    *reference.seen() += 1;
+    *stripped.seen() += 1;
 }

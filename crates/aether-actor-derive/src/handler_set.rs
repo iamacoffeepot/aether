@@ -41,8 +41,10 @@
 //! trips `macro_expanded_macro_exports_accessed_by_absolute_paths` (rust-lang
 //! issue 52234), while the unqualified form resolves through the crate-root
 //! macro prelude and is order-independent, so an adopter above the set's own
-//! `mod` line still sees it. And a `macro_rules!` pastes paths at the use site,
-//! so a native set's kind types need spellings that resolve from every adopter.
+//! `mod` line still sees it. That holds for every macro this module exports, the
+//! gates below included, and it is also what bounds their reach to the defining
+//! crate. And a `macro_rules!` pastes paths at the use site, so a native set's
+//! kind types need spellings that resolve from every adopter.
 //!
 //! A wasm set emits no bridge. Its adopters — the widget family — address each
 //! other by name through `RelativeMailbox::send<K: Kind>`, which carries no
@@ -73,9 +75,6 @@
 //! pair and the count stays linear in gated handlers. A handler with no `#[cfg]`
 //! gets no gate and its tokens stay inline, so an unchanged set expands to
 //! exactly what it expanded to before.
-//!
-//! The gate is invoked unqualified for the same rust-lang issue 52234 reason the
-//! bridge is, so it inherits the bridge's same-crate-only reach.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
@@ -451,7 +450,7 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
 
     let markers = handlers.iter().zip(&gate_idents).map(|(h, gate)| {
         let kind_ty = &h.kind_ty;
-        gated(gate.as_ref(), quote! { impl ::aether_actor::HandlesKind<#kind_ty> for $ty {} })
+        wrap_in_gate(gate.as_ref(), quote! { impl ::aether_actor::HandlesKind<#kind_ty> for $ty {} })
     });
     let inventory = handlers.iter().zip(&gate_idents).map(|(h, gate)| {
         let kind_ty = &h.kind_ty;
@@ -460,7 +459,7 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
         } else {
             quote! { ::core::option::Option::None }
         };
-        gated(
+        wrap_in_gate(
             gate.as_ref(),
             quote! {
                 #[cfg(not(target_family = "wasm"))]
@@ -490,9 +489,9 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
 }
 
 /// Wrap one bridge item in its handler's gate invocation, or leave it inline
-/// when the handler carries no `#[cfg]`. The invocation is unqualified for the
-/// same rust-lang issue 52234 reason the bridge's own is.
-fn gated(gate: Option<&syn::Ident>, tokens: TokenStream2) -> TokenStream2 {
+/// when the handler carries no `#[cfg]`. The invocation is unqualified, like
+/// every other one this module emits (see the module header).
+fn wrap_in_gate(gate: Option<&syn::Ident>, tokens: TokenStream2) -> TokenStream2 {
     match gate {
         Some(gate_ident) => quote! { #gate_ident! { #tokens } },
         None => tokens,
@@ -575,11 +574,12 @@ mod tests {
 
     use super::expand_handler_set;
 
-    /// The bridge half of ADR-0183 is the one artifact family no trybuild
-    /// fixture in this crate can reach: a native set's expansion names
-    /// `aether_substrate` types in the trait it emits, and a proc-macro crate
-    /// carries no substrate dev-dependency. These read the emitted tokens
-    /// instead, which is where the gate decision is actually made.
+    /// The bridge half of ADR-0183 is the one artifact family this crate's
+    /// trybuild fixtures do not cover: a native set's expansion names
+    /// `aether_substrate` types in the trait it emits, and `aether-substrate`
+    /// depends on `aether-actor`, which depends on this crate — so the real
+    /// types cannot be brought in here at any dependency level. These read the
+    /// emitted tokens instead, which is where the gate decision is made.
     fn native_set(handlers: &proc_macro2::TokenStream) -> String {
         expand_handler_set(syn::parse_quote! {
             trait Set {
@@ -600,12 +600,33 @@ mod tests {
         }
     }
 
-    /// Tripwire: a gated handler's marker and inventory row reach an adopter
-    /// only through a gate pair whose two arms are the handler's predicate and
-    /// its exact negation. Losing the negative arm is the silent failure — the
-    /// gate would be undefined in the stripping configuration rather than
-    /// expanding to nothing — and losing the wrapper puts the decision back in
-    /// the adopter's crate, which is the routing hole ADR-0183 exists to close.
+    /// One arm of a gate pair as the expansion spells it, from the `#[cfg]`
+    /// through to the transcriber. Asserting an arm whole is the point: a
+    /// predicate and a transcriber checked as two independent substrings both
+    /// still appear when the two transcribers are swapped, and a gate that
+    /// passes its tokens through exactly when the handler is stripped is the
+    /// routing hole ADR-0183 exists to close — an adopter would gain a
+    /// `HandlesKind` marker for a kind the set's dispatch chain answers
+    /// `DISPATCH_UNKNOWN_KIND` for, so the send compiles and the mail is
+    /// dropped at run time.
+    fn gate_arm(index: usize, predicate: &str, transcriber: &str) -> String {
+        format!(
+            "# [cfg ({predicate})] # [macro_export] # [doc (hidden)] \
+             macro_rules ! __aether_handler_set_gate_Set_{index} \
+             {{ ($ ($ __aether_gated : tt) *) => {transcriber} ; }}"
+        )
+    }
+
+    /// The transcriber that hands a gated handler's tokens on to the adopter.
+    const PASS_THROUGH: &str = "{ $ ($ __aether_gated) * }";
+    /// The transcriber that drops them.
+    const SWALLOW: &str = "{ }";
+
+    /// Tripwire: the gate arm that passes a gated handler's marker and
+    /// inventory row through to the adopter is the one carrying the handler's
+    /// own predicate, and the arm that swallows them is the one carrying its
+    /// exact negation. Bind either predicate to the other body and the marker
+    /// reaching an adopter stops agreeing with the dispatch arm beside it.
     #[test]
     fn a_gated_handler_reaches_the_bridge_through_a_resolved_gate_pair() {
         let expanded = native_set(&quote! {
@@ -616,13 +637,15 @@ mod tests {
             }
         });
 
+        let passes_through = gate_arm(0, r#"all (feature = "extra")"#, PASS_THROUGH);
         assert!(
-            expanded.contains(r#"# [cfg (all (feature = "extra"))]"#),
-            "the positive arm carries the handler's own predicate: {expanded}"
+            expanded.contains(&passes_through),
+            "the handler's own predicate guards the pass-through arm, contiguously:\n{passes_through}\nin: {expanded}"
         );
+        let swallows = gate_arm(0, r#"not (all (feature = "extra"))"#, SWALLOW);
         assert!(
-            expanded.contains(r#"# [cfg (not (all (feature = "extra")))]"#),
-            "the negative arm carries its exact negation: {expanded}"
+            expanded.contains(&swallows),
+            "and its exact negation guards the empty one:\n{swallows}\nin: {expanded}"
         );
         assert!(
             expanded.contains("__aether_handler_set_gate_Set_0 ! { impl :: aether_actor :: HandlesKind < Gated >"),
@@ -634,10 +657,11 @@ mod tests {
         );
     }
 
-    /// Tripwire: several `#[cfg]`s on one handler conjoin, and the negative arm
-    /// negates the whole conjunction rather than one term. A per-term negation
-    /// would emit both arms in a configuration satisfying only some predicates,
-    /// duplicating the marker.
+    /// Tripwire: several `#[cfg]`s on one handler conjoin into one predicate,
+    /// and the negation covers that whole conjunction. Negating term by term
+    /// instead leaves configurations that satisfy some predicates and not
+    /// others matching neither arm, and a gate with neither arm defined is a
+    /// bridge invocation naming a macro that does not exist.
     #[test]
     fn several_cfgs_on_one_handler_conjoin_before_they_are_negated() {
         let expanded = native_set(&quote! {
@@ -649,14 +673,13 @@ mod tests {
             }
         });
 
+        let passes_through = gate_arm(0, r#"all (unix , feature = "extra")"#, PASS_THROUGH);
         assert!(
-            expanded.contains(r#"# [cfg (all (unix , feature = "extra"))]"#),
-            "the predicates conjoin in declaration order: {expanded}"
+            expanded.contains(&passes_through),
+            "the predicates conjoin in declaration order:\n{passes_through}\nin: {expanded}"
         );
-        assert!(
-            expanded.contains(r#"# [cfg (not (all (unix , feature = "extra")))]"#),
-            "and the negation covers the conjunction: {expanded}"
-        );
+        let swallows = gate_arm(0, r#"not (all (unix , feature = "extra"))"#, SWALLOW);
+        assert!(expanded.contains(&swallows), "and the negation covers the conjunction:\n{swallows}\nin: {expanded}");
     }
 
     /// Tripwire: a set with no gated handler emits no gate and no invocation, so
