@@ -7,15 +7,18 @@
 //! trusting a smaller set (a dropped signer would read as "not authorized" — a
 //! silent security downgrade). The single `#[handler::single] on_verify`
 //! delegates to the inherent [`verify`](SigningCapabilityState::verify), which
-//! decodes the wire `Statement` and runs the pure
+//! decodes the wire `Statement` and the caller-supplied authority, then runs the
+//! pure
 //! [`Statement::verify_authority`](aether_bloomery::Statement::verify_authority)
 //! against the provider — so the "only author signatures verify" rule stays in
-//! core and the test drives the exact method the handler does.
+//! core and the test drives the exact method the handler does. The authority the
+//! caller supplies is what the signature must be bound to (ADR-0182); this
+//! capability never derives one from the statement it was handed.
 
 use std::collections::BTreeMap;
 
 use aether_actor::runtime;
-use aether_bloomery::{Ed25519KeyProvider, KeyId, Statement};
+use aether_bloomery::{AuthorityDoor, Digest, Ed25519KeyProvider, KeyId, Statement};
 use aether_data::wire::from_bytes;
 use ed25519_dalek::VerifyingKey;
 
@@ -39,19 +42,30 @@ impl SigningCapabilityState {
         Self { provider }
     }
 
-    /// Decode the wire-encoded [`Statement`] and verify its author signature
-    /// against the allowlist. A statement that does not decode is a
-    /// [`VerifyResult::Err`]; a well-formed one that does not verify (non-author
-    /// provenance, unknown / mismatched / malformed signature) is
+    /// Decode the wire-encoded [`Statement`] and the caller-supplied
+    /// `(AuthorityDoor, Digest)` authority, and verify the author signature
+    /// against the allowlist as authority for exactly that door and binding
+    /// (ADR-0182).
+    ///
+    /// Either side failing to decode is a [`VerifyResult::Err`] — an
+    /// undecodable authority answers exactly as an undecodable statement does,
+    /// because in both cases there is no request to check the signature against.
+    /// A well-formed request that does not verify (non-author provenance,
+    /// unknown / mismatched / malformed signature, or a genuine signature
+    /// presented under a door or binding it was not signed for) is
     /// `Ok { verified: false }` — the fail-closed answer the gate turns into a
     /// `400`.
     #[must_use]
-    pub fn verify(&self, statement: &[u8]) -> VerifyResult {
+    pub fn verify(&self, statement: &[u8], authority: &[u8]) -> VerifyResult {
         let statement: Statement = match from_bytes(statement) {
             Ok(statement) => statement,
             Err(error) => return VerifyResult::Err { error: error.to_string() },
         };
-        VerifyResult::Ok { verified: statement.verify_authority(&self.provider) }
+        let (door, binding): (AuthorityDoor, Digest) = match from_bytes(authority) {
+            Ok(authority) => authority,
+            Err(error) => return VerifyResult::Err { error: error.to_string() },
+        };
+        VerifyResult::Ok { verified: statement.verify_authority(&self.provider, door, binding) }
     }
 }
 
@@ -140,6 +154,6 @@ impl NativeActor for SigningCapability {
     #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_verify(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Verify) -> VerifyResult {
-        state.verify(&mail.statement)
+        state.verify(&mail.statement, &mail.authority)
     }
 }

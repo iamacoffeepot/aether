@@ -1,6 +1,6 @@
 # ADR-0182: Signed authorizations bind their request
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-12
 
 ## Context
@@ -13,7 +13,7 @@ Every door that admits a signed statement therefore binds it to a request *struc
 - **Answer** (`reduce_adopt_answer`, `crates/aether-bloomery/src/reduce/evidence.rs`) signs the answer text and binds by `answer.parents` naming an open hold. It is sound only while every answer's text is unique across every open hold. Nothing enforces that: two parked questions answered `yes` produce identical signed bytes, so the first envelope re-parents onto the second hold and adopts it without the operator ever seeing the second question.
 - **Orphan-claim release** (ADR-0179, in flight as pull request #4814) signs the fixed constant `release orphan bloomery claim` and binds by `parents.contains(&self.request())`. Its signed bytes never vary, so one author-signed statement verifies forever and can be re-pointed at any `(ref_kind, expected_holder)` pair. The independent review on that pull request called this the most general instance of the replay class in the codebase: re-parenting a captured release statement defeats the reducer's parent binding entirely, and a single legitimate release authorization becomes a universal release token for that door.
 
-A fourth consumer of signed statements, the prompt-manifest closure walk (`ground_instruction`, `crates/aether-bloomery/src/manifest.rs`), is not a request door — it grounds an instruction slot rather than authorizing an act, and it already refuses to trust caller-declared parents, walking only `ProvenanceIndex::parents`. It is unaffected.
+A fourth consumer of signed statements, the prompt-manifest closure walk (`ground_instruction`, `crates/aether-bloomery/src/manifest.rs`), is not a request door — it grounds an instruction slot rather than authorizing an act, and it already refuses to trust caller-declared parents, walking only `ProvenanceIndex::parents`. Its binding is not at risk, but it does verify signatures, and it holds no request of its own to bind one against; the Decision below therefore has to say where it gets one.
 
 Two facts make the exposure durable rather than momentary. `Fact::AdoptAnswer` carries its `Statement` into the journal, `GET /journal` decodes and serves the whole journal, and ADR-0179 adds `Fact::RequestOrphanClaimRelease` carrying its authorization the same way — so a spent envelope is readable back out by anyone who can read the journal. And the reducer's live-holder refusal still stands in front of the release door, which narrows today's exposure to orphaned refs, the exact surface that door exists to operate on.
 
@@ -24,7 +24,7 @@ One property of the storage layer constrains every available answer. Journal rec
 The message an author signature covers stops being the words alone and becomes the digest of a typed authorization subject.
 
 ```rust
-pub enum AuthorityDoor { Approve, Answer, OrphanClaimRelease }
+pub enum AuthorityDoor { Approve, Answer, OrphanClaimRelease, Ground }
 
 struct Authorization<'a> {
     door: AuthorityDoor,
@@ -50,6 +50,8 @@ The `aether.signing.verify` mail (`crates/aether-chassis-bloomery/src/signing/ki
 - **Approve** binds to the member's `scope_revision`, which the seal path already holds at both the synchronous and deferred verification sites. The existing `words == subject.as_bytes()` precheck stays.
 - **Answer** binds to the adopted question's digest. `POST /blooms/{id}/answer` must therefore name the question it answers, because today the reducer discovers the question by scanning `parents` after verification has already happened. The route learns the question digest, binds the signature to it, and the reducer's hold scan is then a re-check of something the signature already fixed.
 - **Orphan-claim release** binds to `OrphanClaimRelease::request()`, recomputed by the host from the typed target in the request body rather than read from the envelope.
+
+The prompt-manifest closure walk gets its binding a different way, because it has no request to derive one from. `ProvenanceIndex` grows `authority_binding(&Digest) -> Option<(AuthorityDoor, Digest)>`: the host records what a statement was verified against when it admitted the statement, and the walk recovers that record and re-runs the same cryptographic check with it under the `Ground` door. A statement the index cannot answer for leaves the node ungrounded, so the walk stays fail-closed and its check keeps its cryptographic character rather than degrading to a structural one. Inventing a binding for it would have been worse than useless — the walk would verify a signature against a request the signer never agreed to.
 
 ## Migration
 

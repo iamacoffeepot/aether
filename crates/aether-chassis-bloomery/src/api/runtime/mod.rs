@@ -28,7 +28,7 @@
 //! timeout. Neither needs machinery in this cap.
 //!
 //! Three routes are genuinely **multi-hop** and keep an explicit obligation,
-//! because their next hop is not the answer: `POST /blooms/{id}/answer` and
+//! because their next hop is not the answer: `POST /blooms/{id}/answer/{question}` and
 //! `POST /claims/releases` each verify a signature before they admit, and
 //! `POST /drafts/{id}/seal` joins N member verifications before admitting once
 //! (the ADR-0154 §2 scatter/gather exclusion). Their terminal `Admit` is
@@ -348,15 +348,19 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
-    /// `POST /blooms/{id}/answer` — adopt a signed answer to a parked question.
-    #[http::route(Post, "/blooms/{id}/answer")]
+    /// `POST /blooms/{id}/answer/{question}` — adopt a signed answer to the
+    /// parked question `{question}` names. The question is a path segment
+    /// because the signature is bound to it (ADR-0182).
+    #[http::route(Post, "/blooms/{id}/answer/{question}")]
     fn on_answer(
         state: &mut ApiCapabilityState,
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         id: http::Path<String>,
+        question: http::Path<String>,
     ) -> http::Outcome {
         let id = id.0;
-        let routed = state.answer_bloom(&ctx, &id, &ctx.request().body);
+        let question = question.0;
+        let routed = state.answer_bloom(&ctx, &id, &question, &ctx.request().body);
         finish(state, ctx, routed)
     }
 

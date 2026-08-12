@@ -5,8 +5,8 @@
 
 use aether_actor::Manual;
 use aether_bloomery::{
-    Admit, AdmitResult, BloomId, BloomView, Event, Fact, IdempotencyKey, Outcome, Query, QueryResult, Statement,
-    ViewDocument, digest_of,
+    Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, Event, Fact, IdempotencyKey, Outcome, Query, QueryResult,
+    Statement, ViewDocument, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
@@ -17,7 +17,7 @@ use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed, VerifyPending, admit};
 use crate::api::dto::{GrantRequest, OutcomeView, ReleaseAcceptedView, SupersedeRequest};
 use crate::control::ControlCore;
-use crate::signing::{SigningCapability, Verify, VerifyResult};
+use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
 
 impl ApiCapabilityState {
     /// `POST /blooms/{id}/supersede` — seal the named successor draft and admit
@@ -79,8 +79,9 @@ impl ApiCapabilityState {
         })
     }
 
-    /// `POST /blooms/{id}/answer` — adopt an answer to a parked question,
-    /// releasing its hold and re-dispatching the held stage (ADR-0151).
+    /// `POST /blooms/{id}/answer/{question}` — adopt an answer to the parked
+    /// question `{question}` names, releasing its hold and re-dispatching the
+    /// held stage (ADR-0151).
     ///
     /// The body is the native author-signed answer statement. The route is the
     /// cryptographic trust gate: it dials the `aether.signing` capability to
@@ -92,15 +93,50 @@ impl ApiCapabilityState {
     /// answer admits `Fact::AdoptAnswer` and defers on the reducer outcome the
     /// same way seal / supersede do. Custody lives behind the port, so the fake
     /// always-valid provider no longer appears at the live gate.
-    pub(super) fn answer_bloom(&self, ctx: &NativeCtx<'_, Manual>, id: &str, body: &[u8]) -> Routed {
+    ///
+    /// The question rides the path rather than the body, matching ADR-0179's
+    /// `GET /claims/releases/{digest}` and keeping the body a bare `Statement`.
+    /// It is what the signature is bound to (ADR-0182): the reducer used to
+    /// discover the question by scanning `parents` *after* verification had
+    /// already happened, which left the answer door binding on a field outside
+    /// the signature — two questions answered with the same words shared signed
+    /// bytes, so the first envelope could be re-parented onto the second hold.
+    /// Naming it here gives the route a binding it derives from the request
+    /// instead of from the envelope.
+    ///
+    /// Naming it is not sufficient on its own, which is why the `parents` check
+    /// below is part of the gate rather than a nicety. `Fact::AdoptAnswer` has
+    /// no question field — the wire shape is frozen (ADR-0182 §Migration) — so
+    /// the reducer re-derives its target by scanning `parents` for an open hold.
+    /// A route that only *verified* against the path question would let the
+    /// submitter supply both halves of the equality: a genuine envelope signed
+    /// at `(Answer, Q1)` verifies when posted to `.../answer/{Q1}`, and its
+    /// unsigned `parents` — rewritten to `[Q2]` — is what the reducer then acts
+    /// on, releasing a hold nobody signed for. So the route refuses unless
+    /// `parents` is exactly the one question the path names, which is what makes
+    /// the path binding and the reducer's target provably the same digest.
+    /// Membership (`parents.contains(&question)`) would not do it: the reducer
+    /// takes the first parent that is an open hold in submitter order, so
+    /// `[Q2, Q1]` contains the path question and still releases `Q2`.
+    pub(super) fn answer_bloom(&self, ctx: &NativeCtx<'_, Manual>, id: &str, question: &str, body: &[u8]) -> Routed {
         let bloom = match digest_from_hex(id) {
             Some(digest) => BloomId(digest),
             None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
+        };
+        let Some(question) = digest_from_hex(question) else {
+            return Routed::Reply(error_response(400, "question is not a 32-byte hex digest"));
         };
         let answer: Statement = match serde_json::from_slice(body) {
             Ok(answer) => answer,
             Err(error) => return Routed::Reply(error_response(400, &format!("invalid answer statement: {error}"))),
         };
+        if answer.parents.as_slice() != [question] {
+            return Routed::Reply(error_response(
+                400,
+                "answer parents must name exactly the question the path names, and nothing else",
+            ));
+        }
+
         let statement = match to_vec(&answer) {
             Ok(bytes) => bytes,
             Err(error) => return Routed::Reply(error_response(500, &format!("answer encode failed: {error}"))),
@@ -109,7 +145,10 @@ impl ApiCapabilityState {
         // trip; it admits only if the signature verifies (`resolve_verify`).
         let key = format!("aether.bloomery.answer:{}", hex_encode(digest_of(&answer).as_bytes()));
         let event = Event { idempotency_key: IdempotencyKey(key), fact: Fact::AdoptAnswer { bloom, answer } };
-        let correlation = self.send_tracked(ctx.actor::<SigningCapability>(), &Verify { statement });
+        let correlation = self.send_tracked(
+            ctx.actor::<SigningCapability>(),
+            &Verify { statement, authority: authority_bytes(AuthorityDoor::Answer, question) },
+        );
         Routed::DeferredVerify { correlation, subject: "answer statement", event: Box::new(event) }
     }
 
