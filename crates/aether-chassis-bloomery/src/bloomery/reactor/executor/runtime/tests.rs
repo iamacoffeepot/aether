@@ -197,7 +197,11 @@ fn enqueue_dispatch_with_configs(
         bloom: bloom.0,
         workpiece: WorkpieceId(workpiece.to_owned()),
         stage,
-        transformation: Transformation::for_member_stage(stage, scope_revision, digest(0xC0)),
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(stage),
+            scope_revision,
+            digest(0xC0),
+        ),
         scope_revision,
         candidate: None,
         configs,
@@ -228,7 +232,12 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
     let payload = AggregateReviewPayload {
         profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: bloom.0,
-        transformation: Transformation::for_aggregate_review(digest(30), digest(40), digest(50)),
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(30),
+            digest(40),
+            digest(50),
+        ),
         pass: ReviewPass::Full,
     };
     // A queued review belongs to a live bloom; the drain reads its membership to
@@ -276,7 +285,12 @@ fn the_second_aggregate_roll_frames_a_delta_confirm_against_the_frozen_findings(
     let payload = AggregateReviewPayload {
         profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: bloom.0,
-        transformation: Transformation::for_aggregate_review(digest(30), digest(40), digest(50)),
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(30),
+            digest(40),
+            digest(50),
+        ),
         pass: ReviewPass::DeltaConfirm,
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
@@ -315,7 +329,12 @@ fn a_fresh_roll_one_aggregate_dispatch_clears_the_stale_frozen_row() {
     let payload = AggregateReviewPayload {
         profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: bloom.0,
-        transformation: Transformation::for_aggregate_review(digest(30), digest(40), digest(50)),
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(30),
+            digest(40),
+            digest(50),
+        ),
         pass: ReviewPass::Full,
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
@@ -449,7 +468,12 @@ fn drain_dispatches_the_review_lane_under_its_own_calibrated_profile() {
     let payload = AggregateReviewPayload {
         profile: StageCatalog::profile_of(StageId::AggregateReview),
         bloom: digest(1),
-        transformation: Transformation::for_aggregate_review(digest(30), digest(40), digest(50)),
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(30),
+            digest(40),
+            digest(50),
+        ),
         pass: ReviewPass::Full,
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
@@ -525,7 +549,8 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
 
     // A well-formed dispatch, then a subject-less one, then another well-formed one.
     let (first, _) = enqueue_construct_dispatch(&mut store, bloom, "wp-a", 5);
-    let mut subjectless = Transformation::for_member_stage(StageId::Construct, digest(9), digest(0xC0));
+    let mut subjectless =
+        Transformation::for_member_stage(&StageCatalog::binding_of(StageId::Construct), digest(9), digest(0xC0));
     subjectless.inputs.clear();
     let payload = DispatchPayload {
         profile: StageCatalog::profile_of(StageId::Construct),
@@ -861,7 +886,11 @@ fn drain_stamps_the_record_axes_from_the_payload() {
         bloom: bloom.0,
         workpiece: WorkpieceId("wp-cand".to_owned()),
         stage: StageId::Verify,
-        transformation: Transformation::for_member_stage(StageId::Verify, candidate_tree, digest(0xC0)),
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Verify),
+            candidate_tree,
+            digest(0xC0),
+        ),
         scope_revision: digest(5),
         candidate: Some(candidate_tree),
         configs: ConfigRegistry::default(),
@@ -1305,7 +1334,11 @@ fn a_local_only_boot_mounts_and_says_why_an_actions_lane_cannot_run() {
     )
     .expect("a local-only shell connects without GitHub");
     let order = WorkOrder {
-        transformation: Transformation::for_member_stage(StageId::Verify, digest(0xC0), digest(0xC0)),
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Verify),
+            digest(0xC0),
+            digest(0xC0),
+        ),
         nonce: Nonce("probe".to_owned()),
     };
     let refusal = shell.submit(&order).expect_err("a verify lane routes to Actions, which is unconfigured");
@@ -1323,7 +1356,11 @@ fn an_unconfigured_actions_refusal_is_permanent_so_the_drain_parks_it() {
     // implies progress while guaranteeing none.
     let refusal = UnconfiguredActionsBackend::new("GITHUB_TOKEN".to_owned())
         .submit(&WorkOrder {
-            transformation: Transformation::for_member_stage(StageId::Verify, digest(0xC0), digest(0xC0)),
+            transformation: Transformation::for_member_stage(
+                &StageCatalog::binding_of(StageId::Verify),
+                digest(0xC0),
+                digest(0xC0),
+            ),
             nonce: Nonce("probe".to_owned()),
         })
         .expect_err("the stub refuses every submit");

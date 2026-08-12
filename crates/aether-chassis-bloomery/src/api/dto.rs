@@ -3,7 +3,7 @@
 //!
 //! These are the wire contract an operator's `curl` speaks — plain serde
 //! structs over the `aether-bloomery` value types (`Workpiece`, `BloomDraft`,
-//! `Membership`, `Budget`, `Forecast`, `Digest`, and the reducer `Event` /
+//! `Membership`, `Forecast`, `Digest`, and the reducer `Event` /
 //! `Outcome` / projection `ViewDocument` / `BloomView`). The value types
 //! already derive serde, so the API layer serializes them directly; these
 //! structs are the request bodies and the small response envelopes that bundle
@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use aether_bloomery::{
-    Budget, ConfigRegistry, Digest, Event, Forecast, Membership, StageId, Statement, Workpiece, WorkpieceId,
+    ConfigRegistry, Digest, Event, Forecast, Membership, StageId, Statement, Workpiece, WorkpieceId,
 };
 
 use crate::bloomery::{AdrTouch, Completeness};
@@ -59,9 +59,6 @@ pub struct DraftPatch {
     /// Replace the base tree digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<Digest>,
-    /// Replace the budget.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub budget: Option<Budget>,
     /// Replace the forecast.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forecast: Option<Forecast>,

@@ -42,7 +42,7 @@ closed`.
 | `GET /workpieces` | List staged workpieces. |
 | `POST /drafts` | Open an empty draft; returns its handle (`draft_id`). |
 | `GET /drafts` · `GET /drafts/{id}` | List / read open drafts. |
-| `PATCH /drafts/{id}` | Replace the present fields of a draft (membership, base, configuration registry, budget, forecast). |
+| `PATCH /drafts/{id}` | Replace the present fields of a draft (membership, base, configuration registry, forecast). |
 | `POST /configs` | Canonically encode and durably store a configuration by kind; returns its content address. |
 | `POST /drafts/{id}/seal` | Run the approve gate over every proposal (the body carries one scope projection per member), freeze the draft to a `BloomSpec`, and admit `Fact::Seal`; returns the reducer outcome. |
 | `POST /blooms/{id}/supersede` | Seal the named successor draft and admit `Fact::Supersede` against the `{id}` predecessor. |
@@ -235,10 +235,10 @@ curl -s -X POST localhost:8910/blooms/<bloom-hex>/grant \
 ```
 
 `attempts` is how many more dispatched attempts the member may spend before it
-wedges again, bounded by the stage's own retry budget (and by the bloom's sealed
-`retry_cap` when it states one). A `Verify` grant resumes the member at `Refine`,
-since re-running the mechanical gate on an unchanged candidate cannot change its
-verdict.
+wedges again, bounded by the stage's own retry budget in the sealed stage
+catalog — the whole retry authority, with no second bloom-wide cap layered over
+it. A `Verify` grant resumes the member at `Refine`, since re-running the
+mechanical gate on an unchanged candidate cannot change its verdict.
 
 The sealed `base` is what divides the two verbs. A base that has not moved, with
 scope, membership, and configuration unchanged, is an execution decision — a

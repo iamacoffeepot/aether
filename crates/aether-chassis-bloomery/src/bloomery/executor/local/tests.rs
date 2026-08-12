@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
-    Conclusion, Digest, ExecutionStatus, ExecutorBackend, Harness, Nonce, ReasoningEffort, ResolvedModel, StageId,
-    StageVerdict, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle,
+    Conclusion, Digest, ExecutionStatus, ExecutorBackend, Harness, Nonce, ReasoningEffort, ResolvedModel, StageCatalog,
+    StageId, StageVerdict, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle,
 };
 use tempfile::TempDir;
 
@@ -50,7 +50,11 @@ fn executor(base: &TempDir, evidence: &str, lifecycle: RunLifecycle) -> LocalExe
 
 fn construct_order(subject: Digest, nonce: &str) -> aether_bloomery::WorkOrder {
     aether_bloomery::WorkOrder {
-        transformation: Transformation::for_member_stage(StageId::Construct, subject, digest(0xC0)),
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Construct),
+            subject,
+            digest(0xC0),
+        ),
         nonce: Nonce(nonce.to_owned()),
     }
 }
@@ -102,7 +106,11 @@ fn a_verify_status_field_drives_the_verdict() {
     );
 
     let order = aether_bloomery::WorkOrder {
-        transformation: Transformation::for_member_stage(StageId::Verify, subject, digest(0xC0)),
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Verify),
+            subject,
+            digest(0xC0),
+        ),
         nonce: Nonce("n-v".to_owned()),
     };
     let handle = exec.submit(&order).unwrap();
@@ -126,7 +134,11 @@ fn a_passing_verify_body_projects_the_empty_failure_set() {
     let evidence = r#"{"command":"verify.check","nonce":"n-pass","status":"pass"}"#;
     let exec = executor(&base, evidence, RunLifecycle::Exited { success: true });
     let order = aether_bloomery::WorkOrder {
-        transformation: Transformation::for_member_stage(StageId::Verify, digest(7), digest(0xC0)),
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Verify),
+            digest(7),
+            digest(0xC0),
+        ),
         nonce: Nonce("n-pass".to_owned()),
     };
 
@@ -144,7 +156,11 @@ fn a_malformed_body_failure_set_fails_closed() {
     let evidence = r#"{"command":"verify.check","nonce":"n-bad-set","status":"pass","failed_verifiers":["verify.test","verify.fmt"]}"#;
     let exec = executor(&base, evidence, RunLifecycle::Exited { success: true });
     let order = aether_bloomery::WorkOrder {
-        transformation: Transformation::for_member_stage(StageId::Verify, digest(7), digest(0xC0)),
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Verify),
+            digest(7),
+            digest(0xC0),
+        ),
         nonce: Nonce("n-bad-set".to_owned()),
     };
 
@@ -467,7 +483,12 @@ fn an_aggregate_review_spawn_names_the_range_a_member_spawn_does_not() {
         LocalExecutor::new(Arc::new(CapturingRunner { seen: Arc::clone(&seen) }), Arc::clone(&store) as _, base.path());
 
     let review = aether_bloomery::WorkOrder {
-        transformation: Transformation::for_aggregate_review(digest(5), digest(0xC0), digest(0xBA)),
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(5),
+            digest(0xC0),
+            digest(0xBA),
+        ),
         nonce: Nonce(test_nonce("aggregate")),
     };
     exec.submit(&review).unwrap();
@@ -496,7 +517,12 @@ fn an_unresolvable_diff_base_refuses_the_submit() {
     let exec = LocalExecutor::new(Arc::new(CapturingRunner { seen }), Arc::new(store), base.path());
 
     let review = aether_bloomery::WorkOrder {
-        transformation: Transformation::for_aggregate_review(digest(5), digest(0xC0), digest(0xBA)),
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(5),
+            digest(0xC0),
+            digest(0xBA),
+        ),
         nonce: Nonce(test_nonce("unseeded")),
     };
 
