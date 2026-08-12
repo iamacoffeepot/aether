@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 
 use super::MirrorReactorCapability;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
-use crate::bloomery::{GithubMirrorConfig, ProjectionShell, SourceShell};
+use crate::bloomery::{MirrorReactorSetup, ProjectionShell, SourceShell};
 use crate::store::{AckOutbox, AckOutboxResult, DrainOutbox, DrainOutboxResult, OutboxEntry, StoreCapability};
 
 /// The self-addressed wake the poll timer fires each interval; its handler
@@ -177,27 +177,15 @@ fn project_batch(projection: &ProjectionShell, entries: &[OutboxEntry]) -> Vec<A
     delivered.into_iter().map(|(topic, through_sequence)| AckOutbox { topic: Some(topic), through_sequence }).collect()
 }
 
-fn connect_mirror_shells(config: &GithubMirrorConfig) -> Result<(ProjectionShell, SourceShell), BootError> {
-    #[cfg(any(test, feature = "testing"))]
-    if config.uses_fixture() {
-        let fake = config.shared_fixture();
-        let projection = ProjectionShell::new(Arc::new(aether_bloomery_github::GithubProjection::new(fake)));
-        let source = config.fixture_source();
-        return Ok((projection, source));
-    }
-    let projection = ProjectionShell::connect(config).map_err(|e| BootError::Other(Box::new(e)))?;
-    let source = SourceShell::connect(config).map_err(|e| BootError::Other(Box::new(e)))?;
-    Ok((projection, source))
-}
-
 #[runtime]
 impl NativeActor for MirrorReactorCapability {
     type State = MirrorReactorState;
-    type Config = GithubMirrorConfig;
+    type Config = ();
+    type Params = MirrorReactorSetup;
 
     const NAMESPACE: &'static str = "aether.bloomery.mirror";
 
-    fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<MirrorReactorState, BootError> {
+    fn init((): (), config: MirrorReactorSetup, ctx: &mut NativeInitCtx<'_>) -> Result<MirrorReactorState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
 
@@ -205,9 +193,7 @@ impl NativeActor for MirrorReactorCapability {
         // and republishes once a token/owner/repo is supplied, unless the
         // `fake` backend is selected (#4732) which mounts with an in-memory
         // double and needs no token.
-        let configured =
-            config.uses_fixture() || !(config.token.is_empty() || config.owner.is_empty() || config.repo.is_empty());
-        if !configured {
+        let Some(projection) = config.projection else {
             tracing::info!(
                 target: "aether_chassis_bloomery::mirror",
                 "mirror reactor mounted disabled (unconfigured token/owner/repo); outbox will accumulate",
@@ -221,9 +207,9 @@ impl NativeActor for MirrorReactorCapability {
                 awaited_drains: 0,
                 outstanding: Arc::default(),
             });
-        }
+        };
 
-        let (projection, source) = connect_mirror_shells(&config)?;
+        let source = config.source.expect("enabled mirror setup carries its source shell");
         let interval = Duration::from_secs(config.poll_interval_secs.max(1));
         let timer = spawn_timer(
             Arc::clone(&mailer),
@@ -235,8 +221,7 @@ impl NativeActor for MirrorReactorCapability {
         );
         tracing::info!(
             target: "aether_chassis_bloomery::mirror",
-            owner = %config.owner,
-            repo = %config.repo,
+            repository = ?config.repository,
             poll_interval_secs = config.poll_interval_secs,
             "mirror reactor mounted; polling the store outbox for projection topics",
         );

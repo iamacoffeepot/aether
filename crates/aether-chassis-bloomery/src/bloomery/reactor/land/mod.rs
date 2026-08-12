@@ -6,10 +6,19 @@
 //! through the control core. The identity/runtime split follows ADR-0122 — this
 //! ZST is the addressing identity; the state-bearing logic is [`runtime`].
 
+use crate::bloomery::SourceShell;
 use aether_actor::actor;
 use aether_bloomery::Topic;
 
 pub use runtime::{LandReactorState, LandTick};
+
+pub struct LandReactorSetup {
+    pub source: Option<SourceShell>,
+    pub store_path: String,
+    pub poll_interval_secs: u64,
+    pub repository: Option<(String, String)>,
+    pub cas_land_enabled: bool,
+}
 
 /// Addressing identity for the land reactor capability.
 #[actor(singleton, root)]

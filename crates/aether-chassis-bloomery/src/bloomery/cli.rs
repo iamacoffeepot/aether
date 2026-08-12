@@ -9,7 +9,7 @@ use clap::Parser;
 
 use crate::artifacts::ArtifactsOverlay;
 use crate::bloomery::chassis::{HttpPortOverlay, RpcPortOverlay};
-use crate::bloomery::mirror::GithubMirrorOverlay;
+use crate::bloomery::{CoordinatorOverlay, GithubConnectionOverlay};
 use crate::session::SessionOverlay;
 use crate::signing::SigningOverlay;
 use crate::store::StoreOverlay;
@@ -39,13 +39,14 @@ pub struct BloomeryCli {
     pub artifacts: ArtifactsOverlay,
 
     /// `--github-*` shadow `AETHER_GITHUB_*` / `GITHUB_TOKEN` — the shared GitHub
-    /// connection knobs (token / owner / repo / api-base / cas-land-enabled) plus
-    /// the mirror poll cadence. One flag set serves both the mirror reactor
-    /// and the git source-port capability (`SourceOverlay` is a
-    /// re-export of `GithubMirrorOverlay`); unset → unconfigured, so the mirror
-    /// reactor mounts disabled.
+    /// adapter connection, Actions, App-auth, and fixture knobs. Unset means
+    /// unconfigured, so remote reactors mount disabled.
     #[command(flatten)]
-    pub github: GithubMirrorOverlay,
+    pub github: GithubConnectionOverlay,
+
+    /// Backend-neutral coordinator cadence, persistence, routing, process, and identity knobs.
+    #[command(flatten)]
+    pub coordinator: CoordinatorOverlay,
 
     /// `--session-db-path` / `--session-cache-ttl-cutoff-mins` /
     /// `--session-lease-ttl-mins` / `--session-context-cap-tokens` shadow the

@@ -19,8 +19,8 @@ use super::lane_program::LaneProgram;
 use super::process_runner::{CaptureIdentity, ProcessTransformRunner};
 use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
+use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::intake::NameEvidenceClaims;
-use crate::bloomery::mirror::GithubMirrorConfig;
 
 /// One tracked run: the spawned child, its scratch worktree, where its evidence
 /// lands, and the digest the returning evidence must bind to.
@@ -78,7 +78,7 @@ impl LocalExecutor {
     /// run executes under is not config — it rides each order as the resolved
     /// agent profile the host overlaid at dispatch (ADR-0149 §The line).
     #[must_use]
-    pub fn from_config(config: &GithubMirrorConfig, correspondence: SharedCorrespondence) -> Self {
+    pub fn from_config(config: &CoordinatorConfig, correspondence: SharedCorrespondence) -> Self {
         let identity = CaptureIdentity { name: config.operator_name.clone(), email: config.operator_email.clone() };
 
         Self::new(

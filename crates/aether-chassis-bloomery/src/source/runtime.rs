@@ -401,29 +401,19 @@ impl SourceCapabilityState {
     }
 }
 
-fn source_claims_enabled(config: &super::SourceConfig) -> bool {
-    #[cfg(any(test, feature = "testing"))]
-    if config.uses_fixture() {
-        return true;
-    }
-    !(config.token.is_empty() || config.owner.is_empty() || config.repo.is_empty())
-}
-fn connect_source_shell(config: &super::SourceConfig) -> Result<SourceShell, BootError> {
-    #[cfg(any(test, feature = "testing"))]
-    if config.uses_fixture() {
-        return Ok(config.fixture_source());
-    }
-    SourceShell::connect(config).map_err(|error| BootError::Other(Box::new(error)))
-}
-
 #[runtime]
 impl NativeActor for SourceCapability {
     type State = SourceCapabilityState;
-    type Config = super::SourceConfig;
+    type Config = ();
+    type Params = super::SourceSetup;
 
     const NAMESPACE: &'static str = "aether.source";
 
-    fn init(config: super::SourceConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<SourceCapabilityState, BootError> {
+    fn init(
+        (): (),
+        config: super::SourceSetup,
+        _ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<SourceCapabilityState, BootError> {
         // Same "unconfigured → disabled" predicate the mirror reactor mounts on
         // (`bloomery/reactor/mirror/runtime.rs`): with no token / owner / repo
         // there is no shared repository to hold claim refs in, so the claim
@@ -431,8 +421,8 @@ impl NativeActor for SourceCapability {
         // shell is still connected (it opens no network until driven) so a
         // later-configured bin needs no re-mount. Fixture backend (#4732) needs
         // no token and keeps claims enabled.
-        let claims_enabled = source_claims_enabled(&config);
-        let shell = connect_source_shell(&config)?;
+        let claims_enabled = config.claims_enabled;
+        let shell = config.shell;
         tracing::info!(
             target: "aether_chassis_bloomery::source",
             claims_enabled,

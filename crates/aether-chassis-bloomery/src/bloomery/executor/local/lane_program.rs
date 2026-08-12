@@ -17,12 +17,12 @@
 //! [`AETHER_HARNESS_FLEET_HEADLESS_BIN`] is the precedent for the *shape* — a
 //! harness pointing a real fork at a stand-in binary — but not for the
 //! mechanism: this resolves through the ADR-0090 derive-`Config` path
-//! ([`GithubMirrorConfig::local_lane_program`]) rather than a naked env read, so
+//! ([`CoordinatorConfig::local_lane_program`]) rather than a naked env read, so
 //! it is argv-overridable, appears in the coordinator's config surface, and
 //! needs no process-global mutation to set from a test.
 //!
 //! [`AETHER_HARNESS_FLEET_HEADLESS_BIN`]: https://docs.rs/aether-harness-fleet
-//! [`GithubMirrorConfig::local_lane_program`]: crate::bloomery::mirror::GithubMirrorConfig::local_lane_program
+//! [`CoordinatorConfig::local_lane_program`]: crate::bloomery::CoordinatorConfig::local_lane_program
 
 use std::process::Command;
 

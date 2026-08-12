@@ -5,6 +5,7 @@ pub use aether_substrate::Chassis;
 mod approve;
 mod chassis;
 mod cli;
+mod config;
 mod construct;
 mod driver;
 mod executor;
@@ -23,6 +24,7 @@ pub use approve::{
 };
 pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};
 pub use cli::BloomeryCli;
+pub use config::{CoordinatorConfig, CoordinatorOverlay, GithubConnectionConfig, GithubConnectionOverlay};
 pub use construct::{CONSTRUCT_IMPLEMENT_COMMAND, dispatch_model};
 pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
 pub use executor::{
@@ -35,12 +37,12 @@ pub use intake::{
     IntakeError, IntakeRefusal, NameEvidenceClaims, UploadedEvidence, admit_uploaded, attempt_artifact_name,
     dispatch_and_record, record_dispatch, run_intake_cycle,
 };
-pub use mirror::{GithubMirrorConfig, GithubMirrorOverlay, ProjectionShell};
+pub use mirror::ProjectionShell;
 pub use outbox::TopicOutbox;
 pub use reactor::{
-    DispatchTick, DrainTick, ExecutorReactorCapability, ExecutorReactorState, IntegrateReactorCapability,
-    IntegrateReactorState, IntegrateTick, LandReactorCapability, LandReactorState, LandTick, MirrorReactorCapability,
-    MirrorReactorState,
+    DispatchTick, DrainTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState,
+    IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, LandReactorCapability,
+    LandReactorSetup, LandReactorState, LandTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
 };
 pub use source::SourceShell;
 pub use study::{

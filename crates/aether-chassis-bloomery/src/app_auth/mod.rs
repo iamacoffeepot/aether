@@ -16,7 +16,7 @@
 //! The custody is an in-process [`AppTokenSource`] handle, not a per-request
 //! mail hop (a round-trip on every GitHub call would serialize the hot path):
 //! the port shells build their client from the source at boot
-//! ([`GithubMirrorConfig::connect_client`](crate::bloomery::GithubMirrorConfig::connect_client))
+//! ([`GithubConnectionConfig::connect_client`](crate::bloomery::GithubConnectionConfig::connect_client))
 //! and the source caches-and-refreshes behind them. An absent key fails that
 //! client construction fast (ADR-0150 — no silent fallback to an ambient
 //! secret), never over a mail boundary the key would have to cross.

@@ -7,11 +7,9 @@
 //! github-crate type (ADR-0149 §The boundary, the "no core module names a
 //! GitHub type" clause).
 //!
-//! The connection knobs — token, owner/name, API base, and the CAS-land enable
-//! flag — ride the same ADR-0090 derive-`Config`
-//! [`GithubMirrorConfig`] the mirror shell uses:
-//! that config already carries `cas_land_enabled` for exactly this port, so one
-//! GitHub-connection config serves both caps rather than duplicating the knobs.
+//! At the chassis edge, [`GithubConnectionConfig`] supplies the adapter values
+//! used to construct this shell. Consumers receive clones of the constructed
+//! shell rather than adapter configuration.
 //!
 //! This slice ships the shell and the demo that drives a synthetic bloom
 //! through it (see `tests/source_demo.rs`). Wiring the shell into the chassis
@@ -30,7 +28,7 @@ use aether_bloomery::{
 };
 use aether_bloomery_github::{GitObjectId, GitSource, GithubError, SourceError};
 
-use super::mirror::GithubMirrorConfig;
+use super::GithubConnectionConfig;
 
 /// The source cap shell: the git source backend behind an `Arc<dyn …>`, so no
 /// core module ever names the concrete github-crate type. A live (connected)
@@ -70,9 +68,8 @@ impl SourceShell {
     /// # Errors
     /// The underlying `reqwest` client or the correspondence store could not be
     /// constructed.
-    pub fn connect(config: &GithubMirrorConfig) -> Result<Self, GithubError> {
+    pub fn connect(config: &GithubConnectionConfig, correspondence: SharedCorrespondence) -> Result<Self, GithubError> {
         let client = config.connect_client()?;
-        let correspondence = config.connect_correspondence()?;
         let backend = Arc::new(GitSource::new(client, Arc::clone(&correspondence), config.cas_land_enabled));
         Ok(Self { backend, correspondence: Some(correspondence) })
     }

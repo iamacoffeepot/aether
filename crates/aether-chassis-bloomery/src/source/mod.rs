@@ -20,7 +20,7 @@ pub use kinds::*;
 #[cfg(feature = "runtime")]
 mod config;
 #[cfg(feature = "runtime")]
-pub use config::{SourceConfig, SourceOverlay};
+pub use config::SourceSetup;
 
 use aether_actor::actor;
 
