@@ -19,6 +19,19 @@ use crate::store::{OutstandingOrder, StoreBackend};
 /// the digest its evidence is about (what the observation *claims*), the
 /// verdict, and the supporting detail artifact. The broker checks the claimed
 /// `subject` against the digest the matched order displayed.
+///
+/// Also the shape a *synthesised* result takes (ADR-0177): an order that
+/// outlived its sealed execution limit produces no upload at all, so the
+/// executor reactor builds one over the order's own facts — the displayed digest
+/// as `subject`, a stored `TimeoutRecord`'s address as `detail` — and puts it
+/// through this same broker. Deliberately the same door: a timeout must clear
+/// the same nonce and displayed-digest checks a real upload does, spend the same
+/// consume-once order, and reach the same retry and wedge accounting rather than
+/// a parallel authority. Only *most* of the same door: an uploaded result for a
+/// stage with no executor-dispatch lifecycle is refused here as
+/// [`IntakeRefusal::OutOfLineStage`], but the synthesised side never gets that
+/// far, because the reactor has no timeout verdict to build one from for such a
+/// stage and leaves the order outstanding instead.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct UploadedEvidence {
     /// The nonce the upload claims to answer.
@@ -36,9 +49,11 @@ pub struct UploadedEvidence {
     /// reference like the candidate. Persisted keyed by the order's member on a
     /// failing review so a Refine re-entry is directed by it.
     pub findings: Option<String>,
-    /// The exact failed `verify.check` members (ADR-0178), decoded by the
-    /// executor backend and cross-checked against the artifact name before this
-    /// claim exists. Nonempty only for a failed member Verify.
+    /// The exact failed `verify.check` members (ADR-0178), decoded from the
+    /// artifact name's mask — the same value the backend projected onto the
+    /// port reference, which either composes that mask (local) or reads it
+    /// (Actions). Nonempty only for a failed member Verify — the invariant
+    /// `verifier_failure_refusal` below is what enforces that.
     pub failed_verifiers: VerifyFailureSet,
     /// What the attempt cost (#4679), authoritative from the port reference like
     /// the candidate. The study lane admits it against the same order — but

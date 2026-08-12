@@ -453,7 +453,26 @@ impl ExecutorBackend for LocalExecutor {
         let worktree_dir = {
             let mut runs = self.lock();
             let Some(run) = runs.get_mut(&handle.nonce.0) else {
-                return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
+                // Idempotent (ADR-0177): no tracked run means the order was
+                // never submitted to this backend or a prior cancel already
+                // evicted it, and both are the "already absent" success the port
+                // contract names. The deadline enforcement reissues its cancel
+                // until the expired order is admitted, so refusing here would
+                // make one store fault permanent.
+                //
+                // Absent here does not prove reclaimed, so say which it was in
+                // the log rather than only in the return value. Boot
+                // reconciliation (issue #4847) re-adopts a pre-restart order that
+                // left a footprint under the scratch root, so reaching this arm
+                // now means the order left none — nothing local to reclaim — or
+                // this process already tore its run down. The nonce is what an
+                // operator greps for if a checkout does turn out to be sitting
+                // somewhere this reconciliation could not see.
+                tracing::warn!(
+                    nonce = %handle.nonce.0,
+                    "local executor backend: cancel found no tracked run — nothing was killed or reclaimed here",
+                );
+                return Ok(());
             };
             run.process.kill()?;
             let worktree_dir = run.worktree_dir.clone();

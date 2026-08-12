@@ -114,6 +114,12 @@ pub struct EvidenceRef {
     /// local backend decodes this from the evidence body; the name-only Actions
     /// backend decodes the equivalent mask from the artifact name. Empty on a
     /// pass and on every non-Verify lane.
+    ///
+    /// On both transports this is the same value the reference's `name` carries
+    /// — the local backend composes that mask from what it reports here, the
+    /// Actions backend reads this out of that mask — so it is a second
+    /// rendering of the name channel, never an independent one. Intake reads
+    /// the set off the name and has nothing here to cross-check it against.
     pub failed_verifiers: VerifyFailureSet,
     /// What the attempt cost (#4679) — reported by a backend that reads the
     /// run's evidence bytes itself (the local executor, from the result
@@ -155,9 +161,18 @@ pub trait ExecutorBackend {
 
     /// Cancel the run the handle resolves to.
     ///
+    /// **Idempotent for a handle backed by an outstanding order** (ADR-0177):
+    /// success means the run is now cancelled, was already terminal, or is
+    /// already absent after a prior successful cancel. A nonce this backend
+    /// resolves no run for is therefore `Ok(())`, not an error — the deadline
+    /// enforcement leaves an expired order durable until its evidence is stored
+    /// and its result admitted, so the same cancel is reissued on the next tick
+    /// after any fault downstream of it, and a second one must not turn a
+    /// recoverable retry into a permanent refusal.
+    ///
     /// # Errors
-    /// Backend-defined — e.g. no run resolves for the nonce, or the cancel
-    /// surface is unreachable.
+    /// Backend-defined — a transport or backend fault, which stays retryable and
+    /// leaves the order live. "No run resolves for the nonce" is not one of them.
     fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error>;
 
     /// Stream the references to the evidence the run uploaded, filtered to the

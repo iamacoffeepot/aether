@@ -22,10 +22,12 @@ pub enum LocalExecutorError {
     /// The run's `evidence.json` could not be read (the run wrote none, or the
     /// read faulted).
     Evidence(String),
-    /// A `cancel` / `stream_evidence` resolved no tracked run for the nonce — the
-    /// order was never submitted to this backend, or was already consumed.
-    /// (`inspect` reports the same condition as the clean
-    /// [`ExecutionStatus::Unknown`](aether_bloomery::ExecutionStatus::Unknown).)
+    /// A `stream_evidence` resolved no tracked run for the nonce — the order was
+    /// never submitted to this backend, or was already consumed. (`inspect`
+    /// reports the same condition as the clean
+    /// [`ExecutionStatus::Unknown`](aether_bloomery::ExecutionStatus::Unknown),
+    /// and `cancel` as a clean success — it is idempotent per ADR-0177, so an
+    /// absent run is already cancelled.)
     NoRunForNonce(Nonce),
     /// The order's checkout digest resolved no real git object through the
     /// correspondence store (ADR-0150) — the sealed source was never materialized

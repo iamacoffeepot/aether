@@ -37,8 +37,8 @@ pub fn attempt_artifact_name(nonce: &Nonce, subject: &Digest, verdict: StageVerd
 
 /// The production [`EvidenceClaims`]: decode an attempt result from the pulled
 /// [`EvidenceRef`]'s **name** (the data channel a nonce-scoped GitHub artifact
-/// exposes without a byte fetch), pairing the name-encoded verdict + subject +
-/// detail with the reference's own nonce. A reference whose name is not a
+/// exposes without a byte fetch), pairing the name-encoded verdict + failure
+/// mask + subject + detail with the reference's own nonce. A reference whose name is not a
 /// well-formed attempt artifact is skipped (`None`) — the same seam a study
 /// artifact or a stray upload rides past. CI-verifiable against `FakeGithub`,
 /// whose `seed_run_artifacts` sets the artifact name this decodes.
@@ -71,13 +71,14 @@ impl EvidenceClaims for NameEvidenceClaims {
         let rest = reference.name.strip_prefix(ATTEMPT_ARTIFACT_PREFIX)?.strip_prefix('.')?;
         // verdict . failure_mask . subject_hex . detail_hex . <nonce…>; the
         // nonce may itself contain '.', so bound the split to the four leading
-        // fields. The executor-projected set must agree with the name token:
-        // local derives the former from bytes, while Actions derives both from
-        // the authenticated name channel.
+        // fields.
         let mut fields = rest.splitn(5, '.');
         let verdict = verdict_from_token(fields.next()?)?;
         let mask_or_subject = fields.next()?;
         let (failed_verifiers, subject, detail, _named_nonce) = if mask_or_subject.len() == 2 {
+            // A two-character token sits in the mask position, so it must be a
+            // canonical ADR-0178 mask; anything else is a malformed attempt
+            // name and buys no upload.
             (
                 VerifyFailureSet::from_mask(mask_or_subject)?,
                 digest_from_hex(fields.next()?)?,
@@ -96,12 +97,18 @@ impl EvidenceClaims for NameEvidenceClaims {
                 fields.next()?,
             )
         };
-        if failed_verifiers != reference.failed_verifiers {
-            return None;
-        }
         // The nonce, candidate, findings, and cost are authoritative from the
         // reference (what the port matched the run by / what the backend read
-        // out of the run's own evidence), not the name.
+        // out of the run's own evidence), not the name. The failure set is the
+        // name's, and the reference's own copy is no second opinion to check it
+        // against: the Actions backend derives that copy from this very name
+        // token, and the local backend composes the name from the copy it
+        // reports, so the pair is one value on both transports. What does guard
+        // the set is elsewhere — the malformed-mask refusal above, the local
+        // backend's fail-closed body decode, the nonce binding a body to its
+        // order, the artifact digest binding the bytes, and intake's
+        // `verifier_failure_refusal`, which refuses a set that disagrees with
+        // the order's stage and the claimed verdict.
         Some(UploadedEvidence {
             nonce: reference.nonce.clone(),
             subject,

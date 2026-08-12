@@ -249,6 +249,46 @@ fn a_failing_aggregate_review_drives_a_repair_lap_that_resolves() {
 }
 
 #[test]
+fn a_lane_that_never_exits_reaches_an_accountable_wedge_rather_than_sitting_outstanding() {
+    // The scenario #4731 carried a mode for and deliberately did not drive,
+    // because its own liveness invariant — every dispatched order terminates —
+    // predicted it would fail. A `NeverExits` lane writes a complete, valid
+    // `evidence.json` and only then parks forever, so nothing derived from lane
+    // progress can tell it from a healthy finished run; only the sealed
+    // wall-clock deadline can (ADR-0177).
+    //
+    // What has to happen: the child is killed, the order leaves
+    // `outstanding_orders`, the failed attempt spends the member's ordinary
+    // retry budget, and the exhausted budget records a wedge. Nothing here is
+    // timeout-specific except the cause — that is the point of routing a timeout
+    // through the existing failed-attempt normalisation rather than a parallel
+    // retry authority.
+    let mut harness =
+        LaneHarness::start_with_wall_clock(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 5);
+
+    let bloom = harness.settle("the hung member comes to rest", at_rest);
+
+    assert!(bloom.members[0].resolution.is_none(), "a lane that never answered resolves nothing");
+    assert!(
+        bloom.members[0].wedge.is_some(),
+        "a hung lane must reach the wedge counter — sitting outstanding is the bug, and it advances no counter at all",
+    );
+    assert!(harness.outstanding().is_empty(), "every expired order was consumed exactly once");
+    let runs = harness.ledger().len();
+    assert!(runs >= 2, "the first timeout re-drove the stage rather than wedging on one attempt: {runs} runs");
+
+    let runs_dir = harness.runs_dir();
+    let leaked: Vec<String> = harness
+        .repo()
+        .registered_worktrees()
+        .into_iter()
+        .filter(|registered| Path::new(registered).starts_with(&runs_dir))
+        .collect();
+    assert!(leaked.is_empty(), "a cancelled run releases its scratch worktree like a consumed one; leaked: {leaked:?}");
+    harness.assert_live();
+}
+
+#[test]
 fn every_dispatch_releases_the_scratch_worktree_it_materialized() {
     // A worktree per order, forever, is the leak the release path exists to
     // prevent — and it is invisible to any double mounted above the spawn,
