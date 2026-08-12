@@ -26,10 +26,10 @@ use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::registry::Registry;
 
 use super::{
-    BACKOFF_CAP, CandidatePush, ExecutorReactorState, NameEvidenceClaims, Stores, TickClock, TrackedHandle,
-    backoff_delay, default_candidate_push, drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch,
-    is_disabled_mount, is_stale, next_backoff, pull_and_admit, push_admitted_candidates, seed_tracked,
-    select_stale_handles,
+    BACKOFF_CAP, CandidatePush, ExecutorReactorState, GitCandidatePush, NameEvidenceClaims, Stores, TickClock,
+    TrackedHandle, backoff_delay, default_candidate_push, drain_and_dispatch, drain_and_dispatch_aggregate,
+    drain_and_redispatch, is_disabled_mount, is_stale, next_backoff, pull_and_admit, push_admitted_candidates,
+    seed_tracked, select_stale_handles,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -1475,6 +1475,41 @@ fn default_candidate_push_refuses_on_a_fixture_boot() {
     assert!(refusal.contains("refusing to push"), "the fixture arm declines by name, not by a failed git shell-out");
     assert!(refusal.contains(target_ref), "the refusal names the ref it declined: {refusal}");
     assert!(refusal.contains(&commit_hex), "the refusal names the commit it declined: {refusal}");
+}
+
+// Tripwire: the *real* pusher refuses the null oid, so the destructive case is
+// closed on the arm that actually shells git (#4841) — not only on the fixture
+// arm above. An all-zero source sha is git's ref-delete sentinel, so
+// `GitCandidatePush` would exit 0 and report a deleted ref as a pushed capture;
+// the empty string is the same sentinel by the other spelling (`:<ref>`).
+//
+// The target ref is deliberately one that cannot exist. If this guard is ever
+// removed, this test shells a real `git push --force origin` — so the ref it
+// names has to be harmless to delete. A never-created reserved name makes the
+// regression show up as a failed `expect_err` (git warns and exits 0 on
+// deleting a missing ref) rather than as damage to a live bloom ref.
+#[test]
+fn the_real_pusher_refuses_gits_ref_delete_sentinels() {
+    let target_ref = "refs/heads/aether-null-oid-tripwire-must-never-exist";
+
+    for sentinel in ["0".repeat(40), "0".repeat(64), String::new()] {
+        let refusal = GitCandidatePush
+            .push(&sentinel, target_ref)
+            .expect_err("the production pusher declines git's ref-delete sentinel");
+
+        assert!(
+            refusal.contains("refusing to push"),
+            "the refusal is this guard's, not git's stderr — a git message means the shell-out ran: {refusal}",
+        );
+        assert!(refusal.contains(target_ref), "the refusal names the ref it declined: {refusal}");
+    }
+
+    // That the guard is the sentinel and nothing wider — a sha that merely
+    // *starts* with zeros still being an object id — is asserted at the type
+    // boundary instead (`the_null_object_id_is_refused_on_every_construction_path`
+    // in aether-bloomery-github). Asserting it here would mean letting the
+    // shell-out run against `origin`, which is a network call this tier has no
+    // business making.
 }
 
 // Tripwire: a state built by `with_parts` — the fixture-shaped constructor
