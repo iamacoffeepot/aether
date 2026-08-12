@@ -1,0 +1,69 @@
+{
+  "totals": {
+    "findings": 1,
+    "papercut": 0,
+    "missingPrimitive": 0,
+    "docGap": 1,
+    "blocker": 0,
+    "softHolds": 0
+  },
+  "succeeded": true,
+  "buildGreen": true,
+  "summary": "Built and ran a scratch native consumer against the public aether-bloomery crate. Distinct Fmt, Clippy, and Docs failures re-entered Refine with zero repair rolls; repeated Clippy exhausted the sealed Verify budget of 3 and projected a typed wedge; a three-attempt grant cleared the wedge and resumed at Refine; repeated Clippy then re-wedged the target while a sibling with one Clippy failure remained unwedgeed. Format, Clippy, and runtime assertions passed.",
+  "artifact": null,
+  "friction": {
+    "papercut": [],
+    "missing-primitive": [],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "low",
+        "where": "docs/guide/recipes/bloomery-rest-api.md approval example versus public Membership::subject()",
+        "what": "The recipe says the reducer-shaped placeholder Approval binds the member's scope_revision, but using that shape directly with Fact::Seal produced SealRejected(UnapprovedMember). A direct reducer consumer must bind approval.subject to Membership::subject(), which was only discovered through public rustdoc after the failed run.",
+        "suggested": "Clarify that the REST seal gate replaces the placeholder approval, and show direct reducer consumers constructing approval evidence against Membership::subject()."
+      }
+    ],
+    "blocker": []
+  },
+  "softHolds": [],
+  "task": {
+    "medium": "build-layer",
+    "prompt": "Drive one member through distinct fmt, clippy, and docs failures, repeat clippy through a grant, and inspect its outward state beside a sibling that failed clippy once.",
+    "surfaceUnderTest": "Bloomery Verify/Refine reducer facts, grant handling, and outward wedge projection",
+    "expectedArtifact": null
+  },
+  "provenance": {
+    "driver": {
+      "model": null,
+      "surface": "codex-main-thread"
+    },
+    "phases": {
+      "author": {
+        "model": null,
+        "effort": null,
+        "surface": "collaboration.spawn_agent",
+        "forkTurns": "none",
+        "taskName": null,
+        "prompt": null
+      },
+      "attempt": {
+        "model": null,
+        "effort": null,
+        "surface": "collaboration.spawn_agent",
+        "forkTurns": "none",
+        "taskName": "dogfood_attempt_4780_20260812_013308",
+        "prompt": "Run one fresh consumer-viewpoint Attempt. Treat everything below as the complete task; do not seek or infer producer context.\n\nConsumer task view:\n- medium: build-layer\n- prompt: Drive one member through distinct fmt, clippy, and docs failures, repeat clippy through a grant, and inspect its outward state beside a sibling that failed clippy once.\n- surfaceUnderTest: Bloomery Verify/Refine reducer facts, grant handling, and outward wedge projection\n- renders: false\n\nEnvironment and public pointers:\n- All repository inspection and all build work must occur on host `eve`.\n- Selected repository (READ ONLY): `/mnt/dev/workspace/aether/.agents/worktrees/issue-4780`\n- Exact repository head required: `7be1d89b546cd6a2ab130384916db0bc656e25f8`. Verify it before work.\n- Public documentation root: `/mnt/dev/workspace/aether/.agents/worktrees/issue-4780/docs/guide`\n- Start at `/mnt/dev/workspace/aether/.agents/worktrees/issue-4780/docs/guide/SUMMARY.md`.\n- Useful public guide pointer: `/mnt/dev/workspace/aether/.agents/worktrees/issue-4780/docs/guide/recipes/bloomery-rest-api.md`.\n- Public crate entry point: `/mnt/dev/workspace/aether/.agents/worktrees/issue-4780/crates/aether-bloomery/src/lib.rs`; learn the rest through its public Rust API/signatures and normal compiler/rustdoc feedback.\n- Exact solution directory (you must create it and put the complete scratch native crate there): `/tmp/aether-dogfood-4780-20260812-013308/solution`\n- Supplied engine id: null. Known engine baseline: none. This is nonvisual and must use no engine/MCP.\n\nConsumer restrictions:\n- The repository is read-only. Every write, including source, Cargo files/lockfile, targets, generated docs, and temporary build output, must remain beneath the exact solution directory. When invoking Cargo, set its target directory beneath the solution directory so the repository remains untouched.\n- Do not commit, push, post to GitHub, mutate issue/PR state, or inspect git history/diffs for implementation clues.\n- Do not read private implementation bodies or repository tests to learn usage. If public docs/signatures are insufficient, first record a `doc-gap` finding, then perform only the minimum discovery needed to proceed.\n- Start from public docs and public crate signatures. Log friction where it occurs; do not hide awkward API, missing primitive, surprising default, confusing error, or blocker.\n- For this build-layer task, build and run/verify the complete scratch consumer using the public `aether-bloomery` workspace crate. Set buildGreen accurately. A failed build means succeeded=false and buildGreen=false.\n- Because renders=false and no engine is supplied, return engineId=null and replayMails=[] without spawning or using any engine.\n- solutionPath must be exactly `/tmp/aether-dogfood-4780-20260812-013308/solution`.\n\nReturn exactly one JSON object with no prose or Markdown fence, with these required fields:\n{\n  \"succeeded\": true,\n  \"summary\": \"What the consumer accomplished and how it went.\",\n  \"engineId\": null,\n  \"replayMails\": [],\n  \"buildGreen\": true,\n  \"findings\": [],\n  \"solutionPath\": \"/tmp/aether-dogfood-4780-20260812-013308/solution\"\n}\nEach finding must be `{ \"category\": \"papercut|missing-primitive|doc-gap|blocker\", \"severity\": \"high|medium|low\", \"where\": \"public surface or task step\", \"what\": \"concrete friction\", \"suggested\": \"consumer-facing improvement or empty string\" }`. An empty finding list means the surface was friction-free."
+      },
+      "judge": {
+        "model": null,
+        "effort": null,
+        "surface": "collaboration.spawn_agent",
+        "forkTurns": "none",
+        "taskName": null,
+        "prompt": null
+      }
+    }
+  },
+  "executionErrors": []
+}
+

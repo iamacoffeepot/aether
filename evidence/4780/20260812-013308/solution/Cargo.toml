@@ -1,0 +1,10 @@
+[package]
+name = "bloomery-reducer-consumer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aether-bloomery = { path = "/mnt/dev/workspace/aether/.agents/worktrees/issue-4780/crates/aether-bloomery" }
+serde_json = "1"
+
+[workspace]
