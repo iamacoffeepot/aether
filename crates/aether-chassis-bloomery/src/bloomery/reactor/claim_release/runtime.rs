@@ -38,7 +38,8 @@ use aether_bloomery::{
     Admit, ClaimReleaseOutcome, Digest, Event, Fact, IdempotencyKey, OrphanClaimRelease, OrphanClaimReleaseCompletion,
     OrphanClaimReleasePayload, Topic,
 };
-use aether_data::wire::{from_bytes, to_vec};
+use aether_bloomery_github::SourceError;
+use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -113,10 +114,7 @@ fn completion_key(request: &Digest) -> IdempotencyKey {
 }
 
 /// Build the completion admit for one finished release.
-fn completion_admit(
-    request: &Digest,
-    completion: OrphanClaimReleaseCompletion,
-) -> Result<Admit, aether_data::wire::Error> {
+fn completion_admit(request: &Digest, completion: OrphanClaimReleaseCompletion) -> Result<Admit, WireError> {
     let event = Event {
         idempotency_key: completion_key(request),
         fact: Fact::CompleteOrphanClaimRelease { request: *request, completion },
@@ -126,10 +124,7 @@ fn completion_admit(
 
 /// Run one authorized release against the source and map its outcome onto the
 /// journaled completion vocabulary.
-fn release(
-    source: &SourceShell,
-    target: &OrphanClaimRelease,
-) -> Result<OrphanClaimReleaseCompletion, aether_bloomery_github::SourceError> {
+fn release(source: &SourceShell, target: &OrphanClaimRelease) -> Result<OrphanClaimReleaseCompletion, SourceError> {
     Ok(match source.complete_release(Some(&target.expected_holder), &target.ref_kind)? {
         ClaimReleaseOutcome::Released => OrphanClaimReleaseCompletion::Released,
         ClaimReleaseOutcome::AlreadyAbsent => OrphanClaimReleaseCompletion::AlreadyAbsent,
