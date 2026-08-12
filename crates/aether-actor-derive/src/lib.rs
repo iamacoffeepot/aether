@@ -455,3 +455,81 @@ mod capability_tests {
         assert!(fields.unnamed[0].to_token_stream().to_string().contains("target_family = \"wasm\""));
     }
 }
+
+/// The `#[actor]` / `#[runtime]` expansions consume the impl block they
+/// decorate, so the block's own rustdoc reaches the compiler only if an
+/// expansion replays it. Nothing downstream reports the omission: rustdoc
+/// link-checks the items it is handed and says nothing about documentation it
+/// never received, which is how an actor's headline docs went unlinted by every
+/// `cargo doc` configuration until iamacoffeepot/aether#4848. These assert the
+/// replay lands on a documented item, per expansion path.
+#[cfg(test)]
+mod impl_doc_tests {
+    use super::*;
+    use diagnostics::doc_attrs;
+    use quote::ToTokens;
+
+    /// The doc attributes carried by items of an expansion that rustdoc would
+    /// document. A `#[doc(hidden)]` item is excluded: rustdoc neither renders
+    /// nor link-checks one, so documentation landing there would be exactly as
+    /// unreachable as documentation dropped outright.
+    fn documented_doc_attrs(expanded: &TokenStream2) -> String {
+        syn::parse2::<syn::File>(expanded.clone())
+            .expect("an expansion parses as a file")
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::Item::Impl(block) => Some(&block.attrs),
+                _ => None,
+            })
+            .filter(|attrs| !attrs.iter().any(|attr| attr.to_token_stream().to_string().contains("hidden")))
+            .flat_map(|attrs| doc_attrs(attrs))
+            .map(|attr| attr.to_token_stream().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn wasm_actor_replays_impl_docs_onto_a_documented_item() {
+        let item: ItemImpl = syn::parse_quote! {
+            /// Headline prose naming [`WidgetConfig`].
+            impl WasmActor for Widget {
+                const NAMESPACE: &'static str = "test.widget";
+
+                fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+                    Ok(Widget)
+                }
+
+                #[handler::single]
+                fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
+            }
+        };
+
+        let expanded = expand_wasm_actor(item, &ActorOpts::default()).expect("the fixture is a well-formed actor");
+
+        assert!(documented_doc_attrs(&expanded).contains("WidgetConfig"));
+    }
+
+    #[test]
+    fn native_actor_replays_impl_docs_onto_a_documented_item() {
+        let item: ItemImpl = syn::parse_quote! {
+            /// Headline prose naming [`CapConfig`].
+            impl NativeActor for Cap {
+                type Config = ();
+
+                const NAMESPACE: &'static str = "test.cap";
+
+                fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                    Ok(Cap)
+                }
+
+                #[handler::single]
+                fn on_ping(&mut self, _ctx: &mut NativeCtx<'_>, _ping: Ping) {}
+            }
+        };
+
+        let expanded = expand_native_actor_trait(item, &ActorOpts::default(), NativeEmit::Full)
+            .expect("the fixture is a well-formed native actor");
+
+        assert!(documented_doc_attrs(&expanded).contains("CapConfig"));
+    }
+}
