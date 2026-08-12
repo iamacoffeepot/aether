@@ -7,7 +7,7 @@
 //! drained it until this reactor. It is the executor-dispatch reactor the
 //! reducer's producer side (#3497) and the `MirrorReactorCapability` doc both
 //! reserved: a poll-driven drain that submits each dispatch through the
-//! [`ExecutorShell`](crate::bloomery::ExecutorShell) and records its intake
+//! [`ExecutorShell`] and records its intake
 //! context, then pulls matched attempt
 //! results back and admits them to the `aether.bloomery.control` actor — closing
 //! the line into a moving loop.

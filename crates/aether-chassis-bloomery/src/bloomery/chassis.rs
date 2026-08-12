@@ -86,6 +86,102 @@ fn mounted_correspondence<T>(
     mounted.map(|_| Arc::clone(correspondence))
 }
 
+struct BloomeryActorSetups {
+    mirror: MirrorReactorSetup,
+    executor: ExecutorReactorSetup,
+    land: LandReactorSetup,
+    integrate: IntegrateReactorSetup,
+    source: SourceSetup,
+}
+
+fn correspondence_views(
+    github_connection: &GithubConnectionConfig,
+    store_path: &str,
+) -> Result<(DomainSharedCorrespondence, GitSharedCorrespondence), BootError> {
+    #[cfg(not(any(test, feature = "testing")))]
+    let _ = github_connection;
+
+    #[cfg(any(test, feature = "testing"))]
+    if github_connection.uses_fixture() {
+        let store = Arc::new(github_connection.shared_fixture());
+        return Ok((Arc::clone(&store) as DomainSharedCorrespondence, store as GitSharedCorrespondence));
+    }
+
+    let store = Arc::new(SqliteCorrespondence::open(store_path).map_err(|error| BootError::Other(Box::new(error)))?);
+    Ok((Arc::clone(&store) as DomainSharedCorrespondence, store as GitSharedCorrespondence))
+}
+
+fn source_shell(
+    github: &GithubConnectionConfig,
+    correspondence: DomainSharedCorrespondence,
+) -> Result<SourceShell, BootError> {
+    #[cfg(any(test, feature = "testing"))]
+    if github.uses_fixture() {
+        return Ok(github.fixture_source(correspondence));
+    }
+
+    SourceShell::connect(github, correspondence).map_err(|error| BootError::Other(Box::new(error)))
+}
+
+fn projection_shell(github: &GithubConnectionConfig, configured: bool) -> Result<Option<ProjectionShell>, BootError> {
+    #[cfg(any(test, feature = "testing"))]
+    if github.uses_fixture() {
+        return Ok(Some(ProjectionShell::new(Arc::new(aether_bloomery_github::GithubProjection::new(
+            github.shared_fixture(),
+        )))));
+    }
+
+    configured.then(|| ProjectionShell::connect(github)).transpose().map_err(|error| BootError::Other(Box::new(error)))
+}
+
+fn actor_setups(
+    github: &GithubConnectionConfig,
+    coordinator: &CoordinatorConfig,
+) -> Result<BloomeryActorSetups, BootError> {
+    let configured = github.uses_fixture() || github.missing_connection_knobs().is_empty();
+    let repository = configured.then(|| (github.owner.clone(), github.repo.clone()));
+    let (domain_correspondence, git_correspondence) = correspondence_views(github, &coordinator.store_path)?;
+    let source = source_shell(github, Arc::clone(&domain_correspondence))?;
+    let executor = (!(!configured && !coordinator.local_lane_enabled))
+        .then(|| ExecutorShell::connect(github, coordinator, Arc::clone(&domain_correspondence), git_correspondence))
+        .transpose()
+        .map_err(|error| BootError::Other(Box::new(error)))?;
+    let executor_correspondence = mounted_correspondence(executor.as_ref(), &domain_correspondence);
+
+    Ok(BloomeryActorSetups {
+        mirror: MirrorReactorSetup {
+            projection: projection_shell(github, configured)?,
+            source: configured.then(|| source.clone()),
+            poll_interval_secs: coordinator.poll_interval_secs,
+            repository: repository.clone(),
+        },
+        executor: ExecutorReactorSetup {
+            executor,
+            correspondence: executor_correspondence,
+            store_path: coordinator.store_path.clone(),
+            artifacts_root: coordinator.artifacts_root.clone(),
+            poll_interval_secs: coordinator.poll_interval_secs,
+            stale_warn_after_secs: coordinator.stale_warn_after_secs,
+            repository: repository.clone(),
+            disabled_missing: github.missing_connection_knobs(),
+        },
+        land: LandReactorSetup {
+            source: configured.then(|| source.clone()),
+            store_path: coordinator.store_path.clone(),
+            poll_interval_secs: coordinator.poll_interval_secs,
+            repository: repository.clone(),
+            cas_land_enabled: github.cas_land_enabled,
+        },
+        integrate: IntegrateReactorSetup {
+            source: configured.then(|| source.clone()),
+            store_path: coordinator.store_path.clone(),
+            poll_interval_secs: coordinator.poll_interval_secs,
+            repository,
+        },
+        source: SourceSetup { shell: source, claims_enabled: configured },
+    })
+}
+
 /// The resolved boot knobs for [`BloomeryChassis`].
 #[derive(Clone, Debug)]
 pub struct BloomeryEnv {
@@ -205,7 +301,6 @@ impl BootableChassis for BloomeryChassis {
     /// `TraceDispatchCapability` in this delta; the aborter is supplied by
     /// `composed`. Takes the boot handle by reference so [`Chassis::build`] can
     /// move the same `boot` into the driver afterward.
-    #[allow(clippy::too_many_lines)] // The chassis edge intentionally assembles every backend-neutral setup in one place.
     fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
         let BloomeryEnv { rpc_port, http_port, store, artifacts, github, coordinator, session, signing } = env;
         // Capture the tier-policy path before `github` is moved into the source
@@ -221,96 +316,7 @@ impl BootableChassis for BloomeryChassis {
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
         };
-
-        let configured = github.uses_fixture() || github.missing_connection_knobs().is_empty();
-        let repository = configured.then(|| (github.owner.clone(), github.repo.clone()));
-        let (domain_correspondence, git_correspondence) = {
-            #[cfg(any(test, feature = "testing"))]
-            if github.uses_fixture() {
-                let store = Arc::new(github.shared_fixture());
-                (Arc::clone(&store) as DomainSharedCorrespondence, store as GitSharedCorrespondence)
-            } else {
-                let store = Arc::new(
-                    SqliteCorrespondence::open(&coordinator.store_path)
-                        .map_err(|error| BootError::Other(Box::new(error)))?,
-                );
-                (Arc::clone(&store) as DomainSharedCorrespondence, store as GitSharedCorrespondence)
-            }
-            #[cfg(not(any(test, feature = "testing")))]
-            {
-                let store = Arc::new(
-                    SqliteCorrespondence::open(&coordinator.store_path)
-                        .map_err(|error| BootError::Other(Box::new(error)))?,
-                );
-                (Arc::clone(&store) as DomainSharedCorrespondence, store as GitSharedCorrespondence)
-            }
-        };
-        #[cfg(any(test, feature = "testing"))]
-        let source = if github.uses_fixture() {
-            github.fixture_source(Arc::clone(&domain_correspondence))
-        } else {
-            SourceShell::connect(&github, Arc::clone(&domain_correspondence))
-                .map_err(|error| BootError::Other(Box::new(error)))?
-        };
-        #[cfg(not(any(test, feature = "testing")))]
-        let source = SourceShell::connect(&github, Arc::clone(&domain_correspondence))
-            .map_err(|error| BootError::Other(Box::new(error)))?;
-        #[cfg(any(test, feature = "testing"))]
-        let projection = if github.uses_fixture() {
-            Some(ProjectionShell::new(Arc::new(aether_bloomery_github::GithubProjection::new(github.shared_fixture()))))
-        } else {
-            configured
-                .then(|| ProjectionShell::connect(&github))
-                .transpose()
-                .map_err(|error| BootError::Other(Box::new(error)))?
-        };
-        #[cfg(not(any(test, feature = "testing")))]
-        let projection = configured
-            .then(|| ProjectionShell::connect(&github))
-            .transpose()
-            .map_err(|error| BootError::Other(Box::new(error)))?;
-        let executor = (!(!configured && !coordinator.local_lane_enabled))
-            .then(|| {
-                ExecutorShell::connect(
-                    &github,
-                    &coordinator,
-                    Arc::clone(&domain_correspondence),
-                    Arc::clone(&git_correspondence),
-                )
-            })
-            .transpose()
-            .map_err(|error| BootError::Other(Box::new(error)))?;
-        let executor_correspondence = mounted_correspondence(executor.as_ref(), &domain_correspondence);
-        let mirror_setup = MirrorReactorSetup {
-            projection,
-            source: configured.then(|| source.clone()),
-            poll_interval_secs: coordinator.poll_interval_secs,
-            repository: repository.clone(),
-        };
-        let executor_setup = ExecutorReactorSetup {
-            executor,
-            correspondence: executor_correspondence,
-            store_path: coordinator.store_path.clone(),
-            artifacts_root: coordinator.artifacts_root.clone(),
-            poll_interval_secs: coordinator.poll_interval_secs,
-            stale_warn_after_secs: coordinator.stale_warn_after_secs,
-            repository: repository.clone(),
-            disabled_missing: github.missing_connection_knobs(),
-        };
-        let land_setup = LandReactorSetup {
-            source: configured.then(|| source.clone()),
-            store_path: coordinator.store_path.clone(),
-            poll_interval_secs: coordinator.poll_interval_secs,
-            repository: repository.clone(),
-            cas_land_enabled: github.cas_land_enabled,
-        };
-        let integrate_setup = IntegrateReactorSetup {
-            source: configured.then(|| source.clone()),
-            store_path: coordinator.store_path.clone(),
-            poll_interval_secs: coordinator.poll_interval_secs,
-            repository,
-        };
-        let source_setup = SourceSetup { shell: source, claims_enabled: configured };
+        let setups = actor_setups(&github, &coordinator)?;
 
         // #3947's explicit `with_aborter` is superseded by the seam inversion:
         // `composed` (which `build` routes through) installs `OutboundFatalAborter`
@@ -326,32 +332,32 @@ impl BootableChassis for BloomeryChassis {
             // retirement — the api and reactors address it as a typed peer.
             .with_actor::<ControlCore>(())
             .with_actor_configured::<ArtifactsCapability>((), artifacts)
-            .with_actor::<MirrorReactorCapability>(mirror_setup)
+            .with_actor::<MirrorReactorCapability>(setups.mirror)
             // The executor dispatch reactor (#3505): drains the reducer's
             // dispatch-topic decisions, submits them through the
             // executor port, and admits matched results back to the control core.
             // Receives only its assembled executor, correspondence view, and
             // backend-neutral coordinator scalars.
-            .with_actor::<ExecutorReactorCapability>(executor_setup)
+            .with_actor::<ExecutorReactorCapability>(setups.executor)
             // The land reactor (#3559, ADR-0149 migration step 3): drains the
             // reducer's `aether.bloomery.land` decisions, issues the source-port
             // compare-and-swap that is now the landing of record, and admits
             // `Fact::Land` back to the control core. Receives the already-built
             // source shell and its coordinator scalars.
-            .with_actor::<LandReactorCapability>(land_setup)
+            .with_actor::<LandReactorCapability>(setups.land)
             // The integrate reactor (#3650, ADR-0152): drains the reducer's
             // `aether.bloomery.integrate` decisions, folds the claimed candidate
             // onto the bloom's integration branch, and admits `Fact::Resolve`
             // back to the control core. Receives the shared source shell clone
             // and its coordinator scalars.
-            .with_actor::<IntegrateReactorCapability>(integrate_setup)
+            .with_actor::<IntegrateReactorCapability>(setups.integrate)
             // App-key custody (ADR-0149 §Migration step 3) is not a mounted
             // mailbox: the host-local minter (`app_auth::AppTokenSource`) is an
             // in-process `TokenSource` the port shells' client pulls from in
             // `connect_client`, reading the App key and failing fast there
             // (ADR-0150). The source actor receives only the chassis-built shell
             // and the claim-registry enable decision.
-            .with_actor::<SourceCapability>(source_setup)
+            .with_actor::<SourceCapability>(setups.source)
             .with_actor_configured::<SessionPoolCapability>((), session)
             // The statement-signature custody point (ADR-0149 step 3): the
             // answer gate dials it to verify author signatures against the

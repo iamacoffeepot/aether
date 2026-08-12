@@ -136,11 +136,8 @@ pub struct CoordinatorConfig {
     /// ([`super::Gate`] / [`super::ApprovalPolicy`], ADR-0149 §The line /
     /// ADR-0151) resolves a workpiece's declared surface against — the
     /// Bloomery-owned `approval-policy.yml` at the repository root. A
-    /// repository-relative path read host-side
-    /// like [`executor_workflow_file`](Self::executor_workflow_file) names an
-    /// in-repo workflow file; carried on this shared config the same way, so one
-    /// Bloomery-host configuration serves the mirror, source, executor, and
-    /// approve-gate readers rather than duplicating the knob. Tier policy (*what*
+    /// repository-relative path read host-side, like the connection config's
+    /// `executor_workflow_file`, names an in-repo artifact. Tier policy (*what*
     /// tier) is a **distinct reader** from the signing capability's key policy
     /// (*who* may sign) — the two are never folded (ADR-0151).
     #[config(env = "AETHER_APPROVAL_POLICY_FILE", default = "approval-policy.yml")]
@@ -212,9 +209,8 @@ pub struct CoordinatorConfig {
     /// deployment that wants a distinct, stable identity.
     ///
     /// Named `AETHER_BLOOMERY_OPERATOR_*` rather than under this struct's
-    /// `AETHER_GITHUB` prefix, the way [`token`](Self::token) pins the
-    /// conventional `GITHUB_TOKEN`: the operator is not a property of the GitHub
-    /// connection — it holds whether or not a remote is configured at all.
+    /// `AETHER_GITHUB` prefix: the operator is not a property of the GitHub
+    /// connection and exists whether or not a remote is configured.
     #[config(env = "AETHER_BLOOMERY_OPERATOR_NAME", default = "")]
     pub operator_name: String,
     /// The email half of the operator identity; see
