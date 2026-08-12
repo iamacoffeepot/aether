@@ -101,10 +101,10 @@ pub(super) fn author_config(body: &[u8]) -> Routed {
 /// than a silently truncated address.
 pub(super) fn config_response(result: RecordConfigResult) -> HttpServerResponse {
     match result {
-        RecordConfigResult::Ok { digest, kind } => <[u8; 32]>::try_from(digest.as_slice()).map_or_else(
-            |_| error_response(500, &format!("config write echoed a {}-byte address", digest.len())),
-            |bytes| json(200, &ConfigView { digest: Digest::from_bytes(bytes), kind }),
-        ),
+        RecordConfigResult::Ok { digest, kind } => match <[u8; 32]>::try_from(digest.as_slice()) {
+            Ok(bytes) => json(200, &ConfigView { digest: Digest::from_bytes(bytes), kind }),
+            Err(_) => error_response(500, &format!("config write echoed a {}-byte address", digest.len())),
+        },
         RecordConfigResult::Err { error } => error_response(500, &format!("config write failed: {error}")),
     }
 }

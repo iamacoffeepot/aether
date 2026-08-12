@@ -333,7 +333,7 @@ impl NativeActor for BloomeryApiCapability {
     /// The control core's reply to a live projection read.
     #[http::reply]
     fn on_query_result(
-        _state: &mut Self::State,
+        _state: &mut ApiCapabilityState,
         _ctx: &mut NativeCtx<'_, Manual>,
         mail: QueryResult,
     ) -> HttpServerResponse {
@@ -343,7 +343,7 @@ impl NativeActor for BloomeryApiCapability {
     /// The store's reply to a journal read.
     #[http::reply]
     fn on_replay_result(
-        _state: &mut Self::State,
+        _state: &mut ApiCapabilityState,
         _ctx: &mut NativeCtx<'_, Manual>,
         mail: ReplayJournalResult,
     ) -> HttpServerResponse {
@@ -353,7 +353,7 @@ impl NativeActor for BloomeryApiCapability {
     /// The artifacts cap's reply to an artifact fetch.
     #[http::reply]
     fn on_get_result(
-        _state: &mut Self::State,
+        _state: &mut ApiCapabilityState,
         _ctx: &mut NativeCtx<'_, Manual>,
         mail: GetResult,
     ) -> HttpServerResponse {
@@ -385,7 +385,7 @@ impl NativeActor for BloomeryApiCapability {
     /// is the reply's own echo, so the route holds nothing across the write.
     #[http::reply]
     fn on_record_config_result(
-        _state: &mut Self::State,
+        _state: &mut ApiCapabilityState,
         _ctx: &mut NativeCtx<'_, Manual>,
         mail: RecordConfigResult,
     ) -> HttpServerResponse {
