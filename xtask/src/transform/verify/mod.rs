@@ -204,8 +204,15 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // every candidate for a reason unrelated to the candidate. Caught
             // by running the umbrella for real (#4706); `crates` is still
             // exactly the path CI scans.
+            //
+            // `--no-ignore` because the walk skips gitignored files by
+            // default, so a `.gitignore` pattern matching a crate path drops
+            // it from the scan and the gate reports "no unused dependencies"
+            // over a crate it never opened (#4863). `--skip-target-dir` then
+            // re-excludes `target/`, which is all `.gitignore` was excluding
+            // here.
             program: "cargo-machete",
-            args: &["crates"],
+            args: &["--no-ignore", "--skip-target-dir", "crates"],
             env: &[],
             requires: &["cargo", "cargo-machete"],
             requires_targets: &[],

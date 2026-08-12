@@ -511,7 +511,12 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo install cargo-machete --locked
-      - run: cargo machete crates
+      # --no-ignore because cargo-machete skips gitignored files by default,
+      # so a .gitignore pattern that happens to match a crate path retires it
+      # from this gate silently — exit 0, "Good job!", never scanned (#4863).
+      # --skip-target-dir then re-excludes target/, which is the only thing
+      # .gitignore was doing for this scan.
+      - run: cargo machete --no-ignore --skip-target-dir crates
 
   # Cargo.lock records every workspace package's dependency list, so a
   # manifest edit that lands without the matching lock update leaves the
