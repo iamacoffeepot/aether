@@ -90,12 +90,14 @@ pub struct ApiCapabilityState {
     /// dispatch `MailId.correlation_id`, back-pointing at the held [`PendingSeal`]
     /// and the member it forms the approval for on a verified reply.
     pub(super) seal_verifications: HashMap<u64, SealVerify>,
+    #[cfg(feature = "github")]
     /// Orphan-claim release submissions awaiting their signature verification
     /// (ADR-0179), keyed by the verify dispatch's `MailId.correlation_id`. Held
     /// separately from `verifying` so the reply handler can tell a release verify
     /// from an answer verify by correlation alone, the same way `seal_verifications`
     /// separates the seal-member verifies.
     pub(super) releasing: HashMap<u64, ReleasePending>,
+    #[cfg(feature = "github")]
     /// The request digest each in-flight release admit will report, keyed by the
     /// admit dispatch's `MailId.correlation_id`. A release answers `202` with its
     /// digest rather than the bare reducer outcome every other write route
@@ -103,6 +105,7 @@ pub struct ApiCapabilityState {
     pub(super) release_admits: HashMap<u64, Digest>,
 }
 
+#[cfg(feature = "github")]
 /// A release submission held across the signature-verification round trip: the
 /// reply obligation, the request digest the `202` carries, and the request event
 /// to admit once (and only if) the signature verifies.
@@ -199,6 +202,7 @@ pub(super) enum Routed {
     Reply(HttpServerResponse),
     /// Await the downstream reply correlated by this id.
     Deferred(u64),
+    #[cfg(feature = "github")]
     /// Await the `aether.signing` verify reply for an orphan-claim release
     /// (ADR-0179), then admit `event` on a verified signature and answer `202`
     /// with `request`, or answer `400` on a rejection.
@@ -295,6 +299,7 @@ pub(super) fn finish(
             state.verifying.insert(correlation, VerifyPending { inbound: ctx.take_inbound(), event: *event });
             http::Outcome::Deferred
         }
+        #[cfg(feature = "github")]
         Routed::DeferredRelease { correlation, request, event } => {
             state.releasing.insert(correlation, ReleasePending { inbound: ctx.take_inbound(), request, event: *event });
             http::Outcome::Deferred

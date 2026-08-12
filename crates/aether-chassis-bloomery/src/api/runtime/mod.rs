@@ -50,6 +50,7 @@
 //! constructors and the bloom-id URL codec.
 
 mod blooms;
+#[cfg(feature = "github")]
 mod claims;
 mod configs;
 mod drafts;
@@ -64,7 +65,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use aether_actor::{Manual, runtime};
-use aether_bloomery::{AdmitResult, EnumerateClaimsResult, Outcome, QueryResult, ReplayJournal, ReplayJournalResult};
+#[cfg(feature = "github")]
+use aether_bloomery::Outcome;
+use aether_bloomery::{AdmitResult, EnumerateClaimsResult, QueryResult, ReplayJournal, ReplayJournalResult};
 use aether_http as http;
 use aether_kinds::trace::Settled;
 
@@ -73,13 +76,17 @@ pub use aether_substrate::chassis::error::BootError;
 
 pub use state::ApiCapabilityState;
 
+#[cfg(feature = "github")]
 use aether_data::wire::from_bytes;
 
 use blooms::{admit_response, query_response};
+#[cfg(feature = "github")]
 use claims::{claims_response, release_accepted_response, release_status_response};
 use reads::{artifact_response, journal_response};
 use response::{error_response, json};
-use state::{ReleasePending, Routed, SealVerify, VerifyPending, finish};
+#[cfg(feature = "github")]
+use state::ReleasePending;
+use state::{Routed, SealVerify, VerifyPending, finish};
 
 use super::BloomeryApiCapability;
 use super::dto::WorkpiecesView;
@@ -88,10 +95,87 @@ use crate::bloomery::ApprovalPolicy;
 use crate::signing::VerifyResult;
 use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult, StoreCapability};
 
+/// The claim routes' bodies for a build with no GitHub source runtime: an
+/// immediate `503` rather than a deferral onto a `SourceCapability` mailbox that
+/// was never registered.
+///
+/// Without this the three routes are actively harmful rather than merely absent:
+/// `GET /claims` would return `Routed::Deferred` on a warn-dropped send and hang
+/// its caller until the settlement net fired, and `POST /claims/releases` would
+/// verify the signature, journal a pending release, and enqueue an outbox row
+/// that no reactor drains in that build — a request durably pending forever.
+#[cfg(not(feature = "github"))]
+impl ApiCapabilityState {
+    fn claims_unavailable() -> Routed {
+        Routed::Reply(error_response(503, "claim inspection and release need the GitHub source runtime"))
+    }
+
+    fn list_claims(&self, _ctx: &NativeCtx<'_, Manual>) -> Routed {
+        Self::claims_unavailable()
+    }
+
+    fn request_claim_release(&self, _ctx: &NativeCtx<'_, Manual>, _body: &[u8]) -> Routed {
+        Self::claims_unavailable()
+    }
+
+    fn query_claim_release(&self, _ctx: &NativeCtx<'_, Manual>, _digest: &str) -> Routed {
+        Self::claims_unavailable()
+    }
+}
+
+/// Render a claim enumeration. Unreachable without the GitHub source runtime —
+/// the route that would ask for one refuses first — so the reply only has to
+/// exist for the accepted-kind table.
+#[cfg(not(feature = "github"))]
+fn claims_response(_result: EnumerateClaimsResult) -> aether_http::HttpServerResponse {
+    error_response(503, "claim inspection needs the GitHub source runtime")
+}
+
+/// Whether `correlation` names an in-flight release verification. Always false
+/// without the github feature, where no release route exists to start one.
+#[cfg(feature = "github")]
+fn releasing_contains(state: &ApiCapabilityState, correlation: u64) -> bool {
+    state.releasing.contains_key(&correlation)
+}
+
+#[cfg(not(feature = "github"))]
+const fn releasing_contains(_state: &ApiCapabilityState, _correlation: u64) -> bool {
+    false
+}
+
+/// Resolve a held release verification. Unreachable without the github feature,
+/// where `releasing_contains` is constant-false.
+#[cfg(feature = "github")]
+fn resolve_release(state: &mut ApiCapabilityState, ctx: &NativeCtx<'_, Manual>, correlation: u64, mail: VerifyResult) {
+    state.resolve_release_verify(ctx, correlation, verify_verdict(mail));
+}
+
+#[cfg(not(feature = "github"))]
+fn resolve_release(
+    _state: &mut ApiCapabilityState,
+    _ctx: &NativeCtx<'_, Manual>,
+    _correlation: u64,
+    _mail: VerifyResult,
+) {
+}
+
+/// Take the held reply obligation of a release verification whose chain settled
+/// without a reply.
+#[cfg(feature = "github")]
+fn release_settled(state: &mut ApiCapabilityState, correlation: u64) -> Option<aether_substrate::InboundMail> {
+    state.releasing.remove(&correlation).map(|ReleasePending { inbound, .. }| inbound)
+}
+
+#[cfg(not(feature = "github"))]
+const fn release_settled(_state: &mut ApiCapabilityState, _correlation: u64) -> Option<aether_substrate::InboundMail> {
+    None
+}
+
 /// Flatten a signing reply into the verified-or-why the release gate decides on.
 /// The release path only ever needs "did this signature hold", so it takes the
 /// verdict rather than the reply kind and stays independent of the two other
 /// verify consumers' own handling.
+#[cfg(feature = "github")]
 fn verify_verdict(result: VerifyResult) -> Result<bool, String> {
     match result {
         VerifyResult::Ok { verified } => Ok(verified),
@@ -159,7 +243,9 @@ impl NativeActor for BloomeryApiCapability {
             configs: HashMap::new(),
             next_seal: 1,
             seal_verifications: HashMap::new(),
+            #[cfg(feature = "github")]
             releasing: HashMap::new(),
+            #[cfg(feature = "github")]
             release_admits: HashMap::new(),
         })
     }
@@ -364,7 +450,9 @@ impl NativeActor for BloomeryApiCapability {
     fn on_admit_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: AdmitResult) {
         // A release submission answers `202` with its request digest rather than
         // the bare outcome, because the digest is the handle the status route
-        // reads by and the admit reply does not carry it.
+        // reads by and the admit reply does not carry it. Only a github build has
+        // release routes, so only it holds that correlation.
+        #[cfg(feature = "github")]
         let response = match state.release_admits.remove(&ctx.reply_target().correlation_id) {
             Some(request) => match &mail {
                 AdmitResult::Ok { outcome } => match from_bytes::<Outcome>(outcome) {
@@ -375,6 +463,8 @@ impl NativeActor for BloomeryApiCapability {
             },
             None => admit_response(mail),
         };
+        #[cfg(not(feature = "github"))]
+        let response = admit_response(mail);
         state.answer(ctx, &response);
     }
 
@@ -383,10 +473,13 @@ impl NativeActor for BloomeryApiCapability {
     fn on_query_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: QueryResult) {
         // The release branch is its own reply variant, so the read it answers is
         // decided by the payload rather than by a second correlation table.
+        #[cfg(feature = "github")]
         let response = match mail {
             QueryResult::Release { .. } => release_status_response(mail),
             mail => query_response(mail),
         };
+        #[cfg(not(feature = "github"))]
+        let response = query_response(mail);
         state.answer(ctx, &response);
     }
 
@@ -425,8 +518,8 @@ impl NativeActor for BloomeryApiCapability {
         let correlation = ctx.reply_target().correlation_id;
         if state.seal_verifications.contains_key(&correlation) {
             state.resolve_seal_verify(ctx, correlation, mail);
-        } else if state.releasing.contains_key(&correlation) {
-            state.resolve_release_verify(ctx, correlation, verify_verdict(mail));
+        } else if cfg!(feature = "github") && releasing_contains(state, correlation) {
+            resolve_release(state, ctx, correlation, mail);
         } else {
             state.resolve_verify(ctx, mail);
         }
@@ -470,11 +563,12 @@ impl NativeActor for BloomeryApiCapability {
             // A release admit holds a second entry keyed by the same correlation;
             // drop it here too, or a control core that stops replying leaves one
             // digest per request behind forever.
+            #[cfg(feature = "github")]
             state.release_admits.remove(&mail.root.correlation_id);
             inbound.reply(&error_response(504, "control-plane request settled without a reply"));
         } else if let Some(VerifyPending { inbound, .. }) = state.verifying.remove(&mail.root.correlation_id) {
             inbound.reply(&error_response(504, "signature verification settled without a reply"));
-        } else if let Some(ReleasePending { inbound, .. }) = state.releasing.remove(&mail.root.correlation_id) {
+        } else if let Some(inbound) = release_settled(state, mail.root.correlation_id) {
             inbound.reply(&error_response(504, "signature verification settled without a reply"));
         } else if let Some(SealVerify { seal, .. }) = state.seal_verifications.remove(&mail.root.correlation_id) {
             // An above-auto member's verify chain settled without a reply — the

@@ -16,9 +16,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "github")]
+use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind};
 use aether_bloomery::{
-    BloomId, Budget, ClaimHolder, ClaimRefKind, ConfigRegistry, Digest, Event, Forecast, Membership, StageId,
-    Statement, Workpiece, WorkpieceId,
+    Budget, ConfigRegistry, Digest, Event, Forecast, Membership, StageId, Statement, Workpiece, WorkpieceId,
 };
 
 use crate::bloomery::{AdrTouch, Completeness};
@@ -201,6 +202,7 @@ pub struct JournalView {
     pub records: Vec<JournalEntry>,
 }
 
+#[cfg(feature = "github")]
 /// One enumerated claim ref for `GET /claims` (ADR-0179).
 ///
 /// The diagnostic surface that used to require leaving the API for `git
@@ -217,6 +219,7 @@ pub struct ClaimRefView {
     pub holder: ClaimHolder,
 }
 
+#[cfg(feature = "github")]
 /// `GET /claims` — every live claim ref, with its holder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaimsView {
@@ -224,6 +227,7 @@ pub struct ClaimsView {
     pub claims: Vec<ClaimRefView>,
 }
 
+#[cfg(feature = "github")]
 /// `POST /claims/releases` body — the typed release target plus the author
 /// signature authorizing it (ADR-0179).
 ///
@@ -243,6 +247,7 @@ pub struct ReleaseRequest {
     pub authorization: Statement,
 }
 
+#[cfg(feature = "github")]
 /// `POST /claims/releases` reply — the request digest, returned with `202` once
 /// the request fact is durably admitted. The operator polls
 /// `GET /claims/releases/{digest}` for the terminal result.
