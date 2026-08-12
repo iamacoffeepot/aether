@@ -63,7 +63,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use aether_actor::{Manual, runtime};
-use aether_bloomery::{AdmitResult, QueryResult, ReplayJournal, ReplayJournalResult};
+use aether_bloomery::{
+    AdmitResult, LoadConfigsResult, QueryResult, ReplayJournal, ReplayJournalResult, ResolvedConfigs,
+};
 use aether_http as http;
 use aether_kinds::trace::Settled;
 
@@ -73,6 +75,7 @@ pub use aether_substrate::chassis::error::BootError;
 pub use state::ApiCapabilityState;
 
 use blooms::{admit_response, query_response};
+use configs::load_configs;
 use reads::{artifact_response, journal_response};
 use response::{error_response, json};
 use state::{Routed, SealVerify, VerifyPending, finish};
@@ -80,20 +83,24 @@ use state::{Routed, SealVerify, VerifyPending, finish};
 use super::BloomeryApiCapability;
 use super::dto::WorkpiecesView;
 use crate::artifacts::{ArtifactsCapability, Get, GetResult};
-use crate::bloomery::ApprovalPolicy;
+use crate::bloomery::load_policy;
 use crate::signing::VerifyResult;
 use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult, StoreCapability};
 
 /// Composer-supplied params for the REST control api cap (ADR-0156 §3 `Params`
-/// channel): the tier-policy file the pre-seal approve gate loads at init (issue
-/// #3583). Threaded from the shared GitHub config's `approval_policy_file` at
-/// chassis build so one Bloomery configuration serves every reader — a
-/// composer-computed value, not an operator-resolvable knob, so it is `Params`.
-/// A policy that fails to load leaves the cap with no policy, so the gate fails
-/// **closed** — every member resolves `human` and its seal is refused, never
-/// silently `auto`.
+/// channel): the fallback tier-policy file the pre-seal approve gate loads at
+/// init (issue #3583). Threaded from the shared GitHub config's
+/// `approval_policy_file` at chassis build so one Bloomery configuration serves
+/// every reader — a composer-computed value, not an operator-resolvable knob, so
+/// it is `Params`.
+///
+/// The file is the fallback, not the authority: a draft that seals an
+/// `aether.bloomery.approval_policy` entry is gated against that sealed value
+/// (#4616). A policy file that fails to load leaves the cap with no fallback, so
+/// a draft sealing none fails **closed** — its seal is refused rather than
+/// admitted at a tier nothing decided.
 pub struct ApiParams {
-    /// Repository-relative path to the Bloomery-owned tier policy
+    /// Repository-relative path to the Bloomery-owned fallback tier policy
     /// (`approval-policy.yml`).
     pub approval_policy_file: String,
 }
@@ -110,30 +117,32 @@ impl NativeActor for BloomeryApiCapability {
     const NAMESPACE: &'static str = "aether.bloomery.api";
 
     fn init((): (), params: ApiParams, ctx: &mut NativeInitCtx<'_>) -> Result<ApiCapabilityState, BootError> {
-        // Load the tier policy once at init. An unreadable or malformed policy is
-        // not a boot failure — it leaves the cap policy-less, and the pre-seal
-        // gate then fails closed (every member resolves `human`, its seal is
+        // Load the fallback tier policy once at init. An unreadable or malformed
+        // file is not a boot failure — it leaves the cap fallback-less, and a
+        // draft that seals no policy of its own then fails closed (its seal is
         // refused), which is the security-required posture: never silently `auto`.
-        let policy = match ApprovalPolicy::load(Path::new(&params.approval_policy_file)) {
+        let file_policy = match load_policy(Path::new(&params.approval_policy_file)) {
             Ok(policy) => Some(policy),
             Err(error) => {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::api",
                     path = %params.approval_policy_file,
                     ?error,
-                    "approval policy unavailable; the pre-seal approve gate fails closed (no auto tier)"
+                    "fallback approval policy unavailable; a draft sealing none fails closed (no auto tier)"
                 );
                 None
             }
         };
         tracing::info!(
             target: "aether_chassis_bloomery::api",
-            policy_loaded = policy.is_some(),
+            policy_loaded = file_policy.is_some(),
             "bloomery REST control api mounted"
         );
         Ok(ApiCapabilityState {
             self_mailbox: ctx.self_id(),
-            policy,
+            file_policy,
+            configs: ResolvedConfigs::default(),
+            configs_ready: false,
             mailer: ctx.mailer(),
             staged: BTreeMap::new(),
             drafts: BTreeMap::new(),
@@ -141,16 +150,22 @@ impl NativeActor for BloomeryApiCapability {
             pending: HashMap::new(),
             verifying: HashMap::new(),
             seals: HashMap::new(),
-            configs: HashMap::new(),
+            authoring: HashMap::new(),
             next_seal: 1,
             seal_verifications: HashMap::new(),
         })
     }
 
+    /// Read the stored configuration set so a sealed tier policy is resolvable
+    /// from inside the synchronous pre-seal gate (#4616). Lives here rather than
+    /// in `init` because it is mail, and `init` has none.
+    ///
     /// `#[http::router]` appends the per-route `RegisterRouteSelf` sends to
     /// this body — one exact-match claim per `(static head, method)` group,
     /// registered on the HTTP ingress cap (ADR-0130) post-init (#3672).
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {}
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+        load_configs(ctx);
+    }
 
     /// `POST /workpieces` — stage a workpiece for later draft membership.
     #[http::route(Post, "/workpieces")]
@@ -363,6 +378,15 @@ impl NativeActor for BloomeryApiCapability {
             RecordConfigResult::Err { error } => Some(error),
         };
         state.resolve_config_write(ctx, error.as_deref());
+    }
+
+    /// The store's reply to the boot configuration read (#4616). Fills the
+    /// resolved-configuration cache the pre-seal gate resolves a draft's sealed
+    /// tier policy out of, and marks it ready — a seal arriving before this is
+    /// refused rather than gated against content the cap has not read.
+    #[handler::manual]
+    fn on_load_configs_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadConfigsResult) {
+        state.hydrate_configs(ctx, mail);
     }
 
     /// The store's reply to a fire-and-forget dispatch-description write (#3595).
