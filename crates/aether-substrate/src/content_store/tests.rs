@@ -1,12 +1,12 @@
 //! Domain-clean core tests: content addressing, dedup, persistence,
-//! pinning, and the eviction-policy parameter. These exercise the storage
-//! primitive over a trivial metadata type `M` — the hub's binary /
-//! component projections are tested against the real manifests in
-//! `aether-fleet`.
+//! pinning, the eviction-policy parameter, and what two live handles on
+//! one root can see of each other. These exercise the storage primitive
+//! over a trivial metadata type `M` — the hub's binary / component
+//! projections are tested against the real manifests in `aether-fleet`.
 
 use super::{ContentStore, EvictionPolicy, Selector, hash_hex, now_nanos};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{env, fs, process};
 
 /// A trivial sidecar metadata type standing in for a real domain manifest.
@@ -206,5 +206,169 @@ fn failed_write_reports_an_error_and_leaves_no_dangling_name_pointer() {
     assert!(!store.contains(&hash), "the failed write leaves the hash unindexed");
     assert_eq!(store.name_for(&hash), None, "no dangling name pointer at an unindexed hash");
     assert!(store.get(&Selector::Name("svc".to_owned())).is_none(), "the name resolves nowhere");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Open two handles over `root` in the order the shipping arrangement
+/// does: `first` comes up (a chassis mounting a capability), then
+/// `second` (a reactor opening its own handle) — so `first`'s index was
+/// built before any of `second`'s writes existed.
+fn two_handles(root: &Path) -> (ContentStore<Meta>, ContentStore<Meta>) {
+    let first = ContentStore::open(root, EvictionPolicy::None).expect("open first handle");
+    let second = ContentStore::open(root, EvictionPolicy::None).expect("open second handle");
+    (first, second)
+}
+
+/// Tripwire: a handle resolves an entry a peer handle wrote to the same
+/// root after it opened. `restore` runs once at open, so the index is a
+/// snapshot; if `get` answered from it alone, the mounted bloomery
+/// artifacts capability would reply `NotFound` for every record the
+/// executor reactor's handle filed after boot — bytes that are on disk,
+/// written by the same process moments earlier.
+#[test]
+fn a_peer_handles_upload_resolves_through_an_older_handle() {
+    let root = temp_root("peer-get");
+    let (mut first, mut second) = two_handles(&root);
+
+    let hash = second.upload(b"filed-by-the-peer", meta("peer"), None).expect("upload lands");
+
+    assert!(!first.contains(&hash), "the older handle's index has not seen the peer's write");
+    let resolved =
+        first.get(&Selector::Hash(hash.clone())).expect("the peer's entry resolves through the older handle");
+    assert_eq!(resolved.hash, hash);
+    assert_eq!(resolved.metadata, meta("peer"), "the peer's sidecar metadata comes back, not a placeholder");
+    assert_eq!(fs::read(&resolved.path).expect("the stored bytes are readable"), b"filed-by-the-peer");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Tripwire: an upload of bytes a peer handle already stored dedups onto
+/// the peer's entry instead of rewriting it. Dedup decided against this
+/// handle's index alone would take the `persist_new` branch and overwrite
+/// the sidecar — in bloomery that sidecar is `ArtifactMeta::parents`, so
+/// a peer's recorded derivation edge would vanish with nothing logged
+/// (the dropped-parents warning cannot fire on a write that looks new).
+#[test]
+fn upload_dedups_onto_a_peer_written_entry_and_keeps_its_metadata() {
+    let root = temp_root("peer-upload");
+    let (mut first, mut second) = two_handles(&root);
+
+    let peer_hash = second.upload(b"shared-bytes", meta("the-peers-parents"), None).expect("upload lands");
+    let own_hash = first.upload(b"shared-bytes", meta("a-later-callers-parents"), None).expect("upload lands");
+
+    assert_eq!(own_hash, peer_hash, "identical bytes address the same entry across handles");
+    let resolved = first.get(&Selector::Hash(peer_hash.clone())).expect("the entry resolves");
+    assert_eq!(resolved.metadata, meta("the-peers-parents"), "the peer's sidecar survived the second handle's upload");
+
+    // The sidecar on disk is the record both handles and any restart read.
+    let sidecar: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("entries").join(format!("{peer_hash}.manifest"))).expect("read"))
+            .expect("decode sidecar JSON");
+    assert_eq!(
+        sidecar.get("label").and_then(serde_json::Value::as_str),
+        Some("the-peers-parents"),
+        "the on-disk sidecar was not rewritten under the later caller's metadata",
+    );
+
+    // And the peer's own view is unchanged — nothing clobbered it either.
+    assert_eq!(
+        second.get(&Selector::Hash(peer_hash)).expect("the peer still resolves its entry").metadata,
+        meta("the-peers-parents"),
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Tripwire: a name a peer handle pointed after this handle opened
+/// resolves. `names.json` is rewritten atomically by whichever handle
+/// uploads, so the in-memory name map is as stale as the entry index —
+/// a name miss re-reads the file before it becomes a `None`.
+#[test]
+fn a_peer_pointed_name_resolves_through_an_older_handle() {
+    let root = temp_root("peer-name");
+    let (mut first, mut second) = two_handles(&root);
+
+    let hash = second.upload(b"named-by-the-peer", meta("peer"), Some("svc".to_owned())).expect("upload lands");
+
+    let resolved = first.get(&Selector::Name("svc".to_owned())).expect("the peer's name resolves");
+    assert_eq!(resolved.hash, hash);
+    assert_eq!(resolved.metadata, meta("peer"));
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Tripwire: the two selectors agree on the resolved entry's name. The
+/// hash path adopts on a miss and the name path re-reads `names.json`, so
+/// an adopt that took the entry without its name would make
+/// `Resolved::name` depend on which selector happened to reach it —
+/// `None` by hash, `Some` by name, for one entry at one instant. That is
+/// a wrong answer rather than a stale one, and it reaches a caller:
+/// `aether-fleet` hands `Resolved::name` straight out as a resolved
+/// component's name.
+#[test]
+fn both_selectors_resolve_a_peer_pointed_name_the_same_way() {
+    let root = temp_root("peer-name-agreement");
+    let (mut first, mut second) = two_handles(&root);
+
+    let hash = second.upload(b"named-by-the-peer", meta("peer"), Some("svc".to_owned())).expect("upload lands");
+
+    // The hash path reaches the entry first, so it is the one that adopts.
+    let by_hash = first.get(&Selector::Hash(hash.clone())).expect("the entry resolves by hash");
+    assert_eq!(by_hash.name.as_deref(), Some("svc"), "an entry adopted by hash carries the name the root records");
+    assert_eq!(first.name_for(&hash).as_deref(), Some("svc"));
+
+    let by_name = first.get(&Selector::Name("svc".to_owned())).expect("the entry resolves by name");
+    assert_eq!(by_name.name, by_hash.name, "both selectors agree on the resolved name");
+    assert_eq!(by_name.hash, by_hash.hash);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Tripwire: `refresh` is the enumeration-side counterpart of the
+/// miss-path adopt. `entries` / `entry_count` answer from the index with
+/// no disk read of their own, so a projection rebuild over a shared root
+/// (bloomery's `rebuild_study_index`) enumerates only its own handle's
+/// writes until it refreshes.
+#[test]
+fn refresh_adopts_peer_written_entries_into_enumeration() {
+    let root = temp_root("peer-refresh");
+    let (mut first, mut second) = two_handles(&root);
+
+    let own = first.upload(b"mine", meta("mine"), None).expect("upload lands");
+    let peer = second.upload(b"theirs", meta("theirs"), Some("svc".to_owned())).expect("upload lands");
+    assert_eq!(first.entry_count(), 1, "enumeration sees only this handle's own write before a refresh");
+
+    first.refresh();
+
+    let mut rows: Vec<(String, String)> =
+        first.entries().map(|entry| (entry.hash.to_owned(), entry.metadata.label.clone())).collect();
+    rows.sort();
+    let mut expected = vec![(own, "mine".to_owned()), (peer.clone(), "theirs".to_owned())];
+    expected.sort();
+    assert_eq!(rows, expected, "refresh adopts the peer's entry into enumeration");
+    assert_eq!(first.entry_count(), 2);
+    assert_eq!(first.name_for(&peer).as_deref(), Some("svc"), "the peer's name comes across too");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Tripwire: `refresh` merges into the index rather than replacing it.
+/// `pinned` and recency are per-handle state no peer writes to disk, so a
+/// refresh that re-restored wholesale would silently unprotect every
+/// pinned entry — invisible until eviction later reclaims one the caller
+/// had pinned. The budget below forces both unpinned entries out, so only
+/// a surviving pin keeps `pinned` indexed.
+#[test]
+fn refresh_preserves_a_pin_the_disk_does_not_record() {
+    let root = temp_root("peer-refresh-pin");
+    // Ten-byte payloads against a 15-byte budget: the trigger upload must
+    // evict every unpinned entry to get back under it.
+    let mut first: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(15)).expect("open store");
+    let mut second: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open peer handle");
+
+    let pinned = first.upload(b"pinned-aaa", meta("a"), None).expect("upload lands");
+    assert!(first.pin(&pinned), "pin targets a stored entry");
+    second.upload(b"peers-bbbb", meta("b"), None).expect("upload lands");
+
+    first.refresh();
+    first.upload(b"trigger-cc", meta("c"), None).expect("upload lands");
+
+    assert_eq!(first.entry_count(), 1, "both unpinned entries were reclaimed to hold the budget");
+    assert!(first.contains(&pinned), "the pin survived the refresh and protected its entry from eviction");
     let _ = fs::remove_dir_all(&root);
 }

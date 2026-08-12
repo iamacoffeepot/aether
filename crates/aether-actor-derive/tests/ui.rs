@@ -151,4 +151,20 @@ fn ui() {
     // exist in that configuration and fails the build.
     t.pass("tests/ui/accepts_cfg_gated_handler_wasm.rs");
     t.pass("tests/ui/accepts_cfg_gated_handler_native.rs");
+    // ADR-0183: the same contract on the sibling macro. A wasm set emits arms
+    // and manifest records and no marker bridge, so this fixture pins the replay
+    // half: the stripped handler's kind type is gated with it, so a leaked
+    // artifact names a type that is not there, and the surviving records are
+    // compared byte-for-byte against an ungated set declaring exactly the
+    // handlers that outlive `#[cfg(test)]`, so over-stripping fails too. The
+    // bridge is a native-set artifact, and it is asserted twice elsewhere: its
+    // gate pair over the emitted tokens in `handler_set::tests`, and its effect
+    // on a real adopter in `aether-substrate/tests/native_actor_macro.rs`.
+    // Neither belongs here, because a native set's expansion names
+    // `aether_substrate` types and `aether-substrate` depends transitively on
+    // this crate. A dev-dependency can close that cycle, so what rules a fixture
+    // out here is cost, not the dependency graph: it would pull the wasmtime and
+    // cranelift tree into these UI tests, which the substrate side of the edge
+    // builds anyway.
+    t.pass("tests/ui/accepts_cfg_gated_handler_set_wasm.rs");
 }

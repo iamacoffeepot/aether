@@ -54,10 +54,11 @@ pub use mirror::ProjectionShell;
 pub use outbox::TopicOutbox;
 #[cfg(feature = "github")]
 pub use reactor::{
-    ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick, DispatchTick,
-    DrainTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState, IntegrateReactorCapability,
-    IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, LandReactorCapability, LandReactorSetup,
-    LandReactorState, LandTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
+    CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick,
+    DispatchTick, DrainTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState,
+    IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, LandReactorCapability,
+    LandReactorSetup, LandReactorState, LandTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
+    default_candidate_push,
 };
 #[cfg(feature = "github")]
 pub use source::SourceShell;

@@ -54,7 +54,7 @@ pub(super) fn reduce_verify_failed(
     let rolls = cursor.repair_rolls + u32::from(!repeated_verifiers.is_empty());
     let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
 
-    // The loop is bounded by N + B: V1 has N = 7 identities, so at most seven
+    // The loop is bounded by N + B: V1 has N = 8 identities, so at most eight
     // failed verdicts can add a new identity without spending a roll; at most B
     // later verdicts can spend the sealed Verify budget before this member wedges.
     if !repeated_verifiers.is_empty() && rolls >= record.stage_catalog.retry_budget_of(StageId::Verify).unwrap_or(1) {
