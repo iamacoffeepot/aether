@@ -735,9 +735,11 @@ impl Transformation {
     ///
     /// `binding` is the sealed catalog's `AggregateVerify` binding, carrying the
     /// authored wall-clock limit this fan-out runs under. That pairing is
-    /// asserted rather than assumed: the sibling `for_member_stage` gets it
-    /// structurally from an exhaustive `match binding.stage`, and a debug
-    /// assertion is what gives this constructor the same guarantee.
+    /// checked rather than assumed, but only in a debug build: the sibling
+    /// `for_member_stage` derives its whole lane from an exhaustive
+    /// `match binding.stage`, so cross-pairing is impossible there in every
+    /// profile, while here a debug-only assertion is a test-and-CI tripwire that
+    /// keeps release behavior total.
     ///
     /// # Panics
     ///
@@ -790,9 +792,11 @@ impl Transformation {
     ///
     /// `binding` is the sealed catalog's `AggregateReview` binding, carrying the
     /// authored wall-clock limit this critic runs under. That pairing is
-    /// asserted rather than assumed: the sibling `for_member_stage` gets it
-    /// structurally from an exhaustive `match binding.stage`, and a debug
-    /// assertion is what gives this constructor the same guarantee.
+    /// checked rather than assumed, but only in a debug build: the sibling
+    /// `for_member_stage` derives its whole lane from an exhaustive
+    /// `match binding.stage`, so cross-pairing is impossible there in every
+    /// profile, while here a debug-only assertion is a test-and-CI tripwire that
+    /// keeps release behavior total.
     ///
     /// # Panics
     ///
@@ -1170,6 +1174,36 @@ mod tests {
             1_500,
             "the aggregate-review critic copies the binding it was handed, not the compiled calibration"
         );
+    }
+
+    // Tripwire: each aggregate constructor rejects a binding for a stage other
+    // than its own. Its limit is copied straight off the binding it was handed,
+    // so a member `Verify` binding reaching the whole-bloom fan-out would
+    // dispatch the member lane's wall-clock as the aggregate's — a wrong number
+    // that no other assertion here can see, because the copy itself is correct.
+    // Nothing in the tree hands either constructor a mismatched binding, so
+    // without these two the guards could be deleted and every suite stay green.
+    //
+    // The guards are `debug_assert_eq!`, so they only fire when
+    // `debug_assertions` is on; gate the panic tests on it so a
+    // `cargo test --release` run (assertions compiled out) stays green.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "the dispatched limit must come from the stage being dispatched")]
+    fn for_aggregate_verify_panics_on_a_binding_for_another_stage() {
+        let subject = Digest::from_bytes([7; 32]);
+        let checkout = Digest::from_bytes([9; 32]);
+        let _ = Transformation::for_aggregate_verify(&binding(StageId::Verify), subject, checkout);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "the dispatched limit must come from the stage being dispatched")]
+    fn for_aggregate_review_panics_on_a_binding_for_another_stage() {
+        let subject = Digest::from_bytes([7; 32]);
+        let checkout = Digest::from_bytes([9; 32]);
+        let base = Digest::from_bytes([3; 32]);
+        let _ = Transformation::for_aggregate_review(&binding(StageId::Review), subject, checkout, base);
     }
 
     // Step-6 tripwire (#3572): the Construct and Refine bindings name the native
