@@ -100,7 +100,7 @@ impl AppTokenSource {
     /// and wire the production exchange against `api_base`. A malformed key
     /// fails fast here (ADR-0150 — no silent fallback to an ambient secret).
     /// `skew_secs` is how many seconds before the reported expiry to re-mint;
-    /// `0` resolves to [`DEFAULT_SKEW_SECS`].
+    /// `0` resolves to the 300-second default.
     ///
     /// The caller owns reading the key file, so the host-local path never
     /// crosses into this adapter.
@@ -292,7 +292,6 @@ fn now_unix() -> Result<u64, GithubError> {
 /// is asserted with no live GitHub. Tripwire: mint-once-then-cache vs
 /// re-mint-when-stale is the behavior the design turns on, not a passthrough.
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

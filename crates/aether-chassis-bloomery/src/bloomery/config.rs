@@ -378,7 +378,6 @@ impl GithubConnectionConfig {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use clap::Parser as _;
 
@@ -459,9 +458,9 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
 
         // Configured with a real key on disk → the App branch constructs a
         // minted-token client.
-        let mut key_file = tempfile::NamedTempFile::new().unwrap();
-        key_file.write_all(TEST_PRIVATE_KEY.as_bytes()).unwrap();
-        let path = key_file.path().to_str().unwrap().to_owned();
+        let mut key_file = tempfile::NamedTempFile::new().expect("a temp key file is creatable");
+        key_file.write_all(TEST_PRIVATE_KEY.as_bytes()).expect("the fixture key writes");
+        let path = key_file.path().to_str().expect("the temp path is UTF-8").to_owned();
         let with_key = configured(12345, &path, 42);
         assert!(with_key.connect_client().is_ok(), "App path builds a client from a present key");
     }
