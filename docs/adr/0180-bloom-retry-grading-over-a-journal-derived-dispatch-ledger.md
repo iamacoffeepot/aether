@@ -53,7 +53,7 @@ rest of the record. `DispatchKey` is a closed two-variant vocabulary naming the 
 - `Member { workpiece, stage }` — one slot per member per stage.
 - `Bloom { stage }` — one slot per bloom-level position.
 
-The reducer's six dispatch decisions become snapshot-folding: each increments its own key by one.
+The reducer's five dispatch decisions become snapshot-folding: each increments its own key by one.
 `DispatchAttempt` carries the workpiece and stage it dispatches and keys `Member`; `DispatchIntegration`,
 `DispatchAggregateVerify`, `DispatchAggregateReview`, and `DispatchLand` each key `Bloom` at their own
 stage. The outbox rows those decisions carry are untouched — only their snapshot fold is new.
