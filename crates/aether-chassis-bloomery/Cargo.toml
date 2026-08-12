@@ -22,14 +22,14 @@ required-features = ["runtime"]
 [[bin]]
 name = "bloomery-mock-lane"
 path = "src/bin/bloomery_mock_lane.rs"
-required-features = ["runtime"]
+required-features = ["runtime", "github"]
 
 [features]
 # Chassis-target default: the full native host (SQLite store runtime,
 # chassis, RPC/trace caps, signal driver). A wasm/marker consumer does
 # `default-features = false` and gets only the `aether.store.*` kind
 # identity + markers.
-default = ["runtime"]
+default = ["runtime", "github"]
 # Durable backend-object correspondence without the Bloomery process, GitHub
 # adapter, or the rest of the native chassis. This is the narrow build-layer
 # surface for a non-Git source/executor adapter.
@@ -48,8 +48,6 @@ runtime = [
     "dep:aether-codec",
     "dep:dirs",
     "dep:ed25519-dalek",
-    "dep:aether-bloomery-github",
-    "dep:jsonwebtoken",
     "dep:tracing",
     "dep:clap",
     "dep:confique",
@@ -63,7 +61,8 @@ runtime = [
 # `#[cfg(any(test, feature = "testing"))]` so prod manifests never
 # advertise `AETHER_GITHUB_BACKEND` and prod binaries never link
 # `FakeGithub` unless the `testing` feature is enabled.
-testing = ["aether-bloomery-github/testing"]
+github = ["dep:aether-bloomery-github", "dep:jsonwebtoken"]
+testing = ["github", "aether-bloomery-github/testing"]
 
 [dependencies]
 # Always-on (wasm-safe) — the `#[actor]` identity markers and the

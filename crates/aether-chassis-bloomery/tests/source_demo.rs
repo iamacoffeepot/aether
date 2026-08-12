@@ -1,3 +1,5 @@
+#![cfg(feature = "github")]
+
 //! The ADR-0149 git source-port demo (#3465 step 3 coverage).
 //!
 //! Drives a synthetic bloom through the source cap shell against the adapter's

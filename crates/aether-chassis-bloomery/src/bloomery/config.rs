@@ -1,22 +1,26 @@
 //! Bloomery coordinator and GitHub adapter configuration boundaries.
 
+#[cfg(feature = "github")]
 use std::sync::Arc;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(all(feature = "github", any(test, feature = "testing")))]
 use std::sync::OnceLock;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(all(feature = "github", any(test, feature = "testing")))]
 use aether_bloomery::Digest;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(all(feature = "github", any(test, feature = "testing")))]
 use aether_bloomery::SharedCorrespondence;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(all(feature = "github", any(test, feature = "testing")))]
 use aether_bloomery_github::{GitSource, testing::FakeGithub};
+#[cfg(feature = "github")]
 use aether_bloomery_github::{GithubConfig, GithubError, ReqwestGithub};
 
-use super::executor::DEFAULT_LANE_PROGRAM;
-#[cfg(any(test, feature = "testing"))]
+const DEFAULT_LANE_PROGRAM: &str = "cargo xtask transform";
+#[cfg(all(feature = "github", any(test, feature = "testing")))]
 use super::source::SourceShell;
+#[cfg(feature = "github")]
 use crate::app_auth::AppTokenSource;
 
+#[cfg(feature = "github")]
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_GITHUB", cli_prefix = "github")]
 pub struct GithubConnectionConfig {
@@ -96,7 +100,7 @@ pub struct GithubConnectionConfig {
     /// "testing"))`, so a production `config_manifest()` never advertises
     /// `AETHER_GITHUB_BACKEND` and a production binary never links
     /// `FakeGithub`.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(all(feature = "github", any(test, feature = "testing")))]
     #[config(env = "AETHER_GITHUB_BACKEND", default = "github")]
     pub github_backend: String,
     /// The commit the fixture's base digest names, as a git sha.
@@ -110,7 +114,7 @@ pub struct GithubConnectionConfig {
     ///
     /// Cfg-gated beside [`github_backend`](Self::github_backend), for the same
     /// reason.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(all(feature = "github", any(test, feature = "testing")))]
     #[config(env = "AETHER_GITHUB_FIXTURE_BASE_SHA", default = "")]
     pub fixture_base_sha: String,
 }
@@ -221,6 +225,7 @@ pub struct CoordinatorConfig {
     pub operator_email: String,
 }
 
+#[cfg(feature = "github")]
 impl Default for GithubConnectionConfig {
     fn default() -> Self {
         Self {
@@ -236,9 +241,9 @@ impl Default for GithubConnectionConfig {
             app_private_key_path: String::new(),
             app_installation_id: 0,
             app_token_skew_secs: 300,
-            #[cfg(any(test, feature = "testing"))]
+            #[cfg(all(feature = "github", any(test, feature = "testing")))]
             github_backend: "github".to_owned(),
-            #[cfg(any(test, feature = "testing"))]
+            #[cfg(all(feature = "github", any(test, feature = "testing")))]
             fixture_base_sha: String::new(),
         }
     }
@@ -274,6 +279,7 @@ impl CoordinatorConfig {
     }
 }
 
+#[cfg(feature = "github")]
 impl GithubConnectionConfig {
     #[must_use]
     pub fn to_github_config(&self) -> GithubConfig {
@@ -308,7 +314,7 @@ impl GithubConnectionConfig {
         }
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(all(feature = "github", any(test, feature = "testing")))]
     #[must_use]
     pub fn uses_fixture(&self) -> bool {
         self.github_backend == "fixture" || self.github_backend == "fake"
@@ -320,7 +326,7 @@ impl GithubConnectionConfig {
         false
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(all(feature = "github", any(test, feature = "testing")))]
     #[must_use]
     pub fn shared_fixture(&self) -> FakeGithub {
         static FAKE: OnceLock<FakeGithub> = OnceLock::new();
@@ -341,7 +347,7 @@ impl GithubConnectionConfig {
         .clone()
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(all(feature = "github", any(test, feature = "testing")))]
     #[must_use]
     pub fn fixture_source(&self, correspondence: SharedCorrespondence) -> SourceShell {
         let fake = self.shared_fixture();

@@ -8,8 +8,10 @@
 use clap::Parser;
 
 use crate::artifacts::ArtifactsOverlay;
+use crate::bloomery::CoordinatorOverlay;
+#[cfg(feature = "github")]
+use crate::bloomery::GithubConnectionOverlay;
 use crate::bloomery::chassis::{HttpPortOverlay, RpcPortOverlay};
-use crate::bloomery::{CoordinatorOverlay, GithubConnectionOverlay};
 use crate::session::SessionOverlay;
 use crate::signing::SigningOverlay;
 use crate::store::StoreOverlay;
@@ -41,6 +43,7 @@ pub struct BloomeryCli {
     /// `--github-*` shadow `AETHER_GITHUB_*` / `GITHUB_TOKEN` — the shared GitHub
     /// adapter connection, Actions, App-auth, and fixture knobs. Unset means
     /// unconfigured, so remote reactors mount disabled.
+    #[cfg(feature = "github")]
     #[command(flatten)]
     pub github: GithubConnectionOverlay,
 

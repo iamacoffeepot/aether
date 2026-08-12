@@ -20,6 +20,7 @@
 //! atomically inside the commit.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt::Write as _;
 
 use aether_actor::{Manual, runtime};
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
@@ -39,7 +40,6 @@ use aether_bloomery::{
     BloomId, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event, Fact, IdempotencyKey, Outcome,
     ResolvedConfigs, Snapshot, Unproducible, reduce, view_of,
 };
-use aether_bloomery_github::to_hex;
 
 use super::ControlCore;
 use crate::source::SourceCapability;
@@ -437,7 +437,7 @@ impl NativeActor for ControlCore {
         };
 
         let event = Event {
-            idempotency_key: IdempotencyKey(format!("observe-mainline-{}", to_hex(&head))),
+            idempotency_key: IdempotencyKey(format!("observe-mainline-{}", lowercase_hex(head.as_bytes()))),
             fact: Fact::ObserveMainline { head },
         };
         match to_vec(&event) {
@@ -798,5 +798,22 @@ fn admit_ok(outcome: &Outcome) -> AdmitResult {
     match to_vec(outcome) {
         Ok(outcome) => AdmitResult::Ok { outcome },
         Err(error) => AdmitResult::Err { error: format!("admit outcome encode failed: {error}") },
+    }
+}
+
+fn lowercase_hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut text, byte| {
+        write!(&mut text, "{byte:02x}").expect("writing to String cannot fail");
+        text
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lowercase_hex;
+
+    #[test]
+    fn observe_mainline_key_uses_lowercase_hex() {
+        assert_eq!(lowercase_hex(&[0, 15, 160, 255]), "000fa0ff");
     }
 }

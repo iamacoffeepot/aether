@@ -17,9 +17,9 @@
 pub mod kinds;
 pub use kinds::*;
 
-#[cfg(feature = "runtime")]
+#[cfg(all(feature = "runtime", feature = "github"))]
 mod config;
-#[cfg(feature = "runtime")]
+#[cfg(all(feature = "runtime", feature = "github"))]
 pub use config::SourceSetup;
 
 use aether_actor::actor;
@@ -28,10 +28,10 @@ use aether_actor::actor;
 #[actor(singleton, root)]
 pub struct SourceCapability;
 
-#[cfg(feature = "runtime")]
+#[cfg(all(feature = "runtime", feature = "github"))]
 mod runtime;
-#[cfg(feature = "runtime")]
+#[cfg(all(feature = "runtime", feature = "github"))]
 pub use runtime::SourceCapabilityState;
 
-#[cfg(all(test, feature = "runtime"))]
+#[cfg(all(test, feature = "runtime", feature = "github"))]
 mod tests;

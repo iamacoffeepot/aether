@@ -1,3 +1,5 @@
+#![cfg(feature = "github")]
+
 //! The ADR-0149 outward-mirror demo (#3459 step 7 coverage).
 //!
 //! Drives a synthetic bloom through the real journal (`SqliteStore`) and the

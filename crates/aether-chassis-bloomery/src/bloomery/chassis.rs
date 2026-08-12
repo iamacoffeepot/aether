@@ -8,7 +8,9 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+#[cfg(feature = "github")]
 use aether_bloomery::SharedCorrespondence as DomainSharedCorrespondence;
+#[cfg(feature = "github")]
 use aether_bloomery_github::SharedCorrespondence as GitSharedCorrespondence;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_http::{HttpServerCapability, HttpServerConfig};
@@ -22,18 +24,25 @@ use aether_trace::TraceDispatchCapability;
 
 use crate::api::{ApiParams, BloomeryApiCapability};
 use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
+use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
+#[cfg(feature = "github")]
 use crate::bloomery::{
-    CoordinatorConfig, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig,
-    IntegrateReactorCapability, IntegrateReactorSetup, LandReactorCapability, LandReactorSetup,
-    MirrorReactorCapability, MirrorReactorSetup, ProjectionShell, SourceShell,
+    ExecutorReactorCapability, ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig, IntegrateReactorCapability,
+    IntegrateReactorSetup, LandReactorCapability, LandReactorSetup, MirrorReactorCapability, MirrorReactorSetup,
+    ProjectionShell, SourceShell,
 };
 use crate::control::ControlCore;
 use crate::session::{SessionConfig, SessionPoolCapability};
 use crate::signing::{SigningCapability, SigningConfig};
-use crate::source::{SourceCapability, SourceSetup};
-use crate::store::{SqliteCorrespondence, StoreCapability, StoreConfig};
+#[cfg(feature = "github")]
+use crate::source::SourceCapability;
+#[cfg(feature = "github")]
+use crate::source::SourceSetup;
+#[cfg(feature = "github")]
+use crate::store::SqliteCorrespondence;
+use crate::store::{StoreCapability, StoreConfig};
 
 /// The default RPC port when `AETHER_RPC_PORT` is unset (distinct from the hub's
 /// 8901 so a bloomery and a hub can coexist on one host).
@@ -79,6 +88,7 @@ impl Default for HttpPortConfig {
 /// The unit marker for the Bloomery chassis (ADR-0071).
 pub struct BloomeryChassis;
 
+#[cfg(feature = "github")]
 fn mounted_correspondence<T>(
     mounted: Option<&T>,
     correspondence: &DomainSharedCorrespondence,
@@ -86,6 +96,7 @@ fn mounted_correspondence<T>(
     mounted.map(|_| Arc::clone(correspondence))
 }
 
+#[cfg(feature = "github")]
 struct BloomeryActorSetups {
     mirror: MirrorReactorSetup,
     executor: ExecutorReactorSetup,
@@ -94,6 +105,7 @@ struct BloomeryActorSetups {
     source: SourceSetup,
 }
 
+#[cfg(feature = "github")]
 fn correspondence_views(
     github_connection: &GithubConnectionConfig,
     store_path: &str,
@@ -111,6 +123,7 @@ fn correspondence_views(
     Ok((Arc::clone(&store) as DomainSharedCorrespondence, store as GitSharedCorrespondence))
 }
 
+#[cfg(feature = "github")]
 fn source_shell(
     github: &GithubConnectionConfig,
     correspondence: DomainSharedCorrespondence,
@@ -123,6 +136,7 @@ fn source_shell(
     SourceShell::connect(github, correspondence).map_err(|error| BootError::Other(Box::new(error)))
 }
 
+#[cfg(feature = "github")]
 fn projection_shell(github: &GithubConnectionConfig, configured: bool) -> Result<Option<ProjectionShell>, BootError> {
     #[cfg(any(test, feature = "testing"))]
     if github.uses_fixture() {
@@ -134,6 +148,7 @@ fn projection_shell(github: &GithubConnectionConfig, configured: bool) -> Result
     configured.then(|| ProjectionShell::connect(github)).transpose().map_err(|error| BootError::Other(Box::new(error)))
 }
 
+#[cfg(feature = "github")]
 fn actor_setups(
     github: &GithubConnectionConfig,
     coordinator: &CoordinatorConfig,
@@ -195,6 +210,7 @@ pub struct BloomeryEnv {
     pub artifacts: ArtifactsConfig,
     /// The GitHub adapter connection, Actions, App-auth, and fixture settings.
     /// Unconfigured (empty token/owner/repo) mounts remote reactors disabled.
+    #[cfg(feature = "github")]
     pub github: GithubConnectionConfig,
     /// Backend-neutral Bloomery coordinator settings.
     pub coordinator: CoordinatorConfig,
@@ -235,11 +251,22 @@ impl BloomeryEnv {
         let http_port = HttpPortConfig::try_from_argv_then_env(cli.http.clone().into_layer())?.port;
         let store = StoreConfig::try_from_argv_then_env(cli.store.clone().into_layer())?;
         let artifacts = ArtifactsConfig::try_from_argv_then_env(cli.artifacts.clone().into_layer())?;
+        #[cfg(feature = "github")]
         let github = GithubConnectionConfig::try_from_argv_then_env(cli.github.clone().into_layer())?;
         let coordinator = CoordinatorConfig::try_from_argv_then_env(cli.coordinator.clone().into_layer())?;
         let session = SessionConfig::try_from_argv_then_env(cli.session.clone().into_layer())?;
         let signing = SigningConfig::try_from_argv_then_env(cli.signing.clone().into_layer())?;
-        Ok(Self { rpc_port, http_port, store, artifacts, github, coordinator, session, signing })
+        Ok(Self {
+            rpc_port,
+            http_port,
+            store,
+            artifacts,
+            #[cfg(feature = "github")]
+            github,
+            coordinator,
+            session,
+            signing,
+        })
     }
 }
 
@@ -301,6 +328,7 @@ impl BootableChassis for BloomeryChassis {
     /// `TraceDispatchCapability` in this delta; the aborter is supplied by
     /// `composed`. Takes the boot handle by reference so [`Chassis::build`] can
     /// move the same `boot` into the driver afterward.
+    #[cfg(feature = "github")]
     fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
         let BloomeryEnv { rpc_port, http_port, store, artifacts, github, coordinator, session, signing } = env;
         // Capture the tier-policy path before `github` is moved into the source
@@ -386,9 +414,45 @@ impl BootableChassis for BloomeryChassis {
             )
             .with_actor::<BloomeryApiCapability>(ApiParams { approval_policy_file }))
     }
+    #[cfg(not(feature = "github"))]
+    fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
+        let BloomeryEnv { rpc_port, http_port, store, artifacts, coordinator, session, signing } = env;
+        let approval_policy_file = coordinator.approval_policy_file.clone();
+        let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);
+        let component_host = ComponentHostParams {
+            engine: Arc::clone(&boot.engine),
+            linker: Arc::clone(&boot.linker),
+            hub_outbound: Arc::clone(&boot.outbound),
+        };
+
+        Ok(builder
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor_configured::<StoreCapability>((), store)
+            .with_actor::<ControlCore>(())
+            .with_actor_configured::<ArtifactsCapability>((), artifacts)
+            .with_actor_configured::<SessionPoolCapability>((), session)
+            .with_actor_configured::<SigningCapability>((), signing)
+            .with_actor::<ComponentHostCapability>(component_host)
+            .with_actor_configured::<RpcServerCapability>(
+                RpcServerParams {
+                    peer_kind: PeerKind::Substrate {
+                        engine_name: aether_substrate::engine_name::<Self>(),
+                        engine_version: env!("CARGO_PKG_VERSION").into(),
+                        kinds: vec![],
+                    },
+                    route_target: None,
+                },
+                RpcServerConfig { port: Some(rpc_port) },
+            )
+            .with_actor_configured::<HttpServerCapability>(
+                (),
+                HttpServerConfig { enabled: true, bind_addr: http_addr.to_string(), ..HttpServerConfig::default() },
+            )
+            .with_actor::<BloomeryApiCapability>(ApiParams { approval_policy_file }))
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "github"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::sync::Arc;
