@@ -1408,6 +1408,26 @@ fn a_local_only_boot_mounts_and_says_why_an_actions_lane_cannot_run() {
 }
 
 #[test]
+fn a_selected_fixture_mounts_even_with_the_local_lane_off() {
+    // The exact configuration the in-process scenarios boot (#4711): the
+    // in-memory double as the Actions backend, and no local lane, so every stage
+    // dispatches through one backend a scenario can script.
+    //
+    // Tripwire: `is_disabled_mount` is a test-only copy of the expression
+    // `actor_setups` mounts by, and the copy had drifted from it. Boot already
+    // counted a selected fixture as a configured backend; the copy read only the
+    // missing connection knobs, so it called this combination unmountable while
+    // boot mounted it. No binary evaluates the copy, so nothing shipped disabled
+    // — the defect was a test vouching for an answer production does not give,
+    // and this pins the two back together.
+    let fixture = GithubConnectionConfig { github_backend: "fixture".to_owned(), ..GithubConnectionConfig::default() };
+    let no_local_lane = CoordinatorConfig { local_lane_enabled: false, ..CoordinatorConfig::default() };
+
+    assert!(!fixture.missing_connection_knobs().is_empty(), "a fixture names none of the connection knobs");
+    assert!(!is_disabled_mount(&fixture, &no_local_lane), "a selected fixture is a usable Actions backend on its own");
+}
+
+#[test]
 fn an_unconfigured_actions_refusal_is_permanent_so_the_drain_parks_it() {
     // Tripwire: the stub's `400` is load-bearing. Missing config cannot resolve
     // by waiting, so a status the classifier reads as transient (a 5xx, a 429, or
