@@ -7,7 +7,7 @@ use std::fmt;
 
 use aether_bloomery::{
     Admit, BloomId, CandidateRef, Digest, Event, Evidence, Fact, IdempotencyKey, InwardError, Nonce, ResolutionClaim,
-    StageCatalog, StageId, StageResult, StageVerdict, StudyCost, WorkpieceId, normalize_stage_result,
+    StageCatalog, StageId, StageResult, StageVerdict, StudyCost, VerifyFailureSet, WorkpieceId, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
@@ -36,6 +36,10 @@ pub struct UploadedEvidence {
     /// reference like the candidate. Persisted keyed by the order's member on a
     /// failing review so a Refine re-entry is directed by it.
     pub findings: Option<String>,
+    /// The exact failed `verify.check` members (ADR-0178), decoded by the
+    /// executor backend and cross-checked against the artifact name before this
+    /// claim exists. Nonempty only for a failed member Verify.
+    pub failed_verifiers: VerifyFailureSet,
     /// What the attempt cost (#4679), authoritative from the port reference like
     /// the candidate. The study lane admits it against the same order — but
     /// *without* consuming, before the verdict admit below consumes — so an
@@ -64,6 +68,16 @@ pub enum IntakeRefusal {
     /// Refine / Review) — a well-formed dispatch only ever carries a member-line
     /// stage, so this is a corrupt order. Refused rather than silently integrated.
     OutOfLineStage(StageId),
+    /// The typed verifier set disagrees with the stored stage/verdict: only a
+    /// failed member Verify may carry a set, and that case must carry one.
+    InvalidVerifierFailures {
+        /// The outstanding order's stored stage.
+        stage: StageId,
+        /// The upload's claimed verdict.
+        verdict: StageVerdict,
+        /// The set that violated the stage/verdict contract.
+        failed_verifiers: VerifyFailureSet,
+    },
 }
 
 /// An accepted attempt result: the reducer [`Event`] the upload normalized to
@@ -141,6 +155,21 @@ fn verdict_passed(verdict: StageVerdict) -> bool {
     // the gate is consulted, so a stray one here reads as non-passing — never a
     // false advance.
     matches!(verdict, StageVerdict::Approved | StageVerdict::VerificationPassed)
+}
+
+// The ADR-0178 transport invariant, kept outside `admit_uploaded` so the trust
+// boundary's main path stays readable: only a failed member Verify may carry a
+// set, and that one case must carry a nonempty set.
+fn verifier_failure_refusal(stage: StageId, upload: &UploadedEvidence) -> Option<IntakeRefusal> {
+    let valid = match (stage, upload.verdict) {
+        (StageId::Verify, StageVerdict::VerificationFailed) => !upload.failed_verifiers.is_empty(),
+        _ => upload.failed_verifiers.is_empty(),
+    };
+    (!valid).then_some(IntakeRefusal::InvalidVerifierFailures {
+        stage,
+        verdict: upload.verdict,
+        failed_verifiers: upload.failed_verifiers,
+    })
 }
 
 /// Decompose a failing aggregate verdict's findings against the bloom's
@@ -278,6 +307,9 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     let Some(record) = DispatchRecord::from_stored(&stored) else {
         return Ok(AdmitDecision::Refused(IntakeRefusal::CorruptOrder(upload.nonce.clone())));
     };
+    if let Some(refusal) = verifier_failure_refusal(record.stage, upload) {
+        return Ok(AdmitDecision::Refused(refusal));
+    }
     let observed = StageResult { subject: upload.subject, verdict: upload.verdict, detail: upload.detail };
     let evidence = match normalize_stage_result(&record.displayed_digest, &observed) {
         Ok(evidence) => evidence,

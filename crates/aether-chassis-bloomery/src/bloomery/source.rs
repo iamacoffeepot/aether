@@ -24,12 +24,11 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome, IntegrationPosition,
-    LandOutcome, LandProposal, Snapshot, SourceBackend, SourceSnapshot, WorkpieceId,
+    BackendObjectId, BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, CorrespondenceError, Digest,
+    IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal, SharedCorrespondence, Snapshot, SourceBackend,
+    SourceSnapshot, WorkpieceId,
 };
-use aether_bloomery_github::{
-    CorrespondenceError, GitObjectId, GitSource, GithubError, SharedCorrespondence, SourceError,
-};
+use aether_bloomery_github::{GitObjectId, GitSource, GithubError, SourceError};
 
 use super::mirror::GithubMirrorConfig;
 
@@ -94,7 +93,7 @@ impl SourceShell {
             .ok_or_else(|| SourceError::Correspondence(CorrespondenceError::new("no correspondence store mounted")))?;
         let git = GitObjectId::from_hex(head_commit_sha)
             .ok_or_else(|| SourceError::Malformed(format!("mainline head sha `{head_commit_sha}`")))?;
-        correspondence.record(base, &git)?;
+        correspondence.record(base, &BackendObjectId::from(git))?;
         Ok(())
     }
 
@@ -131,7 +130,8 @@ impl SourceShell {
             .correspondence
             .as_ref()
             .ok_or_else(|| SourceError::Correspondence(CorrespondenceError::new("no correspondence store mounted")))?;
-        if correspondence.resolve_git(&Snapshot::GENESIS_MAINLINE)?.is_some() {
+        if let Some(object) = correspondence.resolve_backend_object(&Snapshot::GENESIS_MAINLINE)? {
+            GitObjectId::try_from(object)?;
             return Ok(());
         }
 
@@ -334,8 +334,9 @@ impl SourceShell {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use aether_bloomery::{BackendObjectId, SharedCorrespondence};
     use aether_bloomery_github::testing::FakeGithub;
-    use aether_bloomery_github::{GitSource, SharedCorrespondence};
+    use aether_bloomery_github::{GitObjectId, GitSource};
 
     use super::{
         Arc, BloomId, Digest, IntegrateOutcome, LandOutcome, LandProposal, Snapshot, SourceBackend, SourceError,
@@ -345,7 +346,7 @@ mod tests {
     #[test]
     fn seed_mainline_records_a_resolvable_base_correspondence() {
         // Tripwire: seed_mainline records the sealed base digest ↔ the repo's real
-        // (40-hex sha1) mainline head commit, so a later `resolve_git` reads it back
+        // (40-hex sha1) mainline head commit, so a later forward resolve reads it back
         // — the record path the deferred boot reconcile drives, verified here
         // without the live mainline read that supplies the sha.
         let fake = FakeGithub::new();
@@ -357,8 +358,13 @@ mod tests {
         let head = "3a3f8c0b9e1d2a4f6b8c0e2d4a6f8b0c1e3d5a7f";
         shell.seed_mainline(&base, head).unwrap();
 
-        let resolved =
-            correspondence.resolve_git(&base).unwrap().expect("the seeded base resolves to the mainline head");
+        let resolved = GitObjectId::try_from(
+            correspondence
+                .resolve_backend_object(&base)
+                .unwrap()
+                .expect("the seeded base resolves to the mainline head"),
+        )
+        .unwrap();
         assert_eq!(resolved.to_hex(), head, "the resolved object is the real 40-hex sha1, not a hex-punned digest");
     }
 
@@ -376,7 +382,8 @@ mod tests {
         let correspondence: SharedCorrespondence = Arc::new(fake.clone());
         let tree = Digest::from_bytes([10; 32]);
         fake.seed_git_object(&tree);
-        let tree_sha = correspondence.resolve_git(&tree).unwrap().unwrap().to_hex();
+        let tree_sha =
+            GitObjectId::try_from(correspondence.resolve_backend_object(&tree).unwrap().unwrap()).unwrap().to_hex();
 
         let opening_head = fake.seed_commit_with_message("opening", &tree_sha);
         fake.seed_ref("heads/main", &opening_head);
@@ -392,9 +399,27 @@ mod tests {
         shell.reconcile_genesis_mainline().unwrap();
 
         assert_eq!(
-            correspondence.resolve_git(&Snapshot::GENESIS_MAINLINE).unwrap().unwrap().to_hex(),
+            GitObjectId::try_from(
+                correspondence.resolve_backend_object(&Snapshot::GENESIS_MAINLINE).unwrap().unwrap(),
+            )
+            .unwrap()
+            .to_hex(),
             opening_head,
             "the later boot leaves genesis bound to the head the journal opened against",
+        );
+    }
+
+    #[test]
+    fn genesis_reconcile_rejects_a_non_git_backend_binding() {
+        let fake = FakeGithub::new();
+        let correspondence: SharedCorrespondence = Arc::new(fake.clone());
+        correspondence.record(&Snapshot::GENESIS_MAINLINE, &BackendObjectId::new(vec![0xAB; 17])).unwrap();
+        let backend = Arc::new(GitSource::new(fake, Arc::clone(&correspondence), true));
+        let shell = SourceShell { backend, correspondence: Some(correspondence) };
+
+        assert!(
+            matches!(shell.reconcile_genesis_mainline(), Err(SourceError::Correspondence(_))),
+            "an opaque binding that cannot cross the Git adapter boundary must not suppress authoritative seeding",
         );
     }
 
@@ -419,7 +444,9 @@ mod tests {
         // Genesis must be the sole digest for the head commit.
         let correspondence: SharedCorrespondence = Arc::new(fake.clone());
         fake.seed_git_object(&base_tree);
-        let tree_sha = correspondence.resolve_git(&base_tree).unwrap().unwrap().to_hex();
+        let tree_sha = GitObjectId::try_from(correspondence.resolve_backend_object(&base_tree).unwrap().unwrap())
+            .unwrap()
+            .to_hex();
         let head_sha = fake.seed_commit(&tree_sha);
         fake.seed_ref("heads/main", &head_sha);
 
@@ -432,7 +459,7 @@ mod tests {
         // — the sole digest mapping for the head commit object.
         shell.reconcile_genesis_mainline().unwrap();
         assert!(
-            correspondence.resolve_git(&Snapshot::GENESIS_MAINLINE).unwrap().is_some(),
+            correspondence.resolve_backend_object(&Snapshot::GENESIS_MAINLINE).unwrap().is_some(),
             "the genesis base resolves to the repo's real head after the reconcile"
         );
         // The integration namespace is cut from the genesis base (resolvable only

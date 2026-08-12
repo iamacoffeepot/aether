@@ -55,6 +55,7 @@
 extern crate alloc;
 
 pub mod control;
+pub mod correspondence;
 pub mod digest;
 pub mod ids;
 pub mod inward;
@@ -72,6 +73,7 @@ pub use control::{
     MembershipMutation, ObserveMainline, ObserveMainlineResult, OutboxPayload, Query, QueryResult, RedispatchPayload,
     ReleaseSeal, ReplayJournal, ReplayJournalResult, ReviewPass, Topic, TransferSeal,
 };
+pub use correspondence::{BackendObjectId, Correspondence, CorrespondenceError, SharedCorrespondence};
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};
 pub use inward::{InwardError, StageResult, StageVerdict, StudyResult, normalize_stage_result, normalize_study_result};
@@ -101,5 +103,5 @@ pub use values::{
     Observation, OverrideError, PriceRow, PriceTable, Provenance, Question, REVIEW_CRITIC_COMMAND, ReasoningEffort,
     ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel, StageBinding, StageCatalog, StageOverride,
     StageReceipt, Statement, StudyCost, StudyRecord, ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND,
-    Wedge, Workpiece, config_address, decode_config, is_model_lane,
+    VerifyFailure, VerifyFailureSet, Wedge, Workpiece, config_address, decode_config, is_model_lane,
 };

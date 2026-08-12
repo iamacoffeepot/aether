@@ -1,7 +1,7 @@
 //! The evidence-naming seam: turn a pulled reference into the attempt result a
 //! worker uploaded, decoding it from the artifact name alone.
 
-use aether_bloomery::{Digest, EvidenceRef, Nonce, StageVerdict};
+use aether_bloomery::{Digest, EvidenceRef, Nonce, StageVerdict, VerifyFailureSet};
 
 use super::admit::UploadedEvidence;
 
@@ -19,7 +19,7 @@ pub trait EvidenceClaims {
 }
 
 /// The artifact-name prefix an attempt-result upload carries. The full name is
-/// `attempt.<verdict>.<subject_hex>.<detail_hex>.<nonce>` — the thin wrapper
+/// `attempt.<verdict>.<failure_mask>.<subject_hex>.<detail_hex>.<nonce>` — the thin wrapper
 /// (#3501) names its evidence artifact this way, and the executor port's
 /// nonce-scoped [`ExecutorShell::stream_evidence`](crate::bloomery::executor::ExecutorShell::stream_evidence)
 /// returns it because the trailing `nonce` segment is delimiter-bounded (ADR-0149 §The line).
@@ -32,7 +32,7 @@ const ATTEMPT_ARTIFACT_PREFIX: &str = "attempt";
 /// the trailing delimiter-bounded segment `stream_evidence` filters on.
 #[must_use]
 pub fn attempt_artifact_name(nonce: &Nonce, subject: &Digest, verdict: StageVerdict, detail: &Digest) -> String {
-    format!("{ATTEMPT_ARTIFACT_PREFIX}.{}.{}.{}.{}", verdict_token(verdict), hex_of(subject), hex_of(detail), nonce.0)
+    NameEvidenceClaims::attempt_artifact_name(nonce, subject, verdict, VerifyFailureSet::EMPTY, detail)
 }
 
 /// The production [`EvidenceClaims`]: decode an attempt result from the pulled
@@ -45,15 +45,60 @@ pub fn attempt_artifact_name(nonce: &Nonce, subject: &Digest, verdict: StageVerd
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NameEvidenceClaims;
 
+impl NameEvidenceClaims {
+    /// Compose a canonical attempt name carrying ADR-0178's verifier mask.
+    #[must_use]
+    pub fn attempt_artifact_name(
+        nonce: &Nonce,
+        subject: &Digest,
+        verdict: StageVerdict,
+        failed_verifiers: VerifyFailureSet,
+        detail: &Digest,
+    ) -> String {
+        format!(
+            "{ATTEMPT_ARTIFACT_PREFIX}.{}.{}.{}.{}.{}",
+            verdict_token(verdict),
+            failed_verifiers.to_mask(),
+            hex_of(subject),
+            hex_of(detail),
+            nonce.0,
+        )
+    }
+}
+
 impl EvidenceClaims for NameEvidenceClaims {
     fn claim_for(&self, reference: &EvidenceRef) -> Option<UploadedEvidence> {
         let rest = reference.name.strip_prefix(ATTEMPT_ARTIFACT_PREFIX)?.strip_prefix('.')?;
-        // verdict . subject_hex . detail_hex . <nonce…>; the nonce may itself
-        // contain '.', so bound the split to the three leading fields.
-        let mut fields = rest.splitn(4, '.');
+        // verdict . failure_mask . subject_hex . detail_hex . <nonce…>; the
+        // nonce may itself contain '.', so bound the split to the four leading
+        // fields. The executor-projected set must agree with the name token:
+        // local derives the former from bytes, while Actions derives both from
+        // the authenticated name channel.
+        let mut fields = rest.splitn(5, '.');
         let verdict = verdict_from_token(fields.next()?)?;
-        let subject = digest_from_hex(fields.next()?)?;
-        let detail = digest_from_hex(fields.next()?)?;
+        let mask_or_subject = fields.next()?;
+        let (failed_verifiers, subject, detail, _named_nonce) = if mask_or_subject.len() == 2 {
+            (
+                VerifyFailureSet::from_mask(mask_or_subject)?,
+                digest_from_hex(fields.next()?)?,
+                digest_from_hex(fields.next()?)?,
+                fields.next()?,
+            )
+        } else {
+            // The credential-bearing model wrapper is outside the mechanical
+            // ADR-0178 lane and still emits the pre-mask name shape. Preserve
+            // that non-Verify transport as an empty failure set; a malformed
+            // short mask cannot take this path because a subject is 64 hex.
+            (
+                VerifyFailureSet::EMPTY,
+                digest_from_hex(mask_or_subject)?,
+                digest_from_hex(fields.next()?)?,
+                fields.next()?,
+            )
+        };
+        if failed_verifiers != reference.failed_verifiers {
+            return None;
+        }
         // The nonce, candidate, findings, and cost are authoritative from the
         // reference (what the port matched the run by / what the backend read
         // out of the run's own evidence), not the name.
@@ -62,6 +107,7 @@ impl EvidenceClaims for NameEvidenceClaims {
             subject,
             verdict,
             detail,
+            failed_verifiers,
             candidate: reference.candidate,
             findings: reference.findings.clone(),
             cost: reference.cost,

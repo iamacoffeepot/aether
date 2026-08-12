@@ -4,6 +4,7 @@ mod tools;
 use std::fs;
 use std::process::{self, Command};
 
+use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 use anyhow::{Context, Result, bail};
 
 use crate::cargo::{WASM_TARGET, run_captured, write_json_pretty};
@@ -216,6 +217,11 @@ fn all_passed(statuses: &[bool]) -> bool {
     statuses.iter().all(|&passed| passed)
 }
 
+/// Project failed member outcomes onto ADR-0178's closed canonical set.
+fn failed_verifiers<'a>(members: impl IntoIterator<Item = (&'a str, bool)>) -> VerifyFailureSet {
+    members.into_iter().filter_map(|(id, passed)| (!passed).then(|| VerifyFailure::from_name(id)).flatten()).collect()
+}
+
 /// Every program the umbrella's members need — the roots
 /// [`tools::preflight`] resolves through the dependency graph.
 fn required_tools() -> Vec<&'static str> {
@@ -299,7 +305,18 @@ fn run_member(id: &str, invocation: &VerifyInvocation) -> Result<(bool, Vec<u8>,
 
     let mut log = rendered.into_bytes();
     log.extend_from_slice(&output.stderr);
-    Ok((passed, log, output.status.code().unwrap_or(1)))
+    Ok((passed, log, effective_exit_code(passed, output.status.code())))
+}
+
+// A derived verdict (currently clippy's structured warning predicate) may fail
+// even when the child exited zero. The umbrella must still exit nonzero so its
+// evidence status and the Actions step outcome cannot disagree.
+fn effective_exit_code(passed: bool, exit_code: Option<i32>) -> i32 {
+    if passed {
+        exit_code.unwrap_or(0)
+    } else {
+        exit_code.filter(|code| *code != 0).unwrap_or(1)
+    }
 }
 
 /// Run `invocation`'s prepare step, when it has one. `None` is a member clear to
@@ -342,19 +359,25 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     log_bytes.extend_from_slice(&output.stderr);
     fs::write(&log_path, &log_bytes).with_context(|| format!("write {}", log_path.display()))?;
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let passed = output.status.success() && (args.command != "verify.clippy" || clippy_verdict(&stdout));
+    let exit_code = effective_exit_code(passed, output.status.code());
+
     // A failing single verify contributes its own diagnostics on the same
     // channel the umbrella uses, so a lane run alone directs a Refine too.
-    let findings = (!output.status.success())
+    let findings = (!passed)
         .then(|| verify_findings(&[(args.command.as_str(), false, String::from_utf8_lossy(&log_bytes).into_owned())]))
         .flatten();
 
-    let evidence = build_evidence(&args.command, args.nonce.clone(), output.status, log_name, findings);
+    let failures = (!passed).then(|| VerifyFailure::from_name(&args.command).map(VerifyFailureSet::one)).flatten();
+    let evidence =
+        build_evidence(&args.command, args.nonce.clone(), passed, Some(exit_code), log_name, findings, failures);
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
 
-    if output.status.success() {
+    if passed {
         Ok(())
     } else {
-        process::exit(output.status.code().unwrap_or(1));
+        process::exit(exit_code);
     }
 }
 
@@ -489,6 +512,7 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
     if !missing.is_empty() {
         let evidence = Evidence {
             findings: Some(tools::missing_findings(&missing)),
+            failed_verifiers: Some(VerifyFailureSet::one(VerifyFailure::Preflight)),
             command: VERIFY_CHECK.to_owned(),
             nonce: args.nonce.clone(),
             status: "fail",
@@ -528,8 +552,10 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
     }
 
     let all_pass = all_passed(&passed);
+    let failures = failed_verifiers(outcomes.iter().map(|(id, passed, _)| (*id, *passed)));
     let evidence = Evidence {
         findings: verify_findings(&outcomes),
+        failed_verifiers: (!failures.is_empty()).then_some(failures),
         command: VERIFY_CHECK.to_owned(),
         nonce: args.nonce.clone(),
         status: if all_pass {
@@ -552,13 +578,14 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_FINDING_LINES, VERIFY_CHECK, all_passed, clippy_verdict, distil_diagnostics, preflight_tools,
-        prepare_failure_log, render_diagnostics, required_targets, required_tools, verify_check_members,
-        verify_command, verify_findings,
+        MAX_FINDING_LINES, VERIFY_CHECK, all_passed, clippy_verdict, distil_diagnostics, effective_exit_code,
+        failed_verifiers, preflight_tools, prepare_failure_log, render_diagnostics, required_targets, required_tools,
+        verify_check_members, verify_command, verify_findings,
     };
     use crate::cargo::WASM_TARGET;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
     use crate::transform::review::REVIEW_CRITIC;
+    use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 
     #[test]
     fn known_ids_map_to_ci_parity_argv() {
@@ -637,6 +664,7 @@ mod tests {
         assert!(!clippy_verdict(&stream), "a warning is a failure exactly as `-D warnings` would make it");
         assert!(clippy_verdict(r#"{"reason":"compiler-artifact","target":{"name":"x"}}"#), "progress alone passes");
         assert!(clippy_verdict(""), "a silent run is a clean run");
+        assert_eq!(effective_exit_code(false, Some(0)), 1, "a derived failure must make the umbrella exit nonzero");
     }
 
     #[test]
@@ -892,6 +920,30 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         assert!(!all_passed(&[true, false, true]));
         assert!(!all_passed(&[false, false, false]));
         assert!(all_passed(&[]), "no members is vacuously all-passed");
+    }
+
+    #[test]
+    fn failed_member_projection_is_exact_canonical_and_empty_on_pass() {
+        let multi = failed_verifiers([
+            ("verify.fmt", false),
+            ("verify.clippy", true),
+            ("verify.docs", false),
+            ("verify.test", false),
+        ]);
+        assert_eq!(
+            multi,
+            [VerifyFailure::Fmt, VerifyFailure::Docs, VerifyFailure::Test].into_iter().collect(),
+            "every failed command contributes its closed identity",
+        );
+        assert_eq!(failed_verifiers([("verify.test", false)]), VerifyFailureSet::one(VerifyFailure::Test));
+        assert!(failed_verifiers([("verify.fmt", true), ("verify.deps", true)]).is_empty());
+    }
+
+    #[test]
+    fn preflight_has_its_own_synthetic_failure_identity() {
+        let failures = VerifyFailureSet::one(VerifyFailure::Preflight);
+        assert_eq!(failures.to_mask(), "01");
+        assert!(!failures.contains(VerifyFailure::Fmt), "missing tools are not attributed to a member");
     }
 
     #[test]

@@ -7,10 +7,9 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{BloomId, Digest, Event, Fact, LandPayload, Topic};
-use aether_bloomery_github::Correspondence;
+use aether_bloomery::{BloomId, Correspondence, Digest, Event, Fact, LandPayload, Topic};
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GitSource, PullRequestApi, short_hex};
+use aether_bloomery_github::{GitObjectId, GitSource, PullRequestApi, short_hex};
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::drain_and_land;
@@ -101,7 +100,12 @@ fn an_accepted_proposal_admits_a_fact_land_carrying_the_merge_commit() {
             // accept never produced, and the next bloom would seal on it.
             assert_ne!(head, new_head, "the admitted head is the merge commit, not the proposed head");
             assert_eq!(
-                fake.resolve_git(&head).unwrap().map(|object| object.to_hex()),
+                fake.resolve_backend_object(&head)
+                    .unwrap()
+                    .map(GitObjectId::try_from)
+                    .transpose()
+                    .unwrap()
+                    .map(|object| object.to_hex()),
                 Some(squashed),
                 "the admitted head resolves to the commit mainline actually became",
             );

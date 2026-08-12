@@ -15,6 +15,7 @@ mod question;
 mod stage;
 mod statement;
 mod study;
+mod verify;
 
 pub use bloom::{
     BloomDraft, BloomSpec, LandingReceipt, MemberCandidate, MemberSubject, Membership, ResolutionClaim, ResolvedBloom,
@@ -33,6 +34,7 @@ pub use stage::{
 };
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 pub use study::{StudyCost, StudyRecord};
+pub use verify::{VerifyFailure, VerifyFailureSet};
 
 use alloc::string::String;
 use alloc::vec::Vec;

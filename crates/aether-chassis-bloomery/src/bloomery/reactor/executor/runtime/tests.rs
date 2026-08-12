@@ -12,11 +12,13 @@ use std::collections::BTreeMap;
 use aether_bloomery::{
     AgentSelection, AggregateReviewPayload, BloomId, ConfigKind, ConfigRegistry, DispatchPayload, EvidenceRef,
     ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce, ReasoningEffort, RedispatchPayload,
-    ReviewPass, StageCatalog, StageId, StageOverride, Topic, Transformation, WorkHandle, WorkOrder, WorkpieceId,
+    ReviewPass, SharedCorrespondence as DomainSharedCorrespondence, StageCatalog, StageId, StageOverride, Topic,
+    Transformation, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
-    ActionsExecutor, Artifact, ExecutorError, GithubError, LaneWorkflows, RunConclusion, RunStatus, StageVerdict,
+    ActionsExecutor, Artifact, ExecutorError, GitObjectId, GithubError, LaneWorkflows, RunConclusion, RunStatus,
+    SharedCorrespondence as GitSharedCorrespondence, StageVerdict,
 };
 use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
@@ -668,15 +670,15 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
     let base = tempfile::TempDir::new().unwrap();
     // A correspondence seeded with the dispatch checkout (`digest(0xC0)`) so both
     // backends resolve it — the local lane checks it out for the `git worktree add`.
-    let correspondence: aether_bloomery_github::SharedCorrespondence = {
-        let fake = FakeGithub::new();
-        fake.seed_git_object(&digest(0xC0));
-        Arc::new(fake)
-    };
+    let fake = FakeGithub::new();
+    fake.seed_git_object(&digest(0xC0));
+    let correspondence = Arc::new(fake);
+    let domain_correspondence = Arc::clone(&correspondence) as DomainSharedCorrespondence;
+    let git_correspondence = correspondence as GitSharedCorrespondence;
     let mut store = SqliteStore::open(":memory:").unwrap();
     let bloom = BloomId(digest(1));
     let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-local", 5);
-    let actions = Arc::new(ActionsExecutor::new(FakeGithub::new(), Arc::clone(&correspondence), lanes(), PINNED_REF));
+    let actions = Arc::new(ActionsExecutor::new(FakeGithub::new(), domain_correspondence, lanes(), PINNED_REF));
     let runner = FixedRunner {
         evidence: format!(
             r#"{{"command":"construct.implement","nonce":"dispatch-{sequence}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"result":{{"num_turns":3}}}}}}"#
@@ -684,7 +686,7 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
         lifecycle: RunLifecycle::Exited { success: true },
         captures: true,
     };
-    let local = Arc::new(LocalExecutor::new(Arc::new(runner), correspondence, base.path()));
+    let local = Arc::new(LocalExecutor::new(Arc::new(runner), git_correspondence, base.path()));
     let routing = RoutingExecutor::new(actions, local, vec!["construct.".to_owned()]);
     let shell = ExecutorShell::new(Arc::new(routing));
 
@@ -881,14 +883,14 @@ fn drain_stamps_the_record_axes_from_the_payload() {
 // (failing) work.
 #[test]
 fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
-    use aether_bloomery::{CandidateRef, Event, IdempotencyKey};
-    use aether_bloomery_github::Correspondence as _;
+    use aether_bloomery::{CandidateRef, Correspondence as _, Event, IdempotencyKey};
 
     let bloom = BloomId(digest(1));
     let capture = CandidateRef { tree: digest(0xAB), checkout: digest(0xAC) };
     let store = FakeGithub::new();
     store.seed_git_object(&capture.checkout);
-    let commit_hex = store.resolve_git(&capture.checkout).unwrap().unwrap().to_hex();
+    let commit_hex =
+        GitObjectId::try_from(store.resolve_backend_object(&capture.checkout).unwrap().unwrap()).unwrap().to_hex();
     let admission = |passed: bool, candidate: Option<CandidateRef>| {
         let fact = Fact::AttemptCompleted {
             bloom,
@@ -907,7 +909,7 @@ fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
     };
 
     let pusher = RecordingPush::default();
-    let correspondence: aether_bloomery_github::SharedCorrespondence = Arc::new(store);
+    let correspondence: DomainSharedCorrespondence = Arc::new(store);
     push_admitted_candidates(
         &[admission(true, Some(capture)), admission(false, Some(capture)), admission(true, None)],
         Some(&correspondence),
@@ -976,6 +978,7 @@ fn park_and_answer(
         detail: question,
         candidate: None,
         findings: None,
+        failed_verifiers: aether_bloomery::VerifyFailureSet::EMPTY,
         cost: None,
     };
     assert!(matches!(admit_uploaded(store, &upload).unwrap(), AdmitDecision::Admitted(_)), "the parked upload admits");

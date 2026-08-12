@@ -8,8 +8,38 @@
 //! carries the `rusqlite` native dependency (ADR-0149 §Packaging).
 //!
 //! Identity/runtime split (ADR-0122): the [`StoreCapability`] ZST + the
-//! `aether.store.*` kind family are always-on; the `SQLite`-backed runtime lives
-//! in `runtime.rs` behind the `runtime` feature.
+//! `aether.store.*` kind family are always-on. The full `SQLite`-backed store
+//! runtime lives in `runtime.rs` behind the `runtime` feature, while the
+//! backend-neutral [`SqliteCorrespondence`] can be selected independently with
+//! the narrow `correspondence` feature.
+//!
+//! A non-Git adapter can persist and reopen opaque object correspondence
+//! without linking the Bloomery process or GitHub adapter:
+//!
+//! ```toml
+//! aether-chassis-bloomery = { path = "../aether-chassis-bloomery", default-features = false, features = ["correspondence"] }
+//! ```
+//!
+//! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::sync::Arc;
+//!
+//! use aether_bloomery::{BackendObjectId, Digest, SharedCorrespondence};
+//! use aether_chassis_bloomery::store::SqliteCorrespondence;
+//!
+//! let path = "bloomery.sqlite";
+//! let digest = Digest::from_bytes([7; 32]);
+//! let object = BackendObjectId::new(b"non-git-object".to_vec());
+//! let correspondence: SharedCorrespondence = Arc::new(SqliteCorrespondence::open(path)?);
+//! correspondence.record(&digest, &object)?;
+//! drop(correspondence);
+//!
+//! let reopened: SharedCorrespondence = Arc::new(SqliteCorrespondence::open(path)?);
+//! assert_eq!(reopened.resolve_backend_object(&digest)?, Some(object.clone()));
+//! assert_eq!(reopened.resolve_digest(&object)?, Some(digest));
+//! # Ok(())
+//! # }
+//! ```
 
 pub mod kinds;
 pub use kinds::*;
@@ -41,9 +71,9 @@ use aether_actor::actor;
 #[actor(singleton, root)]
 pub struct StoreCapability;
 
-#[cfg(feature = "runtime")]
+#[cfg(feature = "correspondence")]
 mod correspondence;
-#[cfg(feature = "runtime")]
+#[cfg(feature = "correspondence")]
 pub use correspondence::SqliteCorrespondence;
 
 #[cfg(feature = "runtime")]

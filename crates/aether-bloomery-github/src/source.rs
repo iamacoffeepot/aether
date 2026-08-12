@@ -15,9 +15,9 @@
 //! object format, so this backend cannot hex-pun a digest into an object sha
 //! (ADR-0150, amended 2026-07-18 for [#3590]). The mainline paths — `snapshot`,
 //! `create_namespace`, `integrate`, and the CAS `land` — resolve real git shas
-//! through a persisted [`Correspondence`] handle held next to the client:
-//! forward ([`Correspondence::resolve_git`]) to turn a digest into the git
-//! object that carries it, reverse ([`Correspondence::resolve_digest`]) to read a
+//! through a persisted [`aether_bloomery::Correspondence`] handle held next to the client:
+//! forward ([`aether_bloomery::Correspondence::resolve_backend_object`]) to turn a digest into the git
+//! object that carries it, reverse ([`aether_bloomery::Correspondence::resolve_digest`]) to read a
 //! real object sha back to its digest. An object the store never recorded is the
 //! clean [`SourceError::UnresolvedCorrespondence`] — the honest boundary this
 //! slice draws — in place of the old fixed-64-hex `Malformed` that a real sha1
@@ -49,25 +49,19 @@
 
 use std::error::Error;
 use std::fmt;
-use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ContentAddressed, Digest,
-    IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal, LandingReceipt, SourceBackend, SourceSnapshot,
-    WorkpieceId, digest_of,
+    BackendObjectId, BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ContentAddressed,
+    CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal, LandingReceipt,
+    SharedCorrespondence, SourceBackend, SourceSnapshot, WorkpieceId, digest_of,
 };
 use serde::Serialize;
 
 use crate::client::{
     ChecksState, GitDataApi, GithubError, MergeResult, NewPullRequest, PullRequestApi, PullRequestState,
 };
-use crate::correspondence::{Correspondence, CorrespondenceError, GitObjectId};
+use crate::correspondence::GitObjectId;
 use crate::short_hex;
-
-/// The persisted correspondence the source port resolves real git shas through,
-/// held behind a shared handle so a `SourceBackend`'s `&self` methods can drive
-/// it. The host mounts a `SQLite`-backed impl; tests mount an in-memory one.
-pub type SharedCorrespondence = Arc<dyn Correspondence + Send + Sync>;
 
 /// The value the integrated-head digest content-addresses (issue #3615): a
 /// bloom plus its integrated artifact tree. Its digest is distinct from the
@@ -160,13 +154,13 @@ pub enum SourceError {
     /// is a genuine transport-garbage fault, not an expected miss).
     Malformed(String),
     /// A mainline path resolved a digest ↔ git object through the
-    /// [`Correspondence`] store and found none recorded — the honest boundary
+    /// [`aether_bloomery::Correspondence`] store and found none recorded — the honest boundary
     /// this slice draws (ADR-0150): the object was never materialized or its
     /// correspondence never seeded, so the port refuses cleanly rather than
     /// hex-punning a digest git cannot resolve. `what` names which resolution
     /// missed (mainline head, candidate tree, …).
     UnresolvedCorrespondence(String),
-    /// The [`Correspondence`] store itself faulted (a durable read/write failed),
+    /// The [`aether_bloomery::Correspondence`] store itself faulted (a durable read/write failed),
     /// distinct from a clean absent correspondence.
     Correspondence(CorrespondenceError),
 }
@@ -315,7 +309,7 @@ fn parse_bloom_line(message: &str) -> Result<ClaimHolder, SourceError> {
 /// Render a digest as 64 lowercase hex — the form a digest takes when it names
 /// a **ref-name segment** in the branch namespace (`heads/bloom/<hex>/…`), the
 /// one place a digest is still hex-rendered now that object shas resolve through
-/// the [`Correspondence`] store. `pub` (not `pub(crate)`) because it lives in a
+/// the [`aether_bloomery::Correspondence`] store. `pub` (not `pub(crate)`) because it lives in a
 /// private module — its reach is already crate-internal, and `pub(crate)` here
 /// would be redundant.
 #[must_use]
@@ -342,7 +336,7 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 /// exactly 64 hex characters — the inverse of [`to_hex`] for the branch
 /// namespace's digest segments (checkpoint enumeration) and the claim-registry
 /// synthetic-tree encoding. **Not** for a git object sha: those are sha1/40 or
-/// sha256/32 and resolve through the [`Correspondence`] store. `pub` for the
+/// sha256/32 and resolve through the [`aether_bloomery::Correspondence`] store. `pub` for the
 /// same private-module reason as [`to_hex`].
 pub fn digest_from_hex(sha: &str) -> Option<Digest> {
     if sha.len() != 64 {
@@ -357,7 +351,7 @@ pub fn digest_from_hex(sha: &str) -> Option<Digest> {
 }
 
 /// The git source backend over a [`GitDataApi`] client and a persisted
-/// [`Correspondence`] handle (ADR-0150). The correspondence is the seam the
+/// [`aether_bloomery::Correspondence`] handle (ADR-0150). The correspondence is the seam the
 /// mainline paths resolve real git shas through; the `cas_land_enabled` gate is
 /// on by default since ADR-0149 migration step 3 made the CAS `land` the landing
 /// of record — a `false` gate is the explicit kill switch under which `land`
@@ -388,7 +382,9 @@ impl<C: GitDataApi + PullRequestApi> GitSource<C> {
     // names the resolution for the error message.
     fn resolve_git_sha(&self, digest: &Digest, what: &str) -> Result<String, SourceError> {
         self.correspondence
-            .resolve_git(digest)?
+            .resolve_backend_object(digest)?
+            .map(GitObjectId::try_from)
+            .transpose()?
             .map(|git| git.to_hex())
             .ok_or_else(|| SourceError::UnresolvedCorrespondence(what.to_owned()))
     }
@@ -401,7 +397,9 @@ impl<C: GitDataApi + PullRequestApi> GitSource<C> {
     fn resolve_object_digest(&self, sha: &str, what: &str) -> Result<Digest, SourceError> {
         let git =
             GitObjectId::from_hex(sha).ok_or_else(|| SourceError::Malformed(format!("git object sha `{sha}`")))?;
-        self.correspondence.resolve_digest(&git)?.ok_or_else(|| SourceError::UnresolvedCorrespondence(what.to_owned()))
+        self.correspondence
+            .resolve_digest(&BackendObjectId::from(git))?
+            .ok_or_else(|| SourceError::UnresolvedCorrespondence(what.to_owned()))
     }
 
     // The digest naming mainline's current head, minting and recording one when
@@ -418,12 +416,12 @@ impl<C: GitDataApi + PullRequestApi> GitSource<C> {
     fn mainline_digest(&self, sha: &str) -> Result<Digest, SourceError> {
         let object =
             GitObjectId::from_hex(sha).ok_or_else(|| SourceError::Malformed(format!("git object sha `{sha}`")))?;
-        if let Some(known) = self.correspondence.resolve_digest(&object)? {
+        if let Some(known) = self.correspondence.resolve_digest(&BackendObjectId::from(&object))? {
             return Ok(known);
         }
 
         let minted = digest_of(&LandedHeadAddress { object: object.bytes() });
-        self.correspondence.record(&minted, &object)?;
+        self.correspondence.record(&minted, &BackendObjectId::from(object))?;
         Ok(minted)
     }
 
@@ -445,12 +443,12 @@ impl<C: GitDataApi + PullRequestApi> GitSource<C> {
     fn integration_tree_digest(&self, sha: &str) -> Result<Digest, SourceError> {
         let object = GitObjectId::from_hex(sha)
             .ok_or_else(|| SourceError::Malformed(format!("integration tree sha `{sha}`")))?;
-        if let Some(known) = self.correspondence.resolve_digest(&object)? {
+        if let Some(known) = self.correspondence.resolve_digest(&BackendObjectId::from(&object))? {
             return Ok(known);
         }
 
         let minted = digest_of(&IntegrationTreeAddress { object: object.bytes() });
-        self.correspondence.record(&minted, &object)?;
+        self.correspondence.record(&minted, &BackendObjectId::from(object))?;
         Ok(minted)
     }
 
@@ -540,7 +538,7 @@ impl<C: GitDataApi + PullRequestApi> GitSource<C> {
         } else {
             let commit_object = GitObjectId::from_hex(&current.sha)
                 .ok_or_else(|| SourceError::Malformed(format!("integration commit sha `{}`", current.sha)))?;
-            self.correspondence.resolve_digest(&commit_object)?
+            self.correspondence.resolve_digest(&BackendObjectId::from(commit_object))?
         };
         Ok(IntegrationPosition { checkpoint: Checkpoint { bloom: *bloom, tree }, head })
     }
@@ -839,7 +837,7 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
         //
         // The commit exists either way by this point; only its reachability is
         // in question, and an unreferenced commit is ordinary git garbage.
-        self.correspondence.record(&head, &commit_object)?;
+        self.correspondence.record(&head, &BackendObjectId::from(commit_object))?;
         match self.client.update_ref(&integration, &commit.sha, false) {
             Ok(_) => Ok(IntegrateOutcome::Integrated { tree: *candidate, head }),
             // A 422 is GitHub's non-fast-forward refusal: a concurrent writer
@@ -904,7 +902,7 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
         let head = digest_of(&IntegratedHead { bloom: *bloom, tree });
         let commit_object = GitObjectId::from_hex(&commit.sha)
             .ok_or_else(|| SourceError::Malformed(format!("merge commit sha `{}`", commit.sha)))?;
-        self.correspondence.record(&head, &commit_object)?;
+        self.correspondence.record(&head, &BackendObjectId::from(commit_object))?;
         Ok(IntegrateOutcome::Integrated { tree, head })
     }
 
@@ -1016,7 +1014,7 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
         let object = GitObjectId::from_hex(&merge_commit)
             .ok_or_else(|| SourceError::Malformed(format!("landing merge commit sha `{merge_commit}`")))?;
         let new_head = digest_of(&LandedHeadAddress { object: object.bytes() });
-        self.correspondence.record(&new_head, &object)?;
+        self.correspondence.record(&new_head, &BackendObjectId::from(object))?;
         Ok(LandProposal::Landed(LandingReceipt { bloom: *bloom, previous_base: *expected_base, new_head }))
     }
 
@@ -1194,8 +1192,9 @@ mod tests {
     use crate::correspondence::{CorrespondenceError, GitObjectId};
 
     use aether_bloomery::{
-        BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome,
-        LandOutcome, LandProposal, SourceBackend, WorkpieceId,
+        BackendObjectId, BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState,
+        Correspondence as DomainCorrespondence, Digest, IntegrateOutcome, LandOutcome, LandProposal, SourceBackend,
+        WorkpieceId,
     };
 
     use std::sync::Arc;
@@ -1449,17 +1448,17 @@ mod tests {
     /// standing in for the durable store failing mid-integrate.
     struct RecordFaults(FakeGithub);
 
-    impl Correspondence for RecordFaults {
-        fn record(&self, _digest: &Digest, _git: &GitObjectId) -> Result<(), CorrespondenceError> {
+    impl DomainCorrespondence for RecordFaults {
+        fn record(&self, _digest: &Digest, _object: &BackendObjectId) -> Result<(), CorrespondenceError> {
             Err(CorrespondenceError::new("store fault"))
         }
 
-        fn resolve_git(&self, digest: &Digest) -> Result<Option<GitObjectId>, CorrespondenceError> {
-            self.0.resolve_git(digest)
+        fn resolve_backend_object(&self, digest: &Digest) -> Result<Option<BackendObjectId>, CorrespondenceError> {
+            DomainCorrespondence::resolve_backend_object(&self.0, digest)
         }
 
-        fn resolve_digest(&self, git: &GitObjectId) -> Result<Option<Digest>, CorrespondenceError> {
-            self.0.resolve_digest(git)
+        fn resolve_digest(&self, object: &BackendObjectId) -> Result<Option<Digest>, CorrespondenceError> {
+            DomainCorrespondence::resolve_digest(&self.0, object)
         }
     }
 
@@ -1654,7 +1653,10 @@ mod tests {
                 // The head is now nameable, so the refusal reports what mainline
                 // actually is rather than declining to say.
                 assert_eq!(
-                    enabled.correspondence.resolve_digest(&GitObjectId::from_hex(&foreign).unwrap()).unwrap(),
+                    enabled
+                        .correspondence
+                        .resolve_digest(&BackendObjectId::from(GitObjectId::from_hex(&foreign).unwrap()))
+                        .unwrap(),
                     Some(actual),
                     "the minted address is recorded, so the next check resolves it",
                 );

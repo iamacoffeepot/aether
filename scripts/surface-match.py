@@ -2,16 +2,13 @@
 """The declared-surface matcher — the one place gitwildmatch semantics are decided.
 
 An issue's `## Declared surface` is a block of globs; `approval-policy.yml`
-maps globs to approval tiers. Three consumers need to evaluate those globs with
-identical semantics, and a second copy of the matcher would drift from the first:
+maps globs to approval tiers. The direct-drive Codex approve skill loads this
+matcher from the captured `origin/main` commit so Plan-to-Ready validation and
+tier resolution use owner-authored semantics. The CLI also retains containment
+mode for deterministic local surface audits.
 
-  - reconciler.yml — does a merged PR's changed-file set stay inside the surface
-    its closing issue declared? (containment; the policy only annotates each
-    escaping path with the tier it would have cost)
-  - agent-tick.yml — what approval tier does a `phase:plan` issue's declared
-    surface resolve to? (only an `auto` tier is dispatched for auto-approval)
-  - Codex approve — validate planned targets and independently re-resolve the
-    tier at the captured `origin/main` commit before writing Ready
+Keeping both modes here gives them identical glob semantics; a second matcher
+would drift from the first.
 
 Policy globs are gitwildmatch (gitignore semantics): `**` spans path segments,
 `*` stays within one, `?` is one non-slash character, and a pattern naming a

@@ -19,7 +19,7 @@
 use std::path::Path;
 use std::{fs, io};
 
-use aether_bloomery::{CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND};
+use aether_bloomery::{CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VerifyFailure, VerifyFailureSet};
 use serde_json::{Value, json};
 
 use super::script::LaneMode;
@@ -169,6 +169,7 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
         "log": format!("{command}.log"),
     });
     if !passed && let Some(object) = evidence.as_object_mut() {
+        object.insert("failed_verifiers".to_owned(), json!(VerifyFailureSet::one(VerifyFailure::Clippy)));
         object.insert("findings".to_owned(), Value::String(verify_findings(command)));
     }
 
@@ -194,7 +195,9 @@ pub fn apply(outcome: &Outcome, worktree: &Path, out: &Path) -> io::Result<()> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "a fixture asserting on evidence it just built reports a miss by panicking")]
 mod tests {
-    use aether_bloomery::{CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND};
+    use aether_bloomery::{
+        CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure, VerifyFailureSet,
+    };
     use serde_json::Value;
 
     use super::super::script::LaneMode;
@@ -255,6 +258,10 @@ mod tests {
         let evidence: Value = serde_json::from_slice(&run.evidence.clone().unwrap()).unwrap();
 
         assert_eq!(evidence["status"], Value::String("fail".to_owned()));
+        assert_eq!(
+            serde_json::from_value::<VerifyFailureSet>(evidence["failed_verifiers"].clone()).unwrap(),
+            VerifyFailureSet::one(VerifyFailure::Clippy),
+        );
         assert!(evidence["findings"].as_str().unwrap().contains("E0308"));
         assert_eq!(run.exit_code, 1);
     }
