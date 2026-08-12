@@ -380,11 +380,11 @@ impl BootableChassis for BloomeryChassis {
             // and its coordinator scalars.
             .with_actor::<IntegrateReactorCapability>(setups.integrate)
             // App-key custody (ADR-0149 §Migration step 3) is not a mounted
-            // mailbox: the host-local minter (`app_auth::AppTokenSource`) is an
-            // in-process `TokenSource` the port shells' client pulls from in
-            // `connect_client`, reading the App key and failing fast there
-            // (ADR-0150). The source actor receives only the chassis-built shell
-            // and the claim-registry enable decision.
+            // mailbox: the adapter's minter (`aether_bloomery_github::AppTokenSource`)
+            // is an in-process `TokenSource` the port shells' client pulls from
+            // in `connect_client`, which reads the host-local App key and fails
+            // fast there (ADR-0150). The source actor receives only the
+            // chassis-built shell and the claim-registry enable decision.
             .with_actor::<SourceCapability>(setups.source)
             .with_actor_configured::<SessionPoolCapability>((), session)
             // The statement-signature custody point (ADR-0149 step 3): the

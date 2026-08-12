@@ -1,6 +1,8 @@
 //! Bloomery coordinator and GitHub adapter configuration boundaries.
 
 #[cfg(feature = "github")]
+use std::fs;
+#[cfg(feature = "github")]
 use std::sync::Arc;
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 use std::sync::OnceLock;
@@ -9,16 +11,14 @@ use std::sync::OnceLock;
 use aether_bloomery::Digest;
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 use aether_bloomery::SharedCorrespondence;
+#[cfg(feature = "github")]
+use aether_bloomery_github::{AppTokenSource, GithubConfig, GithubError, ReqwestGithub};
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 use aether_bloomery_github::{GitSource, testing::FakeGithub};
-#[cfg(feature = "github")]
-use aether_bloomery_github::{GithubConfig, GithubError, ReqwestGithub};
 
 const DEFAULT_LANE_PROGRAM: &str = "cargo xtask transform";
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 use super::source::SourceShell;
-#[cfg(feature = "github")]
-use crate::app_auth::AppTokenSource;
 
 #[cfg(feature = "github")]
 #[derive(Clone, Debug, aether_substrate::Config)]
@@ -305,9 +305,30 @@ impl GithubConnectionConfig {
         self.app_id != 0 && !self.app_private_key_path.is_empty() && self.app_installation_id != 0
     }
 
+    /// Build the client the port shells authenticate with: a minted
+    /// installation-token client when App-auth is configured, else the
+    /// backward-compatible static-PAT one.
+    ///
+    /// The host's whole share of App-auth is here — resolve the key path and
+    /// read the bytes (ADR-0150 keeps that custody host-local, so the path never
+    /// crosses into the adapter), then hand plain values to the adapter's
+    /// minter. A missing or malformed key is a boot fault, never a silent
+    /// fallback to the ambient static token.
     pub fn connect_client(&self) -> Result<ReqwestGithub, GithubError> {
         if self.app_auth_configured() {
-            let source = Arc::new(AppTokenSource::from_config(self)?);
+            let pem = fs::read(&self.app_private_key_path).map_err(|error| {
+                GithubError::Transport(format!(
+                    "reading GitHub App private key '{}': {error}",
+                    self.app_private_key_path
+                ))
+            })?;
+            let source = Arc::new(AppTokenSource::new(
+                self.app_id,
+                self.app_installation_id,
+                &pem,
+                self.app_token_skew_secs,
+                self.api_base.clone(),
+            )?);
             ReqwestGithub::with_token_source(source, self.api_base.clone(), self.to_github_config().repo_path())
         } else {
             ReqwestGithub::new(&self.to_github_config())
@@ -357,11 +378,93 @@ impl GithubConnectionConfig {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use clap::Parser as _;
 
     use super::{CoordinatorConfig, GithubConnectionConfig};
     use crate::bloomery::BloomeryCli;
+
+    // A throwaway 2048-bit RSA keypair (never a real credential) — the fixture
+    // the App branch parses when it is pointed at a key that exists.
+    const TEST_PRIVATE_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----
+MIIEpQIBAAKCAQEAv2JzVEAUCyxtdyoUeFfFzydL9W9BOwO5W1fKkGhQ9dfgid5c
+1dJwUR/jWb5KHXZ2cAvZ5j6wK8PaKG5WSxtSqO5ingxHJA7SzxX6kQseXLUHamAv
+OZ6i3iiNDY3xuO9MdEd8BVT0iNpSm3eQN10+Ug1kXfw9rnIqNp7g/xwSYllKG9o8
+rISa26Huo/WQ+PB/aKRHgVQ3Un8ajKnIc0UBTUa95t1kg1a1S5w2meBLb/sh2y3n
+Wy1V4yMjVO70x2sWgoVTn2s7PAyzTpc0CmQ78/5Y/XxEZlK27VFOP3W4xdlPWC0S
+pggjNDzSt+Q7bur8qzf20HeZOpeTyVCN3croVwIDAQABAoIBAD89sQ5t/jGTBLkT
+1p/NoTfKrHb1xIBTwrREVlNRpS8XnsLwD404dJTaDK5jCuqhcpGj2OUUYfKUTUp+
+61T2OmJII55GQFvR6ic0BBBZtDa+Oy0Ti4dmvDrc+383IGET8heaZ4j7gbKXMiTd
+ZXJmBWnnsvq7l0ZFw105MvAZvplwhHczkq+CjfwypM0VRV9XKxUfuQdiFG377jjZ
+LARbtN7kWxtm2iwL2ZtfKQPbYjxCUrYWVN1q9e3kcL+bITf3GwK34k7umuYy1+rw
+zanpQ0L+F5sU6XCu+3G3XNhM76kKXoi9SCwlhLp4r6T+Wkk6yvBl2nBRtB90qeHE
+ONM1FYECgYEA+sieSVEvvRPc7oH4na/P6JVKdoxCtf4oHHHm5uAltmjF30169R2V
+a2mdQ8pPlLx2WeN9tzM/dEuDCR1f0Gb/04IZBJBlirj1G1yG85GxQqB34C246MlP
++nlc/wCgZi8I79RZ7Hp8OSY86M+h0gZWc6njWzEhyQ+BO4h9KB21cU8CgYEAw12K
+tG53ml3wTTXSvkWrS07rkePR6MmyTBFn8TU3xYTI0Do5a6zM2pViqub3cFh9IhZp
+Odox7onKS+mut/aXfDHZScba0+s9cZOUc/rW8Z2m4Os6vvCa8cguxUW3P/uZ5/Ey
+XrSzJnwb+dKINnC/a6ag/JPwGSmQm4LDYnJ3hnkCgYEA6HZAazvLYZvg5mEp4JlQ
+wopoTL01NVfTPJLEc2yA6LXz/Urn2ABFOhzbPzRwUjHkDuyV4tSpVBaO70sAPsDL
+EPb+U8G5rj5GTceV/H8nbdgrZm1bgsTg0w/eiS2+gRnGUfFoLZFYRu1P9opIuNNR
+HcPz0NsZMzOhGlspkJ8BSncCgYEAv8nHzgOYNJm9uv54qcPZOi/6wJjHS+EdwOFh
+igD1hFkrjodqMVNNM9RtLVtaVBb6mQkpOdsDI6pvRwDcPcq9wfVp26x0zI/mHOaF
+WSpJ8p4S4kDqxeGMKombqJwdHpnP6Ev3Z9O6/6/dAu50PAWJVZQZ/Hr6vKj6RkAj
+sTSwM/kCgYEA+J08Bt+2+HDSw8Grsc3WOiPJTuIMaX3uhEjxwlozq36GPah6T8+d
+q9nQWTzvE1G118enh8FoJE0/v3x+IGXpLXoseASCSkOuJvIZB4LIuz/sndc6QcDX
+xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
+-----END RSA PRIVATE KEY-----";
+
+    fn configured(app_id: u64, key_path: &str, installation_id: u64) -> GithubConnectionConfig {
+        GithubConnectionConfig {
+            app_id,
+            app_private_key_path: key_path.to_owned(),
+            app_installation_id: installation_id,
+            ..GithubConnectionConfig::default()
+        }
+    }
+
+    #[test]
+    fn app_auth_configured_requires_all_three_knobs() {
+        // The default (empty) config is the static-PAT path — App-auth off.
+        assert!(!GithubConnectionConfig::default().app_auth_configured());
+        // All three present → on.
+        assert!(configured(12345, "/keys/app.pem", 42).app_auth_configured());
+        // Any one missing → off (a partial config never silently half-enables).
+        assert!(!configured(0, "/keys/app.pem", 42).app_auth_configured());
+        assert!(!configured(12345, "", 42).app_auth_configured());
+        assert!(!configured(12345, "/keys/app.pem", 0).app_auth_configured());
+    }
+
+    #[test]
+    fn connect_client_takes_the_app_branch_when_configured_and_the_static_branch_otherwise() {
+        // The host wiring under test: `connect_client` branches on
+        // `app_auth_configured`. The App branch reads the host-local key and builds a
+        // minted-token client; the static branch builds the backward-compatible
+        // PAT client. Assert the branch is taken by its distinguishing behavior — a
+        // configured-but-missing-key config errors (only the App branch reads a key),
+        // while the same knobs pointed at a real key, and an unconfigured config,
+        // both construct a client.
+        use std::io::Write as _;
+
+        // Unconfigured → the static-PAT branch constructs a client (no key read).
+        assert!(GithubConnectionConfig::default().connect_client().is_ok(), "static-PAT path builds a client");
+
+        // Configured with an absent key → the App branch is taken and fails fast
+        // (the static branch would have succeeded, so the error proves the branch).
+        // ADR-0150: an absent key is a boot fault, never a silent fallback to an
+        // ambient secret.
+        let missing = configured(12345, "/nonexistent/does-not-exist.pem", 42);
+        assert!(missing.connect_client().is_err(), "App path reads the key and fails fast when it is absent");
+
+        // Configured with a real key on disk → the App branch constructs a
+        // minted-token client.
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        key_file.write_all(TEST_PRIVATE_KEY.as_bytes()).unwrap();
+        let path = key_file.path().to_str().unwrap().to_owned();
+        let with_key = configured(12345, &path, 42);
+        assert!(with_key.connect_client().is_ok(), "App path builds a client from a present key");
+    }
 
     #[test]
     fn coordinator_and_connection_overlays_resolve_independently() {
