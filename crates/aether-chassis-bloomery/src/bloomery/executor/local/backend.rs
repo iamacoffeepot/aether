@@ -627,17 +627,17 @@ impl ExecutorBackend for LocalExecutor {
 impl ReconcileLanes for LocalExecutor {
     /// Rebuild what this backend can know about local runs a previous process
     /// dispatched (issue #4847), by intersecting the store's live orders with the
-    /// scratch root on disk.
+    /// scratch checkouts still on disk.
     ///
-    /// A live order with a footprint under the scratch root comes back as a
+    /// A live order that left a footprint under the scratch root comes back as a
     /// re-adopted run, so the port resolves it again instead of reporting
     /// `Unknown` forever and refusing every cancel with `NoRunForNonce`. A
-    /// footprint with no live order is reclaimed, so a checkout does not outlive
+    /// registered checkout with no live order is reclaimed, so it does not outlive
     /// the order that made it for the life of the host.
     ///
     /// Both halves read the *same* live set, which is what keeps the sweep safe:
-    /// the only directories it removes are the ones re-adoption already declined,
-    /// so it can never pull a checkout out from under an order still in flight.
+    /// the only checkouts it removes are ones re-adoption already declined, so it
+    /// can never pull one out from under an order still in flight.
     fn reconcile(&self, live: &[OutstandingDispatch]) -> ReconcileReport {
         let readopted =
             live.iter().filter(|dispatch| self.readopt(dispatch)).map(|dispatch| dispatch.nonce.clone()).collect();
