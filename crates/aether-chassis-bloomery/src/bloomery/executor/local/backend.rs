@@ -1,14 +1,16 @@
 //! The local-process executor backend: an in-process registry of tracked runs
 //! over the [`TransformRunner`] spawn seam, and its [`ExecutorBackend`] impl.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::{Path, PathBuf, absolute};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::digest::ContentAddressed;
 use aether_bloomery::{
     BackendObjectId, CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce,
-    SharedCorrespondence, StageVerdict, StudyCost, VerifyFailureSet, WorkHandle, WorkOrder, digest_of, is_model_lane,
+    SharedCorrespondence, StageVerdict, StudyCost, Transformation, VerifyFailureSet, WorkHandle, WorkOrder, digest_of,
+    is_model_lane,
 };
 use aether_bloomery_github::parse_study_cost;
 use serde::Serialize;
@@ -16,11 +18,17 @@ use std::fs;
 
 use super::error::LocalExecutorError;
 use super::lane_program::LaneProgram;
+use super::orphan::OrphanedRun;
 use super::process_runner::{CaptureIdentity, ProcessTransformRunner};
 use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::CoordinatorConfig;
+use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes, ReconcileReport};
 use crate::bloomery::intake::NameEvidenceClaims;
+
+/// The suffix distinguishing a run's evidence directory from its scratch
+/// worktree under the same nonce-keyed base dir.
+const EVIDENCE_SUFFIX: &str = "-evidence";
 
 /// One tracked run: the spawned child, its scratch worktree, where its evidence
 /// lands, and the digest the returning evidence must bind to.
@@ -31,21 +39,46 @@ struct Run {
     // does not leak one `git worktree` per order.
     worktree_dir: PathBuf,
     evidence_dir: PathBuf,
-    // The digest the intake broker binds the evidence to — the order's subject
-    // input (`transformation.inputs[0]`, what `drain_and_dispatch` records as the
-    // displayed digest), NOT the checkout target. The two are distinct axes: the
-    // checkout is the tree the work runs on, the subject is what the evidence is
-    // about. Binding to the checkout would refuse at intake as a digest mismatch.
+    // The digest the intake broker binds the evidence to, per `evidence_subject`.
     subject: Digest,
-    // Whether this run is the model-driven construct lane, decided at submit from
-    // the order's command. The completion gate is lane-specific: a construct run's
-    // verdict demands a substantive conclusion (#3596), a verify run's rides its
-    // stamped `status`, so the gate must know which lane produced the evidence —
-    // and must know it even when the evidence bytes do not decode (fail-closed).
+    // Which lane-specific evidence gates this run's verdict rides, decided from
+    // the order's command.
+    gates: LaneGates,
+}
+
+/// Which lane-specific evidence gates a command's run rides.
+///
+/// Derived in one place because two paths stamp it onto a run — `submit` for a
+/// fresh dispatch and `reconcile` for one re-adopted at boot — and a run whose
+/// gates disagree with its lane reads its own evidence by the wrong rule.
+#[derive(Clone, Copy)]
+struct LaneGates {
+    // Whether this run is the model-driven construct lane. The completion gate is
+    // lane-specific: a construct run's verdict demands a substantive conclusion
+    // (#3596), a verify run's rides its stamped `status`, so the gate must know
+    // which lane produced the evidence — and must know it even when the evidence
+    // bytes do not decode (fail-closed).
     is_construct: bool,
     // Whether the evidence body belongs to a mechanical verify lane and must
     // decode ADR-0178's `failed_verifiers` field.
     is_verify: bool,
+}
+
+impl LaneGates {
+    fn of(command: &str) -> Self {
+        Self { is_construct: command == CONSTRUCT_IMPLEMENT_COMMAND, is_verify: command.starts_with("verify.") }
+    }
+}
+
+/// The digest a run's returning evidence binds to: the order's subject input —
+/// the scope-revision digest the broker displayed — falling back to the checkout
+/// only for a malformed order that carries no input.
+///
+/// Not the checkout target. The two are distinct axes: the checkout is the tree
+/// the work runs on, the subject is what the evidence is about, and binding to
+/// the checkout would refuse at intake as a digest mismatch.
+fn evidence_subject(transformation: &Transformation) -> Digest {
+    transformation.inputs.first().copied().unwrap_or(transformation.checkout)
 }
 
 /// The local-process executor backend: an in-process registry of tracked runs
@@ -95,6 +128,24 @@ impl LocalExecutor {
         self.runs.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    // The two directories a run at `nonce` owns: its scratch worktree and its
+    // evidence output dir.
+    //
+    // Resolved absolute against the coordinator's own cwd. The child runs with
+    // `current_dir(worktree_dir)`, so a relative `--out` (the config default
+    // `local_worktree_base` ships relative) would resolve against the *child's*
+    // cwd — the scratch worktree — while `stream_evidence` reads `evidence_dir`
+    // against the *coordinator's* cwd; the two diverge and the intake polls a path
+    // the run never wrote, forever. `std::path::absolute` is a lexical cwd-join
+    // that does not require the path to exist (unlike `canonicalize`).
+    //
+    // The single spelling of the nonce→path convention, because the boot
+    // reconciliation reads it backwards: it recovers a nonce from a directory name
+    // under `base_dir`, which only works while both sides agree on the layout.
+    fn run_paths(&self, nonce: &str) -> io::Result<(PathBuf, PathBuf)> {
+        Ok((absolute(self.base_dir.join(nonce))?, absolute(self.base_dir.join(format!("{nonce}{EVIDENCE_SUFFIX}")))?))
+    }
+
     // Release a terminal run's scratch worktree off the registry lock (the teardown
     // is a blocking git shell-out), folding a failure into a warn rather than the
     // terminal op's result — the child is already dead / the evidence already read,
@@ -106,6 +157,113 @@ impl LocalExecutor {
                 %error,
                 "local executor backend: scratch worktree release failed",
             );
+        }
+    }
+
+    // Re-adopt one live order's run, if the previous process left a local footprint
+    // for it. Returns whether it was re-adopted.
+    //
+    // Either directory counts as that footprint. The evidence dir is created first
+    // (before the checkout, before the spawn), so a dispatch that reached the local
+    // lane at all has one; the worktree may already have been released while the
+    // order stayed outstanding. Re-adopting on the evidence dir alone still
+    // recovers the run's verdict, which is the part the order is waiting on.
+    //
+    // Never replaces a tracked entry: an owned run's `Box<dyn RunProcess>` is the
+    // only handle on its child, and swapping it for an orphan would silently retire
+    // the ability to kill that child.
+    fn readopt(&self, dispatch: &OutstandingDispatch) -> bool {
+        let nonce = &dispatch.nonce;
+        let (worktree_dir, evidence_dir) = match self.run_paths(&nonce.0) {
+            Ok(paths) => paths,
+            Err(error) => {
+                tracing::warn!(
+                    nonce = %nonce.0,
+                    %error,
+                    "local executor backend: could not resolve a re-adopted run's paths",
+                );
+                return false;
+            }
+        };
+        if !worktree_dir.exists() && !evidence_dir.exists() {
+            return false;
+        }
+        let mut runs = self.lock();
+        if runs.contains_key(&nonce.0) {
+            return false;
+        }
+        runs.insert(
+            nonce.0.clone(),
+            Run {
+                process: Box::new(OrphanedRun::new(nonce.clone(), &evidence_dir)),
+                worktree_dir,
+                evidence_dir,
+                subject: evidence_subject(&dispatch.transformation),
+                gates: LaneGates::of(&dispatch.transformation.command),
+            },
+        );
+        true
+    }
+
+    // Reclaim every directory under the scratch root belonging to no live order,
+    // returning how many were reclaimed.
+    //
+    // A directory here is named for the dispatch that made it, so its owning nonce
+    // reads straight back out of the name — and a nonce absent from `live` names an
+    // order the store has already consumed, whose checkout is pure leftover. The
+    // read of the root is best-effort: an absent root is the ordinary
+    // nothing-dispatched-locally-yet case, and an unreadable one is logged and
+    // skipped rather than failing a boot over a cleanup.
+    fn sweep_abandoned(&self, live: &HashSet<&str>) -> usize {
+        let entries = match fs::read_dir(&self.base_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return 0,
+            Err(error) => {
+                tracing::warn!(
+                    base = %self.base_dir.display(),
+                    %error,
+                    "local executor backend: scratch root unreadable; abandoned checkouts not reclaimed",
+                );
+                return 0;
+            }
+        };
+        let mut reclaimed = 0;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let (owner, is_checkout) =
+                name.strip_suffix(EVIDENCE_SUFFIX).map_or((name.as_str(), true), |owner| (owner, false));
+            if live.contains(owner) {
+                continue;
+            }
+            tracing::info!(
+                nonce = %owner,
+                path = %entry.path().display(),
+                "local executor backend: reclaiming a scratch directory left by an order that is no longer outstanding",
+            );
+            if is_checkout {
+                self.reclaim_checkout(&entry.path());
+            } else {
+                remove_abandoned(&entry.path());
+            }
+            reclaimed += 1;
+        }
+        reclaimed
+    }
+
+    // Drop an abandoned checkout through the runner seam, which removes the
+    // directory and the `git worktree` registration together. Falls back to a plain
+    // directory removal when git refuses the path: a dispatch that died between
+    // creating its directory and registering the worktree left the coordinator's
+    // litter behind all the same, and a reclaim that gave up there would re-warn at
+    // every boot for the life of the host.
+    fn reclaim_checkout(&self, dir: &Path) {
+        if let Err(error) = self.runner.release(dir) {
+            tracing::warn!(
+                worktree = %dir.display(),
+                %error,
+                "local executor backend: git refused an abandoned checkout; removing the directory directly",
+            );
+            remove_abandoned(dir);
         }
     }
 
@@ -202,16 +360,7 @@ impl ExecutorBackend for LocalExecutor {
 
     fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
         let nonce = order.nonce.0.clone();
-        // Resolve both run paths absolute against the coordinator's own cwd before
-        // the spawn. The child runs with `current_dir(worktree_dir)`, so a relative
-        // `--out` (the config default `local_worktree_base` ships relative) would
-        // resolve against the *child's* cwd — the scratch worktree — while
-        // `stream_evidence` reads `evidence_dir` against the *coordinator's* cwd; the
-        // two diverge and the intake polls a path the run never wrote, forever.
-        // `std::path::absolute` is a lexical cwd-join that does not require the path
-        // to exist (unlike `canonicalize`).
-        let worktree_dir = absolute(self.base_dir.join(&nonce)).map_err(LocalExecutorError::Io)?;
-        let evidence_dir = absolute(self.base_dir.join(format!("{nonce}-evidence"))).map_err(LocalExecutorError::Io)?;
+        let (worktree_dir, evidence_dir) = self.run_paths(&nonce).map_err(LocalExecutorError::Io)?;
         // Resolve the sealed checkout digest to its real backend object through the
         // correspondence store (ADR-0150) — the `git worktree add` target — rather
         // than hex-punning the digest into a name git cannot resolve. The opaque
@@ -237,17 +386,13 @@ impl ExecutorBackend for LocalExecutor {
                     .map(|object| render_object_hex(&object))
             })
             .transpose()?;
-        // The subject the returning evidence binds to is the order's subject input
-        // (the scope-revision digest the broker displayed), falling back to the
-        // checkout only for a malformed order that carries no input.
-        let subject = order.transformation.inputs.first().copied().unwrap_or(order.transformation.checkout);
+        let subject = evidence_subject(&order.transformation);
         // Harness/model/effort/task ride the model-driven lanes (construct and
         // the review critic), mirroring `transform-model.yml`'s argv; a verify
-        // lane ignores them. `is_construct` stays narrower — it selects the
-        // construct-specific evidence gate (substantive-conclusion, #3596),
-        // which the review lane's `status`-stamped evidence must not ride.
-        let is_construct = order.transformation.command == CONSTRUCT_IMPLEMENT_COMMAND;
-        let is_verify = order.transformation.command.starts_with("verify.");
+        // lane ignores them. The gates stay narrower — `is_construct` selects the
+        // construct-specific evidence gate (substantive-conclusion, #3596), which
+        // the review lane's `status`-stamped evidence must not ride.
+        let gates = LaneGates::of(&order.transformation.command);
         let is_model_lane = is_model_lane(&order.transformation.command);
         // The stage's resolved agent profile, overlaid onto the order by the
         // dispatching host (ADR-0149 §The line) — never a backend-local config
@@ -272,7 +417,7 @@ impl ExecutorBackend for LocalExecutor {
             task: is_model_lane.then_some(order.transformation.description.as_deref()).flatten(),
         };
         let process = self.runner.start(&spec)?;
-        self.lock().insert(nonce, Run { process, worktree_dir, evidence_dir, subject, is_construct, is_verify });
+        self.lock().insert(nonce, Run { process, worktree_dir, evidence_dir, subject, gates });
         Ok(WorkHandle::new(order.nonce.clone()))
     }
 
@@ -326,19 +471,12 @@ impl ExecutorBackend for LocalExecutor {
         // Pull the run's on-disk location, binding digest, and terminal exit out of
         // the guarded region, then drop the lock — the evidence read is blocking IO
         // and must not hold the registry mutex.
-        let (evidence_dir, subject, lifecycle, is_construct, is_verify, worktree_dir) = {
+        let (evidence_dir, subject, lifecycle, LaneGates { is_construct, is_verify }, worktree_dir) = {
             let mut runs = self.lock();
             let Some(run) = runs.get_mut(&handle.nonce.0) else {
                 return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
             };
-            (
-                run.evidence_dir.clone(),
-                run.subject,
-                run.process.poll(),
-                run.is_construct,
-                run.is_verify,
-                run.worktree_dir.clone(),
-            )
+            (run.evidence_dir.clone(), run.subject, run.process.poll(), run.gates, run.worktree_dir.clone())
         };
         let exited_success = matches!(lifecycle, RunLifecycle::Exited { success: true });
         let evidence_path = evidence_dir.join("evidence.json");
@@ -454,6 +592,49 @@ impl ExecutorBackend for LocalExecutor {
             failed_verifiers,
             cost: nonce_matches.then(|| parse_cost(&bytes)).flatten(),
         }])
+    }
+}
+
+impl ReconcileLanes for LocalExecutor {
+    /// Rebuild what this backend can know about local runs a previous process
+    /// dispatched (issue #4847), by intersecting the store's live orders with the
+    /// scratch root on disk.
+    ///
+    /// A live order with a footprint under the scratch root comes back as a
+    /// re-adopted run, so the port resolves it again instead of reporting
+    /// `Unknown` forever and refusing every cancel with `NoRunForNonce`. A
+    /// footprint with no live order is reclaimed, so a checkout does not outlive
+    /// the order that made it for the life of the host.
+    ///
+    /// Both halves read the *same* live set, which is what keeps the sweep safe:
+    /// the only directories it removes are the ones re-adoption already declined,
+    /// so it can never pull a checkout out from under an order still in flight.
+    fn reconcile(&self, live: &[OutstandingDispatch]) -> ReconcileReport {
+        let readopted =
+            live.iter().filter(|dispatch| self.readopt(dispatch)).map(|dispatch| dispatch.nonce.clone()).collect();
+
+        ReconcileReport {
+            readopted,
+            reclaimed: self.sweep_abandoned(&live.iter().map(|dispatch| dispatch.nonce.0.as_str()).collect()),
+        }
+    }
+}
+
+/// Remove an abandoned scratch path, folding a failure into a warn — the caller
+/// is a best-effort cleanup, and a directory that will not go away must not fail
+/// a boot.
+fn remove_abandoned(path: &Path) {
+    let removed = if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    if let Err(error) = removed {
+        tracing::warn!(
+            path = %path.display(),
+            %error,
+            "local executor backend: abandoned scratch path could not be removed",
+        );
     }
 }
 

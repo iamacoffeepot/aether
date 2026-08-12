@@ -362,6 +362,17 @@ and accountable wedges. Prefer this tier when the contract needs both kinds of
 proof: its named outcome and the fact that the coordinator did not silently
 stop short of it.
 
+A coordinator restart is inside what this tier may assert about the local lane.
+The store and the scratch root at `.bloomery/local-worktrees/` both outlive the
+process, so a boot reconciles the two: an order still outstanding whose scratch
+directories survive is re-adopted, routed back to the local arm, and resolves
+from the `evidence.json` its run left behind, while a directory belonging to no
+outstanding order is reclaimed along with its `git worktree` registration. What
+does not survive is the child process itself — a coordinator holds no handle on
+one it did not spawn, so cancelling a re-adopted run reclaims its checkout and
+warns that the lane may still be running. A scenario may assert the recovery and
+the reclaim; it may not assert that the child was terminated.
+
 ## Failure triage
 
 | Failure | Likely layer |

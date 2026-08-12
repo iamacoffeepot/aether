@@ -14,7 +14,10 @@
 //! `ExecutorPortError` mounts through [`ExecutorShell::new`], which wraps it in a
 //! small error-mapping adapter, so the [`RoutingExecutor`]
 //! (which already speaks `ExecutorPortError`), a bare `ActionsExecutor`, and a
-//! bare `LocalExecutor` all mount the same way.
+//! bare `LocalExecutor` all mount the same way. A backend that also answers
+//! [`ReconcileLanes`] mounts through [`ExecutorShell::reconciling`] instead,
+//! which keeps that face reachable so the reactor can hand the port its
+//! outstanding orders at boot (see [`reconcile`]).
 //!
 //! The connection knobs — token, owner/name, API base — plus the executor-only
 //! knobs ride the same ADR-0090 derive-`Config`
@@ -36,12 +39,14 @@ use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, LaneWo
 use super::{CoordinatorConfig, GithubConnectionConfig};
 
 pub mod local;
+mod reconcile;
 mod routing;
 
 pub use local::{
-    CaptureIdentity, DEFAULT_LANE_PROGRAM, LaneProgram, LocalExecutor, LocalExecutorError, ProcessTransformRunner,
-    RunLifecycle, RunProcess, RunSpec, TransformRunner, mock_lane,
+    CaptureIdentity, DEFAULT_LANE_PROGRAM, LaneProgram, LocalExecutor, LocalExecutorError, OrphanedRun,
+    ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, TransformRunner, mock_lane,
 };
+pub use reconcile::{LocalLane, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 pub use routing::RoutingExecutor;
 
 /// A backend that always fails with a missing-GitHub-configuration error.
@@ -134,6 +139,11 @@ impl From<LocalExecutorError> for ExecutorPortError {
 #[derive(Clone)]
 pub struct ExecutorShell {
     backend: Arc<dyn ExecutorBackend<Error = ExecutorPortError> + Send + Sync>,
+    // The same backend's reconciliation face, when the mounted one has one.
+    // `None` for a bare Actions mount, which has nothing to reconcile: its run
+    // state lives on GitHub's side of the wire and resolves from the nonce alone,
+    // so a restart costs it nothing.
+    reconciler: Option<Arc<dyn ReconcileLanes>>,
 }
 
 // Adapt a backend whose error merely converts into `ExecutorPortError` (a bare
@@ -177,7 +187,21 @@ impl ExecutorShell {
         B: ExecutorBackend + Send + Sync + 'static,
         ExecutorPortError: From<B::Error>,
     {
-        Self { backend: Arc::new(ErrorMapped(backend)) }
+        Self { backend: Arc::new(ErrorMapped(backend)), reconciler: None }
+    }
+
+    /// Mount a backend that also answers [`ReconcileLanes`], keeping its
+    /// reconciliation face reachable through [`reconcile`](Self::reconcile).
+    ///
+    /// The production mount, since only the [`RoutingExecutor`] fronts the local
+    /// lane whose run state a restart loses.
+    #[must_use]
+    pub fn reconciling<B>(backend: Arc<B>) -> Self
+    where
+        B: ExecutorBackend + ReconcileLanes + Send + Sync + 'static,
+        ExecutorPortError: From<B::Error>,
+    {
+        Self { backend: Arc::new(ErrorMapped(Arc::clone(&backend))), reconciler: Some(backend) }
     }
 
     /// Connect a live executor port from resolved config. When the local model
@@ -216,7 +240,11 @@ impl ExecutorShell {
                 return Ok(Self::new(actions));
             }
             let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence));
-            return Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, coordinator.local_lane_prefixes()))));
+            return Ok(Self::reconciling(Arc::new(RoutingExecutor::new(
+                actions,
+                local,
+                coordinator.local_lane_prefixes(),
+            ))));
         }
         let missing = connection.missing_connection_knobs();
         if missing.is_empty() {
@@ -234,7 +262,11 @@ impl ExecutorShell {
                 return Ok(Self::new(actions));
             }
             let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence));
-            return Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, coordinator.local_lane_prefixes()))));
+            return Ok(Self::reconciling(Arc::new(RoutingExecutor::new(
+                actions,
+                local,
+                coordinator.local_lane_prefixes(),
+            ))));
         }
 
         // Unconfigured. The stub stands in for Actions either way; what the local
@@ -247,7 +279,19 @@ impl ExecutorShell {
             return Ok(Self::new(actions));
         }
         let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence));
-        Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, coordinator.local_lane_prefixes()))))
+        Ok(Self::reconciling(Arc::new(RoutingExecutor::new(actions, local, coordinator.local_lane_prefixes()))))
+    }
+
+    /// Reconcile the mounted backend against `live`, the orders the store still
+    /// holds outstanding at boot (issue #4847) — re-adopting the runs a previous
+    /// coordinator process dispatched and reclaiming the checkouts of orders that
+    /// are no longer outstanding.
+    ///
+    /// A mount with no reconciliation face reports an empty pass rather than an
+    /// error: nothing was recovered because there was nothing to recover.
+    #[must_use]
+    pub fn reconcile(&self, live: &[OutstandingDispatch]) -> ReconcileReport {
+        self.reconciler.as_ref().map(|reconciler| reconciler.reconcile(live)).unwrap_or_default()
     }
 
     /// Submit a fully-resolved work order, returning the nonce-carrying handle.

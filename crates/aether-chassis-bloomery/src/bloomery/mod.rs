@@ -40,8 +40,9 @@ pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
 #[cfg(feature = "github")]
 pub use executor::{
     CaptureIdentity, DEFAULT_LANE_PROGRAM, ExecutorPortError, ExecutorShell, LaneProgram, LocalExecutor,
-    LocalExecutorError, ProcessTransformRunner, RoutingExecutor, RunLifecycle, RunProcess, RunSpec, TransformRunner,
-    UnconfiguredActionsBackend, mock_lane,
+    LocalExecutorError, LocalLane, OrphanedRun, OutstandingDispatch, ProcessTransformRunner, ReconcileLanes,
+    ReconcileReport, RoutingExecutor, RunLifecycle, RunProcess, RunSpec, TransformRunner, UnconfiguredActionsBackend,
+    mock_lane,
 };
 #[cfg(feature = "github")]
 pub use intake::{
