@@ -314,6 +314,20 @@ impl ExecutorBackend for LocalExecutor {
                 // contract names. The deadline enforcement reissues its cancel
                 // until the expired order is admitted, so refusing here would
                 // make one store fault permanent.
+                //
+                // Absent here does not prove reclaimed, so say which it was in
+                // the log rather than only in the return value. This registry is
+                // process-local and is not rebuilt at boot, so an order
+                // dispatched before a restart has no entry even while its child
+                // and its `<base>/<nonce>` checkout are still live — this arm's
+                // success reclaims nothing for it. The nonce is what an operator
+                // greps for to find and reap that orphan; the same line is
+                // benign noise for a run this process already tore down.
+                tracing::warn!(
+                    nonce = %handle.nonce.0,
+                    "local executor backend: cancel found no tracked run — nothing was killed or reclaimed here, so a \
+                     run dispatched before a restart still holds its child process and scratch worktree",
+                );
                 return Ok(());
             };
             run.process.kill()?;

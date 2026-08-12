@@ -38,7 +38,7 @@ use crate::bloomery::{CoordinatorConfig, GithubConnectionConfig};
 use crate::bloomery::{
     ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
 };
-use crate::store::{SqliteStore, StoreBackend};
+use crate::store::{OutstandingOrder, SqliteStore, StoreBackend};
 use aether_bloomery_github::candidate_ref_name;
 
 // A capturing executor backend: it records every submitted `WorkOrder` so a test
@@ -843,6 +843,34 @@ fn a_verify_timeout_terminates_its_order_rather_than_being_refused_for_naming_no
     assert!(store.list_outstanding_nonces().unwrap().is_empty(), "and the order is consumed, not re-refused forever");
 }
 
+// Dispatch one bloom-level `AggregateReview` order at `NOW_UNIX_MILLIS` over a
+// capturing backend, returning that backend, its shell, the dispatched nonce, and
+// the tracked handle. Every deferred-timeout scenario needs the same hung critic;
+// only what they tick against it differs.
+fn dispatch_aggregate_review(
+    store: &mut SqliteStore,
+) -> (Arc<CapturingBackend>, ExecutorShell, String, Vec<TrackedHandle>) {
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let payload = AggregateReviewPayload {
+        profile: StageCatalog::profile_of(StageId::AggregateReview),
+        bloom: digest(1),
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(30),
+            digest(40),
+            digest(50),
+        ),
+        pass: ReviewPass::Full,
+    };
+    store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
+    let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
+    let (handles, _ack, _transient) = drain_and_dispatch_aggregate(store, &shell, NOW_UNIX_MILLIS).unwrap();
+    store.ack_topic(Topic::AggregateReview, sequence).unwrap();
+    let nonce = handles[0].nonce.0.clone();
+    (backend, shell, nonce, track(handles))
+}
+
 #[test]
 fn a_deferred_aggregate_review_timeout_still_reclaims_the_run_it_cannot_account_for() {
     // ADR-0177 routes an aggregate-review timeout to ADR-0176's `ExecutorFault`,
@@ -856,26 +884,7 @@ fn a_deferred_aggregate_review_timeout_still_reclaims_the_run_it_cannot_account_
     // a stage the ledger cannot yet describe is no reason to leak one of each per
     // timeout until the process exits.
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let backend = Arc::new(CapturingBackend::default());
-    let shell = ExecutorShell::new(Arc::clone(&backend));
-    let bloom = BloomId(digest(1));
-    let payload = AggregateReviewPayload {
-        profile: StageCatalog::profile_of(StageId::AggregateReview),
-        bloom: bloom.0,
-        transformation: Transformation::for_aggregate_review(
-            &StageCatalog::binding_of(StageId::AggregateReview),
-            digest(30),
-            digest(40),
-            digest(50),
-        ),
-        pass: ReviewPass::Full,
-    };
-    store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
-    let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
-    let (handles, _ack, _transient) = drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
-    store.ack_topic(Topic::AggregateReview, sequence).unwrap();
-    let nonce = handles[0].nonce.0.clone();
-    let mut tracked = track(handles);
+    let (backend, shell, nonce, mut tracked) = dispatch_aggregate_review(&mut store);
 
     assert!(
         tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE).is_empty(),
@@ -887,6 +896,78 @@ fn a_deferred_aggregate_review_timeout_still_reclaims_the_run_it_cannot_account_
         store.list_outstanding_nonces().unwrap().len(),
         1,
         "and the order stays live for the build that can account for it",
+    );
+}
+
+#[test]
+fn a_deferred_aggregate_review_timeout_reclaims_its_run_once_rather_than_once_per_tick() {
+    // The steady state one tick cannot see. A deferred expiry consumes nothing,
+    // so the order stays outstanding and every later sweep re-selects the same
+    // row — which is only survivable if the cancel it reissues is latched.
+    // Idempotence makes a repeat harmless, not free: under a routing config that
+    // narrows the review off the local lane, each reissue is an
+    // `ActionsExecutor::cancel` probing both wrappers over the network, once per
+    // poll interval (5s by default), for as long as the fold stays stuck.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let (backend, shell, nonce, mut tracked) = dispatch_aggregate_review(&mut store);
+
+    for elapsed_millis in [0, 60_000, 120_000, 180_000, 240_000] {
+        assert!(
+            tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE + elapsed_millis).is_empty(),
+            "the deferral is the same answer on every tick",
+        );
+    }
+
+    assert_eq!(backend.cancelled(), vec![nonce], "five sweeps of one stuck order reclaim it once, not five times");
+    assert_eq!(store.list_outstanding_nonces().unwrap().len(), 1, "and it is still the build that can account for it");
+}
+
+#[test]
+fn an_expired_order_that_does_not_decode_is_reclaimed_before_it_is_read() {
+    // The row #4697's `Transformation.limits` re-typing produced, and the reason
+    // the store now refuses a legacy one: an outstanding order whose columns no
+    // longer decode into a `DispatchRecord`. Its nonce is a plain column, so the
+    // decode failure says nothing about whether the run behind it may keep
+    // going — and skipping the cancel strands that child and its scratch
+    // worktree for the life of the process, which is the leak this whole change
+    // exists to stop. Latched with the deferred stage, for the same reason: the
+    // row decodes the same way forever, so re-cancelling it every tick is pure
+    // cost.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let nonce = "wo-undecodable".to_owned();
+
+    store
+        .record_order(&OutstandingOrder {
+            nonce: nonce.clone(),
+            bloom: digest(1).as_bytes().to_vec(),
+            workpiece: "wp-corrupt".to_owned(),
+            scope_revision: digest(2).as_bytes().to_vec(),
+            candidate: digest(5).as_bytes().to_vec(),
+            displayed_digest: digest(9).as_bytes().to_vec(),
+            stage: to_vec(&StageId::Construct).unwrap(),
+            // The one broken column: bytes no `Transformation` decodes from.
+            transformation: vec![0xff; 8],
+            configs: to_vec(&ConfigRegistry::default()).unwrap(),
+            profile: to_vec(&StageCatalog::profile_of(StageId::Construct)).unwrap(),
+            deadline_unix_millis: AT_THE_DEADLINE,
+        })
+        .unwrap();
+    let mut tracked = track(vec![WorkHandle::new(Nonce(nonce.clone()))]);
+
+    for elapsed_millis in [0, 60_000, 120_000] {
+        assert!(
+            tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE + elapsed_millis).is_empty(),
+            "a row this build cannot read admits nothing",
+        );
+    }
+
+    assert_eq!(backend.cancelled(), vec![nonce], "the run behind the unreadable row is reclaimed, exactly once");
+    assert_eq!(
+        store.list_outstanding_nonces().unwrap().len(),
+        1,
+        "and the order itself stays live for a build that can read it",
     );
 }
 

@@ -27,8 +27,11 @@ use crate::store::{OutstandingOrder, StoreBackend};
 /// through this same broker. Deliberately the same door: a timeout must clear
 /// the same nonce and displayed-digest checks a real upload does, spend the same
 /// consume-once order, and reach the same retry and wedge accounting rather than
-/// a parallel authority. A stage with no executor-dispatch lifecycle is refused
-/// there as [`IntakeRefusal::OutOfLineStage`] whichever way its result arrived.
+/// a parallel authority. Only *most* of the same door: an uploaded result for a
+/// stage with no executor-dispatch lifecycle is refused here as
+/// [`IntakeRefusal::OutOfLineStage`], but the synthesised side never gets that
+/// far, because the reactor has no timeout verdict to build one from for such a
+/// stage and leaves the order outstanding instead.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct UploadedEvidence {
     /// The nonce the upload claims to answer.

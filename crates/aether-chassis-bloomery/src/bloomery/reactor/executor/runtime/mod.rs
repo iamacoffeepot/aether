@@ -131,16 +131,17 @@ struct TrackedHandle {
     handle: WorkHandle,
     first_seen: Instant,
     stale_warned: bool,
-    /// Guards the deferred-timeout warn the same way `stale_warned` guards the
-    /// staleness one: an expired order this build cannot yet terminate is
-    /// re-selected on every tick, and reporting it every tick would bury the
-    /// first report under the poll cadence.
-    deferred_timeout_warned: bool,
+    /// Guards the whole handling of an expired order this build cannot
+    /// terminate, the way `stale_warned` guards the staleness one. Such an order
+    /// stays outstanding, so every later expiry sweep selects it again: without
+    /// a latch its report buries the first one under the poll cadence, and its
+    /// reclaiming cancel is reissued at that same cadence forever.
+    unterminable_reported: bool,
 }
 
 impl TrackedHandle {
     fn new(handle: WorkHandle, first_seen: Instant) -> Self {
-        Self { handle, first_seen, stale_warned: false, deferred_timeout_warned: false }
+        Self { handle, first_seen, stale_warned: false, unterminable_reported: false }
     }
 }
 
@@ -176,7 +177,7 @@ fn now_unix_millis() -> u64 {
 /// therefore accumulate as a repeated `Preflight`, wedging the member with a
 /// terminal set that reads as "the umbrella never answered".
 ///
-/// `AggregateReview` is deliberately absent. ADR-0177 routes it to ADR-0176's
+/// `AggregateReview` is deliberately `None`. ADR-0177 routes it to ADR-0176's
 /// `ExecutorFault` — a review lane that never answered produced no judgement of
 /// the fold, which is the same fact as one that reported an environment failure,
 /// and must charge the same fold-fault ledger rather than reopening members.
@@ -184,13 +185,33 @@ fn now_unix_millis() -> u64 {
 /// `VerificationFailed` here instead would charge every member a repair lap for
 /// a critic that never ran, so this build defers the aggregate-review timeout
 /// rather than recording the wrong thing.
+///
+/// Exhaustive over [`StageId`] rather than wildcarded. `None` here means the
+/// order never terminates, and the stages that reach it split into two very
+/// different reasons for that — one deferred vocabulary and a set of stages no
+/// executor order carries at all. A wildcard reads a stage that later becomes
+/// dispatchable into the second group silently; naming every variant makes it a
+/// compile error instead.
 fn timeout_verdict(stage: StageId) -> Option<(StageVerdict, VerifyFailureSet)> {
     match stage {
         StageId::Verify => Some((StageVerdict::VerificationFailed, VerifyFailureSet::one(VerifyFailure::Preflight))),
         StageId::Construct | StageId::Refine | StageId::AggregateVerify => {
             Some((StageVerdict::VerificationFailed, VerifyFailureSet::EMPTY))
         }
-        _ => None,
+        // No verdict, for two different reasons. `AggregateReview`'s is deferred,
+        // as above. The rest are never dispatched to an executor at all — the
+        // pre-line stages, the per-member `Review` the member walk does not enter
+        // (`StageCatalog::MEMBER_LINE` ends at `Verify`), and the bloom-level
+        // tail the coordinator performs itself — so no order carries one and
+        // none can expire.
+        StageId::AggregateReview
+        | StageId::Sketch
+        | StageId::Scope
+        | StageId::Approve
+        | StageId::Review
+        | StageId::Integrate
+        | StageId::Land
+        | StageId::Study => None,
     }
 }
 
@@ -276,6 +297,12 @@ fn store_timeout_record(artifacts: Option<&mut ArtifactsCapabilityState>, record
 /// broker's consume-once is what makes the retry admit nothing twice. Late
 /// worker evidence for a consumed order refuses as an unknown nonce, which is
 /// the same answer a replay gets.
+///
+/// Retryable is not the same as repeated forever. A fault is retried because the
+/// next sweep may get a different answer; the three ways an expiry ends without
+/// terminating its order — an undecodable row, a deferred stage verdict, an
+/// intake refusal — will get the same answer every time, so each is reported and
+/// reclaimed exactly once per process (see [`reported_unterminable`]).
 fn expire_overdue_orders(
     stores: Stores<'_>,
     executor: &ExecutorShell,
@@ -294,30 +321,42 @@ fn expire_overdue_orders(
     let mut admits = Vec::new();
     for order in expired {
         let deadline = order.deadline_unix_millis;
-        let Some(record) = DispatchRecord::from_stored(&order) else {
-            tracing::error!(
-                target: "aether_chassis_bloomery::executor",
-                nonce = %order.nonce,
-                "expired order did not decode into a dispatch record; it cannot be terminated by this build",
-            );
+        let nonce = Nonce(order.nonce.clone());
+        // An order this build already cancelled and then could not terminate is
+        // still outstanding, so every sweep after it selects the same row again.
+        // Idempotence makes a repeat cancel *harmless*, not free: on the Actions
+        // lane each one probes both wrappers over the network for a run that
+        // will never change again, once per poll interval for the life of the
+        // process.
+        if reported_unterminable(tracked, &nonce) {
             continue;
-        };
-        // Cancel first, verdict second. Whether this build can *account* for the
-        // expiry is a separate question from whether the run may keep going: an
-        // overdue order still has a child burning wall clock and a scratch
-        // worktree checked out behind it, and a stage whose verdict vocabulary
-        // has not landed yet is no reason to leave those running until the
-        // process exits. The cancel is idempotent, so a deferred stage reissuing
-        // it on the ticks that follow reclaims nothing twice.
-        if let Err(error) = executor.cancel(&WorkHandle::new(record.nonce.clone())) {
+        }
+        // Cancel first, verdict second, and before the decode. Whether this
+        // build can *account* for the expiry is a separate question from whether
+        // the run may keep going: an overdue order still has a child burning
+        // wall clock and a scratch worktree checked out behind it, and neither a
+        // stage whose verdict vocabulary has not landed yet nor a row that no
+        // longer decodes is a reason to leave those running until the process
+        // exits. The nonce is a plain column, so the cancel needs none of the
+        // decoding below.
+        if let Err(error) = executor.cancel(&WorkHandle::new(nonce.clone())) {
             tracing::warn!(
                 target: "aether_chassis_bloomery::executor",
-                nonce = %record.nonce.0,
+                nonce = %nonce.0,
                 %error,
                 "expired order's cancel failed; leaving it live to retry",
             );
             continue;
         }
+        let Some(record) = DispatchRecord::from_stored(&order) else {
+            latch_unterminable(tracked, &nonce);
+            tracing::error!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %nonce.0,
+                "expired order did not decode into a dispatch record; its run was cancelled, but the order cannot be terminated by this build",
+            );
+            continue;
+        };
         let Some((verdict, failed_verifiers)) = timeout_verdict(record.stage) else {
             warn_deferred_timeout(tracked, &record, deadline);
             continue;
@@ -362,6 +401,11 @@ fn expire_overdue_orders(
                 tracked.retain(|tracked_handle| tracked_handle.handle.nonce != record.nonce);
             }
             Ok(AdmitDecision::Refused(refusal)) => {
+                // A refusal is a judgement about the order's own stored columns,
+                // so the same order refuses the same way on every later sweep —
+                // latch it with the other two unterminable shapes rather than
+                // re-logging and re-cancelling at the poll cadence.
+                latch_unterminable(tracked, &record.nonce);
                 tracing::error!(
                     target: "aether_chassis_bloomery::executor",
                     nonce = %record.nonce.0,
@@ -382,23 +426,41 @@ fn expire_overdue_orders(
     admits
 }
 
+/// Whether the expiry sweep has already cancelled `nonce` and found it could not
+/// terminate the order behind it — a row that no longer decodes, a stage whose
+/// timeout verdict is deferred, or an admission the intake refuses. All three
+/// leave the order outstanding, so every later sweep re-selects it; the latch is
+/// what makes the report and the reclaiming cancel one-shot rather than one per
+/// poll tick.
+///
+/// Kept on the tracked handle rather than in a set of its own because every
+/// outstanding order already has one: a live dispatch tracks its handle, and
+/// [`seed_tracked`] re-seeds one per outstanding nonce after a restart. A nonce
+/// with no handle reads as unlatched, which reports and reclaims rather than
+/// silently skipping an order nothing else is watching.
+fn reported_unterminable(tracked: &[TrackedHandle], nonce: &Nonce) -> bool {
+    tracked.iter().any(|tracked_handle| tracked_handle.handle.nonce == *nonce && tracked_handle.unterminable_reported)
+}
+
+/// Latch `nonce` against [`reported_unterminable`]. A no-op for an untracked
+/// nonce, which cannot be latched and is reported again next sweep.
+fn latch_unterminable(tracked: &mut [TrackedHandle], nonce: &Nonce) {
+    if let Some(tracked_handle) = tracked.iter_mut().find(|tracked_handle| tracked_handle.handle.nonce == *nonce) {
+        tracked_handle.unterminable_reported = true;
+    }
+}
+
 /// Report an expired order this build has no verdict vocabulary for, once per
 /// tracked handle rather than once per tick.
 fn warn_deferred_timeout(tracked: &mut [TrackedHandle], record: &DispatchRecord, deadline_unix_millis: u64) {
-    let Some(tracked_handle) = tracked.iter_mut().find(|tracked_handle| tracked_handle.handle.nonce == record.nonce)
-    else {
-        return;
-    };
-    if tracked_handle.deferred_timeout_warned {
-        return;
-    }
-    tracked_handle.deferred_timeout_warned = true;
+    latch_unterminable(tracked, &record.nonce);
     tracing::warn!(
         target: "aether_chassis_bloomery::executor",
         nonce = %record.nonce.0,
         stage = ?record.stage,
         deadline_unix_millis,
-        "expired order's stage has no timeout verdict in this build (issue #4738 owns the aggregate-review one); \
+        "expired order's stage has no timeout verdict in this build (issue #4738 owns the aggregate-review one; \
+         any other stage here is a corrupt order, since nothing else is dispatched); \
          the order stays outstanding rather than being charged the wrong ledger",
     );
 }
