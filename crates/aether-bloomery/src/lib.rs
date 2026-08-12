@@ -68,10 +68,11 @@ pub mod values;
 
 pub use control::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, CONTROL_CORE_NAMESPACE, ClaimResult, ClaimSeal,
-    Commit, CommitResult, CompleteRelease, CompleteTransfer, ConfigRecord, DispatchPayload, EnumerateClaims,
-    EnumerateClaimsResult, IntegratePayload, JournalRecord, LandPayload, LoadConfigs, LoadConfigsResult,
-    MembershipMutation, ObserveMainline, ObserveMainlineResult, OutboxPayload, Query, QueryResult, RedispatchPayload,
-    ReleaseSeal, ReplayJournal, ReplayJournalResult, ReviewPass, Topic, TransferSeal,
+    Commit, CommitResult, CompleteRelease, CompleteReleaseResult, CompleteTransfer, ConfigRecord, DispatchPayload,
+    EnumerateClaims, EnumerateClaimsResult, IntegratePayload, JournalRecord, LandPayload, LoadConfigs,
+    LoadConfigsResult, MembershipMutation, ObserveMainline, ObserveMainlineResult, OrphanClaimReleasePayload,
+    OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal, ReplayJournal, ReplayJournalResult, ReviewPass,
+    Topic, TransferSeal,
 };
 pub use correspondence::{BackendObjectId, Correspondence, CorrespondenceError, SharedCorrespondence};
 pub use digest::{ContentAddressed, Digest, digest_of};
@@ -81,16 +82,16 @@ pub use manifest::{
     ClosureViolation, MANIFEST_CLOSURE_BUDGET, PromptManifest, ProvenanceIndex, Slot, SlotRole, assemble_manifest,
 };
 pub use port::{
-    BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, Conclusion, EvidenceRef,
-    ExecutionStatus, ExecutorBackend, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal, LandingBlock,
-    MemberView, PendingDecisionView, ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument, WorkHandle,
-    WorkOrder,
+    BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome, Conclusion,
+    EvidenceRef, ExecutionStatus, ExecutorBackend, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal,
+    LandingBlock, MemberView, PendingDecisionView, ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument,
+    WorkHandle, WorkOrder,
 };
 pub use reduce::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError,
     BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, FoldedIntegration, GrantAttemptsError,
-    IntegrateError, LandError, LandingRejectedError, Outcome, ResolveError, SealConflict, SealError, Snapshot,
-    StageProgress, SupersedeError, VerifyFailedError, is_active_unlanded, reduce, view_of,
+    IntegrateError, LandError, LandingRejectedError, OrphanClaimReleaseError, Outcome, ResolveError, SealConflict,
+    SealError, Snapshot, StageProgress, SupersedeError, VerifyFailedError, is_active_unlanded, reduce, view_of,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;
@@ -100,8 +101,10 @@ pub use values::{
     AgentProfile, AgentSelection, Artifact, Attempt, BloomDraft, BloomSpec, Budget, CONSTRUCT_IMPLEMENT_COMMAND,
     CandidateRef, CatalogError, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, Evidence, EvidenceKind,
     Forecast, Harness, LandingReceipt, MemberCandidate, MemberSubject, Membership, ModelOverride, NetworkProfile,
-    Observation, OverrideError, PriceRow, PriceTable, Provenance, Question, REVIEW_CRITIC_COMMAND, ReasoningEffort,
-    ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel, StageBinding, StageCatalog, StageOverride,
-    StageReceipt, Statement, StudyCost, StudyRecord, ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND,
-    VerifyFailure, VerifyFailureSet, Wedge, Workpiece, config_address, decode_config, is_model_lane,
+    ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease, OrphanClaimReleaseCompletion,
+    OrphanClaimReleaseRecord, OverrideError, PriceRow, PriceTable, Provenance, Question, REVIEW_CRITIC_COMMAND,
+    ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel, StageBinding, StageCatalog,
+    StageOverride, StageReceipt, Statement, StudyCost, StudyRecord, ToolPolicy, Transformation, Unproducible,
+    VERIFY_CHECK_COMMAND, VerifyFailure, VerifyFailureSet, Wedge, Workpiece, config_address, decode_config,
+    is_model_lane,
 };

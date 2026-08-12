@@ -17,7 +17,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use aether_bloomery::{
-    Budget, ConfigRegistry, Digest, Event, Forecast, Membership, StageId, Statement, Workpiece, WorkpieceId,
+    BloomId, Budget, ClaimHolder, ClaimRefKind, ConfigRegistry, Digest, Event, Forecast, Membership, StageId,
+    Statement, Workpiece, WorkpieceId,
 };
 
 use crate::bloomery::{AdrTouch, Completeness};
@@ -198,6 +199,59 @@ pub struct JournalEntry {
 pub struct JournalView {
     /// Every journaled event, in sequence order.
     pub records: Vec<JournalEntry>,
+}
+
+/// One enumerated claim ref for `GET /claims` (ADR-0179).
+///
+/// The diagnostic surface that used to require leaving the API for `git
+/// ls-remote`: an operator blocked by `ActiveBloomExists` can now see which ref
+/// holds the bloom it named. Enumeration is **not** a liveness oracle — a holder
+/// absent from this instance's journal may be another instance's live bloom —
+/// so the operator investigates before signing a release.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimRefView {
+    /// Which typed claim ref this is.
+    pub ref_kind: ClaimRefKind,
+    /// Who currently holds it (or the tombstone marker an interrupted release
+    /// stranded).
+    pub holder: ClaimHolder,
+}
+
+/// `GET /claims` — every live claim ref, with its holder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimsView {
+    /// The live claim refs, in enumeration order.
+    pub claims: Vec<ClaimRefView>,
+}
+
+/// `POST /claims/releases` body — the typed release target plus the author
+/// signature authorizing it (ADR-0179).
+///
+/// There is deliberately no ref-path field. The target is named by
+/// [`ClaimRefKind`] and [`BloomId`], so no spelling of this body reaches a Git
+/// ref outside the claim namespace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseRequest {
+    /// The typed claim ref to release.
+    pub ref_kind: ClaimRefKind,
+    /// The holder the release expects to find on it — the compare half of the
+    /// source port's compare-and-swap.
+    pub expected_holder: BloomId,
+    /// The author-signed statement whose words are exactly
+    /// `release orphan bloomery claim` and whose parents name the request
+    /// digest. Verified against the custodied signer allowlist before admission.
+    pub authorization: Statement,
+}
+
+/// `POST /claims/releases` reply — the request digest, returned with `202` once
+/// the request fact is durably admitted. The operator polls
+/// `GET /claims/releases/{digest}` for the terminal result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseAcceptedView {
+    /// The request digest, lowercase hex — the status route's path segment.
+    pub request: String,
+    /// The reducer outcome the admitted request resolved to.
+    pub outcome: aether_bloomery::Outcome,
 }
 
 /// A structured error body for a `4xx` / `5xx` reply.

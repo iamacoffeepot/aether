@@ -90,6 +90,30 @@ pub struct ApiCapabilityState {
     /// dispatch `MailId.correlation_id`, back-pointing at the held [`PendingSeal`]
     /// and the member it forms the approval for on a verified reply.
     pub(super) seal_verifications: HashMap<u64, SealVerify>,
+    /// Orphan-claim release submissions awaiting their signature verification
+    /// (ADR-0179), keyed by the verify dispatch's `MailId.correlation_id`. Held
+    /// separately from `verifying` so the reply handler can tell a release verify
+    /// from an answer verify by correlation alone, the same way `seal_verifications`
+    /// separates the seal-member verifies.
+    pub(super) releasing: HashMap<u64, ReleasePending>,
+    /// The request digest each in-flight release admit will report, keyed by the
+    /// admit dispatch's `MailId.correlation_id`. A release answers `202` with its
+    /// digest rather than the bare reducer outcome every other write route
+    /// returns, and the digest is not recoverable from the admit reply.
+    pub(super) release_admits: HashMap<u64, Digest>,
+}
+
+/// A release submission held across the signature-verification round trip: the
+/// reply obligation, the request digest the `202` carries, and the request event
+/// to admit once (and only if) the signature verifies.
+pub(super) struct ReleasePending {
+    /// The held HTTP reply obligation.
+    pub(super) inbound: InboundMail,
+    /// The request digest — the handle the accepted reply hands back.
+    pub(super) request: Digest,
+    /// The `Fact::RequestOrphanClaimRelease` event to admit on a verified
+    /// signature.
+    pub(super) event: Event,
 }
 
 /// An answer request held across the signature-verification round trip: the
@@ -175,6 +199,17 @@ pub(super) enum Routed {
     Reply(HttpServerResponse),
     /// Await the downstream reply correlated by this id.
     Deferred(u64),
+    /// Await the `aether.signing` verify reply for an orphan-claim release
+    /// (ADR-0179), then admit `event` on a verified signature and answer `202`
+    /// with `request`, or answer `400` on a rejection.
+    DeferredRelease {
+        /// The verify dispatch correlation the reply will echo.
+        correlation: u64,
+        /// The request digest the accepted reply reports.
+        request: Digest,
+        /// The release request event to admit once the signature verifies.
+        event: Box<Event>,
+    },
     /// Await the `aether.signing` verify reply correlated by this id, then admit
     /// `event` on a verified signature or answer `400` on a rejection.
     DeferredVerify {
@@ -258,6 +293,10 @@ pub(super) fn finish(
         }
         Routed::DeferredVerify { correlation, event } => {
             state.verifying.insert(correlation, VerifyPending { inbound: ctx.take_inbound(), event: *event });
+            http::Outcome::Deferred
+        }
+        Routed::DeferredRelease { correlation, request, event } => {
+            state.releasing.insert(correlation, ReleasePending { inbound: ctx.take_inbound(), request, event: *event });
             http::Outcome::Deferred
         }
         Routed::DeferredSeal(setup) => {

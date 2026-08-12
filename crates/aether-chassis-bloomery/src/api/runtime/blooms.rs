@@ -146,7 +146,7 @@ impl ApiCapabilityState {
 
     /// `GET /blooms` and `GET /view` — read the whole live projection.
     pub(super) fn query(&self, ctx: &NativeCtx<'_, Manual>, bloom: Option<Vec<u8>>) -> Routed {
-        Routed::Deferred(self.send_tracked(ctx.actor::<ControlCore>(), &Query { bloom }))
+        Routed::Deferred(self.send_tracked(ctx.actor::<ControlCore>(), &Query { bloom, release: None }))
     }
 
     /// `GET /blooms/{id}` — read one bloom's live view by hex id.
@@ -184,6 +184,9 @@ pub(super) fn query_response(result: QueryResult) -> HttpServerResponse {
         },
         QueryResult::NotFound => error_response(404, "no bloom with that id"),
         QueryResult::Err { error } => error_response(500, &error),
+        // A projection read never asks for a release record, so a `Release` reply
+        // on this correlation is a routing bug rather than an answer to render.
+        QueryResult::Release { .. } => error_response(500, "projection read answered with a release record"),
     }
 }
 

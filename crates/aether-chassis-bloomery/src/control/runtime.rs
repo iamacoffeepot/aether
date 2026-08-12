@@ -30,11 +30,11 @@ pub use aether_substrate::chassis::error::BootError;
 
 use aether_bloomery::control::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, ClaimResult, ClaimSeal, Commit, CommitResult,
-    DispatchPayload, EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload, LandPayload, LoadConfigs,
-    LoadConfigsResult, MembershipMutation, ObserveMainline, ObserveMainlineResult, OutboxPayload, Query, QueryResult,
-    ReconcileOp, RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, Topic, TransferSeal,
-    held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail, seal_claim_mail,
-    transfer_seal_mail,
+    CompleteReleaseResult, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload,
+    LandPayload, LoadConfigs, LoadConfigsResult, MembershipMutation, ObserveMainline, ObserveMainlineResult,
+    OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, ReconcileOp, RedispatchPayload, ReplayJournal,
+    ReplayJournalResult, ReviewPass, Topic, TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals,
+    reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
     BloomId, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event, Fact, IdempotencyKey, Outcome,
@@ -487,6 +487,31 @@ impl NativeActor for ControlCore {
         }
     }
 
+    /// The boot reconcile's per-ref release reply (ADR-0179 gave this operation
+    /// its own result type).
+    ///
+    /// The deep heals this core drives are idempotent sweeps and stranded-drop
+    /// releases, so every clean variant is converged and carries nothing to act
+    /// on. Only an operational fault is worth a word — the heal will be re-planned
+    /// on the next boot from a fresh enumeration, so it is logged rather than
+    /// retried here. Handled explicitly rather than left to warn-drop: this cap
+    /// *is* the sender, and an unhandled reply from a send it made reads as a
+    /// routing bug to anyone watching the logs.
+    #[handler::manual]
+    fn on_complete_release_result(
+        _state: &mut ControlCoreState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: CompleteReleaseResult,
+    ) {
+        if let CompleteReleaseResult::Err { error } = mail {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::control",
+                %error,
+                "boot claim-ref deep heal release failed; the next boot re-plans it from a fresh enumeration",
+            );
+        }
+    }
+
     /// The `aether.bloomery.query` read surface. With `bloom` unset, reply the
     /// whole [`ViewDocument`](aether_bloomery::ViewDocument); with `bloom` set to a
     /// digest, reply that one bloom's [`BloomView`](aether_bloomery::BloomView) (or
@@ -494,6 +519,13 @@ impl NativeActor for ControlCore {
     #[handler::manual]
     fn on_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: Query) {
         let inbound = ctx.take_inbound();
+        // A release-request read is answered off the snapshot's own record map
+        // rather than the view document — the document projects blooms, and an
+        // orphan release belongs to no bloom by construction (ADR-0179).
+        if let Some(request) = mail.release {
+            inbound.reply(&release_response(&state.snapshot, &request));
+            return;
+        }
         // The live-read path holds no artifact access, so it resolves no question
         // bytes: a held member surfaces its pending decision only on the outward
         // mirror path. The digest-only hold still gates resolution in the reducer.
@@ -661,6 +693,22 @@ impl ControlCoreState {
     }
 }
 
+/// Answer an orphan-claim release-status read from the snapshot's record map
+/// (ADR-0179). A digest that is not 32 bytes, or names no admitted request, is
+/// [`QueryResult::NotFound`] — the same shape an unknown bloom id gets.
+fn release_response(snapshot: &Snapshot, request: &[u8]) -> QueryResult {
+    let Some(request) = Digest::from_slice(request) else {
+        return QueryResult::NotFound;
+    };
+    let Some(record) = snapshot.orphan_releases.get(&request) else {
+        return QueryResult::NotFound;
+    };
+    match to_vec(record) {
+        Ok(record) => QueryResult::Release { record },
+        Err(error) => QueryResult::Err { error: format!("release record encode failed: {error}") },
+    }
+}
+
 /// The idempotency key echoed on every [`CommitResult`] variant (the correlation
 /// axis for the commit reply).
 fn commit_key(result: &CommitResult) -> &str {
@@ -752,7 +800,12 @@ fn project(
                 };
                 outbox.push(OutboxPayload::new(Topic::AggregateVerify, to_vec(&payload)?));
             }
-            Decision::InheritClaim { .. }
+            Decision::DispatchOrphanClaimRelease { request, target } => {
+                let payload = OrphanClaimReleasePayload { request: *request, target: target.clone() };
+                outbox.push(OutboxPayload::new(Topic::OrphanClaimRelease, to_vec(&payload)?));
+            }
+            Decision::RecordOrphanClaimRelease { .. }
+            | Decision::InheritClaim { .. }
             | Decision::RecordResolution { .. }
             | Decision::RecordEvidence { .. }
             | Decision::ReleaseHold { .. }

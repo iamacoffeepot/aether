@@ -29,6 +29,7 @@ mod integrate;
 mod land;
 mod landing;
 mod observe;
+mod orphan_claim;
 mod outcome;
 mod review;
 mod seal;
@@ -39,8 +40,8 @@ mod view;
 pub use decision::Decision;
 pub use error::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError,
-    BaseMismatch, GrantAttemptsError, IntegrateError, LandError, LandingRejectedError, ResolveError, SealConflict,
-    SealError, SupersedeError, VerifyFailedError,
+    BaseMismatch, GrantAttemptsError, IntegrateError, LandError, LandingRejectedError, OrphanClaimReleaseError,
+    ResolveError, SealConflict, SealError, SupersedeError, VerifyFailedError,
 };
 pub use event::{Event, Fact};
 pub use outcome::{Decisions, Outcome};
@@ -58,6 +59,7 @@ use integrate::{reduce_integrate, reduce_resolve};
 use land::reduce_land;
 use landing::reduce_landing_rejected;
 use observe::reduce_observe_mainline;
+use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_claim_release};
 use review::reduce_aggregate_review_completed;
 use seal::{reduce_seal, reduce_supersede};
 use verify::reduce_verify_failed;
@@ -105,6 +107,12 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> 
         }
         Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers } => {
             reduce_verify_failed(snapshot, bloom, workpiece, evidence, *failed_verifiers)
+        }
+        Fact::RequestOrphanClaimRelease { request, authorization } => {
+            reduce_request_orphan_claim_release(snapshot, request, authorization)
+        }
+        Fact::CompleteOrphanClaimRelease { request, completion } => {
+            reduce_complete_orphan_claim_release(snapshot, request, *completion)
         }
     }
 }

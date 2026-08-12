@@ -153,7 +153,7 @@ fn query_until_blooms(stream: &mut TcpStream, cid_base: u64, control: MailboxId,
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut cid = cid_base;
     loop {
-        let document = match call::<_, QueryResult>(stream, cid, control, &Query { bloom: None }) {
+        let document = match call::<_, QueryResult>(stream, cid, control, &Query { bloom: None, release: None }) {
             QueryResult::Document { document } => from_bytes::<ViewDocument>(&document).expect("document decodes"),
             other => panic!("expected a document reply, got {other:?}"),
         };

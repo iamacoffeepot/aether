@@ -50,6 +50,7 @@
 //! constructors and the bloom-id URL codec.
 
 mod blooms;
+mod claims;
 mod configs;
 mod drafts;
 mod hex;
@@ -63,7 +64,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use aether_actor::{Manual, runtime};
-use aether_bloomery::{AdmitResult, QueryResult, ReplayJournal, ReplayJournalResult};
+use aether_bloomery::{AdmitResult, EnumerateClaimsResult, Outcome, QueryResult, ReplayJournal, ReplayJournalResult};
 use aether_http as http;
 use aether_kinds::trace::Settled;
 
@@ -72,10 +73,13 @@ pub use aether_substrate::chassis::error::BootError;
 
 pub use state::ApiCapabilityState;
 
+use aether_data::wire::from_bytes;
+
 use blooms::{admit_response, query_response};
+use claims::{claims_response, release_accepted_response, release_status_response};
 use reads::{artifact_response, journal_response};
 use response::{error_response, json};
-use state::{Routed, SealVerify, VerifyPending, finish};
+use state::{ReleasePending, Routed, SealVerify, VerifyPending, finish};
 
 use super::BloomeryApiCapability;
 use super::dto::WorkpiecesView;
@@ -83,6 +87,17 @@ use crate::artifacts::{ArtifactsCapability, Get, GetResult};
 use crate::bloomery::ApprovalPolicy;
 use crate::signing::VerifyResult;
 use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult, StoreCapability};
+
+/// Flatten a signing reply into the verified-or-why the release gate decides on.
+/// The release path only ever needs "did this signature hold", so it takes the
+/// verdict rather than the reply kind and stays independent of the two other
+/// verify consumers' own handling.
+fn verify_verdict(result: VerifyResult) -> Result<bool, String> {
+    match result {
+        VerifyResult::Ok { verified } => Ok(verified),
+        VerifyResult::Err { error } => Err(error),
+    }
+}
 
 /// Composer-supplied params for the REST control api cap (ADR-0156 §3 `Params`
 /// channel): the tier-policy file the pre-seal approve gate loads at init (issue
@@ -144,6 +159,8 @@ impl NativeActor for BloomeryApiCapability {
             configs: HashMap::new(),
             next_seal: 1,
             seal_verifications: HashMap::new(),
+            releasing: HashMap::new(),
+            release_admits: HashMap::new(),
         })
     }
 
@@ -290,6 +307,38 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `GET /claims` — enumerate the live claim refs and their holders
+    /// (ADR-0179). The diagnostic that used to require `git ls-remote`.
+    #[http::route(Get, "/claims")]
+    fn on_get_claims(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = state.list_claims(&ctx);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /claims/releases` — authorize releasing one orphaned claim ref with
+    /// an author signature (ADR-0179).
+    #[http::route(Post, "/claims/releases")]
+    fn on_post_claim_release(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+    ) -> http::Outcome {
+        let routed = state.request_claim_release(&ctx, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /claims/releases/{digest}` — read one authorized release's
+    /// journal-derived state: pending, or its terminal result.
+    #[http::route(Get, "/claims/releases/{digest}")]
+    fn on_get_claim_release(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        digest: http::Path<String>,
+    ) -> http::Outcome {
+        let digest = digest.0;
+        let routed = state.query_claim_release(&ctx, &digest);
+        finish(state, ctx, routed)
+    }
+
     /// `GET /journal` — read the durable event journal from the store.
     #[http::route(Get, "/journal")]
     fn on_get_journal(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
@@ -313,13 +362,42 @@ impl NativeActor for BloomeryApiCapability {
     /// the reducer outcome, or an admit error.
     #[handler::manual]
     fn on_admit_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: AdmitResult) {
-        state.answer(ctx, &admit_response(mail));
+        // A release submission answers `202` with its request digest rather than
+        // the bare outcome, because the digest is the handle the status route
+        // reads by and the admit reply does not carry it.
+        let response = match state.release_admits.remove(&ctx.reply_target().correlation_id) {
+            Some(request) => match &mail {
+                AdmitResult::Ok { outcome } => match from_bytes::<Outcome>(outcome) {
+                    Ok(outcome) => release_accepted_response(request, outcome),
+                    Err(error) => error_response(500, &format!("outcome decode failed: {error}")),
+                },
+                AdmitResult::Err { error } => error_response(500, error),
+            },
+            None => admit_response(mail),
+        };
+        state.answer(ctx, &response);
     }
 
     /// The control core's reply to a live projection read.
     #[handler::manual]
     fn on_query_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: QueryResult) {
-        state.answer(ctx, &query_response(mail));
+        // The release branch is its own reply variant, so the read it answers is
+        // decided by the payload rather than by a second correlation table.
+        let response = match mail {
+            QueryResult::Release { .. } => release_status_response(mail),
+            mail => query_response(mail),
+        };
+        state.answer(ctx, &response);
+    }
+
+    /// The source cap's reply to a claim enumeration (ADR-0179).
+    #[handler::manual]
+    fn on_enumerate_claims_result(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Manual>,
+        mail: EnumerateClaimsResult,
+    ) {
+        state.answer(ctx, &claims_response(mail));
     }
 
     /// The store's reply to a journal read.
@@ -347,6 +425,8 @@ impl NativeActor for BloomeryApiCapability {
         let correlation = ctx.reply_target().correlation_id;
         if state.seal_verifications.contains_key(&correlation) {
             state.resolve_seal_verify(ctx, correlation, mail);
+        } else if state.releasing.contains_key(&correlation) {
+            state.resolve_release_verify(ctx, correlation, verify_verdict(mail));
         } else {
             state.resolve_verify(ctx, mail);
         }
@@ -389,6 +469,8 @@ impl NativeActor for BloomeryApiCapability {
         if let Some(inbound) = state.pending.remove(&mail.root.correlation_id) {
             inbound.reply(&error_response(504, "control-plane request settled without a reply"));
         } else if let Some(VerifyPending { inbound, .. }) = state.verifying.remove(&mail.root.correlation_id) {
+            inbound.reply(&error_response(504, "signature verification settled without a reply"));
+        } else if let Some(ReleasePending { inbound, .. }) = state.releasing.remove(&mail.root.correlation_id) {
             inbound.reply(&error_response(504, "signature verification settled without a reply"));
         } else if let Some(SealVerify { seal, .. }) = state.seal_verifications.remove(&mail.root.correlation_id) {
             // An above-auto member's verify chain settled without a reply — the

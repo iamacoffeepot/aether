@@ -50,6 +50,9 @@ closed`.
 | `POST /blooms/{id}/answer` | Adopt an owner-signed answer statement to a parked question, releasing the hold it took. |
 | `GET /blooms` · `GET /view` | The whole live view document. |
 | `GET /blooms/{id}` | One bloom's live view (`{id}` is the bloom's hex digest). |
+| `GET /claims` | Every live claim ref and the bloom holding it. |
+| `POST /claims/releases` | Authorize releasing one orphaned claim ref with an author signature; returns `202` and the request digest. |
+| `GET /claims/releases/{digest}` | One authorized release's state — pending, or its terminal result. |
 | `GET /journal` | The whole journal, decoded, oldest first. |
 | `GET /artifacts/{digest}` | The content-addressed artifact bytes, or `404`. |
 
@@ -255,3 +258,96 @@ durable routes forward a mail to a peer cap — the control core
 (`aether.store.replay_journal`), or the artifacts cap (`aether.artifacts.get`)
 — and answer the HTTP client only when that reply lands, correlating the
 deferred reply the same way the RPC and HTTP server caps do.
+
+## Releasing an orphaned claim ref
+
+A claim ref outlives the journal that created it — that is what makes it work
+across instances. So any journal lifetime shorter than the claim's leaves a ref
+whose holder no surviving snapshot knows: a trial coordinator whose store was
+discarded, a journal reset, a restore to a snapshot older than the seal. Boot
+reconcile deliberately leaves such a holder alone (absence from *this* journal is
+not proof another instance's bloom is dead), and supersession needs the
+predecessor locally, so an orphaned mainline-admission ref refuses every later
+seal against that mainline:
+
+```json
+{"outcome": {"SealRejected": {"ActiveBloomExists": "…ea019763…"}}}
+```
+
+Start by looking at the refs. `GET /claims` is the read surface that used to
+require leaving the API for `git ls-remote`:
+
+```bash
+curl -s localhost:8080/claims | jq
+```
+
+```json
+{"claims": [
+  {"ref_kind": "MainlineAdmission", "holder": {"Held": [/* 32 bytes */]}},
+  {"ref_kind": {"Workpiece": "wp-trial-hop"}, "holder": {"Held": [/* 32 bytes */]}}
+]}
+```
+
+**Enumeration is diagnostic, not a liveness oracle.** A holder this instance does
+not know may be another instance's live bloom, mid-run. Investigate the holder
+before you go further — the machine cannot tell the two apart, which is exactly
+why the next step needs your signature rather than a flag.
+
+Once you have satisfied yourself the holder is dead, sign the release. The
+request names one typed ref and one expected holder; there is no ref-path field,
+so no spelling of this body reaches a Git ref outside the claim namespace. The
+authorizing statement's words must be exactly `release orphan bloomery claim`,
+and its `parents` must name the request's own content digest — the parent binding
+is what keeps one signature from authorizing a second, different release.
+
+```bash
+curl -s -X POST localhost:8080/claims/releases -d @- <<'JSON' | jq
+{
+  "ref_kind": "MainlineAdmission",
+  "expected_holder": [/* the 32-byte holder from GET /claims */],
+  "authorization": {
+    "words": [/* utf-8 bytes of: release orphan bloomery claim */],
+    "provenance": {"AuthorSignature": {"signer": "operator", "signature": [/* … */]}},
+    "parents": [[/* the 32-byte request digest */]]
+  }
+}
+JSON
+```
+
+A `202` carries the request digest. Poll it:
+
+```bash
+curl -s localhost:8080/claims/releases/<digest> | jq
+```
+
+```json
+{"target": {"ref_kind": "MainlineAdmission", "expected_holder": [/* … */]},
+ "completion": "Released"}
+```
+
+`completion` is `null` while the release is still pending, then one of three
+terminals:
+
+- **`Released`** — the expected holder's ref was deleted. Seals against that
+  mainline work again.
+- **`AlreadyAbsent`** — the ref was already gone. A success, not a failure: it is
+  also what a redrive reports after a crash between the deletion and its
+  journaled completion, which is what makes the same authorized request safe to
+  finish rather than permanently stuck.
+- **`Changed`** — the ref exists under a *different* holder, so nothing was
+  touched. The expected-holder compare-and-swap protected a ref that moved under
+  you. Re-read `GET /claims` and decide again; the release never retries against
+  a holder you did not name.
+
+Four refusals are synchronous, and none of them attempts a mutation: a body that
+does not decode (`400`), a signature that does not verify against the host's
+signer allowlist (`400`), an authorization whose words or parents do not bind
+this request, and an `expected_holder` that *is* a bloom this journal knows. The
+last one is the important boundary — a known holder belongs to the ordinary
+lifecycle (reconcile, supersede, the land-time release), and this route must
+never become a second, unaudited way to free the claims of a bloom that is still
+working.
+
+Every release is journaled: the signed request, its digest, and its terminal
+result. Resubmitting the same request returns the same digest and enqueues
+nothing, so a retried call cannot release twice.

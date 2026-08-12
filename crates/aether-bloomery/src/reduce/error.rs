@@ -331,6 +331,34 @@ pub enum GrantAttemptsError {
     },
 }
 
+/// Why an orphan-claim release request was refused (ADR-0179).
+///
+/// Every variant is a synchronous refusal that attempts no mutation: the request
+/// fact is never admitted, so no outbox effect is emitted and the source is never
+/// dialled.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum OrphanClaimReleaseError {
+    /// The authorization is not an author signature — only that provenance
+    /// becomes instruction (ADR-0149 §The value vocabulary).
+    NotInstructionCapable,
+    /// The authorization does not bind this request: its words are not the exact
+    /// [`ORPHAN_CLAIM_RELEASE_WORDS`](crate::ORPHAN_CLAIM_RELEASE_WORDS), or its
+    /// parents do not name the request digest. Both halves matter — without the
+    /// parent binding, a signature over those words would authorize the release
+    /// of *any* ref.
+    AuthorizationNotBound,
+    /// The expected holder is a bloom this journal knows, so it is not an orphan.
+    /// Boot reconcile, supersession, and the ordinary land-time release own a
+    /// known record; this escape hatch must never become a second route around
+    /// them.
+    HolderKnown(BloomId),
+    /// A completion named a request that was never admitted.
+    UnknownRequest(Digest),
+    /// A completion named a request that already reached a terminal result. The
+    /// first completion wins; a second is a stale redrive and changes nothing.
+    AlreadyCompleted(Digest),
+}
+
 /// A land refused because mainline had moved off the bloom's sealed base.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BaseMismatch {

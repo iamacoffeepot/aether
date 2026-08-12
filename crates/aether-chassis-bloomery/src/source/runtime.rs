@@ -14,16 +14,17 @@
 
 use aether_actor::runtime;
 use aether_bloomery::{
-    BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, Digest, IntegrateOutcome, LandOutcome, LandProposal, WorkpieceId,
+    BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimReleaseOutcome, Digest, IntegrateOutcome, LandOutcome,
+    LandProposal, WorkpieceId,
 };
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::SourceCapability;
 use super::kinds::{
-    ClaimResult, ClaimSeal, CompleteRelease, CompleteTransfer, EnumerateClaims, EnumerateClaimsResult, Integrate,
-    IntegrateResult, Land, LandResult, ListCheckpoints, ListCheckpointsResult, ObserveMainline, ObserveMainlineResult,
-    PollLand, PollLandResult, RecordCheckpoint, RecordCheckpointResult, ReleaseSeal, Snapshot, SnapshotResult,
-    TransferSeal,
+    ClaimResult, ClaimSeal, CompleteRelease, CompleteReleaseResult, CompleteTransfer, EnumerateClaims,
+    EnumerateClaimsResult, Integrate, IntegrateResult, Land, LandResult, ListCheckpoints, ListCheckpointsResult,
+    ObserveMainline, ObserveMainlineResult, PollLand, PollLandResult, RecordCheckpoint, RecordCheckpointResult,
+    ReleaseSeal, Snapshot, SnapshotResult, TransferSeal,
 };
 use crate::bloomery::SourceShell;
 
@@ -375,28 +376,39 @@ impl SourceCapabilityState {
     /// Decode the operands, complete the per-ref release, and encode the outcome.
     /// An **empty** `bloom` is the `None` holder — the holder-agnostic tombstone
     /// sweep; a non-empty `bloom` releases that holder's ref.
+    ///
+    /// Replies [`CompleteReleaseResult`] rather than the shared [`ClaimResult`]:
+    /// an authorized orphan release (ADR-0179) journals *which* terminal the
+    /// source reached, and `Acquired` cannot separate a live deletion from an
+    /// already-absent ref.
     #[must_use]
-    pub fn complete_release(&self, bloom: &[u8], ref_kind: &[u8]) -> ClaimResult {
+    pub fn complete_release(&self, bloom: &[u8], ref_kind: &[u8]) -> CompleteReleaseResult {
         let expected_holder: Option<BloomId> = if bloom.is_empty() {
             None
         } else {
             match from_bytes(bloom) {
                 Ok(bloom) => Some(bloom),
-                Err(error) => return ClaimResult::Err { error: error.to_string() },
+                Err(error) => return CompleteReleaseResult::Err { error: error.to_string() },
             }
         };
         let ref_kind: ClaimRefKind = match from_bytes(ref_kind) {
             Ok(ref_kind) => ref_kind,
-            Err(error) => return ClaimResult::Err { error: error.to_string() },
+            Err(error) => return CompleteReleaseResult::Err { error: error.to_string() },
         };
         // Claim registry disabled — the no-op the seal ops take (operands decoded
-        // first regardless).
+        // first regardless). An unconfigured bin holds no refs at all, so the
+        // honest answer is that the ref is not there.
         if !self.claims_enabled {
-            return ClaimResult::Acquired;
+            return CompleteReleaseResult::AlreadyAbsent;
         }
         match self.shell.complete_release(expected_holder.as_ref(), &ref_kind) {
-            Ok(outcome) => claim_result(outcome),
-            Err(error) => ClaimResult::Err { error: error.to_string() },
+            Ok(ClaimReleaseOutcome::Released) => CompleteReleaseResult::Released,
+            Ok(ClaimReleaseOutcome::AlreadyAbsent) => CompleteReleaseResult::AlreadyAbsent,
+            Ok(ClaimReleaseOutcome::Changed { observed_holder }) => match to_vec(&observed_holder) {
+                Ok(observed_holder) => CompleteReleaseResult::Changed { observed_holder },
+                Err(error) => CompleteReleaseResult::Err { error: error.to_string() },
+            },
+            Err(error) => CompleteReleaseResult::Err { error: error.to_string() },
         }
     }
 }
@@ -557,7 +569,11 @@ impl NativeActor for SourceCapability {
 
     #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
-    fn on_complete_release(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: CompleteRelease) -> ClaimResult {
+    fn on_complete_release(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: CompleteRelease,
+    ) -> CompleteReleaseResult {
         state.complete_release(&mail.bloom, &mail.ref_kind)
     }
 }

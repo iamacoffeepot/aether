@@ -9,6 +9,7 @@
 mod bloom;
 mod config;
 mod model_override;
+mod orphan_claim;
 mod price;
 mod profile;
 mod question;
@@ -25,6 +26,9 @@ pub use config::{
     decode_config,
 };
 pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedModel, StageOverride};
+pub use orphan_claim::{
+    ORPHAN_CLAIM_RELEASE_WORDS, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord,
+};
 pub use price::{PriceRow, PriceTable};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use question::Question;

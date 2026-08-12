@@ -29,12 +29,19 @@
 //!   bloom on the mainline (ADR-0149 §The boundary).
 //! - [`mirror`] — routes landing receipts and view documents out to the GitHub
 //!   projection (ADR-0149 migration step 1).
+//! - [`claim_release`] — runs the expected-holder compare-and-swap that retires
+//!   an authorized orphan claim ref (ADR-0179). Mounted only on the GitHub
+//!   branch: there is no ref namespace to release without one.
 
+mod claim_release;
 mod executor;
 mod integrate;
 mod land;
 mod mirror;
 
+pub use claim_release::{
+    ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick,
+};
 pub use executor::{DispatchTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState};
 pub use integrate::{IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick};
 pub use land::{LandReactorCapability, LandReactorSetup, LandReactorState, LandTick};
