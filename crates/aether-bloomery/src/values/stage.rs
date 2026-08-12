@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
-use crate::ids::StageId;
+use crate::ids::{StageId, WorkpieceId};
 use crate::values::{AgentProfile, ConfigScopes, Harness, ReasoningEffort, ResolvedConfigs, ResolvedModel, ToolPolicy};
 
 /// The declared output name every dispatched attempt uploads its result record
@@ -524,6 +524,39 @@ impl StageCatalog {
         };
         AgentProfile { harness, model: String::from(model), effort, tools: ToolPolicy::Full }
     }
+}
+
+/// The execution slot one dispatch targets — the key of a bloom's dispatch
+/// ledger (ADR-0180, [`BloomRecord::dispatches`](crate::BloomRecord::dispatches)).
+///
+/// A coordinate into the line rather than a stage of it: [`StageId`] names
+/// *which* stage, and this names *whose* — the member a per-member stage
+/// dispatches against, or the bloom itself for the positions that run once per
+/// bloom. Counting dispatches per slot is what separates two members each
+/// constructing once (two slots at one dispatch each, no retry) from one member
+/// constructing twice (one slot at two dispatches, one retry).
+///
+/// Its [`Ord`] is the ledger map's key order, so `Member` entries sort by
+/// workpiece then stage and precede every `Bloom` entry. Nothing reads that
+/// order for meaning — the grade sums the whole map — but it makes a rendered
+/// ledger stable across replays.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+pub enum DispatchKey {
+    /// One member's slot at one stage: `Construct`, `Verify`, or the
+    /// repair-only `Refine` re-entry (ADR-0153's dispatched member positions).
+    Member {
+        /// The member the attempt runs against.
+        workpiece: WorkpieceId,
+        /// The stage dispatched against it.
+        stage: StageId,
+    },
+    /// One bloom-level position's slot: `Integrate`, `AggregateVerify`,
+    /// `AggregateReview`, or `Land` — the stages that dispatch once per bloom
+    /// rather than once per member.
+    Bloom {
+        /// The dispatched bloom-level stage.
+        stage: StageId,
+    },
 }
 
 /// One execution of one binding against one subject (ADR-0149 §The line).
