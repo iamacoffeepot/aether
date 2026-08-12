@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (shipped — bounded Bloomery state transitions in `crates/aether-bloomery/src/reduce/` and the control surface in `crates/aether-bloomery/src/control/`)
 - **Date:** 2026-07-15
+- **Amended:** 2026-08-11 (#4663) — the outward projection targets the objects a repository already holds instead of opening its own. See _[2026-08-11 amendment (#4663): the projection targets existing objects](#2026-08-11-amendment-4663-the-projection-targets-existing-objects)_; §The boundary's projection clause reads under it.
 
 ## Context
 
@@ -174,7 +175,9 @@ GitHub lives entirely outside those ports as `aether-bloomery-github`, and its d
 candidates, reviews becoming decision proposals; the owner's intent is the reverse)*: the adapter maintains
 a shadow copy of Bloomery's internals — workpieces project to issues, blooms to their aggregate views,
 evidence to checks and comments, every projection carrying internal ids and digests in stable metadata,
-idempotent and rebuildable from the journal after deletion — and it implements the source port when GitHub
+idempotent and rebuildable from the journal after deletion *(amended 2026-08-11, #4663: what a projection
+**owns** is narrowed to marker-keyed comments on objects the repository already holds; see the amendment
+section)* — and it implements the source port when GitHub
 hosts the repository, so Git remains the versioning substrate. Intent enters Bloomery natively; GitHub is
 never the driver. Two narrow inward channels exist. First, stage results: when a stage Bloomery dispatched
 executes on GitHub — a reviewer verdict, a check run — the adapter normalizes the outcome into evidence
@@ -290,3 +293,150 @@ Each step is reversible and the current pipeline keeps operating until explicitl
 - **One shared mega-branch per bloom, hand-managed** — lower implementation cost; rejected for shared-writer
   races and unrecoverable provenance; the owned integration branch plus per-attempt sub-branches gives the
   same aggregate boundary with one writer.
+
+## 2026-08-11 amendment (#4663): the projection targets existing objects
+
+§The boundary's projection clause is written for a topology where the mirror is the only inhabitant of the
+repository it writes into — a dedicated shadow repository, where "workpieces project to issues, blooms to
+their aggregate views" describes objects nothing else could be confused with. Pointed at the repository
+Bloomery develops, the same clause writes duplicates of objects that are already there. A workpiece named
+`issue-4628` names an issue that exists, and the adapter opens a second one titled `Workpiece issue-4628`
+beside it, with a `Bloom <hex>` umbrella above that. Neither is actionable: nothing is assigned to them, no
+reducer transition reads them, and nothing closes them — the projection's issue verbs are create and
+overwrite-title-and-body, and no close verb exists. Their bodies render state whose source of truth is the
+journal, which the control API serves live at `GET /view`. A machine-generated `Bloom <hex>` title cannot
+satisfy the repository's Conventional-Commits title lint either, so every umbrella is marked invalid by
+construction. Finding those objects by marker also scans repository-wide issue history before every write —
+dozens of sequential list requests per lookup on a repository of any age, growing without bound, against a
+page cap that eventually reports a present object as absent.
+
+This amendment narrows what a projection **owns**. It does not change the direction of the boundary, the
+self-contained view document, or the rule that a platform event never advances the reducer.
+
+### Addressing
+
+The GitHub adapter resolves a `WorkpieceId` to an existing object when, and only when, the id is exactly
+`issue-<N>` with `<N>` a canonical decimal — non-zero, no leading zeros, no sign, no surrounding space —
+naming that object's number in the repository the adapter is already configured for. `WorkpieceId` keeps the
+identity §The bloom gives it: an arbitrary native handle no platform owns. The convention is adapter-local;
+the core gains no issue semantics and answers no question about numbers.
+
+Any other id shape is **unaddressable on GitHub**, which is an ordinary state rather than a fault. A
+workpiece with no GitHub home has no comment projected and keeps `GET /view` as its authoritative view.
+
+The number resolves against whatever the configured repository holds:
+
+- **Closed** is a target like any other. Closure is the ordinary terminal state of a workpiece that landed,
+  and a receipt on a closed issue is the receipt where it belongs. The projection never opens, closes, or
+  reopens anything, so a closed target stays closed.
+- **A pull request number** is a target too. GitHub numbers issues and pull requests from one sequence and
+  the comment route is shared, so refusing would strand a workpiece whose source is a pull request and buy
+  no safety.
+- **Absent, or locked against comment**, is reported and skipped. Nothing is fabricated to give the
+  projection a home — that fabrication is the behavior this amendment removes.
+
+Nothing verifies that the configured repository is the one the ids were authored against, because there is
+nothing trustworthy to verify against: number 4628 is a live issue in most repositories of any age. The risk
+is answered by bounding the write rather than by an unavailable assertion, and bounded further by the fact
+that this same configuration is where the source port pushes refs and opens landing pull requests — a wrong
+repository breaks landing loudly, before a projection can write anywhere quietly.
+
+### The write surface
+
+A projection may create and update **only comments carrying its own marker**, and only on objects it did not
+create. It may not write an issue or pull-request title or body. It may not open, close, reopen, lock,
+label, assign, or merge. The client contract loses its issue create, overwrite, and find-by-marker verbs, so
+no method reachable from a projection can address a human-authored body — the bound holds by absence rather
+than by discipline.
+
+A comment is the surface, rather than a marker-delimited managed region inside the body, because a managed
+region still writes the whole body back. Every update would round-trip a person's prose through the
+projection's renderer, and one marker mis-parse, one truncated read, or one human edit landing between the
+read and the write replaces an authored body with a machine render — through the API, with no undo. A
+comment carries the same content with none of that exposure: a separate object, additive, individually
+deletable, worst case noise. A label carries no content, and the payload here is rendered prose. Writing
+nothing at all is insufficient for the same reason ADR-0151 gives for held questions: the receipt and the
+parked question have to be visible where a person already looks, and the umbrella was the exception to that
+principle rather than an instance of it.
+
+### What each object is
+
+A **member** projects as one comment on its source issue, keyed by workpiece *and* bloom and digested over
+the whole member render. State, approval, resolution, and any held question fold into that single comment
+rather than taking one apiece: they derive from the same value and change together. The bloom half of the
+key is load-bearing — a successor bloom re-admitting the same workpiece now shares one issue with its
+predecessor, and a workpiece-only key would have the two overwrite each other.
+
+A **bloom** has no object of its own before it lands. Afterwards its landing pull request is the aggregate:
+one per bloom by the landing-branch convention, carrying the whole diff, closing itself on merge. No
+umbrella issue is opened at any point.
+
+A **landing receipt** projects as one comment per bloom onto every resolvable member issue, and onto the
+landing pull request when one exists. The pull request is a target, not a precondition — a bloom can land
+through a path that opened none, and requiring it would wedge those lanes.
+
+### The receipt carries its members
+
+`LandingReceipt` names a bloom, a previous base, and a new head, and no membership, so a receipt drained
+from the outbox after a restart cannot reach the issues it belongs on. The outbox payload on the
+landing-receipt topic therefore carries the unchanged receipt together with the landed bloom's ordered
+member ids, which the reducer holds at the moment it mints the receipt. The receipt value itself, the land
+fact, the land outcome, and the source port are unchanged.
+
+Reading membership back out of the store stays forbidden — it is the self-contained-document rule this same
+section states. Recovering it from the pull request's prose stays forbidden too: that would make free-form
+platform content an input to projection.
+
+### Failure is skipped, not stalled
+
+Outbox delivery is at-least-once and holds a topic until its entry succeeds, so a permanent condition must
+never surface as an error — one unaddressable member would otherwise block the mirror indefinitely. The
+adapter classifies instead: an unaddressable id, or a target the repository refuses, is recorded and
+skipped, and the entry still settles. Only a transport fault or an unexpected status is an error, and that
+is what re-drives. Every write is one request against one target, so a skipped target leaves nothing
+half-written.
+
+### The objects already opened
+
+Eight umbrella issues exist under the previous rule — seven for one bloom, one for another — every one of
+them a receipt-opened stub, and all of them already closed. No workpiece issue was ever opened, because only
+the receipt path ran against this repository. **They stay as they are.** They are a bounded, complete, and
+accurate record of what the projection did; deleting issues is irreversible; and closing what is already
+closed is a no-op. No reconciliation code ships, and none is needed: the marker scan that made them findable
+is the same repository-wide walk this amendment removes, so nothing in the projection path reads them again.
+
+### Consequences
+
+- The projection stops creating objects. Its only creates are comments, its only find is scoped to one
+  target's comment list, and repository-wide issue enumeration leaves the projection path — taking with it
+  the per-lookup latency that let a poll drain lap a single projection.
+- Bloomery's outward surface lands where the work already is: a receipt reaches the issue and the pull
+  request a person already has open, and no object appears that nobody will ever close.
+- A workpiece whose id is not `issue-<N>` is invisible on GitHub. Accepted — those are the local and fixture
+  lanes, whose reader is `GET /view`.
+- A wrong repository configuration can address a comment at an unrelated object. Accepted at bounded cost:
+  one deletable comment, no authored content lost, and the same configuration fails landing first.
+- The projection depends on the landing-branch convention that the source port owns, so the two must read
+  that name from one place rather than each spelling it.
+
+### Alternatives considered
+
+- **Keep the shadow issues and make the marker lookup cheap** (an index, a cache, a search query) — removes
+  the latency and none of the rest: the objects still have no lifecycle, still never close, still fail the
+  title lint, and still duplicate what the repository holds. It optimizes the mechanism of the wrong
+  decision.
+- **Own a marker-delimited managed section of the source issue's body** — the richest surface, and rejected
+  as the one unrecoverable failure mode available here. It requires writing a human's whole body back on
+  every update, so any parse, truncation, or concurrency defect destroys authored prose with no undo. The
+  content it would carry fits in a comment.
+- **Give `WorkpieceId` an issue number, or a variant carrying one** — contradicts §The bloom directly: a
+  GitHub issue is a projection of a workpiece, not its identity, and the id outlives any scope revision.
+  It would also make every non-GitHub lane construct a number it does not have.
+- **Keep an umbrella issue as the bloom's aggregate, and target only that** — one object instead of many,
+  and rejected because the object still has no lifecycle of its own and still duplicates `GET /view`. The
+  landing pull request is the aggregate that already exists, already carries the diff, and already closes.
+- **Carry the landing on the next view reconcile rather than enriching the receipt payload** — the view
+  document already retains landed blooms with their membership, so no payload would change. Rejected because
+  the bloom view carries no previous-base/new-head pair, so the receipt's actual content would be lost, and
+  because it would replace a topic with its own at-least-once delivery by whenever a view reconcile next
+  happens to run.
