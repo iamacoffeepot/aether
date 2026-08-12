@@ -164,8 +164,8 @@ Under both sits the oldest of the three, the **cross-process tests**
 (`crates/aether-chassis-bloomery/tests/`: `rest_api.rs`, `control_loop.rs`,
 `recovery.rs`). Each boots the real `bloomery` binary over a socket and drives it the
 way an operator or a crash would — `curl` against the HTTP ingress, typed mail over
-RPC, `kill -9` and restart against the same database file. They are the only tier with
-a real process to lose, which is exactly what they are for.
+RPC, `kill -9` and restart against the same database file. They are the only tier that
+kills and restarts its coordinator, which is exactly what they are for.
 
 | | LaneHarness | fixture harness | cross-process |
 | --- | --- | --- | --- |
