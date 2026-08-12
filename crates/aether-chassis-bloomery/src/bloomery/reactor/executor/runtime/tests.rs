@@ -24,9 +24,9 @@ use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::{
-    BACKOFF_CAP, CandidatePush, NameEvidenceClaims, Stores, TrackedHandle, backoff_delay, drain_and_dispatch,
-    drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_stale, next_backoff, pull_and_admit,
-    push_admitted_candidates, seed_tracked, select_stale_handles,
+    BACKOFF_CAP, CandidatePush, NameEvidenceClaims, Stores, TrackedHandle, backoff_delay, default_candidate_push,
+    drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_stale, next_backoff,
+    pull_and_admit, push_admitted_candidates, seed_tracked, select_stale_handles,
 };
 use crate::bloomery::executor::local::testing::FixedRunner;
 use crate::bloomery::intake::{
@@ -955,6 +955,20 @@ fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
     );
     assert!(issued[0].1.starts_with("refs/heads/bloom/"), "the ref lives in the bloom namespace");
     assert!(issued[0].1.ends_with("/candidate/wp-cand"), "the workpiece segment is sanitized to ref-safe characters");
+}
+
+// Tripwire: every fixture-shaped construction — `with_parts` (#4835) included —
+// resolves its pusher through `default_candidate_push`'s fixture arm, which
+// declines to push rather than shelling git. If either `default_candidate_push`
+// or `with_parts` is switched back to the real `GitCandidatePush`, this fails
+// instead of a fixture harness silently shelling a real push.
+#[test]
+fn default_candidate_push_refuses_on_a_fixture_boot() {
+    let target_ref = "refs/heads/bloom/…/candidate/wp";
+
+    let outcome = default_candidate_push(true).push(&"0".repeat(40), target_ref);
+
+    assert!(outcome.is_err(), "the fixture arm declines instead of shelling git");
 }
 
 // #3656 / ADR-0153 — persisted findings from the failing verdict compose onto
