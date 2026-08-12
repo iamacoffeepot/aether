@@ -150,8 +150,11 @@ impl TrackedHandle {
 ///
 /// Taken once per tick rather than per order, so the dispatches and expiries of
 /// a single tick share one instant and cannot disagree about what "now" was. A
-/// clock before the epoch reads as `0`, which expires every order on its next
-/// tick rather than letting an unusable clock run work unbounded.
+/// clock before the epoch is not a reading any deadline arithmetic can use, so
+/// it reads as `0` — which defers every expiry rather than terminating anything
+/// on a number that means nothing: `0` is behind every deadline a dispatch under
+/// the same clock would have stamped. Deadlines stop enforcing until the host's
+/// clock is usable again, and no order is cancelled on a fiction in the meantime.
 fn now_unix_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
@@ -201,36 +204,50 @@ fn digest_to_parent(digest: &Digest) -> String {
     out
 }
 
-/// Put a timeout record's canonical bytes into the content store, returning
-/// whether the expiry may go on to admit it.
+/// Put a timeout record's canonical bytes into the content store, returning the
+/// address the synthesised evidence details them by — or `None` when the expiry
+/// must leave the order live and retry on the next tick.
+///
+/// The address is sha256 over the record's canonical wire bytes, which is
+/// exactly the key the artifacts store files them under: `put` hashes the same
+/// bytes the same way, so a `detail` minted here resolves against the store a
+/// wedge later reads. It is computed rather than read back out of the reply so
+/// the no-store host below can still name where the bytes belong, and it is
+/// deliberately *not* [`TimeoutRecord::id`] — the value vocabulary's typed
+/// address hashes a length-prefixed domain tag ahead of the same bytes, so an
+/// evidence detail taken from it would point at nothing any store holds. The
+/// local lane mints its evidence detail the same way ([`Digest::of_wire_bytes`]
+/// over the bytes it wrote).
 ///
 /// Two "no store" shapes, answered differently on purpose. A host with no
 /// artifacts store configured never had anywhere to put the bytes and never
 /// will, so refusing here would leave the order outstanding forever — which is
-/// the bug being fixed. The record's address is a pure function of the order, so
-/// the evidence still names the right artifact; the bytes are simply
+/// the bug being fixed. The address is a pure function of the record, so the
+/// evidence still names where the artifact belongs; the bytes are simply
 /// unretrievable, and the hole is loud in the log (the same trade `record_cost`
 /// makes for study rows). A store that is present and *faults* is transient, so
 /// that one leaves the order live to retry on the next tick.
-fn store_timeout_record(artifacts: Option<&mut ArtifactsCapabilityState>, record: &TimeoutRecord) -> bool {
-    let Some(artifacts) = artifacts else {
-        tracing::warn!(
-            target: "aether_chassis_bloomery::executor",
-            nonce = %record.nonce.0,
-            "no artifacts store configured; the timeout terminates the order but its record bytes are unretrievable",
-        );
-        return true;
-    };
+fn store_timeout_record(artifacts: Option<&mut ArtifactsCapabilityState>, record: &TimeoutRecord) -> Option<Digest> {
     let Ok(bytes) = to_vec(record) else {
         tracing::error!(
             target: "aether_chassis_bloomery::executor",
             nonce = %record.nonce.0,
             "timeout record did not encode; leaving the order live to retry",
         );
-        return false;
+        return None;
+    };
+    let address = Digest::of_wire_bytes(&bytes);
+
+    let Some(artifacts) = artifacts else {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            nonce = %record.nonce.0,
+            "no artifacts store configured; the timeout terminates the order but its record bytes are unretrievable",
+        );
+        return Some(address);
     };
     match artifacts.put(&bytes, &[digest_to_parent(&record.subject)]) {
-        PutResult::Ok { .. } => true,
+        PutResult::Ok { .. } => Some(address),
         PutResult::Err { error } => {
             tracing::warn!(
                 target: "aether_chassis_bloomery::executor",
@@ -238,7 +255,7 @@ fn store_timeout_record(artifacts: Option<&mut ArtifactsCapabilityState>, record
                 ?error,
                 "timeout record was not stored; leaving the order live to retry",
             );
-            false
+            None
         }
     }
 }
@@ -285,10 +302,13 @@ fn expire_overdue_orders(
             );
             continue;
         };
-        let Some((verdict, failed_verifiers)) = timeout_verdict(record.stage) else {
-            warn_deferred_timeout(tracked, &record, deadline);
-            continue;
-        };
+        // Cancel first, verdict second. Whether this build can *account* for the
+        // expiry is a separate question from whether the run may keep going: an
+        // overdue order still has a child burning wall clock and a scratch
+        // worktree checked out behind it, and a stage whose verdict vocabulary
+        // has not landed yet is no reason to leave those running until the
+        // process exits. The cancel is idempotent, so a deferred stage reissuing
+        // it on the ticks that follow reclaims nothing twice.
         if let Err(error) = executor.cancel(&WorkHandle::new(record.nonce.clone())) {
             tracing::warn!(
                 target: "aether_chassis_bloomery::executor",
@@ -298,6 +318,10 @@ fn expire_overdue_orders(
             );
             continue;
         }
+        let Some((verdict, failed_verifiers)) = timeout_verdict(record.stage) else {
+            warn_deferred_timeout(tracked, &record, deadline);
+            continue;
+        };
 
         let timeout = TimeoutRecord {
             bloom: record.bloom,
@@ -310,15 +334,15 @@ fn expire_overdue_orders(
             subject: record.displayed_digest,
             deadline_unix_millis: deadline,
         };
-        if !store_timeout_record(artifacts.as_deref_mut(), &timeout) {
+        let Some(detail) = store_timeout_record(artifacts.as_deref_mut(), &timeout) else {
             continue;
-        }
+        };
 
         let upload = UploadedEvidence {
             nonce: record.nonce.clone(),
             subject: record.displayed_digest,
             verdict,
-            detail: timeout.id(),
+            detail,
             candidate: None,
             findings: None,
             failed_verifiers,
@@ -1330,8 +1354,10 @@ struct TickClock {
 /// Three passes, in an order ADR-0177 fixes. Completion first, so evidence that
 /// arrived at the deadline boundary is admitted normally rather than losing to a
 /// clock that has just crossed. Then the deadline sweep, which terminates every
-/// order still pending past its persisted deadline. Then the advisory staleness
-/// sweep (#3635), which is left exactly as it was: a handle past
+/// order still pending past its persisted deadline — and which runs only when
+/// the completion pass actually completed, because a faulted cycle has not
+/// looked at every handle and its "still pending" is unearned. Then the advisory
+/// staleness sweep (#3635), which is left exactly as it was: a handle past
 /// `stale_warn_after` warns once, naming its nonce, age, and last observed
 /// status — it reports, and the deadline is what acts.
 ///
@@ -1348,13 +1374,12 @@ fn pull_and_admit(
     let Stores { store, mut artifacts } = stores;
     let mut sink = CollectingSink::default();
     let handles: Vec<WorkHandle> = tracked.iter().map(|tracked_handle| tracked_handle.handle.clone()).collect();
-    let report = match run_intake_cycle(store, executor, &handles, &claims, artifacts.as_deref_mut(), &mut sink) {
-        Ok(report) => report,
-        Err(error) => {
-            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "intake cycle failed; results re-drive next tick");
-            CycleReport::default()
-        }
-    };
+    let cycle = run_intake_cycle(store, executor, &handles, &claims, artifacts.as_deref_mut(), &mut sink);
+    let completion_was_observed = cycle.is_ok();
+    let report = cycle.unwrap_or_else(|error| {
+        tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "intake cycle failed; results re-drive next tick");
+        CycleReport::default()
+    });
 
     // Drop the handles whose order was consumed on admit — a still-outstanding
     // order (order lookup Some) stays tracked to poll again; a store fault leaves
@@ -1378,7 +1403,20 @@ fn pull_and_admit(
 
     // Only now that completion has been observed and consumed: terminate what is
     // still pending past its sealed deadline.
-    let timed_out = expire_overdue_orders(Stores { store, artifacts }, executor, tracked, clock.now_unix_millis);
+    //
+    // And only if it *was* observed. `run_intake_cycle` abandons its loop on the
+    // first handle whose inspect or evidence stream faults, so a failed cycle
+    // leaves the handles behind it uninspected — "still pending" then means
+    // "never asked", not "not finished". Sweeping on that reading cancels a lane
+    // that completed well inside its budget and admits a synthesised failure over
+    // real passing evidence, spending a retry to hide a transport blip. A
+    // deferred sweep costs one poll interval and the transport re-drives; a wrong
+    // sweep destroys the attempt.
+    let timed_out = if completion_was_observed {
+        expire_overdue_orders(Stores { store, artifacts }, executor, tracked, clock.now_unix_millis)
+    } else {
+        Vec::new()
+    };
 
     for (nonce, age, status) in select_stale_handles(tracked, &report.pending, Instant::now(), clock.stale_warn_after) {
         tracing::warn!(

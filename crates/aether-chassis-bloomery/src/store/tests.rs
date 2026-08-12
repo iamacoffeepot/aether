@@ -417,6 +417,38 @@ fn an_empty_legacy_store_migrates_and_one_holding_orders_is_refused() {
     assert!(refusal.contains("ADR-0177"), "and the decision that requires it: {refusal}");
 }
 
+#[test]
+fn a_half_migrated_legacy_store_finishes_the_job_rather_than_being_stamped_current() {
+    // The shape a non-atomic migration leaves behind. Two `ALTER`s under separate
+    // autocommits, and a fault or a crash between them migrates
+    // `outstanding_orders` while `parked_question` stays legacy — with the
+    // version unstamped, because the fault propagated. The next open then reads
+    // the first table as proof the whole step was done, skips it, and stamps the
+    // version anyway: permanently "current" with the ADR-0151 park column
+    // missing, and nothing left that will ever repair it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("half-migrated.db").to_str().unwrap().to_owned();
+    write_legacy_schema(&path, false);
+    let legacy = rusqlite::Connection::open(&path).unwrap();
+    legacy
+        .execute_batch("ALTER TABLE outstanding_orders ADD COLUMN deadline_unix_millis INTEGER NOT NULL DEFAULT 0;")
+        .unwrap();
+    drop(legacy);
+
+    let mut store = SqliteStore::open(&path).expect("a half-migrated store opens and completes its migration");
+
+    // Exercise the park path itself rather than re-reading `PRAGMA table_info` —
+    // that path is what a missing column actually breaks, and its deadline is
+    // what a replayed lane runs to.
+    let parked = order_due_at("n-1", NOW_UNIX_MILLIS + 5_000);
+    store.record_parked_question(b"question-bytes", &parked).unwrap();
+    let replayed = store
+        .lookup_parked_question(&parked.bloom, b"question-bytes")
+        .unwrap()
+        .expect("a parked order resolves by its question");
+    assert_eq!(replayed.deadline_unix_millis, NOW_UNIX_MILLIS + 5_000, "the parked order kept its sealed deadline");
+}
+
 /// Write a pre-ADR-0177 store at `path`: the order-bearing tables without their
 /// `deadline_unix_millis` column, at schema version zero, optionally holding one
 /// outstanding order.

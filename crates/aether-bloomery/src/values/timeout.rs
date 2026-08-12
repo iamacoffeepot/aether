@@ -45,8 +45,16 @@ impl ContentAddressed for TimeoutRecord {
 }
 
 impl TimeoutRecord {
-    /// The record's content-addressed identity — the digest an expiry hands the
-    /// reducer as its evidence `detail`.
+    /// The record's typed content-addressed identity in the ADR-0149 value
+    /// vocabulary: sha256 over the domain tag above, length-prefixed, followed
+    /// by the record's canonical wire bytes.
+    ///
+    /// Not the address an expiry details its evidence by. An evidence `detail`
+    /// names bytes in the artifacts store, which keys on plain sha256 of the
+    /// bytes alone — the domain tag makes this digest a different number, and a
+    /// detail taken from here would resolve to nothing. The expiry mints that
+    /// one with [`Digest::of_wire_bytes`] over the same bytes it stores, the way
+    /// every other evidence detail is minted.
     #[must_use]
     pub fn id(&self) -> Digest {
         digest_of(self)

@@ -86,6 +86,12 @@ impl Error for CycleError {
 /// # Errors
 /// [`CycleError`] if inspecting a run, streaming its evidence, or the broker
 /// faulted; a clean broker refusal is counted, not an error.
+///
+/// An error abandons the loop, so the handles after the faulting one were never
+/// inspected at all. That makes the returned error load-bearing to the caller's
+/// sweep and not merely something to log: a caller must not read "no completion
+/// observed" off a failed cycle and cancel on it, because the run it would
+/// cancel may have finished inside its budget and simply not been asked.
 pub fn run_intake_cycle(
     store: &mut dyn StoreBackend,
     shell: &ExecutorShell,

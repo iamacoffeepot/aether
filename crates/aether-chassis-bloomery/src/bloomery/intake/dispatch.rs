@@ -97,8 +97,11 @@ impl DispatchRecord {
 /// deadline can be written in and read back after a restart (ADR-0177).
 ///
 /// A clock before the epoch is not a time any deadline arithmetic can use, so it
-/// reads as `0`; the resulting order expires on its first tick rather than
-/// running unbounded under a host whose clock is unusable.
+/// reads as `0`. The order it stamps is then due at `0 + limit`, and the sweep
+/// that tests it reads the same unusable clock back as `0` — so such an order
+/// does not expire early and does not expire at all: deadline enforcement stands
+/// down until the host's clock is usable, rather than terminating work on a
+/// number that means nothing.
 pub(super) fn now_unix_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }

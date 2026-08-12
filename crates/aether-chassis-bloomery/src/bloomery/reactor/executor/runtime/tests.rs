@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, BloomId, ConfigKind, ConfigRegistry, DispatchPayload, EvidenceRef,
     ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce, ReasoningEffort, RedispatchPayload,
-    ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride, Topic, Transformation, VerifyFailure,
-    VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
+    ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride, TimeoutRecord, Topic, Transformation,
+    VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -26,8 +26,9 @@ use aether_data::wire::{from_bytes, to_vec};
 use super::{
     BACKOFF_CAP, CandidatePush, NameEvidenceClaims, Stores, TickClock, TrackedHandle, backoff_delay,
     drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_stale, next_backoff,
-    pull_and_admit, push_admitted_candidates, seed_tracked, select_stale_handles, timeout_verdict,
+    pull_and_admit, push_admitted_candidates, seed_tracked, select_stale_handles,
 };
+use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
 use crate::bloomery::intake::{
     Admission, AdmitDecision, DispatchError, UploadedEvidence, admit_uploaded, attempt_artifact_name,
@@ -42,16 +43,22 @@ use aether_bloomery_github::candidate_ref_name;
 
 // A capturing executor backend: it records every submitted `WorkOrder` so a test
 // can assert exactly what `drain_and_dispatch` built — the advisory description it
-// threaded onto the construct transformation (#3595) in particular. Only `submit`
-// is driven by the drain; the other port methods are inert stubs.
+// threaded onto the construct transformation (#3595) in particular — and every
+// nonce `cancel` was issued for, which is the only observable a reclaim that
+// records no verdict leaves behind. The remaining port methods are inert stubs.
 #[derive(Default)]
 struct CapturingBackend {
     orders: Mutex<Vec<WorkOrder>>,
+    cancelled: Mutex<Vec<String>>,
 }
 
 impl CapturingBackend {
     fn orders(&self) -> Vec<WorkOrder> {
         self.orders.lock().unwrap().clone()
+    }
+
+    fn cancelled(&self) -> Vec<String> {
+        self.cancelled.lock().unwrap().clone()
     }
 }
 
@@ -67,7 +74,8 @@ impl ExecutorBackend for CapturingBackend {
         Ok(ExecutionStatus::Unknown)
     }
 
-    fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
+    fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
+        self.cancelled.lock().unwrap().push(handle.nonce.0.clone());
         Ok(())
     }
 
@@ -652,7 +660,20 @@ const AT_THE_DEADLINE: u64 = NOW_UNIX_MILLIS + 3_600_000;
 /// return its tracked handle — the shared setup for the deadline scenarios,
 /// whose whole point is a lane that then never resolves.
 fn dispatch_one(store: &mut SqliteStore, shell: &ExecutorShell, workpiece: &str) -> Vec<TrackedHandle> {
-    enqueue_construct_dispatch(store, BloomId(digest(1)), workpiece, 5);
+    dispatch_one_at(store, shell, workpiece, StageId::Construct)
+}
+
+/// The same dispatch at an explicit member stage. What a timeout *means* is
+/// stage-dependent — Verify's answer has to name a failing verifier where the
+/// others must name none (ADR-0178) — so a deadline scenario that pins the
+/// difference needs the stage as an axis.
+fn dispatch_one_at(
+    store: &mut SqliteStore,
+    shell: &ExecutorShell,
+    workpiece: &str,
+    stage: StageId,
+) -> Vec<TrackedHandle> {
+    enqueue_dispatch_at(store, BloomId(digest(1)), workpiece, 5, stage);
     let (handles, ack_through, _transient_failure) = drain_and_dispatch(store, shell, NOW_UNIX_MILLIS).unwrap();
     store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
     track(handles)
@@ -793,36 +814,203 @@ fn a_cancel_that_faults_leaves_the_expired_order_live_to_retry() {
 }
 
 #[test]
-fn a_member_verify_timeout_names_the_umbrella_rather_than_no_verifier_at_all() {
-    // Tripwire: the intake refuses a failed member `Verify` carrying an empty
-    // verifier set (ADR-0178), so a timeout that named none would be refused and
-    // the hung order would never terminate. A timeout cannot know which verifier
-    // would have failed, and `Preflight` is the umbrella-level identity that says
-    // exactly that.
-    assert_eq!(
-        timeout_verdict(StageId::Verify),
-        Some((StageVerdict::VerificationFailed, VerifyFailureSet::one(VerifyFailure::Preflight))),
+fn a_verify_timeout_terminates_its_order_rather_than_being_refused_for_naming_no_verifier() {
+    // The cross-module hazard no Construct scenario can reach. ADR-0178 makes
+    // the intake refuse a failed member `Verify` that carries an empty verifier
+    // set, and this expiry's whole answer to a refusal is to log and move on — so
+    // a Verify timeout that named no verifier would be refused every tick and its
+    // hung order would sit outstanding forever, which is the bug being fixed,
+    // reappearing one stage over. A timeout cannot know which verifier would have
+    // failed; `Preflight` is the umbrella-level identity that says exactly that.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let shell = shell(FakeGithub::new());
+    let mut tracked = dispatch_one_at(&mut store, &shell, "wp-hung", StageId::Verify);
+
+    let admits = tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE);
+
+    assert_eq!(admits.len(), 1, "the expired verify order admits a result rather than being refused");
+    match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
+        Fact::VerifyFailed { workpiece, failed_verifiers, .. } => {
+            assert_eq!(workpiece, WorkpieceId("wp-hung".to_owned()));
+            assert_eq!(
+                failed_verifiers,
+                VerifyFailureSet::one(VerifyFailure::Preflight),
+                "the umbrella that never answered is the failing identity the accounting repeats on",
+            );
+        }
+        other => panic!("expected a Fact::VerifyFailed, got {other:?}"),
+    }
+    assert!(store.list_outstanding_nonces().unwrap().is_empty(), "and the order is consumed, not re-refused forever");
+}
+
+#[test]
+fn a_deferred_aggregate_review_timeout_still_reclaims_the_run_it_cannot_account_for() {
+    // ADR-0177 routes an aggregate-review timeout to ADR-0176's `ExecutorFault`,
+    // which issue #4738 introduces. Until it lands there is no verdict that
+    // states "the critic produced no judgement of the fold", and the nearest
+    // available one would charge every member a repair lap for a critic that
+    // never ran — so this build records nothing for one.
+    //
+    // Deferring the *record* is not deferring the *reclaim*. The overdue child is
+    // still burning wall clock with a scratch worktree checked out behind it, and
+    // a stage the ledger cannot yet describe is no reason to leak one of each per
+    // timeout until the process exits.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let payload = AggregateReviewPayload {
+        profile: StageCatalog::profile_of(StageId::AggregateReview),
+        bloom: bloom.0,
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(30),
+            digest(40),
+            digest(50),
+        ),
+        pass: ReviewPass::Full,
+    };
+    store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
+    let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
+    let (handles, _ack, _transient) = drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    store.ack_topic(Topic::AggregateReview, sequence).unwrap();
+    let nonce = handles[0].nonce.0.clone();
+    let mut tracked = track(handles);
+
+    assert!(
+        tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE).is_empty(),
+        "no verdict in this build's vocabulary states the fact, so nothing is charged to any ledger",
     );
+
+    assert_eq!(backend.cancelled(), vec![nonce], "the hung run is reclaimed even though its expiry records nothing");
     assert_eq!(
-        timeout_verdict(StageId::Construct),
-        Some((StageVerdict::VerificationFailed, VerifyFailureSet::EMPTY)),
-        "every other dispatched member stage carries no set, which is what the same invariant requires of them",
+        store.list_outstanding_nonces().unwrap().len(),
+        1,
+        "and the order stays live for the build that can account for it",
     );
 }
 
 #[test]
-fn an_aggregate_review_timeout_is_deferred_rather_than_charged_a_member_ledger() {
-    // ADR-0177 routes an aggregate-review timeout to ADR-0176's `ExecutorFault`,
-    // which issue #4738 introduces. Until it lands there is no verdict that
-    // states "the critic produced no judgement of the fold", and the nearest
-    // available one — `VerificationFailed` — would charge every member a repair
-    // lap for a critic that never ran. Deferring records nothing; recording the
-    // wrong thing would be worse than recording nothing.
-    assert_eq!(timeout_verdict(StageId::AggregateReview), None);
-    assert!(
-        timeout_verdict(StageId::AggregateVerify).is_some(),
-        "the mechanical aggregate gate is unaffected: its timeout is an ordinary verification failure",
+fn a_timeout_details_its_evidence_by_the_address_the_store_filed_the_record_under() {
+    // A wedge names the evidence that produced it, and resolving that evidence
+    // means resolving its `detail` against the artifacts store — so a detail the
+    // store never keyed under is a pointer to nothing, and the record the expiry
+    // took the trouble to write is unreachable from the fact it explains.
+    //
+    // The store keys on plain sha256 of the bytes. The value vocabulary's typed
+    // `TimeoutRecord::id` hashes a domain tag ahead of the same bytes, so the two
+    // numbers can never agree; detailing by the latter loses the record silently,
+    // because nothing on the write path ever reads the address back.
+    let dir = tempfile::tempdir().unwrap();
+    let mut artifacts = ArtifactsCapabilityState::open(dir.path()).unwrap();
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let shell = shell(FakeGithub::new());
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-hung");
+    let nonce = tracked[0].handle.nonce.clone();
+
+    let admits = pull_and_admit(
+        Stores { store: &mut store, artifacts: Some(&mut artifacts) },
+        &shell,
+        NameEvidenceClaims,
+        &mut tracked,
+        &tick_clock_at(AT_THE_DEADLINE),
+        None,
+        &NopPush,
     );
+
+    let evidence = match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
+        Fact::AttemptCompleted { evidence, .. } => evidence,
+        other => panic!("expected a Fact::AttemptCompleted, got {other:?}"),
+    };
+    let bytes = match artifacts.get(to_hex(&evidence.detail)) {
+        GetResult::Ok { bytes, .. } => bytes,
+        GetResult::Err { error, .. } => {
+            panic!("the detail must resolve in the store the record was put into: {error:?}")
+        }
+    };
+    let record = from_bytes::<TimeoutRecord>(&bytes).unwrap();
+    assert_eq!(record.nonce, nonce, "and the bytes it resolves to are this expired order's own account");
+    assert_eq!(record.deadline_unix_millis, AT_THE_DEADLINE, "carrying the deadline it crossed");
+}
+
+#[test]
+fn a_cycle_that_faulted_partway_does_not_expire_the_handles_it_never_inspected() {
+    // `run_intake_cycle` abandons its loop on the first handle whose inspect
+    // faults, so the handles behind it are not "still pending" — they were never
+    // asked. Sweeping on that reading cancels a lane that finished well inside
+    // its budget and admits a synthesised failure over real passing evidence,
+    // spending one of the member's retries to paper over a transport blip.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let fake = FakeGithub::new();
+    let working = shell(fake.clone());
+    let mut tracked = dispatch_one(&mut store, &working, "wp-silent");
+    tracked.extend(dispatch_one(&mut store, &working, "wp-done"));
+
+    // The second lane concluded inside its allowance with a passing verdict. The
+    // first one is what faults, and it is inspected first, so the cycle never
+    // reaches the evidence that already exists.
+    let done = tracked[1].handle.nonce.0.clone();
+    let run = fake.seed_run(&done, RunStatus::Completed, Some(RunConclusion::Success));
+    let name = attempt_artifact_name(&Nonce(done), &digest(5), StageVerdict::VerificationPassed, &digest(9));
+    fake.seed_run_artifacts(run, vec![Artifact { id: 1, name, size_bytes: 20 }]);
+    let faulting = ExecutorShell::new(Arc::new(InspectFaultingOn {
+        nonce: tracked[0].handle.nonce.0.clone(),
+        inner: shell(fake),
+    }));
+
+    assert!(
+        tick(&mut store, &faulting, &mut tracked, AT_THE_DEADLINE).is_empty(),
+        "a cycle that never observed completion must not act on what it did not observe",
+    );
+    assert_eq!(store.list_outstanding_nonces().unwrap().len(), 2, "both orders survive the blip");
+
+    // The transport recovers on the next tick: the finished lane admits its own
+    // passing verdict, and only the genuinely silent one times out.
+    let admits = tick(&mut store, &working, &mut tracked, AT_THE_DEADLINE);
+
+    let passed: Vec<bool> = admits
+        .iter()
+        .map(|admit| match from_bytes::<aether_bloomery::Event>(&admit.event).unwrap().fact {
+            Fact::AttemptCompleted { passed, .. } => passed,
+            other => panic!("expected a Fact::AttemptCompleted, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(passed, vec![true, false], "the finished lane keeps its own verdict; only the silent one is timed out");
+}
+
+/// A backend that faults one named nonce's `inspect` and delegates everything
+/// else to a real shell — the transport blip that aborts an intake cycle partway
+/// through its handles, leaving the ones behind it uninspected.
+struct InspectFaultingOn {
+    nonce: String,
+    inner: ExecutorShell,
+}
+
+impl ExecutorBackend for InspectFaultingOn {
+    type Error = ExecutorPortError;
+
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        self.inner.submit(order)
+    }
+
+    fn inspect(&self, handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+        if handle.nonce.0 == self.nonce {
+            return Err(ExecutorError::Github(GithubError::Status {
+                status: 503,
+                body: "inspect unreachable".to_owned(),
+            })
+            .into());
+        }
+        self.inner.inspect(handle)
+    }
+
+    fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
+        self.inner.cancel(handle)
+    }
+
+    fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+        self.inner.stream_evidence(handle)
+    }
 }
 
 /// A backend whose `cancel` always faults — the transport failure that must

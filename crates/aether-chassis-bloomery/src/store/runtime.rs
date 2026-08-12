@@ -342,7 +342,7 @@ impl SqliteStore {
     /// non-durable in-memory database — the same code path, used by tests and
     /// the default unconfigured chassis.
     pub fn open(path: &str) -> rusqlite::Result<Self> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         // WAL gives a durable single-writer / many-reader journal; a `:memory:`
         // database silently ignores the pragma (it has one connection anyway).
         // `synchronous=NORMAL` is the WAL-appropriate durability point: a
@@ -355,7 +355,7 @@ impl SqliteStore {
         // still single-writer, so the timeout serializes the rare concurrent write.
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch(MIGRATIONS)?;
-        migrate_schema(&conn)?;
+        migrate_schema(&mut conn)?;
         Ok(Self { conn })
     }
 }
@@ -379,19 +379,45 @@ const SCHEMA_VERSION: i64 = 1;
 /// empty legacy store migrates mechanically and a legacy store still holding
 /// order rows is refused by name, with the operator reset or export/recreate
 /// cycle ADR-0177 requires.
-fn migrate_schema(conn: &Connection) -> rusqlite::Result<()> {
+fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     if conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? >= SCHEMA_VERSION {
         return Ok(());
     }
-    if !has_column(conn, "outstanding_orders", "deadline_unix_millis")? {
-        let outstanding = count_rows(conn, "outstanding_orders")?;
-        let parked = count_rows(conn, "parked_question")?;
+    // One transaction over the whole step — the counts that decide the refusal,
+    // every `ALTER`, and the version stamp. Left as separate autocommits, a
+    // second `ALTER` that faults (or a process that dies between two of them)
+    // commits the first and skips the stamp, and the *next* open sees one
+    // migrated table, concludes there is nothing to do, and stamps the version
+    // over a half-migrated store: permanently "current" with `parked_question`
+    // missing its column, which silently breaks the ADR-0151 park/replay path
+    // for good. SQLite makes both DDL and the `user_version` header write
+    // transactional, so committing them together is all-or-nothing.
+    let migration = conn.transaction()?;
+    // Each table is gated on its own column rather than one standing in for
+    // both: they are altered independently, so only their own `PRAGMA
+    // table_info` says whether they still need it — and a store already left
+    // half-migrated by an earlier build repairs on this open instead of being
+    // read as done.
+    let mut pending = Vec::new();
+    for table in ORDER_BEARING_TABLES {
+        if !has_column(&migration, table, "deadline_unix_millis")? {
+            pending.push(table);
+        }
+    }
+
+    if !pending.is_empty() {
+        let outstanding = count_rows(&migration, "outstanding_orders")?;
+        let parked = count_rows(&migration, "parked_question")?;
         if outstanding > 0 || parked > 0 {
             return Err(legacy_store_refusal(outstanding, parked));
         }
-        conn.execute_batch(LEGACY_ORDER_DEADLINE_MIGRATION)?;
+        for table in pending {
+            migration.execute_batch(&add_deadline_column(table))?;
+        }
     }
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+
+    migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    migration.commit()
 }
 
 /// Whether `table` already declares `column`.
@@ -420,13 +446,16 @@ fn legacy_store_refusal(outstanding: u64, parked: u64) -> rusqlite::Error {
     )
 }
 
-/// The empty-store migration: add the deadline column to both order-bearing
-/// tables so they match [`MIGRATIONS`]. Only ever runs against zero rows, so the
+/// The tables that carry an order row, and so carry its deadline: the live one
+/// and the ADR-0151 parked one. Both are migrated, and each on its own gate.
+const ORDER_BEARING_TABLES: [&str; 2] = ["outstanding_orders", "parked_question"];
+
+/// The empty-store migration for one order-bearing table: add the deadline
+/// column so it matches [`MIGRATIONS`]. Only ever runs against zero rows, so the
 /// default it declares is never read back as a real deadline.
-const LEGACY_ORDER_DEADLINE_MIGRATION: &str = "\
-ALTER TABLE outstanding_orders ADD COLUMN deadline_unix_millis INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE parked_question ADD COLUMN deadline_unix_millis INTEGER NOT NULL DEFAULT 0;
-";
+fn add_deadline_column(table: &str) -> String {
+    format!("ALTER TABLE {table} ADD COLUMN deadline_unix_millis INTEGER NOT NULL DEFAULT 0;")
+}
 
 /// The schema, applied idempotently on every open.
 const MIGRATIONS: &str = "\
