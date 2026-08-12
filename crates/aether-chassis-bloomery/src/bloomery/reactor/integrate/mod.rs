@@ -10,10 +10,18 @@
 //! ADR-0122 — this ZST is the addressing identity; the state-bearing logic is
 //! [`runtime`].
 
+use crate::bloomery::SourceShell;
 use aether_actor::actor;
 use aether_bloomery::Topic;
 
 pub use runtime::{IntegrateReactorState, IntegrateTick};
+
+pub struct IntegrateReactorSetup {
+    pub source: Option<SourceShell>,
+    pub store_path: String,
+    pub poll_interval_secs: u64,
+    pub repository: Option<(String, String)>,
+}
 
 /// Addressing identity for the integrate reactor capability.
 #[actor(singleton, root)]

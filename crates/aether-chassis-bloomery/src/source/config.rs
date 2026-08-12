@@ -1,10 +1,13 @@
-//! The `source` capability's boot configuration (ADR-0090 derive-`Config`).
+//! Chassis-owned construction parameters for the `source` capability.
 //!
-//! The connection knobs — token, owner/name, API base, and the CAS-land
-//! enable flag — ride the same [`GithubMirrorConfig`](crate::bloomery::GithubMirrorConfig)
-//! the mirror shell uses (`bloomery/mirror.rs`): that config already carries
-//! `cas_land_enabled` for exactly this port, so one GitHub-connection config
-//! serves both caps rather than duplicating the knobs.
+//! The chassis resolves adapter configuration and constructs the shared
+//! [`SourceShell`] before actor mounting. The actor receives that shell plus the
+//! claim-registry enable decision as params; no adapter config crosses its
+//! `NativeActor::Config` boundary.
 
-pub use crate::bloomery::GithubMirrorConfig as SourceConfig;
-pub use crate::bloomery::GithubMirrorOverlay as SourceOverlay;
+use crate::bloomery::SourceShell;
+
+pub struct SourceSetup {
+    pub shell: SourceShell,
+    pub claims_enabled: bool,
+}

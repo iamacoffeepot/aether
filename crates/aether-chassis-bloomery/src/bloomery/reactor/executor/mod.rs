@@ -17,10 +17,23 @@
 //! `#[runtime] impl NativeActor` — the poll timer, the drain → submit → pull →
 //! admit state machine, and the config-gating — lives in `runtime.rs`.
 
+use crate::bloomery::ExecutorShell;
 use aether_actor::actor;
+use aether_bloomery::SharedCorrespondence;
 use aether_bloomery::Topic;
 
 pub use runtime::{DispatchTick, ExecutorReactorState};
+
+pub struct ExecutorReactorSetup {
+    pub executor: Option<ExecutorShell>,
+    pub correspondence: Option<SharedCorrespondence>,
+    pub store_path: String,
+    pub artifacts_root: Option<String>,
+    pub poll_interval_secs: u64,
+    pub stale_warn_after_secs: u64,
+    pub repository: Option<(String, String)>,
+    pub disabled_missing: Vec<&'static str>,
+}
 
 /// Addressing identity for the executor dispatch reactor capability.
 #[actor(singleton, root)]

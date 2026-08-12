@@ -35,7 +35,7 @@ mod integrate;
 mod land;
 mod mirror;
 
-pub use executor::{DispatchTick, ExecutorReactorCapability, ExecutorReactorState};
-pub use integrate::{IntegrateReactorCapability, IntegrateReactorState, IntegrateTick};
-pub use land::{LandReactorCapability, LandReactorState, LandTick};
-pub use mirror::{DrainTick, MirrorReactorCapability, MirrorReactorState};
+pub use executor::{DispatchTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState};
+pub use integrate::{IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick};
+pub use land::{LandReactorCapability, LandReactorSetup, LandReactorState, LandTick};
+pub use mirror::{DrainTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState};

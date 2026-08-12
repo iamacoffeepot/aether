@@ -60,13 +60,15 @@ use super::ExecutorReactorCapability;
 use crate::artifacts::{ArtifactsCapabilityState, resolve_root};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::ExecutorShell;
+#[cfg(test)]
+use crate::bloomery::GithubConnectionConfig;
 use crate::bloomery::dispatch_model;
 use crate::bloomery::intake::{
     Admission, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims, dispatch_and_record, run_intake_cycle,
 };
-use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
+use crate::bloomery::{CoordinatorConfig, ExecutorReactorSetup};
 use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend, StoreConfigError, resolve_config};
 
@@ -232,7 +234,7 @@ impl ExecutorReactorState {
             self_mailbox,
             _timer: None,
             backoff: None,
-            stale_warn_after: stale_warn_after(GithubMirrorConfig::default().stale_warn_after_secs),
+            stale_warn_after: stale_warn_after(CoordinatorConfig::default().stale_warn_after_secs),
             correspondence: None,
             pusher: Arc::new(GitCandidatePush),
         }
@@ -1008,6 +1010,11 @@ fn push_admitted_candidates(
     }
 }
 
+#[cfg(test)]
+fn is_disabled_mount(connection: &GithubConnectionConfig, coordinator: &CoordinatorConfig) -> bool {
+    !connection.missing_connection_knobs().is_empty() && !coordinator.local_lane_enabled
+}
+
 /// The restart recovery set (issue #3641): one [`WorkHandle`] per nonce still
 /// outstanding in the store, so a dispatched-but-unresolved order (its outbox
 /// entry acked/delivered, but not yet admitted when the process stopped) is
@@ -1127,27 +1134,19 @@ fn pull_and_admit(
 /// enough: the local backend needs no credential, so it still dispatches every
 /// lane routed to it. Pure so the mount decision is testable without a
 /// `NativeInitCtx`.
-fn is_disabled_mount(config: &GithubMirrorConfig) -> bool {
-    !config.missing_connection_knobs().is_empty() && !config.local_lane_enabled
-}
-
-fn connect_executor_correspondence(config: &GithubMirrorConfig) -> Result<SharedCorrespondence, BootError> {
-    #[cfg(any(test, feature = "testing"))]
-    if config.uses_fixture() {
-        let fake = config.shared_fixture();
-        return Ok(Arc::new(fake) as SharedCorrespondence);
-    }
-    config.connect_correspondence().map_err(|e| BootError::Other(Box::new(e)))
-}
-
 #[runtime]
 impl NativeActor for ExecutorReactorCapability {
     type State = ExecutorReactorState;
-    type Config = GithubMirrorConfig;
+    type Config = ();
+    type Params = ExecutorReactorSetup;
 
     const NAMESPACE: &'static str = "aether.bloomery.executor";
 
-    fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<ExecutorReactorState, BootError> {
+    fn init(
+        (): (),
+        config: ExecutorReactorSetup,
+        ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<ExecutorReactorState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
         let control_mailbox = <ControlCore as Addressable>::resolve(0, ());
@@ -1156,7 +1155,7 @@ impl NativeActor for ExecutorReactorCapability {
         // local) → RoutingExecutor, unconfigured + local enabled → local-only
         // (local lanes still dispatch; Actions lanes fail fast with the missing-
         // knob reason), neither usable → disabled with no shell/store/timer.
-        if is_disabled_mount(&config) {
+        let Some(executor) = config.executor else {
             // A `warn`, not an `info` (#4625): declining to mount is the one
             // condition that makes every later seal look healthy and never
             // dispatch, so it must not sit below the boot chatter. Naming the
@@ -1166,7 +1165,7 @@ impl NativeActor for ExecutorReactorCapability {
             // silently does nothing.
             tracing::warn!(
                 target: "aether_chassis_bloomery::executor",
-                missing = %config.missing_connection_knobs().join(", "),
+                missing = %config.disabled_missing.join(", "),
                 "executor dispatch reactor mounted disabled (unconfigured); dispatch outbox will accumulate and no sealed bloom will dispatch",
             );
             return Ok(ExecutorReactorState {
@@ -1184,9 +1183,8 @@ impl NativeActor for ExecutorReactorCapability {
                 correspondence: None,
                 pusher: Arc::new(GitCandidatePush),
             });
-        }
+        };
 
-        let executor = ExecutorShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
         let mut store = SqliteStore::open(&config.store_path).map_err(|e| BootError::Other(Box::new(e)))?;
         // Restart recovery (#3641): a reactor that cannot read its recovery set
         // must not silently start with an empty one — that is the bug this
@@ -1209,8 +1207,7 @@ impl NativeActor for ExecutorReactorCapability {
         );
         tracing::info!(
             target: "aether_chassis_bloomery::executor",
-            owner = %config.owner,
-            repo = %config.repo,
+            repository = ?config.repository,
             poll_interval_secs = config.poll_interval_secs,
             retracked = tracked.len(),
             "executor dispatch reactor mounted; polling the store for dispatch decisions",
@@ -1219,7 +1216,7 @@ impl NativeActor for ExecutorReactorCapability {
         // correspondence handle on the shared store (ADR-0152). Fixture (#4732)
         // uses the in-memory FakeGithub correspondence so the candidate push
         // resolves without a SQLite store.
-        let correspondence = connect_executor_correspondence(&config)?;
+        let correspondence = config.correspondence;
         Ok(ExecutorReactorState {
             executor: Some(executor),
             store: Some(store),
@@ -1232,7 +1229,7 @@ impl NativeActor for ExecutorReactorCapability {
             _timer: Some(timer),
             backoff: None,
             stale_warn_after: stale_warn_after(config.stale_warn_after_secs),
-            correspondence: Some(correspondence),
+            correspondence,
             pusher: Arc::new(GitCandidatePush),
         })
     }

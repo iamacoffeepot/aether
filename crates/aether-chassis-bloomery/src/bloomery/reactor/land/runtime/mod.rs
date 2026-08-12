@@ -59,8 +59,8 @@ use serde::{Deserialize, Serialize};
 use super::LandReactorCapability;
 use aether_bloomery_github::SourceError;
 
+use crate::bloomery::LandReactorSetup;
 use crate::bloomery::SourceShell;
-use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::control::ControlCore;
@@ -328,22 +328,15 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
     Ok((admits, ack_through))
 }
 
-fn connect_land_source(config: &GithubMirrorConfig) -> Result<SourceShell, BootError> {
-    #[cfg(any(test, feature = "testing"))]
-    if config.uses_fixture() {
-        return Ok(config.fixture_source());
-    }
-    SourceShell::connect(config).map_err(|e| BootError::Other(Box::new(e)))
-}
-
 #[runtime]
 impl NativeActor for LandReactorCapability {
     type State = LandReactorState;
-    type Config = GithubMirrorConfig;
+    type Config = ();
+    type Params = LandReactorSetup;
 
     const NAMESPACE: &'static str = "aether.bloomery.land";
 
-    fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<LandReactorState, BootError> {
+    fn init((): (), config: LandReactorSetup, ctx: &mut NativeInitCtx<'_>) -> Result<LandReactorState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
         let control_mailbox = <ControlCore as Addressable>::resolve(0, ());
@@ -351,9 +344,7 @@ impl NativeActor for LandReactorCapability {
         // Unconfigured → disabled: no shell, no store, no timer. The land outbox
         // accumulates and drains once a token/owner/repo is supplied, unless
         // the `fake` backend is selected (#4732).
-        let configured =
-            config.uses_fixture() || !(config.token.is_empty() || config.owner.is_empty() || config.repo.is_empty());
-        if !configured {
+        let Some(source) = config.source else {
             tracing::info!(
                 target: "aether_chassis_bloomery::land",
                 "land reactor mounted disabled (unconfigured token/owner/repo); land outbox will accumulate",
@@ -366,9 +357,8 @@ impl NativeActor for LandReactorCapability {
                 self_mailbox,
                 _timer: None,
             });
-        }
+        };
 
-        let source = connect_land_source(&config)?;
         let store = SqliteStore::open(&config.store_path).map_err(|e| BootError::Other(Box::new(e)))?;
         let interval = Duration::from_secs(config.poll_interval_secs.max(1));
         let timer = spawn_timer(
@@ -381,8 +371,7 @@ impl NativeActor for LandReactorCapability {
         );
         tracing::info!(
             target: "aether_chassis_bloomery::land",
-            owner = %config.owner,
-            repo = %config.repo,
+            repository = ?config.repository,
             poll_interval_secs = config.poll_interval_secs,
             cas_land_enabled = config.cas_land_enabled,
             "land reactor mounted; polling the store for land decisions",

@@ -8,6 +8,8 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use aether_bloomery::SharedCorrespondence as DomainSharedCorrespondence;
+use aether_bloomery_github::SharedCorrespondence as GitSharedCorrespondence;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_http::{HttpServerCapability, HttpServerConfig};
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
@@ -22,15 +24,16 @@ use crate::api::{ApiParams, BloomeryApiCapability};
 use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
-use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::{
-    ExecutorReactorCapability, IntegrateReactorCapability, LandReactorCapability, MirrorReactorCapability,
+    CoordinatorConfig, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig,
+    IntegrateReactorCapability, IntegrateReactorSetup, LandReactorCapability, LandReactorSetup,
+    MirrorReactorCapability, MirrorReactorSetup, ProjectionShell, SourceShell,
 };
 use crate::control::ControlCore;
 use crate::session::{SessionConfig, SessionPoolCapability};
 use crate::signing::{SigningCapability, SigningConfig};
-use crate::source::SourceCapability;
-use crate::store::{StoreCapability, StoreConfig};
+use crate::source::{SourceCapability, SourceSetup};
+use crate::store::{SqliteCorrespondence, StoreCapability, StoreConfig};
 
 /// The default RPC port when `AETHER_RPC_PORT` is unset (distinct from the hub's
 /// 8901 so a bloomery and a hub can coexist on one host).
@@ -76,6 +79,13 @@ impl Default for HttpPortConfig {
 /// The unit marker for the Bloomery chassis (ADR-0071).
 pub struct BloomeryChassis;
 
+fn mounted_correspondence<T>(
+    mounted: Option<&T>,
+    correspondence: &DomainSharedCorrespondence,
+) -> Option<DomainSharedCorrespondence> {
+    mounted.map(|_| Arc::clone(correspondence))
+}
+
 /// The resolved boot knobs for [`BloomeryChassis`].
 #[derive(Clone, Debug)]
 pub struct BloomeryEnv {
@@ -87,11 +97,11 @@ pub struct BloomeryEnv {
     pub store: StoreConfig,
     /// The eviction-free artifacts content-store configuration.
     pub artifacts: ArtifactsConfig,
-    /// The shared GitHub connection configuration serving both the mirror reactor
-    /// and the git source-port capability (one config, not two —
-    /// `SourceConfig` is a re-export of `GithubMirrorConfig`). Unconfigured
-    /// (empty token/owner/repo) mounts the mirror reactor disabled.
-    pub github: GithubMirrorConfig,
+    /// The GitHub adapter connection, Actions, App-auth, and fixture settings.
+    /// Unconfigured (empty token/owner/repo) mounts remote reactors disabled.
+    pub github: GithubConnectionConfig,
+    /// Backend-neutral Bloomery coordinator settings.
+    pub coordinator: CoordinatorConfig,
     /// The executor session-reuse pool configuration.
     pub session: SessionConfig,
     /// The `aether.signing` capability's host-local authorized-signer allowlist
@@ -129,10 +139,11 @@ impl BloomeryEnv {
         let http_port = HttpPortConfig::try_from_argv_then_env(cli.http.clone().into_layer())?.port;
         let store = StoreConfig::try_from_argv_then_env(cli.store.clone().into_layer())?;
         let artifacts = ArtifactsConfig::try_from_argv_then_env(cli.artifacts.clone().into_layer())?;
-        let github = GithubMirrorConfig::try_from_argv_then_env(cli.github.clone().into_layer())?;
+        let github = GithubConnectionConfig::try_from_argv_then_env(cli.github.clone().into_layer())?;
+        let coordinator = CoordinatorConfig::try_from_argv_then_env(cli.coordinator.clone().into_layer())?;
         let session = SessionConfig::try_from_argv_then_env(cli.session.clone().into_layer())?;
         let signing = SigningConfig::try_from_argv_then_env(cli.signing.clone().into_layer())?;
-        Ok(Self { rpc_port, http_port, store, artifacts, github, session, signing })
+        Ok(Self { rpc_port, http_port, store, artifacts, github, coordinator, session, signing })
     }
 }
 
@@ -194,11 +205,12 @@ impl BootableChassis for BloomeryChassis {
     /// `TraceDispatchCapability` in this delta; the aborter is supplied by
     /// `composed`. Takes the boot handle by reference so [`Chassis::build`] can
     /// move the same `boot` into the driver afterward.
+    #[allow(clippy::too_many_lines)] // The chassis edge intentionally assembles every backend-neutral setup in one place.
     fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
-        let BloomeryEnv { rpc_port, http_port, store, artifacts, github, session, signing } = env;
+        let BloomeryEnv { rpc_port, http_port, store, artifacts, github, coordinator, session, signing } = env;
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
-        let approval_policy_file = github.approval_policy_file.clone();
+        let approval_policy_file = coordinator.approval_policy_file.clone();
         let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);
         // The component host serves on-demand `aether.component.load` over RPC (the
         // MCP harness / fleet load components at runtime). Built from the same
@@ -209,6 +221,96 @@ impl BootableChassis for BloomeryChassis {
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
         };
+
+        let configured = github.uses_fixture() || github.missing_connection_knobs().is_empty();
+        let repository = configured.then(|| (github.owner.clone(), github.repo.clone()));
+        let (domain_correspondence, git_correspondence) = {
+            #[cfg(any(test, feature = "testing"))]
+            if github.uses_fixture() {
+                let store = Arc::new(github.shared_fixture());
+                (Arc::clone(&store) as DomainSharedCorrespondence, store as GitSharedCorrespondence)
+            } else {
+                let store = Arc::new(
+                    SqliteCorrespondence::open(&coordinator.store_path)
+                        .map_err(|error| BootError::Other(Box::new(error)))?,
+                );
+                (Arc::clone(&store) as DomainSharedCorrespondence, store as GitSharedCorrespondence)
+            }
+            #[cfg(not(any(test, feature = "testing")))]
+            {
+                let store = Arc::new(
+                    SqliteCorrespondence::open(&coordinator.store_path)
+                        .map_err(|error| BootError::Other(Box::new(error)))?,
+                );
+                (Arc::clone(&store) as DomainSharedCorrespondence, store as GitSharedCorrespondence)
+            }
+        };
+        #[cfg(any(test, feature = "testing"))]
+        let source = if github.uses_fixture() {
+            github.fixture_source(Arc::clone(&domain_correspondence))
+        } else {
+            SourceShell::connect(&github, Arc::clone(&domain_correspondence))
+                .map_err(|error| BootError::Other(Box::new(error)))?
+        };
+        #[cfg(not(any(test, feature = "testing")))]
+        let source = SourceShell::connect(&github, Arc::clone(&domain_correspondence))
+            .map_err(|error| BootError::Other(Box::new(error)))?;
+        #[cfg(any(test, feature = "testing"))]
+        let projection = if github.uses_fixture() {
+            Some(ProjectionShell::new(Arc::new(aether_bloomery_github::GithubProjection::new(github.shared_fixture()))))
+        } else {
+            configured
+                .then(|| ProjectionShell::connect(&github))
+                .transpose()
+                .map_err(|error| BootError::Other(Box::new(error)))?
+        };
+        #[cfg(not(any(test, feature = "testing")))]
+        let projection = configured
+            .then(|| ProjectionShell::connect(&github))
+            .transpose()
+            .map_err(|error| BootError::Other(Box::new(error)))?;
+        let executor = (!(!configured && !coordinator.local_lane_enabled))
+            .then(|| {
+                ExecutorShell::connect(
+                    &github,
+                    &coordinator,
+                    Arc::clone(&domain_correspondence),
+                    Arc::clone(&git_correspondence),
+                )
+            })
+            .transpose()
+            .map_err(|error| BootError::Other(Box::new(error)))?;
+        let executor_correspondence = mounted_correspondence(executor.as_ref(), &domain_correspondence);
+        let mirror_setup = MirrorReactorSetup {
+            projection,
+            source: configured.then(|| source.clone()),
+            poll_interval_secs: coordinator.poll_interval_secs,
+            repository: repository.clone(),
+        };
+        let executor_setup = ExecutorReactorSetup {
+            executor,
+            correspondence: executor_correspondence,
+            store_path: coordinator.store_path.clone(),
+            artifacts_root: coordinator.artifacts_root.clone(),
+            poll_interval_secs: coordinator.poll_interval_secs,
+            stale_warn_after_secs: coordinator.stale_warn_after_secs,
+            repository: repository.clone(),
+            disabled_missing: github.missing_connection_knobs(),
+        };
+        let land_setup = LandReactorSetup {
+            source: configured.then(|| source.clone()),
+            store_path: coordinator.store_path.clone(),
+            poll_interval_secs: coordinator.poll_interval_secs,
+            repository: repository.clone(),
+            cas_land_enabled: github.cas_land_enabled,
+        };
+        let integrate_setup = IntegrateReactorSetup {
+            source: configured.then(|| source.clone()),
+            store_path: coordinator.store_path.clone(),
+            poll_interval_secs: coordinator.poll_interval_secs,
+            repository,
+        };
+        let source_setup = SourceSetup { shell: source, claims_enabled: configured };
 
         // #3947's explicit `with_aborter` is superseded by the seam inversion:
         // `composed` (which `build` routes through) installs `OutboundFatalAborter`
@@ -224,30 +326,32 @@ impl BootableChassis for BloomeryChassis {
             // retirement — the api and reactors address it as a typed peer.
             .with_actor::<ControlCore>(())
             .with_actor_configured::<ArtifactsCapability>((), artifacts)
-            .with_actor_configured::<MirrorReactorCapability>((), github.clone())
+            .with_actor::<MirrorReactorCapability>(mirror_setup)
             // The executor dispatch reactor (#3505): drains the reducer's
             // dispatch-topic decisions, submits them through the
             // executor port, and admits matched results back to the control core.
-            // Reuses the one GitHub-connection config the mirror + source caps do.
-            .with_actor_configured::<ExecutorReactorCapability>((), github.clone())
+            // Receives only its assembled executor, correspondence view, and
+            // backend-neutral coordinator scalars.
+            .with_actor::<ExecutorReactorCapability>(executor_setup)
             // The land reactor (#3559, ADR-0149 migration step 3): drains the
             // reducer's `aether.bloomery.land` decisions, issues the source-port
             // compare-and-swap that is now the landing of record, and admits
-            // `Fact::Land` back to the control core. Reuses the one
-            // GitHub-connection config the mirror + executor + source caps do.
-            .with_actor_configured::<LandReactorCapability>((), github.clone())
+            // `Fact::Land` back to the control core. Receives the already-built
+            // source shell and its coordinator scalars.
+            .with_actor::<LandReactorCapability>(land_setup)
             // The integrate reactor (#3650, ADR-0152): drains the reducer's
             // `aether.bloomery.integrate` decisions, folds the claimed candidate
             // onto the bloom's integration branch, and admits `Fact::Resolve`
-            // back to the control core. Reuses the same GitHub-connection config.
-            .with_actor_configured::<IntegrateReactorCapability>((), github.clone())
+            // back to the control core. Receives the shared source shell clone
+            // and its coordinator scalars.
+            .with_actor::<IntegrateReactorCapability>(integrate_setup)
             // App-key custody (ADR-0149 §Migration step 3) is not a mounted
             // mailbox: the host-local minter (`app_auth::AppTokenSource`) is an
             // in-process `TokenSource` the port shells' client pulls from in
             // `connect_client`, reading the App key and failing fast there
-            // (ADR-0150). This cap wires that same shared github config into the
-            // source shell.
-            .with_actor_configured::<SourceCapability>((), github)
+            // (ADR-0150). The source actor receives only the chassis-built shell
+            // and the claim-registry enable decision.
+            .with_actor::<SourceCapability>(source_setup)
             .with_actor_configured::<SessionPoolCapability>((), session)
             // The statement-signature custody point (ADR-0149 step 3): the
             // answer gate dials it to verify author signatures against the
@@ -281,9 +385,25 @@ impl BootableChassis for BloomeryChassis {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{ArtifactsConfig, BloomeryChassis, BloomeryEnv, Chassis, GithubMirrorConfig, SessionConfig};
+    use std::sync::Arc;
+
+    use aether_bloomery::SharedCorrespondence;
+    use aether_bloomery_github::testing::FakeGithub;
+
+    use super::{
+        ArtifactsConfig, BloomeryChassis, BloomeryEnv, Chassis, CoordinatorConfig, GithubConnectionConfig,
+        SessionConfig, mounted_correspondence,
+    };
     use crate::signing::SigningConfig;
     use crate::store::StoreConfig;
+
+    #[test]
+    fn every_mounted_executor_retains_the_shared_correspondence() {
+        let correspondence: SharedCorrespondence = Arc::new(FakeGithub::new());
+
+        assert!(mounted_correspondence(Some(&()), &correspondence).is_some());
+        assert!(mounted_correspondence::<()>(None, &correspondence).is_none());
+    }
 
     #[test]
     fn chassis_boots_and_claims_its_mailboxes() {
@@ -314,7 +434,8 @@ mod tests {
             http_port: 0,
             store: StoreConfig::default(),
             artifacts: ArtifactsConfig { root: Some(artifacts_root.path().to_str().unwrap().to_owned()) },
-            github: GithubMirrorConfig::default(),
+            github: GithubConnectionConfig::default(),
+            coordinator: CoordinatorConfig::default(),
             // The default `:memory:` pool touches no filesystem, so the session
             // cap claims `aether.session` without a data-dir open.
             session: SessionConfig::default(),

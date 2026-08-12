@@ -22,7 +22,7 @@ use aether_bloomery_github::{GithubError, InstallationToken, ReqwestGithub, Stat
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;
 
-use crate::bloomery::GithubMirrorConfig;
+use crate::bloomery::GithubConnectionConfig;
 
 /// The default refresh skew when `app_token_skew_secs` resolves to `0` — re-mint
 /// five minutes before the GitHub-reported expiry.
@@ -102,7 +102,7 @@ impl AppTokenSource {
     ///
     /// # Errors
     /// The private-key file is unreadable, or its bytes are not a valid RSA PEM.
-    pub fn from_config(config: &GithubMirrorConfig) -> Result<Self, GithubError> {
+    pub fn from_config(config: &GithubConnectionConfig) -> Result<Self, GithubError> {
         let pem = fs::read(&config.app_private_key_path).map_err(|error| {
             GithubError::Transport(format!("reading GitHub App private key '{}': {error}", config.app_private_key_path))
         })?;

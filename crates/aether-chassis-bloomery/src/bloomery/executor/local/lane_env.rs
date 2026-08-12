@@ -41,7 +41,7 @@ use std::process::Command;
 const COORDINATOR_ENV_PREFIX: &str = "AETHER_";
 
 /// Coordinator configuration spelled outside the prefix. `GITHUB_TOKEN` is the
-/// conventional name `GithubMirrorConfig::token` pins rather than renaming under
+/// conventional name `GithubConnectionConfig::token` pins rather than renaming under
 /// `AETHER_GITHUB_`, so a prefix scrub alone would leave the one variable that
 /// is both a live credential and half of what arms the claim registry.
 const COORDINATOR_ENV_KEYS: [&str; 1] = ["GITHUB_TOKEN"];

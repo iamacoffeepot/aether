@@ -45,8 +45,8 @@ use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
 use super::IntegrateReactorCapability;
+use crate::bloomery::IntegrateReactorSetup;
 use crate::bloomery::SourceShell;
-use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::control::ControlCore;
@@ -319,22 +319,19 @@ fn drain_and_integrate(
     Ok((admits, ack_through))
 }
 
-fn connect_source(config: &GithubMirrorConfig) -> Result<SourceShell, BootError> {
-    #[cfg(any(test, feature = "testing"))]
-    if config.uses_fixture() {
-        return Ok(config.fixture_source());
-    }
-    SourceShell::connect(config).map_err(|e| BootError::Other(Box::new(e)))
-}
-
 #[runtime]
 impl NativeActor for IntegrateReactorCapability {
     type State = IntegrateReactorState;
-    type Config = GithubMirrorConfig;
+    type Config = ();
+    type Params = IntegrateReactorSetup;
 
     const NAMESPACE: &'static str = "aether.bloomery.integrate";
 
-    fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<IntegrateReactorState, BootError> {
+    fn init(
+        (): (),
+        config: IntegrateReactorSetup,
+        ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<IntegrateReactorState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
         let control_mailbox = <ControlCore as Addressable>::resolve(0, ());
@@ -342,9 +339,7 @@ impl NativeActor for IntegrateReactorCapability {
         // Unconfigured → disabled: no shell, no store, no timer. The integrate
         // outbox accumulates and drains once a token/owner/repo is supplied,
         // unless the `fake` backend is selected (#4732).
-        let configured =
-            config.uses_fixture() || !(config.token.is_empty() || config.owner.is_empty() || config.repo.is_empty());
-        if !configured {
+        let Some(source) = config.source else {
             tracing::info!(
                 target: "aether_chassis_bloomery::integrate",
                 "integrate reactor mounted disabled (unconfigured token/owner/repo); integrate outbox will accumulate",
@@ -357,9 +352,8 @@ impl NativeActor for IntegrateReactorCapability {
                 self_mailbox,
                 _timer: None,
             });
-        }
+        };
 
-        let source = connect_source(&config)?;
         let store = SqliteStore::open(&config.store_path).map_err(|e| BootError::Other(Box::new(e)))?;
         let interval = Duration::from_secs(config.poll_interval_secs.max(1));
         let timer = spawn_timer(
@@ -372,8 +366,7 @@ impl NativeActor for IntegrateReactorCapability {
         );
         tracing::info!(
             target: "aether_chassis_bloomery::integrate",
-            owner = %config.owner,
-            repo = %config.repo,
+            repository = ?config.repository,
             poll_interval_secs = config.poll_interval_secs,
             "integrate reactor mounted; polling the store for integration decisions",
         );

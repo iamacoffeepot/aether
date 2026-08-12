@@ -18,7 +18,7 @@
 //!
 //! The connection knobs — token, owner/name, API base — plus the executor-only
 //! knobs ride the same ADR-0090 derive-`Config`
-//! [`GithubMirrorConfig`] the mirror and source
+//! [`GithubConnectionConfig`] the mirror and source
 //! shells use: one GitHub-connection config serves all three caps. When the
 //! local model lane is enabled (the default, ADR-0150), [`connect`](ExecutorShell::connect)
 //! mounts a `RoutingExecutor` fronting both backends; otherwise the bare Actions
@@ -38,7 +38,7 @@ use aether_bloomery_github::{
     ActionsExecutor, ExecutorError, GithubError, LaneWorkflows, SharedCorrespondence as GitSharedCorrespondence,
 };
 
-use super::mirror::GithubMirrorConfig;
+use super::{CoordinatorConfig, GithubConnectionConfig};
 
 pub mod local;
 mod routing;
@@ -200,48 +200,47 @@ impl ExecutorShell {
     ///
     /// # Errors
     /// The underlying `reqwest` client could not be constructed.
-    pub fn connect(config: &GithubMirrorConfig) -> Result<Self, GithubError> {
+    pub fn connect(
+        connection: &GithubConnectionConfig,
+        coordinator: &CoordinatorConfig,
+        domain_correspondence: DomainSharedCorrespondence,
+        git_correspondence: GitSharedCorrespondence,
+    ) -> Result<Self, GithubError> {
         #[cfg(any(test, feature = "testing"))]
-        if config.uses_fixture() {
-            let fake = config.shared_fixture();
-            let concrete = Arc::new(fake.clone());
+        if connection.uses_fixture() {
+            let fake = connection.shared_fixture();
             let actions = Arc::new(ActionsExecutor::new(
                 fake,
-                Arc::clone(&concrete) as DomainSharedCorrespondence,
-                LaneWorkflows {
-                    mechanical: config.executor_workflow_file.clone(),
-                    model: config.executor_model_workflow_file.clone(),
-                },
-                config.executor_dispatch_ref.clone(),
-            ));
-            if !config.local_lane_enabled {
-                return Ok(Self::new(actions));
-            }
-            let correspondence = concrete as GitSharedCorrespondence;
-            let local = Arc::new(LocalExecutor::from_config(config, correspondence));
-            return Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, config.local_lane_prefixes()))));
-        }
-        let missing = config.missing_connection_knobs();
-        if missing.is_empty() {
-            let (domain_correspondence, git_correspondence) = config.connect_correspondence_views()?;
-            // Both backends resolve the order's checkout digest to a real git object
-            // through the same persisted correspondence (ADR-0150) — one store over
-            // the shared `store_path`, mirroring the source shell.
-            let actions = Arc::new(ActionsExecutor::new(
-                config.connect_client()?,
                 domain_correspondence,
                 LaneWorkflows {
-                    mechanical: config.executor_workflow_file.clone(),
-                    model: config.executor_model_workflow_file.clone(),
+                    mechanical: connection.executor_workflow_file.clone(),
+                    model: connection.executor_model_workflow_file.clone(),
                 },
-                config.executor_dispatch_ref.clone(),
+                connection.executor_dispatch_ref.clone(),
             ));
-
-            if !config.local_lane_enabled {
+            if !coordinator.local_lane_enabled {
                 return Ok(Self::new(actions));
             }
-            let local = Arc::new(LocalExecutor::from_config(config, git_correspondence));
-            return Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, config.local_lane_prefixes()))));
+            let local = Arc::new(LocalExecutor::from_config(coordinator, git_correspondence));
+            return Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, coordinator.local_lane_prefixes()))));
+        }
+        let missing = connection.missing_connection_knobs();
+        if missing.is_empty() {
+            let actions = Arc::new(ActionsExecutor::new(
+                connection.connect_client()?,
+                domain_correspondence,
+                LaneWorkflows {
+                    mechanical: connection.executor_workflow_file.clone(),
+                    model: connection.executor_model_workflow_file.clone(),
+                },
+                connection.executor_dispatch_ref.clone(),
+            ));
+
+            if !coordinator.local_lane_enabled {
+                return Ok(Self::new(actions));
+            }
+            let local = Arc::new(LocalExecutor::from_config(coordinator, git_correspondence));
+            return Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, coordinator.local_lane_prefixes()))));
         }
 
         // Unconfigured. The stub stands in for Actions either way; what the local
@@ -250,12 +249,11 @@ impl ExecutorShell {
         // reads that combination as a disabled mount and never calls `connect`,
         // but a direct caller still gets the reason rather than a panic.
         let actions = Arc::new(UnconfiguredActionsBackend::new(missing.join(", ")));
-        if !config.local_lane_enabled {
+        if !coordinator.local_lane_enabled {
             return Ok(Self::new(actions));
         }
-        let (_, correspondence) = config.connect_correspondence_views()?;
-        let local = Arc::new(LocalExecutor::from_config(config, correspondence));
-        Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, config.local_lane_prefixes()))))
+        let local = Arc::new(LocalExecutor::from_config(coordinator, git_correspondence));
+        Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, coordinator.local_lane_prefixes()))))
     }
 
     /// Submit a fully-resolved work order, returning the nonce-carrying handle.

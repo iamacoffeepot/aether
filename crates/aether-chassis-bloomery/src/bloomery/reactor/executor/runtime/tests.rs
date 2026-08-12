@@ -24,15 +24,16 @@ use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::{
-    BACKOFF_CAP, CandidatePush, GithubMirrorConfig, NameEvidenceClaims, Stores, TrackedHandle, backoff_delay,
-    drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_stale, next_backoff,
-    pull_and_admit, push_admitted_candidates, seed_tracked, select_stale_handles,
+    BACKOFF_CAP, CandidatePush, NameEvidenceClaims, Stores, TrackedHandle, backoff_delay, drain_and_dispatch,
+    drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_stale, next_backoff, pull_and_admit,
+    push_admitted_candidates, seed_tracked, select_stale_handles,
 };
 use crate::bloomery::executor::local::testing::FixedRunner;
 use crate::bloomery::intake::{
     Admission, AdmitDecision, DispatchError, UploadedEvidence, admit_uploaded, attempt_artifact_name,
 };
 use crate::bloomery::outbox::TopicOutbox;
+use crate::bloomery::{CoordinatorConfig, GithubConnectionConfig};
 use crate::bloomery::{
     ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
 };
@@ -1249,18 +1250,18 @@ fn the_disabled_mount_names_every_empty_connection_knob() {
     // line (#4625). A predicate that collapsed to a bool — or listed only the
     // first empty knob — sends the operator back to reading `init` to find out
     // which of the three is missing, which is the cost this replaces.
-    let missing = GithubMirrorConfig::default().missing_connection_knobs();
+    let missing = GithubConnectionConfig::default().missing_connection_knobs();
 
     assert_eq!(missing, ["GITHUB_TOKEN", "AETHER_GITHUB_OWNER", "AETHER_GITHUB_REPO"]);
 }
 
 #[test]
 fn a_fully_configured_connection_reports_nothing_missing() {
-    let config = GithubMirrorConfig {
+    let config = GithubConnectionConfig {
         token: "t".to_owned(),
         owner: "o".to_owned(),
         repo: "r".to_owned(),
-        ..GithubMirrorConfig::default()
+        ..GithubConnectionConfig::default()
     };
 
     assert!(config.missing_connection_knobs().is_empty(), "all three present must mount the reactor enabled");
@@ -1271,7 +1272,8 @@ fn an_empty_token_is_named_even_when_owner_and_repo_are_set() {
     // The exact shape that cost a live bring-up: `token` resolves from the
     // unprefixed `GITHUB_TOKEN`, so setting `AETHER_GITHUB_TOKEN` beside a
     // correct owner/repo leaves it empty and the reactor silently declines.
-    let config = GithubMirrorConfig { owner: "o".to_owned(), repo: "r".to_owned(), ..GithubMirrorConfig::default() };
+    let config =
+        GithubConnectionConfig { owner: "o".to_owned(), repo: "r".to_owned(), ..GithubConnectionConfig::default() };
 
     assert_eq!(config.missing_connection_knobs(), ["GITHUB_TOKEN"]);
 }
@@ -1283,17 +1285,25 @@ fn a_local_only_boot_mounts_and_says_why_an_actions_lane_cannot_run() {
     // `git worktree add` and a subprocess — sealed, queued, and never
     // dispatched. Re-tightening the gate to "unconfigured → disabled" restores
     // exactly that silence, and nothing else here would notice.
-    let config = GithubMirrorConfig { local_lane_enabled: true, ..GithubMirrorConfig::default() };
-    assert!(!is_disabled_mount(&config), "an unconfigured boot with the local lane must still mount");
+    let connection = GithubConnectionConfig::default();
+    let coordinator = CoordinatorConfig { local_lane_enabled: true, ..CoordinatorConfig::default() };
+    assert!(!is_disabled_mount(&connection, &coordinator), "an unconfigured boot with the local lane must still mount");
 
     // The local lane is on by default (ADR-0150), so declining to mount now takes
     // an operator turning it off as well — the one combination with no backend.
-    let neither = GithubMirrorConfig { local_lane_enabled: false, ..GithubMirrorConfig::default() };
-    assert!(is_disabled_mount(&neither), "with no local lane either there is nothing to mount");
+    let neither = CoordinatorConfig { local_lane_enabled: false, ..CoordinatorConfig::default() };
+    assert!(is_disabled_mount(&connection, &neither), "with no local lane either there is nothing to mount");
 
     // What the mount costs an Actions-routed lane: a refusal that names the
     // knobs, rather than a dispatch into a backend with no credential.
-    let shell = ExecutorShell::connect(&config).expect("a local-only shell connects without GitHub");
+    let fake = Arc::new(FakeGithub::new());
+    let shell = ExecutorShell::connect(
+        &connection,
+        &coordinator,
+        Arc::clone(&fake) as DomainSharedCorrespondence,
+        fake as GitSharedCorrespondence,
+    )
+    .expect("a local-only shell connects without GitHub");
     let order = WorkOrder {
         transformation: Transformation::for_member_stage(StageId::Verify, digest(0xC0), digest(0xC0)),
         nonce: Nonce("probe".to_owned()),

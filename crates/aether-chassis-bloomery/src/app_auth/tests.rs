@@ -16,7 +16,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Validation, decode};
 use serde::Deserialize;
 
 use super::minter::{AppTokenSource, InstallationTokenExchange};
-use crate::bloomery::GithubMirrorConfig;
+use crate::bloomery::GithubConnectionConfig;
 
 // A throwaway 2048-bit RSA keypair (never a real credential) — the fixture the
 // JWT-signing test signs with and verifies against.
@@ -89,19 +89,19 @@ fn test_key() -> EncodingKey {
     EncodingKey::from_rsa_pem(TEST_PRIVATE_KEY.as_bytes()).expect("fixture RSA key parses")
 }
 
-fn configured(app_id: u64, key_path: &str, installation_id: u64) -> GithubMirrorConfig {
-    GithubMirrorConfig {
+fn configured(app_id: u64, key_path: &str, installation_id: u64) -> GithubConnectionConfig {
+    GithubConnectionConfig {
         app_id,
         app_private_key_path: key_path.to_owned(),
         app_installation_id: installation_id,
-        ..GithubMirrorConfig::default()
+        ..GithubConnectionConfig::default()
     }
 }
 
 #[test]
 fn app_auth_configured_requires_all_three_knobs() {
     // The default (empty) config is the static-PAT path — App-auth off.
-    assert!(!GithubMirrorConfig::default().app_auth_configured());
+    assert!(!GithubConnectionConfig::default().app_auth_configured());
     // All three present → on.
     assert!(configured(12345, "/keys/app.pem", 42).app_auth_configured());
     // Any one missing → off (a partial config never silently half-enables).
@@ -130,7 +130,7 @@ fn connect_client_takes_the_app_branch_when_configured_and_the_static_branch_oth
     use std::io::Write as _;
 
     // Unconfigured → the static-PAT branch constructs a client (no key read).
-    assert!(GithubMirrorConfig::default().connect_client().is_ok(), "static-PAT path builds a client");
+    assert!(GithubConnectionConfig::default().connect_client().is_ok(), "static-PAT path builds a client");
 
     // Configured with an absent key → the App branch is taken and fails fast
     // (the static branch would have succeeded, so the error proves the branch).
