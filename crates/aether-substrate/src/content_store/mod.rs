@@ -28,6 +28,19 @@
 //! The store is single-owner: it holds its index in plain fields behind
 //! `&mut self` rather than an inner lock, matching the single-threaded
 //! `aether.fleet` cap that first hosted this core.
+//!
+//! ## The index is a cache, the directory is the truth
+//!
+//! One root can carry several live handles — the bloomery chassis mounts
+//! its artifacts capability and its executor reactor opens a second
+//! handle on the same root, and a second *process* can do the same. Each
+//! handle builds its index once at open, so the index is a cache over the
+//! content-addressed directory rather than the store's only truth: a
+//! [`get`](ContentStore::get) miss and an [`upload`](ContentStore::upload)
+//! consult disk before answering, and [`refresh`](ContentStore::refresh)
+//! is the enumeration-side counterpart. Without that, a handle is blind
+//! to every entry a peer wrote after it opened, and its `upload` of bytes
+//! a peer already stored would overwrite the peer's sidecar metadata.
 
 mod eviction;
 mod persistence;
@@ -44,7 +57,9 @@ use crate::atomic_write::atomic_write;
 use crate::pid_lock::LockGuard;
 
 pub use persistence::now_nanos;
-use persistence::{RestoredIndex, acquire_lock, ensure_root, hash_hex, restore, write_sidecar};
+use persistence::{
+    DiskEntry, RestoredIndex, acquire_lock, ensure_root, hash_hex, read_entry, read_names, restore, write_sidecar,
+};
 
 const TARGET: &str = "aether_substrate::content_store";
 
@@ -155,7 +170,12 @@ pub struct ContentStore<M> {
     /// `lock.pid` guard. Held for the store's lifetime when the lock was
     /// freshly written; `None` when another live process holds it (the
     /// store still operates — a content-addressed store tolerates a shared
-    /// dir, so the lock is hygiene, not a hard mutex).
+    /// dir, so the lock is hygiene, not a hard mutex). What a shared root
+    /// costs is staleness rather than corruption: this handle's index is
+    /// built at open, and a peer's later writes reach it through the
+    /// miss-path adopt in [`get`](ContentStore::get) /
+    /// [`upload`](ContentStore::upload) or an explicit
+    /// [`refresh`](ContentStore::refresh).
     _lock: Option<LockGuard>,
 }
 
@@ -188,6 +208,13 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
     /// sha256 hex the bytes stored under. Runs the eviction policy
     /// afterward.
     ///
+    /// Dedup is decided against the directory, not only this handle's
+    /// index: bytes a peer handle on the same root already stored are
+    /// adopted first, so they dedup rather than being rewritten under
+    /// this caller's `metadata`. That distinction is the difference
+    /// between keeping and losing the peer's sidecar — bloomery records
+    /// an artifact's derivation parents there.
+    ///
     /// # Errors
     ///
     /// Returns the underlying [`io::Error`] when new content can't be
@@ -197,6 +224,7 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
     /// hand out, and a later [`get`](Self::get) of one would miss.
     pub fn upload(&mut self, bytes: &[u8], metadata: M, name: Option<String>) -> io::Result<String> {
         let hash = hash_hex(bytes);
+        self.adopt_from_disk(&hash);
         let clock = self.next_clock();
 
         let stored = match self.entries.get_mut(&hash) {
@@ -266,14 +294,68 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
         self.set_pinned(hash, true)
     }
 
+    /// Index an entry that is on disk but not in this handle's index —
+    /// the miss path that makes the index a cache over the directory
+    /// rather than the store's only truth. Returns whether it adopted
+    /// one: `false` when the hash is already indexed, or when no complete
+    /// entry (sidecar plus bytes) exists under the root.
+    ///
+    /// The adopted entry starts unpinned with a fresh recency stamp —
+    /// pins and recency are per-handle in-memory state that no peer
+    /// writes to disk — while its `uploaded_seq` comes from the sidecar,
+    /// so the peer's ingest order survives and this handle's `next_seq`
+    /// advances past it rather than reissuing a sequence already spent.
+    fn adopt_from_disk(&mut self, hash: &str) -> bool {
+        if self.entries.contains_key(hash) {
+            return false;
+        }
+        let Some(DiskEntry { metadata, uploaded_seq, bytes_len }) = read_entry::<M>(&self.root, hash) else {
+            return false;
+        };
+
+        let last_access = self.next_clock();
+        self.entries.insert(hash.to_owned(), Entry { metadata, bytes_len, pinned: false, last_access, uploaded_seq });
+        self.total_bytes = self.total_bytes.saturating_add(bytes_len);
+        self.next_seq = self.next_seq.max(uploaded_seq.saturating_add(1));
+        true
+    }
+
+    /// Resolve a name to the hash it points at, re-reading `names.json`
+    /// once on a miss so a name a peer handle pointed after this handle
+    /// opened still resolves.
+    ///
+    /// Only missing mappings are taken; one this handle already holds
+    /// wins. Naming under two writers is not made coherent here — each
+    /// writer rewrites the whole file from its own map, so the last
+    /// `upload` decides what a shared `names.json` contains either way.
+    /// This resolves the miss that made a peer's name unreachable; it
+    /// does not turn the name map into shared state. Both consumers on a
+    /// shared root (bloomery's artifacts record) upload unnamed.
+    fn resolve_name(&mut self, name: &str) -> Option<String> {
+        if let Some(hash) = self.names.get(name) {
+            return Some(hash.clone());
+        }
+        for (disk_name, disk_hash) in read_names(&self.root) {
+            self.names.entry(disk_name).or_insert(disk_hash);
+        }
+        self.names.get(name).cloned()
+    }
+
     /// Resolve an entry by hash or name to its on-disk path + a clone of
     /// its metadata. `None` if the hash / name isn't stored. Bumps the
     /// entry's recency.
+    ///
+    /// A miss in this handle's index is not the answer: the hash is
+    /// looked up on disk and adopted if a peer handle stored it after
+    /// this handle opened, and a name miss re-reads `names.json` first.
+    /// This is the resolving path that [`contains`](Self::contains)
+    /// deliberately is not.
     pub fn get(&mut self, selector: &Selector) -> Option<Resolved<M>> {
         let hash = match selector {
             Selector::Hash(h) => h.clone(),
-            Selector::Name(n) => self.names.get(n)?.clone(),
+            Selector::Name(n) => self.resolve_name(n)?,
         };
+        self.adopt_from_disk(&hash);
         let clock = self.next_clock();
         let entry = self.entries.get_mut(&hash)?;
         entry.last_access = clock;
@@ -281,6 +363,37 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
         let name = self.name_for(&hash);
         let (path, _) = self.entry_paths(&hash);
         Some(Resolved { hash, path, metadata, name })
+    }
+
+    /// Adopt every entry and name under the root that this handle does
+    /// not already hold — the enumeration-side counterpart of the
+    /// miss-path adopt in [`get`](Self::get). [`entries`](Self::entries)
+    /// and [`entry_count`](Self::entry_count) answer from the index
+    /// alone, so a handle that shares its root with another live handle
+    /// (or another process) calls this before it treats its own
+    /// enumeration as the whole record.
+    ///
+    /// Entries this handle already holds are left exactly as they are:
+    /// their `pinned` flag and recency stamp are in-memory state no peer
+    /// can see on disk, and re-restoring over them would discard both.
+    /// No eviction runs — adopting is not an ingest, and a handle asking
+    /// what is on the root should not reclaim from it.
+    pub fn refresh(&mut self) {
+        let RestoredIndex { entries, names, .. } = restore::<M>(&self.root);
+
+        for (hash, entry) in entries {
+            if self.entries.contains_key(&hash) {
+                continue;
+            }
+            self.total_bytes = self.total_bytes.saturating_add(entry.bytes_len);
+            self.next_seq = self.next_seq.max(entry.uploaded_seq.saturating_add(1));
+            let last_access = self.next_clock();
+            self.entries.insert(hash, Entry { last_access, ..entry });
+        }
+
+        for (name, hash) in names {
+            self.names.entry(name).or_insert(hash);
+        }
     }
 
     /// A borrowing iterator over every indexed entry, for consumer-side
@@ -306,7 +419,17 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
         self.total_bytes
     }
 
-    /// Whether an entry with `hash` is stored.
+    /// Whether an entry with `hash` is indexed *by this handle*.
+    ///
+    /// An index-only predicate, deliberately taken by `&self`: it never
+    /// consults disk, so it answers `false` for an entry another live
+    /// handle on the same root wrote after this one opened.
+    /// [`get`](Self::get) is the resolving path — it adopts such an entry
+    /// on a miss — and [`refresh`](Self::refresh) is the enumeration-side
+    /// counterpart. The `&self` borrow is the point: the hub's selector
+    /// disambiguation (`aether-fleet`) uses this as a cheap predicate
+    /// over a store it is the only handle on, where the index and the
+    /// directory cannot disagree.
     #[must_use]
     pub fn contains(&self, hash: &str) -> bool {
         self.entries.contains_key(hash)

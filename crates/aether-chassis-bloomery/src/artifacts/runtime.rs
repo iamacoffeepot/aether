@@ -98,7 +98,9 @@ impl ArtifactsCapabilityState {
 
         // Content-addressed dedup keeps the *original* sidecar metadata: a
         // re-upload of identical bytes under fresh `parents` bumps recency but
-        // never rewrites the recorded parents (`ContentStore::upload`). Surface
+        // never rewrites the recorded parents (`ContentStore::upload`). That
+        // holds for bytes a peer handle on the shared root stored too — the
+        // upload adopts the on-disk entry before it would rewrite it. Surface
         // any newly-submitted parent the store dropped rather than replying Ok
         // as if the derivation edge landed — otherwise the new provenance
         // silently vanishes.
@@ -123,7 +125,15 @@ impl ArtifactsCapabilityState {
     /// scans it here rather than trusting the projection it is reconstructing.
     /// Entries whose bytes cannot be read from disk are skipped (a rebuild is
     /// best-effort over what is durably present, never a hard failure).
+    ///
+    /// The store root is shared: the executor reactor opens its own handle over
+    /// it (`open_artifacts`) and files study records there long after this
+    /// capability's handle was built at boot. `ContentStore::entries` answers
+    /// from that boot-time index, so the scan refreshes first — otherwise the
+    /// rebuild enumerates only what this handle happened to write itself.
     pub fn scan(&mut self) -> Vec<ArtifactEntry> {
+        self.store.refresh();
+
         // Collect the (digest, parents) refs first: `get` borrows the store
         // mutably (it bumps recency), so it cannot run inside the `entries`
         // borrow.
