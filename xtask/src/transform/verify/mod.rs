@@ -147,6 +147,14 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             requires_targets: &[],
             prepare: None,
         }),
+        "verify.suppress" => Some(VerifyInvocation {
+            program: "python3",
+            args: &["scripts/check-suppressions.py"],
+            env: &[],
+            requires: &["git", "python3"],
+            requires_targets: &[],
+            prepare: None,
+        }),
         _ => None,
     }
 }
@@ -191,7 +199,7 @@ fn render_diagnostics(stdout: &str) -> String {
 }
 
 /// The typed id of the verify umbrella (#3626) the reducer dispatches for the
-/// Verify stage (`Transformation::for_member_stage`) — distinct from the three
+/// Verify stage (`Transformation::for_member_stage`) — distinct from the
 /// concrete `verify.*` ids `verify_command` maps individually.
 pub(super) const VERIFY_CHECK: &str = "verify.check";
 
@@ -200,7 +208,7 @@ pub(super) const VERIFY_CHECK: &str = "verify.check";
 /// this list (e.g. a future `verify.test`) needs no change to the reducer's
 /// dispatched stage command.
 fn verify_check_members() -> &'static [&'static str] {
-    &["verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps"]
+    &["verify.suppress", "verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps"]
 }
 
 /// Aggregate `verify.check`'s member results: pass iff every member passed.
@@ -222,6 +230,29 @@ fn required_tools() -> Vec<&'static str> {
         .filter_map(|id| verify_command(id))
         .flat_map(|invocation| invocation.requires.iter().copied())
         .collect()
+}
+
+/// Standalone prerequisites this slice declares without extending the shared
+/// cargo/node dependency graph. Both are host roots with no repository-known
+/// prerequisite, so a direct `--version` probe is the complete check.
+const STANDALONE_TOOLS: [(&str, &str); 2] =
+    [("git", "install Git (https://git-scm.com)"), ("python3", "install Python 3 (https://www.python.org)")];
+
+/// Resolve the dependency graph and the suppression scanner's standalone host
+/// roots into one fail-closed preflight result.
+fn preflight_tools() -> Vec<tools::Missing> {
+    let required = required_tools();
+    let mut missing = tools::preflight(&required);
+    missing.extend(
+        STANDALONE_TOOLS
+            .iter()
+            .filter(|(program, _)| required.contains(program))
+            .filter(|(program, _)| {
+                !Command::new(program).arg("--version").output().is_ok_and(|output| output.status.success())
+            })
+            .map(|(program, install)| tools::Missing { requirement: program, install: (*install).to_owned() }),
+    );
+    missing
 }
 
 /// Every toolchain target the umbrella's members cross-build for, checked
@@ -314,7 +345,7 @@ fn run_prepare(id: &str, invocation: &VerifyInvocation) -> Result<Option<(String
 /// no evidence written, distinct from a verify that ran and failed.
 pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     let Some(invocation) = verify_command(&args.command) else {
-        bail!("unrecognized transform command id: {} (verify.test is out of scope this slice)", args.command);
+        bail!("unrecognized transform command id: {}", args.command);
     };
 
     let output = run_captured(invocation.command())
@@ -352,7 +383,8 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
 
 /// The line prefixes that open a diagnostic in the verify lanes' output — rustc
 /// / clippy / rustdoc errors and warnings, their `-->` source locations, and
-/// rustfmt's per-file diff header.
+/// rustfmt's per-file diff header. Suppression findings use their own
+/// `path:line — token — source` shape and are recognized separately below.
 const DIAGNOSTIC_OPENERS: [&str; 4] = ["error", "warning:", "-->", "Diff in "];
 
 /// How much distilled output one failing member may contribute to the findings.
@@ -413,7 +445,20 @@ fn distil_member(id: &str, log: &str) -> Option<String> {
 /// progress. Leading whitespace is ignored — rustc indents its `-->` locations.
 fn opens_a_diagnostic(line: &str) -> bool {
     let trimmed = line.trim_start();
-    DIAGNOSTIC_OPENERS.iter().any(|opener| trimmed.starts_with(opener))
+    DIAGNOSTIC_OPENERS.iter().any(|opener| trimmed.starts_with(opener)) || opens_a_suppression_finding(trimmed)
+}
+
+/// Whether one scanner output line starts with a concrete `path:line` and the
+/// suppression gate's delimiter. Keeping this narrow prevents ordinary prose
+/// containing an em dash from displacing a real diagnostic in Refine evidence.
+fn opens_a_suppression_finding(line: &str) -> bool {
+    let Some((location, _)) = line.split_once(" — ") else {
+        return false;
+    };
+    let Some((path, line_number)) = location.rsplit_once(':') else {
+        return false;
+    };
+    !path.is_empty() && line_number.parse::<usize>().is_ok()
 }
 
 /// The last few non-empty lines, for a failure whose shape none of the openers
@@ -462,7 +507,7 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
     // Preflight before anything runs. A host missing a tool cannot compute what
     // the member would have said, and reporting that as a pass would let a
     // candidate integrate on the strength of a check that never happened.
-    let mut missing = tools::preflight(&required_tools());
+    let mut missing = preflight_tools();
     missing.extend(tools::preflight_targets(&required_targets()));
     if !missing.is_empty() {
         let evidence = Evidence {
@@ -534,8 +579,8 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
 mod tests {
     use super::{
         MAX_FINDING_LINES, VERIFY_CHECK, all_passed, clippy_verdict, distil_diagnostics, effective_exit_code,
-        failed_verifiers, prepare_failure_log, render_diagnostics, required_targets, verify_check_members,
-        verify_command, verify_findings,
+        failed_verifiers, preflight_tools, prepare_failure_log, render_diagnostics, required_targets, required_tools,
+        verify_check_members, verify_command, verify_findings,
     };
     use crate::cargo::WASM_TARGET;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
@@ -577,6 +622,18 @@ mod tests {
         let deps = verify_command("verify.deps").expect("verify.deps mapped");
         assert_eq!(deps.program, "cargo-machete", "going through `cargo machete` re-adds the bogus path");
         assert_eq!(deps.args, &["crates"]);
+
+        let suppress = verify_command("verify.suppress").expect("verify.suppress mapped");
+        assert_eq!(suppress.program, "python3");
+        assert_eq!(suppress.args, &["scripts/check-suppressions.py"]);
+        assert_eq!(suppress.requires, &["git", "python3"]);
+        let tools = required_tools();
+        assert!(tools.contains(&"git"));
+        assert!(tools.contains(&"python3"));
+        assert!(
+            preflight_tools().iter().all(|missing| missing.requirement != "git" && missing.requirement != "python3"),
+            "the host running the verifier tests must satisfy the scanner roots",
+        );
 
         let docs = verify_command("verify.docs").expect("verify.docs mapped");
         assert_eq!(docs.args, &["doc", "--workspace", "--no-deps", "--document-private-items", "--keep-going"]);
@@ -687,7 +744,15 @@ mod tests {
         // does not, and the lane exists to predict CI. The gap costs a whole
         // bloom re-entry, because the disagreement surfaces at the landing pull
         // request after integrate, aggregate verify, and review have all run.
-        for id in ["verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps"] {
+        for id in [
+            "verify.fmt",
+            "verify.clippy",
+            "verify.docs",
+            "verify.test",
+            "verify.dup",
+            "verify.deps",
+            "verify.suppress",
+        ] {
             assert!(verify_check_members().contains(&id), "{id} is a required CI job the lane must run");
         }
     }
@@ -742,6 +807,17 @@ mod tests {
 
         assert!(findings.contains("### verify.clippy"), "the failing member is named");
         assert!(!findings.contains("verify.fmt"), "a passing member contributes nothing");
+    }
+
+    #[test]
+    fn a_suppression_location_survives_findings_distillation() {
+        let log = "scanning diff\ncrates/demo/src/lib.rs:17 — allow(clippy::all) — #[allow(clippy::all)]\ndone";
+
+        let findings = verify_findings(&[("verify.suppress", false, log.to_owned())]).expect("findings");
+
+        assert!(findings.contains("### verify.suppress"));
+        assert!(findings.contains("crates/demo/src/lib.rs:17 — allow(clippy::all)"));
+        assert!(!findings.contains("scanning diff"));
     }
 
     #[test]
@@ -818,12 +894,20 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     fn verify_check_members_are_the_ci_parity_ids_in_order() {
         // Tripwire: every id verify.check fans out to must resolve via
         // verify_command, and the order must match ci.yml's job order — a drift
-        // here breaks the umbrella-membership invariant. All six of CI's
+        // here breaks the umbrella-membership invariant. All seven of CI's
         // required gates, because a member CI enforces and the lane skips is a
         // false green that surfaces at the landing pull request (#4706).
         assert_eq!(
             verify_check_members(),
-            &["verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps"],
+            &[
+                "verify.suppress",
+                "verify.fmt",
+                "verify.clippy",
+                "verify.docs",
+                "verify.test",
+                "verify.dup",
+                "verify.deps",
+            ],
         );
         for &id in verify_check_members() {
             assert!(verify_command(id).is_some(), "{id} must resolve via verify_command");

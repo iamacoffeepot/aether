@@ -24,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       command:
-        description: "Typed verify command id (verify.fmt / verify.clippy / verify.docs, or the verify.check umbrella)"
+        description: "Typed verify id (fmt/clippy/docs/test/dup/deps/suppress, or the verify.check umbrella)"
         required: true
       subject:
         description: "Exact digest (checkout target) the resolved work order names"
@@ -48,6 +48,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ inputs.subject }}
+          fetch-depth: 0
       # The pinned toolchain, not a channel: this lane's verdict is only worth
       # anything if it was produced by the compiler the merge gate runs (ci.yml
       # resolves the same file). `rust-toolchain.toml` declares the components.

@@ -13,6 +13,21 @@ cargo fmt -- --check
 cargo clippy --all-targets -- -D warnings
 ```
 
+In a multi-worktree checkout with `sccache` installed, run those commands
+through `scripts/cargo-cached.sh` to reuse compiled dependencies without
+sharing build outputs:
+
+```sh
+scripts/cargo-cached.sh fmt -- --check
+scripts/cargo-cached.sh clippy --all-targets -- -D warnings
+```
+
+`scripts/cargo-cached.sh` always uses the current worktree's `target/`
+directory and disables Cargo incremental compilation. It deliberately
+overrides ambient `CARGO_TARGET_DIR`, `RUSTC_WRAPPER`, and `CARGO_INCREMENTAL`
+for that command. The cache is compiler-level only; never configure multiple
+divergent worktrees to share a target directory.
+
 Fix either failure locally. Run `cargo fmt` to apply formatting, then repeat the
 check. This tier applies to every branch using the planned `implement` workflow,
 including a documentation-only implementation branch. Documentation-only work
@@ -26,7 +41,52 @@ Rust tier.
 The checked-in workflows are authoritative for the exact current jobs. The
 aggregate `CI pass` check combines applicable gates such as formatting, clippy,
 docs, marker/feature boundary builds, workspace tests, duplicate-code and
-unused-dependency checks, wasm packaging, and contract jobs. Path filters can make a job intentionally inapplicable.
+unused-dependency checks, wasm packaging, and contract jobs. Path filters can
+make a job intentionally inapplicable.
+
+The pull-request-only `New suppressions` job is deliberately outside those
+filters. It examines additions between the pull request's resolved merge base
+and head and rejects four forms: line-anchored Rust `allow(...)` or
+`expect(...)` attributes, Rust `#[ignore]` attributes, new members of the
+top-level `.jscpd.json` `ignore` array, and new members of
+`package.metadata.cargo-machete.ignored`. The standing suppression population,
+removals, exact renames, comments, strings, and unrelated JSON/TOML keys do not
+fail the diff. Each finding is printed as `file:line — token — added line`.
+
+The pull-request checkout contains proposed code, so CI does not execute the
+scanner from that checkout. It materializes `scripts/check-suppressions.py`
+from the event's exact base commit into runner-temporary storage and runs that
+trusted blob against the explicit base and head refs. The only fallback to the
+head blob is the bootstrap case where the event base does not contain the
+newly introduced scanner at all; after this gate lands, a later pull request
+cannot make its suppressions pass by weakening the scanner in the same diff.
+
+Run the same mechanical scan locally with:
+
+```sh
+python3 scripts/check-suppressions.py
+```
+
+It defaults to the merge base of `origin/main` and `HEAD`; `--base` and
+`--head` select explicit refs. The `verify.suppress` transform runs that exact
+command, and it is a member of `verify.check`. Bloomery has no pull-request
+owner context, so a finding always leaves that lane red for operator action.
+
+A repository owner can sign off an intentional pull-request suppression only
+by editing the pull request's main body so it contains exactly one canonical
+hidden record:
+
+```text
+<!-- aether-suppression-signoff:v1 {"base_sha":"<40 lowercase hex>","head_sha":"<40 lowercase hex>","pull_request":123} -->
+```
+
+The scanner verifies the current body and latest body editor through GitHub
+GraphQL. The latest editor must be the repository owner, and the record must
+bind the current pull-request number, resolved merge base, and head exactly.
+An agent-authored initial body is not authorization. A push, base change, or
+later non-owner body edit invalidates a previous sign-off until the owner edits
+the current body again. The sign-off changes only the exit status: findings
+remain in the job log.
 
 Branch protection currently requires two status checks: `CI pass` and `Lint
 title`. It does not configure required pull-request reviews. `CI pass` proves
@@ -135,6 +195,7 @@ Choose the smallest command that crosses the changed boundary:
 | Markdown/navigation | `mdbook build docs` plus relative-link validation |
 | One Rust unit | `cargo test <name>` |
 | One crate | `cargo test -p <crate>` or `cargo check -p <crate>` |
+| Added-suppression diff | `python3 scripts/check-suppressions.py` |
 | Formatting | `cargo fmt -- --check` |
 | Lints | `cargo clippy --all-targets -- -D warnings` |
 | Doc comments and intra-doc links | `cargo doc --workspace --no-deps --document-private-items` |
@@ -165,6 +226,8 @@ longer needed or ask before preserving useful artifacts.
 Keep each divergent worktree on its own Cargo target directory. Never point
 multiple worktrees at one shared `CARGO_TARGET_DIR`: incremental metadata can
 surface a dependency compiled from another branch and produce phantom errors.
+Use `scripts/cargo-cached.sh` when available to share compiler results through
+sccache, not target artifacts.
 
 Tests must also isolate namespace roots, ports, artifact stores, and other host
 resources. Prefer SubstrateHarness/FleetHarness builders and allocated temp roots over

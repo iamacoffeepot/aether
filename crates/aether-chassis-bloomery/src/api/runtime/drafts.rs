@@ -45,6 +45,9 @@ impl ApiCapabilityState {
         if let Some(proposals) = patch.proposals {
             draft.proposals = proposals;
         }
+        if let Some(configs) = patch.configs {
+            draft.configs = configs;
+        }
         if let Some(base) = patch.base {
             draft.base = base;
         }
