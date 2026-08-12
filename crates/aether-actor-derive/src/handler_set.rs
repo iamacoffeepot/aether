@@ -47,6 +47,35 @@
 //! A wasm set emits no bridge. Its adopters — the widget family — address each
 //! other by name through `RelativeMailbox::send<K: Kind>`, which carries no
 //! `HandlesKind` bound, so a marker there would gate nothing.
+//!
+//! # Gated handlers
+//!
+//! ADR-0183: a `#[cfg]` on a set handler is resolved in the crate that defines
+//! the set, for every artifact the set produces. The dispatch arms, the manifest
+//! records, and the capability rows are emitted here, so replaying the
+//! attributes onto them resolves them here by construction. The markers are not
+//! — a `#[cfg]` inside a `macro_rules!` body is evaluated where the body lands,
+//! so replaying one into the bridge would hand the *adopter's* features the
+//! decision while the other three answered to the definer's. The two would
+//! disagree silently in the direction that matters: a `HandlesKind<K>` marker is
+//! exactly the permission that lets a typed send compile, so an adopter could
+//! gain one for a kind the set's dispatch chain returns `DISPATCH_UNKNOWN_KIND`
+//! for, and the mail would compile and be dropped at run time.
+//!
+//! So the bridge resolves at definition time instead. Each gated handler gets a
+//! pair of `#[cfg]`-ed pass-through gate macros — the conjunction of its
+//! predicates and the negation of that conjunction — and its marker and
+//! inventory tokens are wrapped in an invocation of the gate. Which arm of the
+//! pair exists is decided when *this* crate compiles, so the bridge body an
+//! adopter expands already carries the resolved answer whatever features the
+//! adopter enables. The gate is a pass-through over `$($t:tt)*` rather than one
+//! macro per item, so a handler's marker and its inventory row share a single
+//! pair and the count stays linear in gated handlers. A handler with no `#[cfg]`
+//! gets no gate and its tokens stay inline, so an unchanged set expands to
+//! exactly what it expanded to before.
+//!
+//! The gate is invoked unqualified for the same rust-lang issue 52234 reason the
+//! bridge is, so it inherits the bridge's same-crate-only reach.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
@@ -55,8 +84,8 @@ use syn::{FnArg, ItemTrait, TraitItem, Type};
 use crate::diagnostics::extract_agent_doc;
 use crate::handler_parse::{
     HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler, classify_handler_reply,
-    extract_handler_kind_type, extract_native_actor_handler_kind, multi_kind_or_return_error, parse_handler_class,
-    parse_handler_variant, reject_duplicate_handler_kinds,
+    extract_handler_kind_type, extract_native_actor_handler_kind, handler_cfgs, multi_kind_or_return_error,
+    parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds,
 };
 use crate::manifest::build_handler_set_manifest_const;
 
@@ -235,6 +264,7 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         let reply = classify_handler_reply(&f.sig.output);
         let class = parse_handler_class(&f.attrs[idx], variant)?;
         let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig)?;
+        let cfgs = handler_cfgs(&f.attrs);
         f.attrs.remove(idx);
 
         // The dispatch chain only needs the signature; the body stays on the
@@ -248,12 +278,11 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
             sig: f.sig.clone(),
             block: syn::parse_quote!({}),
         };
-        // iamacoffeepot/aether#4811 covers `#[actor]`. A set's markers travel to
-        // its adopters through a `#[macro_export] macro_rules!` bridge that
-        // expands in the adopter's crate, where a `feature = "…"` predicate would
-        // resolve against the adopter's features — a separate decision, so the
-        // set's artifacts stay ungated for now.
-        handlers.push(HandlerFn { method, kind_ty, agent_doc, reply, class, multi_kind, cfgs: Vec::new() });
+        // ADR-0183: the handler's `#[cfg]`s gate every artifact the set derives
+        // from it, and all of them resolve in this crate — the three emitted
+        // here directly, and the bridge markers through the gate pair
+        // `build_native_marker_bridge` resolves at definition time.
+        handlers.push(HandlerFn { method, kind_ty, agent_doc, cfgs, reply, class, multi_kind });
     }
 
     if handlers.is_empty() {
@@ -331,7 +360,7 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
 
     let marker_bridge = match transport {
         SetTransport::Wasm => quote! {},
-        SetTransport::Native => build_native_marker_bridge(&item.ident, &handlers),
+        SetTransport::Native => build_native_marker_bridge(&item.ident, &handlers)?,
     };
 
     Ok(quote! {
@@ -343,20 +372,37 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
 /// The set's `HandlerCapability` rows, in the same shape `#[actor]` builds for
 /// an actor's own handlers. An adopter appends these to its `capabilities()`
 /// and reads their ids for `measured_kinds()`, so the native describe surface
-/// and the per-handler cost table name the inherited kinds too.
+/// and the per-handler cost table name the inherited kinds too. That second
+/// reader is why gating here is the whole job for ids as well: an adopter's
+/// `measured_kinds` extends from this same call at run time rather than from a
+/// separate macro-time list, so a row that is not built is an id that is not
+/// measured.
+///
+/// ADR-0183: each row is pushed under the handler's own `#[cfg]`s rather than
+/// listed inside a `vec![…]`, because a `#[cfg]` cannot gate an element of a
+/// `vec!` element list — the shape iamacoffeepot/aether#4811 gave `#[actor]`'s
+/// `capabilities()`. It is value-identical for an ungated set.
 fn build_native_capability_rows(handlers: &[HandlerFn]) -> TokenStream2 {
     let rows = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
+        let cfgs = &h.cfgs;
         quote! {
-            ::aether_substrate::actor::native::HandlerCapability {
+            #(#cfgs)*
+            __aether_handlers.push(::aether_substrate::actor::native::HandlerCapability {
                 id: <#kind_ty as ::aether_data::Kind>::ID,
                 name: <#kind_ty as ::aether_data::Kind>::NAME.to_owned(),
                 doc: ::core::option::Option::None,
                 reply: ::aether_data::ReplyContract::None,
-            }
+            });
         }
     });
-    quote! { ::std::vec![#(#rows),*] }
+    quote! {
+        let mut __aether_handlers: ::std::vec::Vec<
+            ::aether_substrate::actor::native::HandlerCapability,
+        > = ::std::vec::Vec::new();
+        #(#rows)*
+        __aether_handlers
+    }
 }
 
 /// The `macro_rules!` bridge carrying the set's `HandlesKind` markers and
@@ -366,34 +412,71 @@ fn build_native_capability_rows(handlers: &[HandlerFn]) -> TokenStream2 {
 ///
 /// The name is derived from the trait ident, so two sets sharing an ident in
 /// one crate collide — the same collision `#[macro_export]` itself would raise.
-fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) -> TokenStream2 {
+/// ADR-0183: a handler carrying a `#[cfg]` also earns a pair of gate macros,
+/// emitted beside the bridge and invoked from inside it, so the predicate is
+/// resolved here rather than wherever the bridge body lands.
+fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) -> syn::Result<TokenStream2> {
     let macro_ident = format_ident!("__aether_handler_set_markers_{}", set_ident);
-    let markers = handlers.iter().map(|h| {
+
+    // The gate is a pass-through, so a handler's marker and its inventory row
+    // ride the same pair from their own places in the body rather than being
+    // pulled together into one invocation. That keeps the emitted order — every
+    // marker, then every inventory row — exactly what it was before gating
+    // existed, so a set with no gated handler expands byte-for-byte as it always
+    // did, and the pair count stays linear in gated handlers either way.
+    let mut gates = Vec::new();
+    let gate_idents: Vec<Option<syn::Ident>> = handlers
+        .iter()
+        .enumerate()
+        .map(|(index, h)| {
+            if h.cfgs.is_empty() {
+                return Ok(None);
+            }
+            let gate_ident = format_ident!("__aether_handler_set_gate_{}_{}", set_ident, index);
+            let predicate = conjoined_cfg_predicate(&h.cfgs)?;
+            gates.push(quote! {
+                #[cfg(#predicate)]
+                #[macro_export]
+                #[doc(hidden)]
+                macro_rules! #gate_ident { ($($__aether_gated:tt)*) => { $($__aether_gated)* }; }
+                #[cfg(not(#predicate))]
+                #[macro_export]
+                #[doc(hidden)]
+                macro_rules! #gate_ident { ($($__aether_gated:tt)*) => {}; }
+            });
+            Ok(Some(gate_ident))
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+
+    let markers = handlers.iter().zip(&gate_idents).map(|(h, gate)| {
         let kind_ty = &h.kind_ty;
-        quote! {
-            impl ::aether_actor::HandlesKind<#kind_ty> for $ty {}
-        }
+        gated(gate.as_ref(), quote! { impl ::aether_actor::HandlesKind<#kind_ty> for $ty {} })
     });
-    let inventory = handlers.iter().map(|h| {
+    let inventory = handlers.iter().zip(&gate_idents).map(|(h, gate)| {
         let kind_ty = &h.kind_ty;
         let reply_expr = if let Some(reply_ty) = h.reply.manifest_kind() {
             quote! { ::core::option::Option::Some(<#reply_ty as ::aether_data::Kind>::ID) }
         } else {
             quote! { ::core::option::Option::None }
         };
-        quote! {
-            #[cfg(not(target_family = "wasm"))]
-            ::aether_data::name_inventory::inventory::submit! {
-                ::aether_data::name_inventory::HandlerEntry {
-                    namespace: <$ty as ::aether_actor::Addressable>::NAMESPACE,
-                    id: <#kind_ty as ::aether_data::Kind>::ID,
-                    name: <#kind_ty as ::aether_data::Kind>::NAME,
-                    reply: #reply_expr,
+        gated(
+            gate.as_ref(),
+            quote! {
+                #[cfg(not(target_family = "wasm"))]
+                ::aether_data::name_inventory::inventory::submit! {
+                    ::aether_data::name_inventory::HandlerEntry {
+                        namespace: <$ty as ::aether_actor::Addressable>::NAMESPACE,
+                        id: <#kind_ty as ::aether_data::Kind>::ID,
+                        name: <#kind_ty as ::aether_data::Kind>::NAME,
+                        reply: #reply_expr,
+                    }
                 }
-            }
-        }
+            },
+        )
     });
-    quote! {
+
+    Ok(quote! {
+        #(#gates)*
         #[macro_export]
         #[doc(hidden)]
         macro_rules! #macro_ident {
@@ -402,7 +485,31 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
                 #(#inventory)*
             };
         }
+    })
+}
+
+/// Wrap one bridge item in its handler's gate invocation, or leave it inline
+/// when the handler carries no `#[cfg]`. The invocation is unqualified for the
+/// same rust-lang issue 52234 reason the bridge's own is.
+fn gated(gate: Option<&syn::Ident>, tokens: TokenStream2) -> TokenStream2 {
+    match gate {
+        Some(gate_ident) => quote! { #gate_ident! { #tokens } },
+        None => tokens,
     }
+}
+
+/// The conjunction of a handler's `#[cfg]` predicates, as `all(P1, …, Pn)`.
+///
+/// Purely syntactic: the macro reads the predicate tokens the author wrote and
+/// never evaluates them, so any predicate rustc accepts — including a custom
+/// `--cfg` flag from a build script — rides through unexamined, and an
+/// ill-formed one is diagnosed by rustc at the author's own span. Stacking the
+/// attributes would express the conjunction on the positive arm, but the
+/// negative arm needs the predicate as a term, so it is built once here.
+fn conjoined_cfg_predicate(cfgs: &[syn::Attribute]) -> syn::Result<TokenStream2> {
+    let predicates =
+        cfgs.iter().map(|attr| Ok(attr.meta.require_list()?.tokens.clone())).collect::<syn::Result<Vec<_>>>()?;
+    Ok(quote! { all(#(#predicates),*) })
 }
 
 /// The set's own kind-id if-chain. Structurally the same shape
@@ -435,7 +542,16 @@ fn build_set_dispatch_body(handlers: &[HandlerFn], transport: SetTransport, spli
             },
         };
         let (matches_kind, decode) = transport.arm_terms(k);
+        // ADR-0183: the arm rides the handler's own `#[cfg]`s the way
+        // `build_dispatch_body` carries them on both `#[actor]` paths — the arm
+        // names both the kind type and the method, neither of which exists in a
+        // configuration that strips the handler. Every arm is a statement (the
+        // `DISPATCH_UNKNOWN_KIND` tail follows them all), so the attribute rides
+        // the `if` directly and an ungated handler emits exactly what it always
+        // did.
+        let cfgs = &h.cfgs;
         quote! {
+            #(#cfgs)*
             if #matches_kind {
                 if let ::core::option::Option::Some(__aether_decoded) = #decode {
                     #call
@@ -449,5 +565,121 @@ fn build_set_dispatch_body(handlers: &[HandlerFn], transport: SetTransport, spli
         #kind_binding
         #( #arms )*
         ::aether_actor::DISPATCH_UNKNOWN_KIND
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quote::quote;
+
+    use super::expand_handler_set;
+
+    /// The bridge half of ADR-0183 is the one artifact family no trybuild
+    /// fixture in this crate can reach: a native set's expansion names
+    /// `aether_substrate` types in the trait it emits, and a proc-macro crate
+    /// carries no substrate dev-dependency. These read the emitted tokens
+    /// instead, which is where the gate decision is actually made.
+    fn native_set(handlers: &proc_macro2::TokenStream) -> String {
+        expand_handler_set(syn::parse_quote! {
+            trait Set {
+                fn seen(&mut self) -> &mut u32;
+                #handlers
+            }
+        })
+        .expect("the fixtures are well-formed sets")
+        .to_string()
+    }
+
+    fn ungated_handler() -> proc_macro2::TokenStream {
+        quote! {
+            #[handler::single]
+            fn on_plain(&mut self, _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>, m: Plain) {
+                let _ = m;
+            }
+        }
+    }
+
+    /// Tripwire: a gated handler's marker and inventory row reach an adopter
+    /// only through a gate pair whose two arms are the handler's predicate and
+    /// its exact negation. Losing the negative arm is the silent failure — the
+    /// gate would be undefined in the stripping configuration rather than
+    /// expanding to nothing — and losing the wrapper puts the decision back in
+    /// the adopter's crate, which is the routing hole ADR-0183 exists to close.
+    #[test]
+    fn a_gated_handler_reaches_the_bridge_through_a_resolved_gate_pair() {
+        let expanded = native_set(&quote! {
+            #[handler::single]
+            #[cfg(feature = "extra")]
+            fn on_gated(&mut self, _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>, m: Gated) {
+                let _ = m;
+            }
+        });
+
+        assert!(
+            expanded.contains(r#"# [cfg (all (feature = "extra"))]"#),
+            "the positive arm carries the handler's own predicate: {expanded}"
+        );
+        assert!(
+            expanded.contains(r#"# [cfg (not (all (feature = "extra")))]"#),
+            "the negative arm carries its exact negation: {expanded}"
+        );
+        assert!(
+            expanded.contains("__aether_handler_set_gate_Set_0 ! { impl :: aether_actor :: HandlesKind < Gated >"),
+            "the marker is wrapped in the gate invocation: {expanded}"
+        );
+        assert!(
+            expanded.contains("__aether_handler_set_gate_Set_0 ! { # [cfg (not (target_family = \"wasm\"))]"),
+            "so is the inventory row: {expanded}"
+        );
+    }
+
+    /// Tripwire: several `#[cfg]`s on one handler conjoin, and the negative arm
+    /// negates the whole conjunction rather than one term. A per-term negation
+    /// would emit both arms in a configuration satisfying only some predicates,
+    /// duplicating the marker.
+    #[test]
+    fn several_cfgs_on_one_handler_conjoin_before_they_are_negated() {
+        let expanded = native_set(&quote! {
+            #[handler::single]
+            #[cfg(unix)]
+            #[cfg(feature = "extra")]
+            fn on_gated(&mut self, _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>, m: Gated) {
+                let _ = m;
+            }
+        });
+
+        assert!(
+            expanded.contains(r#"# [cfg (all (unix , feature = "extra"))]"#),
+            "the predicates conjoin in declaration order: {expanded}"
+        );
+        assert!(
+            expanded.contains(r#"# [cfg (not (all (unix , feature = "extra")))]"#),
+            "and the negation covers the conjunction: {expanded}"
+        );
+    }
+
+    /// Tripwire: a set with no gated handler emits no gate and no invocation, so
+    /// adopting an unchanged set is unchanged. And a gate's index is the
+    /// handler's declaration position, assigned before any predicate is read, so
+    /// a gated-out handler leaves a hole rather than renumbering its siblings —
+    /// the property that keeps these names stable across configurations.
+    #[test]
+    fn gates_appear_only_for_gated_handlers_and_keep_their_declaration_index() {
+        let ungated = native_set(&ungated_handler());
+        assert!(!ungated.contains("__aether_handler_set_gate"), "an ungated set gains nothing: {ungated}");
+
+        let plain_then_gated = ungated_handler();
+        let mixed = native_set(&quote! {
+            #plain_then_gated
+            #[handler::single]
+            #[cfg(unix)]
+            fn on_gated(&mut self, _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>, m: Gated) {
+                let _ = m;
+            }
+        });
+        assert!(
+            mixed.contains("__aether_handler_set_gate_Set_1 !") && !mixed.contains("__aether_handler_set_gate_Set_0"),
+            "the second-declared handler is gate 1, and the ungated first earns none: {mixed}"
+        );
     }
 }

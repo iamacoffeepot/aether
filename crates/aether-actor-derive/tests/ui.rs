@@ -151,4 +151,14 @@ fn ui() {
     // exist in that configuration and fails the build.
     t.pass("tests/ui/accepts_cfg_gated_handler_wasm.rs");
     t.pass("tests/ui/accepts_cfg_gated_handler_native.rs");
+    // ADR-0183: the same contract on the sibling macro. A wasm set emits arms
+    // and manifest records and no marker bridge, so this fixture pins the replay
+    // half: the stripped handler's kind type is gated with it, so a leaked
+    // artifact names a type that is not there, and the surviving records are
+    // compared byte-for-byte against an ungated set declaring exactly the
+    // handlers that outlive `#[cfg(test)]`, so over-stripping fails too. The
+    // bridge half is covered by the `handler_set::tests` unit tests — a native
+    // set's expansion names `aether_substrate` types in the trait it emits, and
+    // this crate carries no substrate dev-dependency.
+    t.pass("tests/ui/accepts_cfg_gated_handler_set_wasm.rs");
 }

@@ -420,6 +420,16 @@ too. The markers travel through a `macro_rules!` bridge the set generates, which
 means a set's kind types need spellings that resolve at each adopter's `#[actor]`
 — for a capability crate, the names re-exported at its crate root.
 
+A `#[cfg]` on a set handler is resolved by the crate that **defines** the set, and
+that answer reaches every artifact the set produces, the markers included. An
+adopter inherits a surface that is already fixed: enabling a feature of its own,
+even one sharing the set's spelling, never changes which handlers it inherits.
+That is what keeps a set's dispatch chain and its markers from disagreeing about
+which kinds it handles — a marker for a kind the chain would not answer is a send
+that compiles and gets dropped at run time. When one adopter genuinely needs a
+handler the others do not, declare it locally in that adopter's own `#[actor]`
+block, where `#[cfg]` already means the adopter's configuration.
+
 Put in a set only what is genuinely uniform. When bodies disagree on something
 load-bearing — the widgets' `SetWidgetState` handlers disagree about which
 predicate cancels an activation — a shared body has to pick one reading and
