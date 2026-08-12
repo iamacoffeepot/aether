@@ -2,16 +2,16 @@
 // Sample selector for the weekly offline quality eval (#3380). Enumerate merged
 // PRs from a trailing window that closed a code-bearing issue, resolve each PR's
 // closing squash commit and its PARENT SHA, and — at selection time — capture
-// the closing issue's `size:*` / `model:*` labels and its body. Deterministically
-// sample N and emit one JSON record per line:
+// the closing issue's normalized Plan routing and body. Deterministically sample
+// N and emit one JSON record per line:
 //
-//   {issue, pr, squash_sha, parent_sha, model_label, size_label, issue_body}
+//   {issue, pr, squash_sha, parent_sha, model, size, issue_body}
 //
 // `parent_sha` is where the blind runner clones (the pre-merge trunk tip);
 // `squash_sha` is the landed "ground truth" the judge compares against and the
-// contamination assert forbids in the scratch clone. `size_label` / `issue_body`
+// contamination assert forbids in the scratch clone. Routing and `issue_body`
 // are captured here because no later stage produces them — the runner needs the
-// body as its task input, and the judge groups verdict rates by the label.
+// body as its task input, and the judge groups verdict rates by size and model.
 //
 // Inputs (env):
 //   GITHUB_TOKEN | GH_TOKEN     GitHub API token (contents+issues read)
@@ -71,10 +71,31 @@ export function isCodeBearing(paths) {
   return (paths || []).some((p) => /^crates\/.+\.rs$/.test(p))
 }
 
-// The first label carrying `<prefix>:` (e.g. `size:` -> `size:m`), or null.
-function pickLabel(labels, prefix) {
-  const hit = (labels || []).find((l) => String(l).startsWith(`${prefix}:`))
-  return hit || null
+// Parse the canonical routing triplet from the managed Plan section. Routing is
+// eligible only when exactly one section exists and its final three non-empty
+// lines are the sole size/model/reason fields in that section. No label or
+// default fallback is permitted: malformed or misplaced routing returns null.
+export function parsePlanRouting(body) {
+  const lines = String(body || '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+  const headings = lines.flatMap((line, index) => (line === '## Implementation plan' ? [index] : []))
+  if (headings.length !== 1) return null
+
+  const start = headings[0] + 1
+  const nextHeading = lines.findIndex((line, index) => index >= start && /^##\s+/.test(line))
+  const section = lines.slice(start, nextHeading === -1 ? lines.length : nextHeading).filter((line) => line.trim() !== '')
+
+  const sizeFields = section.filter((line) => line.trimStart().startsWith('**Size:**'))
+  const modelFields = section.filter((line) => line.trimStart().startsWith('**Implementation model:**'))
+  const reasonFields = section.filter((line) => line.trimStart().startsWith('**Routing reason:**'))
+  if (sizeFields.length !== 1 || modelFields.length !== 1 || reasonFields.length !== 1 || section.length < 3) return null
+  if (section.at(-3) !== sizeFields[0] || section.at(-2) !== modelFields[0] || section.at(-1) !== reasonFields[0]) return null
+
+  const size = sizeFields[0].match(/^\*\*Size:\*\* (s|m|l)$/)
+  const model = modelFields[0].match(/^\*\*Implementation model:\*\* (haiku|sonnet|opus)$/)
+  const reason = reasonFields[0].match(/^\*\*Routing reason:\*\* (\S.*)$/)
+  return size && model && reason ? { size: size[1], model: model[1] } : null
 }
 
 function requireEnv(name) {
@@ -173,15 +194,19 @@ async function main() {
     }
     if (issue.pull_request) continue // the reference resolved to a PR, not an issue
 
-    const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l.name))
+    const routing = parsePlanRouting(issue.body)
+    if (!routing) {
+      console.error(`skip #${issueNumber}: missing or invalid final Plan routing triplet`)
+      continue
+    }
     seenIssues.add(issueNumber)
     candidates.push({
       issue: issueNumber,
       pr: pr.number,
       squash_sha: pr.merge_commit_sha,
       parent_sha: parentSha,
-      model_label: pickLabel(labels, 'model'),
-      size_label: pickLabel(labels, 'size'),
+      model: routing.model,
+      size: routing.size,
       issue_body: issue.body || '',
     })
   }

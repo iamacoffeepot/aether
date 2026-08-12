@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Deterministic completeness self-check for the five-pillar review session's
+// Deterministic completeness self-check for direct-drive five-pillar review's
 // caller-side diff acquisition (#3608).
 //
 // The review session assembles the workflow arg contract ({files, testFiles,
@@ -13,14 +13,12 @@
 // while never reviewing code that needed it.
 //
 // This check closes the silent-drop hole by comparing the AUTHORITATIVE changed
-// reviewable-file set — the one `review.yml`'s resolve step already computes
-// deterministically from `gh api .../pulls/{pr}/files` — against the args the
-// session assembled. Every authoritative file must appear in `files ∪ testFiles`
+// reviewable-file set — computed by the caller from the PR's file list — against
+// the args the session assembled. Every authoritative file must appear in
+// `files ∪ testFiles`
 // AND carry a non-empty `diffs` entry. Any gap is a loud failure: the session
-// must NOT invoke the workflow and must NOT write a rollup, leaving the failure
-// in the transcript so the action records an actionable no-rollup attempt (the
-// harness's existing "no rollup ⇒ no post" contract) rather than a silent
-// partial review.
+// must NOT invoke the local review engine and must NOT write a rollup, leaving
+// the failure in the transcript rather than producing a silent partial review.
 //
 // Usage (CLI):
 //   node scripts/review-args-completeness.mjs <reviewable-list> <args-json>
@@ -104,7 +102,7 @@ async function main() {
   if (gaps.length) {
     console.error(`review args INCOMPLETE — ${gaps.length} changed reviewable file(s) dropped before the model:`)
     console.error(JSON.stringify(gaps, null, 2))
-    console.error('Do NOT invoke the review workflow and do NOT write a rollup — leave this failure in the transcript.')
+    console.error('Do NOT invoke the review engine and do NOT write a rollup — leave this failure in the transcript.')
     process.exit(1)
   }
   console.log(`review args complete: ${reviewable.length} reviewable file(s) all present with non-empty diffs.`)
