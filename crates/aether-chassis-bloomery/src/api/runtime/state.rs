@@ -26,7 +26,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use aether_actor::{HandlesKind, Manual};
-use aether_bloomery::{Admit, BloomDraft, BloomId, Digest, Event, Query, ReplayJournal, Statement, Workpiece};
+use aether_bloomery::{
+    Admit, ApprovalPolicy, BloomDraft, BloomId, Digest, Event, Query, ReplayJournal, ResolvedConfigs, Statement,
+    Workpiece,
+};
 use aether_data::wire::to_vec;
 use aether_data::{Kind, MailId, MailboxId};
 use aether_http as http;
@@ -37,7 +40,6 @@ use aether_substrate::{InboundMail, Mailer};
 
 use super::response::error_response;
 use crate::artifacts::{ArtifactsCapability, Get};
-use crate::bloomery::ApprovalPolicy;
 // The control core is a native sibling cap since the wasm-boundary retirement
 // (ADR-0149 §The boundary, amended), addressed as a typed peer
 // (`ctx.defer(&request).to::<ControlCore>()`) rather than a `resolve_embedded`
@@ -75,10 +77,24 @@ pub(super) const MAX_SEAL_MEMBERS: usize = 256;
 pub struct ApiCapabilityState {
     /// This cap's own mailbox, the settlement-notice target.
     pub(super) self_mailbox: MailboxId,
-    /// The parsed tier policy the pre-seal approve gate decides over (issue
-    /// #3583). `None` when the policy file was unreadable or malformed at init —
-    /// the gate then fails closed (no member resolves `auto`).
-    pub(super) policy: Option<ApprovalPolicy>,
+    /// The host's file-loaded tier policy — the fallback a draft that seals no
+    /// `aether.bloomery.approval_policy` entry is gated against (issue #3583,
+    /// #4616). `None` when the policy file was unreadable or malformed at init;
+    /// a draft that seals none then has nothing to decide over and its seal fails
+    /// closed (no member resolves `auto`).
+    pub(super) file_policy: Option<ApprovalPolicy>,
+    /// Configuration content behind the addresses a draft's registry seals — the
+    /// same window onto the store the control core keeps (ADR-0174), filled from
+    /// the boot [`LoadConfigs`](aether_bloomery::LoadConfigs) read and from every
+    /// successful `POST /configs` write. The pre-seal gate is synchronous over
+    /// in-memory state, so a sealed policy has to be resolvable without a store
+    /// round trip inside the admission path.
+    pub(super) configs: ResolvedConfigs,
+    /// Whether the boot configuration read has landed. Until it has, this cap
+    /// cannot tell an unsealed policy from one whose content it merely has not
+    /// fetched — the two decide opposite tiers — so a seal arriving first is
+    /// refused rather than gated against the fallback.
+    pub(super) configs_ready: bool,
     /// Cached mailer for the multi-hop flows' settlement subscriptions.
     pub(super) mailer: Arc<Mailer>,
     /// Staged workpieces, keyed by their workpiece id.

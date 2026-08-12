@@ -15,7 +15,8 @@ use serde::de::DeserializeOwned;
 
 use aether_actor::Manual;
 use aether_bloomery::{
-    Admit, BloomDraft, BloomId, BloomSpec, Digest, Event, Fact, IdempotencyKey, Membership, Statement,
+    Admit, ApprovalPolicy, BloomDraft, BloomId, BloomSpec, ConfigScopes, Digest, Event, Fact, IdempotencyKey,
+    Membership, Statement,
 };
 use aether_data::wire::to_vec;
 use aether_http::HttpServerResponse;
@@ -58,8 +59,9 @@ impl ApiCapabilityState {
     /// with the gate-formed one so the seal-time `validate_member_admission`
     /// admits a policy-authored approval rather than an unchecked assertion.
     ///
-    /// The gate is fail-closed at every branch: no loaded policy, a missing
-    /// projection, or an `Incomplete` verdict all **refuse the seal** (`422`)
+    /// The gate is fail-closed at every branch: an unresolvable tier policy
+    /// ([`gate_policy`](ApiCapabilityState::gate_policy)), a missing projection,
+    /// or an `Incomplete` verdict all **refuse the seal** (`422`)
     /// rather than admit. An above-`auto` member takes the deferred
     /// signature-verification path (issue #3599): its projection's
     /// `signed_statement` is pre-checked synchronously (subject + author
@@ -87,6 +89,11 @@ impl ApiCapabilityState {
     /// membership through [`Gate::evaluate`], then seal — synchronously when
     /// every member resolves `auto`, or deferred behind one `Verify` per
     /// above-`auto` member.
+    ///
+    /// Both doors resolve the draft's own tier policy first
+    /// ([`gate_policy`](ApiCapabilityState::gate_policy)), so a supersession is
+    /// admitted under the successor's sealed policy rather than under whatever
+    /// the predecessor ran or the host booted with.
     ///
     /// `predecessor` selects the door. `None` admits [`Fact::Seal`]; `Some(id)`
     /// admits [`Fact::Supersede`] against that predecessor. A supersession is a
@@ -117,11 +124,13 @@ impl ApiCapabilityState {
                 &format!("draft has {} members; a seal is capped at {MAX_SEAL_MEMBERS}", draft.proposals.len()),
             ));
         }
-        // No policy → fail closed: never admit a seal the gate could not decide.
-        let Some(policy) = self.policy.as_ref() else {
-            return Routed::Reply(error_response(422, "approval policy unavailable; seal fails closed"));
+        // Which policy this draft is admitted under — the one it seals, or the
+        // host's file fallback. Fail closed on anything ambiguous.
+        let policy = match self.gate_policy(&draft) {
+            Ok(policy) => policy,
+            Err(response) => return Routed::Reply(response),
         };
-        let gate = Gate::new(policy);
+        let gate = Gate::new(&policy);
         // Pass 1: resolve every membership synchronously (fail-closed 422 on any
         // shortfall, before any signing dispatch).
         let (sealed_proposals, pending_verifications) =
@@ -181,6 +190,47 @@ impl ApiCapabilityState {
             idempotency_key,
             verifications,
         }))
+    }
+
+    /// The tier policy this draft's members are admitted under (#4616): the
+    /// `aether.bloomery.approval_policy` it seals bloom-wide, or the host's
+    /// file-loaded fallback when it seals none.
+    ///
+    /// Bloom-wide only, and a member-scoped entry is **refused** rather than
+    /// resolved or ignored. Resolving it would let a member seal the policy that
+    /// decides whether that member may be admitted — self-authorization at the
+    /// one gate that exists to prevent it — and ignoring it would leave a sealed
+    /// configuration nothing reads, which is exactly the attested-but-inert
+    /// divergence ADR-0174 removes.
+    ///
+    /// Every other branch fails closed too. An unready cache cannot tell an
+    /// unsealed policy from unfetched content, so it refuses instead of falling
+    /// back. A sealed address that is missing, misfiled, or undecodable refuses
+    /// rather than defaulting past it: the bloom would otherwise be admitted at a
+    /// tier its own receipt contradicts.
+    fn gate_policy(&self, draft: &BloomDraft) -> Result<ApprovalPolicy, HttpServerResponse> {
+        if let Some(member) = draft.proposals.iter().find(|member| member.configs.address::<ApprovalPolicy>().is_some())
+        {
+            return Err(error_response(
+                422,
+                &format!(
+                    "member {} seals its own approval policy; the tier policy is bloom-wide only, seal fails closed",
+                    member.workpiece.0
+                ),
+            ));
+        }
+        if !self.configs_ready {
+            return Err(error_response(422, "configuration set not yet read; seal fails closed"));
+        }
+
+        match self.configs.resolve::<ApprovalPolicy>(ConfigScopes::bloom_wide(&draft.configs)) {
+            Ok(Some(sealed)) => Ok(sealed),
+            Ok(None) => self
+                .file_policy
+                .clone()
+                .ok_or_else(|| error_response(422, "approval policy unavailable; seal fails closed")),
+            Err(error) => Err(error_response(422, &format!("sealed approval policy unresolvable: {error}"))),
+        }
     }
 
     /// Write one dispatch-description row per member the operator supplied text

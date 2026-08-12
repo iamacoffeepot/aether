@@ -23,8 +23,9 @@ use aether_actor::actor;
 // `#[fallback]` would) and the settlement-notice safety net. The request-ingress
 // kinds are the per-route kinds `#[http::router]` mints in `runtime/mod.rs`, and
 // a deferred route's reply kind rides its own `#[http::reply]` glue (ADR-0154),
-// so neither is named here.
-use aether_bloomery::AdmitResult;
+// so neither is named here. The boot configuration read answers no route at all,
+// so its reply is hand-written and named here (#4616).
+use aether_bloomery::{AdmitResult, LoadConfigsResult};
 use aether_kinds::trace::Settled;
 
 use crate::signing::VerifyResult;

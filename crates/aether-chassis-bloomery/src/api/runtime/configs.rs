@@ -26,18 +26,26 @@
 //! Content addressing makes the write idempotent — identical content under the
 //! same kind addresses to the same digest and rewrites the same row — so the
 //! route is safely repeatable.
+//!
+//! Authoring also fills this cap's own resolved-configuration cache, and the
+//! boot [`LoadConfigs`] read seeds it. The pre-seal approve gate resolves a
+//! draft's sealed tier policy out of that cache (#4616) rather than reaching the
+//! store from inside a synchronous admission decision, so the cap needs the
+//! content in hand before it can gate anything.
 
-use aether_bloomery::{Digest, config_address};
+use aether_actor::Manual;
+use aether_bloomery::{Digest, LoadConfigs, LoadConfigsResult, config_address};
 use aether_codec::encode_schema;
 use aether_data::schema::SchemaType;
 use aether_http::HttpServerResponse;
 use aether_kinds::descriptors;
+use aether_substrate::actor::native::NativeCtx;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::response::{error_response, json};
-use super::state::Routed;
-use crate::store::{RecordConfig, RecordConfigResult};
+use super::state::{ApiCapabilityState, Routed};
+use crate::store::{RecordConfig, RecordConfigResult, StoreCapability};
 
 /// The request: which kind the value is, and the value itself as JSON.
 #[derive(Deserialize)]
@@ -94,17 +102,57 @@ pub(super) fn author_config(body: &[u8]) -> Routed {
 /// address on a durable write, `500` on a failed one — never an address the
 /// caller could seal against nothing.
 ///
-/// The address comes from the reply's own echo rather than from state held
-/// across the write, which is what lets this route ride the plain relay
-/// (ADR-0154 §3) instead of keeping a correlation map. A digest that is not 32
-/// bytes is the store contradicting its own contract, so it is a `500` rather
-/// than a silently truncated address.
-pub(super) fn config_response(result: RecordConfigResult) -> HttpServerResponse {
+/// Everything this route needs arrives in the reply's own echo rather than in
+/// state held across the write, which is what lets it ride the plain relay
+/// (ADR-0154 §3) instead of keeping a correlation map. That is also why the echo
+/// carries the bytes: a durable write has to leave the content resolvable here
+/// too (#4616), and a `#[http::reply]` route receives only the reply.
+///
+/// A failed write files nothing — the address never reached the caller, and
+/// caching content the store does not hold would let a seal succeed here that no
+/// restart could reproduce. A digest that is not 32 bytes is the store
+/// contradicting its own contract, so it is a `500` rather than a silently
+/// truncated address.
+pub(super) fn config_response(state: &mut ApiCapabilityState, result: RecordConfigResult) -> HttpServerResponse {
     match result {
-        RecordConfigResult::Ok { digest, kind } => <[u8; 32]>::try_from(digest.as_slice()).map_or_else(
-            |_| error_response(500, &format!("config write echoed a {}-byte address", digest.len())),
-            |bytes| json(200, &ConfigView { digest: Digest::from_bytes(bytes), kind }),
-        ),
+        RecordConfigResult::Ok { digest, kind, bytes } => {
+            let Some(address) = Digest::from_slice(&digest) else {
+                return error_response(500, &format!("config write echoed a {}-byte address", digest.len()));
+            };
+
+            state.configs.insert(address, kind.clone(), bytes);
+            json(200, &ConfigView { digest: address, kind })
+        }
         RecordConfigResult::Err { error } => error_response(500, &format!("config write failed: {error}")),
     }
+}
+
+impl ApiCapabilityState {
+    /// Fill the resolved-configuration cache from the store's boot read (#4616).
+    ///
+    /// The boot posture is the control core's (ADR-0174): an unreadable table or
+    /// a malformed address aborts rather than coming up on a partial cache,
+    /// because a cap that silently held less content than the store does would
+    /// gate a seal against a policy it merely failed to read — resolving a lower
+    /// tier than the bloom actually sealed, which is the one failure this whole
+    /// path exists to make impossible.
+    pub(super) fn hydrate_configs(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: LoadConfigsResult) {
+        let records = match mail {
+            LoadConfigsResult::Ok { records } => records,
+            LoadConfigsResult::Err { error } => ctx.fatal_abort(format!("boot configuration read failed: {error}")),
+        };
+        for record in records {
+            let Some(address) = Digest::from_slice(&record.digest) else {
+                ctx.fatal_abort(format!("stored configuration `{}` has a malformed address", record.kind));
+            };
+            self.configs.insert(address, record.kind, record.bytes);
+        }
+        self.configs_ready = true;
+    }
+}
+
+/// Ask the store for every stored configuration — the boot read the cap's `wire`
+/// fires so the pre-seal gate has content to resolve a sealed policy against.
+pub(super) fn load_configs(ctx: &mut NativeCtx<'_>) {
+    ctx.actor::<StoreCapability>().send_detached(&LoadConfigs);
 }

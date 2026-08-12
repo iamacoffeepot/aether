@@ -9,9 +9,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 #[cfg(feature = "github")]
-use aether_bloomery::SharedCorrespondence as DomainSharedCorrespondence;
-#[cfg(feature = "github")]
-use aether_bloomery_github::SharedCorrespondence as GitSharedCorrespondence;
+use aether_bloomery::SharedCorrespondence;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_http::{HttpServerCapability, HttpServerConfig};
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
@@ -91,8 +89,8 @@ pub struct BloomeryChassis;
 #[cfg(feature = "github")]
 fn mounted_correspondence<T>(
     mounted: Option<&T>,
-    correspondence: &DomainSharedCorrespondence,
-) -> Option<DomainSharedCorrespondence> {
+    correspondence: &SharedCorrespondence,
+) -> Option<SharedCorrespondence> {
     mounted.map(|_| Arc::clone(correspondence))
 }
 
@@ -106,27 +104,25 @@ struct BloomeryActorSetups {
 }
 
 #[cfg(feature = "github")]
-fn correspondence_views(
+fn correspondence_store(
     github_connection: &GithubConnectionConfig,
     store_path: &str,
-) -> Result<(DomainSharedCorrespondence, GitSharedCorrespondence), BootError> {
+) -> Result<SharedCorrespondence, BootError> {
     #[cfg(not(any(test, feature = "testing")))]
     let _ = github_connection;
 
     #[cfg(any(test, feature = "testing"))]
     if github_connection.uses_fixture() {
-        let store = Arc::new(github_connection.shared_fixture());
-        return Ok((Arc::clone(&store) as DomainSharedCorrespondence, store as GitSharedCorrespondence));
+        return Ok(Arc::new(github_connection.shared_fixture()));
     }
 
-    let store = Arc::new(SqliteCorrespondence::open(store_path).map_err(|error| BootError::Other(Box::new(error)))?);
-    Ok((Arc::clone(&store) as DomainSharedCorrespondence, store as GitSharedCorrespondence))
+    Ok(Arc::new(SqliteCorrespondence::open(store_path).map_err(|error| BootError::Other(Box::new(error)))?))
 }
 
 #[cfg(feature = "github")]
 fn source_shell(
     github: &GithubConnectionConfig,
-    correspondence: DomainSharedCorrespondence,
+    correspondence: SharedCorrespondence,
 ) -> Result<SourceShell, BootError> {
     #[cfg(any(test, feature = "testing"))]
     if github.uses_fixture() {
@@ -155,13 +151,13 @@ fn actor_setups(
 ) -> Result<BloomeryActorSetups, BootError> {
     let configured = github.uses_fixture() || github.missing_connection_knobs().is_empty();
     let repository = configured.then(|| (github.owner.clone(), github.repo.clone()));
-    let (domain_correspondence, git_correspondence) = correspondence_views(github, &coordinator.store_path)?;
-    let source = source_shell(github, Arc::clone(&domain_correspondence))?;
+    let correspondence = correspondence_store(github, &coordinator.store_path)?;
+    let source = source_shell(github, Arc::clone(&correspondence))?;
     let executor = (!(!configured && !coordinator.local_lane_enabled))
-        .then(|| ExecutorShell::connect(github, coordinator, Arc::clone(&domain_correspondence), git_correspondence))
+        .then(|| ExecutorShell::connect(github, coordinator, Arc::clone(&correspondence)))
         .transpose()
         .map_err(|error| BootError::Other(Box::new(error)))?;
-    let executor_correspondence = mounted_correspondence(executor.as_ref(), &domain_correspondence);
+    let executor_correspondence = mounted_correspondence(executor.as_ref(), &correspondence);
 
     Ok(BloomeryActorSetups {
         mirror: MirrorReactorSetup {
