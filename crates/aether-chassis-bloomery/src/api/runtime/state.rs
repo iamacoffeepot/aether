@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use aether_actor::{HandlesKind, Manual};
-use aether_bloomery::{Admit, BloomDraft, BloomId, Digest, Event, Statement, Workpiece};
+use aether_bloomery::{
+    Admit, ApprovalPolicy, BloomDraft, BloomId, Digest, Event, ResolvedConfigs, Statement, Workpiece,
+};
 use aether_data::wire::to_vec;
 use aether_data::{Kind, MailId, MailboxId};
 use aether_http as http;
@@ -15,9 +17,8 @@ use aether_kinds::trace::Settled;
 use aether_substrate::actor::native::{NativeActorMailbox, NativeCtx};
 use aether_substrate::{InboundMail, Mailer};
 
-use super::configs::ConfigView;
+use super::configs::AuthoredConfig;
 use super::response::error_response;
-use crate::bloomery::ApprovalPolicy;
 // The control core is a native sibling cap since the wasm-boundary retirement
 // (ADR-0149 §The boundary, amended), addressed as a typed peer
 // (`ctx.actor::<ControlCore>()`) rather than a `resolve_embedded` component lineage.
@@ -52,10 +53,24 @@ pub(super) const MAX_SEAL_MEMBERS: usize = 256;
 pub struct ApiCapabilityState {
     /// This cap's own mailbox, the settlement-notice target.
     pub(super) self_mailbox: MailboxId,
-    /// The parsed tier policy the pre-seal approve gate decides over (issue
-    /// #3583). `None` when the policy file was unreadable or malformed at init —
-    /// the gate then fails closed (no member resolves `auto`).
-    pub(super) policy: Option<ApprovalPolicy>,
+    /// The host's file-loaded tier policy — the fallback a draft that seals no
+    /// `aether.bloomery.approval_policy` entry is gated against (issue #3583,
+    /// #4616). `None` when the policy file was unreadable or malformed at init;
+    /// a draft that seals none then has nothing to decide over and its seal fails
+    /// closed (no member resolves `auto`).
+    pub(super) file_policy: Option<ApprovalPolicy>,
+    /// Configuration content behind the addresses a draft's registry seals — the
+    /// same window onto the store the control core keeps (ADR-0174), filled from
+    /// the boot [`LoadConfigs`](aether_bloomery::LoadConfigs) read and from every
+    /// successful `POST /configs` write. The pre-seal gate is synchronous over
+    /// in-memory state, so a sealed policy has to be resolvable without a store
+    /// round trip inside the admission path.
+    pub(super) configs: ResolvedConfigs,
+    /// Whether the boot configuration read has landed. Until it has, this cap
+    /// cannot tell an unsealed policy from one whose content it merely has not
+    /// fetched — the two decide opposite tiers — so a seal arriving first is
+    /// refused rather than gated against the fallback.
+    pub(super) configs_ready: bool,
     /// Cached mailer for `send_envelope_detached` settlement subscriptions.
     pub(super) mailer: Arc<Mailer>,
     /// Staged workpieces, keyed by their workpiece id.
@@ -81,11 +96,12 @@ pub struct ApiCapabilityState {
     pub(super) seals: HashMap<u64, PendingSeal>,
     /// The next seal handle to mint.
     pub(super) next_seal: u64,
-    /// Authored scope revisions held across their store write (#4588), keyed by
+    /// Authored configurations held across their store write (#4588), keyed by
     /// the write dispatch's `MailId.correlation_id`. The reply carries only
-    /// success or failure, so the view the caller gets back waits here rather
+    /// success or failure, so the view the caller gets back — and the bytes that
+    /// join [`configs`](Self::configs) once the row is durable — wait here rather
     /// than being rebuilt from it.
-    pub(super) configs: HashMap<u64, ConfigView>,
+    pub(super) authoring: HashMap<u64, AuthoredConfig>,
     /// Each in-flight above-auto member verification, keyed by its `Verify`
     /// dispatch `MailId.correlation_id`, back-pointing at the held [`PendingSeal`]
     /// and the member it forms the approval for on a verified reply.
