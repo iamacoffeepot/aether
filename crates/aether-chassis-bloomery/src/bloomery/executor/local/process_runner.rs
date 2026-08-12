@@ -6,8 +6,7 @@ use std::path::Path;
 use std::process::{Child, Command};
 use std::{fs, io};
 
-use aether_bloomery::is_model_lane;
-use aether_bloomery_github::GitObjectId;
+use aether_bloomery::{BackendObjectId, is_model_lane};
 
 use super::error::LocalExecutorError;
 use super::lane_env::{inherited_keys, scrub_coordinator_env};
@@ -193,12 +192,45 @@ impl TransformRunner for ProcessTransformRunner {
         let commit_hex = git_in(worktree_dir, &["rev-parse", "HEAD"])?;
         #[allow(clippy::literal_string_with_formatting_args, reason = "git revision syntax, not a format string")]
         let tree_hex = git_in(worktree_dir, &["rev-parse", "HEAD^{tree}"])?;
-        let commit = GitObjectId::from_hex(commit_hex.trim()).ok_or_else(|| {
+        let commit = decode_object_hex(commit_hex.trim()).ok_or_else(|| {
             LocalExecutorError::Worktree(format!("malformed capture commit sha `{}`", commit_hex.trim()))
         })?;
-        let tree = GitObjectId::from_hex(tree_hex.trim())
+        let tree = decode_object_hex(tree_hex.trim())
             .ok_or_else(|| LocalExecutorError::Worktree(format!("malformed capture tree sha `{}`", tree_hex.trim())))?;
         Ok(Some(CapturedObjects { commit, tree }))
+    }
+}
+
+/// Decode the hex object id `git rev-parse` printed into the opaque bytes the
+/// domain correspondence stores.
+///
+/// This is the Git text boundary of the host capture path, and nothing more: it
+/// converts a rendering, it does not judge the object. Which byte lengths name a
+/// well-formed Git object (20-byte SHA-1, 32-byte SHA-256) is the adapter's
+/// question, so any even length passes here and either hex case is accepted.
+/// Empty, odd-length, or non-hex text is `None` — text git never produces, which
+/// the caller reports as a malformed sha rather than recording bytes that
+/// correspond to no object.
+fn decode_object_hex(sha: &str) -> Option<BackendObjectId> {
+    let raw = sha.as_bytes();
+    if raw.is_empty() || !raw.len().is_multiple_of(2) {
+        return None;
+    }
+
+    let mut bytes = Vec::with_capacity(raw.len() / 2);
+    for pair in raw.chunks_exact(2) {
+        bytes.push((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?);
+    }
+    Some(BackendObjectId::new(bytes))
+}
+
+/// One hex character as its `0..=15` nibble, or `None` for a non-hex byte.
+const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -385,7 +417,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        CaptureIdentity, FALLBACK_IDENTITY, fetch_subject_if_absent, git_in, reclaim_worktree_path, strip_hooks,
+        CaptureIdentity, FALLBACK_IDENTITY, decode_object_hex, fetch_subject_if_absent, git_in, reclaim_worktree_path,
+        strip_hooks,
     };
 
     // A repo whose *local* identity is set to `identity` — local config outranks
@@ -524,5 +557,31 @@ mod tests {
     #[test]
     fn strip_hooks_errs_on_malformed_json() {
         assert!(strip_hooks("{not json").is_err(), "malformed JSON surfaces as an error, not a silent no-op");
+    }
+
+    #[test]
+    fn object_hex_decodes_either_case_at_any_even_length() {
+        // Tripwire: the decoded bytes are what the candidate digests are taken
+        // over and what the correspondence stores, so a nibble swapped, a case
+        // rejected, or a length refused silently mints a candidate that resolves
+        // to the wrong object. Both real git object formats are covered, plus a
+        // third even length the host has no business ruling on.
+        assert_eq!(decode_object_hex("00ff").unwrap().as_bytes(), [0x00, 0xff], "lowercase decodes");
+        assert_eq!(decode_object_hex("00FF").unwrap().as_bytes(), [0x00, 0xff], "uppercase decodes identically");
+        assert_eq!(decode_object_hex("aB3c").unwrap().as_bytes(), [0xab, 0x3c], "mixed case decodes");
+        assert_eq!(decode_object_hex(&"a".repeat(40)).unwrap().as_bytes().len(), 20, "a SHA-1 sha is 20 bytes");
+        assert_eq!(decode_object_hex(&"a".repeat(64)).unwrap().as_bytes().len(), 32, "a SHA-256 sha is 32 bytes");
+        assert_eq!(decode_object_hex(&"a".repeat(24)).unwrap().as_bytes().len(), 12, "another even length passes too");
+    }
+
+    #[test]
+    fn object_hex_rejects_text_git_never_prints() {
+        // The complement: the capture reports these as a malformed sha rather
+        // than recording bytes that correspond to no object. `+f` is the case a
+        // radix parse would silently accept as 15.
+        assert!(decode_object_hex("").is_none(), "empty text names no object");
+        assert!(decode_object_hex(&"a".repeat(39)).is_none(), "an odd length is half a byte short");
+        assert!(decode_object_hex(&"z".repeat(40)).is_none(), "a non-hex character is refused");
+        assert!(decode_object_hex("+f").is_none(), "a sign is not a hex digit");
     }
 }
