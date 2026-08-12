@@ -216,6 +216,12 @@ impl ExecutorReactorState {
     /// drive with a fake-GitHub-backed shell and an in-memory store, bypassing
     /// `init` (which needs config and a real connect). Spawns no timer; a test
     /// drives the loop by feeding a [`DispatchTick`] into the handler directly.
+    ///
+    /// This constructor exists only for tests, so it is by definition a fixture
+    /// boot: its `pusher` resolves through [`default_candidate_push`]'s fixture
+    /// arm (refusing) rather than hand-picking a default here, so the boot-time
+    /// selector stays the one policy site. Chain [`Self::with_pusher`] to
+    /// substitute a recording seam.
     #[must_use]
     pub fn with_parts(
         executor: Option<ExecutorShell>,
@@ -236,8 +242,17 @@ impl ExecutorReactorState {
             backoff: None,
             stale_warn_after: stale_warn_after(CoordinatorConfig::default().stale_warn_after_secs),
             correspondence: None,
-            pusher: Arc::new(GitCandidatePush),
+            pusher: default_candidate_push(true),
         }
+    }
+
+    /// Substitute the candidate-push seam — for a test harness that wants to
+    /// record exactly which (commit, ref) pairs a push issued, rather than the
+    /// fixture-default refusal [`Self::with_parts`] otherwise resolves.
+    #[must_use]
+    pub fn with_pusher(mut self, pusher: Arc<dyn CandidatePush>) -> Self {
+        self.pusher = pusher;
+        self
     }
 }
 
@@ -946,6 +961,31 @@ impl CandidatePush for GitCandidatePush {
     }
 }
 
+/// The fixture-boot push: declines every push rather than no-opping. A no-op
+/// hides a harness that reached the push path by accident behind a quiet
+/// success; a refusal is legible in a log — the message names exactly what it
+/// declined — so a fixture boot that wanders into this seam fails loudly
+/// instead of pretending to have pushed.
+struct RefusingCandidatePush;
+
+impl CandidatePush for RefusingCandidatePush {
+    fn push(&self, commit_hex: &str, target_ref: &str) -> Result<(), String> {
+        Err(format!("refusing to push fixture commit {commit_hex} to {target_ref}: no real push in a fixture boot"))
+    }
+}
+
+/// Select the [`CandidatePush`] seam for boot: a fixture boot (`uses_fixture`)
+/// refuses every push rather than shelling git against a real `origin` a
+/// fixture has no business touching; a real boot shells `git push`.
+#[must_use]
+pub fn default_candidate_push(uses_fixture: bool) -> Arc<dyn CandidatePush> {
+    if uses_fixture {
+        Arc::new(RefusingCandidatePush)
+    } else {
+        Arc::new(GitCandidatePush)
+    }
+}
+
 /// Push each admitted passing capture to its bloom candidate ref (ADR-0152).
 /// Best-effort with loud warns: a failed push leaves the candidate local-only —
 /// a downstream Actions checkout of it will fail visibly and retry through the
@@ -1181,7 +1221,7 @@ impl NativeActor for ExecutorReactorCapability {
                 backoff: None,
                 stale_warn_after: stale_warn_after(config.stale_warn_after_secs),
                 correspondence: None,
-                pusher: Arc::new(GitCandidatePush),
+                pusher: config.pusher,
             });
         };
 
@@ -1230,7 +1270,7 @@ impl NativeActor for ExecutorReactorCapability {
             backoff: None,
             stale_warn_after: stale_warn_after(config.stale_warn_after_secs),
             correspondence,
-            pusher: Arc::new(GitCandidatePush),
+            pusher: config.pusher,
         })
     }
 

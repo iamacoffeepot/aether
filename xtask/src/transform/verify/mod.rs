@@ -922,6 +922,18 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     }
 
     #[test]
+    fn every_umbrella_member_has_a_typed_failure_identity() {
+        // Tripwire: an umbrella member that VerifyFailure::from_name cannot
+        // decode is dropped from the projected set, so a run in which it is the
+        // only failure emits status "fail" with no failed_verifiers — a shape
+        // both transports refuse, stalling the dispatch to its deadline rather
+        // than charging the member. verify.suppress was exactly that (#4807).
+        for &id in verify_check_members() {
+            assert!(VerifyFailure::from_name(id).is_some(), "{id} must carry a typed failure identity");
+        }
+    }
+
+    #[test]
     fn all_passed_is_pass_only_when_every_member_passed() {
         assert!(all_passed(&[true, true, true]));
         assert!(!all_passed(&[true, false, true]));

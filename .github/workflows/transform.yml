@@ -84,6 +84,7 @@ jobs:
               elif . == "verify.test" then 16
               elif . == "verify.dup" then 32
               elif . == "verify.deps" then 64
+              elif . == "verify.suppress" then 128
               else error("unknown verifier failure")
               end;
             if .status == "pass" and has("failed_verifiers") then

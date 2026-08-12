@@ -1,6 +1,6 @@
 # ADR-0181: Suppression verifier identity and vocabulary saturation
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-12
 
 ## Context
@@ -36,11 +36,11 @@ The canonical vocabulary order is **append-only and independent of the umbrella'
 
 ### The vocabulary saturates the byte
 
-At eight identities `KNOWN_MASK` becomes `0xff`. Three consequences follow and are accepted deliberately.
+At eight identities every bit of the mask byte is assigned, so `KNOWN_MASK` becomes `0xff` and the `value & !KNOWN_MASK == 0` guard it existed for reduces to `value & 0 == 0`. The constant and the guard therefore go away together rather than being kept as an always-true test — `clippy::bad_bit_mask` denies the masked comparison outright, and silencing it to preserve a check that can no longer fail would be a suppression in the very change that makes suppressions accountable. Three consequences follow and are accepted deliberately.
 
 `VerifyFailureSet` still fits one `u8`, and `to_mask` still renders exactly two lowercase hex digits, so the attempt-artifact name grammar `attempt.<verdict>.<mask>.<subject>.<detail>.<nonce>` is **unchanged in shape**. The two-character mask field stays unambiguous against a 64-hex subject, so `NameEvidenceClaims::claim_for`'s length-based disambiguation is untouched.
 
-`from_mask`'s unknown-high-bit refusal becomes vacuous: every two-lowercase-hex-digit token now names a valid set. On the GitHub path the reference set and the claimed set are both derived from that same token, so their agreement check was already tautological there; after this change the only semantic validation of a mask on that path is the workflow's own `jq` table, which must therefore gain `verify.suppress` in the same change. The evidence body's content digest continues to bind the bytes, and the local path continues to cross-check the body-derived set against the name-derived one.
+`from_mask`'s unknown-high-bit refusal disappears: every two-lowercase-hex-digit token now names a valid set, and what remains is the length and lowercase-hex charset check. On the GitHub path the reference set and the claimed set are both derived from that same token, so their agreement check was already tautological there; after this change the only semantic validation of a mask on that path is the workflow's own `jq` table, which must therefore gain `verify.suppress` in the same change. The evidence body's content digest continues to bind the bytes. The local path shares that defect from the other end: its backend reads `failed_verifiers` out of the body and then composes the artifact name from the same value, so `claim_for`'s agreement check compares a value with itself there too. What guards the local path is the body decode — a present but malformed or noncanonical `failed_verifiers` is refused and fails the verdict closed — together with the nonce binding, intake's `verifier_failure_refusal` invariant, and the digest.
 
 A **ninth** identity does not fit. It requires widening the set to `u16` and the token to four hex digits, which is a coordinated change to the artifact-name grammar and both backends' decoders. That is a materially larger decision than this one, and this ADR states the cost so a future author does not discover it mid-implementation.
 
@@ -69,8 +69,8 @@ The mask is transient. Appending leaves bits 0–6 assigned exactly as before, s
 ## Consequences
 
 - The lane's suppression gate becomes a first-class, repairable, reportable failure instead of a lane-killing one. A `Refine` re-entry that suppresses a lint is now told so, charged for repeating it, and wedged visibly if it keeps doing so.
-- `VerifyFailure`, its `ALL` array, `VERIFY_FAILURE_NAMES`, `KNOWN_MASK`, and the Actions `verifier_bit` table are one coordinated pre-1.0 change; the durable journal encoding is not part of it.
-- The failure vocabulary is full. A ninth identity is a wire break against the two-hex-digit mask token and requires its own decision, not an appended variant.
+- `VerifyFailure`, its `ALL` array, `VERIFY_FAILURE_NAMES`, the retired `KNOWN_MASK`, and the Actions `verifier_bit` table are one coordinated pre-1.0 change; the durable journal encoding is not part of it.
+- The failure vocabulary is full. A ninth identity is a wire break against the two-hex-digit mask token and requires its own decision, not an appended variant. A tripwire pins the full set's mask at `ff`, so the ninth is caught at that boundary instead of truncating into the token.
 - The invariant whose absence caused this — every id in `verify_check_members()` resolves through `VerifyFailure::from_name` — becomes an enforced tripwire rather than a coincidence of two lists having the same length.
 - The mask token retains no semantic validation of its own once every bit is known. Integrity on the Actions path rests on the workflow's canonical-order and duplicate checks plus the evidence digest, which is where ADR-0178 already placed the trust boundary.
 - The umbrella's run order and the vocabulary's canonical order are now explicitly separate concerns. Future CI-parity reordering of `verify_check_members()` carries no wire consequence.

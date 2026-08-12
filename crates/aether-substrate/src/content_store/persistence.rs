@@ -26,6 +26,54 @@ pub struct RestoredIndex<M> {
     pub next_seq: u64,
 }
 
+/// One entry exactly as it exists under a root: the restored sidecar
+/// metadata, the ingest sequence recorded beside it, and the byte length
+/// of the stored content. What [`read_entry`] yields, and the unit both
+/// [`restore`] and the store's miss-path adopt index from.
+pub struct DiskEntry<M> {
+    pub metadata: M,
+    pub uploaded_seq: u64,
+    pub bytes_len: u64,
+}
+
+/// Read one entry from `root` by hash: its `entries/<hash>.manifest`
+/// sidecar paired with the length of its `entries/<hash>` bytes.
+///
+/// `None` when either half is absent or unreadable — the same torn-write
+/// rule [`restore`] applies, so a sidecar with no bytes beside it is not
+/// an entry. [`restore`] reads every entry through this function, so a
+/// whole-directory rebuild and a single-hash lookup cannot drift.
+pub fn read_entry<M: DeserializeOwned>(root: &Path, hash: &str) -> Option<DiskEntry<M>> {
+    let entries_dir = root.join("entries");
+    let sidecar = read_sidecar::<M>(&entries_dir.join(format!("{hash}.manifest")))?;
+    let bytes_len = fs::metadata(entries_dir.join(hash)).ok()?.len();
+    Some(DiskEntry { metadata: sidecar.metadata, uploaded_seq: sidecar.uploaded_seq, bytes_len })
+}
+
+/// Read the `names.json` name → hash map from `root`, logging rather
+/// than swallowing a read or parse failure. An absent file is normal (no
+/// names yet) and yields an empty map, as does an unusable one — the
+/// caller keeps whatever it already holds.
+///
+/// The mappings are unfiltered: [`restore`] drops the ones whose hash it
+/// did not index, while a name-miss lookup resolves the hash itself.
+pub fn read_names(root: &Path) -> HashMap<String, String> {
+    match fs::read(root.join("names.json")) {
+        Ok(bytes) => match serde_json::from_slice::<HashMap<String, String>>(&bytes) {
+            Ok(stored) => stored,
+            Err(e) => {
+                tracing::warn!(target: TARGET, error = %e, "content store: parsing names.json failed; ignoring names");
+                HashMap::new()
+            }
+        },
+        Err(e) if e.kind() != ErrorKind::NotFound => {
+            tracing::warn!(target: TARGET, error = %e, "content store: reading names.json failed; ignoring names");
+            HashMap::new()
+        }
+        Err(_) => HashMap::new(),
+    }
+}
+
 /// Rebuild the in-memory index from disk: every `entries/<hash>.manifest`
 /// sidecar paired with its `<hash>` bytes, plus the `names.json` map.
 pub fn restore<M: DeserializeOwned>(root: &Path) -> RestoredIndex<M> {
@@ -33,8 +81,7 @@ pub fn restore<M: DeserializeOwned>(root: &Path) -> RestoredIndex<M> {
     let mut total_bytes: u64 = 0;
     let mut clock: u64 = 0;
     let mut max_uploaded_seq: u64 = 0;
-    let entries_dir = root.join("entries");
-    match fs::read_dir(&entries_dir) {
+    match fs::read_dir(root.join("entries")) {
         Ok(read_dir) => {
             for dirent in read_dir.flatten() {
                 let path = dirent.path();
@@ -45,25 +92,15 @@ pub fn restore<M: DeserializeOwned>(root: &Path) -> RestoredIndex<M> {
                 let Some(hash) = path.file_stem().and_then(|s| s.to_str()) else {
                     continue;
                 };
-                let Some(sidecar) = read_sidecar::<M>(&path) else {
+                // A sidecar whose bytes are missing is a torn write; `read_entry` skips it.
+                let Some(DiskEntry { metadata, uploaded_seq, bytes_len }) = read_entry::<M>(root, hash) else {
                     continue;
                 };
-                let Ok(meta) = fs::metadata(entries_dir.join(hash)) else {
-                    // Sidecar without bytes — a torn write; skip it.
-                    continue;
-                };
-                let bytes_len = meta.len();
                 clock += 1;
-                max_uploaded_seq = max_uploaded_seq.max(sidecar.uploaded_seq);
+                max_uploaded_seq = max_uploaded_seq.max(uploaded_seq);
                 entries.insert(
                     hash.to_owned(),
-                    Entry {
-                        metadata: sidecar.metadata,
-                        bytes_len,
-                        pinned: false,
-                        last_access: clock,
-                        uploaded_seq: sidecar.uploaded_seq,
-                    },
+                    Entry { metadata, bytes_len, pinned: false, last_access: clock, uploaded_seq },
                 );
                 total_bytes = total_bytes.saturating_add(bytes_len);
             }
@@ -76,28 +113,10 @@ pub fn restore<M: DeserializeOwned>(root: &Path) -> RestoredIndex<M> {
         }
         Err(_) => {}
     }
-    // Names: keep only entries that still resolve to a stored hash. A
-    // missing names.json is normal (no names yet); a read or parse error
-    // is logged rather than swallowed.
-    let mut names: HashMap<String, String> = HashMap::new();
-    match fs::read(root.join("names.json")) {
-        Ok(bytes) => match serde_json::from_slice::<HashMap<String, String>>(&bytes) {
-            Ok(stored) => {
-                for (name, hash) in stored {
-                    if entries.contains_key(&hash) {
-                        names.insert(name, hash);
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(target: TARGET, error = %e, "content store: parsing names.json failed; ignoring names");
-            }
-        },
-        Err(e) if e.kind() != ErrorKind::NotFound => {
-            tracing::warn!(target: TARGET, error = %e, "content store: reading names.json failed; ignoring names");
-        }
-        Err(_) => {}
-    }
+
+    // Names: keep only the mappings that still resolve to a stored hash.
+    let names = read_names(root).into_iter().filter(|(_, hash)| entries.contains_key(hash)).collect();
+
     RestoredIndex { entries, names, total_bytes, clock, next_seq: max_uploaded_seq.saturating_add(1) }
 }
 
@@ -140,6 +159,10 @@ pub fn ensure_root(root: &Path) -> io::Result<PathBuf> {
 /// garbage lock is reclaimed; a live holder or a write failure leaves
 /// the store unlocked (returns `None`) but still operating, since a
 /// content-addressed store tolerates a shared dir.
+///
+/// What a live holder costs is staleness, not corruption, so the warning
+/// names that consequence: the index this handle is about to build is a
+/// snapshot of the root taken at open.
 pub fn acquire_lock(root: &Path) -> Option<LockGuard> {
     let path = root.join("lock.pid");
     match acquire_lock_pid(&path) {
@@ -149,7 +172,7 @@ pub fn acquire_lock(root: &Path) -> Option<LockGuard> {
                 target: TARGET,
                 path = %path.display(),
                 holder_pid = pid,
-                "content store: lock held by a live process; operating unlocked",
+                "content store: lock held by a live process; operating unlocked — this handle's index is a snapshot taken at open, so entries the holder writes later reach it only through a get miss or an explicit refresh",
             );
             None
         }

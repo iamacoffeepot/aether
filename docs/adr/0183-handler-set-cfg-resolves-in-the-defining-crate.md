@@ -1,6 +1,6 @@
 # ADR-0183: Handler-Set `#[cfg]` Resolves in the Defining Crate
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-12
 
 Amends the marker-bridge design of **ADR-0169** (shared handler sets via dispatch-miss delegation) and extends the `#[cfg]` propagation `#[actor]` gained in iamacoffeepot/aether#4811 to the set authoring surface. Leaves the delegation seam, the reply classes of ADR-0112 / ADR-0134, and the addressing of ADR-0119 / ADR-0166 untouched.
