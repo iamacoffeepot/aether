@@ -345,7 +345,7 @@ mod tests {
             displayed_digest: attempt,
             stage: StageId::Verify,
             transformation: aether_bloomery::Transformation::for_member_stage(
-                StageId::Verify,
+                &StageCatalog::binding_of(StageId::Verify),
                 attempt,
                 Digest::from_bytes([0xC0; 32]),
             ),

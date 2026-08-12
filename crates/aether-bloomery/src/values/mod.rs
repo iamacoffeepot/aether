@@ -31,8 +31,8 @@ pub use price::{PriceRow, PriceTable};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use question::Question;
 pub use stage::{
-    Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, NetworkProfile, REVIEW_CRITIC_COMMAND,
-    StageBinding, StageCatalog, Transformation, VERIFY_CHECK_COMMAND, is_model_lane,
+    Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, ExecutionLimits, NetworkProfile,
+    REVIEW_CRITIC_COMMAND, StageBinding, StageCatalog, Transformation, VERIFY_CHECK_COMMAND, is_model_lane,
 };
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 pub use study::{StudyCost, StudyRecord};
@@ -154,28 +154,23 @@ pub enum EvidenceKind {
     Question,
 }
 
-/// A sealed bloom's predetermined resource ceiling (ADR-0149 §The bloom):
-/// the bounded promise study grades actual against.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub struct Budget {
-    /// The token ceiling for the whole bloom.
-    pub token_ceiling: u64,
-    /// The wall-clock ceiling in seconds.
-    pub wall_clock_secs: u64,
-    /// The per-stage retry cap.
-    pub retry_cap: u32,
-}
-
-/// The sealed forecast of what a bloom's set will cost — what a study report
-/// grades actual cost, time, and retries against after landing (ADR-0149
-/// §The bloom).
+/// The sealed forecast of what a bloom's set will spend — what a study report
+/// grades the actuals against after landing (ADR-0149 §The bloom, ADR-0177).
+///
+/// Graded, never enforced: an overshoot is reported and refuses no dispatch.
+/// Each field names the quantity it measures, because none of them is elapsed
+/// bloom time — [`predicted_worker_secs`] sums the attempts' own durations, so
+/// a bloom running members concurrently accumulates it faster than the clock on
+/// the wall.
+///
+/// [`predicted_worker_secs`]: Self::predicted_worker_secs
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Forecast {
-    /// The predicted total cost (tokens).
-    pub predicted_cost: u64,
-    /// The predicted wall-clock time in seconds.
-    pub predicted_secs: u64,
-    /// The predicted number of stage retries — the retry axis of the grade
-    /// (ADR-0151; `Budget::retry_cap` precedents the shape).
+    /// The predicted total token spend, summed over every attempt.
+    pub predicted_tokens: u64,
+    /// The predicted total worker time in whole seconds — the sum of the
+    /// attempts' own durations, not the bloom's elapsed wall-clock time.
+    pub predicted_worker_secs: u64,
+    /// The predicted number of stage retries — attempts beyond the first.
     pub predicted_retries: u32,
 }

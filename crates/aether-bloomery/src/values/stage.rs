@@ -4,8 +4,9 @@
 //! The pipeline is a closed stage vocabulary compiled into Rust, not a
 //! workflow language. A [`StageBinding`] declares what one stage consumes
 //! and produces, the profile that runs it, its process, its completion gate,
-//! and its retry budget. A bloom can freeze an authored [`StageCatalog`] in its
-//! configuration registry at seal.
+//! its retry budget, and the wall-clock limit its dispatched attempts run
+//! within. A bloom can freeze an authored [`StageCatalog`] in its configuration
+//! registry at seal.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -14,9 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::StageId;
-use crate::values::{
-    AgentProfile, Budget, ConfigScopes, Harness, ReasoningEffort, ResolvedConfigs, ResolvedModel, ToolPolicy,
-};
+use crate::values::{AgentProfile, ConfigScopes, Harness, ReasoningEffort, ResolvedConfigs, ResolvedModel, ToolPolicy};
 
 /// The declared output name every dispatched attempt uploads its result record
 /// under — the study/verdict envelope the intake broker binds to the displayed
@@ -106,6 +105,43 @@ pub enum CatalogError {
         /// The out-of-range budget.
         budget: u32,
     },
+    /// A wall-clock limit is zero (the stage's worker would have no time to run
+    /// at all) or above [`ExecutionLimits::MAX_WALL_CLOCK_SECS`].
+    WallClockOutOfRange {
+        /// The stage whose binding carries it.
+        stage: StageId,
+        /// The out-of-range limit, in whole seconds.
+        wall_clock_secs: u64,
+    },
+}
+
+/// The resource limits one dispatched attempt runs under (ADR-0177).
+///
+/// Per dispatch, not per bloom. A whole-bloom ceiling can only ever refuse the
+/// *next* dispatch once an overshoot is already spent, and it says nothing at
+/// all about members executing concurrently; the bound a worker can actually be
+/// held to is the one its own lane carries. The authority is the sealed
+/// [`StageCatalog`]: every [`StageBinding`] states its stage's limit and each
+/// [`Transformation`] constructor copies the resolved binding's value, so the
+/// dispatched bound is a function of the catalog the bloom attested.
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ExecutionLimits {
+    /// How long one dispatched attempt may run, in whole seconds.
+    ///
+    /// Always a real bound: [`StageCatalog::validate`] refuses zero and anything
+    /// above [`MAX_WALL_CLOCK_SECS`](Self::MAX_WALL_CLOCK_SECS), so there is no
+    /// zero-means-unlimited mode for a reader to have to know about.
+    pub wall_clock_secs: u64,
+}
+
+impl ExecutionLimits {
+    /// The ceiling on an authored wall-clock limit: one day.
+    ///
+    /// Generous on purpose, like [`StageCatalog::MAX_RETRY_BUDGET`] — it exists
+    /// to stop a mistyped unit (milliseconds authored into a seconds field)
+    /// rather than to express a calibration opinion. A lane that legitimately
+    /// wants longer than a day is a lane that should be split.
+    pub const MAX_WALL_CLOCK_SECS: u64 = 86_400;
 }
 
 /// One stage's declared contract (ADR-0149 §The line).
@@ -134,6 +170,12 @@ pub struct StageBinding {
     pub completion_gate: String,
     /// The stage's retry budget.
     pub retry_budget: u32,
+    /// How long one of this stage's dispatched attempts may run, in whole
+    /// seconds — the value each [`Transformation`] copies into its
+    /// [`ExecutionLimits`]. Authored per stage for the same reason
+    /// [`retry_budget`](Self::retry_budget) is: a model lane and a compiler lane
+    /// do not converge on the same clock.
+    pub wall_clock_secs: u64,
 }
 
 /// The set of stage bindings a bloom runs (ADR-0149 §The line).
@@ -273,8 +315,9 @@ impl StageCatalog {
     ///
     /// Structural, not equality against the compiled line: the point of sealing a
     /// catalog is that it may *differ*. What cannot differ is that every stage is
-    /// bound exactly once, every binding names a process some executor routes, and
-    /// every retry budget is a number the reducer can count to.
+    /// bound exactly once, every binding names a process some executor routes,
+    /// every retry budget is a number the reducer can count to, and every
+    /// wall-clock limit is a duration a worker could actually run for.
     ///
     /// # Errors
     ///
@@ -299,6 +342,12 @@ impl StageCatalog {
             if binding.retry_budget == 0 || binding.retry_budget > Self::MAX_RETRY_BUDGET {
                 return Err(CatalogError::RetryBudgetOutOfRange { stage: binding.stage, budget: binding.retry_budget });
             }
+            if binding.wall_clock_secs == 0 || binding.wall_clock_secs > ExecutionLimits::MAX_WALL_CLOCK_SECS {
+                return Err(CatalogError::WallClockOutOfRange {
+                    stage: binding.stage,
+                    wall_clock_secs: binding.wall_clock_secs,
+                });
+            }
         }
         Ok(())
     }
@@ -307,66 +356,89 @@ impl StageCatalog {
     /// [`StageId`] enum — the compile-time guard that every stage has exactly one
     /// binding (ADR-0149 §The line). The binding references the stage's
     /// calibrated [`AgentProfile`] by digest via [`profile_of`](Self::profile_of).
-    fn binding_of(stage: StageId) -> StageBinding {
-        let (consumes, produces, process, completion_gate, retry_budget): (&[&str], &[&str], &str, &str, u32) =
-            match stage {
-                StageId::Sketch => (&["bloom.intent"], &["bloom.sketch"], "sketch", "issue-well-formed", 1),
-                // Scope is a pre-seal operator-harness process (ADR-0149 §The
-                // line, ADR-0150): the operator's own developer-side Bloomery
-                // session authors the scope revision and stages it through the
-                // REST control API (`aether.bloomery.api`'s `POST /workpieces`,
-                // `PATCH /drafts/{id}`, `POST /drafts/{id}/seal`) — never a
-                // dispatched worker lane. `process` names that api cap's
-                // `NAMESPACE`, not a skill slug.
-                StageId::Scope => (&["bloom.sketch"], &["bloom.scope"], "aether.bloomery.api", "plan-present", 1),
-                // Approve is a pre-seal host-side admission gate (ADR-0149 §The
-                // line, ADR-0151): the coordinator's own host resolves the
-                // workpiece's declared surface to an approval tier and forms the
-                // membership `approval` before `Fact::Seal`, never a dispatched
-                // worker lane (the member-line dispatch loop never reaches this
-                // pre-seal stage). `process` names that host gate, not the retired
-                // `.claude/skills/approve` skill slug.
-                StageId::Approve => {
-                    (&["bloom.scope"], &["bloom.ready"], "aether.bloomery.approve_gate", "phase-ready", 1)
-                }
-                StageId::Construct => {
-                    (&["bloom.ready"], &["bloom.candidate"], CONSTRUCT_IMPLEMENT_COMMAND, "pr-open", 2)
-                }
-                StageId::Verify => {
-                    (&["bloom.candidate"], &["bloom.verify_evidence"], "transform.verify", "ci-green", 3)
-                }
-                StageId::Refine => {
-                    (&["bloom.verify_evidence"], &["bloom.candidate"], CONSTRUCT_IMPLEMENT_COMMAND, "ci-green", 3)
-                }
-                StageId::Review => (&["bloom.candidate"], &["bloom.review_rollup"], "review", "review-approved", 2),
-                StageId::Integrate => {
-                    (&["bloom.candidate"], &["bloom.integration"], "integrate", "integration-checkpoint", 2)
-                }
-                StageId::AggregateVerify => {
-                    (&["bloom.integration"], &["bloom.aggregate_verify"], "aggregate-verify", "aggregate-ci-green", 2)
-                }
-                StageId::AggregateReview => (
-                    &["bloom.integration"],
-                    &["bloom.aggregate_review"],
-                    "aggregate-review",
-                    "aggregate-review-approved",
-                    2,
-                ),
-                // Two landing attempts, not one (#4689): the landing branch's
-                // CI is the only gate that judges the fold against current
-                // mainline, so its first red is often a conflict with work that
-                // merged while this bloom ran — answerable by re-opening the
-                // line once. A second red is not something re-proposing can
-                // fix, so the budget stops there and the bloom parks.
-                StageId::Land => (
-                    &["bloom.aggregate_verify", "bloom.aggregate_review"],
-                    &["bloom.receipt"],
-                    "source.cas_land",
-                    "landed",
-                    2,
-                ),
-                StageId::Study => (&["bloom.receipt"], &["bloom.study"], "retrospect", "study-recorded", 1),
-            };
+    ///
+    /// Public so a caller resolving a sealed catalog has the compiled line's
+    /// binding to fall back on when that catalog binds no such stage — the same
+    /// totality [`profile_of`](Self::profile_of) gives the profile axis.
+    ///
+    /// Every arm calibrates `wall_clock_secs` at one hour. That is the initial
+    /// calibration, refinable per stage without an ADR like the tag/gate strings
+    /// and the retry budgets beside it; a custom catalog may author anything
+    /// [`validate`](Self::validate) accepts.
+    #[must_use]
+    pub fn binding_of(stage: StageId) -> StageBinding {
+        let (consumes, produces, process, completion_gate, retry_budget, wall_clock_secs): (
+            &[&str],
+            &[&str],
+            &str,
+            &str,
+            u32,
+            u64,
+        ) = match stage {
+            StageId::Sketch => (&["bloom.intent"], &["bloom.sketch"], "sketch", "issue-well-formed", 1, 3_600),
+            // Scope is a pre-seal operator-harness process (ADR-0149 §The
+            // line, ADR-0150): the operator's own developer-side Bloomery
+            // session authors the scope revision and stages it through the
+            // REST control API (`aether.bloomery.api`'s `POST /workpieces`,
+            // `PATCH /drafts/{id}`, `POST /drafts/{id}/seal`) — never a
+            // dispatched worker lane. `process` names that api cap's
+            // `NAMESPACE`, not a skill slug.
+            StageId::Scope => (&["bloom.sketch"], &["bloom.scope"], "aether.bloomery.api", "plan-present", 1, 3_600),
+            // Approve is a pre-seal host-side admission gate (ADR-0149 §The
+            // line, ADR-0151): the coordinator's own host resolves the
+            // workpiece's declared surface to an approval tier and forms the
+            // membership `approval` before `Fact::Seal`, never a dispatched
+            // worker lane (the member-line dispatch loop never reaches this
+            // pre-seal stage). `process` names that host gate, not the retired
+            // `.claude/skills/approve` skill slug.
+            StageId::Approve => {
+                (&["bloom.scope"], &["bloom.ready"], "aether.bloomery.approve_gate", "phase-ready", 1, 3_600)
+            }
+            StageId::Construct => {
+                (&["bloom.ready"], &["bloom.candidate"], CONSTRUCT_IMPLEMENT_COMMAND, "pr-open", 2, 3_600)
+            }
+            StageId::Verify => {
+                (&["bloom.candidate"], &["bloom.verify_evidence"], "transform.verify", "ci-green", 3, 3_600)
+            }
+            StageId::Refine => {
+                (&["bloom.verify_evidence"], &["bloom.candidate"], CONSTRUCT_IMPLEMENT_COMMAND, "ci-green", 3, 3_600)
+            }
+            StageId::Review => (&["bloom.candidate"], &["bloom.review_rollup"], "review", "review-approved", 2, 3_600),
+            StageId::Integrate => {
+                (&["bloom.candidate"], &["bloom.integration"], "integrate", "integration-checkpoint", 2, 3_600)
+            }
+            StageId::AggregateVerify => (
+                &["bloom.integration"],
+                &["bloom.aggregate_verify"],
+                "aggregate-verify",
+                "aggregate-ci-green",
+                2,
+                3_600,
+            ),
+            StageId::AggregateReview => (
+                &["bloom.integration"],
+                &["bloom.aggregate_review"],
+                "aggregate-review",
+                "aggregate-review-approved",
+                2,
+                3_600,
+            ),
+            // Two landing attempts, not one (#4689): the landing branch's
+            // CI is the only gate that judges the fold against current
+            // mainline, so its first red is often a conflict with work that
+            // merged while this bloom ran — answerable by re-opening the
+            // line once. A second red is not something re-proposing can
+            // fix, so the budget stops there and the bloom parks.
+            StageId::Land => (
+                &["bloom.aggregate_verify", "bloom.aggregate_review"],
+                &["bloom.receipt"],
+                "source.cas_land",
+                "landed",
+                2,
+                3_600,
+            ),
+            StageId::Study => (&["bloom.receipt"], &["bloom.study"], "retrospect", "study-recorded", 1, 3_600),
+        };
         StageBinding {
             stage,
             consumes: consumes.iter().map(|tag| String::from(*tag)).collect(),
@@ -375,6 +447,7 @@ impl StageCatalog {
             process: String::from(process),
             completion_gate: String::from(completion_gate),
             retry_budget,
+            wall_clock_secs,
         }
     }
 
@@ -511,8 +584,9 @@ pub struct Transformation {
     pub outputs: Vec<String>,
     /// The execution image.
     pub image: String,
-    /// The resource limits.
-    pub limits: Budget,
+    /// The resource limits this one dispatch runs under, copied from the
+    /// resolved [`StageBinding`] the sealed catalog gives its stage.
+    pub limits: ExecutionLimits,
     /// The network profile the lane permits.
     pub network: NetworkProfile,
     /// The advisory, human-readable work-order description the construct lane
@@ -562,9 +636,14 @@ impl Transformation {
     /// network. The `Review` lane keeps its `review.critic` command for the
     /// bloom-level `AggregateReview` position that dispatches it (ADR-0153) — it
     /// is no longer a standing member stage.
+    ///
+    /// `binding` is the sealed catalog's resolved binding for the stage being
+    /// dispatched — it names the stage *and* carries its authored
+    /// `wall_clock_secs`, so the dispatched limit cannot come from a stage other
+    /// than the one being dispatched.
     #[must_use]
-    pub fn for_member_stage(stage: StageId, subject: Digest, checkout: Digest) -> Self {
-        let (command, image, network): (&str, &str, NetworkProfile) = match stage {
+    pub fn for_member_stage(binding: &StageBinding, subject: Digest, checkout: Digest) -> Self {
+        let (command, image, network): (&str, &str, NetworkProfile) = match binding.stage {
             // The mechanical Verify lane runs zero-egress; every model-driven lane
             // (Construct / Refine, and the non-member stages that fall through to
             // the construct lane here) reaches the model API under restricted
@@ -595,7 +674,7 @@ impl Transformation {
             diff_base: None,
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
             image: String::from(image),
-            limits: Budget::default(),
+            limits: ExecutionLimits { wall_clock_secs: binding.wall_clock_secs },
             network,
             // The reducer holds only digests; the operator's work-order text is
             // advisory context the host threads on at dispatch, never here. The
@@ -617,8 +696,11 @@ impl Transformation {
     /// CI, downstream of the point where the bloom can still route it back to
     /// an owner. Zero-egress like the member lane — it runs a compiler and
     /// nothing else.
+    ///
+    /// `binding` is the sealed catalog's `AggregateVerify` binding, carrying the
+    /// authored wall-clock limit this fan-out runs under.
     #[must_use]
-    pub fn for_aggregate_verify(subject: Digest, checkout: Digest) -> Self {
+    pub fn for_aggregate_verify(binding: &StageBinding, subject: Digest, checkout: Digest) -> Self {
         Self {
             command: String::from(VERIFY_CHECK_COMMAND),
             inputs: alloc::vec![subject],
@@ -628,7 +710,7 @@ impl Transformation {
             diff_base: None,
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
             image: String::from("iama/verify:1"),
-            limits: Budget::default(),
+            limits: ExecutionLimits { wall_clock_secs: binding.wall_clock_secs },
             network: NetworkProfile::None,
             description: None,
             model: None,
@@ -656,8 +738,11 @@ impl Transformation {
     /// has passed over the same fold: the compiler is the cheaper and more
     /// decisive gate, and there is nothing to judge in a fold that does not
     /// build.
+    ///
+    /// `binding` is the sealed catalog's `AggregateReview` binding, carrying the
+    /// authored wall-clock limit this critic runs under.
     #[must_use]
-    pub fn for_aggregate_review(subject: Digest, checkout: Digest, base: Digest) -> Self {
+    pub fn for_aggregate_review(binding: &StageBinding, subject: Digest, checkout: Digest, base: Digest) -> Self {
         Self {
             command: String::from(REVIEW_CRITIC_COMMAND),
             inputs: alloc::vec![subject],
@@ -665,7 +750,7 @@ impl Transformation {
             diff_base: Some(base),
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
             image: String::from("iama/review-claude:1"),
-            limits: Budget::default(),
+            limits: ExecutionLimits { wall_clock_secs: binding.wall_clock_secs },
             network: NetworkProfile::Restricted,
             description: None,
             model: None,
@@ -706,6 +791,24 @@ pub enum NetworkProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The compiled line's binding for one stage — what a reducer call site
+    // resolves before it builds a dispatch.
+    fn binding(stage: StageId) -> StageBinding {
+        StageCatalog::binding_of(stage)
+    }
+
+    // The compiled line with one stage's wall-clock limit re-authored, which is
+    // what an operator sealing a custom catalog produces.
+    fn catalog_with_wall_clock(stage: StageId, wall_clock_secs: u64) -> StageCatalog {
+        let mut catalog = StageCatalog::line();
+        for authored in &mut catalog.bindings {
+            if authored.stage == stage {
+                authored.wall_clock_secs = wall_clock_secs;
+            }
+        }
+        catalog
+    }
 
     // The line has exactly one binding per stage, in `StageId::ALL` order. A
     // stage dropped or reordered in `line()` breaks this; `StageId::ALL` is
@@ -820,9 +923,14 @@ mod tests {
     // only one judging the fold against current mainline, so its first red is
     // often a conflict with work that merged mid-bloom — answerable by
     // re-opening the line once, and terminal on the second.
+    // Repinned again for #4697: every binding gains a `wall_clock_secs`, so the
+    // catalog's bytes carry a per-stage dispatch limit the line never stated. A
+    // vocabulary addition is an intended catalog edit — the limit that bounds a
+    // stage's worker becomes something the sealed catalog attests rather than a
+    // whole-bloom number nothing read.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x23, 0x50, 0x3b, 0x84, 0xae, 0x7d, 0xe1, 0x8b, 0x15, 0x1f, 0x76, 0x28, 0xa6, 0xa6, 0x09, 0xea, 0x85, 0xbd,
-        0x54, 0xc7, 0x18, 0xd4, 0xb2, 0x41, 0xcd, 0xa5, 0x97, 0xd3, 0xb7, 0xec, 0x0e, 0x18,
+        0xb3, 0x02, 0x2f, 0xfa, 0x87, 0x49, 0x0d, 0x2d, 0x8e, 0x60, 0xbb, 0x14, 0x47, 0xfa, 0x89, 0xc7, 0xdc, 0x66,
+        0xc7, 0x2f, 0xae, 0xa5, 0x83, 0xbb, 0x19, 0x7a, 0xbf, 0x08, 0xd6, 0x73, 0xf4, 0xb8,
     ];
 
     // Tripwire: the compiled line passes the same validation an authored catalog
@@ -834,6 +942,24 @@ mod tests {
     #[test]
     fn the_compiled_line_satisfies_the_rule_authored_catalogs_are_held_to() {
         assert_eq!(StageCatalog::line().validate(), Ok(()));
+    }
+
+    // Tripwire: the seal door refuses a wall-clock limit no worker could run
+    // under — zero (no time at all) and anything past the one-day ceiling. The
+    // limit is authored by hand, which is where a mistyped unit lands, and an
+    // unvalidated one would ride every dispatch of that stage with nothing
+    // downstream able to tell it from a deliberate value.
+    #[test]
+    fn validate_refuses_a_wall_clock_limit_outside_the_authored_range() {
+        assert_eq!(
+            catalog_with_wall_clock(StageId::Verify, 0).validate(),
+            Err(CatalogError::WallClockOutOfRange { stage: StageId::Verify, wall_clock_secs: 0 })
+        );
+        assert_eq!(
+            catalog_with_wall_clock(StageId::Verify, ExecutionLimits::MAX_WALL_CLOCK_SECS + 1).validate(),
+            Err(CatalogError::WallClockOutOfRange { stage: StageId::Verify, wall_clock_secs: 86_401 })
+        );
+        assert_eq!(catalog_with_wall_clock(StageId::Verify, 900).validate(), Ok(()));
     }
 
     #[test]
@@ -870,7 +996,7 @@ mod tests {
     fn for_member_stage_panics_on_scope() {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
-        let _ = Transformation::for_member_stage(StageId::Scope, subject, checkout);
+        let _ = Transformation::for_member_stage(&binding(StageId::Scope), subject, checkout);
     }
 
     // Land is a host-native source-port CAS (LandReactorCapability, #3559), never
@@ -881,7 +1007,7 @@ mod tests {
     fn for_member_stage_panics_on_land() {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
-        let _ = Transformation::for_member_stage(StageId::Land, subject, checkout);
+        let _ = Transformation::for_member_stage(&binding(StageId::Land), subject, checkout);
     }
 
     // The per-member dispatch transformation pins the given subject as its single
@@ -892,13 +1018,16 @@ mod tests {
     fn member_stage_transformation_pins_subject_and_splits_egress_by_lane() {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
-        let construct = Transformation::for_member_stage(StageId::Construct, subject, checkout);
+        let construct = Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout);
         assert_eq!(construct.inputs, alloc::vec![subject]);
         assert_eq!(construct.outputs, alloc::vec![String::from(RESULT_RECORD_OUTPUT)]);
         assert_eq!(construct.network, NetworkProfile::Restricted);
-        assert_eq!(Transformation::for_member_stage(StageId::Verify, subject, checkout).network, NetworkProfile::None);
         assert_eq!(
-            Transformation::for_member_stage(StageId::Review, subject, checkout).network,
+            Transformation::for_member_stage(&binding(StageId::Verify), subject, checkout).network,
+            NetworkProfile::None
+        );
+        assert_eq!(
+            Transformation::for_member_stage(&binding(StageId::Review), subject, checkout).network,
             NetworkProfile::Restricted
         );
     }
@@ -913,7 +1042,7 @@ mod tests {
     fn member_stage_transformation_carries_the_checkout_distinct_from_the_subject() {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
-        let construct = Transformation::for_member_stage(StageId::Construct, subject, checkout);
+        let construct = Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout);
         assert_eq!(construct.checkout, checkout, "the checkout target is threaded onto the transformation");
         assert_eq!(construct.inputs, alloc::vec![subject], "the subject stays the evidence-binding input, untouched");
         assert_ne!(construct.checkout, construct.inputs[0], "checkout and subject are independent axes");
@@ -929,8 +1058,46 @@ mod tests {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
         assert!(
-            Transformation::for_member_stage(StageId::Construct, subject, checkout).description.is_none(),
+            Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout).description.is_none(),
             "the reducer holds only digests; the description is threaded on at dispatch",
+        );
+    }
+
+    // Every dispatch constructor copies the limit off the binding it was handed
+    // — never a default, never a hard-coded one. An operator who shortens one
+    // lane in an authored catalog must see that lane's dispatch shorten while
+    // every other stage keeps its compiled calibration; a constructor that
+    // reached for a whole-bloom or hard-coded value would pass every other
+    // assertion in this module.
+    #[test]
+    fn every_dispatch_constructor_copies_the_limit_off_the_binding_it_was_handed() {
+        let mut shortened = binding(StageId::Verify);
+        shortened.wall_clock_secs = 900;
+        let subject = Digest::from_bytes([7; 32]);
+        let checkout = Digest::from_bytes([9; 32]);
+        let base = Digest::from_bytes([3; 32]);
+
+        assert_eq!(
+            Transformation::for_member_stage(&shortened, subject, checkout).limits.wall_clock_secs,
+            900,
+            "the re-authored binding's limit reaches the dispatch"
+        );
+        assert_eq!(
+            Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout).limits.wall_clock_secs,
+            3_600,
+            "an untouched sibling keeps the compiled calibration"
+        );
+        assert_eq!(
+            Transformation::for_aggregate_verify(&binding(StageId::AggregateVerify), subject, checkout)
+                .limits
+                .wall_clock_secs,
+            3_600
+        );
+        assert_eq!(
+            Transformation::for_aggregate_review(&binding(StageId::AggregateReview), subject, checkout, base)
+                .limits
+                .wall_clock_secs,
+            3_600
         );
     }
 

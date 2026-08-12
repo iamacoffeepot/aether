@@ -51,14 +51,14 @@ fn sealed_with_forecast(forecast: Forecast) -> (Snapshot, BloomId) {
 
 // ADR-0151 — the grade sums a bloom's study records into actual tokens (uncached
 // input + cache-write + cache-read + output, the TTL splits not re-added),
-// whole-second wall-clock, and retries beyond the first attempt, then reports the
-// signed over/under delta per axis against the sealed forecast.
+// whole-second worker time, and retries beyond the first attempt, then reports
+// the signed over/under delta per axis against the sealed forecast.
 #[test]
 fn grade_folds_actuals_and_signs_the_deltas() {
-    // Forecast chosen so cost overshoots, wall-clock undershoots, and retries
+    // Forecast chosen so tokens overshoot, worker seconds undershoot, and retries
     // overshoot — a mixed-sign grade that exercises both delta directions.
     let (snapshot, bloom) =
-        sealed_with_forecast(Forecast { predicted_cost: 500, predicted_secs: 3, predicted_retries: 0 });
+        sealed_with_forecast(Forecast { predicted_tokens: 500, predicted_worker_secs: 3, predicted_retries: 0 });
 
     let record_a = study(cost(100, 50, 200, 30, 1500)); // 380 tokens, 1500 ms
     let record_b = study(cost(200, 0, 100, 20, 800)); //  320 tokens,  800 ms
@@ -77,11 +77,11 @@ fn grade_folds_actuals_and_signs_the_deltas() {
     assert_eq!(report.blooms.len(), 1);
     let g = report.blooms[0];
     assert_eq!(g.bloom, bloom);
-    assert_eq!(g.actual_cost, 700, "380 + 320 tokens, TTL splits not double-counted");
-    assert_eq!(g.actual_secs, 2, "2300 ms floors to 2 whole seconds");
+    assert_eq!(g.actual_tokens, 700, "380 + 320 tokens, TTL splits not double-counted");
+    assert_eq!(g.actual_worker_secs, 2, "2300 ms floors to 2 whole seconds");
     assert_eq!(g.actual_retries, 1, "two attempts is one retry beyond the first");
-    assert_eq!(g.cost_delta, 200, "700 actual over 500 predicted");
-    assert_eq!(g.secs_delta, -1, "2 actual under 3 predicted");
+    assert_eq!(g.token_delta, 200, "700 actual over 500 predicted");
+    assert_eq!(g.worker_secs_delta, -1, "2 actual under 3 predicted");
     assert_eq!(g.retries_delta, 1, "1 actual over 0 predicted");
 }
 
@@ -90,18 +90,18 @@ fn grade_folds_actuals_and_signs_the_deltas() {
 #[test]
 fn grade_of_a_bloom_with_no_study_evidence_is_zero_actuals() {
     let (snapshot, bloom) =
-        sealed_with_forecast(Forecast { predicted_cost: 500, predicted_secs: 3, predicted_retries: 2 });
+        sealed_with_forecast(Forecast { predicted_tokens: 500, predicted_worker_secs: 3, predicted_retries: 2 });
 
     let report = grade(&snapshot, |_: &Digest| None);
     let g = report.blooms[0];
     assert_eq!(g.bloom, bloom);
-    assert_eq!((g.actual_cost, g.actual_secs, g.actual_retries), (0, 0, 0));
-    assert_eq!((g.cost_delta, g.secs_delta, g.retries_delta), (-500, -3, -2));
+    assert_eq!((g.actual_tokens, g.actual_worker_secs, g.actual_retries), (0, 0, 0));
+    assert_eq!((g.token_delta, g.worker_secs_delta, g.retries_delta), (-500, -3, -2));
 }
 
 // ADR-0151 — the retry axis is journal-derived: a study record whose bytes the
 // resolver cannot read still counts as an attempt (so retries reflect the log),
-// but contributes no cost or wall-clock.
+// but contributes no tokens or worker seconds.
 #[test]
 fn unresolved_study_records_still_count_toward_retries() {
     let (snapshot, bloom) = sealed_with_forecast(Forecast::default());
@@ -113,10 +113,10 @@ fn unresolved_study_records_still_count_toward_retries() {
         snapshot = next;
     }
 
-    // The resolver reads nothing, so cost/time stay zero while the three logged
+    // The resolver reads nothing, so tokens/time stay zero while the three logged
     // attempts still yield two retries.
     let report = grade(&snapshot, |_: &Digest| None);
     let g = report.blooms[0];
-    assert_eq!((g.actual_cost, g.actual_secs), (0, 0));
+    assert_eq!((g.actual_tokens, g.actual_worker_secs), (0, 0));
     assert_eq!(g.actual_retries, 2, "three logged attempts is two retries, independent of resolvability");
 }
