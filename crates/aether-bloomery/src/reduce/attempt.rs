@@ -23,6 +23,30 @@ pub(super) fn move_effects(
     targets: DispatchTargets,
     sealed: SealedLine<'_>,
 ) -> [Decision; 2] {
+    move_effects_with_candidate(
+        bloom,
+        workpiece,
+        scope_revision,
+        progress,
+        targets,
+        progress.candidate.map(|current| current.tree),
+        sealed,
+    )
+}
+
+/// Compose a cursor move whose displayed candidate can outlive the optional
+/// checkout pair retained on the cursor. Aggregate repair re-entry uses this
+/// when an inherited resolution claim names a candidate tree but the member
+/// has no candidate-bearing cursor.
+pub(super) fn move_effects_with_candidate(
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    scope_revision: Digest,
+    progress: StageProgress,
+    targets: DispatchTargets,
+    candidate: Option<Digest>,
+    sealed: SealedLine<'_>,
+) -> [Decision; 2] {
     [
         Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress },
         Decision::DispatchAttempt {
@@ -31,7 +55,7 @@ pub(super) fn move_effects(
             stage: progress.stage,
             transformation: Transformation::for_member_stage(progress.stage, targets.subject, targets.checkout),
             scope_revision,
-            candidate: progress.candidate.map(|current| current.tree),
+            candidate,
             profile: stage_profile(sealed.catalog, progress.stage),
             configs: sealed.configs,
         },
@@ -165,12 +189,13 @@ pub(super) fn reduce_attempt_completed(
     let seen_verify_failures = cursor.seen_verify_failures;
     if let Some(next) = next.filter(|_| passed) {
         let progress = StageProgress { stage: next, attempts: 1, candidate, repair_rolls, seen_verify_failures };
-        effects.extend(move_effects(
+        effects.extend(move_effects_with_candidate(
             *bloom,
             workpiece,
             member.scope_revision,
             progress,
             DispatchTargets { subject, checkout },
+            candidate.map(|current| current.tree),
             SealedLine { configs: member.configs.layered_over(record.spec.configs()), catalog: &record.stage_catalog },
         ));
         return Decisions {
@@ -185,12 +210,13 @@ pub(super) fn reduce_attempt_completed(
     if attempts < budget {
         let attempt = attempts + 1;
         let progress = StageProgress { stage, attempts: attempt, candidate, repair_rolls, seen_verify_failures };
-        effects.extend(move_effects(
+        effects.extend(move_effects_with_candidate(
             *bloom,
             workpiece,
             member.scope_revision,
             progress,
             DispatchTargets { subject, checkout },
+            candidate.map(|current| current.tree),
             SealedLine { configs: member.configs.layered_over(record.spec.configs()), catalog: &record.stage_catalog },
         ));
         return Decisions {

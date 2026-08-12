@@ -112,7 +112,15 @@ pub fn run_intake_cycle(
                     report.admitted += 1;
                     sink.admit(*admission);
                 }
-                AdmitDecision::Refused(_) => report.refused += 1,
+                AdmitDecision::Refused(refusal) => {
+                    tracing::warn!(
+                        target: "aether_chassis_bloomery::intake",
+                        nonce = %upload.nonce.0,
+                        ?refusal,
+                        "attempt evidence refused",
+                    );
+                    report.refused += 1;
+                }
             }
         }
     }

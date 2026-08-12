@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 
-use super::attempt::{DispatchTargets, SealedLine, move_effects};
+use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate};
 use super::{AggregateReviewError, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -135,7 +135,7 @@ pub(super) fn reenter_members(
     for workpiece in members {
         effects.push(Decision::RevokeResolution { bloom: *bloom, workpiece: workpiece.clone() });
         let member = record.spec.members().iter().find(|member| member.workpiece == *workpiece);
-        let candidate = record.claims.get(workpiece).map(|claim| claim.candidate);
+        let claimed_candidate = record.claims.get(workpiece).map(|claim| claim.candidate);
         let cursor = record.progress.get(workpiece).copied();
         let progress = StageProgress {
             stage: StageId::Refine,
@@ -148,15 +148,16 @@ pub(super) fn reenter_members(
         // the claimed candidate tree binds the evidence and its capture commit
         // is the checkout; the cursor's candidate carries the checkout pair.
         let (subject, checkout) = progress.candidate.map_or_else(
-            || (candidate.or_else(|| member.map(|m| m.scope_revision)).unwrap_or(fold), record.spec.base()),
+            || (claimed_candidate.or_else(|| member.map(|m| m.scope_revision)).unwrap_or(fold), record.spec.base()),
             |current| (current.tree, current.checkout),
         );
-        effects.extend(move_effects(
+        effects.extend(move_effects_with_candidate(
             *bloom,
             workpiece,
             member.map_or(fold, |m| m.scope_revision),
             progress,
             DispatchTargets { subject, checkout },
+            progress.candidate.map(|current| current.tree).or(claimed_candidate),
             SealedLine {
                 configs: member.map_or_else(ConfigRegistry::default, |m| m.configs.layered_over(record.spec.configs())),
                 catalog: &record.stage_catalog,
