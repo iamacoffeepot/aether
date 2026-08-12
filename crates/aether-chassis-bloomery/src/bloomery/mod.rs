@@ -23,6 +23,8 @@ mod reactor;
 mod source;
 #[cfg(feature = "github")]
 mod study;
+#[cfg(all(feature = "github", any(test, feature = "testing")))]
+mod testing;
 
 pub use approve::{
     AdmissionRequest, AdrTouch, ApprovalPolicy, Completeness, Decision, Gate, Incompleteness, PolicyError,
@@ -52,10 +54,11 @@ pub use mirror::ProjectionShell;
 pub use outbox::TopicOutbox;
 #[cfg(feature = "github")]
 pub use reactor::{
-    ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick, DispatchTick,
-    DrainTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState, IntegrateReactorCapability,
-    IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, LandReactorCapability, LandReactorSetup,
-    LandReactorState, LandTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
+    CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick,
+    DispatchTick, DrainTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState,
+    IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, LandReactorCapability,
+    LandReactorSetup, LandReactorState, LandTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
+    default_candidate_push,
 };
 #[cfg(feature = "github")]
 pub use source::SourceShell;
@@ -64,3 +67,5 @@ pub use study::{
     StudyAdmission, StudyAdmitDecision, StudyIntakeError, StudyRefusal, UploadedStudyRecord, admit_study,
     rebuild_study_index,
 };
+#[cfg(all(feature = "github", any(test, feature = "testing")))]
+pub use testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, ScriptedVerdict};

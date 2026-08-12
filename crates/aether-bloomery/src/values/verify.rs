@@ -9,6 +9,11 @@ use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// One member of the closed V1 verifier-failure vocabulary, in canonical order.
+///
+/// The order is append-only and independent of the umbrella's run order: each
+/// identity's bit is its position, so a new identity goes on the end or every
+/// deployed mask shifts. Every bit of the mask byte carries an identity, so a
+/// ninth one needs a `u16` set and a four-hex-digit token (ADR-0181).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum VerifyFailure {
     /// The umbrella could not satisfy its tool/target prerequisites.
@@ -25,12 +30,14 @@ pub enum VerifyFailure {
     Dup,
     /// `verify.deps` failed.
     Deps,
+    /// `verify.suppress` failed (ADR-0181).
+    Suppress,
 }
 
 impl VerifyFailure {
     /// Every V1 identity, in canonical wire order.
-    pub const ALL: [Self; 7] =
-        [Self::Preflight, Self::Fmt, Self::Clippy, Self::Docs, Self::Test, Self::Dup, Self::Deps];
+    pub const ALL: [Self; 8] =
+        [Self::Preflight, Self::Fmt, Self::Clippy, Self::Docs, Self::Test, Self::Dup, Self::Deps, Self::Suppress];
 
     /// The canonical identity string.
     #[must_use]
@@ -43,6 +50,7 @@ impl VerifyFailure {
             Self::Test => "verify.test",
             Self::Dup => "verify.dup",
             Self::Deps => "verify.deps",
+            Self::Suppress => "verify.suppress",
         }
     }
 
@@ -57,6 +65,7 @@ impl VerifyFailure {
             b"verify.test" => Some(Self::Test),
             b"verify.dup" => Some(Self::Dup),
             b"verify.deps" => Some(Self::Deps),
+            b"verify.suppress" => Some(Self::Suppress),
             _ => None,
         }
     }
@@ -107,8 +116,16 @@ impl<'de> Deserialize<'de> for VerifyFailure {
     }
 }
 
-const VERIFY_FAILURE_NAMES: [&str; 7] =
-    ["verify.preflight", "verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps"];
+const VERIFY_FAILURE_NAMES: [&str; 8] = [
+    "verify.preflight",
+    "verify.fmt",
+    "verify.clippy",
+    "verify.docs",
+    "verify.test",
+    "verify.dup",
+    "verify.deps",
+    "verify.suppress",
+];
 
 /// A deduplicated verifier-failure set with one canonical order and mask.
 ///
@@ -119,8 +136,6 @@ const VERIFY_FAILURE_NAMES: [&str; 7] =
 pub struct VerifyFailureSet(u8);
 
 impl VerifyFailureSet {
-    const KNOWN_MASK: u8 = 0x7f;
-
     /// The empty set.
     pub const EMPTY: Self = Self(0);
 
@@ -167,15 +182,18 @@ impl VerifyFailureSet {
 
     /// Decode an exact two-lowercase-hex-digit artifact token.
     ///
-    /// Refuses wrong length, uppercase, non-hex text, and the unknown high bit.
+    /// Refuses wrong length, uppercase, and non-hex text. Every bit of the byte
+    /// carries an identity, so any well-formed token names a valid set and the
+    /// decode makes no unknown-bit refusal (ADR-0181); the workflow's own
+    /// canonical-order and duplicate checks, plus the evidence digest, carry the
+    /// semantic validation on the Actions path.
     #[must_use]
     pub fn from_mask(mask: &str) -> Option<Self> {
         let bytes = mask.as_bytes();
         if bytes.len() != 2 || !bytes.iter().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)) {
             return None;
         }
-        let value = (hex_nibble(bytes[0])? << 4) | hex_nibble(bytes[1])?;
-        (value & !Self::KNOWN_MASK == 0).then_some(Self(value))
+        Some(Self((hex_nibble(bytes[0])? << 4) | hex_nibble(bytes[1])?))
     }
 }
 
@@ -302,7 +320,22 @@ mod tests {
         assert_eq!(VerifyFailureSet::from_mask("45"), Some(failures));
         assert_eq!(VerifyFailureSet::from_mask("7f").map(VerifyFailureSet::to_mask).as_deref(), Some("7f"));
 
-        for invalid in ["0", "000", "0A", "GG", "g0", "-1", "80", "ff"] {
+        // Tripwire: the whole vocabulary must still fit the two-hex-digit token
+        // the attempt-artifact grammar reserves for it. A ninth identity shifts
+        // `bit()` by 8, and with overflow checks on — the profile `cargo test`
+        // and CI run — that panics here before the comparison is reached. The
+        // panic is the signal, not the compared mask: with overflow checks off
+        // the shift wraps to bit 0, the mask still reads `ff`, and this line
+        // passes, so a release-profile run does not catch the ninth identity.
+        assert_eq!(VerifyFailure::ALL.into_iter().collect::<VerifyFailureSet>().to_mask(), "ff");
+        assert_eq!(VerifyFailureSet::one(VerifyFailure::Suppress).to_mask(), "80");
+        assert_eq!(VerifyFailureSet::from_mask("80"), Some(VerifyFailureSet::one(VerifyFailure::Suppress)));
+        assert_eq!(
+            VerifyFailureSet::from_mask("ff"),
+            Some(VerifyFailure::ALL.into_iter().collect::<VerifyFailureSet>())
+        );
+
+        for invalid in ["0", "000", "0A", "GG", "g0", "-1"] {
             assert!(VerifyFailureSet::from_mask(invalid).is_none(), "`{invalid}` must be refused");
         }
     }

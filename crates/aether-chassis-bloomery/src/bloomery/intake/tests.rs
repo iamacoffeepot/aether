@@ -934,10 +934,30 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
     };
     assert_eq!(claims.claim_for(&reference).expect("typed mask decodes").failed_verifiers, failures);
 
-    for invalid_mask in ["0A", "80", "0", "gg"] {
-        let malformed =
-            EvidenceRef { name: name.replacen(".0a.", &format!(".{invalid_mask}."), 1), ..reference.clone() };
-        assert!(claims.claim_for(&malformed).is_none(), "mask `{invalid_mask}` must not become an upload");
+    // `80` is the eighth identity's mask (ADR-0181), so it is a well-formed token
+    // that must now decode rather than be refused. Both projections carry it, so
+    // a decode that dropped bit 7 could not hide behind the agreement check below.
+    let suppressed = VerifyFailureSet::one(VerifyFailure::Suppress);
+    let eighth =
+        EvidenceRef { name: name.replacen(".0a.", ".80.", 1), failed_verifiers: suppressed, ..reference.clone() };
+    assert_eq!(claims.claim_for(&eighth).expect("the eighth identity's mask decodes").failed_verifiers, suppressed);
+
+    // Tripwire: a malformed mask token must be refused by the name decode itself
+    // rather than incidentally by the body/name agreement check. Each case pairs
+    // the token with the set a lax decode would read out of it — `0A` is the
+    // reference's own mask in uppercase, while `gg` and the one-character `0`
+    // would fall open to the empty set — so agreement holds and only the decode
+    // can reject. Leave the body at its original set and every case here passes
+    // on the disagreement instead, proving nothing about the token.
+    for (malformed_mask, lax_reading) in
+        [("0A", failures), ("gg", VerifyFailureSet::EMPTY), ("0", VerifyFailureSet::EMPTY)]
+    {
+        let malformed = EvidenceRef {
+            name: name.replacen(".0a.", &format!(".{malformed_mask}."), 1),
+            failed_verifiers: lax_reading,
+            ..reference.clone()
+        };
+        assert!(claims.claim_for(&malformed).is_none(), "mask `{malformed_mask}` must not become an upload");
     }
     let mismatched = EvidenceRef { failed_verifiers: VerifyFailureSet::EMPTY, ..reference };
     assert!(claims.claim_for(&mismatched).is_none(), "body/name projections must agree");

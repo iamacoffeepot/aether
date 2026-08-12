@@ -20,13 +20,16 @@ use aether_bloomery_github::{
     ActionsExecutor, Artifact, ExecutorError, GithubError, LaneWorkflows, RunConclusion, RunStatus, StageVerdict,
     to_hex,
 };
-use aether_data::Kind;
 use aether_data::wire::{from_bytes, to_vec};
+use aether_data::{Kind, MailboxId};
+use aether_substrate::mail::mailer::Mailer;
+use aether_substrate::mail::registry::Registry;
 
 use super::{
-    BACKOFF_CAP, CandidatePush, NameEvidenceClaims, Stores, TickClock, TrackedHandle, backoff_delay,
-    drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_stale, next_backoff,
-    pull_and_admit, push_admitted_candidates, seed_tracked, select_stale_handles,
+    BACKOFF_CAP, CandidatePush, ExecutorReactorState, NameEvidenceClaims, Stores, TickClock, TrackedHandle,
+    backoff_delay, default_candidate_push, drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch,
+    is_disabled_mount, is_stale, next_backoff, pull_and_admit, push_admitted_candidates, seed_tracked,
+    select_stale_handles,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -1448,6 +1451,69 @@ fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
     assert!(issued[0].1.ends_with("/candidate/wp-cand"), "the workpiece segment is sanitized to ref-safe characters");
 }
 
+// Tripwire: `default_candidate_push`'s fixture arm declines every push rather
+// than shelling git. The assertion is on the refusal message rather than on
+// `is_err`, because the message is the only signal here that does not depend on
+// git's behaviour — it names the refusing arm without a remote being contacted
+// at all. What `GitCandidatePush` would do with these arguments is worse than an
+// error: git reads an all-zero source sha as its ref-delete sentinel rather than
+// as an object to resolve, so `git push --force origin 0000…:<ref>` exits 0 and
+// reports "- [deleted]" (measured against a throwaway bare remote, for an
+// existing and a missing ref alike; the non-zero unknown sha is the case that
+// exits 1 with "bad object"). `GitCandidatePush::push` answers `Ok(())` whenever
+// the shell-out succeeds, so the git arm would delete the candidate ref on
+// `origin` and `push_admitted_candidates` would log it as a pushed capture. That
+// silent deletion — not a noisy failed push — is what this seam exists to
+// prevent, and only the refusing arm names the ref and commit it declined.
+#[test]
+fn default_candidate_push_refuses_on_a_fixture_boot() {
+    let target_ref = "refs/heads/bloom/…/candidate/wp";
+    let commit_hex = "0".repeat(40);
+
+    let refusal = default_candidate_push(true).push(&commit_hex, target_ref).expect_err("the fixture arm declines");
+
+    assert!(refusal.contains("refusing to push"), "the fixture arm declines by name, not by a failed git shell-out");
+    assert!(refusal.contains(target_ref), "the refusal names the ref it declined: {refusal}");
+    assert!(refusal.contains(&commit_hex), "the refusal names the commit it declined: {refusal}");
+}
+
+// Tripwire: a state built by `with_parts` — the fixture-shaped constructor
+// (#4835) — refuses at the push seam rather than shelling
+// `git push --force origin`. That claim is scoped to this constructor and goes
+// no wider: the seam keys on backend config rather than on build shape, so a
+// `testing`-featured boot that comes up through `init` still carries the real
+// pusher (#4842). What is asserted here is the refusal itself, not the route to
+// it — `default_candidate_push(true)` and a direct
+// `Arc::new(RefusingCandidatePush)` are indistinguishable through the
+// `CandidatePush` trait, so no assertion here can catch the boot-time selector
+// being bypassed. It does read the constructed field rather than the free
+// function, so restoring the pre-#4835 `pusher: Arc::new(GitCandidatePush)`
+// fails here — which the free-function test above cannot notice. `with_pusher`
+// then overrides that choice, so a harness that wants to observe pushes still
+// can.
+#[test]
+fn with_parts_resolves_the_refusing_pusher_and_with_pusher_substitutes_it() {
+    let mailer = || Arc::new(Mailer::new(Arc::new(Registry::new())));
+    let target_ref = "refs/heads/bloom/…/candidate/wp";
+    let commit_hex = "0".repeat(40);
+
+    let booted = ExecutorReactorState::with_parts(None, None, mailer(), MailboxId::NONE);
+    let refusal = booted.pusher.push(&commit_hex, target_ref).expect_err("the fixture constructor declines to push");
+
+    assert!(refusal.contains("refusing to push"), "`with_parts` resolves the refusing arm, not `GitCandidatePush`");
+
+    let recorder = Arc::new(RecordingPush::default());
+    let substituted = ExecutorReactorState::with_parts(None, None, mailer(), MailboxId::NONE)
+        .with_pusher(Arc::clone(&recorder) as Arc<dyn CandidatePush>);
+
+    substituted.pusher.push(&commit_hex, target_ref).expect("the substituted seam records rather than refusing");
+    assert_eq!(
+        recorder.pushed.lock().unwrap().as_slice(),
+        [(commit_hex, target_ref.to_owned())],
+        "`with_pusher` replaces the fixture default with the caller's seam",
+    );
+}
+
 // #3656 / ADR-0153 — persisted findings from the failing verdict compose onto
 // the construct-lane dispatch as their own labeled section after the work-order
 // description, so a Refine re-entry's prompt names both the original order and
@@ -1832,6 +1898,26 @@ fn a_local_only_boot_mounts_and_says_why_an_actions_lane_cannot_run() {
     for knob in ["GITHUB_TOKEN", "AETHER_GITHUB_OWNER", "AETHER_GITHUB_REPO"] {
         assert!(rendered.contains(knob), "the refusal must name {knob} — got: {rendered}");
     }
+}
+
+#[test]
+fn a_selected_fixture_mounts_even_with_the_local_lane_off() {
+    // The exact configuration the in-process scenarios boot (#4711): the
+    // in-memory double as the Actions backend, and no local lane, so every stage
+    // dispatches through one backend a scenario can script.
+    //
+    // Tripwire: `is_disabled_mount` is a test-only copy of the expression
+    // `actor_setups` mounts by, and the copy had drifted from it. Boot already
+    // counted a selected fixture as a configured backend; the copy read only the
+    // missing connection knobs, so it called this combination unmountable while
+    // boot mounted it. No binary evaluates the copy, so nothing shipped disabled
+    // — the defect was a test vouching for an answer production does not give,
+    // and this pins the two back together.
+    let fixture = GithubConnectionConfig { github_backend: "fixture".to_owned(), ..GithubConnectionConfig::default() };
+    let no_local_lane = CoordinatorConfig { local_lane_enabled: false, ..CoordinatorConfig::default() };
+
+    assert!(!fixture.missing_connection_knobs().is_empty(), "a fixture names none of the connection knobs");
+    assert!(!is_disabled_mount(&fixture, &no_local_lane), "a selected fixture is a usable Actions backend on its own");
 }
 
 #[test]

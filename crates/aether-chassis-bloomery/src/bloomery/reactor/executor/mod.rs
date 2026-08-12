@@ -17,12 +17,21 @@
 //! `#[runtime] impl NativeActor` — the poll timer, the drain → submit → pull →
 //! admit state machine, and the config-gating — lives in `runtime.rs`.
 
+use std::sync::Arc;
+
 use crate::bloomery::ExecutorShell;
+// The scripted-lane seam's mail and reply kinds (#4711). Imported here, beside
+// the ZST, because `#[actor]` re-emits every handler's kinds in *this* module —
+// the same reason `DispatchTick` is re-exported below rather than left in
+// `runtime`. Gated exactly as the handler is, so a production build imports
+// nothing.
+#[cfg(any(test, feature = "testing"))]
+use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult};
 use aether_actor::actor;
 use aether_bloomery::SharedCorrespondence;
 use aether_bloomery::Topic;
 
-pub use runtime::{DispatchTick, ExecutorReactorState};
+pub use runtime::{CandidatePush, DispatchTick, ExecutorReactorState, default_candidate_push};
 
 pub struct ExecutorReactorSetup {
     pub executor: Option<ExecutorShell>,
@@ -33,6 +42,9 @@ pub struct ExecutorReactorSetup {
     pub stale_warn_after_secs: u64,
     pub repository: Option<(String, String)>,
     pub disabled_missing: Vec<&'static str>,
+    /// The candidate-ref push seam (ADR-0152); chosen at boot by
+    /// [`default_candidate_push`].
+    pub pusher: Arc<dyn CandidatePush>,
 }
 
 /// Addressing identity for the executor dispatch reactor capability.

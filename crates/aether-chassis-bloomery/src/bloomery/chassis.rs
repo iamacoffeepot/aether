@@ -30,6 +30,7 @@ use crate::bloomery::{
     ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ExecutorReactorCapability, ExecutorReactorSetup,
     ExecutorShell, GithubConnectionConfig, IntegrateReactorCapability, IntegrateReactorSetup, LandReactorCapability,
     LandReactorSetup, MirrorReactorCapability, MirrorReactorSetup, ProjectionShell, SourceShell,
+    default_candidate_push,
 };
 use crate::control::ControlCore;
 use crate::session::{SessionConfig, SessionPoolCapability};
@@ -176,6 +177,7 @@ fn actor_setups(
             stale_warn_after_secs: coordinator.stale_warn_after_secs,
             repository: repository.clone(),
             disabled_missing: github.missing_connection_knobs(),
+            pusher: default_candidate_push(github.uses_fixture()),
         },
         land: LandReactorSetup {
             source: configured.then(|| source.clone()),

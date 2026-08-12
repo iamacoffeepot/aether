@@ -6,6 +6,10 @@
 //! temp dir: the put/get round-trip, digest dedup, absent-digest `NotFound`,
 //! and the load-bearing property that a stored artifact with no name and no
 //! pin survives a capability restart (index restore from the atomic sidecars).
+//!
+//! One root can carry two live handles — the chassis mounts this capability
+//! and the executor reactor opens its own handle over the same root — so the
+//! last tests drive that arrangement directly.
 
 #![allow(clippy::unwrap_used)]
 
@@ -93,5 +97,77 @@ fn stored_artifact_survives_a_capability_restart_with_no_name_and_no_pin() {
             assert_eq!(got_parents, parents(&["parent-1"]));
         }
         GetResult::Err { error, .. } => panic!("unnamed, unpinned artifact lost across restart: {error:?}"),
+    }
+}
+
+/// Tripwire: the reported bug's own shape (issue #4834). `mounted` is the
+/// capability the chassis mounts at boot; `reactor` is the second handle the
+/// executor opens over the same root and files study records through. Both
+/// are live at once, so `mounted`'s index — built at boot, before any of
+/// `reactor`'s writes existed — is not the whole record. A `get` that
+/// answered from it alone replies `NotFound` for bytes sitting on disk, which
+/// is what `GET /artifacts/{digest}` relays to its caller.
+#[test]
+fn the_mounted_capability_serves_an_artifact_the_reactors_handle_filed_after_boot() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mounted = ArtifactsCapabilityState::open(dir.path()).unwrap();
+    let mut reactor = ArtifactsCapabilityState::open(dir.path()).unwrap();
+
+    let digest = put_digest(&mut reactor, b"study-record", &["graded-attempt"]);
+
+    match mounted.get(digest.clone()) {
+        GetResult::Ok { digest: got, bytes, parents: got_parents } => {
+            assert_eq!(got, digest);
+            assert_eq!(bytes, b"study-record");
+            assert_eq!(got_parents, parents(&["graded-attempt"]), "the reactor's recorded parents come back");
+        }
+        GetResult::Err { error, .. } => panic!("the mounted capability cannot see the reactor's write: {error:?}"),
+    }
+}
+
+/// Tripwire: the enumeration half of the same arrangement, kept separate so it
+/// stands on `scan` alone — a prior `get` of the digest would have pulled the
+/// entry into `mounted`'s index and hidden the failure. `scan` is what
+/// `rebuild_study_index` reads, and it enumerates the index, so without a
+/// refresh the rebuild silently projects over only the records this handle
+/// wrote itself.
+#[test]
+fn the_mounted_capabilitys_scan_enumerates_what_the_reactors_handle_filed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mounted = ArtifactsCapabilityState::open(dir.path()).unwrap();
+    let mut reactor = ArtifactsCapabilityState::open(dir.path()).unwrap();
+
+    let digest = put_digest(&mut reactor, b"study-record", &["graded-attempt"]);
+
+    let scanned = mounted.scan();
+    assert_eq!(scanned.len(), 1, "the projection rebuild enumerates the reactor's record: {scanned:?}");
+    assert_eq!(scanned[0].digest, digest);
+    assert_eq!(scanned[0].bytes, b"study-record");
+    assert_eq!(scanned[0].parents, parents(&["graded-attempt"]));
+}
+
+/// Tripwire: a second handle's `put` of bytes the first already stored keeps
+/// the first handle's recorded parents. Deduping against only the putting
+/// handle's index rewrites the sidecar, so the peer's derivation edge is lost
+/// — and `put`'s dropped-parents warning cannot catch it, because to that
+/// handle the entry looks new. Provenance loss with nothing logged is the
+/// failure this guards.
+#[test]
+fn a_second_handles_put_does_not_overwrite_the_first_handles_recorded_parents() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mounted = ArtifactsCapabilityState::open(dir.path()).unwrap();
+    let mut reactor = ArtifactsCapabilityState::open(dir.path()).unwrap();
+
+    let filed = put_digest(&mut reactor, b"same-artifact-bytes", &["the-reactors-parent"]);
+    let re_put = put_digest(&mut mounted, b"same-artifact-bytes", &["a-later-parent"]);
+    assert_eq!(re_put, filed, "identical bytes address the same artifact across handles");
+
+    for (label, state) in [("the mounted capability", &mut mounted), ("the reactor", &mut reactor)] {
+        match state.get(filed.clone()) {
+            GetResult::Ok { parents: got_parents, .. } => {
+                assert_eq!(got_parents, parents(&["the-reactors-parent"]), "{label} reads the original parents");
+            }
+            GetResult::Err { error, .. } => panic!("{label} lost the artifact: {error:?}"),
+        }
     }
 }
