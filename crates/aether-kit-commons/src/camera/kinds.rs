@@ -131,6 +131,21 @@ pub struct CameraTopdownSet {
     pub params: TopdownParams,
 }
 
+/// `aether.kit.camera.eye` — request the active camera's world-space eye.
+/// The source-bound reply is [`CameraEyeResult`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
+#[kind(name = "aether.kit.camera.eye")]
+pub struct CameraEyeRequest;
+
+/// `aether.kit.camera.eye_result` — source-bound response to
+/// [`CameraEyeRequest`]. `eye` is `None` while no live camera is active.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[kind(name = "aether.kit.camera.eye_result")]
+pub struct CameraEyeResult {
+    /// Active camera position in world-space `(x, y, z)` coordinates.
+    pub eye: Option<[f32; 3]>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +159,7 @@ mod tests {
         assert_eq!(CameraSetMode::NAME, "aether.kit.camera.set_mode");
         assert_eq!(CameraOrbitSet::NAME, "aether.kit.camera.orbit.set");
         assert_eq!(CameraTopdownSet::NAME, "aether.kit.camera.topdown.set");
+        assert_eq!(CameraEyeRequest::NAME, "aether.kit.camera.eye");
+        assert_eq!(CameraEyeResult::NAME, "aether.kit.camera.eye_result");
     }
 }

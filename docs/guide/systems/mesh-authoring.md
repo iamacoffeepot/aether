@@ -5,8 +5,8 @@ triangle-editing model. `aether-mesh` parses the text into a typed tree,
 evaluates primitives and transforms into fixed-point polygons, cleans the
 polygon stream, and tessellates only where a triangle consumer needs it. The
 `aether.kit.mesh` guest actor is the file-backed viewer: it reads a `.dsl` or
-minimal `.obj`, atomically replaces its cached `DrawTriangle`s on success, and
-replays them on every `Render` stage.
+minimal `.obj`, atomically replaces its cached filled `DrawTriangle`s and DSL
+outline loops on success, and renders them on every `Render` stage.
 
 ## Decision map
 
@@ -42,9 +42,10 @@ Keep the layers distinct:
 4. **Wire/render geometry** is triangles. `tessellate_polygon` converts a
    canonical face at the upload boundary; `mesh` offers a direct triangle
    convenience path.
-5. **The viewer actor** maps color indices through its eight-entry RGB palette,
-   adds polygon-edge outline strips for DSL faces, caches `DrawTriangle`s, and
-   resends them to `aether.render` each frame.
+5. **The viewer actor** maps color indices through its eight-entry RGB palette
+   and caches filled `DrawTriangle`s separately from DSL outer and hole loops.
+   It resends the faces directly and rebuilds the loops as eye-facing slate
+   stroke ribbons for the active camera on every `Render`.
 
 The library has no renderer or mailbox dependency. The viewer is guest code in
 the multi-actor `aether-kit-commons` wasm module. Its selector is
@@ -142,8 +143,11 @@ Extension matching is case-insensitive. DSL input must be UTF-8; OBJ is read
 directly from bytes and validates the recognized numeric tokens:
 
 - `.dsl` uses `parse` → `mesh_polygons` → `tessellate_polygon`. Filled faces
-  use `color % 8` in the viewer palette; every outer and hole edge also emits a
-  narrow lifted slate outline.
+  use `color % 8` in the viewer palette. Every outer and hole loop is retained
+  alongside those faces, lifted slightly along its polygon normal, and solved
+  into a slate eye-facing stroke when the active camera eye replies. Its width
+  is angular, so the raster weight does not collapse edge-on or thin with
+  distance.
 - `.obj` accepts positive one-based and relative negative `v` position indices
   in `f` faces, including slash-form references. Faces are fan-triangulated.
   Normals, UVs, groups, materials, smoothing, and other directives are ignored;
@@ -151,7 +155,7 @@ directly from bytes and validates the recognized numeric tokens:
   face indices and references outside the positions defined so far are errors.
 
 Any read, DSL UTF-8, extension, parse, mesh, or OBJ-index failure leaves the
-prior triangle cache untouched and returns `ok: false`. The current loader does
+entire prior face-and-outline cache untouched and returns `ok: false`. The current loader does
 not produce non-fatal warnings, though the reply reserves that vector. The
 actor and request kind are in
 [`aether-kit-commons/src/mesh/mod.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-commons/src/mesh/mod.rs),
@@ -187,8 +191,14 @@ the shared reply type is in
 ## Lifecycle and chassis caveats
 
 `MeshViewer` subscribes only to the `Render` lifecycle stage. It performs file
-I/O and replaces the cache when a load reply arrives, then resends the cache on
-each render stage under the latest view-projection matrix. A chassis without
+I/O and atomically replaces the cache when a load reply arrives. On each render
+it sends cached faces immediately. A DSL cache with outline loops also sends
+`aether.kit.camera.eye` to the `CameraComponent` default-loaded as
+`aether.kit.camera`; the source-bound `aether.kit.camera.eye_result` reply lets
+the viewer rebuild and submit those loops in the same settled Render cascade.
+No loaded camera, or a reply with no active live camera, leaves the filled mesh
+visible and omits only the outlines. OBJ caches never request the eye because
+they contain no outline loops. A chassis without
 `Render`, such as the production headless Tick-only graph, rejects the
 subscription; the actor can load but never submits geometry. The minimal hub
 does not host guest gameplay actors. Use desktop or the render-capable

@@ -473,8 +473,14 @@ frame.
   — for adding cameras and poking their parameters live. A new mode (follow,
   cinematic, free-fly) is a new `view_proj` computation in a camera component;
   the renderer needs no change because it only ever applies the matrix it's
-  handed. Loaded by the `aether_kit_commons@aether.kit.camera` selector, the camera answers at
-  `aether.component/aether.embedded:aether.camera` — the address `LoadResult.name` hands
+  handed. Peers that need the current eye send the source-bound
+  `aether.kit.camera.eye` request. Its `aether.kit.camera.eye_result` reply
+  carries the active orbit or top-down eye as world-space `(x, y, z)`, or
+  `None` while the active binding is absent or no longer live. This is a
+  request/reply read-back, not a subscription stream; the camera still
+  publishes only `view_proj` to `aether.render`. Loaded by the
+  `aether_kit_commons@aether.kit.camera` selector, the camera answers at
+  `aether.component/aether.embedded:aether.kit.camera` — the address `LoadResult.name` hands
   back.
 - **Driving a camera from the keyboard** is a peer component's job, not the
   camera's. `aether-kit-commons`'s `camera-controller` export subscribes `Key` /

@@ -34,6 +34,9 @@
 //!   is in a different mode.
 //! - `aether.kit.camera.topdown.set { name, params }` — same for topdown
 //!   mode.
+//! - `aether.kit.camera.eye` — source-bound request for the active camera's
+//!   world-space eye; replies with `aether.kit.camera.eye_result` carrying
+//!   `None` while no live camera is active.
 //!
 //! Inactive cameras still tick — orbit yaw keeps accumulating — so
 //! re-activating a camera doesn't snap it to a stale yaw.
@@ -50,7 +53,7 @@ pub use kinds::*;
 
 use std::collections::HashMap;
 
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Render, Tick, WindowSize};
 use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
@@ -142,10 +145,13 @@ impl OrbitState {
         }
     }
 
-    fn view_proj(&self, aspect: f32) -> [f32; 16] {
+    fn eye(&self) -> Vec3 {
         let orientation = Quat::from_euler_yxz(self.yaw, self.pitch, 0.0);
-        let eye = self.target + orientation * Vec3::new(0.0, 0.0, self.distance);
-        let view = Mat4::look_at_rh(eye, self.target, Vec3::Y);
+        self.target + orientation * Vec3::new(0.0, 0.0, self.distance)
+    }
+
+    fn view_proj(&self, aspect: f32) -> [f32; 16] {
+        let view = Mat4::look_at_rh(self.eye(), self.target, Vec3::Y);
         let proj = Mat4::perspective_rh(self.fov_y_rad, aspect, Z_NEAR, Z_FAR);
         (proj * view).to_cols_array()
     }
@@ -174,12 +180,15 @@ impl TopdownState {
         }
     }
 
+    fn eye(&self) -> Vec3 {
+        Vec3::new(self.center.x, self.center.y, defaults::TOPDOWN_EYE_HEIGHT)
+    }
+
     fn view_proj(&self, aspect: f32) -> [f32; 16] {
+        let target = Vec3::new(self.center.x, self.center.y, 0.0);
+        let view = Mat4::look_at_rh(self.eye(), target, Vec3::Y);
         let half_w = self.extent * aspect;
         let proj = Mat4::orthographic_rh(-half_w, half_w, -self.extent, self.extent, Z_NEAR, Z_FAR);
-        let eye = Vec3::new(self.center.x, self.center.y, defaults::TOPDOWN_EYE_HEIGHT);
-        let target = Vec3::new(self.center.x, self.center.y, 0.0);
-        let view = Mat4::look_at_rh(eye, target, Vec3::Y);
         (proj * view).to_cols_array()
     }
 }
@@ -208,6 +217,13 @@ impl ModeState {
         match self {
             Self::Orbit(s) => s.view_proj(aspect),
             Self::Topdown(s) => s.view_proj(aspect),
+        }
+    }
+
+    fn eye(&self) -> Vec3 {
+        match self {
+            Self::Orbit(state) => state.eye(),
+            Self::Topdown(state) => state.eye(),
         }
     }
 
@@ -320,6 +336,16 @@ impl WasmActor for CameraComponent {
         {
             let view_proj = cam.mode.view_proj(self.aspect);
             ctx.actor::<RenderCapability>().send(&ViewProjection { view_proj });
+        }
+    }
+
+    /// Reply to the sender with the active camera's world-space eye. The
+    /// source-bound reply carries `None` when the active binding is absent or
+    /// names a camera that is no longer live.
+    #[handler::manual]
+    fn on_eye(&mut self, ctx: &mut WasmCtx<'_, Manual>, _request: CameraEyeRequest) {
+        if ctx.reply_target().is_some() {
+            ctx.reply(&self.eye_result());
         }
     }
 
@@ -448,6 +474,14 @@ impl WasmActor for CameraComponent {
     }
 }
 
+impl CameraComponent {
+    fn eye_result(&self) -> CameraEyeResult {
+        let eye =
+            self.active.as_deref().and_then(|name| self.cameras.get(name)).map(|camera| camera.mode.eye().to_array());
+        CameraEyeResult { eye }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use aether_actor::WasmInitCtx;
@@ -484,5 +518,40 @@ mod tests {
              before={yaw_before}, after={}",
             state.yaw
         );
+    }
+
+    #[test]
+    fn orbit_eye_matches_the_pose_used_by_view_projection() {
+        let state = OrbitState::from_params(&OrbitParams {
+            distance: Some(5.0),
+            pitch: Some(0.0),
+            yaw: Some(PI / 2.0),
+            target: Some([1.0, 2.0, 3.0]),
+            ..Default::default()
+        });
+
+        let eye = state.eye();
+        assert!((eye.x - 6.0).abs() < 1e-6);
+        assert!((eye.y - 2.0).abs() < 1e-6);
+        assert!((eye.z - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn topdown_eye_tracks_the_center_at_the_fixed_height() {
+        let state = TopdownState::from_params(&TopdownParams { center: Some([4.0, -3.0]), extent: None });
+
+        assert_eq!(state.eye(), Vec3::new(4.0, -3.0, defaults::TOPDOWN_EYE_HEIGHT));
+    }
+
+    #[test]
+    fn eye_result_is_none_without_a_live_active_camera() {
+        let mut ctx = WasmInitCtx::__new(0);
+        let mut component =
+            <CameraComponent as aether_actor::Lifecycle<CameraComponent>>::init((), (), &mut ctx).expect("init");
+        component.active = None;
+        assert_eq!(component.eye_result(), CameraEyeResult { eye: None });
+
+        component.active = Some("missing".to_owned());
+        assert_eq!(component.eye_result(), CameraEyeResult { eye: None });
     }
 }
