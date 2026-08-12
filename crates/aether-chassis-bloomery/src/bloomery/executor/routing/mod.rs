@@ -143,8 +143,8 @@ impl ReconcileLanes for RoutingExecutor {
     /// ever reaching the arm that holds the run. Seeding the map closes that.
     ///
     /// The lane is read from the **local arm's observed footprint** rather than
-    /// re-derived by running the persisted command back through
-    /// [`lane_for_command`](Self::lane_for_command). Re-derivation looks equivalent
+    /// re-derived by running the persisted command back through the prefix set
+    /// `submit` selects with. Re-derivation looks equivalent
     /// and is not: the prefix set is config, so an operator who flips a lane
     /// between restarts — the release valve the prefixes exist for — would have
     /// every order dispatched under the old setting re-routed to the arm it never
