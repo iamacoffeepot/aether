@@ -5,7 +5,7 @@
 //! registry / lifecycle / evidence logic is exercised without a real repo or
 //! Claude credential.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aether_bloomery::BackendObjectId;
 
@@ -92,6 +92,19 @@ pub trait TransformRunner: Send + Sync {
     /// # Errors
     /// The worktree teardown (the `git worktree remove` shell-out) failed.
     fn release(&self, worktree_dir: &Path) -> Result<(), LocalExecutorError>;
+
+    /// Every scratch checkout the backing repository currently has registered.
+    ///
+    /// The boot reconciliation's discriminator (issue #4847): the scratch root is
+    /// a configured path, so a directory listing of it proves nothing about who
+    /// made an entry, while a registration at `base_dir/<nonce>` can only have
+    /// come from this backend's own [`start`](Self::start). Paths outside the
+    /// root are the caller's to filter — this seam reports what the repository
+    /// knows, not what the backend owns.
+    ///
+    /// # Errors
+    /// The registration read (the `git worktree list` shell-out) failed.
+    fn registered_worktrees(&self) -> Result<Vec<PathBuf>, LocalExecutorError>;
 
     /// Capture a passed model-lane run's working-tree changes as the candidate
     /// (ADR-0152): stage and commit everything in the run worktree under the

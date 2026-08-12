@@ -160,7 +160,7 @@ stage at a few seconds and seals its address into the bloom, which is the only
 way in: the limit is deliberately sealed rather than ambient, so two blooms
 sealing the same catalog terminate identically and no coordinator-side override
 exists for a scenario to reach for. Past that deadline the run is cancelled, so a
-child process the coordinator still tracks — and the scratch worktree checked out
+child process the coordinator tracks — and the scratch worktree checked out
 behind it — are reclaimed whatever stage was dispatched. For a member stage or
 `AggregateVerify` the attempt is then recorded as an ordinary failure, so retry
 and wedge assertions read exactly as they do for a lane that failed outright.
@@ -181,15 +181,22 @@ that stops and reopens reads back the same number: a scenario can restart
 mid-flight and still assert the original expiry, and one that expected a restart
 to renew the allowance is asserting the bug.
 
-Reclamation does not survive that restart, and a scenario must not assert that it
-does. The local backend's map of live children is process memory, rebuilt empty
-at boot and never re-registered from the store, so cancelling an order dispatched
-by an earlier process finds nothing to kill: the expiry still records its failure
-and consumes the order, but that process's child keeps running and its
-`.bloomery/local-worktrees/<nonce>` checkout stays on disk with its `git worktree`
-registration unpruned. The cancel names the nonce at `warn` so the orphan is
-findable, and reaping it is manual. Assert the accounting across a restart; assert
-the reclaim only within one process's lifetime.
+Reclamation survives that restart in part, and a scenario has to be exact about
+which part. A boot reconciles the two things that outlive the process: the orders
+the store still holds outstanding, and the scratch root at
+`.bloomery/local-worktrees/`. An outstanding order whose directories survived is
+re-adopted and routed back to the local arm, so its expiry cancel reaches the arm
+that holds the run and reclaims the `<nonce>` checkout along with its `git
+worktree` registration — and a directory belonging to no outstanding order is
+swept in the same pass. Re-adoption also means an attempt that finished while the
+coordinator was down still admits from the `evidence.json` its run left behind,
+rather than riding to its deadline.
+
+What does not come back is the child process. A coordinator holds no handle on
+one it did not spawn and records no pid, so cancelling a re-adopted run warns
+that the lane may still be running and removes the ground under it rather than
+killing it. Assert the accounting and the checkout reclaim across a restart;
+assert termination of the child only within one process's lifetime.
 
 The advisory `stale_warn_after_secs` sweep is unrelated to both — it warns about
 an unresolved handle and terminates nothing, so no scenario should wait on it.

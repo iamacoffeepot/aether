@@ -4,6 +4,7 @@
 //! `init` / the timer / the ctx send are the thin glue the chassis-boot test and
 //! compilation cover; this pins the loop that actually dispatches and admits.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,7 +30,7 @@ use super::{
     BACKOFF_CAP, CandidatePush, ExecutorReactorState, GitCandidatePush, NameEvidenceClaims, Stores, TickClock,
     TrackedHandle, backoff_delay, default_candidate_push, drain_and_dispatch, drain_and_dispatch_aggregate,
     drain_and_redispatch, is_disabled_mount, is_stale, next_backoff, pull_and_admit, push_admitted_candidates,
-    seed_tracked, select_stale_handles,
+    seed_dispatches, seed_tracked, select_stale_handles,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -1973,4 +1974,82 @@ fn an_unconfigured_actions_refusal_is_permanent_so_the_drain_parks_it() {
         .expect_err("the stub refuses every submit");
 
     assert!(DispatchError::Submit(ExecutorPortError::from(refusal)).is_permanent(), "a park, not a re-drive");
+}
+
+#[test]
+fn a_local_lane_order_dispatched_before_a_restart_resolves_after_reconciliation() {
+    // Issue #4847, end to end. `seed_tracked` (#3641) re-tracks the order, but both
+    // halves of the port it resolves against are process memory: the router's map
+    // is empty, so the nonce takes the Actions fallback, and the local registry is
+    // empty, so nothing there would answer for it anyway. The order then rides
+    // forever while its checkout and `git worktree` registration sit on disk. Only
+    // the store and the scratch root survive the restart, and reconciling against
+    // both is what makes the pre-restart run resolvable again.
+    let base = tempfile::TempDir::new().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bloomery.db").to_str().unwrap().to_owned();
+    let subject = 5;
+    let fake = FakeGithub::new();
+    fake.seed_git_object(&digest(0xC0));
+    let correspondence = Arc::new(fake) as SharedCorrespondence;
+
+    let nonce = {
+        let mut store = SqliteStore::open(&path).unwrap();
+        let (sequence, _subject) = enqueue_construct_dispatch(&mut store, BloomId(digest(1)), "wp-local", subject);
+        let nonce = format!("dispatch-{sequence}");
+        let shell = local_lane_shell(base.path(), Arc::clone(&correspondence), &nonce);
+        let (handles, ack_through, _transient) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+        store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
+        assert_eq!(handles.len(), 1, "the construct order dispatched to the local lane before the crash");
+        nonce
+        // Both the store handle and the whole executor port drop here: the process
+        // stopped with the order recorded, its run's scratch dirs on disk, and no
+        // in-memory routing or registry entry surviving.
+    };
+
+    let mut store = SqliteStore::open(&path).unwrap();
+    let shell = local_lane_shell(base.path(), correspondence, &nonce);
+    let mut tracked = track(seed_tracked(&mut store).unwrap());
+    assert_eq!(tracked.len(), 1, "the dispatched-but-unresolved order is re-tracked");
+
+    let report = shell.reconcile(&seed_dispatches(&mut store).unwrap());
+    assert_eq!(report.readopted, vec![Nonce(nonce)], "the surviving scratch re-adopts the local run");
+
+    let admits = pull_and_admit(
+        Stores { store: &mut store, artifacts: None },
+        &shell,
+        NameEvidenceClaims,
+        &mut tracked,
+        &tick_clock(),
+        None,
+        &NopPush,
+    );
+
+    assert_eq!(admits.len(), 1, "the run that finished while the coordinator was down admits after reconciliation");
+    assert!(tracked.is_empty(), "the order is consumed on admit");
+    let event: aether_bloomery::Event = from_bytes(&admits[0].event).unwrap();
+    match event.fact {
+        Fact::AttemptCompleted { workpiece, stage, passed, .. } => {
+            assert_eq!(workpiece, WorkpieceId("wp-local".to_owned()));
+            assert_eq!(stage, StageId::Construct);
+            assert!(passed, "the recovered construct evidence still passes on its own body");
+        }
+        other => panic!("expected a Fact::AttemptCompleted, got {other:?}"),
+    }
+}
+
+// A routing shell over a fresh local backend rooted at `base` — the mount a
+// coordinator boot builds, reconstructible twice over the same scratch root so a
+// test can stand a second process up where the first one stopped.
+fn local_lane_shell(base: &Path, correspondence: SharedCorrespondence, nonce: &str) -> ExecutorShell {
+    let actions = Arc::new(ActionsExecutor::new(FakeGithub::new(), Arc::clone(&correspondence), lanes(), PINNED_REF));
+    let runner = FixedRunner {
+        evidence: format!(
+            r#"{{"command":"construct.implement","nonce":"{nonce}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"result":{{"num_turns":3}}}}}}"#
+        ),
+        lifecycle: RunLifecycle::Exited { success: true },
+        captures: true,
+    };
+    let local = Arc::new(LocalExecutor::new(Arc::new(runner), correspondence, base));
+    ExecutorShell::reconciling(Arc::new(RoutingExecutor::new(actions, local, vec!["construct.".to_owned()])))
 }

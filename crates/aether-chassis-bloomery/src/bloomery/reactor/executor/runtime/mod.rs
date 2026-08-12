@@ -64,6 +64,7 @@ use crate::bloomery::ExecutorShell;
 #[cfg(test)]
 use crate::bloomery::GithubConnectionConfig;
 use crate::bloomery::dispatch_model;
+use crate::bloomery::executor::OutstandingDispatch;
 use crate::bloomery::intake::{
     Admission, AdmitDecision, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims, UploadedEvidence,
     admit_uploaded, dispatch_and_record, run_intake_cycle,
@@ -1489,6 +1490,38 @@ fn seed_tracked(store: &mut dyn StoreBackend) -> rusqlite::Result<Vec<WorkHandle
     Ok(store.list_outstanding_nonces()?.into_iter().map(|nonce| WorkHandle::new(Nonce(nonce))).collect())
 }
 
+/// The same outstanding orders as [`seed_tracked`], carrying the transformation
+/// each one dispatched — what the executor port needs to reconcile its own
+/// in-flight state at boot (issue #4847).
+///
+/// Re-tracking a handle is only half of restart recovery: the port that handle
+/// resolves against has an empty routing map and an empty local run registry, so
+/// the re-tracked order resolves to the wrong arm and finds no run there. The
+/// transformation is the missing input — the local arm derives a re-adopted run's
+/// evidence-binding subject and lane gates from it.
+///
+/// A separate pass over the same table rather than one that produces both,
+/// deliberately: an order whose persisted `transformation` will not decode must
+/// still be **tracked**, or a single unreadable blob would strand an order the way
+/// #3641 stranded all of them. So a shortfall here drops that order out of the
+/// reconciliation with a warn and leaves the recovery set whole.
+fn seed_dispatches(store: &mut dyn StoreBackend) -> rusqlite::Result<Vec<OutstandingDispatch>> {
+    let mut dispatches = Vec::new();
+    for nonce in store.list_outstanding_nonces()? {
+        let Some(transformation) = store.lookup_order(&nonce)?.and_then(|order| from_bytes(&order.transformation).ok())
+        else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                %nonce,
+                "outstanding order carries no decodable transformation; it is still tracked but excluded from lane reconciliation",
+            );
+            continue;
+        };
+        dispatches.push(OutstandingDispatch { nonce: Nonce(nonce), transformation });
+    }
+    Ok(dispatches)
+}
+
 /// This reactor's own handle on the artifacts content store, where an admitted
 /// attempt's study record is put (#4679).
 ///
@@ -1786,6 +1819,12 @@ impl NativeActor for ExecutorReactorCapability {
             .into_iter()
             .map(|handle| TrackedHandle::new(handle, seeded_at))
             .collect();
+        // The other half of restart recovery (issue #4847): hand the port the same
+        // outstanding orders so it re-adopts the local runs a previous process
+        // dispatched and reclaims the scratch checkouts of orders that are no longer
+        // outstanding. A read fault fails boot for the same reason `seed_tracked`'s
+        // does — mounting with a silently empty recovery set is the bug, not the fix.
+        let reconciled = executor.reconcile(&seed_dispatches(&mut store).map_err(|e| BootError::Other(Box::new(e)))?);
         let interval = Duration::from_secs(config.poll_interval_secs.max(1));
         let timer = spawn_timer(
             Arc::clone(&mailer),
@@ -1800,6 +1839,8 @@ impl NativeActor for ExecutorReactorCapability {
             repository = ?config.repository,
             poll_interval_secs = config.poll_interval_secs,
             retracked = tracked.len(),
+            readopted = reconciled.readopted.len(),
+            reclaimed = reconciled.reclaimed,
             "executor dispatch reactor mounted; polling the store for dispatch decisions",
         );
         // The push side resolves an admitted capture's commit through its own
