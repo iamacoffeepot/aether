@@ -84,9 +84,22 @@ impl<C: GithubApi> GithubProjection<C> {
     /// unreachable member forever, so it is skipped and the entry settles
     /// (ADR-0149 §Failure is skipped, not stalled). Only a transport fault or
     /// an unexpected status is returned, and that is what re-drives.
+    ///
+    /// The skip traces at `warn`: the id named a number, so someone expected an
+    /// object there, and swallowing the refusal silently would leave the miss
+    /// with no trace anywhere.
     fn comment_on(&self, object: u64, key: &str, digest: Digest, human_body: &str) -> Result<(), GithubError> {
         match self.upsert_comment(object, key, digest, human_body) {
-            Err(error) if refuses_comment(&error) => Ok(()),
+            Err(error) if refuses_comment(&error) => {
+                tracing::warn!(
+                    target: "aether_bloomery_github::projection",
+                    object,
+                    key,
+                    error = %error,
+                    "the repository refused a comment on the addressed object; skipping it rather than stalling the mirror"
+                );
+                Ok(())
+            }
             other => other,
         }
     }
@@ -163,8 +176,25 @@ impl<C: GithubApi + PullRequestApi> ProjectionBackend for GithubProjection<C> {
 /// against whatever the repository holds: a closed issue is a target like any
 /// other, and so is a pull request, since GitHub numbers both from one sequence
 /// and shares the comment route.
+///
+/// The unaddressable case traces at `debug`, not `warn`: it is the steady state
+/// of the local and fixture lanes, whose workpiece ids are never issue numbers,
+/// so a louder level would be noise on every reconcile they drive.
 fn addressed_object(workpiece: &WorkpieceId) -> Option<u64> {
-    let number = workpiece.0.strip_prefix(ISSUE_PREFIX)?;
+    let object = canonical_issue_number(&workpiece.0);
+    if object.is_none() {
+        tracing::debug!(
+            target: "aether_bloomery_github::projection",
+            workpiece = workpiece.0.as_str(),
+            "workpiece addresses no object in the configured repository; projecting nothing for it"
+        );
+    }
+    object
+}
+
+/// The `<N>` of a canonical `issue-<N>` id, if `id` is one.
+fn canonical_issue_number(id: &str) -> Option<u64> {
+    let number = id.strip_prefix(ISSUE_PREFIX)?;
     // `str::parse` would accept `+7` and ` 7`, and would read `007` as 7 — three
     // spellings of one object, so three markers on it. Canonical or nothing.
     if number.is_empty() || number.starts_with('0') || !number.bytes().all(|byte| byte.is_ascii_digit()) {
