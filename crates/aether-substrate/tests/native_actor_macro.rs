@@ -762,17 +762,26 @@ fn adopter_holds_set_marker<K: Kind, A: aether_actor::HandlesKind<K>>() {}
 /// one still contributes all three.
 ///
 /// The two directions are caught by different mechanisms, and both are needed.
-/// *Leaking* is a compile error: an arm, a capability row, or a marker built
-/// from `on_set_stripped` names `SetCfgStripped` and a method, neither of which
-/// exists in this configuration, so it fails the build before this test runs.
-/// *Over-stripping* is not, and is what the two assertions below catch — a gate
-/// whose predicate and negation did not partition the configurations, or an
-/// attribute list applied to the wrong artifact, would quietly drop a handler
-/// the set should have kept, and the set's contribution to an adopter's
-/// `capabilities()` and `measured_kinds()` would silently narrow. The
-/// `adopter_holds_set_marker` calls are the same check for the bridge, whose
-/// output has no run-time value to compare: a swallowed marker is a set member
-/// an adopter can no longer be sent, and nothing else would report it.
+/// *Leaking* is a compile error in every family: an arm, a capability row, or a
+/// marker built from `on_set_stripped` names `SetCfgStripped` and a method,
+/// neither of which exists in this configuration, so it fails the build before
+/// this test runs.
+///
+/// *Over-stripping* compiles, so each family is checked on its own terms — a
+/// gate whose predicate and negation did not partition the configurations, or
+/// an attribute list applied to the wrong artifact, would quietly drop a
+/// handler the set should have kept. The capability row is the two
+/// `assert_eq!`s, read through both projections an adopter exposes it through:
+/// `capabilities()` and `measured_kinds()`. The marker is
+/// `adopter_holds_set_marker`, a compile-time check rather than an assertion —
+/// the bound is satisfiable only if the bridge emitted `impl HandlesKind<K>`,
+/// and a marker has no run-time value to compare. The arm is neither: nothing
+/// the other two read changes when the arm alone goes missing, so it is checked
+/// by behaviour, driving a `SetCfgPresent` through the set's dispatch and
+/// requiring the handler's counter to move. Without that last check the hazard
+/// this block opened with is the one that stays invisible — an adopter that
+/// advertises the kind, measures it, and type-checks the send still drops the
+/// mail.
 #[test]
 fn a_cfg_gated_set_handler_leaves_no_dispatch_artifact_in_an_adopter() {
     use aether_substrate::actor::native::Dispatch;
@@ -787,6 +796,20 @@ fn a_cfg_gated_set_handler_leaves_no_dispatch_artifact_in_an_adopter() {
 
     adopter_holds_set_marker::<SetCfgKept, CfgGatedSetAdopter>();
     adopter_holds_set_marker::<SetCfgPresent, CfgGatedSetAdopter>();
+
+    let (_registry, mailer) = bare_substrate();
+    let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x1850_0002)));
+    let mut adopter = CfgGatedSetAdopter { seen: AtomicU32::new(0) };
+    let mut ctx: NativeCtx<'_, Manual> = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+    let handled = <CfgGatedSetAdopter as CfgGatedSet>::__aether_handler_set_dispatch(
+        &mut adopter,
+        &mut ctx,
+        <SetCfgPresent as Kind>::ID,
+        &SetCfgPresent { tag: 5 }.encode_into_bytes(),
+    );
+    assert_eq!(handled, aether_actor::DISPATCH_HANDLED, "the set's arm for a satisfied gate claims its own kind");
+    assert_eq!(adopter.seen.load(AtomicOrdering::SeqCst), 5, "and runs the handler behind it on the adopter's state");
 }
 
 /// An actor with no task handler measures exactly what it advertises, so the
