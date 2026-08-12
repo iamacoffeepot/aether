@@ -5,6 +5,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{Expr, ImplItem, ItemImpl, ItemStruct, Type};
 
+use crate::diagnostics::doc_attrs;
 use crate::handler_parse::{
     HandlerClass, HandlerReply, HandlerVariant, NativeActorHandlerFn, NativeActorTaskHandlerFn, NativeFallbackFn,
     TaskReplyMode, attr_is_fallback, attr_is_handler, classify_handler_reply, classify_task_reply_mode,
@@ -89,6 +90,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     let generics = &item.generics;
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
     let trait_path = item.trait_.as_ref().map(|(_, p, _)| p).expect("trait_ checked above");
+    let impl_docs = doc_attrs(&item.attrs);
 
     // Spike: identity/runtime split. A pre-scan for an explicit
     // `type State = …`. When present and not `Self`, the macro divides
@@ -874,7 +876,10 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             #capabilities_override
         }
 
-        // The composition: identity → runtime state.
+        // The composition: identity → runtime state. The authored block's own
+        // rustdoc rides it, so the cap's headline documentation is a documented
+        // item rustdoc renders and link-checks (iamacoffeepot/aether#4848).
+        #(#impl_docs)*
         #runtime_gate
         impl #impl_generics #trait_path for #self_ty #where_clause {
             type State = #state_ty;

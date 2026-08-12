@@ -2,7 +2,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{FnArg, ImplItem, ItemImpl, Type};
 
-use crate::diagnostics::extract_agent_doc;
+use crate::diagnostics::{doc_attrs, extract_agent_doc};
 use crate::handler_parse::{
     FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler,
     classify_handler_reply, extract_handler_kind_type, handler_cfgs, multi_kind_or_return_error, parse_handler_class,
@@ -48,6 +48,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     let trait_path = item.trait_.as_ref().map(|(_, p, _)| p).expect("trait_ checked above");
 
     let component_doc = extract_agent_doc(&item.attrs);
+    let impl_docs = doc_attrs(&item.attrs);
 
     let mut init_method: Option<syn::ImplItemFn> = None;
     let mut lifecycle_methods: Vec<syn::ImplItemFn> = Vec::new();
@@ -583,6 +584,10 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
         }
 
+        // The authored block's own rustdoc rides the trait impl that stands in
+        // its place, so the actor's headline documentation is a documented item
+        // rustdoc renders and link-checks (iamacoffeepot/aether#4848).
+        #(#impl_docs)*
         impl #impl_generics #trait_path for #self_ty #where_clause {
             // The runtime state: the identity IS its own runtime (un-split).
             type State = Self;
