@@ -61,8 +61,12 @@ jobs:
               # ci.yml defines these jobs, so it stays.
               - '.github/workflows/ci.yml'
               # jscpd's gate threshold lives in .jscpd.json, so a config
-              # edit must re-run the dup-check job.
+              # edit must re-run the dup-check job. The wrapper that makes
+              # that job fail closed is listed for the same reason: a gate
+              # whose own edits skip the job it gates is unwitnessed.
               - '.jscpd.json'
+              - 'scripts/check-duplication.mjs'
+              - 'scripts/check-duplication.test.mjs'
 
   # A suppression makes the tool it targets green by construction, so this
   # check must sit outside the affected-code filter. It scans only additions
@@ -468,6 +472,15 @@ jobs:
   # run): jscpd only finds clones among the files it scans, so scanning
   # just the PR's changed files would miss a changed file duplicating an
   # unchanged one. node-only, so it needs no Rust toolchain.
+  #
+  # Run through scripts/check-duplication.mjs rather than jscpd directly
+  # (#4856). jscpd exits 0 whether it analyzed every file or none, so a
+  # malformed .jscpd.json — which it answers with one stderr warning and
+  # a silent fall back to defaults, threshold included — or a scan path
+  # that no longer exists both report a clean tree. The wrapper parses
+  # the config strictly, checks the scan paths, and refuses a report
+  # naming zero analyzed files, so this gate goes red when the scan did
+  # not happen instead of green because it did not.
   dup-check:
     name: Duplicate code
     needs: changes
@@ -478,7 +491,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      - run: npx --yes jscpd@5.0.12 crates
+      # The wrapper's own fail-closed behaviour, gated in the one job that
+      # already has node. An untested gate wrapper is the defect it exists
+      # to fix, one level up.
+      - run: node --test scripts/check-duplication.test.mjs
+      - run: node scripts/check-duplication.mjs crates
 
   # Unused-dependency detection (cargo-machete). Scoped to crates/ to
   # match dup-check. False positives (a dep used only through a
