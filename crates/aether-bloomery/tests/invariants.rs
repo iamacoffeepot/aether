@@ -2381,8 +2381,9 @@ fn grant_refuses_a_running_member_a_stale_stage_and_an_unspendable_request() {
         d.outcome,
     );
 
-    // `Construct`'s retry budget is 2, and no `retry_cap` is sealed, so 2 is the
-    // ceiling. Zero is refused on the same door: it would dispatch an attempt
+    // The sealed catalog is the whole retry authority (ADR-0177), so
+    // `Construct`'s retry budget of 2 is the ceiling and nothing narrows it
+    // further. Zero is refused on the same door: it would dispatch an attempt
     // while granting nothing to spend on it.
     for (key, attempts) in [("g-over", 3), ("g-zero", 0)] {
         let (_, d) = step(&wedged, &grant(key, "wp", StageId::Construct, attempts));

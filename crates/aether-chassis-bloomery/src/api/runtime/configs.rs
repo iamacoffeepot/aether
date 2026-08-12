@@ -37,6 +37,7 @@ use aether_actor::Manual;
 use aether_bloomery::{Digest, LoadConfigs, LoadConfigsResult, config_address};
 use aether_codec::encode_schema;
 use aether_data::schema::SchemaType;
+use aether_http::HttpServerResponse;
 use aether_kinds::descriptors;
 use aether_substrate::actor::native::NativeCtx;
 use serde::{Deserialize, Serialize};
@@ -44,7 +45,7 @@ use serde_json::Value;
 
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed};
-use crate::store::{RecordConfig, StoreCapability};
+use crate::store::{RecordConfig, RecordConfigResult, StoreCapability};
 
 /// The request: which kind the value is, and the value itself as JSON.
 #[derive(Deserialize)]
@@ -66,19 +67,6 @@ pub(super) struct ConfigView {
     kind: String,
 }
 
-/// One authored configuration held across its store write: the view the caller
-/// gets back, and the canonical bytes that join this cap's resolved-config cache
-/// once the row is durable.
-///
-/// The bytes ride along rather than being re-fetched, because the whole point of
-/// caching them here is to keep the pre-seal gate off the store: an operator who
-/// authors a policy and immediately seals a draft naming it would otherwise race
-/// a read that has no reason to have happened yet.
-pub(super) struct AuthoredConfig {
-    pub(super) view: ConfigView,
-    pub(super) bytes: Vec<u8>,
-}
-
 /// The kind's schema, from the descriptor inventory this binary links.
 ///
 /// A miss means the requested kind is not compiled into the resolving binary,
@@ -88,62 +76,58 @@ fn schema_of(kind: &str) -> Option<SchemaType> {
     descriptors::all().into_iter().find(|entry| entry.name == kind).map(|entry| entry.schema)
 }
 
+/// `POST /configs` — encode a configuration through its kind's schema, address
+/// it, and relay the store write; [`config_response`] answers once it lands.
+pub(super) fn author_config(body: &[u8]) -> Routed {
+    let request: ConfigRequest = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(error) => return Routed::Reply(error_response(400, &format!("invalid config body: {error}"))),
+    };
+
+    let Some(schema) = schema_of(&request.kind) else {
+        return Routed::Reply(error_response(400, &format!("unknown config kind `{}`", request.kind)));
+    };
+    let bytes = match encode_schema(&request.value, &schema) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Routed::Reply(error_response(400, &format!("config does not match `{}`: {error}", request.kind)));
+        }
+    };
+
+    let digest = config_address(&request.kind, &bytes);
+    Routed::RecordConfig(RecordConfig { digest: digest.as_bytes().to_vec(), kind: request.kind, bytes })
+}
+
+/// Render the store's write reply into the authoring response: `200` with the
+/// address on a durable write, `500` on a failed one — never an address the
+/// caller could seal against nothing.
+///
+/// Everything this route needs arrives in the reply's own echo rather than in
+/// state held across the write, which is what lets it ride the plain relay
+/// (ADR-0154 §3) instead of keeping a correlation map. That is also why the echo
+/// carries the bytes: a durable write has to leave the content resolvable here
+/// too (#4616), and a `#[http::reply]` route receives only the reply.
+///
+/// A failed write files nothing — the address never reached the caller, and
+/// caching content the store does not hold would let a seal succeed here that no
+/// restart could reproduce. A digest that is not 32 bytes is the store
+/// contradicting its own contract, so it is a `500` rather than a silently
+/// truncated address.
+pub(super) fn config_response(state: &mut ApiCapabilityState, result: RecordConfigResult) -> HttpServerResponse {
+    match result {
+        RecordConfigResult::Ok { digest, kind, bytes } => {
+            let Some(address) = Digest::from_slice(&digest) else {
+                return error_response(500, &format!("config write echoed a {}-byte address", digest.len()));
+            };
+
+            state.configs.insert(address, kind.clone(), bytes);
+            json(200, &ConfigView { digest: address, kind })
+        }
+        RecordConfigResult::Err { error } => error_response(500, &format!("config write failed: {error}")),
+    }
+}
+
 impl ApiCapabilityState {
-    /// `POST /configs` — encode a configuration through its kind's schema,
-    /// address it, store it under that address, and reply with both once the
-    /// write lands.
-    pub(super) fn author_config(&mut self, ctx: &NativeCtx<'_, Manual>, body: &[u8]) -> Routed {
-        let request: ConfigRequest = match serde_json::from_slice(body) {
-            Ok(request) => request,
-            Err(error) => return Routed::Reply(error_response(400, &format!("invalid config body: {error}"))),
-        };
-
-        let Some(schema) = schema_of(&request.kind) else {
-            return Routed::Reply(error_response(400, &format!("unknown config kind `{}`", request.kind)));
-        };
-        let bytes = match encode_schema(&request.value, &schema) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return Routed::Reply(error_response(
-                    400,
-                    &format!("config does not match `{}`: {error}", request.kind),
-                ));
-            }
-        };
-
-        let digest = config_address(&request.kind, &bytes);
-        let record =
-            RecordConfig { digest: digest.as_bytes().to_vec(), kind: request.kind.clone(), bytes: bytes.clone() };
-        let correlation = self.send_tracked(ctx.actor::<StoreCapability>(), &record);
-        // Held across the write rather than rebuilt from the store's reply,
-        // which carries only success or failure — the address is this route's to
-        // report.
-        self.authoring.insert(correlation, AuthoredConfig { view: ConfigView { digest, kind: request.kind }, bytes });
-        Routed::Deferred(correlation)
-    }
-
-    /// Answer a held authoring request from the store's write reply: `200` with
-    /// the address on a durable write, `500` on a failed one — never an address
-    /// the caller could seal against nothing.
-    ///
-    /// A durable write also makes the content resolvable here, so a draft sealing
-    /// the address the caller just received gates without waiting on another
-    /// store read. A failed write files nothing: the address never reached the
-    /// caller, and caching content the store does not hold would let a seal
-    /// succeed here that no restart could reproduce.
-    pub(super) fn resolve_config_write(&mut self, ctx: &NativeCtx<'_, Manual>, error: Option<&str>) -> Option<()> {
-        let AuthoredConfig { view, bytes } = self.authoring.remove(&ctx.reply_target().correlation_id)?;
-        let response = match error {
-            None => {
-                self.configs.insert(view.digest, view.kind.clone(), bytes);
-                json(200, &view)
-            }
-            Some(error) => error_response(500, &format!("config write failed: {error}")),
-        };
-        self.answer(ctx, &response);
-        Some(())
-    }
-
     /// Fill the resolved-configuration cache from the store's boot read (#4616).
     ///
     /// The boot posture is the control core's (ADR-0174): an unreadable table or

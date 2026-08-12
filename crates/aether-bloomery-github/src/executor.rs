@@ -87,7 +87,7 @@ pub enum ExecutorError {
     /// not this error, because reporting "no run yet" *is* its job.)
     NoRunForNonce(Nonce),
     /// The order's checkout digest resolved no real git object through the
-    /// [`Correspondence`](crate::Correspondence) store (ADR-0150) — the sealed
+    /// [`Correspondence`](aether_bloomery::Correspondence) store (ADR-0150) — the sealed
     /// source was never materialized or its correspondence never seeded, so the
     /// executor refuses cleanly rather than dispatching a `subject` git cannot
     /// check out.
@@ -419,7 +419,7 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::{
-        Budget, Conclusion, Digest, ExecutionStatus, ExecutorBackend, Harness, NetworkProfile, Nonce,
+        Conclusion, Digest, ExecutionLimits, ExecutionStatus, ExecutorBackend, Harness, NetworkProfile, Nonce,
         REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolvedModel, Transformation, VerifyFailure, VerifyFailureSet,
         WorkHandle, WorkOrder,
     };
@@ -453,7 +453,7 @@ mod tests {
                 diff_base: None,
                 outputs: Vec::new(),
                 image: "iama/verify:1".to_owned(),
-                limits: Budget::default(),
+                limits: ExecutionLimits { wall_clock_secs: 3_600 },
                 network: NetworkProfile::None,
                 description: None,
                 model: None,

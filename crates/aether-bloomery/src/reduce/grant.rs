@@ -71,20 +71,16 @@ pub(super) fn reduce_grant_attempts(
             got: stage,
         }));
     }
+    // The stage's own retry budget is the hard ceiling, and the only one: the
+    // counters this grant writes are read against it, so a larger request could
+    // not be spent even if it were admitted. The sealed catalog is where retry
+    // authority lives (ADR-0177), so there is no second bloom-wide cap to
+    // reconcile it with.
     let budget = record.stage_catalog.retry_budget_of(stage).unwrap_or(1);
-    // The stage's own retry budget is the hard ceiling: the counters this grant
-    // writes are read against it, so a larger request could not be spent even if
-    // it were admitted. The bloom's sealed `retry_cap` narrows it further when the
-    // bloom stated one — a cap of zero is an unstated ceiling (the whole `Budget`
-    // defaults to zeros), not a standing refusal of every grant.
-    let cap = match record.spec.budget().retry_cap {
-        0 => budget,
-        sealed => sealed.min(budget),
-    };
-    if attempts == 0 || attempts > cap {
+    if attempts == 0 || attempts > budget {
         return Decisions::rejected(Outcome::GrantAttemptsRejected(GrantAttemptsError::BeyondCap {
             requested: attempts,
-            cap,
+            cap: budget,
         }));
     }
     // The dispatch re-targets from the cursor exactly as a retry does (ADR-0152):

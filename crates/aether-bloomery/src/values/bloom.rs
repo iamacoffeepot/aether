@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::{BloomId, WorkpieceId};
-use crate::values::{Budget, ConfigRegistry, ConfigScopes, Evidence, Forecast};
+use crate::values::{ConfigRegistry, ConfigScopes, Evidence, Forecast};
 
 /// One workpiece's admission into a bloom: its identity, the exact scope
 /// revision the bloom pins, and the approval evidence bound to that
@@ -88,8 +88,6 @@ pub struct BloomDraft {
     /// [`StageCatalog`](crate::StageCatalog) entry here is what chooses agents
     /// per stage; sealing none runs the compiled line.
     pub configs: ConfigRegistry,
-    /// The predetermined resource ceiling.
-    pub budget: Budget,
     /// The sealed forecast study grades against.
     pub forecast: Forecast,
 }
@@ -121,13 +119,7 @@ impl BloomDraft {
                 .then_with(|| a.approval.detail.cmp(&b.approval.detail))
         });
         members.dedup();
-        BloomSpec {
-            members,
-            base: self.base,
-            configs: self.configs.clone(),
-            budget: self.budget,
-            forecast: self.forecast,
-        }
+        BloomSpec { members, base: self.base, configs: self.configs.clone(), forecast: self.forecast }
     }
 }
 
@@ -142,7 +134,6 @@ pub struct BloomSpec {
     members: Vec<Membership>,
     base: Digest,
     configs: ConfigRegistry,
-    budget: Budget,
     forecast: Forecast,
 }
 
@@ -192,12 +183,6 @@ impl BloomSpec {
     #[must_use]
     pub const fn scopes<'a>(&'a self, member: &'a Membership) -> ConfigScopes<'a> {
         ConfigScopes::member_of(&member.configs, &self.configs)
-    }
-
-    /// The predetermined resource ceiling.
-    #[must_use]
-    pub const fn budget(&self) -> Budget {
-        self.budget
     }
 
     /// The sealed forecast.

@@ -7,7 +7,7 @@ use super::{AttemptCompletedError, BloomStatus, Decision, Decisions, Outcome, Sn
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
-    AgentProfile, CandidateRef, ConfigRegistry, Evidence, StageCatalog, Transformation, VerifyFailureSet, Wedge,
+    CandidateRef, ConfigRegistry, Evidence, StageBinding, StageCatalog, Transformation, VerifyFailureSet, Wedge,
 };
 
 /// The move-and-dispatch effect pair every cursor move of
@@ -47,16 +47,18 @@ pub(super) fn move_effects_with_candidate(
     candidate: Option<Digest>,
     sealed: SealedLine<'_>,
 ) -> [Decision; 2] {
+    let binding = stage_binding(sealed.catalog, progress.stage);
+
     [
         Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress },
         Decision::DispatchAttempt {
             bloom,
             workpiece: workpiece.clone(),
             stage: progress.stage,
-            transformation: Transformation::for_member_stage(progress.stage, targets.subject, targets.checkout),
+            transformation: Transformation::for_member_stage(&binding, targets.subject, targets.checkout),
             scope_revision,
             candidate,
-            profile: stage_profile(sealed.catalog, progress.stage),
+            profile: binding.profile,
             configs: sealed.configs,
         },
     ]
@@ -85,16 +87,21 @@ pub(super) struct SealedLine<'a> {
     pub catalog: &'a StageCatalog,
 }
 
-/// The profile a catalog calibrates one stage at, falling back to the compiled
-/// line when the catalog binds no such stage.
+/// The binding a catalog gives one stage, falling back to the compiled line's
+/// when the catalog binds no such stage.
+///
+/// One resolution per dispatch, because one binding answers everything a
+/// dispatch asks of the catalog: the profile the attempt runs under and the
+/// wall-clock limit it runs within. Resolving them separately would let a
+/// dispatch pair one stage's calibration with another's limit.
 ///
 /// The fallback is unreachable for any catalog a bloom actually runs — the seal
 /// door refuses one that leaves a stage unbound — so it exists to keep the
 /// dispatch total rather than to express a policy. Dispatching *something* the
 /// operator would recognize beats a panic in the one path that has no way to
 /// report a refusal.
-pub(super) fn stage_profile(catalog: &StageCatalog, stage: StageId) -> AgentProfile {
-    catalog.profile_for(stage).cloned().unwrap_or_else(|| StageCatalog::profile_of(stage))
+pub(super) fn stage_binding(catalog: &StageCatalog, stage: StageId) -> StageBinding {
+    catalog.binding(stage).cloned().unwrap_or_else(|| StageCatalog::binding_of(stage))
 }
 
 /// Reduce a per-member attempt completion (ADR-0149 §The line,

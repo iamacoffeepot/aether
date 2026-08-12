@@ -1,7 +1,7 @@
 //! The forecast-grading study report (ADR-0151, ADR-0180): `grade` is a pure
 //! read over a snapshot that sums a bloom's admitted study records into actual
-//! cost and wall-clock, reads its retry actual off the journal-derived dispatch
-//! ledger, and grades all three against the sealed forecast.
+//! tokens and worker seconds, reads its retry actual off the journal-derived
+//! dispatch ledger, and grades all three against the sealed forecast.
 //!
 //! These cases exercise the owned fold logic — the token/duration summation, the
 //! ledger's beyond-the-first retry sum, and the per-axis over/under deltas — not
@@ -79,17 +79,17 @@ fn study_admitted(bloom: BloomId, subject: u8, detail: u8) -> Fact {
 // ADR-0180 — the retry axis counts dispatches per execution slot, so a bloom
 // whose two members each construct once cleanly grades zero retries even though
 // it produced a study record per member and walked each member on to Verify. The
-// cost and wall-clock axes still sum every member's record.
+// token and worker-second axes still sum every member's record.
 //
 // Tripwire for the defect this replaced: counting study records bloom-wide and
 // subtracting one reported one phantom retry here, and the same fold reported a
 // phantom retry for any single member that walked two stages.
 #[test]
 fn independent_members_and_stages_are_not_retries() {
-    // The forecast overshoots on cost and undershoots on time and retries, so
+    // The forecast overshoots on tokens and undershoots on time and retries, so
     // both delta directions are exercised.
     let (snapshot, bloom) = sealed_with(
-        Forecast { predicted_cost: 500, predicted_secs: 3, predicted_retries: 2 },
+        Forecast { predicted_tokens: 500, predicted_worker_secs: 3, predicted_retries: 2 },
         vec![membership("wp-a", 10), membership("wp-b", 11)],
     );
 
@@ -111,11 +111,11 @@ fn independent_members_and_stages_are_not_retries() {
     assert_eq!(report.blooms.len(), 1);
     let graded = report.blooms[0];
     assert_eq!(graded.bloom, bloom);
-    assert_eq!(graded.actual_cost, 700, "380 + 320 tokens, TTL splits not double-counted");
-    assert_eq!(graded.actual_secs, 2, "2300 ms floors to 2 whole seconds");
+    assert_eq!(graded.actual_tokens, 700, "380 + 320 tokens, TTL splits not double-counted");
+    assert_eq!(graded.actual_worker_secs, 2, "2300 ms floors to 2 whole seconds");
     assert_eq!(graded.actual_retries, 0, "four slots dispatched once each is no retry");
-    assert_eq!(graded.cost_delta, 200, "700 actual over 500 predicted");
-    assert_eq!(graded.secs_delta, -1, "2 actual under 3 predicted");
+    assert_eq!(graded.token_delta, 200, "700 actual over 500 predicted");
+    assert_eq!(graded.worker_secs_delta, -1, "2 actual under 3 predicted");
     assert_eq!(graded.retries_delta, -2, "0 actual under 2 predicted");
 }
 
@@ -135,7 +135,8 @@ fn a_re_dispatched_stage_grades_exactly_one_retry() {
 }
 
 // ADR-0180 — the retry axis is the ledger's, so a study artifact the resolver
-// cannot read costs the grade its cost and time columns and nothing else.
+// cannot read costs the grade its token and worker-second columns and nothing
+// else.
 //
 // Tripwire: reading retries back out of the evidence log. Three unresolvable
 // records against a member that was dispatched twice would report two retries
@@ -152,6 +153,10 @@ fn unresolvable_study_artifacts_leave_the_ledger_retries_standing() {
     }
 
     let graded = grade(&snapshot, |_: &Digest| None).blooms[0];
-    assert_eq!((graded.actual_cost, graded.actual_secs), (0, 0), "nothing resolved, so no cost or time");
+    assert_eq!(
+        (graded.actual_tokens, graded.actual_worker_secs),
+        (0, 0),
+        "nothing resolved, so no tokens or worker seconds"
+    );
     assert_eq!(graded.actual_retries, 1, "the one re-dispatch stands, independent of how many records were logged");
 }
