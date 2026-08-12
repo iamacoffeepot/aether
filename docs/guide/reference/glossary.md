@@ -238,16 +238,30 @@ umbrella collection is not itself an admissible workpiece.
 How much of a decision or proposal current code implements. Realization and ADR
 status are independent facts.
 
-**Backlog / Ready / Held**
+**Managed Plan**
 
-Issue lifecycle states. Backlog has no phase label; Ready passed explicit scope
-approval; Held is CI-green and QA-complete, eligible for an explicitly
-authorized land.
+The scope-owned issue-body sections that define the problem, design,
+implementation steps, dependencies, declared surface, dogfood brief, and exact
+size/model routing lines. Their canonical digest is the approval identity.
 
-**Reconciler-owned phase**
+**Approval record**
 
-Building, QA, Findings, or Held, computed from observable PR facts by the hosted
-reconciler rather than asserted by a local skill.
+A trusted hidden issue-body record binding one managed-Plan digest and route to
+an exact base commit and resolved approval policy. Labels and visible comments
+are not substitutes.
+
+**Direct-review verdict**
+
+A trusted semantic pull-request review bound to the exact PR, current head, and
+Plan digest. It is independent of native GitHub review decisions and unresolved
+threads.
+
+**Landable draft**
+
+A draft pull request whose approval ancestry and declared-surface containment
+hold, required current-head checks pass, direct review accepts, native change
+requests and threads are clear, and required dogfood evidence is current. It
+still needs explicit landing authorization.
 
 **Dogfood**
 

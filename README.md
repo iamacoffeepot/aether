@@ -18,7 +18,7 @@ the load-bearing design and its rejected alternatives.
 - [Architecture overview](docs/guide/architecture.md) — operator, hub, substrate, capability, and guest boundaries.
 - [Repository map](docs/guide/orientation/repository-map.md) — crates and where a change belongs.
 - [Subsystem map](docs/guide/systems.md) — runtime, hosting, I/O, media, tooling, and product systems.
-- [Agent and contributor workflow](docs/guide/contributing/agent-workflow.md) — issue phases, draft PRs, review, dogfood, and landing.
+- [Agent and contributor workflow](docs/guide/contributing/agent-workflow.md) — Plan artifacts, digest-bound approval, draft-PR proof, and landing.
 
 The full mdBook navigation lives in [SUMMARY.md](docs/guide/SUMMARY.md).
 
@@ -198,23 +198,27 @@ release. Read [Distribution and packaging](docs/guide/building/distribution.md).
 
 ## Contributing
 
-Planned work lives in GitHub issues and is implemented in an isolated worktree,
-not directly in the primary `main` checkout. PR titles and commits use
-Conventional Commits. Before opening or updating an implementation PR, run:
+Planned work lives in GitHub issues. Managed issue-body sections hold the Plan,
+declared surface, and size/model route; a hidden trusted record binds approval
+to that Plan digest and an exact base commit. Implementation uses one isolated
+issue worktree and draft PR, never the primary `main` checkout. PR titles and
+commits use Conventional Commits. Before opening or updating a draft, run:
 
 ```sh
 cargo fmt -- --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-GitHub Actions owns the expensive build/test/package matrix. Keep PRs focused,
-preserve unrelated user changes, do not push directly to `main`, and do not
-self-merge.
+GitHub Actions owns the expensive build/test/package matrix. The draft's current
+head must also have direct-review acceptance, resolved threads, declared-surface
+containment, and any required dogfood evidence. Landing is an explicit separate
+operation. Keep PRs focused, preserve unrelated user changes, and do not push
+directly to `main` or merge without that authority.
 
 Repository-agent mechanics are surface-specific:
 
 - Codex uses `AGENTS.md`, `.agents/skills/`, and the active Codex tool schema.
-- Claude Code/headless Claude workflows use `CLAUDE.md` and `.claude/`.
+- Claude Code uses `CLAUDE.md` and `.claude/skills/`.
 
 Architecture and public APIs are shared; tool syntax and workflow harnesses are
 not translated by mechanical substitution. Human contributors can start at

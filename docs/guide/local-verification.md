@@ -91,13 +91,11 @@ remain in the job log.
 Branch protection currently requires two status checks: `CI pass` and `Lint
 title`. It does not configure required pull-request reviews. `CI pass` proves
 the applicable tree checks; it does not prove automated review, dogfood, or
-lifecycle reconciliation.
-
-The Codex skills retain contracts for those post-Ready activities, but current
-`main` has no `review.yml`, `dogfood.yml`, `reconciler.yml`, or
-`quality-eval.yml` Actions entry point. Related scripts do not become hosted
-checks without workflow YAML. Treat those activities as unavailable hosted
-machinery, not as implicit merge gates.
+lifecycle readiness. Those are separate direct-drive facts: the implementation
+skill records a trusted semantic review for the exact head and Plan digest,
+requires native change requests and review threads to be clear, and runs the
+scoped dogfood trial when the issue body calls for one. Landing independently
+re-reads those facts before clearing draft state.
 
 Do not copy a list from a CI log into a shell and run it. Logs are evidence;
 commands come from checked-in workflows and repository guidance.
@@ -182,9 +180,9 @@ Inspect the first deterministic red rather than waiting for every expensive job.
 After pushing a fix, evaluate the new head SHA; results on the superseded head
 do not prove the current one.
 
-The [agent workflow](contributing/agent-workflow.md) explains the contracted
-Building, QA, Findings, and Held semantics and identifies the currently absent
-hosted post-Ready machinery.
+The [agent workflow](contributing/agent-workflow.md) explains how Plan,
+approval, owned implementation artifacts, current-head proof, and explicit
+landing compose without synthetic lifecycle state.
 
 ## Targeted local checks
 

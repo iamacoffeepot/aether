@@ -10,12 +10,13 @@ Read relevant guide pages and ADRs before changing a subsystem. Prefer current c
 
 ## Workflow
 
-- Planned work lives in GitHub issues. Use the repo skills in `.agents/skills/` for sketch, scope, approve, implement, findings, land, sweep, wish, review, and dogfood flows.
-- Codex skills in `.agents/skills/` are the authoritative Codex workflows and must execute from Codex's current tools without runtime-reading or translating Claude artifacts. Files in `CLAUDE.md`, `.claude/skills/`, and `.claude/workflows/` remain active on Claude and headless GitHub Actions surfaces; consult them only as source material when intentionally adapting a workflow for Codex.
-- Do not implement directly in the primary `main` checkout. For Codex issue work, create a separate worktree under `.agents/worktrees/issue-<N>` from `origin/main` and work there. Other agent surfaces may use `.claude/worktrees/`; Codex issue work stays under `.agents/worktrees/`.
+- Planned work lives in GitHub issues. `scope` records the managed Plan sections, declared surface, and exact size/model routing lines in the issue body. `approve` appends a trusted hidden record bound to that Plan digest and an exact `origin/main` commit; taxonomy labels do not carry workflow state or routing authority.
+- Use the repo skills in `.agents/skills/` for sketch, scope, approve, implement, land, sweep, wish, review, dogfood, and related flows. Codex skills and their shared contracts are authoritative for Codex and execute through the active Codex tools. `CLAUDE.md` and `.claude/skills/` are the separate Claude Code surface; consult them only when intentionally adapting a workflow.
+- Do not implement directly in the primary `main` checkout. Codex issue work uses one verified `.agents/worktrees/issue-<N>` worktree and issue branch cut from the approved base commit. Other agent surfaces may use `.claude/worktrees/`; Codex issue work stays under `.agents/worktrees/`.
 - Branches use `type/short-slug` or the issue branch shape from the implement skill, for example `chore/issue-2742-make-repository-codex-friendly`.
 - PR titles and commits use Conventional Commits.
-- Do not push to `main`, force-push reviewed branches, self-merge, or run destructive git commands without explicit user approval.
+- An implementation remains a draft PR while its current head accumulates green checks, direct-review acceptance, resolved threads, and required dogfood evidence. Repair findings in the implementation loop; a new head must prove those facts again.
+- Landing is a separate explicitly authorized operation. Do not push to `main`, force-push reviewed branches, clear draft state, merge, or run destructive git commands without the workflow's required user approval.
 - Keep PRs focused: one concept per PR.
 
 ## Commands

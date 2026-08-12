@@ -1,127 +1,214 @@
-# Release phase schema
+# Contributor workflow schema
 
-Each Aether release is tracked entirely on GitHub issue labels — there is no
-project board. Phase and all issue metadata ride `phase:*` / `type:*` / `size:*`
-/ `model:*` labels. The executable Codex contracts are the matching `$scope`,
-`$approve`, `$implement`, `$findings`, `$land`, `$bounce`, and `$release-init`
-skills plus their shared
-[GitHub workflow contract](https://github.com/iamacoffeepot/aether/blob/main/.agents/skills/_shared/github-workflow.md).
-Read those sources for exact mutations; this page owns the lifecycle vocabulary.
+Aether's contributor workflow is encoded in issue-body artifacts and observable
+GitHub/repository facts. Labels classify issues; they do not carry progress,
+approval, size/model routing, or landability. The executable Codex contract is
+the shared [GitHub workflow contract](https://github.com/iamacoffeepot/aether/blob/main/.agents/skills/_shared/github-workflow.md)
+plus the matching skill under `.agents/skills/`. Claude Code follows the same
+artifact invariants through `CLAUDE.md` and `.claude/skills/`.
 
-## Phase — the `phase:*` label
+This page names the durable vocabulary. Read the executable source for exact API
+mutations, trust validation, parsers, and pause boundaries.
 
-The lifecycle vocabulary is the `phase:*` label set, the canonical phase state for an issue. Backlog and Done are **label-absence**: a fresh issue carries no `phase:*` label (Backlog), a merged/closed issue has its `phase:*` label deleted (Done), and every active phase in between carries its own label. The skills read lifecycle state off labels over REST (`labels=phase:ready`, …) — discovering, enumerating, and gating without any board query.
+## Issue taxonomy
 
-| Phase     | Label             | Meaning                                            | Advances by      |
-|-----------|-------------------|----------------------------------------------------|------------------|
-| Backlog   | *(no label)*      | Not yet picked up for this release                 | User             |
-| Define    | `phase:define`    | Problem framing in progress                        | User + `$scope`  |
-| Design    | `phase:design`    | Tradeoffs / options / ADR drafting                 | User + `$scope`  |
-| Plan      | `phase:plan`      | Sequencing, dependencies, declared surface          | User + `$scope`  |
-| Ready     | `phase:ready`     | Agent-ready; awaiting dispatch                     | Gate: `$approve` |
-| Building  | `phase:building`  | Contracted state: PR head unproven, CI not green, or declared-surface gate red | Intended reconciler |
-| QA        | `phase:qa`        | Contracted state: CI green; review/dogfood verdict owed | Intended reconciler |
-| Findings  | `phase:findings`  | Contracted state: QA findings remain open          | Intended reconciler |
-| Held      | `phase:held`      | Contracted state: CI and QA clear; land-eligible   | Intended reconciler |
-| Done      | *(no label)*      | PR merged, issue closed                            | Auto             |
-| Bounced   | `phase:bounced`   | Phase regression — see the `bounce-to:*` label     | User triage      |
-| Stalled   | `phase:stalled`   | Env/tooling failure, blocks dispatch               | User triage      |
+Issue labels are searchable classification. The conventional-commit title and
+exactly one `type:*` label identify the change type; `crate:*` labels identify
+affected Cargo package scopes. Other labels may classify product or triage
+concerns. None of them proves that scope is complete, selects an implementation
+model, records approval, or authorizes a merge.
 
-`Building` / `QA` / `Findings` / `Held` are computed post-Ready resting states
-in the Codex lifecycle contract. The contract reserves their writes for a
-reconciler, so skills do not assert those labels themselves. The checked-in
-`main` tree does not currently contain `.github/workflows/reconciler.yml` (or
-the hosted Review and Dogfood workflows that would supply its QA facts).
-Consequently the phase meanings remain the intended contract, but the hosted
-post-Ready transitions are unavailable until that machinery is checked in.
+An open issue without a complete managed Plan is unscoped. An open issue with a
+complete valid Plan is planned. A current trusted approval record makes that
+specific Plan/base pair approved. A merged closing PR and closed issue are done.
 
-`Executing` and `Refine` are retired vocabulary. Current skills never write
-them, and `release-project-init.sh` no longer creates them.
+## Managed issue sections
 
-## Issue metadata — all labels
+Scope owns these H2 sections in this order:
 
-Phase and every other axis ride labels — durable, REST-cheap, and the signal the skills actually read:
-
-| Metadata      | Lives as                                | Set by | Notes |
-|---------------|-----------------------------------------|--------|-------|
-| Type          | `type:*` label                          | `$sketch` at filing | Mirrors the conventional-commit prefix |
-| Size          | `size:s\|m\|l` label                    | `$scope` at Plan | Dispatch context-cost prior; `size:xl` marks a fat issue needing breakdown |
-| Model route   | `model:*` label                         | `$scope` at Plan | Routes the implementing agent's model |
-| Agent-ready   | `phase:ready` label                     | `$approve` | "Ready" *is* the eligibility signal |
-| Bounce target | `bounce-to:plan\|design\|define` label  | `$bounce` (or a self-bouncing skill) | Present only while `phase:bounced`; `$scope` reads it to resume, then clears it |
-
-The ADR link lives in the issue's `## Design notes` section; per-issue auth budgets aren't persisted in v1 (a breach is noted in the self-bounce comment).
-
-At Plan, `$scope` emits a fenced `## Declared surface` glob list. `$approve`
-validates that it covers the planned targets and resolves the most restrictive
-`auto|judge|human` tier from `approval-policy.yml` over every path
-each declaration can permit, including higher-tier files inside a declared
-subtree. An explicit `ADR flag:` or declared ADR edit makes the issue
-ADR-bearing; the maturity-aware ADR hard gate (ADR-0146 §6) human-routes a new
-or established (non-`Proposed`) ADR, while a change touching only still-`Proposed`
-ADRs defers to the policy lookup (`docs/adr/**` is `judge`).
-The `$approve` judge tier is currently shadow-only, so `judge` still requires
-owner confirmation; `auto` does not. A verified owner-applied
-`approval:pre-approved` label
-makes a non-ADR issue's effective tier `auto` without bypassing any other gate;
-an agent-applied label has no authority, and ADR work has no override. The same
-declared surface later bounds the implementation diff. A validated pure umbrella instead carries the exact
-`N/A — pure umbrella; no implementation PR` declaration and routes to human
-approval; it never produces an implementation PR.
-
-The declared surface is still the approved implementation boundary: `$approve`
-validates it, and `$implement` requires the implementation handoff and diff
-review to stay inside it. There is currently no hosted `Approval gate` status
-because the reconciler workflow is absent. Branch protection requires only
-`CI pass` and `Lint title`, and has no required-pull-request-review rule.
-
-## Issue dependencies
-
-Dependencies use GitHub's native issue relation, not a custom field. `$scope`
-records them and `$approve` checks them; read those skills for exact mechanics.
-
-## Contracted phase transitions
-
-```
-Backlog  → Define     body has a problem statement
-Define   → Design     if multi-PR, umbrella issue exists; if architectural, ADR drafted
-Design   → Plan       tradeoffs aired; ADR merged if applicable
-Plan     → Ready      dependencies declared, one concept per issue (sets phase:ready)
-Ready    → Building   $implement opens a PR; the intended reconciler observes it
-Building → QA         CI green on the PR head and any declared-surface gate clear
-QA       → Findings   review / dogfood verdict in, and findings are open
-QA       → Held       review / dogfood verdict in, and nothing is open
-Findings → Held       all threads resolved and rollups cleared
-Held     → Done       PR merged (deletes the phase:* label)
-Building/QA/Findings/Held → Building   any push (new head SHA), CI red, or declared-surface escape demotes/holds here
-Building/QA/Findings/Held → Bounced    an upstream-phase issue surfaces (sets bounce-to:*)
-Any      → Stalled    env/tooling failure (not the issue's fault)
+```text
+## Problem statement
+## Design notes
+## Implementation plan
+## Sub-issues
+## Depends on
+## Declared surface
+## Dogfood brief
+## Side findings
 ```
 
-The intended `Building → QA → Findings → Held` stretch is not a fixed walk: a
-reconciler derives the target from observable facts, so a fresh push returns the
-contracted state to Building until the new head is proven. No live skill emits
-the superseded legacy edges (`Ready → Executing`, `Executing → Refine`, or
-`Refine → Done`).
+`Sub-issues`, `Depends on`, and `Side findings` are optional. The other five are
+required for a planned issue. Duplicate headings are invalid.
 
-## Hosted lifecycle availability
+The Implementation plan ends with exactly three non-empty lines:
 
-The checked-in Actions directory is the authority for hosted automation. On
-current `main`, `reconciler.yml`, `review.yml`, `dogfood.yml`, and
-`quality-eval.yml` are absent. Related scripts and the `$implement`, `$findings`,
-`$land`, `$review`, and `$dogfood` skills preserve the intended contracts, but
-they do not make an absent Actions entry point runnable. Treat a skill step that
-needs one of those workflows as unavailable, not as evidence that GitHub is
-already enforcing the transition.
+```text
+**Size:** <s|m|l>
+**Implementation model:** <haiku|sonnet|opus>
+**Routing reason:** <one concise reason>
+```
 
-Current branch protection requires the `CI pass` and `Lint title` status checks
-only. Automated review, dogfood, reconciliation, and declared-surface status are
-not merge gates in the present repository configuration.
+Those lines are the routing source. Similar-looking labels are taxonomy drift,
+not authority.
 
-## Operations
+The canonical Plan digest includes the exact managed spans for Problem
+statement, Design notes, Implementation plan, optional Sub-issues and Depends
+on, Declared surface, and Dogfood brief. It excludes Side findings and unmanaged
+prose. Use `.agents/skills/approve/scripts/plan_digest.py`; byte-level details
+belong to that parser.
 
-- **Bootstrap lifecycle labels:** `$release-init` ensures the phase, bounce,
-  size, and model-routing vocabulary exists.
-- **File an issue:** `$sketch` creates a Backlog issue and its filing labels.
-- **Advance phase:** use the skill that owns the target phase; the shared GitHub
-  workflow contract defines the exact mutation and label-preservation rules.
+## Declared surface and dependencies
+
+An implementable Declared surface is one fenced list containing safe concrete
+repository paths or narrow directory prefixes with one final `/**`. It covers
+every planned target and nothing broader. The approval policy resolves the most
+restrictive `auto|judge|human` tier across everything each entry may permit.
+The implementation and actual PR diff must stay inside the same boundary.
+
+Dependencies live under `## Depends on` and must be complete before approval.
+A pure umbrella has non-empty children, coordination-only work, and exactly:
+
+```text
+N/A — pure umbrella; no implementation PR
+```
+
+It can be approved for coordination but is never dispatched as implementation.
+
+## Trusted approval record
+
+Approval is one canonical hidden `aether-approval:v2` record in the issue body's
+unmanaged prefix before the first managed H2. Its strict payload binds:
+
+| Field | Meaning |
+|---|---|
+| `issue` | The positive issue number |
+| `plan_sha256` | Digest of the current managed Plan |
+| `size` / `model` | Exact body routing values |
+| `policy_tier` | Tier resolved from approved paths and targets |
+| `effective_tier` | Tier after applicable ADR routing |
+| `authority` | `owner` or permitted unattended `policy-auto` decision |
+| `base_sha` | Exact implementation base commit |
+
+Trust comes from GitHub's effective issue-body editor provenance, not from the
+payload's authority text. Owner authority requires the repository owner to be
+the effective editor; policy-auto requires the editor and current policy to
+permit it. A failed or ambiguous provenance read is unknown authority.
+
+A current approval matches the freshly recomputed issue number, digest,
+size/model, tiers, authority rules, and captured base. Managed approval-bearing
+edits change the digest, and a different base requires another record. Older
+records remain history. Approval is never a visible machine-JSON comment.
+
+## Observable implementation states
+
+The workflow derives progress from concrete artifacts:
+
+| Observable state | Meaning |
+|---|---|
+| Open issue, incomplete managed artifacts | Scope is not complete |
+| Complete managed artifacts, no current approval | Planned but unauthorized |
+| Current trusted approval, no owned implementation artifact | Eligible for implementation |
+| Owned issue worktree or branch | Implementation is in progress or paused |
+| Open draft pull request | Reviewable implementation exists |
+| Draft current head with pending/red required checks | Build/test proof is incomplete |
+| Green current head without accepted review/thread/dogfood facts | QA evidence is incomplete |
+| Green, contained current head with accepted review, clear threads, and required dogfood | Landable draft; explicit landing authority is still required |
+| Named pull request merged and closing issue closed | Done |
+
+Never infer one row from another. Each consumer re-reads the exact facts it
+needs.
+
+## Worktree and branch identity
+
+Implementation uses one issue branch cut from the approval's exact base and one
+surface-owned issue worktree:
+
+```text
+Codex:       <shared-root>/.agents/worktrees/issue-<N>
+Claude Code: <shared-root>/.claude/worktrees/issue-<N>
+```
+
+The branch, worktree, issue, and optional PR must correlate unambiguously.
+Existing artifacts are ownership evidence, never permission to delete them or
+start a parallel implementation.
+
+## Draft pull-request evidence
+
+All gates describe one exact current head SHA.
+
+### Approval and containment
+
+The selected approval base must exist and be an ancestor of the head. The
+current issue digest and route must still match its trusted record. Enumerate the
+actual PR changed paths and require every one to match the Declared surface.
+
+### Checks
+
+Require every repository-required check for the current head to complete
+successfully. Current branch protection requires `CI pass` and `Lint title`.
+Local checks support this evidence but do not replace it.
+
+### Direct review and native blockers
+
+Direct review records a strict two-line `aether-direct-review:v1` commenting
+review whose payload contains the exact head SHA, Plan digest, pull-request
+number, and semantic `APPROVE` or `REQUEST_CHANGES` verdict. A trusted artifact:
+
+- comes from the current PR's paginated reviews endpoint;
+- is a `COMMENTED` review from an owner, member, or collaborator;
+- binds both its REST commit id and payload to the current head;
+- binds the current PR and freshly recomputed Plan digest.
+
+The newest matching trusted artifact is the semantic verdict. Native decisions
+remain separate: each reviewer's latest active `CHANGES_REQUESTED` blocks until
+that reviewer approves or GitHub reports it dismissed. Every unresolved review
+thread blocks independently. Neither a native approval nor a marker posted in a
+different GitHub object substitutes for the semantic artifact.
+
+### Dogfood
+
+A specific `N/A` Dogfood brief is the exemption. Otherwise the durable rollup
+must name the current head and scoped surface, report complete engine cleanup,
+and contain no actionable result. Evidence from an older head is stale.
+
+## Repair and conflict handling
+
+Review and dogfood findings are verified, fixed inside the approved surface or
+justified with evidence, committed and plain-pushed, replied to, and resolved
+only after their disposition is visible. Every push creates a new head that must
+repeat checks, semantic review, and required dogfood.
+
+A needed path outside the Declared surface, broken Plan premise, or incompatible
+design returns to the matching managed scope artifact. It is not license to
+expand the diff.
+
+Content-conflict resolution preserves both branch and current-main intent in
+three-way context. Claude Code's `/resolve <PR>` merges current `main` into the
+same draft branch, resolves only inside the approved surface, and drives the new
+head through the full evidence loop. It does not rebase, force-push, create a
+second PR, or land.
+
+## Landing and cleanup
+
+Landing is separately authorized. Immediately before mutation it independently
+revalidates issue identity and digest, approval and ancestry, actual diff and
+surface, current-head checks, semantic and native reviews, threads, dogfood,
+branch ownership, and merge prediction.
+
+An eligible landing clears draft state, performs an ordinary squash merge, and
+continues only after GitHub confirms the named PR is merged. Done additionally
+requires that PR to close its issue. A clean exact issue worktree and local
+branch may then be removed; dirty, locked, or uncertain artifacts remain for an
+explicit sweep.
+
+## Hosted and packaging boundaries
+
+The checked-in Actions tree owns hosted behavior. Current branch protection has
+the two required checks named above and no required-pull-request-review rule.
+Direct-drive scope, approval, review, dogfood, conflict, and landing skills are
+not hosted jobs merely because repository scripts or prose describe them.
+
+Landing a PR is separate from building `dist/`, producing a package depot,
+tagging a version, or publishing a release. See
+[Distribution and packaging](https://github.com/iamacoffeepot/aether/blob/main/docs/guide/building/distribution.md)
+for those terms.

@@ -43,12 +43,13 @@ each file opens with one.
 | --- | --- |
 | `issue-labels.yml` | Lints issue titles, auto-applies `type:*` / `crate:*` labels |
 
-**Lifecycle automation not present:** the Codex skills describe an intended
-post-Ready lifecycle with reconciliation, automated review, dogfood, and quality
-evaluation. This checkout does not contain `reconciler.yml`, `review.yml`,
-`dogfood.yml`, or `quality-eval.yml`, so none of those are hosted workflows on
-`main`. Repository scripts with related names are support code, not an Actions
-entry point by themselves.
+**Contributor lifecycle:** the tables above are the complete hosted workflow
+inventory. Issue scoping, digest-bound approval, implementation, direct review,
+dogfood, conflict resolution, and landing are direct-drive repository skills,
+not Actions jobs. Their evidence lives in issue bodies, owned branches and
+worktrees, draft pull requests, current-head checks/reviews/threads, and dogfood
+rollups. A repository script is not hosted behavior unless a checked-in workflow
+invokes it.
 
 ## Rules
 
