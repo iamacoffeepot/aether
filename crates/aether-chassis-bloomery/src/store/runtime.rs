@@ -27,6 +27,7 @@ use aether_bloomery::{
 use std::time::Duration;
 
 use rusqlite::Connection;
+use rusqlite::ffi::{Error as SqliteFfiError, SQLITE_ERROR};
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
@@ -123,6 +124,18 @@ pub struct OutstandingOrder {
     /// reconstruct it — and re-deriving it from the compiled line would dispatch
     /// the fleet default for a bloom that sealed something else.
     pub profile: Vec<u8>,
+    /// The absolute instant this order's attempt is cancelled at, in Unix
+    /// milliseconds (ADR-0177).
+    ///
+    /// Computed once, when the host durably records the order — so queue and
+    /// startup delay spend the same sealed allowance as running time — from the
+    /// order's own
+    /// [`ExecutionLimits::wall_clock_secs`](aether_bloomery::ExecutionLimits).
+    /// Unix milliseconds because it is the only clock that survives a restart:
+    /// a process-local `Instant` is renewed by the restart, which is exactly
+    /// what let a hung order outlive every one of them. Never replaced on
+    /// re-record or rediscovery — a deadline that moves is not a deadline.
+    pub deadline_unix_millis: u64,
 }
 
 /// The outcome of recording an [`OutstandingOrder`]: written, or its nonce was
@@ -182,6 +195,14 @@ pub trait StoreBackend: Send {
     /// restart, rather than only from the (already-consumed-nothing) empty
     /// vec `init` used to start with.
     fn list_outstanding_nonces(&mut self) -> rusqlite::Result<Vec<String>>;
+    /// Every outstanding order whose stored deadline is at or before
+    /// `now_unix_millis` — the expiry set the executor reactor terminates
+    /// (ADR-0177), in nonce order so a repeated tick handles them the same way.
+    ///
+    /// Reads the persisted deadline rather than any process-local age, so a
+    /// restart neither extends nor resets it: the same rows select again from
+    /// the same numbers.
+    fn list_expired_orders(&mut self, now_unix_millis: u64) -> rusqlite::Result<Vec<OutstandingOrder>>;
 
     /// Hold a parked attempt's order under the question digest that parked it
     /// (ADR-0151, #3664) — the order is consumed from `outstanding_orders` on
@@ -321,7 +342,7 @@ impl SqliteStore {
     /// non-durable in-memory database — the same code path, used by tests and
     /// the default unconfigured chassis.
     pub fn open(path: &str) -> rusqlite::Result<Self> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         // WAL gives a durable single-writer / many-reader journal; a `:memory:`
         // database silently ignores the pragma (it has one connection anyway).
         // `synchronous=NORMAL` is the WAL-appropriate durability point: a
@@ -334,8 +355,106 @@ impl SqliteStore {
         // still single-writer, so the timeout serializes the rare concurrent write.
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch(MIGRATIONS)?;
+        migrate_schema(&mut conn)?;
         Ok(Self { conn })
     }
+}
+
+/// The store's schema version, stamped in `PRAGMA user_version`.
+///
+/// `1` is ADR-0177's coordinated pre-1.0 break: an outstanding order gains
+/// `deadline_unix_millis`, and its `transformation` column's canonical bytes
+/// changed with `Transformation.limits` (#4697). Both land in this one version
+/// because both invalidate exactly the same rows.
+const SCHEMA_VERSION: i64 = 1;
+
+/// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
+///
+/// A store created by this build already has the current shape, so the only work
+/// is stamping the version. A store from before the break has neither the
+/// deadline column nor decodable `transformation` bytes, and there is no
+/// truthful origin for either: fabricating a dispatch time would put a deadline
+/// on the wire that no bloom ever attested, and reinterpreting the old
+/// transformation bytes would silently change what a stored order means. So an
+/// empty legacy store migrates mechanically and a legacy store still holding
+/// order rows is refused by name, with the operator reset or export/recreate
+/// cycle ADR-0177 requires.
+fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
+    if conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))? >= SCHEMA_VERSION {
+        return Ok(());
+    }
+    // One transaction over the whole step — the counts that decide the refusal,
+    // every `ALTER`, and the version stamp. Left as separate autocommits, a
+    // second `ALTER` that faults (or a process that dies between two of them)
+    // commits the first and skips the stamp, and the *next* open sees one
+    // migrated table, concludes there is nothing to do, and stamps the version
+    // over a half-migrated store: permanently "current" with `parked_question`
+    // missing its column, which silently breaks the ADR-0151 park/replay path
+    // for good. SQLite makes both DDL and the `user_version` header write
+    // transactional, so committing them together is all-or-nothing.
+    let migration = conn.transaction()?;
+    // Each table is gated on its own column rather than one standing in for
+    // both: they are altered independently, so only their own `PRAGMA
+    // table_info` says whether they still need it — and a store already left
+    // half-migrated by an earlier build repairs on this open instead of being
+    // read as done.
+    let mut pending = Vec::new();
+    for table in ORDER_BEARING_TABLES {
+        if !has_column(&migration, table, "deadline_unix_millis")? {
+            pending.push(table);
+        }
+    }
+
+    if !pending.is_empty() {
+        let outstanding = count_rows(&migration, "outstanding_orders")?;
+        let parked = count_rows(&migration, "parked_question")?;
+        if outstanding > 0 || parked > 0 {
+            return Err(legacy_store_refusal(outstanding, parked));
+        }
+        for table in pending {
+            migration.execute_batch(&add_deadline_column(table))?;
+        }
+    }
+
+    migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    migration.commit()
+}
+
+/// Whether `table` already declares `column`.
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    names.try_fold(false, |found, name| Ok(found || name? == column))
+}
+
+fn count_rows(conn: &Connection, table: &str) -> rusqlite::Result<u64> {
+    let counted = conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get::<_, i64>(0))?;
+    Ok(u64::try_from(counted).unwrap_or_default())
+}
+
+/// The refusal a nonempty legacy store opens with — loud, and naming the rows
+/// that make the migration untruthful rather than the version numbers.
+fn legacy_store_refusal(outstanding: u64, parked: u64) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        SqliteFfiError::new(SQLITE_ERROR),
+        Some(format!(
+            "bloomery store predates schema version {SCHEMA_VERSION} (ADR-0177) and still holds \
+             {outstanding} outstanding order(s) and {parked} parked order(s). Those rows carry no dispatch \
+             deadline and no longer decodable transformation bytes, and inventing either would attest a \
+             limit no bloom sealed. Reset this trial store, or export and recreate it, before reopening."
+        )),
+    )
+}
+
+/// The tables that carry an order row, and so carry its deadline: the live one
+/// and the ADR-0151 parked one. Both are migrated, and each on its own gate.
+const ORDER_BEARING_TABLES: [&str; 2] = ["outstanding_orders", "parked_question"];
+
+/// The empty-store migration for one order-bearing table: add the deadline
+/// column so it matches [`MIGRATIONS`]. Only ever runs against zero rows, so the
+/// default it declares is never read back as a real deadline.
+fn add_deadline_column(table: &str) -> String {
+    format!("ALTER TABLE {table} ADD COLUMN deadline_unix_millis INTEGER NOT NULL DEFAULT 0;")
 }
 
 /// The schema, applied idempotently on every open.
@@ -357,29 +476,31 @@ CREATE TABLE IF NOT EXISTS outbox (
     delivered INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS outstanding_orders (
-    nonce            TEXT PRIMARY KEY,
-    bloom            BLOB NOT NULL,
-    workpiece        TEXT NOT NULL,
-    scope_revision   BLOB NOT NULL,
-    candidate        BLOB NOT NULL,
-    displayed_digest BLOB NOT NULL,
-    stage            BLOB NOT NULL,
-    transformation   BLOB NOT NULL,
-    configs          BLOB NOT NULL,
-    profile          BLOB NOT NULL
+    nonce                TEXT PRIMARY KEY,
+    bloom                BLOB NOT NULL,
+    workpiece            TEXT NOT NULL,
+    scope_revision       BLOB NOT NULL,
+    candidate            BLOB NOT NULL,
+    displayed_digest     BLOB NOT NULL,
+    stage                BLOB NOT NULL,
+    transformation       BLOB NOT NULL,
+    configs              BLOB NOT NULL,
+    profile              BLOB NOT NULL,
+    deadline_unix_millis INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS parked_question (
-    bloom            BLOB NOT NULL,
-    question         BLOB NOT NULL,
-    nonce            TEXT NOT NULL,
-    workpiece        TEXT NOT NULL,
-    scope_revision   BLOB NOT NULL,
-    candidate        BLOB NOT NULL,
-    displayed_digest BLOB NOT NULL,
-    stage            BLOB NOT NULL,
-    transformation   BLOB NOT NULL,
-    configs          BLOB NOT NULL,
-    profile          BLOB NOT NULL,
+    bloom                BLOB NOT NULL,
+    question             BLOB NOT NULL,
+    nonce                TEXT NOT NULL,
+    workpiece            TEXT NOT NULL,
+    scope_revision       BLOB NOT NULL,
+    candidate            BLOB NOT NULL,
+    displayed_digest     BLOB NOT NULL,
+    stage                BLOB NOT NULL,
+    transformation       BLOB NOT NULL,
+    configs              BLOB NOT NULL,
+    profile              BLOB NOT NULL,
+    deadline_unix_millis INTEGER NOT NULL,
     PRIMARY KEY (bloom, question)
 );
 CREATE TABLE IF NOT EXISTS study_index (
@@ -420,8 +541,8 @@ fn is_constraint_violation(error: &rusqlite::Error) -> bool {
 /// Both tables that hold an order — `outstanding_orders` keyed by nonce and
 /// `parked_question` keyed by the question that parked it — select through this
 /// one spelling, so they cannot drift apart column-wise.
-const ORDER_COLUMNS: &str =
-    "nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage, transformation, configs, profile";
+const ORDER_COLUMNS: &str = "nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage, \
+                             transformation, configs, profile, deadline_unix_millis";
 
 /// Read an [`OutstandingOrder`] from a row selected with [`ORDER_COLUMNS`].
 fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutstandingOrder> {
@@ -436,12 +557,25 @@ fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutstandingOrder>
         transformation: row.get(7)?,
         configs: row.get(8)?,
         profile: row.get(9)?,
+        // `SQLite` integers are signed; every deadline this store writes goes
+        // through the clamp in `deadline_column`, so a negative here is a row
+        // no writer of ours produced. `0` reads as immediately expired, which
+        // terminates the order accountably rather than trusting a corrupt one.
+        deadline_unix_millis: u64::try_from(row.get::<_, i64>(10)?).unwrap_or_default(),
     })
 }
 
+/// One deadline as the signed integer the column stores, saturating at
+/// [`i64::MAX`] — a wall clock that far out is unreachable, so the clamp costs
+/// nothing a real dispatch can observe.
+fn deadline_column(order: &OutstandingOrder) -> i64 {
+    i64::try_from(order.deadline_unix_millis).unwrap_or(i64::MAX)
+}
+
 /// An [`OutstandingOrder`]'s columns as positional parameters matching
-/// [`ORDER_COLUMNS`], for the two tables that insert one.
-fn order_params(order: &OutstandingOrder) -> [&dyn rusqlite::ToSql; 10] {
+/// [`ORDER_COLUMNS`], for the two tables that insert one. The deadline is
+/// clamped by the caller into `deadline`, which the array borrows.
+fn order_params<'a>(order: &'a OutstandingOrder, deadline: &'a i64) -> [&'a dyn rusqlite::ToSql; 11] {
     [
         &order.nonce,
         &order.bloom,
@@ -453,16 +587,22 @@ fn order_params(order: &OutstandingOrder) -> [&dyn rusqlite::ToSql; 10] {
         &order.transformation,
         &order.configs,
         &order.profile,
+        deadline,
     ]
 }
 
 impl StoreBackend for SqliteStore {
     fn record_order(&mut self, order: &OutstandingOrder) -> rusqlite::Result<RecordOutcome> {
+        // `INSERT OR IGNORE` is also what keeps a deadline immutable: a
+        // re-recorded nonce changes no column, so a redrive cannot extend the
+        // allowance of an order already in flight.
+        let deadline = deadline_column(order);
         let changed = self.conn.execute(
             &format!(
-                "INSERT OR IGNORE INTO outstanding_orders ({ORDER_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+                "INSERT OR IGNORE INTO outstanding_orders ({ORDER_COLUMNS}) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
             ),
-            order_params(order).as_slice(),
+            order_params(order, &deadline).as_slice(),
         )?;
         Ok(if changed == 0 {
             RecordOutcome::Duplicate
@@ -490,15 +630,25 @@ impl StoreBackend for SqliteStore {
         rows.collect()
     }
 
+    fn list_expired_orders(&mut self, now_unix_millis: u64) -> rusqlite::Result<Vec<OutstandingOrder>> {
+        let now = i64::try_from(now_unix_millis).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ORDER_COLUMNS} FROM outstanding_orders WHERE deadline_unix_millis <= ?1 ORDER BY nonce"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![now], order_from_row)?;
+        rows.collect()
+    }
+
     fn record_parked_question(&mut self, question: &[u8], order: &OutstandingOrder) -> rusqlite::Result<()> {
         // `question` leads the parameter list so the order's own columns keep the
         // ?1.. positions `order_params` produces.
+        let deadline = deadline_column(order);
         self.conn.execute(
             &format!(
                 "INSERT OR REPLACE INTO parked_question (question, {ORDER_COLUMNS}) \
-                 VALUES (?11, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+                 VALUES (?12, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
             ),
-            [order_params(order).as_slice(), &[&question as &dyn rusqlite::ToSql]].concat().as_slice(),
+            [order_params(order, &deadline).as_slice(), &[&question as &dyn rusqlite::ToSql]].concat().as_slice(),
         )?;
         Ok(())
     }

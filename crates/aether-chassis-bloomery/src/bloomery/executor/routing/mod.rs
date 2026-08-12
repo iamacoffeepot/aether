@@ -101,13 +101,18 @@ impl ExecutorBackend for RoutingExecutor {
     }
 
     fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
+        // The routing record is deliberately *kept* across a cancel (ADR-0177).
+        // `cancel` is idempotent, which means a second one has to reach the same
+        // backend as the first — and the deadline enforcement reissues it on
+        // every tick until the expired order is admitted. Dropping the record
+        // here would send the repeat to the Actions fallback, spending a GitHub
+        // round trip probing both wrappers for a nonce that only ever existed on
+        // the local lane. The retained entry is one small row per cancelled
+        // order, which timeouts produce rarely by construction.
         match self.lane_of(&handle.nonce.0) {
             Lane::Actions => self.actions.cancel(handle)?,
             Lane::Local => self.local.cancel(handle)?,
         }
-        // A cancel is terminal — drop the routing record so `routed` tracks
-        // in-flight orders, not the lifetime total.
-        self.lock().remove(&handle.nonce.0);
         Ok(())
     }
 

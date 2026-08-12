@@ -19,6 +19,19 @@ use crate::store::{OutstandingOrder, StoreBackend};
 /// the digest its evidence is about (what the observation *claims*), the
 /// verdict, and the supporting detail artifact. The broker checks the claimed
 /// `subject` against the digest the matched order displayed.
+///
+/// Also the shape a *synthesised* result takes (ADR-0177): an order that
+/// outlived its sealed execution limit produces no upload at all, so the
+/// executor reactor builds one over the order's own facts — the displayed digest
+/// as `subject`, a stored `TimeoutRecord`'s address as `detail` — and puts it
+/// through this same broker. Deliberately the same door: a timeout must clear
+/// the same nonce and displayed-digest checks a real upload does, spend the same
+/// consume-once order, and reach the same retry and wedge accounting rather than
+/// a parallel authority. Only *most* of the same door: an uploaded result for a
+/// stage with no executor-dispatch lifecycle is refused here as
+/// [`IntakeRefusal::OutOfLineStage`], but the synthesised side never gets that
+/// far, because the reactor has no timeout verdict to build one from for such a
+/// stage and leaves the order outstanding instead.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct UploadedEvidence {
     /// The nonce the upload claims to answer.

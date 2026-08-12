@@ -4,9 +4,15 @@
 //! round-trips through [`NameEvidenceClaims`], so an admitted local run binds
 //! exactly as a wrapper-uploaded one would.
 
+use std::fmt::{Debug, Write as _};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id, Record};
+use tracing::subscriber::with_default;
+use tracing::{Event, Metadata, Subscriber};
 
 use aether_bloomery::{
     BackendObjectId, Conclusion, Correspondence, CorrespondenceError, Digest, ExecutionStatus, ExecutorBackend,
@@ -196,6 +202,10 @@ fn cancel_evicts_the_tracked_run() {
         ExecutionStatus::Unknown,
         "a cancelled run is evicted, so it reports Unknown rather than its exit"
     );
+    // And the eviction does not make the next cancel a fault (ADR-0177): the
+    // deadline enforcement reissues its cancel on every tick until the expired
+    // order is admitted, so a refusal here would make one store fault permanent.
+    exec.cancel(&handle).expect("a repeat cancel of an already-evicted run is a clean success");
 }
 
 #[test]
@@ -286,18 +296,90 @@ fn construct_gate_fails_unparseable_evidence() {
     assert_eq!(construct_verdict("not json at all"), StageVerdict::VerificationFailed);
 }
 
+// A `tracing` sink that renders each event as "LEVEL field=value …" into a shared
+// buffer. Local to this module because the only observable a cancel that reclaims
+// nothing leaves behind is the line it logs, and asserting on that needs the
+// events, not the return value.
+#[derive(Default)]
+struct RecordedEvents(Mutex<Vec<String>>);
+
+impl RecordedEvents {
+    fn rendered(&self) -> String {
+        self.0.lock().unwrap().join("\n")
+    }
+}
+
+struct EventRecorder(Arc<RecordedEvents>);
+
+struct RenderedEvent(String);
+
+// `%`-sigil fields arrive as `record_debug` over a `format_args!`, so one arm
+// renders every field this module logs.
+impl Visit for RenderedEvent {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+        let _ = write!(self.0, " {}={value:?}", field.name());
+    }
+}
+
+impl Subscriber for EventRecorder {
+    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _attributes: &Attributes<'_>) -> Id {
+        // Nothing under test opens a span; one fixed id keeps the sink trivial.
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+    fn event(&self, event: &Event<'_>) {
+        let mut rendered = RenderedEvent(event.metadata().level().to_string());
+        event.record(&mut rendered);
+        self.0.0.lock().unwrap().push(rendered.0);
+    }
+
+    fn enter(&self, _span: &Id) {}
+
+    fn exit(&self, _span: &Id) {}
+}
+
 #[test]
-fn cancel_and_stream_with_no_tracked_run_are_the_no_run_error() {
+fn cancelling_an_untracked_nonce_reports_that_it_reclaimed_nothing() {
+    // Answering `Ok` for a nonce this backend never tracked is the port's
+    // idempotence, not evidence of a reclaim — and the two are not
+    // distinguishable from the return value. The registry is process memory that
+    // boot does not rebuild, so an order dispatched before a restart takes
+    // exactly this arm while its child and its scratch worktree are still live.
+    // The nonce in the log is then the only thread an operator has to the orphan,
+    // so the arm must not be silent.
+    let base = TempDir::new().unwrap();
+    let exec = executor(&base, "{}", RunLifecycle::Running);
+    let events = Arc::new(RecordedEvents::default());
+
+    with_default(EventRecorder(Arc::clone(&events)), || {
+        exec.cancel(&WorkHandle::new(Nonce(test_nonce("restarted")))).unwrap();
+    });
+
+    let rendered = events.rendered();
+    assert!(rendered.contains("WARN"), "a cancel that reclaimed nothing is advisory, not silent: {rendered}");
+    assert!(rendered.contains("nonce=wo-restarted"), "and it names the orphan so it can be found: {rendered}");
+}
+
+#[test]
+fn an_untracked_nonce_cancels_cleanly_and_streams_the_no_run_error() {
+    // The two messages part company at ADR-0177: `cancel` is idempotent, so a
+    // nonce with nothing running is already cancelled, while `stream_evidence`
+    // still has to refuse rather than report an attempt produced no evidence.
     let base = TempDir::new().unwrap();
     let exec = executor(&base, "{}", RunLifecycle::Running);
     let ghost = WorkHandle::new(Nonce("ghost".to_owned()));
 
-    match exec.cancel(&ghost) {
-        Err(LocalExecutorError::NoRunForNonce(nonce)) => assert_eq!(nonce, Nonce("ghost".to_owned())),
-        other => panic!("expected NoRunForNonce, got {other:?}"),
-    }
+    exec.cancel(&ghost).expect("a nonce this backend never ran has nothing left to cancel");
     match exec.stream_evidence(&ghost) {
-        Err(LocalExecutorError::NoRunForNonce(_)) => {}
+        Err(LocalExecutorError::NoRunForNonce(nonce)) => assert_eq!(nonce, Nonce("ghost".to_owned())),
         other => panic!("expected NoRunForNonce, got {other:?}"),
     }
 }

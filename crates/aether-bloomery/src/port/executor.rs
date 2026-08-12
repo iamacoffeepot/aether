@@ -155,9 +155,18 @@ pub trait ExecutorBackend {
 
     /// Cancel the run the handle resolves to.
     ///
+    /// **Idempotent for a handle backed by an outstanding order** (ADR-0177):
+    /// success means the run is now cancelled, was already terminal, or is
+    /// already absent after a prior successful cancel. A nonce this backend
+    /// resolves no run for is therefore `Ok(())`, not an error — the deadline
+    /// enforcement leaves an expired order durable until its evidence is stored
+    /// and its result admitted, so the same cancel is reissued on the next tick
+    /// after any fault downstream of it, and a second one must not turn a
+    /// recoverable retry into a permanent refusal.
+    ///
     /// # Errors
-    /// Backend-defined — e.g. no run resolves for the nonce, or the cancel
-    /// surface is unreachable.
+    /// Backend-defined — a transport or backend fault, which stays retryable and
+    /// leaves the order live. "No run resolves for the nonce" is not one of them.
     fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error>;
 
     /// Stream the references to the evidence the run uploaded, filtered to the
