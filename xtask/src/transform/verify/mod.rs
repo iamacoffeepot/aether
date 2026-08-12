@@ -53,6 +53,10 @@ impl VerifyInvocation {
 /// does not descend into a private module without it (#4694). `--keep-going`
 /// keeps cargo scheduling past the first failing crate (#4690), so one run
 /// reports every *independent* unit rather than stopping at one.
+/// `--all-features` (#4836) is what the `Rustdoc` job also passes: a module
+/// behind a non-default feature is otherwise never compiled by `cargo doc`,
+/// so a denied lint inside it never runs, and the job stays green over code
+/// it has not actually looked at.
 ///
 /// **`verify.clippy` does not deny warnings, and that is the point** (#4706).
 /// `-D warnings` makes a lint a compile error, so a lib that trips one is never
@@ -89,7 +93,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
         }),
         "verify.docs" => Some(VerifyInvocation {
             program: "cargo",
-            args: &["doc", "--workspace", "--no-deps", "--document-private-items", "--keep-going"],
+            args: &["doc", "--workspace", "--no-deps", "--document-private-items", "--all-features", "--keep-going"],
             env: &[(
                 "RUSTDOCFLAGS",
                 "-D rustdoc::redundant_explicit_links -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links",
@@ -636,7 +640,10 @@ mod tests {
         );
 
         let docs = verify_command("verify.docs").expect("verify.docs mapped");
-        assert_eq!(docs.args, &["doc", "--workspace", "--no-deps", "--document-private-items", "--keep-going"]);
+        assert_eq!(
+            docs.args,
+            &["doc", "--workspace", "--no-deps", "--document-private-items", "--all-features", "--keep-going"]
+        );
         assert_eq!(docs.env.len(), 1);
         assert_eq!(docs.env[0].0, "RUSTDOCFLAGS");
     }

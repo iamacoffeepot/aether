@@ -174,15 +174,21 @@ jobs:
       # `--document-private-items` extends link resolution to private
       # items (iamacoffeepot/aether#4308), so a refactor that moves a
       # private item across a module boundary breaks the build instead
-      # of silently dangling. `#[cfg(test)]` modules stay undocumented
-      # and therefore stay unchecked even under the flag.
+      # of silently dangling. `--all-features` (iamacoffeepot/aether#4836)
+      # is what makes a module behind a non-default feature reach these
+      # denied lints at all — without it, cargo never compiles that
+      # module, so a broken or private link inside it is never checked.
+      # Two holes remain even under both flags: `#[cfg(test)]` modules
+      # stay undocumented and therefore unchecked, and an item gated
+      # `#[cfg(not(feature = "…"))]` is compiled out by an all-features
+      # build the same way it would be compiled in by a no-features one.
       - name: cargo doc with tracked rustdoc lints denied
         env:
           RUSTDOCFLAGS: >-
             -D rustdoc::redundant_explicit_links
             -D rustdoc::broken_intra_doc_links
             -D rustdoc::private_intra_doc_links
-        run: cargo doc --workspace --no-deps --document-private-items --keep-going
+        run: cargo doc --workspace --no-deps --document-private-items --all-features --keep-going
 
   # Workspace-wide tests run on linux only. Non-chassis crates
   # (aether-kinds, aether-data, aether-actor, aether-actor-derive,

@@ -201,7 +201,7 @@ Choose the smallest command that crosses the changed boundary:
 | Added-suppression diff | `python3 scripts/check-suppressions.py` |
 | Formatting | `cargo fmt -- --check` |
 | Lints | `cargo clippy --all-targets -- -D warnings` |
-| Doc comments and intra-doc links | `cargo doc --workspace --no-deps --document-private-items` |
+| Doc comments and intra-doc links | `cargo doc --workspace --no-deps --document-private-items --all-features --keep-going` |
 | Wasm/component boundary | the owning fixture/build command from CI |
 | SubstrateHarness behavior | focused integration test target |
 | Hub/process boundary | focused FleetHarness test with required dist artifacts |
@@ -209,10 +209,16 @@ Choose the smallest command that crosses the changed boundary:
 The rustdoc row carries `--document-private-items` because rustdoc resolves
 intra-doc links only on items it documents. Without the flag a link between two
 private items is never resolved, so moving a private item across a module
-boundary can dangle every link that named it and no gate notices. CI's `Rustdoc`
-job runs the same command under `RUSTDOCFLAGS='-D rustdoc::…'`, so keep the two
-identical. One gap remains under the flag: `#[cfg(test)]` modules are not
-documented at all, and a doc link inside one stays unchecked.
+boundary can dangle every link that named it and no gate notices. The row also
+carries `--all-features` because a module behind a non-default feature is
+otherwise never compiled by `cargo doc`, so a broken or private link inside it
+is never resolved either — the feature-gated module has to actually build
+before rustdoc can look at it. CI's `Rustdoc` job runs the same command under
+`RUSTDOCFLAGS='-D rustdoc::…'`, so keep the two identical. Two gaps remain even
+under both flags: `#[cfg(test)]` modules are not documented at all, and an item
+gated `#[cfg(not(feature = "…"))]` is compiled out by an all-features build the
+same way it would be compiled in by a no-features one, so a doc link inside
+either stays unchecked.
 
 Do not run the full expensive matrix merely to appear thorough. Do not skip a
 focused boundary test when it is the only proof of the changed contract.

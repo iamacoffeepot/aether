@@ -179,7 +179,7 @@ impl FakeGithub {
     ///
     /// Off by default: an in-memory-only test wants neither the shell-outs nor a
     /// repository to point at, and the synthetic shas round-trip through
-    /// [`digest_from_hex`](crate::source::digest_from_hex) exactly as before.
+    /// `digest_from_hex` exactly as before.
     #[must_use]
     pub fn with_object_repo(self, repo: impl Into<PathBuf>) -> Self {
         self.lock().object_repo = Some(repo.into());

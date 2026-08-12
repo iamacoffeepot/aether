@@ -188,12 +188,16 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("library")
 # intra-doc-link lookup. `broken_intra_doc_links` catches dangling
 # `[Foo]` after a rename. `private_intra_doc_links` catches public
 # docs pointing at private items. CI's `Rustdoc` job (`cargo doc
-# --workspace --no-deps --document-private-items` under
-# `RUSTDOCFLAGS='-D rustdoc::...'`) escalates these to hard failures;
-# `warn` here keeps local `cargo doc` usable for developers without
-# forcing -D on every dev run. `--document-private-items` is what
-# makes a private-to-private link resolve at all — without it rustdoc
-# never visits those items, so the lints above see nothing to check.
+# --workspace --no-deps --document-private-items --all-features
+# --keep-going` under `RUSTDOCFLAGS='-D rustdoc::...'`) escalates
+# these to hard failures; `warn` here keeps local `cargo doc` usable
+# for developers without forcing -D on every dev run.
+# `--document-private-items` is what makes a private-to-private link
+# resolve at all — without it rustdoc never visits those items, so
+# the lints above see nothing to check. `--all-features` is what
+# makes a module behind a non-default feature reach rustdoc at all —
+# without it, cargo never compiles that module, so the lints above
+# see nothing to check there either.
 redundant_explicit_links = "warn"
 broken_intra_doc_links = "warn"
 private_intra_doc_links = "warn"
