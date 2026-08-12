@@ -980,10 +980,10 @@ impl CandidatePush for RefusingCandidatePush {
 #[must_use]
 pub fn default_candidate_push(uses_fixture: bool) -> Arc<dyn CandidatePush> {
     if uses_fixture {
-        return Arc::new(RefusingCandidatePush);
+        Arc::new(RefusingCandidatePush)
+    } else {
+        Arc::new(GitCandidatePush)
     }
-    let git_push = GitCandidatePush;
-    Arc::new(git_push)
 }
 
 /// Push each admitted passing capture to its bloom candidate ref (ADR-0152).
