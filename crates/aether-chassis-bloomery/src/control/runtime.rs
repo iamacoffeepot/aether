@@ -21,8 +21,10 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use aether_actor::{Manual, runtime};
+use aether_data::Kind;
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 use aether_substrate::InboundMail;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -41,7 +43,8 @@ use aether_bloomery::{
     ResolvedConfigs, Snapshot, Unproducible, reduce, view_of,
 };
 
-use super::ControlCore;
+use super::{ControlCore, ControlSetup, ObserveTick};
+use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::source::SourceCapability;
 use crate::store::StoreCapability;
 
@@ -123,21 +126,45 @@ pub struct ControlCoreState {
     pending: BTreeMap<String, VecDeque<Pending>>,
     pending_claims: BTreeMap<u64, PendingClaim>,
     pending_configs: BTreeMap<u64, PendingConfigs>,
+    /// Whether the boot journal replay has finished folding. The mainline
+    /// observer polls off a wall-clock timer, which starts the moment this cap
+    /// mounts, so it has to hold until the snapshot is the one the journal
+    /// describes — see [`on_observe_tick`](ControlCore::on_observe_tick).
+    replayed: bool,
+    /// The mainline observer's poll-timer sidecar, held for its `Drop` (which
+    /// stops and joins the thread on teardown).
+    _timer: TimerHandle,
 }
 
 #[runtime]
 impl NativeActor for ControlCore {
     type State = ControlCoreState;
     type Config = ();
+    type Params = ControlSetup;
     const NAMESPACE: &'static str = aether_bloomery::CONTROL_CORE_NAMESPACE;
 
-    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<ControlCoreState, BootError> {
+    /// Mount the snapshot owner and start its mainline observer on the
+    /// coordinator's poll cadence. No boot tick is pushed here: the one
+    /// observation boot owes is the one the journal replay sends when its fold
+    /// completes, and a wake fired from `init` would race it against the very
+    /// snapshot #4677 sequenced it behind.
+    fn init((): (), config: ControlSetup, ctx: &mut NativeInitCtx<'_>) -> Result<ControlCoreState, BootError> {
+        let timer = spawn_timer(
+            ctx.mailer(),
+            ctx.self_id(),
+            ObserveTick::ID,
+            ObserveTick::default().encode_into_bytes(),
+            "aether-bloomery-observe",
+            Duration::from_secs(config.poll_interval_secs.max(1)),
+        );
         Ok(ControlCoreState {
             snapshot: Snapshot::default(),
             configs: ResolvedConfigs::default(),
             pending: BTreeMap::new(),
             pending_claims: BTreeMap::new(),
             pending_configs: BTreeMap::new(),
+            replayed: false,
+            _timer: timer,
         })
     }
 
@@ -382,6 +409,7 @@ impl NativeActor for ControlCore {
             state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
         }
         state.reconcile_claim_refs(ctx);
+        state.replayed = true;
         // Only now is the snapshot the one the journal describes, so only now can
         // an observation be decided against it (#4677). Asked here rather than
         // from the source cap's own `wire` because that fires the moment the cap
@@ -393,23 +421,49 @@ impl NativeActor for ControlCore {
         ctx.actor::<SourceCapability>().send_detached(&ObserveMainline);
     }
 
-    /// Admit the observed mainline head (#4667). The reply to the
-    /// [`ObserveMainline`] the boot replay sends once its fold is complete
-    /// (#4677), so the reducer decides it against the snapshot the journal
-    /// describes rather than a partial one.
+    /// Poll wake: ask the source for the repository's live mainline head, so a
+    /// commit a person merged reaches the snapshot on the coordinator's own
+    /// cadence rather than on its next restart.
+    ///
+    /// Held until the replay above has folded, and only until then. #4677's
+    /// constraint is an ordering one — an observation decided against a
+    /// half-replayed snapshot finds nothing in flight and advances mainline out
+    /// from under a land the fold has not reached yet — and past
+    /// [`on_replay_result`](Self::on_replay_result) the snapshot is always fully
+    /// folded, so every later observation is decided against a coherent snapshot
+    /// by construction. What keeps a *continuous* observer safe is already in the
+    /// reducer: the advance is held while a bloom is in flight, so an observation
+    /// can never move mainline out from under an in-flight land.
+    ///
+    /// The observer lives here rather than in the source cap because the source
+    /// is stateless between requests and holds no snapshot: which observations
+    /// may be decided at all is a property of the replay state this cap owns.
+    #[handler::manual]
+    fn on_observe_tick(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, _mail: ObserveTick) {
+        if !state.replayed {
+            return;
+        }
+        ctx.actor::<SourceCapability>().send_detached(&ObserveMainline);
+    }
+
+    /// Admit the observed mainline head (#4667). The reply to an
+    /// [`ObserveMainline`] — the one the boot replay sends once its fold is
+    /// complete (#4677), and each one
+    /// [`on_observe_tick`](Self::on_observe_tick) sends on the poll cadence
+    /// afterwards.
     ///
     /// A failed observation logs and continues rather than aborting boot: the
     /// coordinator is fully functional on a stale mainline — every bloom already
-    /// sealed keeps its base, and the pointer catches up on the next restart —
-    /// so an unreachable source is not the unrecoverable class the replay and
-    /// claim-ref reconcile fail-fast on.
+    /// sealed keeps its base, and the next poll re-observes — so an unreachable
+    /// source is not the unrecoverable class the replay and claim-ref reconcile
+    /// fail-fast on.
     ///
     /// The admit goes through the ordinary [`Admit`] door rather than an internal
     /// shortcut, so this fact is journaled, deduped, and committed exactly like
     /// one arriving over the wire.
     #[handler::manual]
     fn on_observe_mainline_result(
-        _state: &mut ControlCoreState,
+        state: &mut ControlCoreState,
         ctx: &mut NativeCtx<'_, Manual>,
         mail: ObserveMainlineResult,
     ) {
@@ -419,7 +473,7 @@ impl NativeActor for ControlCore {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::control",
                     %error,
-                    "boot mainline observation failed; mainline stays where the last land left it until a restart re-observes"
+                    "mainline observation failed; mainline stays where the last land left it until a later poll re-observes"
                 );
                 return;
             }
@@ -430,11 +484,29 @@ impl NativeActor for ControlCore {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::control",
                     %error,
-                    "boot mainline observation did not decode"
+                    "mainline observation did not decode"
                 );
                 return;
             }
         };
+        // Log hygiene, of the two the poll-driven observer forces a choice
+        // between: skip the admit for a head already observed, rather than keep
+        // admitting unconditionally and demote `admit_duplicate`'s warn for this
+        // key shape. An unchanged head is the ordinary case on every interval,
+        // and admitting one does no work in exchange for the warn — the key is
+        // `observe-mainline-<head>` and the journal already holds it, so the
+        // reducer answers `Outcome::Duplicate` and drops the fact. Demoting the
+        // warn was rejected because that warn is the only place a reactor's
+        // fire-and-forget admit surfaces as a discarded fact (#4722), and it is
+        // worth keeping loud for every other key.
+        //
+        // Compared against the snapshot rather than a private memo of the last
+        // head sent: `observed` moves only once a commit durably landed, so a
+        // failed commit leaves it behind and the next poll re-admits, where a
+        // memo would have recorded the send and never retried.
+        if head == state.snapshot.observed {
+            return;
+        }
 
         let event = Event {
             idempotency_key: IdempotencyKey(format!("observe-mainline-{}", lowercase_hex(head.as_bytes()))),
@@ -445,7 +517,7 @@ impl NativeActor for ControlCore {
             Err(error) => tracing::warn!(
                 target: "aether_chassis_bloomery::control",
                 %error,
-                "boot mainline observation did not encode"
+                "mainline observation did not encode"
             ),
         }
     }

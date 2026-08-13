@@ -131,6 +131,7 @@ use aether_chassis_bloomery::bloomery::{
     GithubConnectionConfig, IntegrateReactorCapability, IntegrateTick, LandReactorCapability, LandTick,
     ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, ScriptedVerdict,
 };
+use aether_chassis_bloomery::control::ObserveTick;
 use aether_chassis_bloomery::session::SessionConfig;
 use aether_chassis_bloomery::signing::SigningConfig;
 use aether_chassis_bloomery::store::{OutstandingOrder, SqliteStore, StoreBackend, StoreConfig};
@@ -178,6 +179,10 @@ const SOCKET_READ_TIMEOUT: Duration = Duration::from_mins(2);
 /// not the head Bloomery proposed — the distinction the land watch has to get
 /// right, and one a proposal-head echo would assert away.
 const SQUASH_COMMIT: &str = "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c";
+
+/// The Git Data short form of the ref the coordinator treats as mainline. The
+/// default, since no scenario repoints [`CoordinatorConfig::mainline_ref`].
+const MAINLINE_REF: &str = "heads/main";
 
 /// A live in-process scenario: a booted coordinator, the in-memory repository it
 /// runs against, and the wire connection that drives and observes it.
@@ -417,6 +422,45 @@ impl FixtureHarness {
     /// proposal already open.
     pub fn land_tick(&mut self) {
         self.tick(<LandReactorCapability as Addressable>::resolve(0, ()), &LandTick::default());
+    }
+
+    /// Wake the control core's mainline observer once: read the repository's
+    /// live head and admit what it says. The same wake its own poll timer fires,
+    /// which a scenario's day-long cadence never reaches.
+    pub fn observe_tick(&mut self) {
+        self.tick(control_mailbox(), &ObserveTick::default());
+    }
+
+    /// Move the repository's mainline to `head` — a person merging something
+    /// this coordinator did not land.
+    ///
+    /// The commit is made resolvable as well as pointed at, so an observation
+    /// reverse-resolves the ref to `head` instead of minting a digest of its own
+    /// for an object nothing has named.
+    pub fn move_mainline(&self, head: Digest) {
+        self.fake.seed_git_object(&head);
+        self.fake.seed_ref_at(MAINLINE_REF, &head);
+    }
+
+    /// Wake the observer until the coordinator's mainline reads `want`.
+    ///
+    /// The same asynchrony [`await_order`](Self::await_order) absorbs: the
+    /// observation is admitted detached, so the projection catches up some time
+    /// after the tick that produced it settles.
+    ///
+    /// # Panics
+    /// Mainline did not reach `want` inside [`STEP_BUDGET`].
+    pub fn await_mainline(&mut self, want: Digest) {
+        let deadline = Instant::now() + STEP_BUDGET;
+        loop {
+            self.observe_tick();
+            let mainline = self.view().mainline;
+            if mainline == want {
+                return;
+            }
+            assert!(Instant::now() < deadline, "mainline stayed {mainline:?} rather than reaching {want:?}");
+            thread::sleep(POLL);
+        }
     }
 
     /// Dispatch one reactor's tick and wait for its causal chain to settle.
