@@ -107,6 +107,7 @@ pub use values::{
     OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord, OverrideError, PriceRow, PriceTable,
     Provenance, Question, REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs,
     ResolvedModel, StageBinding, StageCatalog, StageOverride, StageReceipt, Statement, StudyCost, StudyRecord, Tier,
-    TimeoutRecord, ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND, VerifyFailure, VerifyFailureSet,
-    Wedge, Workpiece, config_address, decode_config, is_model_lane,
+    TimeoutRecord, ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE,
+    VERIFY_LANE_NETWORK, VerifiedTree, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
+    Workpiece, config_address, decode_config, is_model_lane,
 };

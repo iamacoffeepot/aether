@@ -13,6 +13,7 @@ mod model_override;
 mod orphan_claim;
 mod price;
 mod profile;
+mod proof;
 mod question;
 mod stage;
 mod statement;
@@ -34,10 +35,12 @@ pub use orphan_claim::{
 };
 pub use price::{PriceRow, PriceTable};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
+pub use proof::{VerifiedTree, VerifyGateSet, VerifyProof, VerifyReuse};
 pub use question::Question;
 pub use stage::{
     Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, DispatchKey, ExecutionLimits, NetworkProfile,
-    REVIEW_CRITIC_COMMAND, StageBinding, StageCatalog, Transformation, VERIFY_CHECK_COMMAND, is_model_lane,
+    REVIEW_CRITIC_COMMAND, StageBinding, StageCatalog, Transformation, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE,
+    VERIFY_LANE_NETWORK, is_model_lane,
 };
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 pub use study::{StudyCost, StudyRecord};

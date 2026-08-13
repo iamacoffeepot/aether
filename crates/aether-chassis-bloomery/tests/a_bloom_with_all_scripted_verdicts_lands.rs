@@ -119,7 +119,16 @@ fn a_bloom_with_all_scripted_verdicts_lands() {
 
     // The claim set is complete, so the reducer dispatched the git-side fold;
     // the aggregate gates and the landing follow from it.
-    harness.land_the_fold(bloom);
+    //
+    // A single member's fold is a *stating* one — it replaces the branch tree
+    // with that member's candidate — so what comes out is the exact tree the
+    // Verify above proved. The mechanical gate has nothing left to learn from
+    // it and passes by identity (#4891), which is what this assertion pins: the
+    // real fold, through the real source port, still lands on the memo.
+    assert!(
+        !harness.land_the_fold(bloom),
+        "the fold reproduced the verified candidate, so the mechanical gate must not run a second time",
+    );
 
     assert_ne!(harness.view().mainline, sealed_on, "mainline advanced off the base the bloom sealed on");
     assert_eq!(harness.bloom(bloom).status, BloomStatus::Landed);

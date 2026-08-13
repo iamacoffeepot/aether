@@ -261,7 +261,12 @@ impl Topic {
             // surface. The effect that reaches the source is its sibling
             // `DispatchOrphanClaimRelease`, and giving the record its own topic
             // would enqueue a row nothing drains.
-            | Decision::RecordOrphanClaimRelease { .. } => None,
+            | Decision::RecordOrphanClaimRelease { .. }
+            // Snapshot-only: the verify memo and its reuse receipts are read
+            // off the record, and a memo hit's whole point is that no lane is
+            // dispatched — a topic here would enqueue rows for work nobody runs.
+            | Decision::RecordVerifyProof { .. }
+            | Decision::RecordVerifyReuse { .. } => None,
         }
     }
 }

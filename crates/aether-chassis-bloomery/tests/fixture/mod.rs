@@ -442,29 +442,41 @@ impl FixtureHarness {
         }
     }
 
-    /// Carry a bloom whose claim set is complete through the fold, both
-    /// aggregate gates, and the landing — the tail every scenario shares once
-    /// its member line has done whatever that scenario is about.
+    /// Carry a bloom whose claim set is complete through the fold, whichever
+    /// aggregate gates it dispatches, and the landing — the tail every scenario
+    /// shares once its member line has done whatever that scenario is about.
     ///
-    /// Both gates are scripted passing, because a scenario about the member line
-    /// has nothing to say about them. What is asserted here is the route each
-    /// verdict took: the idempotency key names the fact the broker chose, so a
-    /// gate whose verdict was routed to the wrong one fails here rather than
-    /// silently resolving the bloom under a fact nobody meant.
+    /// Returns whether the fold's *mechanical* gate actually ran. A fold that
+    /// reproduces a tree the bloom already proved passes it by identity (#4891),
+    /// which is the ordinary case for a single member: its fold is the candidate
+    /// it verified. A scenario that cares which happened asserts on the return;
+    /// the rest read it as "the gates the fold needed, passed".
+    ///
+    /// Every gate that does run is scripted passing, because a scenario about
+    /// the member line has nothing to say about them. What is asserted here is
+    /// the route each verdict took: the idempotency key names the fact the
+    /// broker chose, so a gate whose verdict was routed to the wrong one fails
+    /// here rather than silently resolving the bloom under a fact nobody meant.
     ///
     /// # Panics
     /// A gate did not dispatch, a verdict was refused, or the bloom did not
     /// land.
-    pub fn land_the_fold(&mut self, bloom: BloomId) {
+    pub fn land_the_fold(&mut self, bloom: BloomId) -> bool {
         self.integrate_tick();
 
-        let aggregate_verify = self.await_order();
-        assert!(aggregate_verify.workpiece.is_empty(), "a bloom-level order carries no member axis");
-        let key = self.upload_admitted(&passed(&aggregate_verify));
-        assert!(key.starts_with("aether.bloomery.aggregate_verify:"), "the fold's mechanical gate: {key}");
+        let order = self.await_order();
+        assert!(order.workpiece.is_empty(), "a bloom-level order carries no member axis");
+        let mut key = self.upload_admitted(&passed(&order));
 
-        let aggregate_review = self.await_order();
-        let key = self.upload_admitted(&passed(&aggregate_review));
+        // The mechanical gate, when the fold was a tree nobody had built before.
+        // Its passing verdict is what dispatches the critic; a fold that passed
+        // by identity dispatched the critic already, so that first order was the
+        // critic's own.
+        let mechanical_ran = key.starts_with("aether.bloomery.aggregate_verify:");
+        if mechanical_ran {
+            let aggregate_review = self.await_order();
+            key = self.upload_admitted(&passed(&aggregate_review));
+        }
         assert!(key.starts_with("aether.bloomery.aggregate_review:"), "the critic's gate: {key}");
 
         // Landing is two steps, because mainline is protected: the reactor
@@ -475,6 +487,7 @@ impl FixtureHarness {
 
         self.fake.merge_pull_request(proposal, SQUASH_COMMIT);
         self.await_landing(bloom, BloomStatus::Landed);
+        mechanical_ran
     }
 
     /// Every order the coordinator currently holds outstanding, read from its
