@@ -6,6 +6,7 @@
 use aether_bloomery::BloomDraft;
 use aether_http::HttpServerResponse;
 
+use super::hex;
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, MAX_OPEN_DRAFTS, Routed};
 use crate::api::dto::{DraftPatch, DraftView, DraftsView};
@@ -37,7 +38,7 @@ impl ApiCapabilityState {
             Some(handle) if self.drafts.contains_key(&handle) => handle,
             _ => return Routed::Reply(error_response(404, "no such draft")),
         };
-        let patch: DraftPatch = match serde_json::from_slice(body) {
+        let patch: DraftPatch = match hex::from_slice(body) {
             Ok(patch) => patch,
             Err(error) => return Routed::Reply(error_response(400, &format!("invalid draft patch: {error}"))),
         };

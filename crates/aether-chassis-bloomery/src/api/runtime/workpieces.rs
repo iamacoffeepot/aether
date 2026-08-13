@@ -4,13 +4,14 @@
 
 use aether_bloomery::Workpiece;
 
+use super::hex;
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, MAX_STAGED_WORKPIECES, Routed};
 
 impl ApiCapabilityState {
     /// `POST /workpieces` — stage a workpiece for later draft membership.
     pub(super) fn stage_workpiece(&mut self, body: &[u8]) -> Routed {
-        let workpiece: Workpiece = match serde_json::from_slice(body) {
+        let workpiece: Workpiece = match hex::from_slice(body) {
             Ok(workpiece) => workpiece,
             Err(error) => return Routed::Reply(error_response(400, &format!("invalid workpiece body: {error}"))),
         };

@@ -12,7 +12,7 @@ use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
 use aether_substrate::actor::native::NativeCtx;
 
-use super::hex::{digest_from_hex, hex_encode};
+use super::hex::{self, digest_from_hex, hex_encode};
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed, VerifyPending, admit};
 use crate::api::dto::{GrantRequest, OutcomeView, ReleaseAcceptedView, SupersedeRequest};
@@ -27,7 +27,7 @@ impl ApiCapabilityState {
             Some(digest) => BloomId(digest),
             None => return Routed::Reply(error_response(400, "predecessor id is not a 32-byte hex bloom id")),
         };
-        let request: SupersedeRequest = match serde_json::from_slice(body) {
+        let request: SupersedeRequest = match hex::from_slice(body) {
             Ok(request) => request,
             Err(error) => return Routed::Reply(error_response(400, &format!("invalid supersede body: {error}"))),
         };
@@ -64,7 +64,7 @@ impl ApiCapabilityState {
             Some(digest) => BloomId(digest),
             None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
         };
-        let request: GrantRequest = match serde_json::from_slice(body) {
+        let request: GrantRequest = match hex::from_slice(body) {
             Ok(request) => request,
             Err(error) => return Routed::Reply(error_response(400, &format!("invalid grant body: {error}"))),
         };
@@ -126,7 +126,7 @@ impl ApiCapabilityState {
         let Some(question) = digest_from_hex(question) else {
             return Routed::Reply(error_response(400, "question is not a 32-byte hex digest"));
         };
-        let answer: Statement = match serde_json::from_slice(body) {
+        let answer: Statement = match hex::from_slice(body) {
             Ok(answer) => answer,
             Err(error) => return Routed::Reply(error_response(400, &format!("invalid answer statement: {error}"))),
         };

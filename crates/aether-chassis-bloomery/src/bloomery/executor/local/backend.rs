@@ -1,7 +1,7 @@
 //! The local-process executor backend: an in-process registry of tracked runs
 //! over the [`TransformRunner`] spawn seam, and its [`ExecutorBackend`] impl.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf, absolute};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use aether_bloomery::digest::ContentAddressed;
 use aether_bloomery::{
     BackendObjectId, CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce,
-    SharedCorrespondence, StageVerdict, StudyCost, Transformation, VerifyFailureSet, WorkHandle, WorkOrder, digest_of,
-    is_model_lane,
+    ResolvedModel, SharedCorrespondence, StageVerdict, StudyCost, Transformation, VerifyFailureSet, WorkHandle,
+    WorkOrder, digest_of, is_model_lane,
 };
 use aether_bloomery_github::parse_study_cost;
 use serde::Serialize;
@@ -71,6 +71,66 @@ impl LaneGates {
     }
 }
 
+/// One dispatch that has been accepted but not yet spawned, waiting for a lane
+/// slot under the backend's concurrency ceiling.
+///
+/// Owns everything [`TransformRunner::start`] is handed, because the borrowed
+/// [`WorkOrder`] is long gone by the time a slot frees, plus the two fields the
+/// tracked [`Run`] it becomes carries.
+struct PendingRun {
+    nonce: String,
+    command: String,
+    checkout_hex: String,
+    diff_base_hex: Option<String>,
+    worktree_dir: PathBuf,
+    evidence_dir: PathBuf,
+    profile: Option<ResolvedModel>,
+    task: Option<String>,
+    subject: Digest,
+    gates: LaneGates,
+}
+
+impl PendingRun {
+    fn spec(&self) -> RunSpec<'_> {
+        RunSpec {
+            command: &self.command,
+            checkout_hex: &self.checkout_hex,
+            diff_base_hex: self.diff_base_hex.as_deref(),
+            worktree_dir: &self.worktree_dir,
+            evidence_dir: &self.evidence_dir,
+            nonce: &self.nonce,
+            harness: self.profile.as_ref().map(|resolved| resolved.harness.as_str()),
+            model: self.profile.as_ref().map(|resolved| resolved.model.as_str()),
+            effort: self.profile.as_ref().map(|resolved| resolved.effort.as_str()),
+            task: self.task.as_deref(),
+        }
+    }
+}
+
+/// What the backend tracks: the runs it has spawned, and the dispatches waiting
+/// for a slot to open under the concurrency ceiling.
+///
+/// One lock over both, because the decision a submit makes — start now, or wait
+/// — reads them together, and a ceiling enforced across two locks is a ceiling
+/// two submits can walk through at once.
+#[derive(Default)]
+struct Registry {
+    runs: HashMap<String, Run>,
+    waiting: VecDeque<PendingRun>,
+    // Slots held by a `start` that is in flight. The spawn shells out to git and
+    // must not hold this lock, so a reservation stands in for the run between the
+    // decision to start it and the registry entry it becomes.
+    starting: usize,
+}
+
+impl Registry {
+    // How many lane slots are spoken for: the spawned runs, plus the starts that
+    // have not yet become one.
+    fn occupied(&self) -> usize {
+        self.runs.len() + self.starting
+    }
+}
+
 /// The digest a run's returning evidence binds to: the order's subject input —
 /// the scope-revision digest the broker displayed — falling back to the checkout
 /// only for a malformed order that carries no input.
@@ -88,7 +148,11 @@ pub struct LocalExecutor {
     runner: Arc<dyn TransformRunner>,
     correspondence: SharedCorrespondence,
     base_dir: PathBuf,
-    runs: Mutex<HashMap<String, Run>>,
+    registry: Mutex<Registry>,
+    // How many lane children may run at once. `usize::MAX` is the unthrottled
+    // seam default; production resolves it from config through
+    // `with_max_concurrent_lanes`.
+    max_concurrent_lanes: usize,
     // The store the captured candidate's commit message is filed in, keyed by the
     // member the run's order names. `None` for a backend built without one (the
     // seam tests), which simply files nothing.
@@ -105,14 +169,47 @@ impl LocalExecutor {
     /// stub runner, and [`from_config`](Self::from_config) drives with the
     /// production [`ProcessTransformRunner`]. `base_dir` is the scratch-worktree
     /// root; each run gets `base_dir/<nonce>` (worktree) and
-    /// `base_dir/<nonce>-evidence` (output).
+    /// `base_dir/<nonce>-evidence` (output). Unthrottled — every submit spawns
+    /// immediately until [`with_max_concurrent_lanes`](Self::with_max_concurrent_lanes)
+    /// sets a ceiling, which is what [`from_config`](Self::from_config) does.
     #[must_use]
     pub fn new(
         runner: Arc<dyn TransformRunner>,
         correspondence: SharedCorrespondence,
         base_dir: impl Into<PathBuf>,
     ) -> Self {
-        Self { runner, correspondence, base_dir: base_dir.into(), runs: Mutex::new(HashMap::new()), messages: None }
+        Self {
+            runner,
+            correspondence,
+            base_dir: base_dir.into(),
+            registry: Mutex::new(Registry::default()),
+            max_concurrent_lanes: usize::MAX,
+            messages: None,
+        }
+    }
+
+    /// Cap how many lane children this backend runs at once.
+    ///
+    /// Each lane is a full cargo build with its own throwaway target dir, and a
+    /// seal fans out one dispatch per member, so an uncapped backend turns member
+    /// count directly into simultaneous builds racing the same CPU and disk.
+    /// Dispatches past the ceiling wait in submission order and start as running
+    /// lanes finish — a queue, never a refusal: every dispatch is acked as
+    /// submitted either way, so the reducer's view of it is unchanged and no order
+    /// re-drains.
+    ///
+    /// The ceiling is per backend rather than per bloom: member lanes, aggregate
+    /// lanes, and the runs re-adopted at boot all count against the same slots.
+    ///
+    /// A ceiling of zero would park every dispatch forever, so it resolves to one
+    /// — the smallest ceiling that still makes progress.
+    #[must_use]
+    pub fn with_max_concurrent_lanes(mut self, ceiling: usize) -> Self {
+        if ceiling == 0 {
+            tracing::warn!("local executor backend: a lane ceiling of zero would start nothing; using one");
+        }
+        self.max_concurrent_lanes = ceiling.max(1);
+        self
     }
 
     /// Mount the store a captured candidate's commit message is filed in. A
@@ -137,7 +234,8 @@ impl LocalExecutor {
             Arc::new(ProcessTransformRunner::new(identity, LaneProgram::parse(&config.local_lane_program))),
             correspondence,
             config.local_worktree_base.clone(),
-        );
+        )
+        .with_max_concurrent_lanes(config.max_concurrent_lanes);
         // A store this backend cannot open costs the landing proposal its
         // authored title, never a candidate: the capture still commits and the
         // land path still falls back, so the miss warns rather than failing boot.
@@ -157,8 +255,8 @@ impl LocalExecutor {
     // Lock the registry, recovering the guard on a poisoned mutex rather than
     // panicking — a backend is long-lived behind an Arc and a poisoned lock
     // should degrade to best-effort, not take the whole coordinator down.
-    fn lock(&self) -> MutexGuard<'_, HashMap<String, Run>> {
-        self.runs.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, Registry> {
+        self.registry.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     // The two directories a run at `nonce` owns: its scratch worktree and its
@@ -193,6 +291,168 @@ impl LocalExecutor {
         }
     }
 
+    // Resolve one work order into the spawn it will become.
+    //
+    // Every fallible step of a dispatch lives here rather than at the spawn, so a
+    // dispatch that waits for a lane slot has already had its checkout, its diff
+    // base, and its paths resolved: what is left to fail later is the spawn alone,
+    // and the caller that could have re-driven the order is still on the stack for
+    // everything else.
+    fn prepare(&self, order: &WorkOrder) -> Result<PendingRun, LocalExecutorError> {
+        let nonce = order.nonce.0.clone();
+        let (worktree_dir, evidence_dir) = self.run_paths(&nonce).map_err(LocalExecutorError::Io)?;
+        // Resolve the sealed checkout digest to its real backend object through the
+        // correspondence store (ADR-0150) — the `git worktree add` target — rather
+        // than hex-punning the digest into a name git cannot resolve. The opaque
+        // bytes become Git text only here, at the argv the runner shells out with.
+        let checkout_hex = render_object_hex(
+            &self
+                .correspondence
+                .resolve_backend_object(&order.transformation.checkout)?
+                .ok_or_else(|| LocalExecutorError::UnresolvedCheckout(order.nonce.clone()))?,
+        );
+        // The diff source rides the work order (#4723) and resolves the same way:
+        // an order that names one is judged over the range `base..checkout`, one
+        // that does not is judged over the working tree. Refused when it does not
+        // resolve rather than silently omitted — the omission is invisible at the
+        // lane, which then reads an empty working-tree diff as an empty candidate.
+        let diff_base_hex = order
+            .transformation
+            .diff_base
+            .map(|base| {
+                self.correspondence
+                    .resolve_backend_object(&base)?
+                    .ok_or_else(|| LocalExecutorError::UnresolvedDiffBase(order.nonce.clone()))
+                    .map(|object| render_object_hex(&object))
+            })
+            .transpose()?;
+
+        // Harness/model/effort/task ride the model-driven lanes (construct and
+        // the review critic), mirroring `transform-model.yml`'s argv; a verify
+        // lane ignores them. The gates stay narrower — `is_construct` selects the
+        // construct-specific evidence gate (substantive-conclusion, #3596), which
+        // the review lane's `status`-stamped evidence must not ride.
+        let gates = LaneGates::of(&order.transformation.command);
+        let is_model_lane = is_model_lane(&order.transformation.command);
+        // The stage's resolved agent profile, overlaid onto the order by the
+        // dispatching host (ADR-0149 §The line) — never a backend-local config
+        // knob, which would let a run's model diverge from the profile its bloom
+        // sealed and the receipt attests. An order that carries none names no
+        // model, and the child falls back to the operator's ambient default.
+        let profile = is_model_lane.then_some(order.transformation.model.as_ref()).flatten();
+
+        Ok(PendingRun {
+            nonce,
+            command: order.transformation.command.clone(),
+            checkout_hex,
+            diff_base_hex,
+            worktree_dir,
+            evidence_dir,
+            profile: profile.cloned(),
+            // The work-order description rides the order's transformation (#3595),
+            // populated at dispatch from durable state; the model lanes name it
+            // (the critic judges the candidate against it), mirroring the
+            // model/effort gate.
+            task: is_model_lane.then_some(order.transformation.description.clone()).flatten(),
+            subject: evidence_subject(&order.transformation),
+            gates,
+        })
+    }
+
+    // Claim a lane slot for a dispatch that may start right now, or report that it
+    // has to wait.
+    //
+    // A dispatch already waiting has the prior claim on a free slot, so a fresh one
+    // never overtakes it — the submission order the queue promises holds even in
+    // the window between a slot freeing and the pump handing it out.
+    fn reserve_slot(&self) -> bool {
+        let mut registry = self.lock();
+        if !registry.waiting.is_empty() || registry.occupied() >= self.max_concurrent_lanes {
+            return false;
+        }
+        registry.starting += 1;
+        true
+    }
+
+    // Park a dispatch behind the ceiling until a slot frees, saying so in the log.
+    //
+    // A wide bloom fans out one dispatch per member and every one of them acks as
+    // submitted, so without this line a queued lane is indistinguishable from a
+    // wedged one: nothing is running, nothing is failing, and nothing says why.
+    fn enqueue(&self, pending: PendingRun) {
+        let nonce = pending.nonce.clone();
+        let depth = {
+            let mut registry = self.lock();
+            registry.waiting.push_back(pending);
+            registry.waiting.len()
+        };
+        tracing::info!(
+            %nonce,
+            queue_depth = depth,
+            ceiling = self.max_concurrent_lanes,
+            "local executor backend: lane ceiling reached; dispatch is queued and starts when a lane finishes",
+        );
+    }
+
+    // Spawn a dispatch holding a reserved slot, turning the reservation into a
+    // tracked run. The spawn itself runs off the registry lock — it shells out to
+    // git — and the reservation is what keeps the slot it is spending from being
+    // handed to anyone else meanwhile. Releases the reservation on both paths.
+    fn start_reserved(&self, pending: PendingRun) -> Result<(), LocalExecutorError> {
+        let started = self.runner.start(&pending.spec());
+
+        {
+            let mut registry = self.lock();
+            registry.starting -= 1;
+            registry.runs.insert(
+                pending.nonce,
+                Run {
+                    process: started?,
+                    worktree_dir: pending.worktree_dir,
+                    evidence_dir: pending.evidence_dir,
+                    subject: pending.subject,
+                    gates: pending.gates,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    // Hand every free lane slot to the dispatches waiting for one, in submission
+    // order. Called wherever a run leaves the registry, which is the only place a
+    // slot frees.
+    //
+    // A queued start that fails has no caller left to refuse it — its dispatch
+    // acked as submitted cycles ago — so it is logged and dropped rather than
+    // retried: the order stays outstanding with no run behind it and resolves
+    // through the reactor's deadline sweep, and a head that fails every time can
+    // never block the lanes queued behind it.
+    fn pump(&self) {
+        while let Some(pending) = self.take_waiting() {
+            let nonce = pending.nonce.clone();
+            if let Err(error) = self.start_reserved(pending) {
+                tracing::error!(
+                    %nonce,
+                    %error,
+                    "local executor backend: a queued dispatch failed to start; its order will expire at its deadline",
+                );
+            }
+        }
+    }
+
+    // Take the next waiting dispatch against a free slot, reserving that slot.
+    // `None` when the ceiling is full or nothing is waiting — either way the pump
+    // above has nothing left to do.
+    fn take_waiting(&self) -> Option<PendingRun> {
+        let mut registry = self.lock();
+        if registry.occupied() >= self.max_concurrent_lanes {
+            return None;
+        }
+        // Reserved as it is taken: the slot is spent from here, not from whenever
+        // the spawn it is handed to returns.
+        registry.waiting.pop_front().inspect(|_| registry.starting += 1)
+    }
+
     // Re-adopt one live order's run, if the previous process left a local footprint
     // for it. Returns whether it was re-adopted.
     //
@@ -205,6 +465,12 @@ impl LocalExecutor {
     // Never replaces a tracked entry: an owned run's `Box<dyn RunProcess>` is the
     // only handle on its child, and swapping it for an orphan would silently retire
     // the ability to kill that child.
+    //
+    // A re-adoption enters the registry directly, so it occupies a lane slot like
+    // any other run — and past the ceiling when a previous process left more live
+    // runs than this one allows, which is the honest reading: those children are
+    // already running, and what the ceiling can still do is start nothing new until
+    // they drain.
     fn readopt(&self, dispatch: &OutstandingDispatch) -> bool {
         let nonce = &dispatch.nonce;
         let (worktree_dir, evidence_dir) = match self.run_paths(&nonce.0) {
@@ -221,11 +487,11 @@ impl LocalExecutor {
         if !worktree_dir.exists() && !evidence_dir.exists() {
             return false;
         }
-        let mut runs = self.lock();
-        if runs.contains_key(&nonce.0) {
+        let mut registry = self.lock();
+        if registry.runs.contains_key(&nonce.0) {
             return false;
         }
-        runs.insert(
+        registry.runs.insert(
             nonce.0.clone(),
             Run {
                 process: Box::new(OrphanedRun::new(nonce.clone(), &evidence_dir)),
@@ -438,65 +704,17 @@ impl ExecutorBackend for LocalExecutor {
     type Error = LocalExecutorError;
 
     fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
-        let nonce = order.nonce.0.clone();
-        let (worktree_dir, evidence_dir) = self.run_paths(&nonce).map_err(LocalExecutorError::Io)?;
-        // Resolve the sealed checkout digest to its real backend object through the
-        // correspondence store (ADR-0150) — the `git worktree add` target — rather
-        // than hex-punning the digest into a name git cannot resolve. The opaque
-        // bytes become Git text only here, at the argv the runner shells out with.
-        let checkout_hex = render_object_hex(
-            &self
-                .correspondence
-                .resolve_backend_object(&order.transformation.checkout)?
-                .ok_or_else(|| LocalExecutorError::UnresolvedCheckout(order.nonce.clone()))?,
-        );
-        // The diff source rides the work order (#4723) and resolves the same way:
-        // an order that names one is judged over the range `base..checkout`, one
-        // that does not is judged over the working tree. Refused when it does not
-        // resolve rather than silently omitted — the omission is invisible at the
-        // lane, which then reads an empty working-tree diff as an empty candidate.
-        let diff_base_hex = order
-            .transformation
-            .diff_base
-            .map(|base| {
-                self.correspondence
-                    .resolve_backend_object(&base)?
-                    .ok_or_else(|| LocalExecutorError::UnresolvedDiffBase(order.nonce.clone()))
-                    .map(|object| render_object_hex(&object))
-            })
-            .transpose()?;
-        let subject = evidence_subject(&order.transformation);
-        // Harness/model/effort/task ride the model-driven lanes (construct and
-        // the review critic), mirroring `transform-model.yml`'s argv; a verify
-        // lane ignores them. The gates stay narrower — `is_construct` selects the
-        // construct-specific evidence gate (substantive-conclusion, #3596), which
-        // the review lane's `status`-stamped evidence must not ride.
-        let gates = LaneGates::of(&order.transformation.command);
-        let is_model_lane = is_model_lane(&order.transformation.command);
-        // The stage's resolved agent profile, overlaid onto the order by the
-        // dispatching host (ADR-0149 §The line) — never a backend-local config
-        // knob, which would let a run's model diverge from the profile its bloom
-        // sealed and the receipt attests. An order that carries none names no
-        // model, and the child falls back to the operator's ambient default.
-        let profile = is_model_lane.then_some(order.transformation.model.as_ref()).flatten();
-        let spec = RunSpec {
-            command: &order.transformation.command,
-            checkout_hex: &checkout_hex,
-            diff_base_hex: diff_base_hex.as_deref(),
-            worktree_dir: &worktree_dir,
-            evidence_dir: &evidence_dir,
-            nonce: &nonce,
-            harness: profile.map(|resolved| resolved.harness.as_str()),
-            model: profile.map(|resolved| resolved.model.as_str()),
-            effort: profile.map(|resolved| resolved.effort.as_str()),
-            // The work-order description rides the order's transformation (#3595),
-            // populated at dispatch from durable state; the model lanes name it
-            // (the critic judges the candidate against it), mirroring the
-            // model/effort gate.
-            task: is_model_lane.then_some(order.transformation.description.as_deref()).flatten(),
-        };
-        let process = self.runner.start(&spec)?;
-        self.lock().insert(nonce, Run { process, worktree_dir, evidence_dir, subject, gates });
+        let pending = self.prepare(order)?;
+        // Under the ceiling with nothing already waiting, the spawn happens inline,
+        // so a spawn fault stays the caller's to re-drive exactly as it was before
+        // the ceiling existed. Otherwise the dispatch waits its turn — and is acked
+        // as submitted either way, so the reducer's view of it never depends on how
+        // busy this host happened to be.
+        if self.reserve_slot() {
+            self.start_reserved(pending)?;
+        } else {
+            self.enqueue(pending);
+        }
         Ok(WorkHandle::new(order.nonce.clone()))
     }
 
@@ -508,8 +726,15 @@ impl ExecutorBackend for LocalExecutor {
         // Read the lifecycle out of the guarded region and drop the lock before
         // returning — the guard need only be held for the poll.
         let lifecycle = {
-            let mut runs = self.lock();
-            let Some(run) = runs.get_mut(&handle.nonce.0) else {
+            let mut registry = self.lock();
+            let Some(run) = registry.runs.get_mut(&handle.nonce.0) else {
+                // A dispatch still waiting for a lane slot is dispatched but not
+                // started — exactly what `Queued` names. Reporting it keeps a
+                // throttled lane legible in the reactor's pending log instead of
+                // reading as a run this backend lost track of.
+                if registry.waiting.iter().any(|pending| pending.nonce == handle.nonce.0) {
+                    return Ok(ExecutionStatus::Queued);
+                }
                 // Not tracked here is the clean Unknown, never an error — the same
                 // "dispatch async, not visible yet" state the Actions backend reports.
                 // A cancelled run has been evicted, so it also reports Unknown here
@@ -530,8 +755,20 @@ impl ExecutorBackend for LocalExecutor {
         // teardown runs off the lock. A failed kill returns early, leaving both the
         // entry and the worktree in place.
         let worktree_dir = {
-            let mut runs = self.lock();
-            let Some(run) = runs.get_mut(&handle.nonce.0) else {
+            let mut registry = self.lock();
+            let Some(run) = registry.runs.get_mut(&handle.nonce.0) else {
+                // A dispatch still waiting for a lane slot has no child to kill and
+                // no checkout to reclaim, so dropping it from the queue is the whole
+                // cancel — and it has to happen here, or the ceiling would go on to
+                // spend a slot starting an order that has already expired.
+                if let Some(index) = registry.waiting.iter().position(|pending| pending.nonce == handle.nonce.0) {
+                    registry.waiting.remove(index);
+                    tracing::info!(
+                        nonce = %handle.nonce.0,
+                        "local executor backend: cancel dropped a dispatch that was still waiting for a lane slot",
+                    );
+                    return Ok(());
+                }
                 // Idempotent (ADR-0177): no tracked run means the order was
                 // never submitted to this backend or a prior cancel already
                 // evicted it, and both are the "already absent" success the port
@@ -557,10 +794,12 @@ impl ExecutorBackend for LocalExecutor {
             let worktree_dir = run.worktree_dir.clone();
             // A cancel is terminal — evict the killed run so the registry tracks only
             // in-flight orders rather than parking `cancelled` entries forever.
-            runs.remove(&handle.nonce.0);
+            registry.runs.remove(&handle.nonce.0);
             worktree_dir
         };
         self.release_worktree(&worktree_dir);
+        // The eviction above freed a lane slot; hand it to whatever is waiting.
+        self.pump();
         Ok(())
     }
 
@@ -570,8 +809,8 @@ impl ExecutorBackend for LocalExecutor {
         // the guarded region, then drop the lock — the evidence read is blocking IO
         // and must not hold the registry mutex.
         let (evidence_dir, subject, lifecycle, LaneGates { is_construct, is_verify }, worktree_dir) = {
-            let mut runs = self.lock();
-            let Some(run) = runs.get_mut(&handle.nonce.0) else {
+            let mut registry = self.lock();
+            let Some(run) = registry.runs.get_mut(&handle.nonce.0) else {
                 return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
             };
             (run.evidence_dir.clone(), run.subject, run.process.poll(), run.gates, run.worktree_dir.clone())
@@ -600,8 +839,13 @@ impl ExecutorBackend for LocalExecutor {
                         error = %read_error,
                         "local executor backend: exited run left no readable evidence — failing closed",
                     );
-                    self.lock().remove(&handle.nonce.0);
+                    self.lock().runs.remove(&handle.nonce.0);
                     self.release_worktree(&worktree_dir);
+                    // Terminal, so the lane slot is free — a run that failed without
+                    // leaving evidence must release its slot exactly as a run that
+                    // passed does, or a bloom whose lanes all fail this way wedges
+                    // the queue behind them.
+                    self.pump();
                     return Ok(vec![EvidenceRef {
                         name: NameEvidenceClaims::attempt_artifact_name(
                             &handle.nonce,
@@ -681,8 +925,11 @@ impl ExecutorBackend for LocalExecutor {
         // the process's lifetime, and reclaim its scratch worktree so the checkout
         // does not outlive the run. (The failed-read path above returns early,
         // keeping both the registry entry and the worktree for a later retry.)
-        self.lock().remove(&handle.nonce.0);
+        self.lock().runs.remove(&handle.nonce.0);
         self.release_worktree(&worktree_dir);
+        // The run is off the registry, so its lane slot belongs to whatever has been
+        // waiting for one.
+        self.pump();
         // A lane that stamped `environment` claims it judged nothing (ADR-0176),
         // so it reports an executor fault rather than a failing verdict against
         // the subject. Gated on the nonce binding like every other body-derived

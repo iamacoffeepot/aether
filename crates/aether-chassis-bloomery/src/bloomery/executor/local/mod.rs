@@ -25,6 +25,16 @@
 //! [`NameEvidenceClaims`](crate::bloomery::intake::NameEvidenceClaims) decodes) —
 //! no artifact-upload naming step to depend on.
 //!
+//! # The lane ceiling
+//!
+//! A submit accepts a dispatch; it does not promise to spawn it immediately.
+//! Each lane is a whole cargo build with its own throwaway target dir, and a seal
+//! fans out one dispatch per member, so the backend runs at most
+//! [`with_max_concurrent_lanes`](LocalExecutor::with_max_concurrent_lanes)
+//! children at once and holds the rest in submission order, starting each as a
+//! running lane finishes. Every dispatch is acked as submitted either way — the
+//! ceiling is a queue, never a refusal, so nothing about it reaches the reducer.
+//!
 //! # The spawn seam
 //!
 //! The git-checkout + `cargo xtask` shell-out is behind the [`TransformRunner`]

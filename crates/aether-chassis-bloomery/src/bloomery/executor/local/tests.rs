@@ -1177,3 +1177,144 @@ fn reconcile_never_replaces_a_run_this_process_owns() {
         "the owned child's own lifecycle still answers, not one inferred from the output dir",
     );
 }
+
+// A spawn seam that records the nonce of every run it is asked to start, in
+// order — what a scenario reads to see which lanes the backend has actually
+// spawned, and which it is still holding behind the ceiling.
+//
+// Each start writes an `evidence.json` naming its own run, so a scenario can
+// drain any spawned lane through `stream_evidence` (the binding is per-nonce, so
+// one canned body shared across runs would refuse every one of them).
+struct ThrottleRunner {
+    started: Arc<Mutex<Vec<String>>>,
+    // `false` → `start` writes no evidence.json, so an exited run resolves down
+    // the fail-closed terminal path instead of the ordinary evidence read.
+    writes_evidence: bool,
+}
+
+impl TransformRunner for ThrottleRunner {
+    fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
+        self.started.lock().unwrap().push(spec.nonce.to_owned());
+        fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
+        if self.writes_evidence {
+            let evidence = format!(
+                r#"{{"command":"construct.implement","nonce":"{}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"result":{{"num_turns":1}}}}}}"#,
+                spec.nonce
+            );
+            fs::write(spec.evidence_dir.join("evidence.json"), evidence).map_err(LocalExecutorError::Io)?;
+        }
+        Ok(Box::new(RecordingProcess { lifecycle: RunLifecycle::Exited { success: true } }))
+    }
+
+    fn release(&self, _worktree_dir: &Path) -> Result<(), LocalExecutorError> {
+        Ok(())
+    }
+
+    fn registered_worktrees(&self) -> Result<Vec<PathBuf>, LocalExecutorError> {
+        Ok(Vec::new())
+    }
+
+    fn capture(
+        &self,
+        _worktree_dir: &Path,
+        _message: Option<&str>,
+    ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+        Ok(Some(canned_capture()))
+    }
+}
+
+fn throttled_executor(
+    base: &TempDir,
+    ceiling: usize,
+    writes_evidence: bool,
+) -> (LocalExecutor, Arc<Mutex<Vec<String>>>) {
+    let started = Arc::new(Mutex::new(Vec::new()));
+    let runner = ThrottleRunner { started: Arc::clone(&started), writes_evidence };
+    (LocalExecutor::new(Arc::new(runner), correspondence(), base.path()).with_max_concurrent_lanes(ceiling), started)
+}
+
+fn spawned(started: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    started.lock().unwrap().clone()
+}
+
+#[test]
+fn the_lane_ceiling_holds_and_the_rest_start_in_submission_order() {
+    // Each lane is a whole cargo build with its own throwaway target dir, so a
+    // seal that fans out one dispatch per member must not turn member count into
+    // that many simultaneous builds. Four dispatches under a ceiling of two: only
+    // two children exist at a time, the other two wait, and each waiting one
+    // starts — in submission order — as a running lane finishes. All four still
+    // resolve, because the ceiling is a queue and never a refusal.
+    let base = TempDir::new().unwrap();
+    let (exec, started) = throttled_executor(&base, 2, true);
+
+    let handles: Vec<_> = (0..4)
+        .map(|index| exec.submit(&construct_order(digest(5), &test_nonce(&index.to_string()))).unwrap())
+        .collect();
+
+    assert_eq!(spawned(&started), ["wo-0", "wo-1"], "only the ceiling's worth of lanes are ever spawned at once");
+    assert_eq!(exec.inspect(&handles[2]).unwrap(), ExecutionStatus::Queued, "a waiting dispatch reads as queued");
+
+    // Draining a lane frees exactly one slot, and the queue's head takes it.
+    exec.stream_evidence(&handles[0]).unwrap();
+    assert_eq!(spawned(&started), ["wo-0", "wo-1", "wo-2"], "the slot goes to the dispatch that waited longest");
+
+    exec.stream_evidence(&handles[1]).unwrap();
+    assert_eq!(spawned(&started), ["wo-0", "wo-1", "wo-2", "wo-3"], "and the next slot to the one after it");
+
+    for handle in &handles[2..] {
+        let refs = exec.stream_evidence(handle).unwrap();
+        assert_eq!(refs.len(), 1, "a queued dispatch resolves exactly as an immediately-started one does");
+    }
+}
+
+#[test]
+fn a_cancelled_dispatch_frees_its_slot_and_a_cancelled_queued_one_never_starts() {
+    // Both halves of a cancel under the ceiling. A cancelled *running* lane must
+    // release its slot, or a bloom whose lanes are cancelled at their deadline
+    // wedges the queue behind them. A cancelled *waiting* one must leave the
+    // queue: the reactor cancels an order it has already expired, and starting a
+    // lane for it afterwards spends a slot — and a whole cargo build — on work
+    // nothing will admit.
+    let base = TempDir::new().unwrap();
+    let (exec, started) = throttled_executor(&base, 1, true);
+
+    let running = exec.submit(&construct_order(digest(5), &test_nonce("running"))).unwrap();
+    let expired = exec.submit(&construct_order(digest(5), &test_nonce("expired"))).unwrap();
+    let next = exec.submit(&construct_order(digest(5), &test_nonce("next"))).unwrap();
+    assert_eq!(spawned(&started), ["wo-running"], "the ceiling of one admits one child");
+
+    exec.cancel(&expired).unwrap();
+    assert_eq!(exec.inspect(&expired).unwrap(), ExecutionStatus::Unknown, "a cancelled dispatch is no longer queued");
+
+    exec.cancel(&running).unwrap();
+    assert_eq!(
+        spawned(&started),
+        ["wo-running", "wo-next"],
+        "the freed slot skips the cancelled dispatch and starts the one behind it",
+    );
+    assert_eq!(
+        exec.inspect(&next).unwrap(),
+        ExecutionStatus::Completed { conclusion: Conclusion::Success },
+        "the dispatch that took the slot is a tracked run like any other",
+    );
+}
+
+#[test]
+fn a_run_that_fails_without_evidence_frees_its_slot() {
+    // The fail-closed terminal path — an exited run that left no readable
+    // evidence — evicts the run on its own, so it has to free the lane slot as
+    // well. Missing that, a bloom whose lanes all die this way holds every slot
+    // it ever took and the queue behind them never moves.
+    let base = TempDir::new().unwrap();
+    let (exec, started) = throttled_executor(&base, 1, false);
+
+    let failing = exec.submit(&construct_order(digest(5), &test_nonce("failing"))).unwrap();
+    let waiting = exec.submit(&construct_order(digest(5), &test_nonce("waiting"))).unwrap();
+    assert_eq!(spawned(&started), ["wo-failing"]);
+
+    let refs = exec.stream_evidence(&failing).unwrap();
+    assert_eq!(refs.len(), 1, "the failed run still synthesizes its fail-closed attempt");
+    assert_eq!(spawned(&started), ["wo-failing", "wo-waiting"], "and releases its slot to the queue");
+    assert_ne!(exec.inspect(&waiting).unwrap(), ExecutionStatus::Queued, "the waiting dispatch is now a live run");
+}

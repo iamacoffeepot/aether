@@ -254,15 +254,19 @@ fn send_json(port: u16, method: &str, path: &str, body: &Value) -> (u16, Value) 
     (status, serde_json::from_slice(&response).unwrap_or(Value::Null))
 }
 
-/// Hex-encode a `BloomId` rendered as its serde byte-array JSON, for the
-/// `/blooms/{id}` path (which addresses blooms by hex digest).
+/// The `BloomId` an outcome names, for the `/blooms/{id}` path. Body and path
+/// speak the same 64 hex characters, so the id is taken as rendered.
 fn bloom_hex(bloom_id: &Value) -> String {
-    bloom_id
-        .as_array()
-        .expect("bloom id is a byte array")
-        .iter()
-        .map(|byte| format!("{:02x}", byte.as_u64().expect("byte is a number")))
-        .collect()
+    bloom_id.as_str().expect("a rendered bloom id is a hex string").to_owned()
+}
+
+/// Read a rendered digest back into a [`Digest`] — the inverse of [`hex_of`].
+fn digest_at(rendered: &Value) -> Digest {
+    let hex = rendered.as_str().expect("a rendered digest is a hex string");
+    let bytes: Vec<u8> = (0..hex.len() / 2)
+        .map(|pair| u8::from_str_radix(&hex[pair * 2..pair * 2 + 2], 16).expect("a rendered digest is hex"))
+        .collect();
+    Digest::from_slice(&bytes).expect("a rendered digest is 32 bytes")
 }
 
 /// Hex-encode a [`Digest`] for a path segment that names one — the answer
@@ -350,12 +354,30 @@ fn rest_api_drives_a_bloom_end_to_end() {
     let (status, opened) = send_json(http_port, "POST", "/drafts", &Value::Null);
     assert_eq!(status, 201, "open draft");
     let draft_id = opened["draft_id"].as_str().unwrap().to_owned();
-    let patch = serde_json::to_value(valid_draft("wp-1")).unwrap();
+    // The body spells `base` the way the paths do — 64 hex characters — while
+    // the memberships beside it keep the canonical byte arrays, so one request
+    // exercises both accepted forms. The echo renders every digest as hex.
+    let mut patch = serde_json::to_value(valid_draft("wp-1")).unwrap();
+    let base = hex_of(&Digest::from_bytes([1; 32]));
+    patch["base"] = Value::String(base.clone());
     let (status, patched) = send_json(http_port, "PATCH", &format!("/drafts/{draft_id}"), &patch);
     assert_eq!(status, 200, "patch draft");
+    assert_eq!(patched["draft"]["base"], base, "a hex base is taken and rendered back as hex");
+    assert_eq!(
+        patched["draft"]["proposals"][0]["scope_revision"],
+        hex_of(&member_revision()),
+        "a digest sent as a byte array renders back as hex too"
+    );
     assert_eq!(patched["draft"]["proposals"].as_array().unwrap().len(), 1);
     let (status, _) = get_json(http_port, &format!("/drafts/{draft_id}"));
     assert_eq!(status, 200, "read draft");
+
+    // Malformed hex is a refusal that names its field, never a truncated read.
+    let mut malformed = patch.clone();
+    malformed["base"] = Value::String("nothexatall".to_owned());
+    let (status, refused) = send_json(http_port, "PATCH", &format!("/drafts/{draft_id}"), &malformed);
+    assert_eq!(status, 400, "a malformed digest is refused: {refused:?}");
+    assert!(refused["error"].as_str().unwrap().contains("base"), "the refusal names the field: {refused:?}");
 
     // The control core answers queries once loaded + replayed — the write /
     // live-read readiness signal.
@@ -368,8 +390,8 @@ fn rest_api_drives_a_bloom_end_to_end() {
     assert_gate_fails_closed(http_port, &seal_path);
 
     // Auto surface + complete projection: the gate forms the approval and the
-    // seal admits. The outcome names the sealed bloom id (rendered as the
-    // BloomId digest's serde byte array; hex-encode it for the `{id}` route).
+    // seal admits. The outcome names the sealed bloom id, rendered as the same
+    // hex the `{id}` route takes.
     let (status, body) = try_http(
         http_port,
         "POST",
@@ -574,7 +596,7 @@ fn authoring_a_config_stores_it_under_a_stable_content_address() {
     let (status, authored) =
         send_json(http_port, "POST", "/configs", &request(serde_json::json!({ "topic": "construct" })));
     assert_eq!(status, 200, "authoring answers only once the store write lands");
-    assert!(authored["digest"].as_array().is_some_and(|bytes| bytes.len() == 32), "the reply names a 32-byte address");
+    assert!(authored["digest"].as_str().is_some_and(|hex| hex.len() == 64), "the reply names a 32-byte address");
     assert_eq!(authored["kind"], "aether.store.drain_outbox", "the reply names the key a registry seals under");
     let digest = authored["digest"].clone();
 
@@ -675,7 +697,7 @@ fn a_sealed_approval_policy_decides_the_tier_the_file_policy_would_refuse() {
         &serde_json::json!({ "kind": "aether.bloomery.approval_policy", "value": authored }),
     );
     assert_eq!(status, 200, "the authored policy is durable before its address is returned: {stored:?}");
-    let address: Digest = serde_json::from_value(stored["digest"].clone()).unwrap();
+    let address = digest_at(&stored["digest"]);
     assert_eq!(address, authored.address(), "the route addresses the policy exactly as a typed seal would");
 
     let sealed_draft = draft_with(http_port, Some(registry_naming(address)));
@@ -752,7 +774,7 @@ fn authored_stage_catalog_reaches_the_dispatch_profile() {
         &serde_json::json!({ "kind": "aether.bloomery.stage_catalog", "value": catalog }),
     );
     assert_eq!(status, 200, "the authored catalog is durable before its address is returned");
-    let catalog_address: Digest = serde_json::from_value(authored["digest"].clone()).unwrap();
+    let catalog_address = digest_at(&authored["digest"]);
 
     let mut configs = ConfigRegistry::default();
     configs.insert_named("aether.bloomery.stage_catalog", catalog_address);
@@ -761,12 +783,16 @@ fn authored_stage_catalog_reaches_the_dispatch_profile() {
     let draft_id = opened["draft_id"].as_str().unwrap();
     let mut patch = serde_json::to_value(valid_draft("wp-1")).unwrap();
     patch["configs"] = serde_json::to_value(&configs).unwrap();
+    // The registry goes up in canonical form and comes back with its address
+    // spelled the way the `/artifacts/{digest}` path would spell it.
+    let rendered_registry =
+        serde_json::json!({ "entries": { "aether.bloomery.stage_catalog": hex_of(&catalog_address) } });
     let (status, patched) = send_json(http_port, "PATCH", &format!("/drafts/{draft_id}"), &patch);
     assert_eq!(status, 200, "patch the authored catalog address into the draft registry");
-    assert_eq!(patched["draft"]["configs"], serde_json::to_value(&configs).unwrap());
+    assert_eq!(patched["draft"]["configs"], rendered_registry);
     let (status, fetched) = get_json(http_port, &format!("/drafts/{draft_id}"));
     assert_eq!(status, 200, "read patched draft");
-    assert_eq!(fetched["draft"]["configs"], serde_json::to_value(&configs).unwrap());
+    assert_eq!(fetched["draft"]["configs"], rendered_registry);
 
     wait_for_200(http_port, "/view");
     let (status, sealed) = send_json(
