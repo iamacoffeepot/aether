@@ -1,8 +1,10 @@
 //! The rebuildable projection the reducer reads, and the fold that evolves it.
 //!
 //! [`reduce`](super::reduce) *decides* against a [`Snapshot`]; [`Snapshot::apply`]
-//! *evolves* one into the next. Journal replay is the two in sequence, event by
-//! event — the split that keeps the decision pure and the evolution mechanical.
+//! *evolves* one into the next. A live admission runs the two in sequence;
+//! journal replay folds recorded decisions through [`Snapshot::apply`] alone
+//! (ADR-0190) — the split that keeps the decision pure, the evolution
+//! mechanical, and history immune to rule changes.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;

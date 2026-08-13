@@ -25,6 +25,14 @@ pub struct AppendEvent {
     /// [`aether_bloomery::Event`]).
     #[serde(with = "aether_data::bytes")]
     pub event: Vec<u8>,
+    /// The wire-encoded `aether_bloomery::Decisions` the event reduced to —
+    /// journaled beside the event so replay folds the recorded decision
+    /// (ADR-0190). Every journal write carries one; a row without it cannot
+    /// be replayed.
+    #[serde(with = "aether_data::bytes")]
+    pub decisions: Vec<u8>,
+    /// The identity of the build whose reducer decided this event.
+    pub decider: String,
 }
 
 /// Reply to [`AppendEvent`].
