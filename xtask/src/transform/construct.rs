@@ -10,6 +10,7 @@ use std::process::Command;
 use anyhow::Result;
 
 use crate::transform::claude::assemble_construct_prompt;
+use crate::transform::sccache::{self, Counters};
 use crate::transform::{TransformArgs, conventions, run_model_lane, write_evidence_json};
 
 /// The typed id of the model-driven construct lane (#3511). Recognized here so
@@ -39,12 +40,14 @@ const CONSTRUCT_INSTRUCTIONS: &str = include_str!("construct_instructions.md");
 /// candidate change in the working tree (#3596) — the completion gate reads it
 /// alongside the terminal-`result`/`is_error` signal to demand a substantive
 /// conclusion, not mere non-error. Pure so the binding is testable without
-/// running Claude or git (#3572).
+/// running Claude or git (#3572). `served` carries what sccache did for the
+/// builds the run drove, stamped presence-driven by [`sccache::stamp`].
 fn stamp_construct_evidence(
     nonce: Option<&str>,
     produced_candidate: bool,
     commit_message: Option<&str>,
     record: &serde_json::Value,
+    served: Option<Counters>,
 ) -> serde_json::Value {
     let mut evidence = serde_json::json!({
         "command": CONSTRUCT_IMPLEMENT,
@@ -52,6 +55,7 @@ fn stamp_construct_evidence(
         "produced_candidate": produced_candidate,
         "result_record": record,
     });
+    sccache::stamp(&mut evidence, served);
     // Presence-driven, like the review lane's `findings`: a run that wrote no
     // deliverable stamps no key at all, so the host reads absence as "this run
     // named nothing" rather than as an empty message it might use as a subject.
@@ -134,7 +138,7 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
         args.subject.as_deref(),
         args.task.as_deref(),
     );
-    let record = run_model_lane(&prompt, args)?;
+    let run = run_model_lane(&prompt, args)?;
 
     // Take the commit-message deliverable before the candidate is inspected, and
     // in that order for two reasons: the file is gone by the time the host stages
@@ -149,7 +153,13 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
 
     write_evidence_json(
         &args.out,
-        &stamp_construct_evidence(args.nonce.as_deref(), produced_candidate, commit_message.as_deref(), &record),
+        &stamp_construct_evidence(
+            args.nonce.as_deref(),
+            produced_candidate,
+            commit_message.as_deref(),
+            &run.record,
+            run.sccache,
+        ),
     )
 }
 
@@ -167,7 +177,7 @@ mod tests {
     #[test]
     fn construct_evidence_binds_the_nonce_carries_the_record_and_the_candidate_signal() {
         let record = serde_json::json!({ "cost_usd": 0.42, "num_turns": 3, "input": 1000 });
-        let evidence = stamp_construct_evidence(Some("nonce-7"), true, None, &record);
+        let evidence = stamp_construct_evidence(Some("nonce-7"), true, None, &record, None);
         assert_eq!(evidence["command"], CONSTRUCT_IMPLEMENT);
         assert_eq!(evidence["nonce"], "nonce-7", "the broker-matched nonce binds the evidence");
         assert_eq!(
@@ -184,7 +194,7 @@ mod tests {
 
         // An empty-candidate run stamps `false` so the gate can reject it while the
         // derived record is still carried whole.
-        let no_nonce = stamp_construct_evidence(None, false, None, &serde_json::json!({ "no_result": true }));
+        let no_nonce = stamp_construct_evidence(None, false, None, &serde_json::json!({ "no_result": true }), None);
         assert!(no_nonce["nonce"].is_null());
         assert_eq!(no_nonce["produced_candidate"], false, "an empty-candidate run stamps false");
         assert_eq!(no_nonce["result_record"]["no_result"], true, "the derived record is carried whole");
@@ -197,7 +207,7 @@ mod tests {
     #[test]
     fn a_written_deliverable_rides_the_evidence_envelope_whole() {
         let message = "feat(crate:aether-render): draw the overlay pass\n\nThe world pass owns depth.";
-        let evidence = stamp_construct_evidence(Some("n-1"), true, Some(message), &serde_json::json!({}));
+        let evidence = stamp_construct_evidence(Some("n-1"), true, Some(message), &serde_json::json!({}), None);
         assert_eq!(evidence["commit_message"], message, "the message is carried verbatim, body included");
     }
 

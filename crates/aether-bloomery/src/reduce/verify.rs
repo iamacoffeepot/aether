@@ -98,11 +98,7 @@ pub(super) fn reduce_verify_failed(
         member.scope_revision,
         progress,
         DispatchTargets { subject, checkout },
-        SealedLine {
-            configs: member.configs.layered_over(record.spec.configs()),
-            catalog: &record.stage_catalog,
-            base: record.spec.base(),
-        },
+        SealedLine::of(record, member),
     ));
     Decisions { outcome: Outcome::RefineReentered { bloom: *bloom, workpiece: workpiece.clone(), rolls }, effects }
 }

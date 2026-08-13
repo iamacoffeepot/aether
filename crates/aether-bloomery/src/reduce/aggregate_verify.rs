@@ -11,9 +11,28 @@ use alloc::vec::Vec;
 
 use super::attempt::stage_binding;
 use super::review::reenter_members;
-use super::{AggregateVerifyError, BloomStatus, Decision, Decisions, Outcome, Snapshot};
+use super::verify_memo::proof_of;
+use super::{AggregateVerifyError, BloomRecord, BloomStatus, Decision, Decisions, Outcome, Snapshot};
+use crate::digest::Digest;
 use crate::ids::{BloomId, StageId};
 use crate::values::{Evidence, Transformation};
+
+/// The dispatch that hands a built fold to the critic: the `AggregateReview`
+/// lane over the same `tree` / `head` the mechanical gate just cleared.
+///
+/// Named once because two paths reach it — a returning green verdict, and a
+/// verify that passed by identity on an already-recorded proof (#4891) — and a
+/// second copy would let the two hand the critic different work orders.
+pub(super) fn aggregate_review_dispatch(record: &BloomRecord, bloom: BloomId, tree: Digest, head: Digest) -> Decision {
+    let binding = stage_binding(&record.stage_catalog, StageId::AggregateReview);
+
+    Decision::DispatchAggregateReview {
+        bloom,
+        transformation: Transformation::for_aggregate_review(&binding, tree, head, record.spec.base()),
+        roll: record.aggregate_rolls + 1,
+        profile: binding.profile,
+    }
+}
 
 /// Reduce a whole-bloom aggregate-verify verdict.
 ///
@@ -58,21 +77,15 @@ pub(super) fn reduce_aggregate_verify_completed(
     ];
 
     if passed {
-        let binding = stage_binding(&record.stage_catalog, StageId::AggregateReview);
+        // The gates ran over this exact tree and passed, so the verdict is
+        // filed as a proof of it (#4891): a later fold that produces the same
+        // tree — or a member handed it back unchanged — passes on this record
+        // rather than re-running them.
+        effects.extend(proof_of(*bloom, StageId::AggregateVerify, evidence));
 
         // The fold stays held: the review judges the same integration this
         // verify just built, and it is the passing review that consumes it.
-        effects.push(Decision::DispatchAggregateReview {
-            bloom: *bloom,
-            transformation: Transformation::for_aggregate_review(
-                &binding,
-                integration.tree,
-                integration.head,
-                record.spec.base(),
-            ),
-            roll: record.aggregate_rolls + 1,
-            profile: binding.profile,
-        });
+        effects.push(aggregate_review_dispatch(record, *bloom, integration.tree, integration.head));
         return Decisions { outcome: Outcome::AggregateVerifyPassed { bloom: *bloom, rolls }, effects };
     }
 

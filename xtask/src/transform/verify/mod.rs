@@ -11,6 +11,7 @@ use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 use anyhow::{Context, Result, bail};
 
 use crate::cargo::{WASM_TARGET, run_captured, write_json_pretty};
+use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::verify::scope::Scope;
 use crate::transform::{Evidence, TransformArgs, build_evidence};
 
@@ -88,9 +89,14 @@ enum Breadth {
 impl VerifyInvocation {
     /// The [`Command`] this invocation runs under `scope` — program, argv, and
     /// env — handed to [`run_captured`] for the captured-output spawn.
-    fn command(&self, scope: &Scope) -> Command {
+    ///
+    /// The host's compiler cache rides every member rather than only the ones
+    /// that compile: naming which members build would be a second list to keep
+    /// true, and the wrapper is inert in a member that never invokes rustc.
+    fn command(&self, scope: &Scope, cache: Option<&CompilerCache>) -> Command {
         let mut cmd = Command::new(self.program);
         cmd.args(self.args_under(scope)).envs(self.env.iter().copied());
+        sccache::export(cache, &mut cmd);
         cmd
     }
 
@@ -514,8 +520,13 @@ fn operational_failure_notice(id: &str, invocation: &VerifyInvocation, code: Opt
 
 /// Run one umbrella member under `scope` and reduce its output to `(outcome,
 /// log, exit_code)`.
-fn run_member(id: &str, invocation: &VerifyInvocation, scope: &Scope) -> Result<(MemberOutcome, Vec<u8>, i32)> {
-    let output = run_captured(invocation.command(scope))
+fn run_member(
+    id: &str,
+    invocation: &VerifyInvocation,
+    scope: &Scope,
+    cache: Option<&CompilerCache>,
+) -> Result<(MemberOutcome, Vec<u8>, i32)> {
+    let output = run_captured(invocation.command(scope, cache))
         .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
 
     // A JSON-format member's verdict is ours to derive: its exit status is
@@ -570,13 +581,21 @@ fn effective_exit_code(passed: bool, exit_code: Option<i32>) -> i32 {
 /// Run `invocation`'s prepare step, when it has one. `None` is a member clear to
 /// run; `Some((log, exit_code))` is a prepare that failed, already framed as the
 /// member's log by [`prepare_failure_log`].
-fn run_prepare(id: &str, invocation: &VerifyInvocation) -> Result<Option<(String, i32)>> {
+fn run_prepare(
+    id: &str,
+    invocation: &VerifyInvocation,
+    cache: Option<&CompilerCache>,
+) -> Result<Option<(String, i32)>> {
     let Some(prepare) = invocation.prepare else {
         return Ok(None);
     };
 
+    // The prepare cross-builds every component crate for wasm32 — the largest
+    // single build in the lane — so it goes through the cache like the member it
+    // belongs to.
     let mut step = Command::new("cargo");
     step.args(prepare);
+    sccache::export(cache, &mut step);
     let output = run_captured(step).with_context(|| format!("spawn cargo {}", prepare.join(" ")))?;
     if output.status.success() {
         return Ok(None);
@@ -601,7 +620,8 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     // `verify.check` rather than by a second rule. An order that names none —
     // every current caller of this path — resolves the whole workspace.
     let scope = Scope::resolve(args.diff_base.as_deref());
-    let output = run_captured(invocation.command(&scope))
+    let cache = sccache::detect();
+    let output = run_captured(invocation.command(&scope, cache.as_ref()))
         .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
 
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
@@ -635,7 +655,8 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
 
     let failures = outcome.failure(&args.command).map(VerifyFailureSet::one);
     let evidence =
-        build_evidence(&args.command, args.nonce.clone(), passed, Some(exit_code), log_name, findings, failures);
+        build_evidence(&args.command, args.nonce.clone(), passed, Some(exit_code), log_name, findings, failures)
+            .served_by(cache.as_ref());
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
 
     if passed {
@@ -777,6 +798,9 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         let evidence = Evidence {
             findings: Some(tools::missing_findings(&missing)),
             failed_verifiers: Some(VerifyFailureSet::one(VerifyFailure::Preflight)),
+            // A run that refused before its first member compiled nothing, so
+            // there is nothing for a cache to have served.
+            sccache: None,
             command: VERIFY_CHECK.to_owned(),
             nonce: args.nonce.clone(),
             status: "fail",
@@ -796,6 +820,10 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
     let scope_path = args.out.join(&scope_log);
     fs::write(&scope_path, scope.receipt()).with_context(|| format!("write {}", scope_path.display()))?;
 
+    // Resolved once for the whole umbrella, so the counters the evidence carries
+    // cover every member's build rather than one member's slice of it.
+    let cache = sccache::detect();
+
     let mut log_names = vec![scope_log];
     let mut passed = Vec::with_capacity(verify_check_members().len());
     let mut outcomes = Vec::with_capacity(verify_check_members().len());
@@ -814,9 +842,9 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         // it is already covered — the preflight checks the cross-target the
         // pre-build needs — so what is left is the candidate breaking its own
         // build.
-        let (outcome, log_bytes, exit_code) = match run_prepare(id, &invocation)? {
+        let (outcome, log_bytes, exit_code) = match run_prepare(id, &invocation, cache.as_ref())? {
             Some((log, code)) => (MemberOutcome::Failed, log.into_bytes(), code),
-            None => run_member(id, &invocation, &scope)?,
+            None => run_member(id, &invocation, &scope, cache.as_ref())?,
         };
 
         let log_name = format!("{id}.log");
@@ -836,6 +864,7 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
     let evidence = Evidence {
         findings: verify_findings(&outcomes),
         failed_verifiers: (!failures.is_empty()).then_some(failures),
+        sccache: cache.as_ref().and_then(CompilerCache::served),
         command: VERIFY_CHECK.to_owned(),
         nonce: args.nonce.clone(),
         status: if all_pass {

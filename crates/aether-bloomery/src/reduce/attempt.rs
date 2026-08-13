@@ -3,11 +3,14 @@
 
 use alloc::vec::Vec;
 
-use super::{AttemptCompletedError, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
+use super::integrate::claim_effects;
+use super::verify_memo::reuse_of;
+use super::{AttemptCompletedError, BloomRecord, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
-    CandidateRef, ConfigRegistry, Evidence, StageBinding, StageCatalog, Transformation, VerifyFailureSet, Wedge,
+    CandidateRef, ConfigRegistry, Evidence, Membership, ResolutionClaim, StageBinding, StageCatalog, Transformation,
+    VerifyFailureSet, Wedge,
 };
 
 /// The move-and-dispatch effect pair every cursor move of
@@ -78,8 +81,9 @@ pub(super) struct DispatchTargets {
 }
 
 /// What a dispatch inherits from the bloom that sealed it (ADR-0174): the
-/// flattened configuration registry it resolves through, and the stage catalog
-/// that calibrates it. Both come off the bloom's record, so they travel together.
+/// flattened configuration registry it resolves through, the stage catalog that
+/// calibrates it, and the base its candidate is built over. All three come off
+/// the bloom's record, so they travel together.
 pub(super) struct SealedLine<'a> {
     /// The member's registry layered over the bloom's.
     pub configs: ConfigRegistry,
@@ -89,6 +93,19 @@ pub(super) struct SealedLine<'a> {
     pub base: Digest,
     /// The catalog the bloom sealed, or the compiled line when it sealed none.
     pub catalog: &'a StageCatalog,
+}
+
+impl<'a> SealedLine<'a> {
+    /// The line one member of `record` dispatches under. Every field is read
+    /// off the record and the membership, so a call site cannot assemble two
+    /// of the three from the bloom and the third from somewhere else.
+    pub(super) fn of(record: &'a BloomRecord, member: &Membership) -> Self {
+        Self {
+            configs: member.configs.layered_over(record.spec.configs()),
+            catalog: &record.stage_catalog,
+            base: record.spec.base(),
+        }
+    }
 }
 
 /// The binding a catalog gives one stage, falling back to the compiled line's
@@ -200,6 +217,34 @@ pub(super) fn reduce_attempt_completed(
     let seen_verify_failures = cursor.seen_verify_failures;
     if let Some(next) = next.filter(|_| passed) {
         let progress = StageProgress { stage: next, attempts: 1, candidate, repair_rolls, seen_verify_failures };
+        // The member may be advancing onto a tree this bloom already proved
+        // (#4891) — a repair lap that changed nothing the tree records hands
+        // back the candidate its last verify passed. Pass by identity: the
+        // member lands on the claim a dispatched pass would have produced,
+        // carrying the same verdict, and the mechanical lane never runs.
+        if let Some((current, proof)) = candidate
+            .filter(|_| next == StageId::Verify)
+            .and_then(|current| record.verify_proof_for(current.tree).map(|proof| (current, proof)))
+        {
+            let claim = ResolutionClaim {
+                workpiece: workpiece.clone(),
+                scope_revision: member.scope_revision,
+                candidate: current.tree,
+                evidence: proof.evidence.clone(),
+            };
+            effects.push(Decision::AdvanceStage { bloom: *bloom, workpiece: workpiece.clone(), progress });
+            effects.extend(claim_effects(record, *bloom, &claim, Some(reuse_of(*bloom, StageId::Verify, proof))));
+
+            return Decisions {
+                outcome: Outcome::VerifyReused {
+                    bloom: *bloom,
+                    workpiece: workpiece.clone(),
+                    proof: proof.evidence.detail,
+                },
+                effects,
+            };
+        }
+
         effects.extend(move_effects_with_candidate(
             *bloom,
             workpiece,
@@ -207,11 +252,7 @@ pub(super) fn reduce_attempt_completed(
             progress,
             DispatchTargets { subject, checkout },
             candidate.map(|current| current.tree),
-            SealedLine {
-                configs: member.configs.layered_over(record.spec.configs()),
-                catalog: &record.stage_catalog,
-                base: record.spec.base(),
-            },
+            SealedLine::of(record, member),
         ));
         return Decisions {
             outcome: Outcome::AttemptAdvanced { bloom: *bloom, workpiece: workpiece.clone(), from: stage, to: next },
@@ -232,11 +273,7 @@ pub(super) fn reduce_attempt_completed(
             progress,
             DispatchTargets { subject, checkout },
             candidate.map(|current| current.tree),
-            SealedLine {
-                configs: member.configs.layered_over(record.spec.configs()),
-                catalog: &record.stage_catalog,
-                base: record.spec.base(),
-            },
+            SealedLine::of(record, member),
         ));
         return Decisions {
             outcome: Outcome::AttemptRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, attempt },

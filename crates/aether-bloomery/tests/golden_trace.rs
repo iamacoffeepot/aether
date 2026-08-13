@@ -248,14 +248,20 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // objects a landing belongs on. The land decision gains that member list; every
 // other decision in the stream is byte-identical. An intended, coordinated
 // break, recomputed.
+// Repinned for #4891: a passing verify files its verdict in the bloom's verify
+// memo, so the aggregate verify's decided output gains a `RecordVerifyProof`
+// beside it. The canonical journal's fold is a two-member one and misses the
+// memo, so the stream still dispatches the full aggregate pass — only the new
+// record joins it. An intended, coordinated break, recomputed.
 // Repinned for #4890: the mechanical `Verify` lane's dispatched `Transformation`
 // names the bloom's sealed base as its diff base, so the member verify can narrow
 // its compiling gates to that candidate's reverse-dependency closure. Only the
 // Verify dispatches move — every other decision in the stream is byte-identical.
-// An intended, coordinated break, recomputed.
+// Recomputed once more where that change met #4891's on the merge, so the pin
+// below is the merged tree's own stream rather than either branch's.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0x3e, 0xe0, 0xba, 0xd4, 0x6e, 0xd3, 0x46, 0xa9, 0xb9, 0x21, 0x57, 0xe5, 0x13, 0xb0, 0xad, 0x96, 0x85, 0x76, 0xb8,
-    0x08, 0x3b, 0x03, 0xbd, 0xfa, 0x67, 0x3a, 0xf4, 0xcb, 0x78, 0x5a, 0xea, 0x3d,
+    0x93, 0x09, 0x1e, 0xf6, 0xef, 0x6b, 0x54, 0x5b, 0x7d, 0xb1, 0x4b, 0x05, 0xc0, 0x9a, 0x34, 0xfa, 0xe7, 0xa7, 0x4b,
+    0xe2, 0x2f, 0x93, 0xcf, 0x6c, 0x26, 0x4e, 0x99, 0x90, 0x18, 0xa8, 0x17, 0x0c,
 ];
 
 #[test]

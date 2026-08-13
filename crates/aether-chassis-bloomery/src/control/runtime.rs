@@ -821,6 +821,8 @@ fn project(
             | Decision::RecordIntegration { .. }
             | Decision::RecordAggregateRoll { .. }
             | Decision::RecordAggregateVerifyRoll { .. }
+            | Decision::RecordVerifyProof { .. }
+            | Decision::RecordVerifyReuse { .. }
             | Decision::RecordLandingRoll { .. }
             | Decision::SetUnresolved { .. }
             | Decision::RecordReviewPark { .. }

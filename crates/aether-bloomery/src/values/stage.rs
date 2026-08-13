@@ -40,6 +40,19 @@ pub const REVIEW_CRITIC_COMMAND: &str = "review.critic";
 /// fold (ADR-0149 §The line).
 pub const VERIFY_CHECK_COMMAND: &str = "verify.check";
 
+/// The execution image the mechanical verify lane runs in — named beside its
+/// command because the same two stages dispatch it, and because
+/// [`VerifyGateSet::lane`](crate::VerifyGateSet::lane) derives the gate-set
+/// identity from these words (#4891). A second spelling would let the two verify
+/// positions run different images while a memo treated their verdicts as
+/// interchangeable.
+pub const VERIFY_LANE_IMAGE: &str = "iama/verify:1";
+
+/// The network posture the mechanical verify lane runs under: none at all. It
+/// runs a compiler over a checked-out tree and reaches nothing. Named beside
+/// [`VERIFY_LANE_IMAGE`] for the same reason.
+pub const VERIFY_LANE_NETWORK: NetworkProfile = NetworkProfile::None;
+
 /// Whether a typed command names a **model lane** — a lane whose worker runs a
 /// model and therefore needs a credential, a resolved model, and a reasoning
 /// effort, as opposed to the mechanical lanes that run a compiler and nothing
@@ -684,7 +697,7 @@ impl Transformation {
             // (Construct / Refine, and the non-member stages that fall through to
             // the construct lane here) reaches the model API under restricted
             // egress. Review is its own model lane.
-            StageId::Verify => (VERIFY_CHECK_COMMAND, "iama/verify:1", NetworkProfile::None),
+            StageId::Verify => (VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK),
             StageId::Review => (REVIEW_CRITIC_COMMAND, "iama/review-claude:1", NetworkProfile::Restricted),
             StageId::Scope => unreachable!(
                 "Scope is a pre-seal operator-harness process staged via the REST control API, never a dispatched member transformation"
@@ -766,9 +779,9 @@ impl Transformation {
             // reads no diff at all, so there is no source to name.
             diff_base: None,
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
-            image: String::from("iama/verify:1"),
+            image: String::from(VERIFY_LANE_IMAGE),
             limits: ExecutionLimits { wall_clock_secs: binding.wall_clock_secs },
-            network: NetworkProfile::None,
+            network: VERIFY_LANE_NETWORK,
             description: None,
             model: None,
         }

@@ -1,35 +1,43 @@
 //! Integration and resolution: recording one member's resolution claim, and
 //! folding a complete claim set into the bloom's one artifact (ADR-0152).
 
+use alloc::vec::Vec;
+
+use super::aggregate_verify::aggregate_review_dispatch;
 use super::attempt::stage_binding;
-use super::{BloomStatus, Decision, Decisions, FoldedIntegration, IntegrateError, Outcome, ResolveError, Snapshot};
+use super::verify_memo::{proof_of, reuse_of};
+use super::{
+    BloomRecord, BloomStatus, Decision, Decisions, FoldedIntegration, IntegrateError, Outcome, ResolveError, Snapshot,
+};
 use crate::digest::Digest;
 use crate::ids::BloomId;
 use crate::ids::StageId;
 use crate::values::{MemberCandidate, ResolutionClaim, Transformation};
 
-pub(super) fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &ResolutionClaim) -> Decisions {
-    let Some(record) = snapshot.blooms.get(bloom) else {
-        return Decisions::rejected(Outcome::IntegrateRejected(IntegrateError::UnknownOrInactiveBloom));
-    };
-    if record.status != BloomStatus::Sealed {
-        return Decisions::rejected(Outcome::IntegrateRejected(IntegrateError::UnknownOrInactiveBloom));
-    }
-    if !record.spec.members().iter().any(|m| m.workpiece == claim.workpiece) {
-        return Decisions::rejected(Outcome::IntegrateRejected(IntegrateError::NotAMember));
-    }
-    // Evidence must bind to the exact candidate it claims — no evidence
-    // validates a digest it does not name (ADR-0149 §The value vocabulary).
-    if !claim.evidence.validates(&claim.candidate) {
-        return Decisions::rejected(Outcome::IntegrateRejected(IntegrateError::EvidenceNotBound));
-    }
-    let mut effects = alloc::vec![Decision::RecordResolution { bloom: *bloom, claim: claim.clone() }];
-    // The claim that completes the set dispatches integration (ADR-0152
-    // §Resolution drives integration): with every member now carrying a
-    // resolution, the host reactor folds each claimed candidate tree onto the
-    // integration branch in member order and admits the resulting
-    // `Fact::Resolve`. The snapshot has not folded this claim yet, so the
-    // completeness check counts it alongside the recorded ones.
+/// The effects one member's resolution claim produces: the claim itself, the
+/// `provenance` note for the verdict it carries, and — when it completes the
+/// bloom's claim set — the integration fold.
+///
+/// Shared with the member-`Verify` memo hit (#4891), which lands a member on the
+/// same claim a dispatched pass would and differs only in that note: a fresh
+/// verdict files a proof of the tree it judged, a reused one files the receipt
+/// naming the proof it stood on.
+///
+/// The claim that completes the set dispatches integration (ADR-0152
+/// §Resolution drives integration): with every member now carrying a resolution,
+/// the host reactor folds each claimed candidate tree onto the integration
+/// branch in member order and admits the resulting `Fact::Resolve`. The snapshot
+/// has not folded this claim yet, so the completeness check counts it alongside
+/// the recorded ones.
+pub(super) fn claim_effects(
+    record: &BloomRecord,
+    bloom: BloomId,
+    claim: &ResolutionClaim,
+    provenance: Option<Decision>,
+) -> Vec<Decision> {
+    let mut effects = alloc::vec![Decision::RecordResolution { bloom, claim: claim.clone() }];
+    effects.extend(provenance);
+
     let complete = record
         .spec
         .members()
@@ -50,13 +58,38 @@ pub(super) fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &Res
             })
             .collect();
         effects.push(Decision::DispatchIntegration {
-            bloom: *bloom,
+            bloom,
             base: record.spec.base(),
             members,
             // Its own members produced these refs under its own id.
             adopt_from: None,
         });
     }
+    effects
+}
+
+pub(super) fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &ResolutionClaim) -> Decisions {
+    let Some(record) = snapshot.blooms.get(bloom) else {
+        return Decisions::rejected(Outcome::IntegrateRejected(IntegrateError::UnknownOrInactiveBloom));
+    };
+    if record.status != BloomStatus::Sealed {
+        return Decisions::rejected(Outcome::IntegrateRejected(IntegrateError::UnknownOrInactiveBloom));
+    }
+    if !record.spec.members().iter().any(|m| m.workpiece == claim.workpiece) {
+        return Decisions::rejected(Outcome::IntegrateRejected(IntegrateError::NotAMember));
+    }
+    // Evidence must bind to the exact candidate it claims — no evidence
+    // validates a digest it does not name (ADR-0149 §The value vocabulary).
+    if !claim.evidence.validates(&claim.candidate) {
+        return Decisions::rejected(Outcome::IntegrateRejected(IntegrateError::EvidenceNotBound));
+    }
+
+    // A member's passing terminal `Verify` arrives here and nowhere else, so
+    // this is where the line learns that a tree passed its gates (#4891) — the
+    // fold of a single member is that same tree, and a repair lap can hand it
+    // back unchanged.
+    let effects = claim_effects(record, *bloom, claim, proof_of(*bloom, StageId::Verify, &claim.evidence));
+
     Decisions { outcome: Outcome::Integrated { bloom: *bloom, workpiece: claim.workpiece.clone() }, effects }
 }
 pub(super) fn reduce_resolve(
@@ -106,12 +139,32 @@ pub(super) fn reduce_resolve(
         }));
     }
     let integration = FoldedIntegration { tree: *tree, head: *head, lineage: lineage.to_vec() };
+    let hold = Decision::RecordIntegration { bloom: *bloom, integration: Some(integration) };
+
+    // The fold may be a tree this bloom has already proven (#4891): a
+    // single-member fold is byte-identical to the candidate its member verified,
+    // so the mechanical gate would re-run for a verdict the journal holds. Pass
+    // by identity and hand the same fold straight to the critic, exactly as a
+    // returning green verdict would. A multi-member fold is a tree that never
+    // existed before this moment, so it misses and the gates run.
+    if let Some(proof) = record.verify_proof_for(*tree) {
+        return Decisions {
+            outcome: Outcome::AggregateVerifyReused { bloom: *bloom, rolls: roll, proof: proof.evidence.detail },
+            effects: alloc::vec![
+                hold,
+                reuse_of(*bloom, StageId::AggregateVerify, proof),
+                Decision::RecordAggregateVerifyRoll { bloom: *bloom, rolls: roll },
+                aggregate_review_dispatch(record, *bloom, *tree, *head),
+            ],
+        };
+    }
+
     let binding = stage_binding(&record.stage_catalog, StageId::AggregateVerify);
 
     Decisions {
         outcome: Outcome::AggregateVerifyDispatched { bloom: *bloom, roll },
         effects: alloc::vec![
-            Decision::RecordIntegration { bloom: *bloom, integration: Some(integration) },
+            hold,
             Decision::DispatchAggregateVerify {
                 bloom: *bloom,
                 transformation: Transformation::for_aggregate_verify(&binding, *tree, *head),

@@ -35,6 +35,7 @@ mod review;
 mod seal;
 mod snapshot;
 mod verify;
+mod verify_memo;
 mod view;
 
 pub use decision::Decision;
