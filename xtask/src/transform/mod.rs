@@ -26,6 +26,7 @@ mod grok;
 mod lane;
 mod messages;
 mod muse;
+mod peak_memory;
 mod review;
 mod sccache;
 mod scratch;
@@ -40,6 +41,7 @@ use serde::Serialize;
 
 use crate::cargo::write_json_pretty;
 use crate::transform::construct::CONSTRUCT_IMPLEMENT;
+use crate::transform::peak_memory::PeakMemory;
 use crate::transform::review::REVIEW_CRITIC;
 use crate::transform::sccache::{CompilerCache, Counters};
 use crate::transform::scratch::Scratch;
@@ -134,14 +136,24 @@ struct Evidence {
     /// is the opposite conclusion about the host from the true one.
     #[serde(skip_serializing_if = "Option::is_none")]
     sccache: Option<Counters>,
+    /// The largest resident set any of this run's commands reached, in bytes
+    /// (#4912) — what the lane concurrency ceiling is calibrated from, measured
+    /// on production laps instead of estimated.
+    ///
+    /// Absent on a host whose `/usr/bin/time` cannot report it, for the reason
+    /// the counters above are absent without sccache: a zero would claim a run
+    /// that allocated nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peak_resident_bytes: Option<u64>,
 }
 
 impl Evidence {
-    /// Stamp what `cache` served this run onto the record. Reads the counters at
-    /// the moment it is called, so it belongs at the end of a lane rather than
-    /// beside the record's other fields.
-    fn served_by(mut self, cache: Option<&CompilerCache>) -> Self {
+    /// Stamp what the host measured about this run — what `cache` served it and
+    /// what it peaked at. Reads both at the moment it is called, so it belongs at
+    /// the end of a lane rather than beside the record's other fields.
+    fn measured_by(mut self, cache: Option<&CompilerCache>, peak: &PeakMemory) -> Self {
         self.sccache = cache.and_then(CompilerCache::served);
+        self.peak_resident_bytes = peak.peak_resident_bytes();
         self
     }
 }
@@ -164,6 +176,7 @@ fn build_evidence(
         // resolves a closure, so only the umbrella can report against one.
         environment: None,
         sccache: None,
+        peak_resident_bytes: None,
         command: command.to_string(),
         nonce,
         status: if passed {
@@ -235,30 +248,58 @@ fn resolve_harness(harness: Option<&str>) -> Result<Harness> {
 /// target directories and every run reaps its own. The host's [`CompilerCache`]
 /// is resolved beside it and rides the same child environment, so a run that
 /// builds where an earlier one did draws on what that one compiled instead of
-/// re-paying for it.
+/// re-paying for it, and the host's [`PeakMemory`] wrapper is resolved with them
+/// so the child's own peak is measured rather than modelled.
 fn run_model_lane(prompt: &str, args: &TransformArgs) -> Result<LaneRun> {
     let harness = resolve_harness(args.harness.as_deref())?;
     let scratch = Scratch::prepare(&args.out, args.nonce.as_deref())?;
     let cache = sccache::detect();
+    let peak = peak_memory::detect();
 
     let record = match harness {
-        Harness::Claude => claude::run_headless_claude(prompt, args, &scratch, cache.as_ref())?,
-        Harness::Codex => codex::run(prompt, args, &scratch, cache.as_ref())?,
-        Harness::Muse => muse::run(prompt, args, &scratch, cache.as_ref())?,
-        Harness::Grok => grok::run(prompt, args, &scratch, cache.as_ref())?,
+        Harness::Claude => claude::run_headless_claude(prompt, args, &scratch, cache.as_ref(), &peak)?,
+        Harness::Codex => codex::run(prompt, args, &scratch, cache.as_ref(), &peak)?,
+        Harness::Muse => muse::run(prompt, args, &scratch, cache.as_ref(), &peak)?,
+        Harness::Grok => grok::run(prompt, args, &scratch, cache.as_ref(), &peak)?,
     };
 
-    Ok(LaneRun { record, sccache: cache.as_ref().and_then(CompilerCache::served) })
+    Ok(LaneRun {
+        record,
+        measured: Measurements {
+            sccache: cache.as_ref().and_then(CompilerCache::served),
+            peak_resident_bytes: peak.peak_resident_bytes(),
+        },
+    })
 }
 
 /// What one model lane's run produced.
 ///
-/// The record is the harness's, and the counters are the host's — read after the
-/// child is reaped, so they cover everything the run's agent compiled rather
-/// than only what this process did.
+/// The record is the harness's and the measurements are the host's — taken after
+/// the child is reaped, so they cover everything the run's agent did rather than
+/// only what this process did.
 struct LaneRun {
     record: serde_json::Value,
+    measured: Measurements,
+}
+
+/// What the host measured about a run, in one value.
+///
+/// One value rather than a parameter each, because both lanes' evidence stampers
+/// carry them together and neither reads either: a third reading arriving later
+/// should not re-open two signatures to add itself.
+#[derive(Clone, Copy, Default)]
+struct Measurements {
     sccache: Option<Counters>,
+    peak_resident_bytes: Option<u64>,
+}
+
+impl Measurements {
+    /// Stamp both readings onto a model lane's evidence envelope, each
+    /// presence-driven: a host that cannot measure one stamps no key for it.
+    fn stamp(self, evidence: &mut serde_json::Value) {
+        sccache::stamp(evidence, self.sccache);
+        peak_memory::stamp(evidence, self.peak_resident_bytes);
+    }
 }
 
 #[cfg(test)]

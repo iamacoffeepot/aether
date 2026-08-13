@@ -14,13 +14,14 @@
 //! carrying only a `GROK_CODE_XAI_API_KEY` both resolve their own credential —
 //! the lane handles no secret, exactly as the Claude and Codex arms do not.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::Result;
 
 use crate::transform::TransformArgs;
 use crate::transform::lane::{capture, write_prompt};
 use crate::transform::messages::derive_result_record;
+use crate::transform::peak_memory::PeakMemory;
 use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::scratch::Scratch;
 
@@ -91,9 +92,10 @@ pub(super) fn run(
     args: &TransformArgs,
     scratch: &Scratch,
     cache: Option<&CompilerCache>,
+    peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
     let prompt_file = write_prompt(&args.out, prompt)?;
-    let mut command = Command::new(GROK);
+    let mut command = peak.command(GROK);
     command
         .args(grok_argv(&prompt_file.to_string_lossy(), args.model.as_deref(), args.effort.as_deref()))
         .stdin(Stdio::null())
@@ -102,7 +104,7 @@ pub(super) fn run(
     scratch.export(&mut command);
     sccache::export(cache, &mut command);
 
-    Ok(derive_result_record(&capture(command, &args.out, GROK)?))
+    Ok(derive_result_record(&capture(command, &args.out, GROK, peak)?))
 }
 
 #[cfg(test)]

@@ -491,12 +491,20 @@ fn an_untracked_nonce_cancels_cleanly_and_streams_the_no_run_error() {
 #[derive(Clone, Default)]
 struct RunLog {
     started: Arc<Mutex<Vec<PathBuf>>>,
+    // The cargo target directory each start was pointed at, in the same order —
+    // the other half of where a dispatch builds (#4912), and the one a shared
+    // build directory would show as a constant.
+    targets: Arc<Mutex<Vec<PathBuf>>>,
     released: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl RunLog {
     fn started(&self) -> Vec<PathBuf> {
         self.started.lock().unwrap().clone()
+    }
+
+    fn targets(&self) -> Vec<PathBuf> {
+        self.targets.lock().unwrap().clone()
     }
 
     fn released(&self) -> Vec<PathBuf> {
@@ -522,6 +530,7 @@ struct RecordingRunner {
 impl TransformRunner for RecordingRunner {
     fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
         self.log.started.lock().unwrap().push(spec.worktree_dir.to_owned());
+        self.log.targets.lock().unwrap().push(spec.target_dir.to_owned());
         fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
         if let Some(evidence) = &self.evidence {
             fs::write(spec.evidence_dir.join("evidence.json"), evidence).map_err(LocalExecutorError::Io)?;
@@ -582,6 +591,13 @@ fn sweeping_executor(base: &TempDir, registered: Vec<PathBuf>) -> (LocalExecutor
 // says which slot a run got.
 fn slot_path(base: &TempDir, index: usize) -> PathBuf {
     base.path().join(format!("slot-{index}"))
+}
+
+// The cargo target directory of lane slot `index` under a scratch root — the
+// sibling of `slot_path`'s checkout, and the assertion target wherever a test
+// says where a dispatch's build output goes.
+fn slot_target_path(base: &TempDir, index: usize) -> PathBuf {
+    base.path().join(format!("slot-{index}-target"))
 }
 
 // What a `CapturingRunner` run saw: the `--out` path the child would resolve
@@ -838,6 +854,41 @@ fn a_dispatch_builds_in_its_lane_slots_canonical_checkout() {
         [slot_path(&base, 0), slot_path(&base, 1), slot_path(&base, 0)],
         "the freed slot's path is where the next dispatch builds, which is what the compiler cache is keyed by",
     );
+}
+
+#[test]
+fn a_dispatch_builds_into_its_lane_slots_own_target_directory() {
+    // #4912, at the same seam. Two properties, and the arrangement is wrong
+    // without either. The directory has to be the *slot's* — a shared one
+    // serializes concurrent lanes on cargo's exclusive build lock and grows a
+    // fresh artifact set per checkout path forever, a per-dispatch one is a cold
+    // build every lap — and it has to sit *outside* the checkout, because the
+    // dispatch that takes a slot resets it with `git clean --force --force -d
+    // -x`, which removes ignored files: an in-tree target directory is deleted
+    // once per dispatch, which is the same cold build with no lock contention to
+    // show for it.
+    let base = TempDir::new().unwrap();
+    let evidence = r#"{"command":"verify.check","nonce":"wo-a","status":"pass"}"#;
+    let (exec, log) = recording_executor(&base, Some(evidence), RunLifecycle::Exited { success: true });
+
+    let first = exec.submit(&construct_order(digest(5), &test_nonce("a"))).unwrap();
+    exec.submit(&construct_order(digest(5), &test_nonce("b"))).unwrap();
+    exec.stream_evidence(&first).unwrap();
+    exec.submit(&construct_order(digest(5), &test_nonce("c"))).unwrap();
+
+    assert_eq!(
+        log.targets(),
+        [slot_target_path(&base, 0), slot_target_path(&base, 1), slot_target_path(&base, 0)],
+        "each slot builds into its own directory, and the dispatch that reuses a slot reuses that slot's build tree",
+    );
+    for (checkout, target) in log.started().iter().zip(log.targets()) {
+        assert!(
+            !target.starts_with(checkout),
+            "{} sits inside {}, where the next dispatch's checkout hygiene deletes it",
+            target.display(),
+            checkout.display(),
+        );
+    }
 }
 
 #[test]

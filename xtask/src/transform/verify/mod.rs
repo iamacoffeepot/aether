@@ -12,6 +12,7 @@ use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 use anyhow::{Context, Result, bail};
 
 use crate::cargo::{WASM_TARGET, run_captured, write_json_pretty};
+use crate::transform::peak_memory::{self, PeakMemory};
 use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::verify::closure::Closure;
 use crate::transform::verify::scope::Scope;
@@ -88,16 +89,39 @@ enum Breadth {
     Closure,
 }
 
+/// The build environment every verify member runs under, whatever the host's
+/// tooling (#4912).
+///
+/// Incremental compilation is off for the same two reasons CI has it off. It is
+/// what the gate this lane predicts does, so a lane that compiled incrementally
+/// would be judging a candidate under flags the gate never uses; and sccache
+/// cannot cache an incremental compilation, so leaving it on would make the
+/// wrapper pure overhead on every member that builds.
+///
+/// Not shared with the model lanes, deliberately. A construct lane's child is an
+/// edit loop over one tree, where incremental is worth more than a cache hit
+/// rate — so this rides the verify invocation rather than the cache export both
+/// lanes go through.
+const CI_BUILD_ENV: [(&str, &str); 1] = [("CARGO_INCREMENTAL", "0")];
+
 impl VerifyInvocation {
     /// The [`Command`] this invocation runs under `scope` — program, argv, and
     /// env — handed to [`run_captured`] for the captured-output spawn.
     ///
-    /// The host's compiler cache rides every member rather than only the ones
-    /// that compile: naming which members build would be a second list to keep
-    /// true, and the wrapper is inert in a member that never invokes rustc.
-    fn command(&self, scope: &Scope, cache: Option<&CompilerCache>) -> Command {
-        let mut cmd = Command::new(self.program);
-        cmd.args(self.args_under(scope)).envs(self.env.iter().copied());
+    /// The host's compiler cache and peak-memory wrapper ride every member
+    /// rather than only the ones that compile: naming which members build would
+    /// be a second list to keep true, and both are inert in a member that never
+    /// invokes rustc.
+    ///
+    /// What the member does *not* set is its build directory or its job cap.
+    /// `CARGO_TARGET_DIR` and `CARGO_BUILD_JOBS` are inherited from the lane the
+    /// coordinator dispatched (#4912), which is the whole point of them: the gate
+    /// has to build where the lane that produced the candidate built, in the slot
+    /// that lane holds, under the same share of the host. Setting either here
+    /// would override the dispatch that knows which slot this is.
+    fn command(&self, scope: &Scope, cache: Option<&CompilerCache>, peak: &PeakMemory) -> Command {
+        let mut cmd = peak.command(self.program);
+        cmd.args(self.args_under(scope)).envs(self.env.iter().copied()).envs(CI_BUILD_ENV.iter().copied());
         sccache::export(cache, &mut cmd);
         cmd
     }
@@ -574,13 +598,17 @@ trait MemberRunner {
 /// a rerun is the same spawn a second time.
 struct SpawnRunner<'a> {
     cache: Option<&'a CompilerCache>,
+    peak: &'a PeakMemory,
 }
 
 impl MemberRunner for SpawnRunner<'_> {
     fn run(&mut self, invocation: &VerifyInvocation, scope: &Scope) -> Result<Captured> {
-        let output = run_captured(invocation.command(scope, self.cache))
+        let output = run_captured(invocation.command(scope, self.cache, self.peak))
             .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
-        Ok(Captured { stdout: output.stdout, stderr: output.stderr, code: output.status.code() })
+        // The wrapper's report is taken off the stderr the member's log keeps:
+        // the reading belongs in the evidence record, and the log belongs to
+        // whoever reads the failure.
+        Ok(Captured { stdout: output.stdout, stderr: self.peak.take_report(output.stderr), code: output.status.code() })
     }
 }
 
@@ -794,24 +822,29 @@ fn run_prepare(
     id: &str,
     invocation: &VerifyInvocation,
     cache: Option<&CompilerCache>,
+    peak: &PeakMemory,
 ) -> Result<Option<(String, i32)>> {
     let Some(prepare) = invocation.prepare else {
         return Ok(None);
     };
 
     // The prepare cross-builds every component crate for wasm32 — the largest
-    // single build in the lane — so it goes through the cache like the member it
-    // belongs to.
-    let mut step = Command::new("cargo");
-    step.args(prepare);
+    // single build in the lane — so it goes through the cache, the CI build
+    // environment, and the peak-memory wrapper like the member it belongs to.
+    let mut step = peak.command("cargo");
+    step.args(prepare).envs(CI_BUILD_ENV.iter().copied());
     sccache::export(cache, &mut step);
     let output = run_captured(step).with_context(|| format!("spawn cargo {}", prepare.join(" ")))?;
+    // Read before the success check: the pre-build is the lane's largest single
+    // compile, so a prepare that *worked* is exactly the run whose peak the
+    // concurrency model wants.
+    let stderr = peak.take_report(output.stderr);
     if output.status.success() {
         return Ok(None);
     }
 
     let mut captured = String::from_utf8_lossy(&output.stdout).into_owned();
-    captured.push_str(&String::from_utf8_lossy(&output.stderr));
+    captured.push_str(&String::from_utf8_lossy(&stderr));
     Ok(Some((prepare_failure_log(id, prepare, &captured), output.status.code().unwrap_or(1))))
 }
 
@@ -830,8 +863,10 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     // every current caller of this path — resolves the whole workspace.
     let scope = Scope::resolve(args.diff_base.as_deref());
     let cache = sccache::detect();
-    let output = run_captured(invocation.command(&scope, cache.as_ref()))
+    let peak = peak_memory::detect();
+    let output = run_captured(invocation.command(&scope, cache.as_ref(), &peak))
         .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
+    let stderr = peak.take_report(output.stderr);
 
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
@@ -850,7 +885,7 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
         log_bytes.extend_from_slice(operational_failure_notice(&args.command, &invocation, code).as_bytes());
     }
     log_bytes.extend_from_slice(&output.stdout);
-    log_bytes.extend_from_slice(&output.stderr);
+    log_bytes.extend_from_slice(&stderr);
     fs::write(&log_path, &log_bytes).with_context(|| format!("write {}", log_path.display()))?;
 
     let passed = outcome.passed();
@@ -864,7 +899,7 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     let failures = outcome.failure(&args.command).map(VerifyFailureSet::one);
     let evidence =
         build_evidence(&args.command, args.nonce.clone(), passed, Some(exit_code), log_name, findings, failures)
-            .served_by(cache.as_ref());
+            .measured_by(cache.as_ref(), &peak);
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
 
     if passed {
@@ -1035,8 +1070,10 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
             findings: Some(tools::missing_findings(&missing)),
             failed_verifiers: Some(VerifyFailureSet::one(VerifyFailure::Preflight)),
             // A run that refused before its first member compiled nothing, so
-            // there is nothing for a cache to have served.
+            // there is nothing for a cache to have served and nothing whose
+            // memory there was to measure.
             sccache: None,
+            peak_resident_bytes: None,
             command: VERIFY_CHECK.to_owned(),
             nonce: args.nonce.clone(),
             status: "fail",
@@ -1049,10 +1086,12 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
     }
 
     // Resolved once for the whole umbrella, so the counters the evidence carries
-    // cover every member's build rather than one member's slice of it.
+    // cover every member's build rather than one member's slice of it, and the
+    // peak it reports is the high-water mark of the whole lane.
     let cache = sccache::detect();
+    let peak = peak_memory::detect();
     let closure = closure::resolve(args.diff_base.as_deref());
-    let mut runner = SpawnRunner { cache: cache.as_ref() };
+    let mut runner = SpawnRunner { cache: cache.as_ref(), peak: &peak };
 
     // Resolved once, before any member runs, and written out as its own log:
     // the compiling members are only comparable across a run if they all
@@ -1080,7 +1119,7 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         // it is already covered — the preflight checks the cross-target the
         // pre-build needs — so what is left is the candidate breaking its own
         // build.
-        let run = match run_prepare(id, &invocation, cache.as_ref())? {
+        let run = match run_prepare(id, &invocation, cache.as_ref(), &peak)? {
             Some((log, code)) => MemberRun::plain(id, MemberOutcome::Failed, log.into_bytes(), code),
             None => run_member_discriminated(id, &invocation, &scope, closure.as_ref(), &mut runner)?,
         };
@@ -1102,6 +1141,7 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         findings: verify_findings(&runs),
         failed_verifiers: (!failures.is_empty()).then_some(failures),
         sccache: cache.as_ref().and_then(CompilerCache::served),
+        peak_resident_bytes: peak.peak_resident_bytes(),
         command: VERIFY_CHECK.to_owned(),
         nonce: args.nonce.clone(),
         status,

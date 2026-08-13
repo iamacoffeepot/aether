@@ -3,12 +3,13 @@
 //! `review.critic` lanes run through.
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::{fs, thread};
 
 use anyhow::{Context, Result, bail};
 
 use crate::transform::messages::derive_result_record;
+use crate::transform::peak_memory::PeakMemory;
 use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::scratch::Scratch;
 use crate::transform::{TransformArgs, conventions};
@@ -103,13 +104,18 @@ pub(super) fn run_headless_claude(
     args: &TransformArgs,
     scratch: &Scratch,
     cache: Option<&CompilerCache>,
+    peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
     // Run headless Claude at the resolved model and reasoning effort — both the
     // CLI's own flags, so the calibrated profile reaches the child rather than an
     // env knob nothing on the other side reads.
-    let mut claude = Command::new("claude");
+    //
+    // Under the host's peak-memory wrapper when it has one (#4912): what a
+    // construct lane costs in RAM is the builds its agent drives, and the
+    // wrapper's reading covers the whole reaped tree rather than this process.
+    let mut claude = peak.command("claude");
     claude.args(construct_argv(args.model.as_deref(), args.effort.as_deref()));
     scratch.export(&mut claude);
     sccache::export(cache, &mut claude);
@@ -128,6 +134,9 @@ pub(super) fn run_headless_claude(
     #[allow(clippy::disallowed_methods)]
     let writer = thread::spawn(move || stdin.write_all(&prompt_bytes));
     let run = child.wait_with_output().context("await headless claude")?;
+    // Before the exit check: a run that died still peaked at something, and the
+    // reading is what the concurrency model is calibrated from either way.
+    peak.observe(&run.stderr);
     // A non-zero exit is the CLI itself failing to run (auth, bad args, crash) —
     // an operational failure, distinct from a task-level error, which a completed
     // run records as `is_error` inside the transcript. Surface it rather than

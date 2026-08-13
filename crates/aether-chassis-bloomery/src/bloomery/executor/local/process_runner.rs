@@ -9,6 +9,12 @@
 //! is a *reset* rather than a fresh `git worktree add`, and what it must
 //! guarantee is that a dispatch never sees anything of the dispatch before it:
 //! see [`materialize_checkout`].
+//!
+//! The slot's cargo target directory is its sibling rather than a directory
+//! inside it, for that same reason turned around (#4912): the reset removes
+//! ignored files, so a build tree under the checkout would be deleted on every
+//! dispatch. It reaches the lane — and through it every verify gate the lane
+//! spawns — as `CARGO_TARGET_DIR`; see [`export_build_env`].
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -141,6 +147,7 @@ impl TransformRunner for ProcessTransformRunner {
         // second coordinator (#4714; see `lane_env`).
         let mut lane = self.lane_program.command();
         scrub_coordinator_env(&mut lane, inherited_keys());
+        export_build_env(&mut lane, spec);
         lane.current_dir(spec.worktree_dir)
             .args([spec.command, "--out"])
             .arg(spec.evidence_dir)
@@ -245,6 +252,30 @@ impl TransformRunner for ProcessTransformRunner {
         let tree = decode_object_hex(tree_hex.trim())
             .ok_or_else(|| LocalExecutorError::Worktree(format!("malformed capture tree sha `{}`", tree_hex.trim())))?;
         Ok(Some(CapturedObjects { commit, tree }))
+    }
+}
+
+/// Point a lane's build at its slot's own target directory and cap how much of
+/// the host it may use doing so (#4912).
+///
+/// Both ride the child's environment rather than its argv because neither is the
+/// lane's to know: the lane spawns `cargo xtask transform`, which spawns the
+/// verify gates, which spawn cargo — and every one of them inherits this. That
+/// inheritance is the mechanism, not an accident of it: the gate that judges a
+/// candidate has to build in the same directory the lane that produced it did, or
+/// the fingerprints it reuses are somebody else's.
+///
+/// The two are also set **after** the coordinator's own configuration is scrubbed
+/// out ([`scrub_coordinator_env`]), so a coordinator that inherited a
+/// `CARGO_TARGET_DIR` from its boot environment hands the lane the slot's rather
+/// than its own.
+///
+/// A `build_jobs` of zero states no cap, leaving cargo's default of one job per
+/// core — an explicit `CARGO_BUILD_JOBS=0` is a cargo error, not "unlimited".
+fn export_build_env(lane: &mut Command, spec: &RunSpec<'_>) {
+    lane.env("CARGO_TARGET_DIR", spec.target_dir);
+    if spec.build_jobs > 0 {
+        lane.env("CARGO_BUILD_JOBS", spec.build_jobs.to_string());
     }
 }
 
