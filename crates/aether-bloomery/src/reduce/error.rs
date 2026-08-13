@@ -135,6 +135,23 @@ pub enum SealError {
         /// What makes the override unusable.
         error: OverrideError,
     },
+    /// A member names a workpiece a landed bloom already resolved at the same
+    /// scope revision. The journal is the source of truth for what has landed —
+    /// GitHub issue state is not: bloom landings squash into the day branch, so a
+    /// landed workpiece's source issue stays open until sync-back.
+    ///
+    /// Refused at the door so an operator cannot pay construct lanes to
+    /// fabricate work the operating branch already carries. The re-run escape is
+    /// a fresh scope revision for the same workpiece: that pair is not in the
+    /// landed set, so a deliberate rework or revert-then-redo is a new approved
+    /// plan, not a request flag. Appended so the prior variants' wire
+    /// discriminants are unchanged.
+    WorkpieceAlreadyLanded {
+        /// The workpiece a landed bloom already resolved.
+        workpiece: WorkpieceId,
+        /// The bloom that landed it.
+        bloom: BloomId,
+    },
 }
 
 /// Why a supersession was refused.
