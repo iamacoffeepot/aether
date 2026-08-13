@@ -13,6 +13,8 @@
 //! rather than going to find it, and whoever calls the reducer is responsible for
 //! having it in hand.
 
+#[cfg(test)]
+mod encoder_equivalence;
 mod registry;
 mod resolve;
 

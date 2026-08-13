@@ -139,12 +139,12 @@ pub struct CoordinatorConfig {
     /// The in-repo tier-policy artifact the pre-seal approve gate
     /// ([`super::Gate`] / [`super::ApprovalPolicy`], ADR-0149 §The line /
     /// ADR-0151) resolves a workpiece's declared surface against — the
-    /// Bloomery-owned `approval-policy.yml` at the repository root. A
+    /// Bloomery-owned `approval-policy.toml` at the repository root. A
     /// repository-relative path read host-side, like the connection config's
     /// `executor_workflow_file`, names an in-repo artifact. Tier policy (*what*
     /// tier) is a **distinct reader** from the signing capability's key policy
     /// (*who* may sign) — the two are never folded (ADR-0151).
-    #[config(env = "AETHER_APPROVAL_POLICY_FILE", default = "approval-policy.yml")]
+    #[config(env = "AETHER_APPROVAL_POLICY_FILE", default = "approval-policy.toml")]
     pub approval_policy_file: String,
     /// Whether the executor mounts the local-process backend for the model lane
     /// (ADR-0150, #3586). On by default: the `construct.*` lanes route to a local
@@ -355,7 +355,7 @@ impl Default for CoordinatorConfig {
         Self {
             poll_interval_secs: 5,
             store_path: ":memory:".to_owned(),
-            approval_policy_file: "approval-policy.yml".to_owned(),
+            approval_policy_file: "approval-policy.toml".to_owned(),
             local_lane_enabled: true,
             local_lane_commands: "construct.,review.".to_owned(),
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),

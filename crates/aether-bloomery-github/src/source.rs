@@ -58,8 +58,8 @@ use aether_bloomery::{
 use serde::Serialize;
 
 use crate::client::{
-    ChecksState, GitDataApi, GitRef, GithubApi, GithubError, MergeResult, NewPullRequest, PullRequestApi,
-    PullRequestState,
+    ChecksState, GitDataApi, GitRef, GithubApi, GithubError, IssueStateApi, MergeResult, NewComment, NewPullRequest,
+    PullRequestApi, PullRequestState,
 };
 use crate::correspondence::GitObjectId;
 use crate::mainline::MainlineRef;
@@ -425,14 +425,14 @@ pub fn digest_from_hex(sha: &str) -> Option<Digest> {
 /// The [`GithubApi`] bound is the landing assembly's: a proposal whose member
 /// named no commit message falls back to that member's source issue title, so
 /// the backend that opens the proposal has to be able to read one.
-pub struct GitSource<C: GitDataApi + PullRequestApi + GithubApi> {
+pub struct GitSource<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> {
     client: C,
     correspondence: SharedCorrespondence,
     cas_land_enabled: bool,
     mainline: MainlineRef,
 }
 
-impl<C: GitDataApi + PullRequestApi + GithubApi> GitSource<C> {
+impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
     /// Build a source backend over `client` and `correspondence`, with mainline
     /// landing gated by `cas_land_enabled` (`false` is the kill switch under
     /// which `land` refuses; production wires it on, per ADR-0149 migration
@@ -835,7 +835,7 @@ impl<C: GitDataApi + PullRequestApi + GithubApi> GitSource<C> {
     }
 }
 
-impl<C: GitDataApi + PullRequestApi + GithubApi> SourceBackend for GitSource<C> {
+impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend for GitSource<C> {
     type Error = SourceError;
 
     fn snapshot(&self, base: &Digest) -> Result<SourceSnapshot, Self::Error> {
@@ -1292,11 +1292,29 @@ pub trait LandingSource: SourceBackend<Error = SourceError> {
     /// # Errors
     /// A transport or backend fault other than an already-absent ref.
     fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError>;
+
+    /// Close issue `number` after leaving `comment` on it — the land reactor's
+    /// human-facing close so GitHub agrees with a day-branch land that closing
+    /// keywords will not see until nightly sync-back.
+    ///
+    /// Both writes are attempted: a comment the repository refuses still closes,
+    /// and a close that fails still leaves the comment when one was accepted.
+    ///
+    /// # Errors
+    /// The surface is unreachable, the issue is absent, or either write was refused.
+    fn close_issue(&self, number: u64, comment: &str) -> Result<(), SourceError>;
 }
 
-impl<C: GitDataApi + PullRequestApi + GithubApi> LandingSource for GitSource<C> {
+impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> LandingSource for GitSource<C> {
     fn issue_title(&self, number: u64) -> Result<Option<String>, SourceError> {
         Ok(self.client.issue_title(number)?.map(|title| title.trim().to_owned()).filter(|title| !title.is_empty()))
+    }
+
+    fn close_issue(&self, number: u64, comment: &str) -> Result<(), SourceError> {
+        let commented = self.client.create_comment(&NewComment { issue_number: number, body: comment.to_owned() });
+        let closed = self.client.close_issue(number);
+        commented?;
+        Ok(closed?)
     }
 
     fn land_proposal(
@@ -1385,8 +1403,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        ADMISSION_REF, EMPTY_TREE, GitSource, MainlineRef, SourceError, candidate_ref_name, landing_branch,
-        parse_bloom_line, render_claim_message, render_tombstone_message, to_hex,
+        ADMISSION_REF, EMPTY_TREE, GitSource, LandingSource, MainlineRef, SourceError, candidate_ref_name,
+        landing_branch, parse_bloom_line, render_claim_message, render_tombstone_message, to_hex,
     };
     use crate::client::{GitDataApi, PullRequestApi};
     use crate::short_hex;
@@ -2365,5 +2383,28 @@ mod tests {
             source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(mine)).unwrap(),
             ClaimReleaseOutcome::AlreadyAbsent
         );
+    }
+
+    #[test]
+    fn close_issue_comments_then_closes() {
+        // Tripwire: the land reactor's human-facing close is a comment that
+        // names the landing plus the state write. Dropping either half leaves
+        // GitHub disagreeing with the journal about work that has landed.
+        let fake = FakeGithub::new();
+        fake.seed_issue(7, "the order");
+        let source = git_source(&fake, false);
+
+        source.close_issue(7, "landed via pull request #3").unwrap();
+
+        assert_eq!(fake.comments_on(7), ["landed via pull request #3"]);
+        assert_eq!(fake.issue_is_closed(7), Some(true));
+    }
+
+    #[test]
+    fn close_issue_on_a_missing_target_is_an_error() {
+        let fake = FakeGithub::new();
+        let source = git_source(&fake, false);
+        assert!(source.close_issue(7, "landed via pull request #3").is_err());
+        assert_eq!(fake.issue_is_closed(7), None, "a miss does not fabricate the object");
     }
 }

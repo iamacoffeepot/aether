@@ -32,9 +32,9 @@ use aether_bloomery::{BackendObjectId, BloomId, Correspondence, CorrespondenceEr
 use sha2::{Digest as _, Sha256};
 
 use crate::client::{
-    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, MergeResult,
-    NewComment, NewPullRequest, PullRequest, PullRequestApi, PullRequestState, RunConclusion, RunStatus, WorkflowRun,
-    strip_heads,
+    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, IssueStateApi,
+    MergeResult, NewComment, NewPullRequest, PullRequest, PullRequestApi, PullRequestState, RunConclusion, RunStatus,
+    WorkflowRun, strip_heads,
 };
 use crate::correspondence::GitObjectId;
 use crate::executor::INPUT_NONCE;
@@ -51,6 +51,8 @@ struct StoredIssue {
     /// The object's own body — human-authored, and never written by the
     /// projection. Held so a test can prove it comes back unchanged.
     body: String,
+    /// Closed by the land reactor after a bloom lands. Seeded open.
+    closed: bool,
 }
 
 #[derive(Clone)]
@@ -210,14 +212,14 @@ impl FakeGithub {
     /// `issue-<number>` addresses. The projection opens no object, so a test
     /// that wants one places it here.
     pub fn seed_issue(&self, number: u64, body: &str) {
-        self.lock().issues.push(StoredIssue { number, title: String::new(), body: body.to_owned() });
+        self.lock().issues.push(StoredIssue { number, title: String::new(), body: body.to_owned(), closed: false });
     }
 
     /// Present an issue carrying a human-authored `title` as well as its body —
     /// what the landing assembly falls back to when a member's lane named no
     /// commit message.
     pub fn seed_issue_with_title(&self, number: u64, title: &str, body: &str) {
-        self.lock().issues.push(StoredIssue { number, title: title.to_owned(), body: body.to_owned() });
+        self.lock().issues.push(StoredIssue { number, title: title.to_owned(), body: body.to_owned(), closed: false });
     }
 
     /// Present a pull request the repository already holds, numbered `number`
@@ -266,6 +268,13 @@ impl FakeGithub {
     #[must_use]
     pub fn issue_body(&self, number: u64) -> Option<String> {
         self.lock().issues.iter().find(|issue| issue.number == number).map(|issue| issue.body.clone())
+    }
+
+    /// Whether issue `number` is closed, or `None` when the repository holds no
+    /// such object — what a land-path test asserts after a bloom lands.
+    #[must_use]
+    pub fn issue_is_closed(&self, number: u64) -> Option<bool> {
+        self.lock().issues.iter().find(|issue| issue.number == number).map(|issue| issue.closed)
     }
 
     /// The bodies of the comments on `number`, in creation order.
@@ -1048,6 +1057,17 @@ impl GithubApi for FakeGithub {
             return Err(GithubError::Status { status: 404, body: format!("no comment {comment_id}") });
         };
         body.clone_into(&mut comment.body);
+        Ok(())
+    }
+}
+
+impl IssueStateApi for FakeGithub {
+    fn close_issue(&self, number: u64) -> Result<(), GithubError> {
+        let mut state = self.lock();
+        let Some(issue) = state.issues.iter_mut().find(|issue| issue.number == number) else {
+            return Err(absent_target(number));
+        };
+        issue.closed = true;
         Ok(())
     }
 }

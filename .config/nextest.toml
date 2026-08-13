@@ -136,6 +136,17 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = "package(=aether-chassis-hub) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
+# Bloomery chassis integration binaries (#4727) fork a real coordinator,
+# a real `git worktree add`, and a real lane child per dispatch. Several
+# scenarios wait out a 60-second settle budget — the same wall as the
+# default nextest slow-timeout — so under full-suite contention the
+# default cap is a silent tightening rather than a hang detector. Same
+# 180s deadlock guard as the other chassis crates above; `kind(test)`
+# keeps unit tests on the 60s default.
+[[profile.ci.overrides]]
+filter = "package(=aether-chassis-bloomery) & kind(test)"
+slow-timeout = { period = "180s", terminate-after = 1 }
+
 # The rehomed tcp fleet-load test (`fleetharness_tcp_load`, #3780) forks a
 # real debug `aether-headless` process through `FleetHarness` and
 # then churns real loopback listeners/sessions on top — the same

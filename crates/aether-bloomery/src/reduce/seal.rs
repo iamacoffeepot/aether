@@ -99,6 +99,13 @@ pub(super) fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec, configs: &Resol
     if let Some(conflict) = membership_conflict(snapshot, spec.members(), None) {
         return Decisions::rejected(Outcome::SealRejected(SealError::MembershipConflict(conflict)));
     }
+    // A land releases the claim, so the workpiece is immediately re-claimable —
+    // but the work itself is already on the operating branch. Refuse the same
+    // (workpiece, scope_revision) a landed bloom resolved; a fresh revision is
+    // the re-run escape, not a bypass flag.
+    if let Some(error) = landed_conflict(snapshot, spec.members()) {
+        return Decisions::rejected(Outcome::SealRejected(error));
+    }
     // V1 permits one sealed, unlanded bloom per mainline: refuse while any bloom
     // is still Sealed or Resolved. Landed and Superseded blooms don't block, and
     // a successor seals via Fact::Supersede — exempt, since it nets ≤1 active.
@@ -244,6 +251,27 @@ fn membership_conflict(snapshot: &Snapshot, members: &[Membership], exempt: Opti
     })
 }
 
+/// The first proposed member a landed bloom already resolved at the same scope
+/// revision, if any. Derived from folded bloom records — replay rebuilds
+/// `Landed` status through the land receipt fold, so the set is not a side
+/// channel.
+///
+/// The key is `(workpiece, scope_revision)`, not workpiece id alone: a fresh
+/// scope revision is the sealed-record escape for rework or revert-then-redo.
+/// The set contains only members of *landed* blooms, so a successor re-proposing
+/// its predecessor's still-unlanded members cannot trip this.
+fn landed_conflict(snapshot: &Snapshot, members: &[Membership]) -> Option<SealError> {
+    members.iter().find_map(|member| {
+        snapshot.blooms.iter().find_map(|(bloom, record)| {
+            let already = record.status == BloomStatus::Landed
+                && record.spec.members().iter().any(|landed| {
+                    landed.workpiece == member.workpiece && landed.scope_revision == member.scope_revision
+                });
+            already.then(|| SealError::WorkpieceAlreadyLanded { workpiece: member.workpiece.clone(), bloom: *bloom })
+        })
+    })
+}
+
 /// Whether a bloom's status is active-and-unlanded — `Sealed` or `Resolved`.
 /// The one predicate the V1 one-active-bloom-per-mainline seal guard
 /// (`active_unlanded_bloom`) and the boot-time claim-ref reconcile
@@ -310,6 +338,13 @@ pub(super) fn reduce_supersede(
     // released in this decision set, so only a foreign bloom's hold conflicts.
     if let Some(conflict) = membership_conflict(snapshot, successor.members(), Some(predecessor)) {
         return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::MembershipConflict(conflict)));
+    }
+    // The same landed-set scan seal runs: a fresh successor member that a
+    // landed bloom already resolved is refused, while the predecessor's own
+    // unlanded members stay admissible — they live on a Sealed or Resolved
+    // record, not a Landed one, so they are not in the set.
+    if let Some(error) = landed_conflict(snapshot, successor.members()) {
+        return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
     }
     // A successor that rebases takes mainline with it (#4709) — the resync
     // trigger `reduce_observe_mainline` defers to, landing here because this is

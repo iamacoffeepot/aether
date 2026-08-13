@@ -57,8 +57,10 @@ pub trait ConfigKind: aether_data::Kind + Serialize {
     /// invariant, deliberately loud rather than a silently colliding address.
     #[must_use]
     fn address(&self) -> Digest {
-        let bytes = to_vec(self).expect("configuration values never exceed the ADR-0118 u32 wire-length ceiling");
-        config_address(Self::NAME, &bytes)
+        config_address(
+            Self::NAME,
+            &to_vec(self).expect("configuration values never exceed the ADR-0118 u32 wire-length ceiling"),
+        )
     }
 }
 
@@ -69,25 +71,17 @@ impl<K: aether_data::Kind + Serialize> ConfigKind for K {}
 ///
 /// The generic authoring route reaches for this: it holds a kind *name* and
 /// canonical bytes, never the Rust type, so it cannot go through
-/// [`ConfigKind::address`]. Both compute the same hash over the same inputs —
-/// the length-prefixed domain followed by the value's canonical wire bytes,
-/// matching [`digest_of`](crate::digest::digest_of)'s construction — so the two
-/// paths address a given value identically.
+/// [`ConfigKind::address`]. Both resolve through
+/// [`Digest::of_domain_tagged`](crate::digest::Digest::of_domain_tagged) over
+/// the same inputs — the length-prefixed domain followed by the value's
+/// canonical wire bytes — so the two paths address a given value identically.
 ///
 /// # Panics
 ///
 /// Panics if `kind` is longer than `u32::MAX`, which no kind name is.
 #[must_use]
 pub fn config_address(kind: &str, bytes: &[u8]) -> Digest {
-    use sha2::{Digest as _, Sha256};
-
-    let domain_len =
-        u32::try_from(kind.len()).expect("a kind name is a short static string, well under the u32 ceiling");
-    let mut hasher = Sha256::new();
-    hasher.update(domain_len.to_le_bytes());
-    hasher.update(kind.as_bytes());
-    hasher.update(bytes);
-    Digest::from_bytes(hasher.finalize().into())
+    Digest::of_domain_tagged(kind, bytes)
 }
 
 /// A sealed set of configuration addresses, at most one per kind.

@@ -1610,6 +1610,132 @@ fn landing_releases_memberships() {
     assert!(!after.active.contains_key(&workpiece("wp")), "landing frees the workpiece");
 }
 
+// A land frees the claim, not the work: resealing the same (workpiece,
+// scope_revision) a landed bloom resolved is refused at the door, naming both.
+// Tripwire: the claim release is the only gate, so an operator reseals already-
+// done work and construct lanes burn retry refusing to fabricate it.
+#[test]
+fn seal_refuses_a_workpiece_a_landed_bloom_already_resolved() {
+    let (snapshot, spec) = sealed_and_resolved(1, vec![membership("issue-4866", 10)], 40);
+    let bloom = spec.id();
+    let (landed, _) = step(&snapshot, &event("land", Fact::Land { bloom, new_head: digest(50) }));
+
+    let again = draft(50, vec![membership("issue-4866", 10)]).seal();
+    let refused = reduce(&landed, &event("reseal", Fact::Seal(again)), &ResolvedConfigs::default());
+    match &refused.outcome {
+        Outcome::SealRejected(SealError::WorkpieceAlreadyLanded { workpiece: wp, bloom: landed_by }) => {
+            assert_eq!(wp, &workpiece("issue-4866"));
+            assert_eq!(*landed_by, bloom);
+        }
+        other => panic!("expected WorkpieceAlreadyLanded naming the workpiece and landing bloom, got {other:?}"),
+    }
+    assert!(refused.effects.is_empty(), "a refused seal claims nothing");
+}
+
+// The re-run escape is a fresh scope revision for the same workpiece id — that
+// pair is not in the landed set, so a deliberate rework is a new approved plan,
+// not a bypass flag on the request. Tripwire: the door keys on workpiece id
+// alone and locks the workpiece out of every later bloom.
+#[test]
+fn a_fresh_scope_revision_is_the_rerun_escape() {
+    let (snapshot, spec) = sealed_and_resolved(1, vec![membership("issue-4866", 10)], 40);
+    let (landed, _) = step(&snapshot, &event("land", Fact::Land { bloom: spec.id(), new_head: digest(50) }));
+
+    let rerun = draft(50, vec![membership("issue-4866", 11)]).seal();
+    let decided = reduce(&landed, &event("rerun", Fact::Seal(rerun)), &ResolvedConfigs::default());
+    assert!(matches!(decided.outcome, Outcome::Sealed(_)), "a fresh scope revision reseals: {:?}", decided.outcome);
+}
+
+// Supersession carry stays admissible: a successor re-proposing the predecessor's
+// own unlanded members is the salvage path and must not trip the landed set —
+// that set contains only members of *landed* blooms, so this falls out without a
+// special case. A fresh member a landed bloom already resolved is refused.
+#[test]
+fn supersede_refuses_a_fresh_landed_member_and_admits_the_predecessors_own() {
+    let (snapshot, landed_spec) = sealed_and_resolved(1, vec![membership("done", 10)], 40);
+    let landed_bloom = landed_spec.id();
+    let (snapshot, _) = step(&snapshot, &event("land", Fact::Land { bloom: landed_bloom, new_head: digest(50) }));
+
+    let predecessor_spec = draft(50, vec![membership("carried", 20)]).seal();
+    let predecessor = predecessor_spec.id();
+    let (snapshot, sealed) = step(&snapshot, &event("seal-pred", Fact::Seal(predecessor_spec)));
+    assert!(matches!(sealed.outcome, Outcome::Sealed(_)));
+
+    // Rebase so the carry-only successor is a distinct spec; same members at the
+    // same revision on the current base would be a self-supersession.
+    let snapshot = observing(&snapshot, 51);
+    let carry_only = draft(51, vec![membership("carried", 20)]).seal();
+    let carried = reduce(
+        &snapshot,
+        &event("carry", Fact::Supersede { predecessor, successor: carry_only }),
+        &ResolvedConfigs::default(),
+    );
+    assert!(
+        matches!(carried.outcome, Outcome::Superseded { .. }),
+        "the predecessor's own unlanded members stay admissible: {:?}",
+        carried.outcome,
+    );
+
+    let adding_done = draft(50, vec![membership("carried", 20), membership("done", 10)]).seal();
+    let refused = reduce(
+        &snapshot,
+        &event("add-done", Fact::Supersede { predecessor, successor: adding_done }),
+        &ResolvedConfigs::default(),
+    );
+    match &refused.outcome {
+        Outcome::SupersedeRejected(SupersedeError::InvalidMember(SealError::WorkpieceAlreadyLanded {
+            workpiece: wp,
+            bloom,
+        })) => {
+            assert_eq!(wp, &workpiece("done"));
+            assert_eq!(*bloom, landed_bloom);
+        }
+        other => panic!("expected InvalidMember(WorkpieceAlreadyLanded) for the fresh landed member, got {other:?}"),
+    }
+    assert!(refused.effects.is_empty(), "a refused supersession claims nothing");
+}
+
+// The landed set is read out of folded bloom records, not a side channel: the
+// same journal folded twice from an empty snapshot refuses the same reseal for
+// the same reason. Tripwire: a cache written outside `Snapshot::apply` makes
+// replay miss the refusal the live fold made.
+#[test]
+fn a_replayed_journal_reproduces_the_landed_workpiece_refusal() {
+    let spec = draft(1, vec![membership("issue-4866", 10)]).seal();
+    let bloom = spec.id();
+    let journal = [
+        event("seal", Fact::Seal(spec)),
+        event("integrate", Fact::Integrate { bloom, claim: claim("issue-4866", 10, 100) }),
+        event("resolve", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }),
+        event(
+            "review",
+            Fact::AggregateReviewCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::ReviewFinding, detail: digest(203) },
+                implicated: vec![],
+            },
+        ),
+        event("land", Fact::Land { bloom, new_head: digest(50) }),
+    ];
+    let fold = |events: &[Event]| events.iter().fold(Snapshot::new(digest(1)), |snapshot, ev| step(&snapshot, ev).0);
+    let reseal = event("reseal", Fact::Seal(draft(50, vec![membership("issue-4866", 10)]).seal()));
+
+    let live_refusal = reduce(&fold(&journal), &reseal, &ResolvedConfigs::default());
+    let replayed_refusal = reduce(&fold(&journal), &reseal, &ResolvedConfigs::default());
+    assert_eq!(
+        replayed_refusal.outcome, live_refusal.outcome,
+        "replay of the landed journal refuses the same reseal the live fold did",
+    );
+    match live_refusal.outcome {
+        Outcome::SealRejected(SealError::WorkpieceAlreadyLanded { workpiece: wp, bloom: landed_by }) => {
+            assert_eq!(wp, workpiece("issue-4866"));
+            assert_eq!(landed_by, bloom);
+        }
+        other => panic!("expected WorkpieceAlreadyLanded from the folded journal, got {other:?}"),
+    }
+}
+
 // ADR-0153 + #4696 — the fold passes two gates before the bloom resolves, in
 // order, and resolution is land-readiness. A verified `Fact::Resolve` holds the
 // fold and dispatches the whole-bloom aggregate *verify* — the compiler, not the
