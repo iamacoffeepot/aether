@@ -1,0 +1,75 @@
+# The Bloomery coordinator as a systemd user service.
+#
+#   mkdir -p ~/.config/systemd/user ~/.config/bloomery
+#   cp scripts/bloomery.service ~/.config/systemd/user/bloomery.service
+#   cp scripts/bloomery.env.example ~/.config/bloomery/bloomery.env
+#   $EDITOR ~/.config/bloomery/bloomery.env
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now bloomery
+#
+# Every path, port, and cadence comes from that environment file, so this unit
+# is generic and one host's values live in one uncommitted place. The full
+# recipe — lingering on a headless host, what a restart does to a lane already
+# running — is docs/guide/recipes/supervising-the-coordinator.md.
+
+[Unit]
+Description=Bloomery coordinator
+Documentation=https://github.com/iamacoffeepot/aether/blob/main/docs/guide/recipes/supervising-the-coordinator.md
+# Give up after five failed starts inside five minutes. A coordinator that
+# cannot come up five times running needs a person, and a unit that has stopped
+# trying says so in `systemctl --user status bloomery`, where a silent restart
+# loop would only say "activating" forever.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/bloomery/bloomery.env
+
+# Reap what the previous run left in the lane scratch root. A lane removes its
+# own directory when its run settles, so anything surviving here belongs to a
+# run that died with the coordinator — throwaway cargo target directories, tens
+# of gigabytes each, that nothing will ever come back for. This is safe at
+# exactly this moment because no lane is running: the lanes are this unit's
+# children and went down with it. Give each coordinator on a host its own
+# AETHER_LANE_SCRATCH, or this reap deletes a live build out from under its
+# neighbour.
+ExecStartPre=/bin/sh -euc 'mkdir -p "${AETHER_LANE_SCRATCH:?}"; rm -rf -- "${AETHER_LANE_SCRATCH:?}"/scratch-*'
+
+# The wrapper below does two things systemd cannot do in a directive.
+#
+# It chdirs to the checkout, because WorkingDirectory= takes a literal path with
+# no environment expansion, and the coordinator resolves its approval policy
+# (AETHER_APPROVAL_POLICY_FILE) against its working directory. Naming the
+# checkout here keeps the last host-specific value in the environment file.
+#
+# And it mints GITHUB_TOKEN from the operator's own `gh` login at each start, so
+# the credential lives in this process's environment for as long as the process
+# does and the environment file stays a plain list of paths and ports — safe to
+# read, diff, and back up. The alternative considered was an ExecStartPre that
+# captures `gh auth token` into an EnvironmentFile the unit then reads: rejected
+# because it writes a live credential to disk and leaves it there between runs,
+# while `gh` already holds one in its own credential store. Minting per start
+# also means a rotated token is picked up by `systemctl --user restart bloomery`
+# rather than by remembering to rewrite a file. `sh -e` turns an unauthenticated
+# `gh` into a failed start with the reason in the journal, so the coordinator
+# never boots holding an empty token and runs on silently unconfigured.
+ExecStart=/bin/sh -euc 'cd "${BLOOMERY_HOME:?}"; GITHUB_TOKEN="$(gh auth token)"; export GITHUB_TOKEN; exec "${BLOOMERY_BIN:?}"'
+
+# A crash comes back. A deliberate `systemctl --user stop` stays stopped, and so
+# does a clean exit — the coordinator handles SIGTERM and exits 0.
+Restart=on-failure
+RestartSec=5s
+
+# Stopping kills the whole control group, so a lane still running goes down with
+# the coordinator instead of outliving it as an orphaned build nothing tracks.
+# The boot that follows re-adopts that lane's order from the journal.
+KillMode=control-group
+TimeoutStopSec=30s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bloomery
+
+[Install]
+WantedBy=default.target

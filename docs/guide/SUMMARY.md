@@ -88,6 +88,7 @@
   - [Writing a behavior](recipes/writing-a-behavior.md)
   - [Serving HTTP from a component](recipes/serving-http.md)
   - [Driving a bloom over the REST control API](recipes/bloomery-rest-api.md)
+  - [Supervising the coordinator with systemd](recipes/supervising-the-coordinator.md)
   - [Debugging a hung settlement](recipes/debugging-a-hung-settlement.md)
 
 # Testing and verification
