@@ -52,7 +52,7 @@ mod policy;
 mod statement;
 
 pub use gate::{AdmissionRequest, AdrTouch, Completeness, Decision, Gate, Incompleteness};
-pub use policy::{ApprovalPolicy, PolicyError, Tier, load_policy};
+pub use policy::{ApprovalPolicy, PolicyError, Tier, load_policy, parse_policy};
 pub use statement::{StatementRejected, approval_from_statement, precheck_statement, verified_statement_approval};
 
 #[cfg(test)]

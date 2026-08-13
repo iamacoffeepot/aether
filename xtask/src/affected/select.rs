@@ -251,9 +251,9 @@ mod tests {
             "a library change in the same package keeps its reverse-dependency closure"
         );
 
-        // The approval-policy.yml rule maps the cross-boundary test input to
+        // The approval-policy.toml rule maps the cross-boundary test input to
         // its reader instead of falling back to run-everything.
-        let policy = select(&graph, &strings(&["approval-policy.yml"]), &no_wasm_sources, &no_wasm_consumers)
+        let policy = select(&graph, &strings(&["approval-policy.toml"]), &no_wasm_sources, &no_wasm_consumers)
             .expect("select over approval policy change");
         assert!(policy.run_all.is_none(), "the approval policy maps to a package, not run_all");
         assert!(
