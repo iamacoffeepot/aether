@@ -149,18 +149,53 @@ pub struct ConfigView {
 }
 
 /// The nine completeness facts the pre-seal gate fails closed on.
-#[allow(clippy::struct_excessive_bools)]
+///
+/// Flattened groups keep the wire object one level (the gate's field names)
+/// without packing eight independent bools onto a single Rust struct.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Completeness {
-    pub has_problem_statement: bool,
-    pub has_design_notes: bool,
-    pub has_implementation_plan: bool,
+    #[serde(flatten)]
+    statements: CompletenessStatements,
     pub referenced_adr_prs_merged: bool,
     pub model_routing_count: usize,
     pub blocked: bool,
-    pub declared_surface_fresh: bool,
-    pub dependencies_all_closed: bool,
-    pub umbrella_integrity: bool,
+    #[serde(flatten)]
+    freshness: CompletenessFreshness,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct CompletenessStatements {
+    has_problem_statement: bool,
+    has_design_notes: bool,
+    has_implementation_plan: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct CompletenessFreshness {
+    declared_surface_fresh: bool,
+    dependencies_all_closed: bool,
+    umbrella_integrity: bool,
+}
+
+impl Completeness {
+    /// The checklist a first-class direct-drive seal satisfies.
+    pub fn direct_drive() -> Self {
+        Self {
+            statements: CompletenessStatements {
+                has_problem_statement: true,
+                has_design_notes: true,
+                has_implementation_plan: true,
+            },
+            referenced_adr_prs_merged: true,
+            model_routing_count: 1,
+            blocked: false,
+            freshness: CompletenessFreshness {
+                declared_surface_fresh: true,
+                dependencies_all_closed: true,
+                umbrella_integrity: true,
+            },
+        }
+    }
 }
 
 /// ADR-maturity the hard gate routes on.

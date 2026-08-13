@@ -62,7 +62,7 @@ impl ProjectionInput {
                 let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
                 serde_json::from_slice(&bytes).with_context(|| format!("parse completeness file {}", path.display()))?
             }
-            None => direct_drive_completeness(),
+            None => Completeness::direct_drive(),
         };
         Ok(Self {
             declared_surface: if declared_surface.is_empty() {
@@ -74,21 +74,6 @@ impl ProjectionInput {
             adr_touch,
             pre_approved,
         })
-    }
-}
-
-/// The completeness checklist a first-class direct-drive seal satisfies.
-pub fn direct_drive_completeness() -> Completeness {
-    Completeness {
-        has_problem_statement: true,
-        has_design_notes: true,
-        has_implementation_plan: true,
-        referenced_adr_prs_merged: true,
-        model_routing_count: 1,
-        blocked: false,
-        declared_surface_fresh: true,
-        dependencies_all_closed: true,
-        umbrella_integrity: true,
     }
 }
 
@@ -274,8 +259,10 @@ pub fn require_task(text: &str, path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BaseChoice, ProjectionInput, direct_drive_completeness, resolve_base, seal_patch, successor_patch};
-    use crate::bloom::dto::{AdrTouch, Approval, BloomSpec, ConfigRegistry, DigestHex, Membership, ViewDocument};
+    use super::{BaseChoice, ProjectionInput, resolve_base, seal_patch, successor_patch};
+    use crate::bloom::dto::{
+        AdrTouch, Approval, BloomSpec, Completeness, ConfigRegistry, DigestHex, Membership, ViewDocument,
+    };
     use aether_bloomery::{EvidenceKind, Forecast};
 
     fn digest(byte: u8) -> DigestHex {
@@ -342,7 +329,7 @@ mod tests {
         let input = ProjectionInput::resolve(Vec::new(), None, AdrTouch::None, false)
             .expect("defaults do not read a completeness file");
         assert_eq!(input.declared_surface, ["docs/guide/**"]);
-        assert_eq!(input.completeness.model_routing_count, direct_drive_completeness().model_routing_count);
+        assert_eq!(input.completeness.model_routing_count, Completeness::direct_drive().model_routing_count);
         assert!(!input.completeness.blocked);
     }
 }
