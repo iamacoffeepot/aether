@@ -12,10 +12,9 @@
 //! So the policy is a [`ConfigKind`](super::ConfigKind) sealed into a bloom's
 //! [`ConfigRegistry`](super::ConfigRegistry) like the
 //! [`StageCatalog`](super::StageCatalog) and the [`PriceTable`](super::PriceTable)
-//! (ADR-0174). The text form stays available to a host as a compatibility
-//! default — [`parse`](ApprovalPolicy::parse) is the strict, fail-closed reader
-//! for it — but reading a file is the host's business, so only the parse lives
-//! here and the filesystem does not.
+//! (ADR-0174). The host may still bootstrap a fallback from a TOML file — reading
+//! a file is the host's business, so only the typed value and the resolver live
+//! here.
 
 use alloc::collections::BTreeSet;
 use alloc::string::String;
@@ -26,31 +25,28 @@ use serde::{Deserialize, Serialize};
 /// An approval tier over a declared surface. Ordered `Auto < Judge < Human` so
 /// most-restrictive-wins is a plain `max` (the `human > judge > auto` ranking of
 /// the ported resolver).
+///
+/// The policy-text spelling is lowercase (`auto` / `judge` / `human`); serde
+/// accepts those aliases so a host TOML file deserializes into this type. The
+/// serialized form stays the variant name, which is the JSON spelling the
+/// sealed-config authoring route already uses.
 #[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum Tier {
     /// Advances on its own — the host forms the `approval` directly.
+    #[serde(alias = "auto")]
     Auto,
     /// Needs a second reader (a judge); above `auto`, so a signed statement
     /// populates the approval.
+    #[serde(alias = "judge")]
     Judge,
     /// Stops at the owner's desk; a signed statement populates the approval.
+    #[serde(alias = "human")]
     Human,
-}
-
-impl Tier {
-    /// The lowercase policy-text spelling (`auto` / `judge` / `human`).
-    fn parse(token: &str) -> Option<Self> {
-        Some(match token {
-            "auto" => Self::Auto,
-            "judge" => Self::Judge,
-            "human" => Self::Human,
-            _ => return None,
-        })
-    }
 }
 
 /// One `{glob, tier}` policy rule.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApprovalRule {
     /// The path glob the rule matches, inside the validated policy grammar.
     pub glob: String,
@@ -72,6 +68,7 @@ pub struct ApprovalRule {
 /// rather than resolving or ignoring it.
 #[derive(aether_data::Kind, aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[kind(name = "aether.bloomery.approval_policy")]
+#[serde(deny_unknown_fields)]
 pub struct ApprovalPolicy {
     /// The tier a path no rule matches is admitted at.
     pub default: Tier,
@@ -79,72 +76,74 @@ pub struct ApprovalPolicy {
     pub rules: Vec<ApprovalRule>,
 }
 
-impl ApprovalPolicy {
-    /// Parse a policy from its text form, or `None` if it is malformed
-    /// (fail-closed). A port of `surface-match.py`'s `load_policy_text`: a
-    /// `default:` scalar, one `rules:` header, and `  - glob:` / `    tier:`
-    /// pairs at exact indentation. Any unrecognized line, a repeated
-    /// `default`/`rules`, a dangling glob, an out-of-grammar glob, or an unknown
-    /// tier fails the whole parse.
-    ///
-    /// The empty-`rules` refusal is a truncation check on *text*, not a
-    /// statement about policies: a value authored through the typed
-    /// configuration route arrives whole, so an empty rule list there is a
-    /// deliberate, attested choice rather than a half-written file.
+/// A declared-surface pattern inside the validated grammar: a concrete
+/// repository-relative path, or a literal directory prefix followed by one
+/// final `/**`. Parsed once at the resolve boundary; anything else is [`None`]
+/// and fails closed to [`Tier::Human`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum SurfacePattern {
+    /// A single concrete path.
+    Exact(String),
+    /// Every path at or below this literal prefix.
+    Subtree(String),
+}
+
+impl SurfacePattern {
+    /// Parse a declared-surface glob, or `None` if it is outside the grammar.
     #[must_use]
-    pub fn parse(text: &str) -> Option<Self> {
-        if text.trim().is_empty() {
+    pub fn parse(raw: &str) -> Option<Self> {
+        if !valid_surface_glob(raw) {
             return None;
         }
-        let mut default: Option<Tier> = None;
-        let mut rules: Vec<ApprovalRule> = Vec::new();
-        let mut pending: Option<String> = None;
-        let mut saw_rules = false;
-        for raw in text.lines() {
-            // Strip an inline comment at the first '#', then trailing whitespace.
-            let line = raw.split('#').next().unwrap_or("").trim_end();
-            if line.trim().is_empty() {
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("default:") {
-                let tier = parse_scalar(rest).and_then(|scalar| Tier::parse(&scalar));
-                if default.is_some() || tier.is_none() {
-                    return None;
-                }
-                default = tier;
-                continue;
-            }
-            if line == "rules:" {
-                if saw_rules {
-                    return None;
-                }
-                saw_rules = true;
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("  - glob:") {
-                // A glob line must not itself be nested deeper, and the previous
-                // rule must have been completed by its tier line.
-                if !saw_rules || pending.is_some() {
-                    return None;
-                }
-                pending = Some(parse_scalar(rest)?);
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("    tier:") {
-                let glob = pending.take()?;
-                let tier = parse_scalar(rest).and_then(|scalar| Tier::parse(&scalar))?;
-                if !valid_policy_glob(&glob) {
-                    return None;
-                }
-                rules.push(ApprovalRule { glob, tier });
-                continue;
-            }
-            return None;
+        if let Some(prefix) = raw.strip_suffix("/**") {
+            return Some(Self::Subtree(String::from(prefix)));
         }
-        if default.is_none() || !saw_rules || pending.is_some() || rules.is_empty() {
-            return None;
+        Some(Self::Exact(String::from(raw)))
+    }
+
+    fn as_prefix(&self) -> &str {
+        match self {
+            Self::Exact(path) | Self::Subtree(path) => path,
         }
-        Some(Self { default: default?, rules })
+    }
+}
+
+/// A policy-rule glob, parsed once so the set-algebra helpers are total over a
+/// type rather than re-inspecting the raw string. `Exact` / `Subtree` share
+/// [`SurfacePattern`]; a slashless gitignore pattern is unanchored; anything
+/// else that still has wildcards keeps its segments for the matcher.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum RulePattern {
+    Surface(SurfacePattern),
+    Unanchored,
+    Glob(Vec<String>),
+}
+
+impl RulePattern {
+    fn parse(glob: &str) -> Self {
+        let (pattern, root_anchored) = normalise_pattern(glob);
+        if !(root_anchored || pattern.contains('/')) {
+            return Self::Unanchored;
+        }
+        if let Some(stripped) = pattern.strip_suffix("/**") {
+            let prefix = stripped.trim_end_matches('/');
+            if !prefix.is_empty() && !has_meta(prefix) {
+                return Self::Surface(SurfacePattern::Subtree(String::from(prefix)));
+            }
+        } else if !has_meta(pattern) {
+            return Self::Surface(SurfacePattern::Exact(String::from(pattern)));
+        }
+        Self::Glob(pattern.split('/').map(String::from).collect())
+    }
+}
+
+impl ApprovalPolicy {
+    /// Whether every rule glob is inside the policy grammar. The host file
+    /// loader refuses a policy that is not; a sealed value is authored whole
+    /// and is resolved as sealed.
+    #[must_use]
+    pub fn rules_in_grammar(&self) -> bool {
+        self.rules.iter().all(|rule| valid_policy_glob(&rule.glob))
     }
 
     /// The most restrictive tier over every path a declared surface permits — the
@@ -154,71 +153,30 @@ impl ApprovalPolicy {
     /// the top-level `--tier` reduction.
     #[must_use]
     pub fn resolve_surface(&self, surface: &[String]) -> Tier {
+        let rules: Vec<(RulePattern, Tier)> =
+            self.rules.iter().map(|rule| (RulePattern::parse(&rule.glob), rule.tier)).collect();
         surface
             .iter()
             .map(|glob| {
-                if valid_surface_glob(glob) {
-                    self.tier_of_surface(glob)
-                } else {
-                    Tier::Human
-                }
+                SurfacePattern::parse(glob)
+                    .map_or(Tier::Human, |pattern| tier_of_surface(&rules, self.default, &pattern))
             })
             .max()
             .unwrap_or(self.default)
     }
-
-    /// The maximum tier of every concrete path one declaration permits — a port
-    /// of `surface-match.py`'s `tier_of_surface`. A concrete path resolves over
-    /// its own prefix; a `dir/**` subtree over `dir`; any richer wildcard fails
-    /// closed to [`Tier::Human`].
-    fn tier_of_surface(&self, surface: &str) -> Tier {
-        let surface = surface.trim_end_matches('/');
-        let prefix = if has_meta(surface) {
-            let Some(stripped) = surface.strip_suffix("/**") else {
-                return Tier::Human;
-            };
-            let prefix = stripped.trim_end_matches('/').trim_start_matches('/');
-            if prefix.is_empty() || has_meta(prefix) {
-                return Tier::Human;
-            }
-            String::from(prefix)
-        } else {
-            String::from(surface.trim_start_matches('/'))
-        };
-        let matched =
-            self.rules.iter().filter(|rule| rule_intersects_subtree(&rule.glob, &prefix)).map(|rule| rule.tier);
-        // Set-sound: unless one rule provably covers the whole subtree, an
-        // uncovered path takes the policy default.
-        let covered = self.rules.iter().any(|rule| rule_covers_subtree(&rule.glob, &prefix));
-        let default_tier = (!covered).then_some(self.default);
-        matched.chain(default_tier).max().unwrap_or(self.default)
-    }
 }
 
-/// Parse a YAML scalar the strict way `surface-match.py`'s `_parse_policy_scalar`
-/// does: trim; empty → `None`; a quoted value must close with the same quote and
-/// not contain it inside; an unquoted value must contain no quote character.
-fn parse_scalar(raw: &str) -> Option<String> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let chars: Vec<char> = raw.chars().collect();
-    let first = chars[0];
-    if first == '"' || first == '\'' {
-        if chars.len() < 2 || *chars.last()? != first {
-            return None;
-        }
-        let inner: String = chars[1..chars.len() - 1].iter().collect();
-        if inner.contains(first) || inner.is_empty() {
-            return None;
-        }
-        return Some(inner);
-    }
-    if raw.contains('"') || raw.contains('\'') {
-        return None;
-    }
-    Some(String::from(raw))
+/// The maximum tier of every concrete path one declaration permits — a port
+/// of `surface-match.py`'s `tier_of_surface`. A concrete path resolves over
+/// its own prefix; a `dir/**` subtree over `dir`; any richer wildcard has
+/// already failed closed at [`SurfacePattern::parse`].
+fn tier_of_surface(rules: &[(RulePattern, Tier)], default: Tier, surface: &SurfacePattern) -> Tier {
+    let matched = rules.iter().filter(|(rule, _)| rule_intersects_subtree(rule, surface)).map(|(_, tier)| *tier);
+    // Set-sound: unless one rule provably covers the whole subtree, an
+    // uncovered path takes the policy default.
+    let covered = rules.iter().any(|(rule, _)| rule_covers_subtree(rule, surface));
+    let default_tier = (!covered).then_some(default);
+    matched.chain(default_tier).max().unwrap_or(default)
 }
 
 /// The glob metacharacters — a path with any of these is a wildcard declaration,
@@ -232,11 +190,11 @@ fn has_meta(pattern: &str) -> bool {
 /// The hard ceiling on path-segments in any glob the gate accepts. Declared
 /// surfaces are user-controlled and drive [`intersects`], whose recursion depth
 /// is bounded by policy-plus-surface segment count; a glob past this cap is
-/// refused at the grammar boundary (a policy glob fails the parse, a surface
-/// glob folds to `Human`) rather than allowed to recurse, per CLAUDE.md's
-/// recursion rule that user-controlled data enforce a depth/budget cap that
-/// returns an error instead of overflowing the stack. 64 is far above any real
-/// repository path depth, so it never rejects a legitimate surface.
+/// refused at the grammar boundary (a policy glob fails the host parse, a
+/// surface glob folds to `Human`) rather than allowed to recurse, per
+/// CLAUDE.md's recursion rule that user-controlled data enforce a depth/budget
+/// cap that returns an error instead of overflowing the stack. 64 is far above
+/// any real repository path depth, so it never rejects a legitimate surface.
 const MAX_GLOB_SEGMENTS: usize = 64;
 
 /// Whether a policy glob is inside the canonical, provable grammar — a port of
@@ -299,28 +257,31 @@ fn normalise_pattern(glob: &str) -> (&str, bool) {
 }
 
 /// Whether a policy rule can match any path at or below a literal surface prefix
-/// — a port of `surface-match.py`'s `rule_intersects_subtree`. Exact for the
-/// matcher grammar at the path-segment level: once the fixed surface prefix is
-/// consumed, arbitrary descendant segments may be chosen; once the policy pattern
-/// is consumed, the directory-tail rule covers any remaining surface segments.
-fn rule_intersects_subtree(rule_glob: &str, surface_prefix: &str) -> bool {
-    let (pattern, root_anchored) = normalise_pattern(rule_glob);
-    if !(root_anchored || pattern.contains('/')) {
-        // A slashless gitignore pattern can match a segment at any depth.
-        return true;
+/// — a port of `surface-match.py`'s `rule_intersects_subtree`. Exact and subtree
+/// rules are prefix comparison; a slashless pattern matches at any depth; a
+/// richer glob keeps the segment matcher.
+fn rule_intersects_subtree(rule: &RulePattern, surface: &SurfacePattern) -> bool {
+    match rule {
+        RulePattern::Unanchored => true,
+        RulePattern::Surface(rule) => prefixes_intersect(rule.as_prefix(), surface.as_prefix()),
+        RulePattern::Glob(segments) => {
+            let policy_segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+            let surface_prefix = surface.as_prefix();
+            let surface_segments: Vec<&str> = if surface_prefix.is_empty() {
+                Vec::new()
+            } else {
+                surface_prefix.split('/').collect()
+            };
+            let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
+            intersects(&policy_segments, &surface_segments, 0, 0, &mut seen)
+        }
     }
-    let policy_segments: Vec<&str> = if pattern.is_empty() {
-        Vec::new()
-    } else {
-        pattern.split('/').collect()
-    };
-    let surface_segments: Vec<&str> = if surface_prefix.is_empty() {
-        Vec::new()
-    } else {
-        surface_prefix.split('/').collect()
-    };
-    let mut seen: BTreeSet<(usize, usize)> = BTreeSet::new();
-    intersects(&policy_segments, &surface_segments, 0, 0, &mut seen)
+}
+
+fn prefixes_intersect(left: &str, right: &str) -> bool {
+    left == right
+        || left.strip_prefix(right).is_some_and(|rest| rest.starts_with('/'))
+        || right.strip_prefix(left).is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn intersects(
@@ -351,27 +312,14 @@ fn intersects(
 }
 
 /// Conservatively prove one policy rule covers a whole subtree — a port of
-/// `surface-match.py`'s `rule_covers_subtree`. A `dir/**` rule or a literal
-/// directory pattern covers everything at or below its prefix; any wildcard in
-/// the covering prefix disproves coverage.
-fn rule_covers_subtree(rule_glob: &str, surface_prefix: &str) -> bool {
-    let (pattern, root_anchored) = normalise_pattern(rule_glob);
-    if !(root_anchored || pattern.contains('/')) {
+/// `surface-match.py`'s `rule_covers_subtree`. An exact or `dir/**` rule covers
+/// everything at or below its prefix; an unanchored or richer wildcard cannot.
+fn rule_covers_subtree(rule: &RulePattern, surface: &SurfacePattern) -> bool {
+    let RulePattern::Surface(rule) = rule else {
         return false;
-    }
-    let rule_prefix = if let Some(stripped) = pattern.strip_suffix("/**") {
-        stripped.trim_end_matches('/')
-    } else if has_meta(pattern) {
-        return false;
-    } else {
-        pattern
     };
-    if has_meta(rule_prefix) {
-        return false;
-    }
-
-    // The strip-then-check is `starts_with(rule_prefix + '/')` without building
-    // the joined string this vocabulary would have to allocate for.
+    let rule_prefix = rule.as_prefix();
+    let surface_prefix = surface.as_prefix();
     surface_prefix == rule_prefix || surface_prefix.strip_prefix(rule_prefix).is_some_and(|rest| rest.starts_with('/'))
 }
 
@@ -486,38 +434,32 @@ fn match_class(pattern: &[u8], open: usize, ch: u8) -> Option<(bool, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use alloc::format;
     use alloc::string::String;
     use alloc::vec;
 
-    use super::{ApprovalPolicy, Tier};
+    use super::{ApprovalPolicy, ApprovalRule, Tier};
 
-    /// The reference tier policy — the same shape `test-surface-match.py`'s
-    /// `POLICY` uses, so the resolver is checked against the same cases.
-    const POLICY: &str = r#"default: judge
-rules:
-  - glob: "/Cargo.toml"
-    tier: human
-  - glob: "crates/*/Cargo.toml"
-    tier: human
-  - glob: "crates/aether-data/**"
-    tier: human
-  - glob: "docs/adr/**"
-    tier: human
-  - glob: ".agents/**"
-    tier: human
-  - glob: "docs/guide/**"
-    tier: auto
-  - glob: "crates/aether-kit/**"
-    tier: auto
-  - glob: "crates/aether-chassis-desktop/**"
-    tier: judge
-  - glob: "scripts/surface-match.py"
-    tier: human
-"#;
-
+    /// The reference tier policy — the same rules `test-surface-match.py`'s
+    /// `POLICY` used, so the resolver is checked against the same cases.
     fn policy() -> ApprovalPolicy {
-        ApprovalPolicy::parse(POLICY).expect("reference policy parses")
+        ApprovalPolicy {
+            default: Tier::Judge,
+            rules: vec![
+                rule("/Cargo.toml", Tier::Human),
+                rule("crates/*/Cargo.toml", Tier::Human),
+                rule("crates/aether-data/**", Tier::Human),
+                rule("docs/adr/**", Tier::Human),
+                rule(".agents/**", Tier::Human),
+                rule("docs/guide/**", Tier::Auto),
+                rule("crates/aether-kit/**", Tier::Auto),
+                rule("crates/aether-chassis-desktop/**", Tier::Judge),
+                rule("scripts/surface-match.py", Tier::Human),
+            ],
+        }
+    }
+
+    fn rule(glob: &str, tier: Tier) -> ApprovalRule {
+        ApprovalRule { glob: String::from(glob), tier }
     }
 
     /// Resolve one surface glob to its tier through the public surface reducer.
@@ -578,11 +520,6 @@ rules:
         // stack if the cap were removed.
         let deep = vec!["a"; 4000].join("/");
         assert_eq!(tier(&deep), Tier::Human, "an over-cap surface must fold to human");
-
-        // The same ceiling gates the policy side: an over-cap policy glob fails the
-        // parse closed rather than becoming a rule the matcher recurses over.
-        let policy_text = format!("default: judge\nrules:\n  - glob: {deep}\n    tier: auto\n");
-        assert!(ApprovalPolicy::parse(&policy_text).is_none(), "an over-cap policy glob must fail the parse");
     }
 
     #[test]
@@ -597,30 +534,23 @@ rules:
     }
 
     #[test]
-    fn malformed_policy_text_fails_closed() {
-        let malformed = [
-            "default: judge\nrules:\n  - glob: \"docs/**\"\n    tier: owner\n",
-            "default: judge\nrules:\n  - glob: \"docs//**\"\n    tier: auto\n",
-            "default: judge\nrules:\n  - glob: \"docs***\"\n    tier: auto\n",
-            "default: judge\nrules:\n  - glob: \"../**\"\n    tier: auto\n",
-            "default: judge\nrules:\n- glob: docs/guide/**\ntier: auto\n",
-            "default: judge\nrules:\n  - glob: docs/guide/**\n  tier: auto\n",
-            "default: judge\ndefault: auto\nrules:\n  - glob: docs/**\n    tier: auto\n",
-            "rules:\n  - glob: docs/**\n    tier: auto\n",
-            "default: judge\nrules:\n",
-            "",
-        ];
-        for text in malformed {
-            assert!(ApprovalPolicy::parse(text).is_none(), "must fail closed: {text:?}");
-        }
-    }
-
-    #[test]
-    fn well_formed_policy_with_single_star_and_default_parses() {
+    fn a_single_star_rule_and_the_default_still_resolve() {
         let policy = policy();
         // The `crates/*/Cargo.toml` single-star segment resolves a nested manifest to
         // human, and an unmatched top-level surface takes the judge default.
         assert_eq!(policy.resolve_surface(&[String::from("crates/aether-behavior/Cargo.toml")]), Tier::Human);
         assert_eq!(policy.resolve_surface(&[String::from("unknown-top/thing.rs")]), Tier::Judge);
+    }
+
+    #[test]
+    fn an_out_of_grammar_policy_glob_is_not_in_grammar() {
+        // Tripwire: the host file loader refuses on `rules_in_grammar`, so a
+        // `//` glob or an over-cap path must stay outside the grammar rather
+        // than become a rule the matcher recurses over.
+        let policy = ApprovalPolicy { default: Tier::Judge, rules: vec![rule("docs//**", Tier::Auto)] };
+        assert!(!policy.rules_in_grammar());
+        let over_cap =
+            ApprovalPolicy { default: Tier::Judge, rules: vec![rule(&vec!["a"; 4000].join("/"), Tier::Auto)] };
+        assert!(!over_cap.rules_in_grammar(), "an over-cap policy glob must fail the grammar");
     }
 }

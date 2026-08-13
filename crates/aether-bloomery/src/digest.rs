@@ -65,6 +65,28 @@ impl Digest {
         hasher.update(bytes);
         Self(hasher.finalize().into())
     }
+
+    /// sha256 of a domain tag, length-prefixed as little-endian `u32`, followed
+    /// by already-encoded value bytes.
+    ///
+    /// The one recipe [`digest_of`] and
+    /// [`config_address`](crate::values::config_address) both use, so the typed
+    /// path and the sealed-registry path cannot drift.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `domain` is longer than `u32::MAX`, which no domain tag or kind
+    /// name is.
+    #[must_use]
+    pub fn of_domain_tagged(domain: &str, bytes: &[u8]) -> Self {
+        let domain_len =
+            u32::try_from(domain.len()).expect("a domain tag is a short static string, well under the u32 ceiling");
+        let mut hasher = Sha256::new();
+        hasher.update(domain_len.to_le_bytes());
+        hasher.update(domain.as_bytes());
+        hasher.update(bytes);
+        Self(hasher.finalize().into())
+    }
 }
 
 /// A value that is content-addressed by digest.
@@ -87,9 +109,10 @@ pub trait ContentAddressed: Serialize {
 /// The digest of a content-addressed value: sha256 over its type's domain tag
 /// (length-prefixed) followed by the value's canonical aether-wire encoding.
 ///
-/// The domain tag ([`ContentAddressed::DOMAIN`]) is hashed length-prefixed
-/// ahead of the value bytes so the domain/value boundary is unambiguous and
-/// distinct types never collide.
+/// The domain tag ([`ContentAddressed::DOMAIN`]) is hashed through
+/// [`Digest::of_domain_tagged`] ahead of the value bytes so the domain/value
+/// boundary is unambiguous, distinct types never collide, and the sealed
+/// registry path cannot drift from this one.
 ///
 /// Infallible by invariant: every bloom value encodes well under the ADR-0118
 /// `u32` wire-length ceiling — no control-plane value approaches 4 GiB — so an
@@ -108,13 +131,7 @@ pub trait ContentAddressed: Serialize {
 #[must_use]
 pub fn digest_of<T: ContentAddressed + ?Sized>(value: &T) -> Digest {
     let bytes = to_vec(value).expect("bloom values never exceed the ADR-0118 u32 wire-length ceiling");
-    let domain_len =
-        u32::try_from(T::DOMAIN.len()).expect("a domain tag is a short static string, well under the u32 ceiling");
-    let mut hasher = Sha256::new();
-    hasher.update(domain_len.to_le_bytes());
-    hasher.update(T::DOMAIN.as_bytes());
-    hasher.update(&bytes);
-    Digest(hasher.finalize().into())
+    Digest::of_domain_tagged(T::DOMAIN, &bytes)
 }
 
 #[cfg(test)]

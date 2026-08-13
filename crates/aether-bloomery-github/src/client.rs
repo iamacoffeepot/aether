@@ -211,8 +211,10 @@ pub struct GitCommit {
 /// writes an issue or pull-request title or body, opens an object, or closes
 /// one: a projection owns the marker-keyed comments it wrote and nothing else,
 /// and that bound holds by absence rather than by discipline (ADR-0149 §The
-/// write surface). Every lookup is scoped to one named object, so no path here
-/// enumerates repository-wide issue history either.
+/// write surface). Closing a landed member's source issue lives on
+/// [`IssueStateApi`] so nothing reachable from a projection can issue it.
+/// Every lookup is scoped to one named object, so no path here enumerates
+/// repository-wide issue history either.
 pub trait GithubApi {
     /// The title of issue `number`, or `None` when the repository holds no such
     /// object — a clean 404 is `Ok(None)`, not an error.
@@ -247,6 +249,22 @@ pub trait GithubApi {
     /// # Errors
     /// The projection surface is unreachable or returned an error status.
     fn update_comment(&self, comment_id: u64, body: &str) -> Result<(), GithubError>;
+}
+
+/// The issue-state surface the land reactor drives after a bloom lands.
+///
+/// A sibling of [`GithubApi`] rather than an extension of it: the projection
+/// must not close anything (ADR-0149 §The write surface), and that bound holds
+/// by absence — this verb lives here so nothing reachable from a projection
+/// can issue it. The land reactor is the caller: GitHub closing keywords only
+/// fire on a default-branch merge, so a day-branch land has to close the
+/// member's source issue itself.
+pub trait IssueStateApi {
+    /// Close issue `number`. An already-closed issue is a success.
+    ///
+    /// # Errors
+    /// The surface is unreachable, the issue is absent, or the write was refused.
+    fn close_issue(&self, number: u64) -> Result<(), GithubError>;
 }
 
 /// The Git Data REST surface the source port drives (blob/tree/commit/ref over
@@ -1159,6 +1177,14 @@ impl<T: HttpTransport> GithubApi for ReqwestGithub<T> {
     }
 }
 
+impl<T: HttpTransport> IssueStateApi for ReqwestGithub<T> {
+    fn close_issue(&self, number: u64) -> Result<(), GithubError> {
+        let payload = serde_json::json!({ "state": "closed" }).to_string();
+        self.request(Method::Patch, format!("{}/{number}", self.issues_url()), Some(payload))?;
+        Ok(())
+    }
+}
+
 impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
     fn get_ref(&self, name: &str) -> Result<Option<GitRef>, GithubError> {
         let Some(response) = self.request_opt(Method::Get, self.git_url(&format!("ref/{name}")))? else {
@@ -1384,8 +1410,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        GithubApi, GithubError, HttpRequest, HttpResponse, HttpTransport, Method, NewComment, ReqwestGithub,
-        StaticTokenSource, TokenSource,
+        GithubApi, GithubError, HttpRequest, HttpResponse, HttpTransport, IssueStateApi, Method, NewComment,
+        ReqwestGithub, StaticTokenSource, TokenSource,
     };
 
     // Records the last request and replays a queued response — the seam that
@@ -1525,6 +1551,22 @@ mod tests {
         let request = github.transport.last.borrow().clone().unwrap();
         assert_eq!(request.method, Method::Patch);
         assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/issues/comments/42");
+    }
+
+    #[test]
+    fn close_issue_patches_the_named_object_to_closed() {
+        // Tripwire: a slip to the comment route or a body/title write would
+        // either 404 against real GitHub or rewrite the human-authored issue —
+        // the write the land reactor is bounded away from.
+        let github = client(200, r#"{"number":7,"state":"closed"}"#);
+        github.close_issue(7).expect("2xx close");
+        let request = github.transport.last.borrow().clone().expect("a request was sent");
+        assert_eq!(request.method, Method::Patch);
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/issues/7");
+        let sent: serde_json::Value = serde_json::from_str(&request.body.unwrap()).unwrap();
+        assert_eq!(sent["state"], "closed");
+        assert!(sent.get("title").is_none(), "a close writes no title");
+        assert!(sent.get("body").is_none(), "a close writes no body");
     }
 
     #[test]

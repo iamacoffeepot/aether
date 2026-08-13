@@ -281,6 +281,69 @@ fn several_members_each_get_a_section_and_the_bloom_lands_under_the_floor() {
 }
 
 #[test]
+fn an_open_proposal_does_not_close_member_issues() {
+    // Closing at propose time would mark the work done before anyone accepted
+    // the landing, and a later decline would leave a closed issue pointing at
+    // work that never reached the day branch.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    fake.seed_issue(11, "still in flight");
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    seed_member(&mut store, bloom, "issue-11", Some("fix(crate:aether-fs): reject a traversal"));
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+
+    assert_eq!(fake.issue_is_closed(11), Some(false), "an unaccepted land must not close the source issue");
+    assert!(fake.comments_on(11).is_empty(), "an unaccepted land leaves no close comment");
+}
+
+#[test]
+fn landing_closes_member_issues_best_effort() {
+    // GitHub closing keywords fire only on a default-branch merge, so the land
+    // reactor closes each member issue itself. A workpiece that names no issue
+    // is skipped; a named issue the repository does not hold is journaled and
+    // must not delay the land — the keyword at sync-back is the backstop.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    fake.seed_issue(11, "the addressing member");
+    fake.seed_issue(42, "not in this bloom");
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    seed_member(&mut store, bloom, "issue-11", Some("fix(crate:aether-fs): reject a traversal\n\nThe join escaped."));
+    seed_member(&mut store, bloom, "local-spike", Some("docs(guide): describe the atlas\n\nThe recipe was silent."));
+    seed_member(&mut store, bloom, "issue-9999", Some("chore(meta): tidy the leftover\n\nNothing to close."));
+    let sequence = enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+    let number = fake
+        .find_pull_request_for_head(&format!("bloom/{}/landing", short_hex(&bloom.0)))
+        .unwrap()
+        .expect("proposed")
+        .number;
+    fake.merge_pull_request(number, &"5c".repeat(20));
+
+    let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
+    assert_eq!(admits.len(), 1, "a failed close does not block the land");
+    assert_eq!(ack_through, Some(sequence), "the landed entry is acked");
+
+    assert_eq!(fake.issue_is_closed(11), Some(true), "the addressing member's issue is closed");
+    let comments = fake.comments_on(11);
+    assert_eq!(comments.len(), 1, "the close leaves one comment");
+    assert!(comments[0].contains(&format!("#{number}")), "the comment names the landing pull request: {}", comments[0]);
+    assert!(comments[0].contains(&short_hex(&bloom.0)), "the comment names the bloom: {}", comments[0]);
+
+    assert_eq!(fake.issue_is_closed(42), Some(false), "an issue that is not a member is left alone");
+    assert!(fake.comments_on(42).is_empty(), "an issue that is not a member is not commented");
+    assert_eq!(fake.issue_is_closed(9999), None, "a workpiece naming no object does not fabricate one");
+}
+
+#[test]
 fn a_gated_off_land_is_a_transient_fault_that_re_drains() {
     let (fake, base) = seeded();
     // The kill switch: the land gate off makes `land` refuse with a transport

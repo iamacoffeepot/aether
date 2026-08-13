@@ -57,7 +57,7 @@ use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
 use super::LandReactorCapability;
-use aether_bloomery_github::SourceError;
+use aether_bloomery_github::{SourceError, canonical_issue_number, short_hex};
 
 use crate::bloomery::LandReactorSetup;
 use crate::bloomery::SourceShell;
@@ -256,6 +256,7 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
             Ok(LandOutcome::Proposed { number }) => {
                 match watch_proposal(source, &bloom, &payload, number) {
                     Ok(Watched::Landed(admit)) => {
+                        close_member_issues(store, source, &bloom, number);
                         admits.push(admit);
                         ack_through = Some(entry.sequence);
                     }
@@ -332,6 +333,40 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
         }
     }
     Ok((admits, ack_through))
+}
+
+/// Close each member source issue after a bloom lands. Best-effort: a GitHub
+/// hiccup, a missing object, or a store read that cannot name the roster is
+/// warned and dropped so the land itself still admits. Members whose workpiece
+/// ids do not name an issue are skipped with no write.
+fn close_member_issues(store: &mut dyn StoreBackend, source: &SourceShell, bloom: &BloomId, pull_request: u64) {
+    let members = match store.list_dispatch_descriptions(bloom.0.as_bytes()) {
+        Ok(members) => members,
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::land",
+                %error,
+                "could not list members to close source issues after land; the landing itself stands",
+            );
+            return;
+        }
+    };
+    let comment = format!("**Landed** — bloom `{}` landed via pull request #{pull_request}.", short_hex(&bloom.0));
+    for (workpiece, _) in members {
+        let Some(issue) = canonical_issue_number(&workpiece) else {
+            continue;
+        };
+        if let Err(error) = source.close_issue(issue, &comment) {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::land",
+                workpiece = workpiece.as_str(),
+                issue,
+                pull_request,
+                %error,
+                "failed to close the member's source issue after land; the landing itself stands",
+            );
+        }
+    }
 }
 
 #[runtime]

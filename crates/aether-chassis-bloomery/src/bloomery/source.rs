@@ -283,6 +283,15 @@ impl SourceShell {
         self.backend.issue_title(number)
     }
 
+    /// Close issue `number` after leaving `comment` on it — the land reactor's
+    /// human-facing close so GitHub agrees with a day-branch land.
+    ///
+    /// # Errors
+    /// The surface is unreachable, the issue is absent, or either write was refused.
+    pub fn close_issue(&self, number: u64, comment: &str) -> Result<(), SourceError> {
+        self.backend.close_issue(number, comment)
+    }
+
     /// Read where a previously issued land proposal has got to.
     ///
     /// # Errors

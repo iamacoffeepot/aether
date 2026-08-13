@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use aether_bloomery::{
-    AuthorityDoor, Ed25519KeyProvider, EvidenceKind, KeyId, Provenance, SignatureEnvelope, Statement,
+    ApprovalRule, AuthorityDoor, Ed25519KeyProvider, EvidenceKind, KeyId, Provenance, SignatureEnvelope, Statement,
     authorization_message, digest_of,
 };
 use aether_bloomery::{Digest, FakeKeyProvider};
@@ -24,21 +24,19 @@ use super::{
 /// The test tier policy the gate cases decide over: `docs/guide/**` advances on
 /// its own, `crates/aether-data/**` stops at the owner, and anything else takes
 /// the `judge` default.
-const POLICY: &str = r#"default: judge
-rules:
-  - glob: "docs/guide/**"
-    tier: auto
-  - glob: "crates/aether-data/**"
-    tier: human
-"#;
-
 fn policy() -> ApprovalPolicy {
-    ApprovalPolicy::parse(POLICY).expect("test policy parses")
+    ApprovalPolicy {
+        default: Tier::Judge,
+        rules: vec![
+            ApprovalRule { glob: "docs/guide/**".to_owned(), tier: Tier::Auto },
+            ApprovalRule { glob: "crates/aether-data/**".to_owned(), tier: Tier::Human },
+        ],
+    }
 }
 
 /// The repository's real seeded policy artifact.
 fn seeded_policy_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../approval-policy.yml")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../approval-policy.toml")
 }
 
 #[test]
@@ -49,7 +47,7 @@ fn the_seeded_repository_policy_parses_and_guards_itself() {
     // policy file's own self-listing) against an accidental edit.
     let policy = load_policy(&seeded_policy_path()).expect("seeded policy parses");
     for guarded in [
-        "approval-policy.yml",
+        "approval-policy.toml",
         ".github/workflows/ci.yml",
         "CLAUDE.md",
         "AGENTS.md",

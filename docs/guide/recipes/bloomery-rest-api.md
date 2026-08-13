@@ -31,7 +31,7 @@ seals an `aether.bloomery.approval_policy` entry in its bloom-wide registry is
 gated against that value, so the tier its members were admitted at is part of
 what the bloom attests. A draft that seals none falls back to the file the
 pre-seal approve gate loads at boot from `AETHER_APPROVAL_POLICY_FILE` —
-`approval-policy.yml` by default, resolved against the working directory, so
+`approval-policy.toml` by default, resolved against the working directory, so
 launch from the repository root. The startup line `bloomery REST control api
 mounted policy_loaded=true` confirms the gate has that fallback. Without it, a
 draft sealing no policy of its own has nothing to be decided over and its seal is
