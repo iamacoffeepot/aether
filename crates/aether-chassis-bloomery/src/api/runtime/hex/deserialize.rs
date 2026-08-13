@@ -231,7 +231,6 @@ impl Variant {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::{ConfigRegistry, Digest, Evidence, EvidenceKind, Membership, Workpiece, WorkpieceId};
     use serde_json::json;
@@ -258,8 +257,9 @@ mod tests {
     fn both_digest_spellings_decode_to_the_same_value() {
         let member = member();
 
-        let canonical: Membership = from_slice(&serde_json::to_vec(&member).unwrap()).unwrap();
-        let hex: Membership = from_slice(&to_vec(&member).unwrap()).unwrap();
+        let canonical: Membership =
+            from_slice(&serde_json::to_vec(&member).expect("a member renders canonically")).expect("and decodes back");
+        let hex: Membership = from_slice(&to_vec(&member).expect("a member renders in hex")).expect("and decodes back");
 
         assert_eq!(canonical, member, "the canonical byte-array spelling still decodes");
         assert_eq!(hex, member, "the hex spelling decodes to the same member, digest for digest");
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn malformed_hex_names_the_field_it_failed_in() {
-        let mut body = serde_json::to_value(member()).unwrap();
+        let mut body = serde_json::to_value(member()).expect("a member renders as JSON");
         body["scope_revision"] = json!("abc");
 
         let reported = from_slice::<Membership>(body.to_string().as_bytes())
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn a_non_hex_character_is_refused_rather_than_misread() {
-        let mut body = serde_json::to_value(member()).unwrap();
+        let mut body = serde_json::to_value(member()).expect("a member renders as JSON");
         body["scope_revision"] = json!("z".repeat(64));
 
         assert!(
@@ -301,7 +301,8 @@ mod tests {
             scope_revision: Digest::from_bytes([2; 32]),
         };
 
-        let decoded: Workpiece = from_slice(&to_vec(&staged).unwrap()).unwrap();
+        let decoded: Workpiece =
+            from_slice(&to_vec(&staged).expect("a workpiece renders in hex")).expect("and decodes back");
 
         assert_eq!(decoded, staged, "the id stays a string while its neighbours decode as digests");
         assert_eq!(decoded.id.0, hex_looking);

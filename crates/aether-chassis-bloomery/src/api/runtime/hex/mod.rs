@@ -63,7 +63,6 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::{Digest, Workpiece, WorkpieceId};
     use aether_data::wire;
@@ -80,8 +79,8 @@ mod tests {
         let canonical = json!({ "base": BASE.as_bytes() }).to_string();
         let hex = json!({ "base": hex_encode(BASE.as_bytes()) }).to_string();
 
-        let from_canonical: DraftPatch = from_slice(canonical.as_bytes()).unwrap();
-        let from_hex: DraftPatch = from_slice(hex.as_bytes()).unwrap();
+        let from_canonical: DraftPatch = from_slice(canonical.as_bytes()).expect("the byte-array spelling decodes");
+        let from_hex: DraftPatch = from_slice(hex.as_bytes()).expect("the hex spelling decodes");
 
         assert_eq!(from_canonical.base, Some(BASE), "the canonical byte array is still the wire form");
         assert_eq!(from_hex.base, Some(BASE), "and 64 hex characters name the same digest");
@@ -99,7 +98,7 @@ mod tests {
             from_slice(
                 json!({ "id": "wp-a", "intent": BASE.as_bytes(), "scope_revision": revision }).to_string().as_bytes(),
             )
-            .unwrap()
+            .expect("a staged workpiece decodes in either spelling")
         };
 
         let from_canonical = staged(json!(BASE.as_bytes()));
@@ -111,15 +110,17 @@ mod tests {
         );
         assert_eq!(from_hex, from_canonical, "the two spellings are one value");
         assert_eq!(
-            hex_encode(Digest::of_wire_bytes(&wire::to_vec(&from_hex).unwrap()).as_bytes()),
+            hex_encode(Digest::of_wire_bytes(&wire::to_vec(&from_hex).expect("a workpiece wire-encodes")).as_bytes()),
             "d6d830ebdc12bcd7032b51f0a3dc88d1753984e463a76fa6ee388639d26be35e"
         );
     }
 
     #[test]
     fn a_rendered_digest_reads_as_hex() {
-        let rendered =
-            String::from_utf8(to_vec(&DraftPatch { base: Some(BASE), ..DraftPatch::default() }).unwrap()).unwrap();
+        let rendered = String::from_utf8(
+            to_vec(&DraftPatch { base: Some(BASE), ..DraftPatch::default() }).expect("a draft patch renders"),
+        )
+        .expect("rendered JSON is UTF-8");
 
         assert_eq!(rendered, format!(r#"{{"base":"{}"}}"#, hex_encode(BASE.as_bytes())));
     }

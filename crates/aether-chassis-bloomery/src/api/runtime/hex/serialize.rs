@@ -297,7 +297,6 @@ fn digest_bytes(value: &(impl Serialize + ?Sized)) -> Option<[u8; 32]> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::{BloomId, Digest};
     use serde::Serialize;
@@ -314,8 +313,10 @@ mod tests {
 
     #[test]
     fn a_digest_renders_as_hex_at_every_depth() {
-        let rendered =
-            String::from_utf8(to_vec(&vec![Some(BloomId(Digest::from_bytes([0xab; 32])))]).unwrap()).unwrap();
+        let rendered = String::from_utf8(
+            to_vec(&vec![Some(BloomId(Digest::from_bytes([0xab; 32])))]).expect("a nested bloom id renders"),
+        )
+        .expect("rendered JSON is UTF-8");
 
         assert_eq!(rendered, format!("[\"{}\"]", "ab".repeat(32)), "a digest inside a seq and an option renders hex");
     }
@@ -328,7 +329,7 @@ mod tests {
         // operator writes prose into.
         let sample = Sample { words: vec![b'a'; 32], subject: Digest::from_bytes([1; 32]) };
 
-        let rendered = String::from_utf8(to_vec(&sample).unwrap()).unwrap();
+        let rendered = String::from_utf8(to_vec(&sample).expect("the sample renders")).expect("rendered JSON is UTF-8");
 
         assert!(rendered.contains("\"words\":[97,"), "32 bytes stay a byte array: {rendered}");
         assert!(rendered.contains(&format!("\"{}\"", "01".repeat(32))), "the digest beside them is hex: {rendered}");
