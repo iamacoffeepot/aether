@@ -184,6 +184,26 @@ pub struct CoordinatorConfig {
     /// whether or not a remote is configured at all.
     #[config(env = "AETHER_BLOOMERY_LANE_PROGRAM", default = "cargo xtask transform")]
     pub local_lane_program: String,
+    /// How many local lane children the executor backend may run at once.
+    ///
+    /// Each construct or verify lane is a whole cargo build with its own throwaway
+    /// target dir, and a seal fans out one dispatch per member, so an uncapped
+    /// backend turns member count directly into simultaneous builds racing the same
+    /// CPU and disk. Dispatches past the ceiling wait in submission order and start
+    /// as running lanes finish — a queue, never a refusal: every dispatch acks as
+    /// submitted either way, so the reducer's view of one is the same whether it
+    /// waited or not.
+    ///
+    /// Per backend rather than per bloom: member lanes, aggregate lanes, and the
+    /// runs re-adopted at boot all count against the same slots. `0` resolves to
+    /// `1`, since a ceiling of zero would start nothing at all.
+    ///
+    /// Named `AETHER_BLOOMERY_MAX_CONCURRENT_LANES` rather than under this struct's
+    /// `AETHER_GITHUB` prefix, for the reason the lane program and operator knobs
+    /// are: how much a host runs at once is a property of the machine, not of the
+    /// GitHub connection.
+    #[config(env = "AETHER_BLOOMERY_MAX_CONCURRENT_LANES", default = 3)]
+    pub max_concurrent_lanes: usize,
     /// How long (in seconds) a tracked dispatch may stay unresolved before the
     /// executor reactor logs a `warn` naming the wedge ([`super::ExecutorReactorCapability`],
     /// #3635) — observability only, never a behavior change to admission or
@@ -259,6 +279,7 @@ impl Default for CoordinatorConfig {
             local_lane_commands: "construct.,review.".to_owned(),
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),
             local_lane_program: DEFAULT_LANE_PROGRAM.to_owned(),
+            max_concurrent_lanes: 3,
             stale_warn_after_secs: 1800,
             artifacts_root: None,
             operator_name: String::new(),
