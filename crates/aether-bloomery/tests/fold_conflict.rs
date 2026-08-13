@@ -2,8 +2,6 @@
 //! exhaust into a wedge with the conflict evidence attached. The journal
 //! is the only state.
 
-#![allow(clippy::unwrap_used)]
-
 mod common;
 
 use aether_bloomery::{
@@ -74,10 +72,10 @@ fn a_fold_conflict_dispatches_reconcile_against_the_folded_checkpoint() {
         "Reconcile checks out the folded checkpoint head, not the sealed base",
     );
 
-    let record = after.blooms.get(&bloom).unwrap();
+    let record = after.blooms.get(&bloom).expect("the sealed bloom is still in the snapshot");
     assert!(!record.claims.contains_key(&workpiece("beta")), "the revoked claim is gone");
     assert!(record.claims.contains_key(&workpiece("alpha")), "the already-folded member keeps its claim");
-    let progress = record.progress.get(&workpiece("beta")).unwrap();
+    let progress = record.progress.get(&workpiece("beta")).expect("beta still has a progress cursor");
     assert_eq!(progress.stage, StageId::Reconcile);
     assert_eq!(progress.attempts, 1);
     assert_eq!(progress.fold_checkpoint, Some(head));
@@ -133,7 +131,13 @@ fn a_passing_reconcile_rejoins_verify_with_the_new_candidate() {
     });
     assert_eq!(dispatch, Some((StageId::Verify, captured.checkout)), "Verify checks out the reconciled capture");
 
-    let progress = after.blooms.get(&bloom).unwrap().progress.get(&workpiece("beta")).unwrap();
+    let progress = after
+        .blooms
+        .get(&bloom)
+        .expect("the sealed bloom is still in the snapshot")
+        .progress
+        .get(&workpiece("beta"))
+        .expect("beta still has a progress cursor");
     assert_eq!(progress.stage, StageId::Verify);
     assert_eq!(progress.candidate, Some(captured));
     assert_eq!(progress.fold_checkpoint, None, "leaving Reconcile clears the fold checkout");
@@ -183,7 +187,13 @@ fn exhausting_reconcile_wedges_with_the_conflict_evidence() {
         !wedged.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
         "a wedged member stops dispatching",
     );
-    let wedge = after_wedge.blooms.get(&bloom).unwrap().wedged.get(&workpiece("beta")).expect("the wedge is recorded");
+    let wedge = after_wedge
+        .blooms
+        .get(&bloom)
+        .expect("the sealed bloom is still in the snapshot")
+        .wedged
+        .get(&workpiece("beta"))
+        .expect("the wedge is recorded");
     assert_eq!(wedge.stage, StageId::Reconcile);
     assert_eq!(wedge.evidence, conflict.detail, "the wedge attaches the collision evidence, not the last attempt");
 }
@@ -237,8 +247,8 @@ fn a_replayed_journal_reproduces_the_fold_conflict_sequence() {
     }
 
     assert_eq!(live, replayed, "apply-only replay rebuilds the live snapshot");
-    let record = live.blooms.get(&bloom).unwrap();
-    assert_eq!(record.claims.get(&workpiece("beta")).unwrap().candidate, digest(41));
+    let record = live.blooms.get(&bloom).expect("the sealed bloom is still in the snapshot");
+    assert_eq!(record.claims.get(&workpiece("beta")).expect("the replaced claim is recorded").candidate, digest(41));
     assert!(
         recorded[2].1.effects.iter().any(|effect| matches!(effect, Decision::DispatchIntegration { .. })),
         "the replaced claim re-dispatches the fold",

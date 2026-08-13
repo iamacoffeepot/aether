@@ -311,7 +311,7 @@ pub struct StageProgress {
     /// a successor gets a fresh cursor and therefore an empty set.
     pub seen_verify_failures: VerifyFailureSet,
     /// The landable head of the folded tree this member is reconciling onto
-    /// (ADR-0189). Set by [`Fact::FoldConflict`](crate::Fact::FoldConflict),
+    /// (ADR-0189). Set by [`Fact::FoldConflict`],
     /// consumed as the Reconcile lane's checkout, cleared when the member
     /// leaves Reconcile. `None` on every other stage. Defaulted so a journal
     /// written before the field existed still decodes.
