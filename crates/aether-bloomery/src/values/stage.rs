@@ -678,7 +678,7 @@ impl Transformation {
     /// `wall_clock_secs`, so the dispatched limit cannot come from a stage other
     /// than the one being dispatched.
     #[must_use]
-    pub fn for_member_stage(binding: &StageBinding, subject: Digest, checkout: Digest) -> Self {
+    pub fn for_member_stage(binding: &StageBinding, subject: Digest, checkout: Digest, base: Digest) -> Self {
         let (command, image, network): (&str, &str, NetworkProfile) = match binding.stage {
             // The mechanical Verify lane runs zero-egress; every model-driven lane
             // (Construct / Refine, and the non-member stages that fall through to
@@ -705,9 +705,15 @@ impl Transformation {
             command: String::from(command),
             inputs: alloc::vec![subject],
             checkout,
-            // A member lane's candidate is the uncommitted change its worker
-            // leaves in the checked-out tree, so it names no diff base.
-            diff_base: None,
+            // A model lane's candidate is the uncommitted change its worker
+            // leaves in the checked-out tree, so it names no diff base. The
+            // mechanical `Verify` lane is the exception: by the time it runs,
+            // the candidate is already captured as `base..checkout`, and
+            // naming that range is what lets it narrow its compiling gates to
+            // the diff's reverse-dependency closure instead of recompiling the
+            // workspace on every refine lap (#4890). The whole-bloom aggregate
+            // verify deliberately names none, so it keeps the whole tree.
+            diff_base: matches!(binding.stage, StageId::Verify).then_some(base),
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
             image: String::from(image),
             limits: ExecutionLimits { wall_clock_secs: binding.wall_clock_secs },
@@ -1062,7 +1068,8 @@ mod tests {
     fn for_member_stage_panics_on_scope() {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
-        let _ = Transformation::for_member_stage(&binding(StageId::Scope), subject, checkout);
+        let base = Digest::from_bytes([5; 32]);
+        let _ = Transformation::for_member_stage(&binding(StageId::Scope), subject, checkout, base);
     }
 
     // Land is a host-native source-port CAS (LandReactorCapability, #3559), never
@@ -1073,7 +1080,8 @@ mod tests {
     fn for_member_stage_panics_on_land() {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
-        let _ = Transformation::for_member_stage(&binding(StageId::Land), subject, checkout);
+        let base = Digest::from_bytes([5; 32]);
+        let _ = Transformation::for_member_stage(&binding(StageId::Land), subject, checkout, base);
     }
 
     // The per-member dispatch transformation pins the given subject as its single
@@ -1084,16 +1092,17 @@ mod tests {
     fn member_stage_transformation_pins_subject_and_splits_egress_by_lane() {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
-        let construct = Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout);
+        let base = Digest::from_bytes([5; 32]);
+        let construct = Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout, base);
         assert_eq!(construct.inputs, alloc::vec![subject]);
         assert_eq!(construct.outputs, alloc::vec![String::from(RESULT_RECORD_OUTPUT)]);
         assert_eq!(construct.network, NetworkProfile::Restricted);
         assert_eq!(
-            Transformation::for_member_stage(&binding(StageId::Verify), subject, checkout).network,
+            Transformation::for_member_stage(&binding(StageId::Verify), subject, checkout, base).network,
             NetworkProfile::None
         );
         assert_eq!(
-            Transformation::for_member_stage(&binding(StageId::Review), subject, checkout).network,
+            Transformation::for_member_stage(&binding(StageId::Review), subject, checkout, base).network,
             NetworkProfile::Restricted
         );
     }
@@ -1108,10 +1117,48 @@ mod tests {
     fn member_stage_transformation_carries_the_checkout_distinct_from_the_subject() {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
-        let construct = Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout);
+        let base = Digest::from_bytes([5; 32]);
+        let construct = Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout, base);
         assert_eq!(construct.checkout, checkout, "the checkout target is threaded onto the transformation");
         assert_eq!(construct.inputs, alloc::vec![subject], "the subject stays the evidence-binding input, untouched");
         assert_ne!(construct.checkout, construct.inputs[0], "checkout and subject are independent axes");
+    }
+
+    // Only the mechanical Verify lane names a diff base (#4890). It is the one
+    // member stage whose candidate is already captured by the time it runs, so
+    // `base..checkout` is a real range there, and naming it is what lets the
+    // lane narrow its compiling gates to that range's reverse-dependency
+    // closure instead of recompiling the workspace on every refine lap.
+    //
+    // Tripwire in both directions. A model lane that gained one would judge the
+    // sealed base's own history instead of the uncommitted candidate in front
+    // of it. And the whole-bloom aggregate verify — built by
+    // `for_aggregate_verify`, asserted here beside its member sibling — must
+    // keep naming none, because the stage that proves what lands is the one
+    // stage that must go on compiling the whole tree.
+    #[test]
+    fn only_the_member_verify_lane_names_the_range_its_candidate_was_captured_over() {
+        let subject = Digest::from_bytes([7; 32]);
+        let checkout = Digest::from_bytes([9; 32]);
+        let base = Digest::from_bytes([5; 32]);
+
+        assert_eq!(
+            Transformation::for_member_stage(&binding(StageId::Verify), subject, checkout, base).diff_base,
+            Some(base),
+            "the member verify's candidate is the committed range its narrowing reads",
+        );
+        for stage in [StageId::Construct, StageId::Refine, StageId::Review] {
+            assert_eq!(
+                Transformation::for_member_stage(&binding(stage), subject, checkout, base).diff_base,
+                None,
+                "{stage:?}'s candidate is the working tree, which names no range",
+            );
+        }
+        assert_eq!(
+            Transformation::for_aggregate_verify(&binding(StageId::AggregateVerify), subject, checkout).diff_base,
+            None,
+            "the aggregate verify keeps the whole workspace, so it names nothing to narrow by",
+        );
     }
 
     // The reducer never authors the advisory work-order description (#3595): it
@@ -1123,8 +1170,11 @@ mod tests {
     fn for_member_stage_authors_no_description() {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
+        let base = Digest::from_bytes([5; 32]);
         assert!(
-            Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout).description.is_none(),
+            Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout, base)
+                .description
+                .is_none(),
             "the reducer holds only digests; the description is threaded on at dispatch",
         );
     }
@@ -1153,12 +1203,14 @@ mod tests {
         let base = Digest::from_bytes([3; 32]);
 
         assert_eq!(
-            Transformation::for_member_stage(&shortened, subject, checkout).limits.wall_clock_secs,
+            Transformation::for_member_stage(&shortened, subject, checkout, base).limits.wall_clock_secs,
             900,
             "the re-authored binding's limit reaches the dispatch"
         );
         assert_eq!(
-            Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout).limits.wall_clock_secs,
+            Transformation::for_member_stage(&binding(StageId::Construct), subject, checkout, base)
+                .limits
+                .wall_clock_secs,
             3_600,
             "an untouched sibling keeps the compiled calibration"
         );

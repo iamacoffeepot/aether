@@ -348,6 +348,7 @@ mod tests {
                 &StageCatalog::binding_of(StageId::Verify),
                 attempt,
                 Digest::from_bytes([0xC0; 32]),
+                Digest::from_bytes([0xB0; 32]),
             ),
             configs: aether_bloomery::ConfigRegistry::default(),
         };

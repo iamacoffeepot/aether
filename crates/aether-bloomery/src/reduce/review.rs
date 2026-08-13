@@ -231,6 +231,7 @@ pub(super) fn reenter_members(
             SealedLine {
                 configs: member.map_or_else(ConfigRegistry::default, |m| m.configs.layered_over(record.spec.configs())),
                 catalog: &record.stage_catalog,
+                base: record.spec.base(),
             },
         ));
     }

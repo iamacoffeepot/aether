@@ -117,7 +117,11 @@ pub(super) fn reduce_grant_attempts(
         progress,
         DispatchTargets { subject, checkout },
         candidate.map(|current| current.tree),
-        SealedLine { configs: member.configs.layered_over(record.spec.configs()), catalog: &record.stage_catalog },
+        SealedLine {
+            configs: member.configs.layered_over(record.spec.configs()),
+            catalog: &record.stage_catalog,
+            base: record.spec.base(),
+        },
     );
     Decisions {
         outcome: Outcome::AttemptsGranted {

@@ -55,7 +55,7 @@ pub(super) fn move_effects_with_candidate(
             bloom,
             workpiece: workpiece.clone(),
             stage: progress.stage,
-            transformation: Transformation::for_member_stage(&binding, targets.subject, targets.checkout),
+            transformation: Transformation::for_member_stage(&binding, targets.subject, targets.checkout, sealed.base),
             scope_revision,
             candidate,
             profile: binding.profile,
@@ -83,6 +83,10 @@ pub(super) struct DispatchTargets {
 pub(super) struct SealedLine<'a> {
     /// The member's registry layered over the bloom's.
     pub configs: ConfigRegistry,
+    /// The git commit the bloom was sealed onto — the base every member's
+    /// candidate is built over, and so the range the mechanical `Verify` lane
+    /// reads its candidate's diff against (#4890).
+    pub base: Digest,
     /// The catalog the bloom sealed, or the compiled line when it sealed none.
     pub catalog: &'a StageCatalog,
 }
@@ -203,7 +207,11 @@ pub(super) fn reduce_attempt_completed(
             progress,
             DispatchTargets { subject, checkout },
             candidate.map(|current| current.tree),
-            SealedLine { configs: member.configs.layered_over(record.spec.configs()), catalog: &record.stage_catalog },
+            SealedLine {
+                configs: member.configs.layered_over(record.spec.configs()),
+                catalog: &record.stage_catalog,
+                base: record.spec.base(),
+            },
         ));
         return Decisions {
             outcome: Outcome::AttemptAdvanced { bloom: *bloom, workpiece: workpiece.clone(), from: stage, to: next },
@@ -224,7 +232,11 @@ pub(super) fn reduce_attempt_completed(
             progress,
             DispatchTargets { subject, checkout },
             candidate.map(|current| current.tree),
-            SealedLine { configs: member.configs.layered_over(record.spec.configs()), catalog: &record.stage_catalog },
+            SealedLine {
+                configs: member.configs.layered_over(record.spec.configs()),
+                catalog: &record.stage_catalog,
+                base: record.spec.base(),
+            },
         ));
         return Decisions {
             outcome: Outcome::AttemptRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, attempt },

@@ -140,11 +140,17 @@ impl TransformRunner for ProcessTransformRunner {
             .args([spec.command, "--out"])
             .arg(spec.evidence_dir)
             .args(["--nonce", spec.nonce]);
+        // The diff base is not a model-lane detail: the critic reads it to see
+        // a committed candidate, and the mechanical verify lane reads it to
+        // narrow its compiling gates to that candidate's reverse-dependency
+        // closure (#4890). An order naming none — the whole-bloom aggregate
+        // verify, and every stage whose candidate is the working tree — leaves
+        // both lanes exactly as they were.
+        if let Some(diff_base) = spec.diff_base_hex {
+            lane.args(["--diff-base", diff_base]);
+        }
         if is_model_lane(spec.command) {
             lane.args(["--subject", spec.checkout_hex]);
-            if let Some(diff_base) = spec.diff_base_hex {
-                lane.args(["--diff-base", diff_base]);
-            }
             if let Some(harness) = spec.harness {
                 lane.args(["--harness", harness]);
             }

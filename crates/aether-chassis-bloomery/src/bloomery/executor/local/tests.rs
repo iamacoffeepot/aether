@@ -35,12 +35,16 @@ fn digest(seed: u8) -> Digest {
     Digest::from_bytes([seed; 32])
 }
 
-// A correspondence seeded with the one checkout target these orders carry
-// (`for_member_stage`'s third arg, `digest(0xC0)`), so `submit` resolves the
-// `git worktree add` target through it rather than hex-punning the digest.
+// A correspondence seeded with the two commits these orders carry — the
+// checkout target (`for_member_stage`'s third arg, `digest(0xC0)`) and the
+// sealed base its fourth names — so `submit` resolves both through it rather
+// than hex-punning a digest. Both resolve in production for the same reason:
+// the base is the very commit the entry-stage dispatch checked out, so an
+// unresolvable one would have refused that dispatch long before a verify.
 fn correspondence() -> Arc<FakeGithub> {
     let fake = FakeGithub::new();
     fake.seed_git_object(&digest(0xC0));
+    fake.seed_git_object(&digest(0xB0));
     Arc::new(fake)
 }
 
@@ -63,6 +67,7 @@ fn construct_order(subject: Digest, nonce: &str) -> aether_bloomery::WorkOrder {
             &StageCatalog::binding_of(StageId::Construct),
             subject,
             digest(0xC0),
+            digest(0xB0),
         ),
         nonce: Nonce(nonce.to_owned()),
     }
@@ -119,6 +124,7 @@ fn a_verify_status_field_drives_the_verdict() {
             &StageCatalog::binding_of(StageId::Verify),
             subject,
             digest(0xC0),
+            digest(0xB0),
         ),
         nonce: Nonce("n-v".to_owned()),
     };
@@ -147,6 +153,7 @@ fn a_passing_verify_body_projects_the_empty_failure_set() {
             &StageCatalog::binding_of(StageId::Verify),
             digest(7),
             digest(0xC0),
+            digest(0xB0),
         ),
         nonce: Nonce("n-pass".to_owned()),
     };
@@ -169,6 +176,7 @@ fn a_malformed_body_failure_set_fails_closed() {
             &StageCatalog::binding_of(StageId::Verify),
             digest(7),
             digest(0xC0),
+            digest(0xB0),
         ),
         nonce: Nonce("n-bad-set".to_owned()),
     };
@@ -697,6 +705,28 @@ fn an_aggregate_review_spawn_names_the_range_a_member_spawn_does_not() {
 
     exec.submit(&construct_order(digest(5), &test_nonce("member"))).unwrap();
     assert_eq!(seen.lock().unwrap().diff_base, None, "a member candidate is the working tree, not a range");
+
+    // The mechanical verify lane is the second stage whose candidate is
+    // already committed, and the range has to reach its spawn or the narrowing
+    // #4890 built is inert: the lane resolves no diff base, computes no
+    // closure, and recompiles the workspace on every refine lap exactly as
+    // before, with nothing anywhere saying so.
+    store.seed_git_object(&digest(0xB0));
+    let verify = aether_bloomery::WorkOrder {
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Verify),
+            digest(5),
+            digest(0xC0),
+            digest(0xB0),
+        ),
+        nonce: Nonce(test_nonce("verify")),
+    };
+    exec.submit(&verify).unwrap();
+    assert_eq!(
+        seen.lock().unwrap().diff_base.as_deref(),
+        Some(to_hex(&digest(0xB0)).as_str()),
+        "the verify spawn names the sealed base its candidate's diff is taken against",
+    );
 }
 
 // The complement, fail-closed: a diff base that resolves to no git object must
@@ -1017,6 +1047,7 @@ fn outstanding(subject: Digest, nonce: &str) -> OutstandingDispatch {
             &StageCatalog::binding_of(StageId::Construct),
             subject,
             digest(0xC0),
+            digest(0xB0),
         ),
     }
 }

@@ -39,7 +39,7 @@ mark-changed = ["aether-chassis-bloomery"]
 "#;
 
 /// Screen for paths that force the full suite, returning the first hit.
-pub(super) fn global_screen(changed: &[String]) -> Option<&str> {
+pub fn global_screen(changed: &[String]) -> Option<&str> {
     changed
         .iter()
         .map(String::as_str)
