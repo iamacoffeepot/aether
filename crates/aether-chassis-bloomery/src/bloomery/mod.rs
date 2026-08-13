@@ -16,7 +16,9 @@ mod intake;
 #[cfg(feature = "github")]
 mod mirror;
 mod outbox;
-mod poll_timer;
+// Crate-visible: the control core runs the same sidecar for its mainline
+// observer, and that cap lives outside this module.
+pub(crate) mod poll_timer;
 #[cfg(feature = "github")]
 mod reactor;
 #[cfg(feature = "github")]
