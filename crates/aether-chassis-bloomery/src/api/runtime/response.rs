@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use aether_http::{HttpHeader, HttpServerResponse};
 
+use super::hex;
 use crate::api::dto::ErrorView;
 
 /// A `Content-Type: application/json` header set.
@@ -13,8 +14,11 @@ fn json_headers() -> Vec<HttpHeader> {
 }
 
 /// A JSON response over a serializable value; a `500` if it fails to encode.
+///
+/// Rendered through [`hex::to_vec`], so every digest in the body reads as the
+/// same 64 hex characters the route's own path segments speak.
 pub(super) fn json(status: u16, value: &impl Serialize) -> HttpServerResponse {
-    match serde_json::to_vec(value) {
+    match hex::to_vec(value) {
         Ok(body) => HttpServerResponse { status, headers: json_headers(), body },
         Err(error) => error_response(500, &format!("response encode failed: {error}")),
     }

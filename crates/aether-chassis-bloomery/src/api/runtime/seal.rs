@@ -22,7 +22,7 @@ use aether_data::wire::to_vec;
 use aether_http::HttpServerResponse;
 use aether_substrate::actor::native::NativeCtx;
 
-use super::hex::hex_encode;
+use super::hex::{self, hex_encode};
 use super::response::error_response;
 use super::state::{
     ApiCapabilityState, MAX_OPEN_SEALS, MAX_SEAL_MEMBERS, PendingSeal, PendingSealSetup, PendingVerify, Routed,
@@ -434,7 +434,7 @@ fn parse_optional_body<T: DeserializeOwned + Default>(body: &[u8]) -> Result<T, 
     if body.is_empty() {
         return Ok(T::default());
     }
-    serde_json::from_slice(body).map_err(|error| error_response(400, &format!("invalid request body: {error}")))
+    hex::from_slice(body).map_err(|error| error_response(400, &format!("invalid request body: {error}")))
 }
 
 #[cfg(test)]

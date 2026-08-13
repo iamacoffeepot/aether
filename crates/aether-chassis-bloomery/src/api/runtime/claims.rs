@@ -30,7 +30,7 @@ use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
 use aether_substrate::actor::native::NativeCtx;
 
-use super::hex::{digest_from_hex, hex_encode};
+use super::hex::{self, digest_from_hex, hex_encode};
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed};
 use crate::api::dto::{ClaimRefView, ClaimsView, ReleaseRequest};
@@ -59,7 +59,7 @@ impl ApiCapabilityState {
     /// downstream: a signature that does not verify answers `400` from the verify
     /// reply, and a locally-known holder is the reducer's refusal.
     pub(super) fn request_claim_release(&self, ctx: &NativeCtx<'_, Manual>, body: &[u8]) -> Routed {
-        let request: ReleaseRequest = match serde_json::from_slice(body) {
+        let request: ReleaseRequest = match hex::from_slice(body) {
             Ok(request) => request,
             Err(error) => return Routed::Reply(error_response(400, &format!("invalid release request: {error}"))),
         };

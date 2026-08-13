@@ -43,6 +43,7 @@ use aether_substrate::actor::native::NativeCtx;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::hex;
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed};
 use crate::store::{RecordConfig, RecordConfigResult, StoreCapability};
@@ -79,7 +80,7 @@ fn schema_of(kind: &str) -> Option<SchemaType> {
 /// `POST /configs` — encode a configuration through its kind's schema, address
 /// it, and relay the store write; [`config_response`] answers once it lands.
 pub(super) fn author_config(body: &[u8]) -> Routed {
-    let request: ConfigRequest = match serde_json::from_slice(body) {
+    let request: ConfigRequest = match hex::from_slice(body) {
         Ok(request) => request,
         Err(error) => return Routed::Reply(error_response(400, &format!("invalid config body: {error}"))),
     };

@@ -63,12 +63,16 @@ Request and response bodies are JSON over the `aether-bloomery` value types
 (`Workpiece`, `BloomDraft`, `Membership`, `ViewDocument`, …) via serde. Three
 representation notes carry from those types:
 
-- **Digests** (a workpiece intent, a bloom's `base`, a `BloomId`) serialize as
-  a 32-element byte array in request and response bodies — serde's native form
-  for the `Digest([u8; 32])` newtype.
-- **Bloom ids in a URL path** (`/blooms/{id}`) are the lowercase **hex** of that
-  digest. The seal outcome hands the id back as the byte array, so hex-encode
-  it before addressing the bloom by path.
+- **Digests** (a workpiece intent, a bloom's `base`, a `BloomId`) are 64
+  lowercase **hex** characters wherever they appear — a path segment, a request
+  body, a response body. The seal outcome hands the sealed id back in exactly
+  the spelling `/blooms/{id}` takes, so nothing has to be re-encoded between
+  reading a digest and naming it.
+- **A request body also accepts the canonical form**: the 32-element byte array
+  serde renders `Digest([u8; 32])` as. Either spelling resolves to the same
+  bytes before anything downstream sees it, so a client holding serde-encoded
+  values needs no translation layer. Hex that is the wrong length or carries a
+  non-hex character is a `400` naming the field, never a partial read.
 - **Configuration registries** map a kind name to the content address returned
   by `POST /configs`. A draft with no stage-catalog entry uses the compiled
   default line; an entry names the authored catalog the bloom runs. The same
@@ -80,23 +84,23 @@ representation notes carry from those types:
 
 ## A curl walkthrough
 
-The walkthrough reuses a handful of digests, so bind them once — three
-placeholder byte arrays. It authors its stage catalog through the same generic
+The walkthrough reuses a handful of digests, so bind them once — four
+placeholder hex strings. It authors its stage catalog through the same generic
 route every configuration uses:
 
 ```bash
-intent='[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]'
-revision='[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]'
-detail='[9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9]'
-base='[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]'
+intent=$(printf '02%.0s' $(seq 32))
+revision=$(printf '07%.0s' $(seq 32))
+detail=$(printf '09%.0s' $(seq 32))
+base=$(printf '01%.0s' $(seq 32))
 ```
 
-Stage a workpiece (its `intent` / `scope_revision` are digest byte arrays):
+Stage a workpiece (its `intent` / `scope_revision` are digests):
 
 ```bash
 curl -s -X POST localhost:8910/workpieces \
   -H 'content-type: application/json' \
-  -d "{\"id\":\"wp-1\",\"intent\":$intent,\"scope_revision\":$revision}"
+  -d "{\"id\":\"wp-1\",\"intent\":\"$intent\",\"scope_revision\":\"$revision\"}"
 ```
 
 Open a draft and read the handle it mints:
@@ -124,12 +128,12 @@ curl -s -X PATCH localhost:8910/drafts/1 -H 'content-type: application/json' -d 
   "proposals": [
     {
       "workpiece": "wp-1",
-      "scope_revision": $revision,
+      "scope_revision": "$revision",
       "configs": { "entries": {} },
-      "approval": { "subject": $revision, "kind": "Approval", "detail": $detail }
+      "approval": { "subject": "$revision", "kind": "Approval", "detail": "$detail" }
     }
   ],
-  "base": $base,
+  "base": "$base",
   "configs": { "entries": { "aether.bloomery.stage_catalog": $catalog } }
 }
 JSON
@@ -152,7 +156,7 @@ curl -s -X POST localhost:8910/drafts/1/seal -H 'content-type: application/json'
   "projections": [
     {
       "workpiece": "wp-1",
-      "scope_revision": $revision,
+      "scope_revision": "$revision",
       "declared_surface": ["docs/guide/recipes/bloomery-rest-api.md"],
       "completeness": {
         "has_problem_statement": true,
@@ -258,8 +262,8 @@ Read the sealed bloom back — the whole view document, then one bloom by its
 hex id:
 
 ```bash
-curl -s localhost:8910/view                    # → {"mainline":[…],"blooms":[{…}]}
-curl -s localhost:8910/blooms/<hex-of-the-32-bytes>
+curl -s localhost:8910/view                    # → {"mainline":"…","blooms":[{…}]}
+curl -s localhost:8910/blooms/<the-hex-id-the-seal-returned>
 ```
 
 Read the journal (the seal is now a durable record) and fetch a referenced
@@ -380,8 +384,8 @@ curl -s localhost:8080/claims | jq
 
 ```json
 {"claims": [
-  {"ref_kind": "MainlineAdmission", "holder": {"Held": [/* 32 bytes */]}},
-  {"ref_kind": {"Workpiece": "wp-trial-hop"}, "holder": {"Held": [/* 32 bytes */]}}
+  {"ref_kind": "MainlineAdmission", "holder": {"Held": "/* the holder bloom id, in hex */"}},
+  {"ref_kind": {"Workpiece": "wp-trial-hop"}, "holder": {"Held": "/* … */"}}
 ]}
 ```
 
@@ -407,11 +411,11 @@ authorization on its own.
 curl -s -X POST localhost:8080/claims/releases -d @- <<'JSON' | jq
 {
   "ref_kind": "MainlineAdmission",
-  "expected_holder": [/* the 32-byte holder from GET /claims */],
+  "expected_holder": "/* the hex holder from GET /claims */",
   "authorization": {
     "words": [/* utf-8 bytes of: release orphan bloomery claim */],
     "provenance": {"AuthorSignature": {"signer": "operator", "signature": [/* … */]}},
-    "parents": [[/* the 32-byte request digest */]]
+    "parents": ["/* the request digest, in hex */"]
   }
 }
 JSON
