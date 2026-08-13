@@ -4,10 +4,9 @@
 //! No lane shares a target directory with another, on purpose: reusing cargo's
 //! incremental state across divergent source is unsound, and the shared
 //! directory that avoids the cold cost instead grows without bound. The verify
-//! lane builds in its dispatch worktree's own tree and a model lane's child
-//! builds in a throwaway under the run's scratch, and both pay the same price
-//! for it — every lap recompiles the whole dependency tree, and a sweep re-pays
-//! it on the next lane.
+//! lane builds in its checkout's own tree and a model lane's child builds in a
+//! throwaway under the run's scratch, and both start empty — every lap
+//! recompiles the whole dependency tree from the compiler's point of view.
 //!
 //! sccache is sound exactly where a shared target directory is not. It keys each
 //! compiler invocation by content — the source bytes, the flags, the hashes of
@@ -23,9 +22,12 @@
 //! included — while a lane at a **new** path misses on the dependencies too, not
 //! merely on the workspace crates. Measured over `aether-data`'s tree, twelve
 //! compilations: a swept rebuild at the same path hit all twelve, and the same
-//! rebuild one directory over hit none. Canonical per-slot build paths are what
-//! turn that into a cross-lane win; this is the half that has to be wired first,
-//! and the counters below are what make the follow-on measurable rather than
+//! rebuild one directory over hit none. Which is why a lane builds in its lane
+//! slot's canonical checkout rather than a per-dispatch one (#4904, the local
+//! executor backend): the dispatches that share a slot share a build path, so
+//! the second one hits what the first paid for. Two lanes in *different* slots
+//! still miss each other, which is the accepted cost of not serializing them.
+//! The counters below are what make either claim measurable rather than
 //! anecdotal.
 //!
 //! It is host tooling, not a dependency of this workspace. A host without

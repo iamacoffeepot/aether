@@ -27,18 +27,42 @@ use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes, ReconcileRe
 use crate::bloomery::intake::NameEvidenceClaims;
 use crate::store::{SqliteStore, StoreBackend};
 
-/// The suffix distinguishing a run's evidence directory from its scratch
-/// worktree under the same nonce-keyed base dir.
+/// The suffix distinguishing a run's evidence directory from the lane slot
+/// checkouts under the same base dir. Evidence stays per dispatch (nonce-keyed):
+/// it is what that one attempt produced.
 const EVIDENCE_SUFFIX: &str = "-evidence";
 
-/// One tracked run: the spawned child, its scratch worktree, where its evidence
-/// lands, and the digest the returning evidence must bind to.
+/// The prefix a lane slot's canonical checkout directory carries under the
+/// scratch root, completed by the slot's index (`slot-0`, `slot-1`, …).
+///
+/// The build path is what makes this a name rather than a nonce (#4904).
+/// `sccache` keys every compilation partly by the paths cargo names on the
+/// `rustc` invocation — `--out-dir`, `-L dependency=…` — so a dispatch that
+/// builds at a path no dispatch built at before misses the cache on its whole
+/// dependency tree, however much of that tree an earlier lane already compiled.
+/// A slot's dispatches all build at the slot's own path, so the second one hits
+/// what the first paid for.
+const SLOT_PREFIX: &str = "slot-";
+
+/// The file a dispatch records its lane slot in, inside its own evidence
+/// directory — the durable half of the slot assignment, read back by boot
+/// reconciliation (see [`recorded_slot`]).
+const SLOT_RECORD: &str = "slot";
+
+/// One tracked run: the spawned child, the lane slot it holds, where its
+/// evidence lands, and the digest the returning evidence must bind to.
 struct Run {
     process: Box<dyn RunProcess>,
-    // The scratch worktree `start` materialized the checkout into, released on the
-    // run's terminal path (cancel, or evidence consumed) so a long-lived backend
-    // does not leak one `git worktree` per order.
-    worktree_dir: PathBuf,
+    // The lane slot this run occupies, released on its terminal path (cancel, or
+    // evidence consumed) so the next dispatch can build at that slot's path.
+    // `None` for a run re-adopted at boot whose slot could not be recovered:
+    // this process cannot name the checkout it is running in, and guessing would
+    // hand another dispatch's live build path to a stranger.
+    slot: Option<usize>,
+    // The slot checkout the run builds in — the same path every dispatch in that
+    // slot uses, reset to the dispatch's own tree as it starts rather than
+    // created fresh. `None` alongside a `None` slot.
+    worktree_dir: Option<PathBuf>,
     evidence_dir: PathBuf,
     // The digest the intake broker binds the evidence to, per `evidence_subject`.
     subject: Digest,
@@ -82,7 +106,6 @@ struct PendingRun {
     command: String,
     checkout_hex: String,
     diff_base_hex: Option<String>,
-    worktree_dir: PathBuf,
     evidence_dir: PathBuf,
     profile: Option<ResolvedModel>,
     task: Option<String>,
@@ -91,12 +114,15 @@ struct PendingRun {
 }
 
 impl PendingRun {
-    fn spec(&self) -> RunSpec<'_> {
+    // The spawn request, over the slot checkout the dispatch was handed. The
+    // build path is not resolved with the rest of the dispatch: it belongs to
+    // the slot, and which slot this run gets is decided when one frees.
+    fn spec<'a>(&'a self, worktree_dir: &'a Path) -> RunSpec<'a> {
         RunSpec {
             command: &self.command,
             checkout_hex: &self.checkout_hex,
             diff_base_hex: self.diff_base_hex.as_deref(),
-            worktree_dir: &self.worktree_dir,
+            worktree_dir,
             evidence_dir: &self.evidence_dir,
             nonce: &self.nonce,
             harness: self.profile.as_ref().map(|resolved| resolved.harness.as_str()),
@@ -121,6 +147,11 @@ struct Registry {
     // must not hold this lock, so a reservation stands in for the run between the
     // decision to start it and the registry entry it becomes.
     starting: usize,
+    // Which slot indices are spoken for right now — the allocator behind the
+    // canonical build paths. Held from the moment a dispatch is handed a slot
+    // until the run leaves the registry, because the slot's checkout is what the
+    // dispatch is building in and the next claimant resets it.
+    slots: HashSet<usize>,
 }
 
 impl Registry {
@@ -128,6 +159,34 @@ impl Registry {
     // have not yet become one.
     fn occupied(&self) -> usize {
         self.runs.len() + self.starting
+    }
+
+    // Claim the lowest unheld slot index.
+    //
+    // Lowest rather than next-in-sequence, and that is the whole point: a
+    // counter would mint a fresh path per dispatch — exactly the arrangement
+    // that keeps the compiler cache at a 0% hit rate — while reusing the lowest
+    // free index keeps a host's builds inside `0..ceiling` paths forever.
+    //
+    // One of `0..=len` is always free, so the search is total.
+    fn claim_lowest_free_slot(&mut self) -> usize {
+        let slot = (0..=self.slots.len()).find(|index| !self.slots.contains(index)).unwrap_or(self.slots.len());
+        self.slots.insert(slot);
+        slot
+    }
+
+    // Claim one named slot, reporting whether it was free. Boot reconciliation's
+    // path: a re-adopted run must get back the slot it was dispatched in, not
+    // whichever one happens to be lowest.
+    fn claim_slot(&mut self, slot: usize) -> bool {
+        self.slots.insert(slot)
+    }
+
+    // Hand a terminal run's slot back, so the next dispatch builds at its path.
+    fn release_slot(&mut self, slot: Option<usize>) {
+        if let Some(slot) = slot {
+            self.slots.remove(&slot);
+        }
     }
 }
 
@@ -167,11 +226,12 @@ pub struct LocalExecutor {
 impl LocalExecutor {
     /// Build a backend over an explicit spawn seam — the seam tests drive with a
     /// stub runner, and [`from_config`](Self::from_config) drives with the
-    /// production [`ProcessTransformRunner`]. `base_dir` is the scratch-worktree
-    /// root; each run gets `base_dir/<nonce>` (worktree) and
-    /// `base_dir/<nonce>-evidence` (output). Unthrottled — every submit spawns
-    /// immediately until [`with_max_concurrent_lanes`](Self::with_max_concurrent_lanes)
-    /// sets a ceiling, which is what [`from_config`](Self::from_config) does.
+    /// production [`ProcessTransformRunner`]. `base_dir` is the scratch root;
+    /// each run writes its evidence to `base_dir/<nonce>-evidence` and builds in
+    /// the canonical checkout of the lane slot it holds, `base_dir/slot-<index>`.
+    /// Unthrottled — every submit spawns immediately until
+    /// [`with_max_concurrent_lanes`](Self::with_max_concurrent_lanes) sets a
+    /// ceiling, which is what [`from_config`](Self::from_config) does.
     #[must_use]
     pub fn new(
         runner: Arc<dyn TransformRunner>,
@@ -259,36 +319,38 @@ impl LocalExecutor {
         self.registry.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    // The two directories a run at `nonce` owns: its scratch worktree and its
-    // evidence output dir.
+    // The evidence output dir a run at `nonce` owns — per dispatch, because it
+    // holds what that one attempt produced.
     //
     // Resolved absolute against the coordinator's own cwd. The child runs with
     // `current_dir(worktree_dir)`, so a relative `--out` (the config default
     // `local_worktree_base` ships relative) would resolve against the *child's*
-    // cwd — the scratch worktree — while `stream_evidence` reads `evidence_dir`
+    // cwd — the slot checkout — while `stream_evidence` reads `evidence_dir`
     // against the *coordinator's* cwd; the two diverge and the intake polls a path
     // the run never wrote, forever. `std::path::absolute` is a lexical cwd-join
     // that does not require the path to exist (unlike `canonicalize`).
     //
     // The single spelling of the nonce→path convention, because the boot
-    // reconciliation reads it backwards: it recovers a nonce from a directory name
-    // under `base_dir`, which only works while both sides agree on the layout.
-    fn run_paths(&self, nonce: &str) -> io::Result<(PathBuf, PathBuf)> {
-        Ok((absolute(self.base_dir.join(nonce))?, absolute(self.base_dir.join(format!("{nonce}{EVIDENCE_SUFFIX}")))?))
+    // reconciliation reads it backwards: it recovers a run from a directory under
+    // `base_dir`, which only works while both sides agree on the layout.
+    fn evidence_dir(&self, nonce: &str) -> io::Result<PathBuf> {
+        absolute(self.base_dir.join(format!("{nonce}{EVIDENCE_SUFFIX}")))
     }
 
-    // Release a terminal run's scratch worktree off the registry lock (the teardown
-    // is a blocking git shell-out), folding a failure into a warn rather than the
-    // terminal op's result — the child is already dead / the evidence already read,
-    // so a cleanup miss must not fail the cancel or the evidence stream.
-    fn release_worktree(&self, worktree_dir: &Path) {
-        if let Err(error) = self.runner.release(worktree_dir) {
-            tracing::warn!(
-                worktree = %worktree_dir.display(),
-                %error,
-                "local executor backend: scratch worktree release failed",
-            );
-        }
+    // The canonical checkout one lane slot builds in, reused by every dispatch
+    // that holds the slot. Absolute for the reason the evidence dir is.
+    fn slot_dir(&self, slot: usize) -> io::Result<PathBuf> {
+        absolute(self.base_dir.join(format!("{SLOT_PREFIX}{slot}")))
+    }
+
+    // Drop a terminal run from the registry and hand its slot back, so the next
+    // dispatch can build at that slot's path. The checkout itself stays: it is
+    // the slot's, not the run's, and the dispatch that takes the slot next resets
+    // it to its own tree before building (see `ProcessTransformRunner::start`).
+    fn retire(&self, nonce: &str) {
+        let mut registry = self.lock();
+        let slot = registry.runs.remove(nonce).and_then(|run| run.slot);
+        registry.release_slot(slot);
     }
 
     // Resolve one work order into the spawn it will become.
@@ -300,7 +362,7 @@ impl LocalExecutor {
     // everything else.
     fn prepare(&self, order: &WorkOrder) -> Result<PendingRun, LocalExecutorError> {
         let nonce = order.nonce.0.clone();
-        let (worktree_dir, evidence_dir) = self.run_paths(&nonce).map_err(LocalExecutorError::Io)?;
+        let evidence_dir = self.evidence_dir(&nonce).map_err(LocalExecutorError::Io)?;
         // Resolve the sealed checkout digest to its real backend object through the
         // correspondence store (ADR-0150) — the `git worktree add` target — rather
         // than hex-punning the digest into a name git cannot resolve. The opaque
@@ -346,7 +408,6 @@ impl LocalExecutor {
             command: order.transformation.command.clone(),
             checkout_hex,
             diff_base_hex,
-            worktree_dir,
             evidence_dir,
             profile: profile.cloned(),
             // The work-order description rides the order's transformation (#3595),
@@ -365,13 +426,13 @@ impl LocalExecutor {
     // A dispatch already waiting has the prior claim on a free slot, so a fresh one
     // never overtakes it — the submission order the queue promises holds even in
     // the window between a slot freeing and the pump handing it out.
-    fn reserve_slot(&self) -> bool {
+    fn reserve_slot(&self) -> Option<usize> {
         let mut registry = self.lock();
         if !registry.waiting.is_empty() || registry.occupied() >= self.max_concurrent_lanes {
-            return false;
+            return None;
         }
         registry.starting += 1;
-        true
+        Some(registry.claim_lowest_free_slot())
     }
 
     // Park a dispatch behind the ceiling until a slot frees, saying so in the log.
@@ -394,28 +455,40 @@ impl LocalExecutor {
         );
     }
 
-    // Spawn a dispatch holding a reserved slot, turning the reservation into a
-    // tracked run. The spawn itself runs off the registry lock — it shells out to
-    // git — and the reservation is what keeps the slot it is spending from being
-    // handed to anyone else meanwhile. Releases the reservation on both paths.
-    fn start_reserved(&self, pending: PendingRun) -> Result<(), LocalExecutorError> {
-        let started = self.runner.start(&pending.spec());
+    // Spawn a dispatch into the lane slot it reserved, turning the reservation
+    // into a tracked run. The spawn itself runs off the registry lock — it shells
+    // out to git — and the reservation is what keeps the slot it is spending, and
+    // the build path that comes with it, from being handed to anyone else
+    // meanwhile. A spawn that fails hands the slot straight back.
+    fn start_reserved(&self, pending: PendingRun, slot: usize) -> Result<(), LocalExecutorError> {
+        let worktree_dir = self.slot_dir(slot).map_err(LocalExecutorError::Io)?;
+        record_slot(&pending.evidence_dir, slot);
+        let started = self.runner.start(&pending.spec(&worktree_dir));
 
-        {
-            let mut registry = self.lock();
-            registry.starting -= 1;
-            registry.runs.insert(
-                pending.nonce,
-                Run {
-                    process: started?,
-                    worktree_dir: pending.worktree_dir,
-                    evidence_dir: pending.evidence_dir,
-                    subject: pending.subject,
-                    gates: pending.gates,
-                },
-            );
-        }
-        Ok(())
+        let mut registry = self.lock();
+        registry.starting -= 1;
+        let outcome = match started {
+            Ok(process) => {
+                registry.runs.insert(
+                    pending.nonce,
+                    Run {
+                        process,
+                        slot: Some(slot),
+                        worktree_dir: Some(worktree_dir),
+                        evidence_dir: pending.evidence_dir,
+                        subject: pending.subject,
+                        gates: pending.gates,
+                    },
+                );
+                Ok(())
+            }
+            Err(error) => {
+                registry.release_slot(Some(slot));
+                Err(error)
+            }
+        };
+        drop(registry);
+        outcome
     }
 
     // Hand every free lane slot to the dispatches waiting for one, in submission
@@ -428,9 +501,9 @@ impl LocalExecutor {
     // through the reactor's deadline sweep, and a head that fails every time can
     // never block the lanes queued behind it.
     fn pump(&self) {
-        while let Some(pending) = self.take_waiting() {
+        while let Some((pending, slot)) = self.take_waiting() {
             let nonce = pending.nonce.clone();
-            if let Err(error) = self.start_reserved(pending) {
+            if let Err(error) = self.start_reserved(pending, slot) {
                 tracing::error!(
                     %nonce,
                     %error,
@@ -443,24 +516,32 @@ impl LocalExecutor {
     // Take the next waiting dispatch against a free slot, reserving that slot.
     // `None` when the ceiling is full or nothing is waiting — either way the pump
     // above has nothing left to do.
-    fn take_waiting(&self) -> Option<PendingRun> {
+    fn take_waiting(&self) -> Option<(PendingRun, usize)> {
         let mut registry = self.lock();
         if registry.occupied() >= self.max_concurrent_lanes {
             return None;
         }
         // Reserved as it is taken: the slot is spent from here, not from whenever
         // the spawn it is handed to returns.
-        registry.waiting.pop_front().inspect(|_| registry.starting += 1)
+        let pending = registry.waiting.pop_front()?;
+        registry.starting += 1;
+        Some((pending, registry.claim_lowest_free_slot()))
     }
 
     // Re-adopt one live order's run, if the previous process left a local footprint
     // for it. Returns whether it was re-adopted.
     //
-    // Either directory counts as that footprint. The evidence dir is created first
-    // (before the checkout, before the spawn), so a dispatch that reached the local
-    // lane at all has one; the worktree may already have been released while the
-    // order stayed outstanding. Re-adopting on the evidence dir alone still
-    // recovers the run's verdict, which is the part the order is waiting on.
+    // The evidence dir is that footprint. It is created first — before the
+    // checkout, before the spawn — so a dispatch that reached the local lane at
+    // all has one, and it is the part the order is waiting on: re-adopting on it
+    // recovers the run's verdict.
+    //
+    // The slot the dispatch recorded there comes back with it. Which slot matters
+    // because the checkout is the slot's rather than the run's: without the
+    // record, the next dispatch would claim that slot and reset the very tree a
+    // surviving child is building in. A footprint that recorded no usable slot is
+    // re-adopted with none, so this process never releases or resets a checkout it
+    // cannot prove belongs to the run.
     //
     // Never replaces a tracked entry: an owned run's `Box<dyn RunProcess>` is the
     // only handle on its child, and swapping it for an orphan would silently retire
@@ -473,8 +554,8 @@ impl LocalExecutor {
     // they drain.
     fn readopt(&self, dispatch: &OutstandingDispatch) -> bool {
         let nonce = &dispatch.nonce;
-        let (worktree_dir, evidence_dir) = match self.run_paths(&nonce.0) {
-            Ok(paths) => paths,
+        let evidence_dir = match self.evidence_dir(&nonce.0) {
+            Ok(evidence_dir) => evidence_dir,
             Err(error) => {
                 tracing::warn!(
                     nonce = %nonce.0,
@@ -484,18 +565,20 @@ impl LocalExecutor {
                 return false;
             }
         };
-        if !worktree_dir.exists() && !evidence_dir.exists() {
+        if !evidence_dir.exists() {
             return false;
         }
         let mut registry = self.lock();
         if registry.runs.contains_key(&nonce.0) {
             return false;
         }
+        let slot = recorded_slot(&evidence_dir).filter(|slot| registry.claim_slot(*slot));
         registry.runs.insert(
             nonce.0.clone(),
             Run {
                 process: Box::new(OrphanedRun::new(nonce.clone(), &evidence_dir)),
-                worktree_dir,
+                slot,
+                worktree_dir: slot.and_then(|slot| self.slot_dir(slot).ok()),
                 evidence_dir,
                 subject: evidence_subject(&dispatch.transformation),
                 gates: LaneGates::of(&dispatch.transformation.command),
@@ -504,8 +587,8 @@ impl LocalExecutor {
         true
     }
 
-    // Reclaim the scratch checkouts belonging to no live order, returning how many
-    // were reclaimed.
+    // Reclaim the nonce-keyed scratch checkouts belonging to no live order,
+    // returning how many were reclaimed.
     //
     // The candidates are the repo's *registered* worktrees, not the scratch root's
     // directory listing. The listing cannot tell this backend's checkouts from
@@ -513,14 +596,20 @@ impl LocalExecutor {
     // configured root, so the sweep must not assume it owns everything below it;
     // acting on a directory listing means deleting an operator's files on the
     // strength of where they sat. A registration, filtered to direct children of
-    // the root, is positive proof of a checkout this backend created: `git
-    // worktree add` at `base_dir/<nonce>` is the only thing that makes one.
+    // the root, is positive proof of a checkout this backend created.
+    //
+    // A slot checkout is never one of them. It belongs to the lane slot rather
+    // than to any one order, which is what makes its path canonical and its
+    // compilations cacheable; removing it because no order names it would undo
+    // that on every boot, and would remove a live re-adopted run's tree along the
+    // way. It is bounded (one per slot), and the dispatch that takes the slot next
+    // resets it, so it needs no sweep. What remains sweepable is a run directory
+    // keyed by a nonce — what a coordinator from before this layout left behind.
     //
     // What that leaves behind is a dispatch that died between creating its
-    // directory and registering the worktree. That is bounded litter at a nonce
-    // path no dispatch reuses, and `reclaim_worktree_path` clears it if the same
-    // nonce ever dispatches again — a fair trade against a sweep that could delete
-    // something it does not own.
+    // directory and registering the worktree. That is bounded litter, and
+    // `reclaim_worktree_path` clears it when the path is next dispatched into — a
+    // fair trade against a sweep that could delete something it does not own.
     fn sweep_abandoned(&self, live: &HashSet<&str>) -> usize {
         // Canonical, because git reports canonical paths and the configured root
         // may be relative or reached through a symlink. An absent root is the
@@ -544,7 +633,7 @@ impl LocalExecutor {
             let Some(nonce) = scratch_nonce_of(&base, &worktree) else {
                 continue;
             };
-            if live.contains(nonce.as_str()) {
+            if is_slot_directory(&nonce) || live.contains(nonce.as_str()) {
                 continue;
             }
             tracing::info!(
@@ -710,8 +799,8 @@ impl ExecutorBackend for LocalExecutor {
         // the ceiling existed. Otherwise the dispatch waits its turn — and is acked
         // as submitted either way, so the reducer's view of it never depends on how
         // busy this host happened to be.
-        if self.reserve_slot() {
-            self.start_reserved(pending)?;
+        if let Some(slot) = self.reserve_slot() {
+            self.start_reserved(pending, slot)?;
         } else {
             self.enqueue(pending);
         }
@@ -751,10 +840,9 @@ impl ExecutorBackend for LocalExecutor {
     }
 
     fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
-        // Kill and evict under the lock, then pull the run's worktree out so the
-        // teardown runs off the lock. A failed kill returns early, leaving both the
-        // entry and the worktree in place.
-        let worktree_dir = {
+        // Kill and evict under the lock. A failed kill returns early, leaving both
+        // the entry and its slot claim in place.
+        {
             let mut registry = self.lock();
             let Some(run) = registry.runs.get_mut(&handle.nonce.0) else {
                 // A dispatch still waiting for a lane slot has no child to kill and
@@ -791,13 +879,14 @@ impl ExecutorBackend for LocalExecutor {
                 return Ok(());
             };
             run.process.kill()?;
-            let worktree_dir = run.worktree_dir.clone();
             // A cancel is terminal — evict the killed run so the registry tracks only
-            // in-flight orders rather than parking `cancelled` entries forever.
-            registry.runs.remove(&handle.nonce.0);
-            worktree_dir
-        };
-        self.release_worktree(&worktree_dir);
+            // in-flight orders rather than parking `cancelled` entries forever, and
+            // hand its slot back. The slot's checkout stays where it is: the next
+            // dispatch to hold the slot resets it, and removing it here would pull
+            // the tree out from under whoever holds the slot by then.
+            let slot = registry.runs.remove(&handle.nonce.0).and_then(|run| run.slot);
+            registry.release_slot(slot);
+        }
         // The eviction above freed a lane slot; hand it to whatever is waiting.
         self.pump();
         Ok(())
@@ -822,25 +911,24 @@ impl ExecutorBackend for LocalExecutor {
             // The run's own lifecycle is the terminal-vs-transient discriminator. An
             // Exited run that has left no readable evidence never will — re-driving
             // the read against it loops forever (the live 2026-07-18 bug), so this is
-            // terminal: evict, release the worktree, and synthesize a fail-closed
+            // terminal: evict, free the slot, and synthesize a fail-closed
             // VerificationFailed attempt that feeds the retry/wedge machinery rather
             // than an error the intake re-drives. A Running run's missing file is
-            // transient — keep the entry and worktree for the next cycle's retry.
+            // transient — keep the entry and its slot for the next cycle's retry.
             Err(read_error) => {
                 if matches!(lifecycle, RunLifecycle::Exited { .. }) {
                     // Log the real IO fault before folding it into a fail-closed
                     // verdict — a permission/disk fault reads identically to a
                     // genuinely-absent evidence file once synthesized, so the fault
                     // must stay visible in the operator's logs (the same best-effort
-                    // warn convention `release_worktree` uses).
+                    // warn convention the reclaim path uses).
                     tracing::warn!(
                         nonce = %handle.nonce.0,
                         evidence = %evidence_path.display(),
                         error = %read_error,
                         "local executor backend: exited run left no readable evidence — failing closed",
                     );
-                    self.lock().runs.remove(&handle.nonce.0);
-                    self.release_worktree(&worktree_dir);
+                    self.retire(&handle.nonce.0);
                     // Terminal, so the lane slot is free — a run that failed without
                     // leaving evidence must release its slot exactly as a run that
                     // passed does, or a bloom whose lanes all fail this way wedges
@@ -897,17 +985,18 @@ impl ExecutorBackend for LocalExecutor {
         } else {
             nonce_matches && status_passed
         };
-        // A passed construct-lane run's work is captured while its worktree still
-        // exists (ADR-0152) — commit + tree recorded as correspondence rows, the
-        // digest pair riding the evidence reference. Fail-closed: a passed run
-        // whose capture falls short downgrades to a failing verdict rather than
-        // admitting a pass whose work was lost with the worktree below.
+        // A passed construct-lane run's work is captured out of the slot checkout
+        // it built in (ADR-0152) — commit + tree recorded as correspondence rows,
+        // the digest pair riding the evidence reference — while that checkout
+        // still holds it, which is until the next dispatch takes the slot.
+        // Fail-closed: a passed run whose capture falls short downgrades to a
+        // failing verdict rather than admitting a pass whose work was lost. A run
+        // whose checkout this process cannot name (a boot re-adoption that
+        // recovered no slot) captures nothing and takes the same downgrade.
         let commit_message = (is_construct && nonce_matches).then(|| parse_commit_message(&bytes)).flatten();
-        let candidate = if is_construct && concluded {
-            self.capture_candidate(&worktree_dir, &handle.nonce, commit_message.as_deref())
-        } else {
-            None
-        };
+        let candidate = worktree_dir
+            .filter(|_| is_construct && concluded)
+            .and_then(|worktree_dir| self.capture_candidate(&worktree_dir, &handle.nonce, commit_message.as_deref()));
         // File the message against the member the run's order names, while that
         // order is still outstanding — the intake consumes it a moment later, and
         // the land path has no other way back from a bloom to the lane that wrote
@@ -922,11 +1011,10 @@ impl ExecutorBackend for LocalExecutor {
         let passed = concluded && (!is_construct || candidate.is_some());
         // The evidence has been consumed and any candidate captured — evict the
         // run so the registry tracks only in-flight orders rather than growing for
-        // the process's lifetime, and reclaim its scratch worktree so the checkout
-        // does not outlive the run. (The failed-read path above returns early,
-        // keeping both the registry entry and the worktree for a later retry.)
-        self.lock().runs.remove(&handle.nonce.0);
-        self.release_worktree(&worktree_dir);
+        // the process's lifetime, and hand its lane slot back. (The failed-read
+        // path above returns early, keeping both the registry entry and the slot
+        // claim for a later retry, so nothing resets the checkout the retry reads.)
+        self.retire(&handle.nonce.0);
         // The run is off the registry, so its lane slot belongs to whatever has been
         // waiting for one.
         self.pump();
@@ -990,13 +1078,55 @@ impl ReconcileLanes for LocalExecutor {
     }
 }
 
+/// Record which lane slot a dispatch is running in, beside that dispatch's own
+/// evidence.
+///
+/// The slot decides the build path and the path is reused, so a coordinator that
+/// restarts mid-dispatch has to be able to find the slot a surviving child is
+/// building in — otherwise the next dispatch claims that slot and resets the
+/// checkout out from under it. The record lives in the evidence directory
+/// because that is per dispatch and is already where boot reconciliation looks.
+///
+/// Best-effort: a record that cannot be written costs a re-adopted run its
+/// checkout (it captures nothing and fails closed), never the dispatch itself.
+fn record_slot(evidence_dir: &Path, slot: usize) {
+    if let Err(error) =
+        fs::create_dir_all(evidence_dir).and_then(|()| fs::write(evidence_dir.join(SLOT_RECORD), slot.to_string()))
+    {
+        tracing::warn!(
+            evidence = %evidence_dir.display(),
+            %error,
+            "local executor backend: could not record the dispatch's lane slot; a restart will not recover its checkout",
+        );
+    }
+}
+
+/// The lane slot a dispatch recorded in its evidence directory, or `None` when
+/// it recorded none (a dispatch from before this layout, or one whose record
+/// could not be written) or recorded text that is not a slot index.
+fn recorded_slot(evidence_dir: &Path) -> Option<usize> {
+    fs::read_to_string(evidence_dir.join(SLOT_RECORD)).ok()?.trim().parse().ok()
+}
+
+/// Whether a scratch-root directory name is a lane slot's canonical checkout.
+///
+/// Exact rather than prefix-loose: the sweep reads this to decide what it must
+/// *not* reclaim, and a nonce that merely began with the prefix would otherwise
+/// leave an abandoned checkout on disk forever.
+fn is_slot_directory(name: &str) -> bool {
+    name.strip_prefix(SLOT_PREFIX)
+        .is_some_and(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
 /// The dispatch nonce a registered worktree belongs to, or `None` when the
 /// worktree is not one of this backend's.
 ///
-/// Every scratch checkout it makes is a direct child of the (canonical) scratch
-/// root named for its dispatch nonce, so anything else in the repo's worktree
-/// list — the operator's own, another tool's, one under a different root — is
-/// outside the sweep's remit and reads as `None`.
+/// Every checkout it makes is a direct child of the (canonical) scratch root, so
+/// anything else in the repo's worktree list — the operator's own, another
+/// tool's, one under a different root — is outside the sweep's remit and reads
+/// as `None`. A slot checkout is a direct child too and reads as its own name,
+/// which the sweep recognizes through [`is_slot_directory`] rather than as a
+/// nonce nobody is waiting on.
 fn scratch_nonce_of(base: &Path, worktree: &Path) -> Option<String> {
     let parent = fs::canonicalize(worktree.parent()?).ok()?;
     if parent != *base {

@@ -160,8 +160,10 @@ stage at a few seconds and seals its address into the bloom, which is the only
 way in: the limit is deliberately sealed rather than ambient, so two blooms
 sealing the same catalog terminate identically and no coordinator-side override
 exists for a scenario to reach for. Past that deadline the run is cancelled, so a
-child process the coordinator tracks — and the scratch worktree checked out
-behind it — are reclaimed whatever stage was dispatched. For a member stage or
+child process the coordinator tracks is killed and the lane slot it held is
+handed back whatever stage was dispatched. The slot's checkout stays where it is
+— it is the canonical path every dispatch in that slot builds at, and the next
+one to take the slot resets it to its own subject. For a member stage or
 `AggregateVerify` the attempt is then recorded as an ordinary failure, so retry
 and wedge assertions read exactly as they do for a lane that failed outright.
 
@@ -184,19 +186,27 @@ to renew the allowance is asserting the bug.
 Reclamation survives that restart in part, and a scenario has to be exact about
 which part. A boot reconciles the two things that outlive the process: the orders
 the store still holds outstanding, and the scratch root at
-`.bloomery/local-worktrees/`. An outstanding order whose directories survived is
-re-adopted and routed back to the local arm, so its expiry cancel reaches the arm
-that holds the run and reclaims the `<nonce>` checkout along with its `git
-worktree` registration — and a directory belonging to no outstanding order is
-swept in the same pass. Re-adoption also means an attempt that finished while the
-coordinator was down still admits from the `evidence.json` its run left behind,
-rather than riding to its deadline.
+`.bloomery/local-worktrees/`. That root holds one evidence directory per
+dispatch, `<nonce>-evidence`, and one canonical checkout per lane slot,
+`slot-<index>` — the build path every dispatch in that slot shares, which is what
+lets the compiler cache serve a later dispatch what an earlier one compiled. An
+outstanding order whose evidence directory survived is re-adopted and routed back
+to the local arm, holding again the slot its dispatch recorded there, so its
+expiry cancel reaches the arm that owns the run and frees that slot rather than
+leaving it spoken for. A `<nonce>` checkout belonging to no outstanding order —
+what a coordinator from before this layout left — is swept in the same pass; a
+slot checkout never is, since it belongs to the slot rather than to any one
+order. Re-adoption also means an attempt that finished while the coordinator was
+down still admits from the `evidence.json` its run left behind, rather than
+riding to its deadline.
 
 What does not come back is the child process. A coordinator holds no handle on
 one it did not spawn and records no pid, so cancelling a re-adopted run warns
-that the lane may still be running and removes the ground under it rather than
-killing it. Assert the accounting and the checkout reclaim across a restart;
-assert termination of the child only within one process's lifetime.
+that the lane may still be running and stops short of doing anything to it: the
+tree it is building in is the slot's, and pulling that out would land on whichever
+dispatch holds the slot by then. Assert the accounting and the slot's release
+across a restart; assert termination of the child only within one process's
+lifetime.
 
 The advisory `stale_warn_after_secs` sweep is unrelated to both — it warns about
 an unresolved handle and terminates nothing, so no scenario should wait on it.

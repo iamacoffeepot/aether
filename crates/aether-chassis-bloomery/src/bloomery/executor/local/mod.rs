@@ -25,7 +25,7 @@
 //! [`NameEvidenceClaims`](crate::bloomery::intake::NameEvidenceClaims) decodes) —
 //! no artifact-upload naming step to depend on.
 //!
-//! # The lane ceiling
+//! # The lane ceiling, and the slot a dispatch runs in
 //!
 //! A submit accepts a dispatch; it does not promise to spawn it immediately.
 //! Each lane is a whole cargo build with its own throwaway target dir, and a seal
@@ -34,6 +34,20 @@
 //! children at once and holds the rest in submission order, starting each as a
 //! running lane finishes. Every dispatch is acked as submitted either way — the
 //! ceiling is a queue, never a refusal, so nothing about it reaches the reducer.
+//!
+//! The ceiling is also what names the checkouts. A dispatch holds a **lane
+//! slot** — the lowest index free when it starts — and builds in that slot's
+//! canonical checkout, `<base>/slot-<index>`, which every later dispatch in the
+//! same slot builds in too. That is the whole point of the arrangement (#4904):
+//! `sccache` keys a compilation partly by the paths cargo names on the `rustc`
+//! invocation, so a per-dispatch checkout misses the cache on its entire
+//! dependency tree while a per-slot one hits everything an earlier lane in that
+//! slot already compiled. A host's builds therefore live in `0..ceiling` paths
+//! forever, and what a terminal run frees is the slot, not the tree: the next
+//! dispatch to take it resets the checkout to its own subject before building.
+//! Evidence stays per dispatch (`<base>/<nonce>-evidence`) — it is what one
+//! attempt produced — and carries the slot the dispatch ran in, so a coordinator
+//! restart can re-adopt a run without handing its build path to a stranger.
 //!
 //! # The spawn seam
 //!

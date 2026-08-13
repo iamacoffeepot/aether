@@ -63,11 +63,15 @@ impl RunProcess for OrphanedRun {
     /// across the restart, no recorded pid, and no portable syscall on this
     /// crate's path to use one with. Failing the cancel instead would strand the
     /// order — its expiry would refuse to consume it and the member would never
-    /// retry — while still not killing anything, so the cancel proceeds and the
-    /// caller goes on to release the scratch worktree. That is the reclaim this
-    /// process genuinely owns, and pulling the checkout out from under a
-    /// surviving child is also the closest thing to termination available here:
-    /// a lane whose working directory has been removed fails its next write.
+    /// retry — while still not killing anything, so the cancel proceeds and what
+    /// it reclaims is the lane slot the run held.
+    ///
+    /// Not the checkout in that slot. Removing it would be the closest thing to
+    /// termination available here — a lane whose working directory is gone fails
+    /// its next write — but the path is the slot's rather than the run's, so the
+    /// tree that would be pulled belongs to whichever dispatch holds the slot by
+    /// then. Freeing the slot is the honest reclaim; the surviving child is left
+    /// to whatever it does next.
     fn kill(&mut self) -> Result<(), LocalExecutorError> {
         tracing::warn!(
             target: "aether_chassis_bloomery::executor",

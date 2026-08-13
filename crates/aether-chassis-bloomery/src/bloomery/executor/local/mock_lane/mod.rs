@@ -1,8 +1,8 @@
 //! A stand-in for `cargo xtask transform`, for driving the lane boundary
 //! without compiling a workspace or forking a model (#4727).
 //!
-//! Everything else about a dispatch stays real when this is mounted: the scratch
-//! worktree `git worktree add` materializes, the environment scrub, the child
+//! Everything else about a dispatch stays real when this is mounted: the lane
+//! slot's checkout the dispatch resets into place, the environment scrub, the child
 //! process, its exit status, the `evidence.json` it leaves on disk, the
 //! candidate the coordinator captures out of the worktree. Only the program at
 //! the end of the argv changes, through [`LaneProgram`]. That is the point — the
@@ -64,10 +64,10 @@ impl From<io::Error> for MockLaneError {
 
 /// Where the script and ledger live for a run whose evidence goes to `out`.
 ///
-/// The backend lays a run out as `<base>/<nonce>` (worktree) beside
-/// `<base>/<nonce>-evidence` (`--out`), so the run directories' shared parent is
-/// the one place both the harness and every child can name without agreeing on
-/// anything else. A run whose `--out` has no parent falls back to `--out`
+/// The backend lays a run out as `<base>/slot-<index>` (the lane slot's
+/// checkout) beside `<base>/<nonce>-evidence` (`--out`), so the run directories'
+/// shared parent is the one place both the harness and every child can name
+/// without agreeing on anything else. A run whose `--out` has no parent falls back to `--out`
 /// itself, which is wrong but recoverable — the script simply will not be found
 /// and the run takes the default mode.
 fn script_dir(out: &Path) -> &Path {
