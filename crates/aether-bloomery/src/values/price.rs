@@ -111,7 +111,7 @@ pub struct PriceTable {
 }
 
 impl ContentAddressed for PriceTable {
-    const DOMAIN: &'static str = "aether.bloomery.price_table";
+    const DOMAIN: &'static str = <Self as aether_data::Kind>::NAME;
 }
 
 impl PriceTable {
