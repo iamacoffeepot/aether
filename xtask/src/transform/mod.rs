@@ -22,7 +22,9 @@ mod claude;
 mod codex;
 mod construct;
 mod conventions;
+mod grok;
 mod lane;
+mod messages;
 mod muse;
 mod review;
 mod sccache;
@@ -243,6 +245,7 @@ fn run_model_lane(prompt: &str, args: &TransformArgs) -> Result<LaneRun> {
         Harness::Claude => claude::run_headless_claude(prompt, args, &scratch, cache.as_ref())?,
         Harness::Codex => codex::run(prompt, args, &scratch, cache.as_ref())?,
         Harness::Muse => muse::run(prompt, args, &scratch, cache.as_ref())?,
+        Harness::Grok => grok::run(prompt, args, &scratch, cache.as_ref())?,
     };
 
     Ok(LaneRun { record, sccache: cache.as_ref().and_then(CompilerCache::served) })
