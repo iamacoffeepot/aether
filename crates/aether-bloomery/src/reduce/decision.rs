@@ -220,7 +220,8 @@ pub enum Decision {
         /// the tree alone cannot be merged.
         members: Vec<MemberCandidate>,
         /// The predecessor whose candidate refs this fold adopts before it
-        /// runs, when the bloom inherited its whole claim set from one.
+        /// runs, when any of the bloom's folded candidates was inherited from
+        /// one.
         ///
         /// A candidate ref is addressed under the bloom that produced it, and a
         /// successor is a different bloom — its id is a content address over a
@@ -228,6 +229,12 @@ pub enum Decision {
         /// has claims but no refs of its own to merge. Adopting copies them into
         /// its namespace first, leaving the successor self-contained rather than
         /// reaching back into a retired bloom's refs every time it folds.
+        ///
+        /// Named for a *mixed* set too, not only a wholly inherited one: a
+        /// successor that re-ran some members folds their fresh captures beside
+        /// the inherited claims, and adoption is adopt-if-absent, so the refs
+        /// this bloom already carries stand while the missing ones are filled in
+        /// (#4903).
         adopt_from: Option<BloomId>,
     },
     /// Record (or clear) the folded integration held on the bloom while its
