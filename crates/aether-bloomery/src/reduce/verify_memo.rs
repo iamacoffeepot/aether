@@ -6,9 +6,9 @@
 //! [`VerifiedTree`](crate::VerifiedTree) — the tree, plus the identity of the
 //! gates that judged it — and any later verify aimed at that same key passes on
 //! the record instead of dispatching. The lookup itself lives on the record
-//! ([`BloomRecord::verify_proof_for`]), so every position asks the question the
-//! same way; what lives here is the minting of a proof and the receipt a hit
-//! leaves behind.
+//! ([`BloomRecord::verify_proof_for`](crate::BloomRecord::verify_proof_for)), so
+//! every position asks the question the same way; what lives here is the minting
+//! of a proof and the receipt a hit leaves behind.
 //!
 //! The two callers are the two verify positions of the line. The member
 //! `Verify` reaches it through the passing verdict's
