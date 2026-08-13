@@ -13,7 +13,7 @@ use aether_bloomery::{
     Evidence, EvidenceKind, Fact, Question, ResolvedConfigs, Snapshot, StageId, VerifyFailure, VerifyFailureSet,
     WorkpieceId, reduce, view_of,
 };
-use common::{digest, draft, event, membership, sealed_and_resolved};
+use common::{digest, draft, event, membership, observing, sealed_and_resolved};
 use proptest::collection::btree_set;
 use proptest::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,6 +33,30 @@ fn sealed(members: Vec<aether_bloomery::Membership>) -> Snapshot {
     let snapshot = Snapshot::new(digest(0));
     let seal = event("seal", Fact::Seal(spec));
     snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()), &ResolvedConfigs::default())
+}
+
+#[test]
+fn view_carries_the_snapshots_observed_digest() {
+    // A boot-fresh snapshot has never recorded an observation, so `observed`
+    // is still Digest::default() — the same all-zero genesis sentinel
+    // Snapshot::GENESIS_MAINLINE names. The field is a Digest, not an Option:
+    // the projection copies that sentinel through rather than treating "no
+    // observation yet" as absent, so GET /view always renders a hex digest
+    // (never null) and never panics. An operator can name that genesis digest
+    // as a successor base the same way they name mainline.
+    let fresh = Snapshot::new(digest(1));
+    let view = view_of(&fresh, |_| None);
+    assert_eq!(view.mainline, digest(1));
+    assert_eq!(view.observed, Snapshot::GENESIS_MAINLINE);
+
+    // After a held observation, mainline and observed diverge; the document
+    // carries the recorded head, not a second copy of mainline — the pair
+    // reduce_supersede admits.
+    let snapshot = observing(&sealed(vec![membership("wp", 1)]), 9);
+    let view = view_of(&snapshot, |_| None);
+    assert_eq!(view.mainline, digest(0));
+    assert_eq!(view.observed, digest(9));
+    assert_eq!(view.observed, snapshot.observed);
 }
 
 // A parked question on one member of a two-member bloom: `view_of` resolves the

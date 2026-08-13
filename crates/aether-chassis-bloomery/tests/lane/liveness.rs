@@ -171,6 +171,7 @@ mod tests {
     fn document(status: BloomStatus, members: Vec<MemberView>) -> ViewDocument {
         ViewDocument {
             mainline: Digest::default(),
+            observed: Digest::default(),
             blooms: vec![BloomView {
                 id: BloomId(Digest::from_bytes([7; 32])),
                 status,
@@ -212,6 +213,7 @@ mod tests {
         // stopped dead on a broken host read as one that finished its work.
         let faulted = ViewDocument {
             mainline: Digest::default(),
+            observed: Digest::default(),
             blooms: vec![BloomView {
                 id: BloomId(Digest::from_bytes([7; 32])),
                 status: BloomStatus::Sealed,
