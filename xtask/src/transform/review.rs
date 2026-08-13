@@ -199,7 +199,7 @@ pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{ReviewVerdict, candidate_section, parse_review_verdict, review_conclusion, stamp_review_evidence};
-    use crate::transform::claude::derive_result_record;
+    use crate::transform::messages::derive_result_record;
 
     #[test]
     fn review_verdict_parses_the_last_standalone_verdict_line_fail_closed() {

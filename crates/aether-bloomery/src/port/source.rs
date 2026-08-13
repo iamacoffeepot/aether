@@ -319,8 +319,8 @@ pub trait SourceBackend {
     ) -> Result<IntegrateOutcome, Self::Error>;
 
     /// Point `successor`'s candidate ref for `workpiece` at whatever
-    /// `predecessor`'s names, so a bloom that inherited a claim can fold the
-    /// work behind it.
+    /// `predecessor`'s names, when the successor carries no such ref of its own,
+    /// so a bloom that inherited a claim can fold the work behind it.
     ///
     /// A candidate ref is addressed under the bloom that produced it, and a
     /// successor is a different bloom — its id is a content address over a spec
@@ -330,10 +330,13 @@ pub trait SourceBackend {
     /// its fold reads only its own refs, and a retired predecessor's namespace
     /// is never load-bearing for a live bloom.
     ///
-    /// Idempotent — adopting a ref the successor already carries is a no-op, so
-    /// a re-drained fold re-adopts harmlessly. A predecessor ref that is absent
-    /// is `Ok(false)`: the member has no captured candidate to adopt, which the
-    /// caller reads rather than treating as a fault.
+    /// Adopt-if-absent, which makes it both idempotent and safe on a *mixed*
+    /// successor: a ref the successor already carries is left exactly as it is,
+    /// so a re-drained fold re-adopts harmlessly and a member that re-ran under
+    /// the successor keeps the capture it produced instead of having the
+    /// predecessor's superseded candidate written over it. `Ok(false)` says the
+    /// ref is absent from both namespaces — the member has no captured candidate
+    /// to fold at all, which the caller reads rather than treating as a fault.
     ///
     /// # Errors
     /// Backend-defined — e.g. the ref could not be read or written.

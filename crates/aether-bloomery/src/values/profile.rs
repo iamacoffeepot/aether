@@ -69,6 +69,8 @@ pub enum Harness {
     Codex,
     /// The Muse Code CLI, headless.
     Muse,
+    /// The Grok Build CLI, headless.
+    Grok,
 }
 
 impl Harness {
@@ -83,6 +85,7 @@ impl Harness {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Muse => "muse",
+            Self::Grok => "grok",
         }
     }
 
@@ -97,6 +100,7 @@ impl Harness {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "muse" => Some(Self::Muse),
+            "grok" => Some(Self::Grok),
             _ => None,
         }
     }
@@ -188,7 +192,7 @@ mod tests {
     // variant is what catches the half-added arm.
     #[test]
     fn every_harness_round_trips_through_its_runner_facing_name() {
-        for harness in [Harness::Claude, Harness::Codex, Harness::Muse] {
+        for harness in [Harness::Claude, Harness::Codex, Harness::Muse, Harness::Grok] {
             assert_eq!(
                 Harness::from_name(harness.as_str()),
                 Some(harness),

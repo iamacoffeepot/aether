@@ -30,6 +30,7 @@ use crate::values::{MemberCandidate, ResolutionClaim, Transformation};
 /// has not folded this claim yet, so the completeness check counts it alongside
 /// the recorded ones.
 pub(super) fn claim_effects(
+    snapshot: &Snapshot,
     record: &BloomRecord,
     bloom: BloomId,
     claim: &ResolutionClaim,
@@ -44,7 +45,7 @@ pub(super) fn claim_effects(
         .iter()
         .all(|member| member.workpiece == claim.workpiece || record.claims.contains_key(&member.workpiece));
     if complete {
-        let members = record
+        let members: Vec<MemberCandidate> = record
             .spec
             .members()
             .iter()
@@ -57,15 +58,48 @@ pub(super) fn claim_effects(
                 candidate.map(|candidate| MemberCandidate { workpiece: member.workpiece.clone(), candidate })
             })
             .collect();
-        effects.push(Decision::DispatchIntegration {
-            bloom,
-            base: record.spec.base(),
-            members,
-            // Its own members produced these refs under its own id.
-            adopt_from: None,
-        });
+        let adopt_from = adoption_source(snapshot, bloom, &members);
+        effects.push(Decision::DispatchIntegration { bloom, base: record.spec.base(), members, adopt_from });
     }
     effects
+}
+
+/// The predecessor whose candidate refs this fold has to adopt before it can
+/// merge them, or `None` when every folded candidate was produced under this
+/// bloom's own id.
+///
+/// A candidate ref is addressed under the bloom that produced it, so a member
+/// arriving on an inherited claim has no ref in this bloom's namespace to merge.
+/// `reduce_supersede` already handles the successor whose members were *all*
+/// inherited — no claim arrives to complete its set, so it dispatches its own
+/// fold naming the predecessor. The set that arrives here is the mixed one: some
+/// members re-ran under the successor and captured their own refs, and the claim
+/// completing the set is one of theirs. Dispatched with no predecessor, that fold
+/// merges a ref that only the predecessor's namespace holds, and the source
+/// answers 404 every tick forever (#4903).
+///
+/// The lineage is read off the projection rather than carried alongside it: the
+/// predecessor is the bloom this one superseded, which is the record holding
+/// `superseded_by == bloom` (unique — a supersession refuses a successor id that
+/// collides with a known bloom), and the claim it left behind names the
+/// candidate. A member whose folded candidate is the one the predecessor
+/// recorded is a member whose ref was written under the predecessor; a member
+/// that re-ran carries a different candidate and its own ref. One scan of the
+/// bloom map per completed claim set, over state the journal already rebuilds.
+///
+/// The distinction stays a *fold-wide* fact rather than a per-member one because
+/// presence is the honest test and it lives at the ref: adoption is
+/// adopt-if-absent, so naming the predecessor asks the source to fill in the
+/// refs this bloom lacks and to leave every ref it already carries — including a
+/// successor-produced capture standing beside an inherited one — exactly where
+/// it is.
+fn adoption_source(snapshot: &Snapshot, bloom: BloomId, members: &[MemberCandidate]) -> Option<BloomId> {
+    let (predecessor, record) = snapshot.blooms.iter().find(|(_, record)| record.superseded_by == Some(bloom))?;
+    let inherited = members
+        .iter()
+        .any(|member| record.claims.get(&member.workpiece).is_some_and(|claim| claim.candidate == member.candidate));
+
+    inherited.then_some(*predecessor)
 }
 
 pub(super) fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &ResolutionClaim) -> Decisions {
@@ -88,7 +122,7 @@ pub(super) fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &Res
     // this is where the line learns that a tree passed its gates (#4891) — the
     // fold of a single member is that same tree, and a repair lap can hand it
     // back unchanged.
-    let effects = claim_effects(record, *bloom, claim, proof_of(*bloom, StageId::Verify, &claim.evidence));
+    let effects = claim_effects(snapshot, record, *bloom, claim, proof_of(*bloom, StageId::Verify, &claim.evidence));
 
     Decisions { outcome: Outcome::Integrated { bloom: *bloom, workpiece: claim.workpiece.clone() }, effects }
 }

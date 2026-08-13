@@ -1,6 +1,14 @@
-//! The production spawn seam: `git worktree add` the sealed checkout, then spawn
-//! `cargo xtask transform` in that worktree — the same two steps the wrapper
-//! workflow runs, performed natively on the operator's machine.
+//! The production spawn seam: bring the lane slot's checkout to the sealed
+//! subject, then spawn `cargo xtask transform` in it — the same two steps the
+//! wrapper workflow runs, performed natively on the operator's machine.
+//!
+//! The slot's checkout is a path rather than a directory: it belongs to the lane
+//! slot and every dispatch that holds the slot builds in it, because that is
+//! what makes a compilation cacheable across dispatches (#4904 — `sccache`
+//! hashes the paths cargo names on each `rustc` invocation). So the first step
+//! is a *reset* rather than a fresh `git worktree add`, and what it must
+//! guarantee is that a dispatch never sees anything of the dispatch before it:
+//! see [`materialize_checkout`].
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -37,6 +45,12 @@ const FALLBACK_IDENTITY: (&str, &str) = ("aether-bloomery", "bloomery@iamateapot
 /// The subject a capture commit falls back to when the run's lane named none —
 /// the flat literal every capture carried before the lane wrote its own message.
 const FALLBACK_CAPTURE_SUBJECT: &str = "bloomery: candidate capture";
+
+/// The interactive-session settings file a dispatch neutralizes in its checkout,
+/// relative to the checkout root. Named once because two steps address it: the
+/// neutralization that marks it skip-worktree, and the reset that clears the
+/// mark before the next dispatch checks the file out again.
+const SETTINGS_PATH: &str = ".claude/settings.json";
 
 /// The subject line a capture commits under: the run's own message's first line
 /// when the lane wrote one, otherwise [`FALLBACK_CAPTURE_SUBJECT`].
@@ -107,19 +121,10 @@ impl ProcessTransformRunner {
 impl TransformRunner for ProcessTransformRunner {
     fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
         fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
-        // Materialize the sealed checkout into a detached scratch worktree, clearing
-        // any leftover directory at the nonce's path first (see `reclaim_worktree_path`).
-        reclaim_worktree_path(spec.worktree_dir)?;
         fetch_subject_if_absent(Path::new("."), spec.checkout_hex)?;
-        let checkout = Command::new("git")
-            .args(["worktree", "add", "--force", "--detach"])
-            .arg(spec.worktree_dir)
-            .arg(spec.checkout_hex)
-            .output()
-            .map_err(LocalExecutorError::Spawn)?;
-        if !checkout.status.success() {
-            return Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&checkout.stderr), 1000)));
-        }
+        // Bring the slot's checkout to the sealed subject — reset in place when the
+        // slot already holds one, created when it does not.
+        materialize_checkout(Path::new("."), spec.worktree_dir, spec.checkout_hex)?;
         // The scratch worktree is a full checkout carrying the repo's interactive
         // `.claude/settings.json` hooks, and the construct lane spawns headless
         // `claude` in it — so the SessionStart worktree-rebind hook would fire and
@@ -308,27 +313,101 @@ fn fetch_subject_if_absent(repo_dir: &Path, checkout_hex: &str) -> Result<(), Lo
     Ok(())
 }
 
+/// Bring the checkout at `worktree_dir` to `checkout_hex`, reusing the directory
+/// when the slot already holds one of this repository's worktrees (#4904).
+///
+/// Reuse is the point: the path is what makes a lane's compilations cacheable
+/// across dispatches, so a slot keeps its checkout instead of tearing it down at
+/// the end of every run. Which makes hygiene the load-bearing half — the tree a
+/// dispatch starts from is whatever the dispatch before it left, and a lane
+/// judges (and the host captures) what it finds in that tree. A leftover file is
+/// a candidate committed against work that was never done, and a leftover
+/// modification is a verdict about a tree nobody sealed.
+///
+/// So the reset is total, not tidy: [`reset_checkout`] discards tracked
+/// modifications by detaching onto the exact sha, then removes everything git
+/// does not track — ignored build output included. A reused slot is
+/// indistinguishable from a freshly created one, which is also the fallback: any
+/// step that fails leaves the path cleared and re-created outright, so a
+/// directory git will not reset cannot wedge every future dispatch that slot
+/// takes.
+fn materialize_checkout(repo_dir: &Path, worktree_dir: &Path, checkout_hex: &str) -> Result<(), LocalExecutorError> {
+    if worktree_dir.exists() {
+        match reset_checkout(worktree_dir, checkout_hex) {
+            Ok(()) => return Ok(()),
+            Err(error) => tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                worktree = %worktree_dir.display(),
+                %error,
+                "the lane slot's checkout could not be reset; re-creating it from scratch",
+            ),
+        }
+    }
+    reclaim_worktree_path(worktree_dir)?;
+    add_worktree(repo_dir, worktree_dir, checkout_hex)
+}
+
+/// Reset a slot's existing checkout to exactly `checkout_hex`'s tree.
+///
+/// Three steps, each answering a way the previous dispatch left state behind:
+///
+/// - the skip-worktree mark [`neutralize_hooks`] set is cleared first, because
+///   git deliberately does not update a skip-worktree path on checkout — leaving
+///   the mark would carry one dispatch's stripped settings file into every later
+///   one. Best-effort: a checkout whose index does not carry the path (the file
+///   does not exist at that sha) has nothing to clear and is not a failure.
+/// - `checkout --detach --force` moves HEAD onto the exact subject and throws
+///   away tracked modifications and index state, including the capture commit a
+///   construct lane left on the detached head.
+/// - `clean --force --force -d -x` removes what remains: untracked files, nested
+///   directories, and ignored ones — the last of which is what a stale `target`
+///   tree is. Keeping it would trade the cache win for a build directory shared
+///   across divergent source, which is the arrangement the lanes deliberately do
+///   not use.
+fn reset_checkout(worktree_dir: &Path, checkout_hex: &str) -> Result<(), LocalExecutorError> {
+    let _ = git_in(worktree_dir, &["update-index", "--no-skip-worktree", SETTINGS_PATH]);
+    git_in(worktree_dir, &["checkout", "--detach", "--force", checkout_hex])?;
+    git_in(worktree_dir, &["clean", "--force", "--force", "-d", "-x"])?;
+    Ok(())
+}
+
+/// Create the slot's checkout at `worktree_dir`, detached at `checkout_hex`.
+///
+/// `--force` relaxes the two refusals a reused path can still raise: a
+/// `<commit-ish>` already checked out by another worktree, and a path assigned to
+/// a worktree but missing from disk (what a `reclaim_worktree_path` above leaves).
+fn add_worktree(repo_dir: &Path, worktree_dir: &Path, checkout_hex: &str) -> Result<(), LocalExecutorError> {
+    let checkout = Command::new("git")
+        .current_dir(repo_dir)
+        .args(["worktree", "add", "--force", "--detach"])
+        .arg(worktree_dir)
+        .arg(checkout_hex)
+        .output()
+        .map_err(LocalExecutorError::Spawn)?;
+    if !checkout.status.success() {
+        return Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&checkout.stderr), 1000)));
+    }
+    Ok(())
+}
+
 /// Clear a leftover scratch worktree directory so `git worktree add` cannot
 /// refuse the path (#4633).
 ///
 /// `add --force` relaxes exactly two refusals: a `<commit-ish>` already checked
 /// out by another worktree, and a path *assigned* to a worktree but missing from
 /// disk. A path that exists on disk is refused either way — `fatal: '<path>'
-/// already exists`. A run killed before [`release`] never reaches its teardown
-/// and leaves precisely that, and because the path is keyed by the dispatch
-/// nonce, every retry of that dispatch collides with the same directory: without
-/// this the dispatch can never succeed, however long it re-drives.
+/// already exists`. Any leftover at a slot's path is precisely that, and the
+/// path is reused by every dispatch that slot ever takes: without this, one
+/// directory git can neither reset nor overwrite would refuse every one of them.
 ///
 /// Removing the directory leaves behind the stale admin entry, which is the half
 /// `--force` does handle — so the two together reclaim the path whichever half
-/// survived the abort. The path is nonce-keyed and owned by this executor, so
-/// clearing it races nothing.
-///
-/// [`release`]: TransformRunner::release
+/// survived. The slot is held by the dispatch doing the reclaim, so clearing it
+/// races nothing.
 fn reclaim_worktree_path(worktree_dir: &Path) -> Result<(), LocalExecutorError> {
     match fs::remove_dir_all(worktree_dir) {
-        // A first dispatch at this nonce has no directory to reclaim, which is
-        // the common case rather than an error.
+        // A slot's first dispatch has no directory to reclaim, which is the
+        // common case rather than an error.
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(LocalExecutorError::Io(error)),
         Ok(()) => Ok(()),
@@ -426,7 +505,7 @@ fn strip_hooks(settings: &str) -> Result<String, serde_json::Error> {
 /// headless action's absence handling); a read, parse, or write fault surfaces as
 /// an error rather than silently proceeding with live hooks.
 fn neutralize_hooks(worktree_dir: &Path) -> Result<(), LocalExecutorError> {
-    let settings_path = worktree_dir.join(".claude/settings.json");
+    let settings_path = worktree_dir.join(SETTINGS_PATH);
     let body = match fs::read_to_string(&settings_path) {
         Ok(body) => body,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -440,7 +519,7 @@ fn neutralize_hooks(worktree_dir: &Path) -> Result<(), LocalExecutorError> {
     let marked = Command::new("git")
         .arg("-C")
         .arg(worktree_dir)
-        .args(["update-index", "--skip-worktree", ".claude/settings.json"])
+        .args(["update-index", "--skip-worktree", SETTINGS_PATH])
         .output()
         .map_err(LocalExecutorError::Spawn)?;
     if !marked.status.success() {
@@ -459,8 +538,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, ProcessTransformRunner, TransformRunner,
-        capture_subject, decode_object_hex, fetch_subject_if_absent, git_in, reclaim_worktree_path, strip_hooks,
+        CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, ProcessTransformRunner, SETTINGS_PATH,
+        TransformRunner, capture_subject, decode_object_hex, fetch_subject_if_absent, git_in, materialize_checkout,
+        neutralize_hooks, reclaim_worktree_path, reset_checkout, strip_hooks,
     };
 
     #[test]
@@ -622,6 +702,115 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
 
         reclaim_worktree_path(&base.path().join("never-created")).unwrap();
+    }
+
+    // A repository with two commits over the same tracked file, an ignored
+    // build directory, and the interactive settings file a dispatch neutralizes
+    // — plus a scratch root outside it to put slot checkouts in. The shape a
+    // reused slot has to be reset across.
+    fn repo_with_two_commits() -> (TempDir, TempDir, String, String) {
+        let repo = repo_with_identity(Some(("test", "test@example.test")));
+        fs::create_dir_all(repo.path().join(".claude")).unwrap();
+        fs::write(repo.path().join(".gitignore"), "/target\n").unwrap();
+        for subject in ["first", "second"] {
+            fs::write(repo.path().join("tracked.txt"), format!("{subject}\n")).unwrap();
+            fs::write(
+                repo.path().join(SETTINGS_PATH),
+                format!(r#"{{"hooks": {{"SessionStart": []}}, "model": "{subject}"}}"#),
+            )
+            .unwrap();
+            run_git(repo.path(), &["add", "--all"]);
+            run_git(repo.path(), &["commit", "--quiet", "--message", subject]);
+        }
+        let second = git_in(repo.path(), &["rev-parse", "HEAD"]).unwrap().trim().to_owned();
+        let first = git_in(repo.path(), &["rev-parse", "HEAD~1"]).unwrap().trim().to_owned();
+        (repo, tempfile::tempdir().unwrap(), first, second)
+    }
+
+    #[test]
+    fn a_reused_slot_checkout_is_reset_to_the_dispatchs_own_tree() {
+        // Tripwire (#4904): a slot's path is reused across dispatches so the
+        // compiler cache keeps hitting it, which means the tree a dispatch
+        // starts from is whatever the dispatch before it left. Skip the reset
+        // and the next lane judges — and the host's capture commits, since it
+        // stages `--all` — files no order ever sealed: the stale-state
+        // reversion class, once per dispatch. All three leftovers a real run
+        // produces are covered, because each survives a different half of the
+        // reset: a staged untracked file, a tracked modification, and the
+        // ignored build tree.
+        let (repo, scratch, first, second) = repo_with_two_commits();
+        let slot = scratch.path().join("slot-0");
+
+        materialize_checkout(repo.path(), &slot, &first).unwrap();
+        fs::write(slot.join("leftover.txt"), "a previous dispatch's candidate").unwrap();
+        fs::write(slot.join("tracked.txt"), "locally modified\n").unwrap();
+        fs::create_dir_all(slot.join("target")).unwrap();
+        fs::write(slot.join("target/build.log"), "a previous dispatch's build output").unwrap();
+        run_git(&slot, &["add", "--all"]);
+
+        materialize_checkout(repo.path(), &slot, &second).unwrap();
+
+        assert_eq!(git_in(&slot, &["rev-parse", "HEAD"]).unwrap().trim(), second, "the slot holds this dispatch's sha");
+        assert_eq!(
+            fs::read_to_string(slot.join("tracked.txt")).unwrap(),
+            "second\n",
+            "a tracked file modified by the previous dispatch is restored",
+        );
+        assert!(!slot.join("leftover.txt").exists(), "the previous dispatch's untracked file is gone");
+        assert!(!slot.join("target").exists(), "and so is its ignored build output");
+        assert_eq!(
+            git_in(&slot, &["status", "--porcelain"]).unwrap().trim(),
+            "",
+            "a reused slot presents exactly as a freshly created checkout, which is what the lane assumes",
+        );
+    }
+
+    #[test]
+    fn a_reset_clears_the_skip_worktree_mark_the_previous_dispatch_set() {
+        // Tripwire: git refuses to update a skip-worktree path, by design, and
+        // every dispatch marks the settings file (#3632) — so a reset that does
+        // not clear the mark first fails outright, on `Entry
+        // '.claude/settings.json' not uptodate`. Nothing above would say so:
+        // `materialize_checkout` falls back to re-creating the checkout, which
+        // is correct but pays a full checkout on every single dispatch and
+        // leaves the reset permanently dead. Hence the assertion against the
+        // reset itself rather than through the fallback that hides it.
+        let (repo, scratch, first, second) = repo_with_two_commits();
+        let slot = scratch.path().join("slot-0");
+        materialize_checkout(repo.path(), &slot, &first).unwrap();
+        neutralize_hooks(&slot).unwrap();
+
+        reset_checkout(&slot, &second).expect("a slot whose settings file was marked still resets in place");
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(slot.join(SETTINGS_PATH)).unwrap()).unwrap();
+        assert_eq!(
+            settings.get("model").and_then(serde_json::Value::as_str),
+            Some("second"),
+            "the settings file is this dispatch's, not the copy the previous dispatch pinned",
+        );
+    }
+
+    #[test]
+    fn a_slot_path_that_is_not_a_checkout_is_recreated_rather_than_wedging_the_slot() {
+        // The #4633 collision, made permanent by reuse: the path is the slot's
+        // for the life of the host, so a directory git can neither reset nor
+        // overwrite — a crash mid-`worktree add`, a half-deleted tree — would
+        // refuse not one dispatch's retry but every dispatch that slot ever
+        // takes.
+        let (repo, scratch, first, _second) = repo_with_two_commits();
+        let slot = scratch.path().join("slot-0");
+        fs::create_dir_all(slot.join("nested")).unwrap();
+        fs::write(slot.join("nested/junk.txt"), "not a checkout").unwrap();
+
+        materialize_checkout(repo.path(), &slot, &first).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(slot.join("tracked.txt")).unwrap(),
+            "first\n",
+            "the slot holds the dispatch's tree rather than refusing it",
+        );
+        assert!(!slot.join("nested").exists(), "and whatever was in the way is gone");
     }
 
     #[test]

@@ -393,6 +393,54 @@ fn a_successor_inheriting_every_claim_dispatches_its_own_fold() {
     }
 }
 
+// #4903 — the mixed successor: one member arrives on an inherited claim, the
+// other re-runs under the successor and its claim completes the set. That
+// completing claim takes the ordinary integrate path, which named no predecessor
+// at all — so the fold went looking for a candidate ref that exists only under
+// the predecessor's bloom, the source answered "head does not exist" every tick,
+// and the bloom read healthy throughout. The predecessor's own record is where
+// the inheritance is written: the candidate this fold carries for that member is
+// the candidate the predecessor claimed.
+#[test]
+fn a_mixed_successors_completing_claim_dispatches_a_fold_that_adopts_the_predecessor() {
+    let (snapshot, predecessor_spec) =
+        sealed_and_resolved(1, vec![membership("kept", 10), membership("rerun", 11)], 40);
+    let predecessor = predecessor_spec.id();
+    let inherited = snapshot.blooms.get(&predecessor).unwrap().claims.get(&workpiece("kept")).unwrap().candidate;
+
+    // "kept" is re-admitted at its own scope revision and inherits; "rerun" comes
+    // back at a new one, so it drops its stale claim and enters the line fresh.
+    let snapshot = observing(&snapshot, 2);
+    let successor_spec = draft(2, vec![membership("kept", 10), membership("rerun", 12)]).seal();
+    let successor = successor_spec.id();
+    let (snapshot, _) = step(&snapshot, &event("sup", Fact::Supersede { predecessor, successor: successor_spec }));
+
+    // The re-run member captured under the successor, and its claim completes a
+    // set whose other candidate is still the predecessor's.
+    let (_, decided) =
+        step(&snapshot, &event("rerun-claim", Fact::Integrate { bloom: successor, claim: claim("rerun", 12, 150) }));
+
+    match decided.effects.iter().find(|e| matches!(e, Decision::DispatchIntegration { .. })) {
+        Some(Decision::DispatchIntegration { bloom, members, adopt_from, .. }) => {
+            assert_eq!(*bloom, successor, "the fold is dispatched for the successor");
+            assert_eq!(
+                *adopt_from,
+                Some(predecessor),
+                "one folded candidate was produced under the predecessor's id, so the fold has to adopt its ref \
+                 before it can merge one",
+            );
+            let folded: Vec<(&str, Digest)> =
+                members.iter().map(|member| (member.workpiece.0.as_str(), member.candidate)).collect();
+            assert_eq!(
+                folded,
+                vec![("kept", inherited), ("rerun", digest(150))],
+                "carrying the inherited candidate beside the one the successor just produced",
+            );
+        }
+        other => panic!("expected a DispatchIntegration for the successor, got {other:?}"),
+    }
+}
+
 // C4 — a bloom cannot supersede itself into a bloom superseded by itself: an
 // identical successor spec (same id) is refused.
 #[test]

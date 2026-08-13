@@ -18,7 +18,8 @@
 mod common;
 mod lane;
 
-use std::path::Path;
+use std::fs;
+use std::path::PathBuf;
 
 use aether_bloomery::{
     BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure,
@@ -329,33 +330,53 @@ fn a_lane_that_never_exits_reaches_an_accountable_wedge_rather_than_sitting_outs
     let runs = harness.ledger().len();
     assert!(runs >= 2, "the first timeout re-drove the stage rather than wedging on one attempt: {runs} runs");
 
-    let runs_dir = harness.runs_dir();
-    let leaked: Vec<String> = harness
-        .repo()
-        .registered_worktrees()
-        .into_iter()
-        .filter(|registered| Path::new(registered).starts_with(&runs_dir))
-        .collect();
-    assert!(leaked.is_empty(), "a cancelled run releases its scratch worktree like a consumed one; leaked: {leaked:?}");
+    assert_scratch_checkouts_are_lane_slots(&harness, "a cancelled run leaves no checkout of its own behind");
     harness.assert_live();
 }
 
+// Every checkout git has registered under the harness's run directories.
+//
+// Both sides are canonicalized: `git worktree list` reports canonical paths, and
+// a temp root reached through a symlink (macOS `/var` → `/private/var`) would
+// otherwise match nothing and quietly assert over an empty list.
+fn registered_scratch_checkouts(harness: &LaneHarness) -> Vec<PathBuf> {
+    let runs_dir = fs::canonicalize(harness.runs_dir()).unwrap();
+    harness
+        .repo()
+        .registered_worktrees()
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|registered| registered.starts_with(&runs_dir))
+        .collect()
+}
+
+// The scratch checkouts are the lane slots' and nothing else.
+//
+// A worktree per order, accumulating forever, is the leak this catches — and it
+// is invisible to any double mounted above the spawn, because there is no
+// worktree to leak. What a dispatch registers is its lane slot's canonical
+// checkout (#4904), reused by every dispatch that holds the slot afterwards, so
+// the registered set is bounded by the lane ceiling however many orders run.
+// Anything named after an order is the leak, and the name is what says so.
+fn assert_scratch_checkouts_are_lane_slots(harness: &LaneHarness, context: &str) {
+    for checkout in registered_scratch_checkouts(harness) {
+        let name = checkout.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_owned();
+        assert!(
+            name.strip_prefix("slot-").is_some_and(|index| index.chars().all(|digit| digit.is_ascii_digit())),
+            "{context}: {name} is not a lane slot's checkout, so something registered one per order",
+        );
+    }
+}
+
 #[test]
-fn every_dispatch_releases_the_scratch_worktree_it_materialized() {
-    // A worktree per order, forever, is the leak the release path exists to
-    // prevent — and it is invisible to any double mounted above the spawn,
-    // because there is no worktree to leak.
+fn the_only_scratch_checkouts_a_bloom_leaves_are_its_lane_slots() {
+    // The green path's half of the same invariant: a bloom that runs a construct
+    // lane, a verify lane, and a critic against one member registers the slot
+    // checkouts those dispatches shared, and never a directory per order.
     let mut harness = LaneHarness::start(&LaneScript::all_passing());
 
     harness
         .settle("the member resolves", |bloom| bloom.members.first().is_some_and(|member| member.resolution.is_some()));
 
-    let runs_dir = harness.runs_dir();
-    let leaked: Vec<String> = harness
-        .repo()
-        .registered_worktrees()
-        .into_iter()
-        .filter(|registered| Path::new(registered).starts_with(&runs_dir))
-        .collect();
-    assert!(leaked.is_empty(), "every consumed run released its scratch worktree; leaked: {leaked:?}");
+    assert_scratch_checkouts_are_lane_slots(&harness, "a resolved member's dispatches shared their slots' checkouts");
 }

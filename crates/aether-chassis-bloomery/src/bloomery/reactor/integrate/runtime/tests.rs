@@ -98,12 +98,15 @@ fn a_completed_claim_set_folds_and_admits_a_resolve() {
 }
 
 // Seed the candidate branch a member's capture would have pushed, at its own
-// commit — what a combining fold merges. Keyed off `candidate_ref_name` so the
-// test addresses it exactly as the fold does; a hand-spelled name here would
-// pass while the fold read an empty branch.
-fn seed_candidate_branch(fake: &FakeGithub, bloom: &BloomId, workpiece: &str, tree: &str) {
+// commit — what a combining fold merges — and return the commit sha the branch
+// now points at. Keyed off `candidate_ref_name` so the test addresses it exactly
+// as the fold does; a hand-spelled name here would pass while the fold read an
+// empty branch.
+fn seed_candidate_branch(fake: &FakeGithub, bloom: &BloomId, workpiece: &str, tree: &str) -> String {
     let commit = fake.create_commit(workpiece, tree, &[]).unwrap();
     fake.seed_ref(candidate_ref_name(bloom, workpiece).trim_start_matches("refs/"), &commit.sha);
+
+    commit.sha
 }
 
 // ADR-0152 / #3653 — a multi-member fold merges every member's candidate ref
@@ -176,6 +179,46 @@ fn an_inherited_member_with_no_predecessor_ref_refuses_rather_than_folding_a_par
 
     assert!(admits.is_empty(), "a set missing a member's work resolves nothing");
     assert_eq!(ack_through, Some(sequence), "the refusal is definitive — acked, never re-driven");
+}
+
+// #4903 — the mixed supersession: one member arrived on an inherited claim and
+// has no ref of its own, the other re-ran under the successor and captured one.
+// Both halves are asserted together because either alone passes a wrong fix —
+// adopting nothing leaves the inherited member's ref absent and the fold merging
+// a branch that is not there, while adopting the whole member set with a forced
+// write puts the predecessor's superseded candidate over the fresh capture and
+// folds work the re-run replaced.
+#[test]
+fn a_mixed_supersession_adopts_the_inherited_ref_and_keeps_the_re_run_capture() {
+    let (inherited, re_run) = (digest(0xAB), digest(0xAC));
+    let (fake, base) = seeded(&inherited);
+    fake.seed_git_object(&re_run);
+    let (predecessor, successor) = (BloomId(digest(1)), BloomId(digest(2)));
+
+    // wp-0 integrated under the predecessor and transferred with the claim; wp-1
+    // re-ran, so both namespaces hold a ref for it and only the successor's is
+    // the candidate this fold claims.
+    let transferred = seed_candidate_branch(&fake, &predecessor, "wp-0", "tree-a");
+    let superseded = seed_candidate_branch(&fake, &predecessor, "wp-1", "tree-stale");
+    let captured = seed_candidate_branch(&fake, &successor, "wp-1", "tree-fresh");
+    let source = shell(fake.clone());
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let sequence =
+        enqueue_integration_adopting(&mut store, successor, base, vec![inherited, re_run], Some(predecessor.0));
+
+    let (admits, ack_through) = drain_and_integrate(&mut store, &source).unwrap();
+
+    assert_eq!(admits.len(), 1, "the mixed set folds instead of stalling on a ref addressed under another bloom");
+    assert_eq!(ack_through, Some(sequence));
+    assert_eq!(
+        fake.ref_target(candidate_ref_name(&successor, "wp-0").trim_start_matches("refs/")),
+        Some(transferred),
+        "the inherited member's ref is adopted into the successor's namespace",
+    );
+
+    let re_run_ref = fake.ref_target(candidate_ref_name(&successor, "wp-1").trim_start_matches("refs/"));
+    assert_ne!(re_run_ref, Some(superseded), "a forced adoption would have written the superseded candidate here");
+    assert_eq!(re_run_ref, Some(captured), "the re-run member keeps the capture it produced under the successor");
 }
 
 // A cross-member collision is refused, not re-driven: the two candidates

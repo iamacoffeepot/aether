@@ -240,7 +240,8 @@ impl SourceShell {
 
     /// Adopt `predecessor`'s candidate ref for `workpiece` into `successor`'s
     /// namespace, so a bloom that inherited the claim can fold the work behind
-    /// it. `false` when the predecessor has no such ref.
+    /// it. Adopt-if-absent: a ref the successor already carries stands. `false`
+    /// when neither namespace holds one.
     ///
     /// # Errors
     /// The ref could not be read or written.
