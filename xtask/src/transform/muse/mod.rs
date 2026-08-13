@@ -3,12 +3,13 @@
 
 mod usage;
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::Result;
 
 use crate::transform::TransformArgs;
 use crate::transform::lane::{Terminal, capture, record, write_prompt};
+use crate::transform::peak_memory::PeakMemory;
 use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::scratch::Scratch;
 
@@ -99,9 +100,10 @@ pub(super) fn run(
     args: &TransformArgs,
     scratch: &Scratch,
     cache: Option<&CompilerCache>,
+    peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
     let prompt_file = write_prompt(&args.out, prompt)?;
-    let mut command = Command::new(MUSE);
+    let mut command = peak.command(MUSE);
     command
         .args(muse_argv(&prompt_file.to_string_lossy(), args.model.as_deref(), args.effort.as_deref()))
         .stdin(Stdio::null())
@@ -110,7 +112,7 @@ pub(super) fn run(
     scratch.export(&mut command);
     sccache::export(cache, &mut command);
 
-    let transcript = capture(command, &args.out, MUSE)?;
+    let transcript = capture(command, &args.out, MUSE, peak)?;
     Ok(record(derive_terminal(&transcript).map(|terminal| Terminal {
         usage: usage::session_id(&transcript).and_then(|session| usage::from_session_log(&session)),
         ..terminal

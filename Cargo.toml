@@ -149,6 +149,15 @@ wgpu = "29.0.1"
 # in lockstep so validation and compilation agree.
 naga = "29.0.1"
 
+# Backtraces and panic locations keep file:line fidelity; the variable and
+# type debug sections they drop are the bulk of every test binary. With full
+# debuginfo a cold --all-targets target dir weighs ~100 GB, which caps the
+# pipeline's concurrent build lanes at 2 on disk alone
+# (spikes/build-concurrency on the spike branch, iamacoffeepot/aether#4915).
+# A debugger session opts back in with CARGO_PROFILE_DEV_DEBUG=full.
+[profile.dev]
+debug = "line-tables-only"
+
 # Optimize the cranelift compiler even in dev/test builds. Every wasm
 # component load runs a full cranelift compile of the module, and
 # unoptimized cranelift is ~10-30x slower — ~15s per module in CI, which

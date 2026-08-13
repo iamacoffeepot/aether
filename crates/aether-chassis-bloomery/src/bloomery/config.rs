@@ -204,6 +204,43 @@ pub struct CoordinatorConfig {
     /// GitHub connection.
     #[config(env = "AETHER_BLOOMERY_MAX_CONCURRENT_LANES", default = 3)]
     pub max_concurrent_lanes: usize,
+    /// Where the per-slot cargo target directories live — one `slot-<index>-target`
+    /// under this root, handed to the lane that holds that slot as its
+    /// `CARGO_TARGET_DIR` (#4912).
+    ///
+    /// Empty (the default) puts them beside the slot checkouts, under
+    /// [`local_worktree_base`](Self::local_worktree_base). A deployment whose
+    /// scratch root sits on a small volume points this at a roomier one instead:
+    /// a build tree is tens of gigabytes per slot and is pure cache, so it need
+    /// not share a volume with the checkouts it is taken over.
+    ///
+    /// What it may **not** be is a path inside a slot's checkout. Every dispatch
+    /// resets its slot with `git clean --force --force -d -x`, which removes
+    /// ignored files — a target directory in there would be deleted once per
+    /// dispatch, turning the warm dependency tree the slot layout exists for into
+    /// a cold build every lap. A base that resolves inside one is refused in
+    /// favour of the default rather than honoured.
+    ///
+    /// Named `AETHER_BLOOMERY_LANE_TARGET_BASE` rather than under this struct's
+    /// `AETHER_GITHUB` prefix, for the reason the lane program and operator knobs
+    /// are: which volume a host builds on is a property of the machine, not of
+    /// the GitHub connection.
+    #[config(env = "AETHER_BLOOMERY_LANE_TARGET_BASE", default = "")]
+    pub lane_target_base: String,
+    /// How many build jobs one lane's cargo invocations may run at once — the
+    /// `CARGO_BUILD_JOBS` every dispatch and the verify gates inside it run under
+    /// (#4912).
+    ///
+    /// The default is eight because that is where the measurement landed
+    /// (`spike/build-concurrency`, 2026-08-13): `-j32` beat `-j8` by 18% on a solo
+    /// cold build — the crate graph's critical path dominates, not the core count
+    /// — while a `-j8` build peaks around 5 GiB. Capping each lane is therefore
+    /// nearly free on latency and is what lets several lanes coexist in one
+    /// host's memory instead of racing it to the out-of-memory killer.
+    ///
+    /// `0` resolves to cargo's own default (unset), which is one job per core.
+    #[config(env = "AETHER_BLOOMERY_LANE_BUILD_JOBS", default = 8)]
+    pub lane_build_jobs: usize,
     /// How long (in seconds) a tracked dispatch may stay unresolved before the
     /// executor reactor logs a `warn` naming the wedge ([`super::ExecutorReactorCapability`],
     /// #3635) — observability only, never a behavior change to admission or
@@ -301,6 +338,8 @@ impl Default for CoordinatorConfig {
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),
             local_lane_program: DEFAULT_LANE_PROGRAM.to_owned(),
             max_concurrent_lanes: 3,
+            lane_target_base: String::new(),
+            lane_build_jobs: 8,
             stale_warn_after_secs: 1800,
             artifacts_root: None,
             operator_name: String::new(),

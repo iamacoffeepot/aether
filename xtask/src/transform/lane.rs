@@ -18,6 +18,8 @@ use std::{fs, io};
 
 use anyhow::{Context, Result, bail};
 
+use crate::transform::peak_memory::PeakMemory;
+
 /// What a harness reported when its run ended.
 pub(super) struct Terminal {
     /// Whether the run ended in error. The construct gate demands `false`.
@@ -113,9 +115,15 @@ pub(super) fn write_prompt(out: &Path, prompt: &str) -> Result<PathBuf> {
 /// operational failure, distinct from a task-level error, which a completed run
 /// records inside its transcript. It is surfaced rather than folded into an
 /// empty record reported as success.
-pub(super) fn capture(mut command: Command, out: &Path, harness: &str) -> Result<String> {
+///
+/// `peak` reads the run's peak memory off its stderr, where the host's wrapper
+/// reports it (#4912) — before the exit check, because a run that died still
+/// peaked at something and the reading is what the concurrency model is
+/// calibrated from either way.
+pub(super) fn capture(mut command: Command, out: &Path, harness: &str, peak: &PeakMemory) -> Result<String> {
     fs::create_dir_all(out).with_context(|| format!("create {}", out.display()))?;
     let run = command.output().map_err(|error| spawn_context(error, harness))?;
+    peak.observe(&run.stderr);
     let transcript = String::from_utf8_lossy(&run.stdout).into_owned();
 
     // Write the transcript before the exit check, so a failed run still leaves
