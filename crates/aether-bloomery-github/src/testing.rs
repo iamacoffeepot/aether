@@ -131,7 +131,7 @@ struct State {
     // Merges armed to conflict, as (base, head) bare branch names. A fake holds
     // no real file content, so a collision cannot arise from what is seeded and
     // has to be stated outright.
-    merge_conflicts: HashSet<(String, String)>,
+    merge_conflicts: HashMap<(String, String), Vec<String>>,
     // The Actions surface the executor port drives: recorded dispatches (a
     // `workflow_dispatch` creates no resolvable run synchronously, so a
     // dispatched-but-unseeded nonce inspects `Unknown`), and the runs a test
@@ -494,7 +494,19 @@ impl FakeGithub {
     /// conflict — the cross-member collision a fold parks on, which no amount of
     /// seeded content can otherwise provoke from a fake with no real diffs.
     pub fn seed_merge_conflict(&self, base: &str, head: &str) {
-        self.lock().merge_conflicts.insert((base.to_owned(), head.to_owned()));
+        self.seed_merge_conflict_paths(base, head, Vec::new());
+    }
+
+    /// Arm a merge to conflict and name the paths that collided — what the
+    /// reconcile work order carries as the collision's evidence.
+    pub fn seed_merge_conflict_paths(&self, base: &str, head: &str, paths: Vec<String>) {
+        self.lock().merge_conflicts.insert((base.to_owned(), head.to_owned()), paths);
+    }
+
+    /// Disarm a previously seeded collision so a later fold of the same
+    /// branches can succeed — the reconcile lap's re-fold.
+    pub fn clear_merge_conflict(&self, base: &str, head: &str) {
+        self.lock().merge_conflicts.remove(&(base.to_owned(), head.to_owned()));
     }
 
     /// The commit sha `name` resolves to — a branch (bare name) through its ref,
@@ -720,16 +732,18 @@ impl GitDataApi for FakeGithub {
         // commit's tree equals neither side — so a fold resuming after a restart
         // would re-merge every member it had already folded.
         let repo = self.object_repo();
-        let collided =
-            || MergeResult::Conflict { detail: format!("{{\"message\":\"Merge conflict\"}} ({head} into {base})") };
         let already = repo
             .as_ref()
             .map_or_else(|| self.contains(&base_sha, &head_sha), |repo| real_is_ancestor(repo, &head_sha, &base_sha));
         if already {
             return Ok(MergeResult::AlreadyUpToDate);
         }
-        if self.lock().merge_conflicts.contains(&(base.to_owned(), head.to_owned())) {
-            return Ok(collided());
+        let armed = self.lock().merge_conflicts.get(&(base.to_owned(), head.to_owned())).cloned();
+        if let Some(paths) = armed {
+            return Ok(MergeResult::Conflict {
+                detail: format!("{{\"message\":\"Merge conflict\"}} ({head} into {base})"),
+                paths,
+            });
         }
 
         // The one property worth modelling: a merge's tree is a function of
@@ -741,7 +755,12 @@ impl GitDataApi for FakeGithub {
         let tree = match repo.as_deref() {
             Some(repo) => match real_merge_tree(repo, &base_sha, &head_sha)? {
                 Some(tree) => tree,
-                None => return Ok(collided()),
+                None => {
+                    return Ok(MergeResult::Conflict {
+                        detail: format!("{{\"message\":\"Merge conflict\"}} ({head} into {base})"),
+                        paths: Vec::new(),
+                    });
+                }
             },
             None => merged_tree(&self.tree_at(base)?, &self.tree_at(head)?),
         };

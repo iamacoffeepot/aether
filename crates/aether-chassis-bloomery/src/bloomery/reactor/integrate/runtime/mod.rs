@@ -34,7 +34,8 @@ use std::time::Duration;
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, BloomId, Checkpoint, Digest, Event, Fact, IdempotencyKey, IntegrateOutcome, IntegratePayload, Topic,
+    Admit, BloomId, Checkpoint, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, IntegrateOutcome,
+    IntegratePayload, Topic, WorkpieceId,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
@@ -111,6 +112,43 @@ impl IntegrateReactorState {
 /// the lap that follows integrates a different tree under the same bloom
 /// (#4722). Under the bloom-only key that second resolve was swallowed as a
 /// replay and the run stopped dead.
+fn fold_conflict_key(bloom: &Digest, workpiece: &str, checkpoint: &Digest) -> IdempotencyKey {
+    use core::fmt::Write;
+    let mut key = String::with_capacity(32 + 64 + 1 + workpiece.len() + 1 + 64);
+    key.push_str("aether.bloomery.fold-conflict:");
+    for byte in bloom.as_bytes() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    key.push(':');
+    key.push_str(workpiece);
+    key.push(':');
+    for byte in checkpoint.as_bytes() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    IdempotencyKey(key)
+}
+
+fn fold_conflict_overlay(paths: &[String], candidate: Digest) -> String {
+    use core::fmt::Write;
+    let mut overlay = String::from(
+        "## Fold conflict\n\nReproduce this member's intent on top of what the fold now contains; stay inside the \
+         declared surface.\n",
+    );
+    if !paths.is_empty() {
+        overlay.push_str("\n## Conflicting paths\n\n");
+        for path in paths {
+            let _ = writeln!(overlay, "- {path}");
+        }
+    }
+    overlay.push_str("\n## Conflicted candidate\n\n");
+    let _ = write!(overlay, "tree: ");
+    for byte in candidate.as_bytes() {
+        let _ = write!(overlay, "{byte:02x}");
+    }
+    overlay.push('\n');
+    overlay
+}
+
 fn resolve_key(bloom: &Digest, tree: &Digest) -> IdempotencyKey {
     use core::fmt::Write;
     let mut key = String::with_capacity(24 + 64 + 1 + 64);
@@ -130,6 +168,9 @@ enum FoldOutcome {
     /// Every candidate integrated (or was already on the branch); the resolve
     /// fact to admit.
     Resolved(Box<Event>),
+    /// A cross-member collision (ADR-0189): admit `FoldConflict` so the
+    /// later member reconciles against the folded checkpoint.
+    Conflicted { event: Box<Event>, overlay: String, workpiece: WorkpieceId },
     /// A definitive refusal — the branch carries a tree that matches neither
     /// the bootstrap position nor any candidate (a foreign advance). Acked with
     /// the carried reason, never re-driven.
@@ -219,16 +260,34 @@ fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOut
                 expected = Checkpoint { bloom, tree };
                 head = Some(new_head);
             }
-            // A cross-member collision. Refused rather than stopped: re-driving
-            // on a timer cannot resolve it — the two candidates conflict until
-            // something changes one of them, which is a decision above this
-            // reactor, not a retry.
-            Ok(IntegrateOutcome::Conflict { .. }) => {
-                return FoldOutcome::Refused(format!(
-                    "member `{}` conflicts with the members already folded; the collision needs a decision, \
-                     not a re-drive",
-                    member.workpiece.0
-                ));
+            // A cross-member collision. Journaled as FoldConflict (ADR-0189)
+            // rather than refused in prose: the later member reconciles
+            // against the folded checkpoint. Re-driving the same trees
+            // cannot resolve it; the dispatched lane can.
+            Ok(IntegrateOutcome::Conflict { paths, .. }) => {
+                let checkpoint = expected.tree;
+                let checkout = head.unwrap_or(payload.base);
+                let overlay = fold_conflict_overlay(&paths, member.candidate);
+                let evidence = Evidence {
+                    subject: checkpoint,
+                    kind: EvidenceKind::FoldConflict,
+                    detail: Digest::of_wire_bytes(overlay.as_bytes()),
+                };
+                let event = Event {
+                    idempotency_key: fold_conflict_key(&payload.bloom, &member.workpiece.0, &checkpoint),
+                    fact: Fact::FoldConflict {
+                        bloom,
+                        workpiece: member.workpiece.clone(),
+                        checkpoint,
+                        head: checkout,
+                        evidence,
+                    },
+                };
+                return FoldOutcome::Conflicted {
+                    event: Box::new(event),
+                    overlay,
+                    workpiece: member.workpiece.clone(),
+                };
             }
             Ok(other) => {
                 return FoldOutcome::Stopped(format!(
@@ -293,6 +352,27 @@ fn drain_and_integrate(
                         target: "aether_chassis_bloomery::integrate",
                         sequence = entry.sequence,
                         "resolve event did not encode; stopping the ack prefix to re-drive",
+                    );
+                    break;
+                };
+                admits.push(Admit { event: bytes });
+                ack_through = Some(entry.sequence);
+            }
+            FoldOutcome::Conflicted { event, overlay, workpiece } => {
+                if let Err(error) = store.record_fold_conflict(payload.bloom.as_bytes(), &workpiece.0, &overlay) {
+                    tracing::warn!(
+                        target: "aether_chassis_bloomery::integrate",
+                        sequence = entry.sequence,
+                        %error,
+                        "fold-conflict overlay did not persist; stopping the ack prefix to re-drive",
+                    );
+                    break;
+                }
+                let Ok(bytes) = to_vec(&*event) else {
+                    tracing::warn!(
+                        target: "aether_chassis_bloomery::integrate",
+                        sequence = entry.sequence,
+                        "fold-conflict event did not encode; stopping the ack prefix to re-drive",
                     );
                     break;
                 };

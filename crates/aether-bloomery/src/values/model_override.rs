@@ -325,7 +325,7 @@ mod tests {
         let binding = StageCatalog::binding_of(stage);
         let digest = Digest::from_bytes([0; 32]);
         match stage {
-            StageId::Construct | StageId::Refine | StageId::Review | StageId::Verify => {
+            StageId::Construct | StageId::Refine | StageId::Reconcile | StageId::Review | StageId::Verify => {
                 Some(Transformation::for_member_stage(&binding, digest, digest, digest).command)
             }
             StageId::AggregateReview => {

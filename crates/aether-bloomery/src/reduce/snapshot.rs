@@ -310,6 +310,17 @@ pub struct StageProgress {
     /// Verify verdict (ADR-0178). Carried across repair transitions and grants;
     /// a successor gets a fresh cursor and therefore an empty set.
     pub seen_verify_failures: VerifyFailureSet,
+    /// The landable head of the folded tree this member is reconciling onto
+    /// (ADR-0189). Set by [`Fact::FoldConflict`](crate::Fact::FoldConflict),
+    /// consumed as the Reconcile lane's checkout, cleared when the member
+    /// leaves Reconcile. `None` on every other stage. Defaulted so a journal
+    /// written before the field existed still decodes.
+    #[serde(default)]
+    pub fold_checkpoint: Option<Digest>,
+    /// The `FoldConflict` evidence detail to attach if Reconcile exhausts.
+    /// Defaulted for the same reason as [`fold_checkpoint`](Self::fold_checkpoint).
+    #[serde(default)]
+    pub fold_conflict_evidence: Option<Digest>,
 }
 
 /// A bloom's position in the one-way lifecycle.
@@ -658,7 +669,8 @@ impl BloomRecord {
             | EvidenceKind::VerificationResult
             | EvidenceKind::ReviewFinding
             | EvidenceKind::ResolutionClaim
-            | EvidenceKind::StudyRecord => {}
+            | EvidenceKind::StudyRecord
+            | EvidenceKind::FoldConflict => {}
         }
     }
 }

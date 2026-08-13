@@ -7,7 +7,7 @@
 //! revision — to express an execution decision, and throws away the candidate
 //! the wedged member had already built. This door expresses it directly.
 
-use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate};
+use super::attempt::{SealedLine, move_effects_with_candidate, reconcile_or_line_targets};
 use super::{BloomStatus, Decisions, GrantAttemptsError, Outcome, Snapshot, StageProgress};
 use crate::ids::{BloomId, StageId, WorkpieceId};
 
@@ -88,8 +88,8 @@ pub(super) fn reduce_grant_attempts(
     // checks out its capture commit, so the resumed attempt continues the work the
     // wedged member had already built rather than starting from the sealed base.
     let candidate = cursor.candidate;
-    let (subject, checkout) = candidate
-        .map_or_else(|| (member.scope_revision, record.spec.base()), |current| (current.tree, current.checkout));
+    let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile);
+    let targets = reconcile_or_line_targets(member.scope_revision, record.spec.base(), candidate, fold_checkpoint);
     // Leave exactly `attempts` of headroom under the stage's budget. `Verify`
     // counts repair rolls and resumes at `Refine`; every other stage counts
     // attempts and resumes in place.
@@ -100,6 +100,8 @@ pub(super) fn reduce_grant_attempts(
             candidate,
             repair_rolls: budget - attempts,
             seen_verify_failures: cursor.seen_verify_failures,
+            fold_checkpoint: None,
+            fold_conflict_evidence: None,
         }
     } else {
         StageProgress {
@@ -108,6 +110,8 @@ pub(super) fn reduce_grant_attempts(
             candidate,
             repair_rolls: cursor.repair_rolls,
             seen_verify_failures: cursor.seen_verify_failures,
+            fold_checkpoint: cursor.fold_checkpoint,
+            fold_conflict_evidence: cursor.fold_conflict_evidence,
         }
     };
     let effects = move_effects_with_candidate(
@@ -115,7 +119,7 @@ pub(super) fn reduce_grant_attempts(
         workpiece,
         member.scope_revision,
         progress,
-        DispatchTargets { subject, checkout },
+        targets,
         candidate.map(|current| current.tree),
         SealedLine::of(record, member),
     );

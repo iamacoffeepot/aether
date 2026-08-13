@@ -1000,7 +1000,9 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
             // retry. GitHub's 409 body is a bare "Merge conflict" with no file
             // list, so there is nothing to carry beyond the point it happened —
             // the caller names the member from its own fold position.
-            MergeResult::Conflict { .. } => return Ok(IntegrateOutcome::Conflict { at: current_tree }),
+            MergeResult::Conflict { paths, .. } => {
+                return Ok(IntegrateOutcome::Conflict { at: current_tree, paths });
+            }
         };
 
         // The merged tree is new to the correspondence — it is neither the

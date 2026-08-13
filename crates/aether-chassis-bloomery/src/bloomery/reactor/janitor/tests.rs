@@ -23,7 +23,7 @@ use aether_data::wire::to_vec;
 use super::sweep::{JanitorPolicy, SweepRequest, retention_duration, sweep};
 use crate::bloomery::SourceShell;
 use crate::bloomery::{CapturedObjects, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner};
-use crate::store::{OutstandingOrder, SqliteStore, StoreBackend};
+use crate::store::{JournalWrite, OutstandingOrder, SqliteStore, StoreBackend};
 
 fn digest(seed: u8) -> Digest {
     Digest::from_bytes([seed; 32])
@@ -49,7 +49,10 @@ fn event(key: &str, fact: Fact) -> Event {
 }
 
 fn journal(store: &mut SqliteStore, key: &str, fact: Fact) {
-    store.append_event(key, &to_vec(&event(key, fact)).expect("the event encodes")).expect("the journal appends");
+    let bytes = to_vec(&event(key, fact)).expect("the event encodes");
+    store
+        .append_event(&JournalWrite { idempotency_key: key, event: &bytes, decisions: &[], decider: "test" })
+        .expect("the journal appends");
 }
 
 /// Seal a predecessor and supersede it, so the journal describes one terminal

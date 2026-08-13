@@ -214,6 +214,8 @@ pub(super) fn reenter_members(
             candidate: cursor.and_then(|progress| progress.candidate),
             repair_rolls: cursor.map_or(0, |progress| progress.repair_rolls),
             seen_verify_failures: cursor.map_or(VerifyFailureSet::EMPTY, |progress| progress.seen_verify_failures),
+            fold_checkpoint: None,
+            fold_conflict_evidence: None,
         };
         // The dispatch targets re-resolve like a member-line move (ADR-0152):
         // the claimed candidate tree binds the evidence and its capture commit

@@ -51,6 +51,8 @@ fn entry_dispatch_effects(
                 candidate: None,
                 repair_rolls: 0,
                 seen_verify_failures: VerifyFailureSet::EMPTY,
+                fold_checkpoint: None,
+                fold_conflict_evidence: None,
             },
         },
         Decision::DispatchAttempt {

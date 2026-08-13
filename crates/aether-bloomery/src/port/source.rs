@@ -63,8 +63,13 @@ pub enum IntegrateOutcome {
     },
     /// The candidate conflicted at `at` and was not integrated.
     Conflict {
-        /// The conflicting tree/point.
+        /// The conflicting tree/point — the folded tree the candidate collided with.
         at: Digest,
+        /// The paths the merge reported as colliding. Empty when the source
+        /// (GitHub's 409) names none; the reconcile work order still carries
+        /// the member's original description and the standing contract.
+        #[serde(default)]
+        paths: Vec<String>,
     },
     /// The expected checkpoint was stale — the integration branch has
     /// advanced past it, so the single-writer CAS is refused rather than
