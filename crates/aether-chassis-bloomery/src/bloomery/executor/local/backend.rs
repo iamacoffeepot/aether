@@ -25,6 +25,7 @@ use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes, ReconcileReport};
 use crate::bloomery::intake::NameEvidenceClaims;
+use crate::store::{SqliteStore, StoreBackend};
 
 /// The suffix distinguishing a run's evidence directory from its scratch
 /// worktree under the same nonce-keyed base dir.
@@ -88,6 +89,15 @@ pub struct LocalExecutor {
     correspondence: SharedCorrespondence,
     base_dir: PathBuf,
     runs: Mutex<HashMap<String, Run>>,
+    // The store the captured candidate's commit message is filed in, keyed by the
+    // member the run's order names. `None` for a backend built without one (the
+    // seam tests), which simply files nothing.
+    //
+    // Its own connection to the coordinator's store file, exactly as
+    // `SqliteCorrespondence` and the dispatch reactor open theirs — the WAL
+    // journal serializes the rare concurrent write. Behind a `Mutex` because the
+    // port's methods take `&self` while the store writes through `&mut`.
+    messages: Option<Mutex<SqliteStore>>,
 }
 
 impl LocalExecutor {
@@ -102,7 +112,16 @@ impl LocalExecutor {
         correspondence: SharedCorrespondence,
         base_dir: impl Into<PathBuf>,
     ) -> Self {
-        Self { runner, correspondence, base_dir: base_dir.into(), runs: Mutex::new(HashMap::new()) }
+        Self { runner, correspondence, base_dir: base_dir.into(), runs: Mutex::new(HashMap::new()), messages: None }
+    }
+
+    /// Mount the store a captured candidate's commit message is filed in. A
+    /// backend without one captures exactly as before and files nothing, so the
+    /// seam tests that do not care about the message need not open a store.
+    #[must_use]
+    pub fn with_message_store(mut self, store: SqliteStore) -> Self {
+        self.messages = Some(Mutex::new(store));
+        self
     }
 
     /// Build the production backend from resolved config: the real git + cargo
@@ -114,11 +133,25 @@ impl LocalExecutor {
     pub fn from_config(config: &CoordinatorConfig, correspondence: SharedCorrespondence) -> Self {
         let identity = CaptureIdentity { name: config.operator_name.clone(), email: config.operator_email.clone() };
 
-        Self::new(
+        let backend = Self::new(
             Arc::new(ProcessTransformRunner::new(identity, LaneProgram::parse(&config.local_lane_program))),
             correspondence,
             config.local_worktree_base.clone(),
-        )
+        );
+        // A store this backend cannot open costs the landing proposal its
+        // authored title, never a candidate: the capture still commits and the
+        // land path still falls back, so the miss warns rather than failing boot.
+        match SqliteStore::open(&config.store_path) {
+            Ok(store) => backend.with_message_store(store),
+            Err(error) => {
+                tracing::warn!(
+                    store = %config.store_path,
+                    %error,
+                    "local executor backend: commit-message store unavailable; captured candidates will name no message",
+                );
+                backend
+            }
+        }
     }
 
     // Lock the registry, recovering the guard on a poisoned mutex rather than
@@ -284,8 +317,8 @@ impl LocalExecutor {
     // substantive-conclusion gate), a store write fault — folds to `None` with a
     // warn; the caller downgrades the verdict, so a lost capture reads as a
     // failed attempt, never a pass whose work silently evaporated.
-    fn capture_candidate(&self, worktree_dir: &Path, nonce: &Nonce) -> Option<CandidateRef> {
-        let captured = match self.runner.capture(worktree_dir) {
+    fn capture_candidate(&self, worktree_dir: &Path, nonce: &Nonce, message: Option<&str>) -> Option<CandidateRef> {
+        let captured = match self.runner.capture(worktree_dir, message) {
             Ok(Some(captured)) => captured,
             Ok(None) => {
                 tracing::warn!(
@@ -313,6 +346,42 @@ impl LocalExecutor {
                 tracing::warn!(nonce = %nonce.0, %error, "local executor backend: candidate correspondence write failed");
                 None
             }
+        }
+    }
+
+    // File a captured candidate's commit message against the member its order
+    // names, re-keying from the nonce the backend knows to the (bloom, workpiece)
+    // pair the land path reads — the same key the review findings channel uses.
+    //
+    // Best-effort throughout: no mounted store, an order that has already gone,
+    // or a write fault each cost the landing proposal its authored title and
+    // nothing more, so none of them may downgrade a candidate that was captured
+    // successfully.
+    fn file_commit_message(&self, nonce: &Nonce, message: &str) {
+        let Some(messages) = self.messages.as_ref() else {
+            return;
+        };
+        // The lock is held for the read-then-write pair and dropped before the
+        // report below: the re-key has to see the order it read.
+        let filed = {
+            let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
+            store.lookup_order(&nonce.0).and_then(|order| {
+                order.map_or(Ok(false), |order| {
+                    store.record_candidate_commit_message(&order.bloom, &order.workpiece, message).map(|()| true)
+                })
+            })
+        };
+        match filed {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                nonce = %nonce.0,
+                "local executor backend: no outstanding order to key the captured candidate's commit message by",
+            ),
+            Err(error) => tracing::warn!(
+                nonce = %nonce.0,
+                %error,
+                "local executor backend: candidate commit-message write failed; the landing proposal will fall back",
+            ),
         }
     }
 }
@@ -589,11 +658,23 @@ impl ExecutorBackend for LocalExecutor {
         // digest pair riding the evidence reference. Fail-closed: a passed run
         // whose capture falls short downgrades to a failing verdict rather than
         // admitting a pass whose work was lost with the worktree below.
+        let commit_message = (is_construct && nonce_matches).then(|| parse_commit_message(&bytes)).flatten();
         let candidate = if is_construct && concluded {
-            self.capture_candidate(&worktree_dir, &handle.nonce)
+            self.capture_candidate(&worktree_dir, &handle.nonce, commit_message.as_deref())
         } else {
             None
         };
+        // File the message against the member the run's order names, while that
+        // order is still outstanding — the intake consumes it a moment later, and
+        // the land path has no other way back from a bloom to the lane that wrote
+        // this. Only for a candidate that was actually captured, so the row and
+        // the candidate arrive together and a lane that produced nothing cannot
+        // leave a message behind for the next one.
+        if candidate.is_some()
+            && let Some(message) = commit_message.as_deref()
+        {
+            self.file_commit_message(&handle.nonce, message);
+        }
         let passed = concluded && (!is_construct || candidate.is_some());
         // The evidence has been consumed and any candidate captured — evict the
         // run so the registry tracks only in-flight orders rather than growing for
@@ -747,6 +828,19 @@ fn parse_failed_verifiers(bytes: &[u8]) -> Option<VerifyFailureSet> {
 fn parse_findings(bytes: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     value.get("findings").and_then(serde_json::Value::as_str).map(str::to_owned)
+}
+
+/// The evidence's top-level `commit_message` prose — what the construct/refine
+/// lane's agent wrote for the change it just made. Presence-driven like
+/// [`parse_findings`]: a lane that wrote none yields `None`, and so does a blank
+/// one, because an empty message names neither a capture subject nor a title.
+fn parse_commit_message(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value
+        .get("commit_message")
+        .and_then(serde_json::Value::as_str)
+        .map(|message| message.trim().to_owned())
+        .filter(|message| !message.is_empty())
 }
 
 /// What the attempt cost, from the `result_record` the lane nested in its

@@ -1,7 +1,7 @@
 //! The git source-port cap shell ([#3465]).
 //!
 //! The host mounts the `aether-bloomery-github` [`GitSource`] backend behind a
-//! thin shell holding it as an `Arc<dyn SourceBackend>`, exactly mirroring the
+//! thin shell holding it as an `Arc<dyn LandingSource>`, exactly mirroring the
 //! [`ProjectionShell`](super::ProjectionShell) — no GitHub type crosses into a
 //! core module: the shell is the boundary, and only it and the adapter name a
 //! github-crate type (ADR-0149 §The boundary, the "no core module names a
@@ -24,9 +24,9 @@ use std::sync::Arc;
 use aether_bloomery::{
     BackendObjectId, BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,
     CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal,
-    SharedCorrespondence, Snapshot, SourceBackend, SourceSnapshot, WorkpieceId,
+    SharedCorrespondence, Snapshot, SourceSnapshot, WorkpieceId,
 };
-use aether_bloomery_github::{GitObjectId, GitSource, GithubError, SourceError};
+use aether_bloomery_github::{GitObjectId, GitSource, GithubError, LandingProposal, LandingSource, SourceError};
 
 use super::GithubConnectionConfig;
 
@@ -35,9 +35,14 @@ use super::GithubConnectionConfig;
 /// shell also holds the correspondence handle so it can seed the mainline
 /// correspondence (ADR-0150); a fake-backed shell (`new`) seeds the double
 /// directly and carries none.
+///
+/// The backend is held as the adapter's [`LandingSource`], which is an
+/// [`aether_bloomery::SourceBackend`] plus the landing-assembly face: the land reactor is what
+/// holds a shell and what assembles a proposal's prose, so widening the shell
+/// here is what keeps that prose out of the digest-only port contract.
 #[derive(Clone)]
 pub struct SourceShell {
-    backend: Arc<dyn SourceBackend<Error = SourceError> + Send + Sync>,
+    backend: Arc<dyn LandingSource + Send + Sync>,
     correspondence: Option<SharedCorrespondence>,
 }
 
@@ -47,14 +52,14 @@ impl SourceShell {
     /// handle (the fake-backed tests seed their double directly); use
     /// [`connect`](Self::connect) for a live shell that can [`seed_mainline`](Self::seed_mainline).
     #[must_use]
-    pub fn new(backend: Arc<dyn SourceBackend<Error = SourceError> + Send + Sync>) -> Self {
+    pub fn new(backend: Arc<dyn LandingSource + Send + Sync>) -> Self {
         Self { backend, correspondence: None }
     }
 
     #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn new_with_correspondence(
-        backend: Arc<dyn SourceBackend<Error = SourceError> + Send + Sync>,
+        backend: Arc<dyn LandingSource + Send + Sync>,
         correspondence: SharedCorrespondence,
     ) -> Self {
         Self { backend, correspondence: Some(correspondence) }
@@ -233,14 +238,33 @@ impl SourceShell {
         self.backend.adopt_candidate(predecessor, successor, workpiece)
     }
 
-    /// Propose landing `new_head` onto mainline, guarded by `expected_base`.
+    /// Propose landing `new_head` onto mainline, guarded by `expected_base`,
+    /// under the caller's assembled `proposal` prose. `None` opens the proposal
+    /// under the adapter's floor title and bare provenance body — what a caller
+    /// with no membership in view (the source cap's own surface) issues.
     ///
     /// # Errors
     /// [`SourceError::LandingDisabled`] while the land gate is off, or a
     /// transport/backend fault (a moved base is the clean
     /// [`LandOutcome::BaseMoved`], not an error).
-    pub fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, SourceError> {
-        self.backend.land(bloom, expected_base, new_head)
+    pub fn land(
+        &self,
+        bloom: &BloomId,
+        expected_base: &Digest,
+        new_head: &Digest,
+        proposal: Option<&LandingProposal>,
+    ) -> Result<LandOutcome, SourceError> {
+        self.backend.land_proposal(bloom, expected_base, new_head, proposal)
+    }
+
+    /// The human-authored title of issue `number`, or `None` when the repository
+    /// holds no such object — the landing assembly's fallback for a member whose
+    /// lane named no commit message.
+    ///
+    /// # Errors
+    /// A transport or backend fault.
+    pub fn issue_title(&self, number: u64) -> Result<Option<String>, SourceError> {
+        self.backend.issue_title(number)
     }
 
     /// Read where a previously issued land proposal has got to.
@@ -337,7 +361,7 @@ mod tests {
     use aether_bloomery_github::{GitObjectId, GitSource};
 
     use super::{
-        Arc, BloomId, Digest, IntegrateOutcome, LandOutcome, LandProposal, Snapshot, SourceBackend, SourceError,
+        Arc, BloomId, Digest, IntegrateOutcome, LandOutcome, LandProposal, LandingSource, Snapshot, SourceError,
         SourceShell,
     };
 
@@ -449,7 +473,7 @@ mod tests {
         fake.seed_ref("heads/main", &head_sha);
 
         let concrete = Arc::new(GitSource::new(fake.clone(), Arc::clone(&correspondence), true));
-        let backend: Arc<dyn SourceBackend<Error = SourceError> + Send + Sync> = concrete.clone();
+        let backend: Arc<dyn LandingSource + Send + Sync> = concrete.clone();
         let bloom = BloomId(Digest::from_bytes([1; 32]));
         let shell = SourceShell { backend, correspondence: Some(Arc::clone(&correspondence)) };
 
@@ -487,7 +511,7 @@ mod tests {
         // reverse-resolve of the real mainline object returns the genesis base,
         // so the guard passes and a proposal is opened with no Malformed /
         // UnresolvedCorrespondence fault.
-        let number = match shell.land(&bloom, &Snapshot::GENESIS_MAINLINE, &head).unwrap() {
+        let number = match shell.land(&bloom, &Snapshot::GENESIS_MAINLINE, &head, None).unwrap() {
             LandOutcome::Proposed { number } => number,
             LandOutcome::BaseMoved { expected, actual } => {
                 panic!("expected Proposed, got BaseMoved {{ expected: {expected:?}, actual: {actual:?} }}")

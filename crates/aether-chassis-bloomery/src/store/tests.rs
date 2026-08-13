@@ -643,6 +643,38 @@ fn dispatch_description_records_looks_up_and_is_key_scoped() {
     assert_eq!(store.lookup_dispatch_description(&bloom, "wp-a").unwrap().as_deref(), Some("revised work order"));
 }
 
+#[test]
+fn a_members_candidate_commit_message_is_superseded_by_its_next_capture() {
+    // The keying claim the landing assembly rests on. A member's only writer is
+    // the lane that captures a candidate for it, so last-writer-wins on
+    // (bloom, workpiece) is what makes the row *per candidate*: a Refine's fresh
+    // capture supersedes the message of the candidate it replaces, and the row
+    // the land path reads at the end is the resolving candidate's. A second row
+    // per member instead would leave the land path choosing between a stale
+    // message and a fresh one with nothing to tell them apart.
+    let mut store = memory();
+    let bloom = [0xB1; 32];
+    store.record_candidate_commit_message(&bloom, "issue-11", "fix(crate:aether-fs): reject a traversal").unwrap();
+
+    assert_eq!(
+        store.lookup_candidate_commit_message(&bloom, "issue-11").unwrap().as_deref(),
+        Some("fix(crate:aether-fs): reject a traversal"),
+    );
+    assert_eq!(store.lookup_candidate_commit_message(&bloom, "issue-12").unwrap(), None, "a sibling member is its own");
+    assert_eq!(
+        store.lookup_candidate_commit_message(&[0xB2; 32], "issue-11").unwrap(),
+        None,
+        "the key is scoped to the bloom, not the workpiece alone",
+    );
+
+    store.record_candidate_commit_message(&bloom, "issue-11", "fix(crate:aether-fs): reject every traversal").unwrap();
+    assert_eq!(
+        store.lookup_candidate_commit_message(&bloom, "issue-11").unwrap().as_deref(),
+        Some("fix(crate:aether-fs): reject every traversal"),
+        "the refined candidate's message supersedes the one it replaced",
+    );
+}
+
 // The sealed-configuration resolution path (ADR-0174). A test kind stands in
 // for a real configuration: the resolver is generic over `ConfigKind`, so what
 // it resolves is the contract and which kind is incidental.

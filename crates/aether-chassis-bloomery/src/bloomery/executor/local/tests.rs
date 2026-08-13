@@ -29,6 +29,7 @@ use super::testing::{FixedRunner, canned_capture};
 use super::{LocalExecutor, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes};
 use crate::bloomery::intake::{EvidenceClaims, NameEvidenceClaims};
+use crate::store::{OutstandingOrder, SqliteStore, StoreBackend};
 
 fn digest(seed: u8) -> Digest {
     Digest::from_bytes([seed; 32])
@@ -52,7 +53,7 @@ fn test_nonce(tag: &str) -> String {
 }
 
 fn executor(base: &TempDir, evidence: &str, lifecycle: RunLifecycle) -> LocalExecutor {
-    let runner = FixedRunner { evidence: evidence.to_owned(), lifecycle, captures: true };
+    let runner = FixedRunner::new(evidence, lifecycle, true);
     LocalExecutor::new(Arc::new(runner), correspondence(), base.path())
 }
 
@@ -475,7 +476,11 @@ impl TransformRunner for RecordingRunner {
         Ok(self.registered.clone())
     }
 
-    fn capture(&self, _worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+    fn capture(
+        &self,
+        _worktree_dir: &Path,
+        _message: Option<&str>,
+    ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
         Ok(Some(canned_capture()))
     }
 }
@@ -563,7 +568,11 @@ impl TransformRunner for CapturingRunner {
         Ok(Vec::new())
     }
 
-    fn capture(&self, _worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+    fn capture(
+        &self,
+        _worktree_dir: &Path,
+        _message: Option<&str>,
+    ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
         Ok(None)
     }
 }
@@ -807,11 +816,7 @@ fn a_passing_construct_run_captures_its_candidate() {
     let base = TempDir::new().unwrap();
     let store = correspondence();
     let evidence = r#"{"command":"construct.implement","nonce":"n-cap","produced_candidate":true,"result_record":{"schema":1,"is_error":false,"result":{"num_turns":3}}}"#;
-    let runner = FixedRunner {
-        evidence: evidence.to_owned(),
-        lifecycle: RunLifecycle::Exited { success: true },
-        captures: true,
-    };
+    let runner = FixedRunner::new(evidence, RunLifecycle::Exited { success: true }, true);
     let exec = LocalExecutor::new(Arc::new(runner), Arc::clone(&store) as _, base.path());
 
     let handle = exec.submit(&construct_order(digest(5), "n-cap")).unwrap();
@@ -835,6 +840,103 @@ fn a_passing_construct_run_captures_its_candidate() {
     assert_eq!(upload.candidate, Some(candidate), "the claim carries the capture to the intake");
 }
 
+// The lane's commit message reaches both places the host uses it: the capture
+// that commits under its first line, and the member row the landing assembly
+// reads at the end of the bloom. Catches a message read out of the evidence and
+// then dropped — the capture would silently fall back to the literal and the
+// proposal to the floor, with nothing failing.
+#[test]
+fn a_captured_candidates_message_reaches_the_capture_and_its_member_row() {
+    let base = TempDir::new().unwrap();
+    let message = "feat(crate:aether-text): shelf-pack the glyph atlas\n\nGlyphs arrive one at a time.";
+    let evidence = format!(
+        r#"{{"command":"construct.implement","nonce":"n-msg","produced_candidate":true,"commit_message":{},"result_record":{{"schema":1,"is_error":false,"result":{{"num_turns":3}}}}}}"#,
+        serde_json::to_string(message).unwrap(),
+    );
+    let runner = FixedRunner::new(&evidence, RunLifecycle::Exited { success: true }, true);
+    let captured_messages = Arc::clone(&runner.captured_messages);
+    let store = store_dir();
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path())
+        .with_message_store(open_store(&store, &member_order("n-msg", "issue-4242")));
+
+    let handle = exec.submit(&construct_order(digest(5), "n-msg")).unwrap();
+    assert!(exec.stream_evidence(&handle).unwrap()[0].candidate.is_some(), "the run captured a candidate");
+
+    assert_eq!(
+        captured_messages.lock().unwrap().as_slice(),
+        &[Some(message.to_owned())],
+        "the capture is handed the lane's own message, not the flat literal",
+    );
+    assert_eq!(
+        SqliteStore::open(store.path().join("bloomery.sqlite").to_str().unwrap())
+            .unwrap()
+            .lookup_candidate_commit_message(&[1; 32], "issue-4242")
+            .unwrap()
+            .as_deref(),
+        Some(message),
+        "the message is filed against the member its order names, which is how the land path finds it",
+    );
+}
+
+// The complement, and the reason the file is written on the capture rather than
+// on the verdict: a run whose worktree yielded nothing leaves no row, so the next
+// candidate for that member cannot inherit a message describing work that was
+// never captured.
+#[test]
+fn a_run_that_captured_nothing_files_no_message() {
+    let base = TempDir::new().unwrap();
+    let evidence = r#"{"command":"construct.implement","nonce":"n-void-msg","produced_candidate":true,"commit_message":"fix(crate:aether-fs): reject a traversing path","result_record":{"schema":1,"is_error":false,"result":{"num_turns":3}}}"#;
+    let store = store_dir();
+    let exec = LocalExecutor::new(
+        Arc::new(FixedRunner::new(evidence, RunLifecycle::Exited { success: true }, false)),
+        correspondence(),
+        base.path(),
+    )
+    .with_message_store(open_store(&store, &member_order("n-void-msg", "issue-4242")));
+
+    let handle = exec.submit(&construct_order(digest(5), "n-void-msg")).unwrap();
+    assert!(exec.stream_evidence(&handle).unwrap()[0].candidate.is_none(), "nothing was captured");
+
+    assert_eq!(
+        SqliteStore::open(store.path().join("bloomery.sqlite").to_str().unwrap())
+            .unwrap()
+            .lookup_candidate_commit_message(&[1; 32], "issue-4242")
+            .unwrap(),
+        None,
+        "a lost capture files no message for the candidate that never existed",
+    );
+}
+
+// A file-backed store the executor and the assertion can both open — `:memory:`
+// is private per connection, and `with_message_store` takes the executor's.
+fn store_dir() -> TempDir {
+    TempDir::new().unwrap()
+}
+
+fn open_store(dir: &TempDir, order: &OutstandingOrder) -> SqliteStore {
+    let mut store = SqliteStore::open(dir.path().join("bloomery.sqlite").to_str().unwrap()).unwrap();
+    store.record_order(order).unwrap();
+    store
+}
+
+// An outstanding order for `nonce` naming `workpiece` in bloom `[1; 32]` — the
+// (bloom, workpiece) pair the backend re-keys a captured message onto.
+fn member_order(nonce: &str, workpiece: &str) -> OutstandingOrder {
+    OutstandingOrder {
+        nonce: nonce.to_owned(),
+        bloom: vec![1; 32],
+        workpiece: workpiece.to_owned(),
+        scope_revision: vec![2; 32],
+        candidate: vec![5; 32],
+        displayed_digest: vec![5; 32],
+        stage: vec![9],
+        transformation: vec![7, 7],
+        configs: vec![3, 3],
+        profile: Vec::new(),
+        deadline_unix_millis: 1_700_000_000_000,
+    }
+}
+
 // ADR-0152 — fail-closed: a construct run that concluded substantively but whose
 // capture found a clean worktree downgrades to a failing verdict instead of
 // admitting a pass whose work was lost. Catches the inverted gate (trusting the
@@ -843,11 +945,7 @@ fn a_passing_construct_run_captures_its_candidate() {
 fn a_passing_construct_run_with_nothing_to_capture_fails_closed() {
     let base = TempDir::new().unwrap();
     let evidence = r#"{"command":"construct.implement","nonce":"n-void","produced_candidate":true,"result_record":{"schema":1,"is_error":false,"result":{"num_turns":3}}}"#;
-    let runner = FixedRunner {
-        evidence: evidence.to_owned(),
-        lifecycle: RunLifecycle::Exited { success: true },
-        captures: false,
-    };
+    let runner = FixedRunner::new(evidence, RunLifecycle::Exited { success: true }, false);
     let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path());
 
     let handle = exec.submit(&construct_order(digest(5), "n-void")).unwrap();
@@ -889,11 +987,7 @@ fn a_capture_whose_correspondence_write_faults_fails_closed() {
     let store = FakeGithub::new();
     store.seed_git_object(&digest(0xC0));
     let evidence = r#"{"command":"construct.implement","nonce":"n-fault","produced_candidate":true,"result_record":{"schema":1,"is_error":false,"result":{"num_turns":3}}}"#;
-    let runner = FixedRunner {
-        evidence: evidence.to_owned(),
-        lifecycle: RunLifecycle::Exited { success: true },
-        captures: true,
-    };
+    let runner = FixedRunner::new(evidence, RunLifecycle::Exited { success: true }, true);
     let exec = LocalExecutor::new(Arc::new(runner), Arc::new(RecordFaults(store)), base.path());
 
     let handle = exec.submit(&construct_order(digest(5), "n-fault")).unwrap();

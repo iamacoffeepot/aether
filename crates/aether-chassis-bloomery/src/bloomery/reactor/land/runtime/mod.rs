@@ -68,6 +68,8 @@ use crate::store::{SqliteStore, StoreBackend};
 
 use aether_bloomery::Topic;
 
+mod proposal;
+
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the land topic and issues each land. Zero-field — the timer carries only the
 /// schedule.
@@ -246,7 +248,11 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
             break;
         };
         let bloom = BloomId(payload.bloom);
-        match source.land(&bloom, &payload.expected_base, &payload.new_head) {
+        // Assemble the proposal from what the bloom's own lanes wrote, before the
+        // land: the title is the mainline commit's subject forever, so it is
+        // authored here rather than defaulted in the adapter.
+        let assembled = proposal::assemble(store, source, &bloom)?;
+        match source.land(&bloom, &payload.expected_base, &payload.new_head, Some(&assembled)) {
             Ok(LandOutcome::Proposed { number }) => {
                 match watch_proposal(source, &bloom, &payload, number) {
                     Ok(Watched::Landed(admit)) => {

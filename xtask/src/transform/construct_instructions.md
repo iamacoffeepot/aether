@@ -52,7 +52,20 @@ say so plainly rather than guessing at a change to make.
    empty evidence, which reads as a failure of the work rather than of the disk.
    The lane clears its scratch directory when the run ends, so anything you leave
    there costs nothing.
-6. **Stop at the candidate.** Leave the change in the working tree. You do not
+6. **Write the commit message.** Before you finish, write the message for the
+   change you just made to `.bloomery-commit-message` in the root of your working
+   directory. This is a required deliverable, not an optional extra: it is the
+   subject the candidate is captured under and the title the landing proposal is
+   opened with, so the model that wrote the change is the one that names it.
+   - The first line is a Conventional Commits header — `type(scope): subject` —
+     with `type` one of `feat`, `fix`, `chore`, `docs`, `perf`, `refactor`,
+     `flake`, `scope` the dominant crate the change lands in (or `meta` for
+     repository-wide work), and `subject` starting with a lowercase letter.
+   - Then a blank line, then a body in this repository's commit style: what
+     changed and why, in prose, at the altitude the diff cannot state itself.
+   - Write the file and nothing else about it — the lane reads it back and
+     deletes it, so it never becomes part of the candidate you are producing.
+7. **Stop at the candidate.** Leave the change in the working tree. You do not
    open a pull request, push, merge, or touch git history — the broker collects
    your candidate and evidence. Do not delete or rewrite files outside the work
    order's surface.

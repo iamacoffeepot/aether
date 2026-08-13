@@ -207,13 +207,25 @@ pub struct GitCommit {
 /// [`ReqwestGithub`] and the test `FakeGithub` implement it,
 /// so the projection logic is exercised without a token or network.
 ///
-/// **Comments only.** There is deliberately no verb here that writes an issue
-/// or pull-request title or body, opens an object, or closes one: a projection
-/// owns the marker-keyed comments it wrote and nothing else, and that bound
-/// holds by absence rather than by discipline (ADR-0149 §The write surface).
-/// Every lookup is scoped to one named object's comment list, so no path here
+/// **Comments only on the write side.** There is deliberately no verb here that
+/// writes an issue or pull-request title or body, opens an object, or closes
+/// one: a projection owns the marker-keyed comments it wrote and nothing else,
+/// and that bound holds by absence rather than by discipline (ADR-0149 §The
+/// write surface). Every lookup is scoped to one named object, so no path here
 /// enumerates repository-wide issue history either.
 pub trait GithubApi {
+    /// The title of issue `number`, or `None` when the repository holds no such
+    /// object — a clean 404 is `Ok(None)`, not an error.
+    ///
+    /// A read, and the bound above is about writes: the landing assembly falls
+    /// back to a member's source issue title when its lane named no commit
+    /// message, so the adapter has to be able to see the one it is falling back
+    /// to. Nothing here writes it.
+    ///
+    /// # Errors
+    /// The surface is unreachable or returned a non-404 error status.
+    fn issue_title(&self, number: u64) -> Result<Option<String>, GithubError>;
+
     /// Find the comment on `issue_number` whose marker carries `key`, if any.
     /// The projection's idempotency lookup: a match with the desired digest is
     /// a no-op, a mismatch an update, `None` a create.
@@ -748,6 +760,11 @@ struct GhComment {
 }
 
 #[derive(Deserialize)]
+struct GhIssue {
+    title: String,
+}
+
+#[derive(Deserialize)]
 struct GhRefObject {
     sha: String,
 }
@@ -1097,6 +1114,13 @@ fn decode<D: for<'de> Deserialize<'de>>(response: &HttpResponse) -> Result<D, Gi
 }
 
 impl<T: HttpTransport> GithubApi for ReqwestGithub<T> {
+    fn issue_title(&self, number: u64) -> Result<Option<String>, GithubError> {
+        let Some(response) = self.request_opt(Method::Get, format!("{}/{number}", self.issues_url()))? else {
+            return Ok(None);
+        };
+        Ok(Some(decode::<GhIssue>(&response)?.title))
+    }
+
     fn find_comment(&self, issue_number: u64, key: &str) -> Result<Option<Comment>, GithubError> {
         for page in 1..=MAX_LIST_PAGES {
             let url = format!("{}/{issue_number}/comments?per_page={PER_PAGE}&page={page}", self.issues_url());
@@ -1450,6 +1474,27 @@ mod tests {
         let request = github.transport.last.borrow().clone().unwrap();
         assert_eq!(request.method, Method::Post);
         assert_eq!(request.url, "https://api.github.com/app/installations/42/access_tokens");
+    }
+
+    #[test]
+    fn issue_title_gets_the_named_object_and_absorbs_a_404() {
+        // Tripwire: a slip in this route reads as "the repository holds no such
+        // object", which the landing assembly answers by dropping to the floor
+        // title — a silent downgrade with nothing failing anywhere.
+        let github = client(200, r#"{"number":7,"title":"fix(crate:aether-fs): reject a traversing path"}"#);
+
+        assert_eq!(
+            github.issue_title(7).expect("2xx decodes").as_deref(),
+            Some("fix(crate:aether-fs): reject a traversing path")
+        );
+        let request = github.transport.last.borrow().clone().expect("a request was sent");
+        assert_eq!(request.method, Method::Get);
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/issues/7");
+        assert!(request.body.is_none(), "a title read writes nothing");
+
+        // An object the repository does not hold is the clean absence the
+        // fallback expects, not an error that would stop the drain.
+        assert_eq!(client(404, "{}").issue_title(7).expect("a 404 is the clean absence"), None);
     }
 
     #[test]

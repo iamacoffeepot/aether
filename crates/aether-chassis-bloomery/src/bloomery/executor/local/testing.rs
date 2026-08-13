@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use aether_bloomery::BackendObjectId;
 
@@ -31,6 +32,21 @@ pub struct FixedRunner {
     /// Whether `capture` returns the [`canned_capture`] pair (`true`) or a
     /// clean-worktree `None` (`false`).
     pub captures: bool,
+    /// The message each `capture` was handed — what the real runner commits its
+    /// subject from, recorded so a test can assert the lane's own message
+    /// reached the capture rather than the flat literal.
+    pub captured_messages: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+impl FixedRunner {
+    /// A runner writing `evidence`, fixed at `lifecycle`, capturing (or not) the
+    /// canned pair. Its `captured_messages` log starts empty; clone the handle
+    /// off the runner before mounting it to read what the backend handed each
+    /// capture.
+    #[must_use]
+    pub fn new(evidence: &str, lifecycle: RunLifecycle, captures: bool) -> Self {
+        Self { evidence: evidence.to_owned(), lifecycle, captures, captured_messages: Arc::new(Mutex::new(Vec::new())) }
+    }
 }
 
 impl TransformRunner for FixedRunner {
@@ -50,7 +66,12 @@ impl TransformRunner for FixedRunner {
         Ok(Vec::new())
     }
 
-    fn capture(&self, _worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+    fn capture(
+        &self,
+        _worktree_dir: &Path,
+        message: Option<&str>,
+    ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+        self.captured_messages.lock().unwrap_or_else(PoisonError::into_inner).push(message.map(str::to_owned));
         Ok(self.captures.then(canned_capture))
     }
 }

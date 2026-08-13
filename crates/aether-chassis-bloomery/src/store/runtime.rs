@@ -290,6 +290,19 @@ pub trait StoreBackend: Send {
     fn lookup_review_findings(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
     /// Clear the member's recorded findings — a passing review makes them stale.
     fn clear_review_findings(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<()>;
+    /// Record the commit message the member's construct/refine lane wrote for the
+    /// candidate it just captured, keyed by (`bloom`, `workpiece`) exactly as the
+    /// findings channel is. Last-writer-wins on the key, which is what makes the
+    /// row *per candidate*: a member's only writer is the lane that captures a
+    /// candidate for it, so a Refine's fresh capture supersedes the message of the
+    /// candidate it replaces, and the row the land path reads at the end belongs
+    /// to the candidate that resolved the member.
+    fn record_candidate_commit_message(&mut self, bloom: &[u8], workpiece: &str, message: &str)
+    -> rusqlite::Result<()>;
+    /// The commit message recorded for (`bloom`, `workpiece`), or `None` when the
+    /// member's lane wrote none — the landing assembly falls back rather than
+    /// blocking on the absence.
+    fn lookup_candidate_commit_message(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
     /// Drop every study index row — the first half of a projection rebuild
     /// (`clear` then re-`record` from the artifact bytes).
     fn clear_study_index(&mut self) -> rusqlite::Result<()>;
@@ -524,6 +537,12 @@ CREATE TABLE IF NOT EXISTS review_findings (
     bloom     BLOB NOT NULL,
     workpiece TEXT NOT NULL,
     findings  TEXT NOT NULL,
+    PRIMARY KEY (bloom, workpiece)
+);
+CREATE TABLE IF NOT EXISTS candidate_commit_message (
+    bloom     BLOB NOT NULL,
+    workpiece TEXT NOT NULL,
+    message   TEXT NOT NULL,
     PRIMARY KEY (bloom, workpiece)
 );
 ";
@@ -766,6 +785,27 @@ impl StoreBackend for SqliteStore {
             rusqlite::params![bloom, workpiece],
         )?;
         Ok(())
+    }
+
+    fn record_candidate_commit_message(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+        message: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO candidate_commit_message (bloom, workpiece, message) VALUES (?1, ?2, ?3)",
+            rusqlite::params![bloom, workpiece, message],
+        )?;
+        Ok(())
+    }
+
+    fn lookup_candidate_commit_message(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>> {
+        let mut stmt =
+            self.conn.prepare("SELECT message FROM candidate_commit_message WHERE bloom = ?1 AND workpiece = ?2")?;
+        let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| row.get::<_, String>(0))?;
+        // The (bloom, workpiece) pair is the primary key, so at most one row.
+        rows.next().transpose()
     }
 
     fn clear_study_index(&mut self) -> rusqlite::Result<()> {

@@ -201,7 +201,10 @@ impl SourceCapabilityState {
             Ok(new_head) => new_head,
             Err(error) => return LandResult::Err { error: error.to_string() },
         };
-        match self.shell.land(&bloom, &expected_base, &new_head) {
+        // No proposal: this surface decodes three digests off a mail and has no
+        // sight of the bloom's membership, so it lands under the adapter's floor.
+        // The land reactor, which holds the store, is what assembles prose.
+        match self.shell.land(&bloom, &expected_base, &new_head, None) {
             Ok(LandOutcome::Proposed { number }) => LandResult::Proposed { number },
             Ok(LandOutcome::BaseMoved { expected, actual }) => match (to_vec(&expected), to_vec(&actual)) {
                 (Ok(expected), Ok(actual)) => LandResult::BaseMoved { expected, actual },

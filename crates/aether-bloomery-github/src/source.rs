@@ -58,7 +58,7 @@ use aether_bloomery::{
 use serde::Serialize;
 
 use crate::client::{
-    ChecksState, GitDataApi, GithubError, MergeResult, NewPullRequest, PullRequestApi, PullRequestState,
+    ChecksState, GitDataApi, GithubApi, GithubError, MergeResult, NewPullRequest, PullRequestApi, PullRequestState,
 };
 use crate::correspondence::GitObjectId;
 use crate::short_hex;
@@ -249,13 +249,44 @@ impl ContentAddressed for LandedHeadAddress<'_> {
     const DOMAIN: &'static str = "aether.bloomery.landed.head";
 }
 
-/// The body of a bloom's landing proposal: what is being landed, onto what, and
-/// the digests a reader verifies it against. Prose for a person — the machine
-/// side reads the proposal's number, never this text — so it names the bloom
-/// and both ends of the swap rather than restating the whole spec.
-fn render_landing_body(bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> String {
+/// The prose a landing proposal is opened with, assembled by the caller that can
+/// see the bloom's membership — the messages its lanes wrote and the objects its
+/// workpieces address. This port sees neither, so the text arrives here already
+/// composed rather than being derived from the three digests `land` is given.
+///
+/// The title is optional because a bloom does not always have one to offer: a
+/// member whose lane wrote no usable subject, and a multi-member bloom whose
+/// several messages name no single change, both land under
+/// [`landing_floor_title`] instead. The caller says which by leaving it `None`,
+/// so the floor keeps one spelling — here, beside the proposal it opens.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct LandingProposal {
+    /// The proposal's title, or `None` to land under the floor.
+    pub title: Option<String>,
+    /// The caller's half of the body. The provenance footer is appended below
+    /// it, so an assembly never restates the digests.
+    pub body: String,
+}
+
+/// The title a landing proposal falls back to: the bloom named by its short hex,
+/// under the repository's `chore(meta)` type. Always a lint-valid Conventional
+/// Commits header, which is what makes it a floor rather than a guess — mainline
+/// squash-merges with this as the commit subject.
+#[must_use]
+pub fn landing_floor_title(bloom: &BloomId) -> String {
+    format!("chore(meta): land bloom {}", short_hex(&bloom.0))
+}
+
+/// The provenance footer every landing proposal body ends on: what is being
+/// landed, onto what, and the digests a reader verifies it against. Prose for a
+/// person — the machine side reads the proposal's number, never this text — so
+/// it names the bloom and both ends of the swap rather than restating the whole
+/// spec, and it sits below the assembled body because the change is what a
+/// reader came for and the provenance is what they check afterwards.
+fn render_provenance_footer(bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> String {
     format!(
-        "Landing bloom `{}`.\n\n\
+        "---\n\n\
+         Landing bloom `{}`.\n\n\
          - sealed base: `{}`\n\
          - resolved head: `{}`\n\n\
          Bloomery opened this proposal after the bloom resolved and its aggregate \
@@ -267,6 +298,23 @@ fn render_landing_body(bloom: &BloomId, expected_base: &Digest, new_head: &Diges
         to_hex(expected_base),
         to_hex(new_head),
     )
+}
+
+/// The title and body a proposal is opened with: the caller's assembly when it
+/// made one, the floor plus a bare footer when it did not.
+fn render_landing_proposal(
+    bloom: &BloomId,
+    expected_base: &Digest,
+    new_head: &Digest,
+    proposal: Option<&LandingProposal>,
+) -> (String, String) {
+    let footer = render_provenance_footer(bloom, expected_base, new_head);
+    let title = proposal.and_then(|proposal| proposal.title.clone()).unwrap_or_else(|| landing_floor_title(bloom));
+    let body = match proposal.map(|proposal| proposal.body.trim()) {
+        Some(assembled) if !assembled.is_empty() => format!("{assembled}\n\n{footer}"),
+        _ => footer,
+    };
+    (title, body)
 }
 
 /// The single mainline-admission claim ref (short `heads/…`-style form, no
@@ -372,13 +420,17 @@ pub fn digest_from_hex(sha: &str) -> Option<Digest> {
 /// on by default since ADR-0149 migration step 3 made the CAS `land` the landing
 /// of record — a `false` gate is the explicit kill switch under which `land`
 /// refuses.
-pub struct GitSource<C: GitDataApi + PullRequestApi> {
+///
+/// The [`GithubApi`] bound is the landing assembly's: a proposal whose member
+/// named no commit message falls back to that member's source issue title, so
+/// the backend that opens the proposal has to be able to read one.
+pub struct GitSource<C: GitDataApi + PullRequestApi + GithubApi> {
     client: C,
     correspondence: SharedCorrespondence,
     cas_land_enabled: bool,
 }
 
-impl<C: GitDataApi + PullRequestApi> GitSource<C> {
+impl<C: GitDataApi + PullRequestApi + GithubApi> GitSource<C> {
     /// Build a source backend over `client` and `correspondence`, with mainline
     /// landing gated by `cas_land_enabled` (`false` is the kill switch under
     /// which `land` refuses; production wires it on, per ADR-0149 migration
@@ -746,7 +798,7 @@ impl<C: GitDataApi + PullRequestApi> GitSource<C> {
     }
 }
 
-impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
+impl<C: GitDataApi + PullRequestApi + GithubApi> SourceBackend for GitSource<C> {
     type Error = SourceError;
 
     fn snapshot(&self, base: &Digest) -> Result<SourceSnapshot, Self::Error> {
@@ -953,58 +1005,7 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
     }
 
     fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, Self::Error> {
-        if !self.cas_land_enabled {
-            return Err(SourceError::LandingDisabled);
-        }
-        // Adopt before anything else: a re-drained land entry (or a crash-and-
-        // replay) must find the proposal it already opened rather than opening a
-        // second one. This is what makes issuing a land idempotent, and it runs
-        // before any write so a redrive touches nothing.
-        //
-        // Ahead of the base check, deliberately. The base check decides whether to
-        // *open* a landing; once one is open its fate belongs to the proposal, and
-        // re-deciding it here would abandon the bloom the moment mainline moved —
-        // including when it moved *because this very proposal merged*, which is
-        // the one outcome the watch exists to observe.
-        let branch = landing_branch(bloom);
-        if let Some(existing) = self.client.find_pull_request_for_head(&branch)? {
-            return Ok(LandOutcome::Proposed { number: existing.number });
-        }
-
-        let current =
-            self.client.get_ref(MAINLINE_REF)?.ok_or_else(|| SourceError::MissingRef(MAINLINE_REF.to_owned()))?;
-        // Reverse-resolve the real mainline object (a sha1/40-hex on a real repo,
-        // which the old fixed-64-hex gate rejected as `Malformed` before any swap)
-        // to the base digest, then compare against the sealed base.
-        let actual = self.mainline_digest(&current.sha)?;
-
-        if actual != *expected_base {
-            return Ok(LandOutcome::BaseMoved { expected: *expected_base, actual });
-        }
-
-        // Forward-resolve the new head digest to its real git object, point the
-        // bloom's landing branch at it, and propose that branch onto mainline.
-        self.point_landing_branch(bloom, &self.resolve_git_sha(new_head, "land new head digest")?)?;
-        let proposal = NewPullRequest {
-            title: format!("chore(meta): land bloom {}", short_hex(&bloom.0)),
-            body: render_landing_body(bloom, expected_base, new_head),
-            head: branch.clone(),
-            base: mainline_branch().to_owned(),
-        };
-        match self.client.create_pull_request(&proposal) {
-            Ok(opened) => Ok(LandOutcome::Proposed { number: opened.number }),
-            // A 422 is the duplicate-head refusal: something opened a proposal
-            // for this branch between our lookup and our create. Re-read and
-            // adopt it — the same idempotent answer the lookup above gives, one
-            // race later. A 422 with still no proposal to adopt is a genuine
-            // refusal (an empty diff, a missing base) and propagates.
-            Err(GithubError::Status { status: 422, body }) => self
-                .client
-                .find_pull_request_for_head(&branch)?
-                .map(|raced| LandOutcome::Proposed { number: raced.number })
-                .ok_or(SourceError::Github(GithubError::Status { status: 422, body })),
-            Err(error) => Err(SourceError::Github(error)),
-        }
+        self.land_proposal(bloom, expected_base, new_head, None)
     }
 
     fn poll_land(&self, bloom: &BloomId, expected_base: &Digest, number: u64) -> Result<LandProposal, Self::Error> {
@@ -1204,6 +1205,103 @@ impl<C: GitDataApi + PullRequestApi> SourceBackend for GitSource<C> {
         ref_kind: &ClaimRefKind,
     ) -> Result<ClaimReleaseOutcome, Self::Error> {
         self.release_target(expected_holder, &Self::ref_name(ref_kind))
+    }
+}
+
+/// The landing-assembly face of the source port: what a caller that can see a
+/// bloom's membership needs, over and above the digest-only
+/// [`SourceBackend::land`].
+///
+/// Its own trait rather than a wider `land` on the port, because the port's
+/// vocabulary is digests and outcomes and this is prose: a title, a body, and
+/// the issue titles the body falls back to. The reactor holds a
+/// [`LandingSource`] and calls [`land_proposal`](Self::land_proposal); the port
+/// contract stays exactly as narrow as it was, and `land` delegates here with no
+/// proposal, which is the floor the assembly falls back to anyway.
+pub trait LandingSource: SourceBackend<Error = SourceError> {
+    /// The human-authored title of issue `number`, or `None` when the repository
+    /// holds no such object.
+    ///
+    /// # Errors
+    /// The surface is unreachable or returned a non-404 error status.
+    fn issue_title(&self, number: u64) -> Result<Option<String>, SourceError>;
+
+    /// Propose landing `new_head` onto mainline under caller-assembled prose,
+    /// guarded by `expected_base` exactly as [`SourceBackend::land`] is.
+    ///
+    /// # Errors
+    /// [`SourceError::LandingDisabled`] while the land gate is off, or a
+    /// transport/backend fault (a moved base is the clean
+    /// [`LandOutcome::BaseMoved`], not an error).
+    fn land_proposal(
+        &self,
+        bloom: &BloomId,
+        expected_base: &Digest,
+        new_head: &Digest,
+        proposal: Option<&LandingProposal>,
+    ) -> Result<LandOutcome, SourceError>;
+}
+
+impl<C: GitDataApi + PullRequestApi + GithubApi> LandingSource for GitSource<C> {
+    fn issue_title(&self, number: u64) -> Result<Option<String>, SourceError> {
+        Ok(self.client.issue_title(number)?.map(|title| title.trim().to_owned()).filter(|title| !title.is_empty()))
+    }
+
+    fn land_proposal(
+        &self,
+        bloom: &BloomId,
+        expected_base: &Digest,
+        new_head: &Digest,
+        proposal: Option<&LandingProposal>,
+    ) -> Result<LandOutcome, SourceError> {
+        if !self.cas_land_enabled {
+            return Err(SourceError::LandingDisabled);
+        }
+        // Adopt before anything else: a re-drained land entry (or a crash-and-
+        // replay) must find the proposal it already opened rather than opening a
+        // second one. This is what makes issuing a land idempotent, and it runs
+        // before any write so a redrive touches nothing.
+        //
+        // Ahead of the base check, deliberately. The base check decides whether to
+        // *open* a landing; once one is open its fate belongs to the proposal, and
+        // re-deciding it here would abandon the bloom the moment mainline moved —
+        // including when it moved *because this very proposal merged*, which is
+        // the one outcome the watch exists to observe.
+        let branch = landing_branch(bloom);
+        if let Some(existing) = self.client.find_pull_request_for_head(&branch)? {
+            return Ok(LandOutcome::Proposed { number: existing.number });
+        }
+
+        let current =
+            self.client.get_ref(MAINLINE_REF)?.ok_or_else(|| SourceError::MissingRef(MAINLINE_REF.to_owned()))?;
+        // Reverse-resolve the real mainline object (a sha1/40-hex on a real repo,
+        // which the old fixed-64-hex gate rejected as `Malformed` before any swap)
+        // to the base digest, then compare against the sealed base.
+        let actual = self.mainline_digest(&current.sha)?;
+
+        if actual != *expected_base {
+            return Ok(LandOutcome::BaseMoved { expected: *expected_base, actual });
+        }
+
+        // Forward-resolve the new head digest to its real git object, point the
+        // bloom's landing branch at it, and propose that branch onto mainline.
+        self.point_landing_branch(bloom, &self.resolve_git_sha(new_head, "land new head digest")?)?;
+        let (title, body) = render_landing_proposal(bloom, expected_base, new_head, proposal);
+        let opening = NewPullRequest { title, body, head: branch.clone(), base: mainline_branch().to_owned() };
+        match self.client.create_pull_request(&opening) {
+            Ok(opened) => Ok(LandOutcome::Proposed { number: opened.number }),
+            // A 422 is the duplicate-head refusal: something opened a proposal
+            // for this branch between our lookup and our create. Re-read and
+            // adopt it — the same idempotent answer the lookup above gives, one
+            // race later. A 422 with still no proposal to adopt is a genuine
+            // refusal (an empty diff, a missing base) and propagates.
+            Err(GithubError::Status { status: 422, body }) => self
+                .client
+                .find_pull_request_for_head(&branch)?
+                .map(|raced| LandOutcome::Proposed { number: raced.number })
+                .ok_or(SourceError::Github(GithubError::Status { status: 422, body })),
+            Err(error) => Err(SourceError::Github(error)),
+        }
     }
 }
 
