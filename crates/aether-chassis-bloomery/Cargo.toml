@@ -77,6 +77,8 @@ aether-data = { path = "../aether-data" }
 # it never links it natively (issue #3497).
 aether-bloomery = { path = "../aether-bloomery", default-features = false }
 serde = { workspace = true, features = ["derive", "alloc"] }
+# Host bootstrap of the fallback approval policy (`approval-policy.toml`).
+toml = { workspace = true }
 
 # Runtime-only (native).
 aether-substrate = { path = "../aether-substrate", optional = true }
