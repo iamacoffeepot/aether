@@ -20,7 +20,18 @@ use crate::transform::{TransformArgs, conventions};
 /// so the profile wiring is testable without spawning Claude; the assembled
 /// prompt is piped on the child's stdin (not an argv positional).
 fn construct_argv(model: Option<&str>, effort: Option<&str>) -> Vec<String> {
-    let mut argv = vec!["-p".to_owned()];
+    // `--dangerously-skip-permissions` is what makes the lane actually run
+    // headless: `claude -p` under the default permission mode denies every
+    // `Edit`/`Write`, and a non-interactive session has no way to grant one, so
+    // the lane investigates for dozens of turns and leaves a clean worktree —
+    // `produced_candidate: false` twice wedged the first live Claude member
+    // (bloom `73d025b42e0a`, 2026-08-12). The sibling arms already carry their
+    // headless equivalents (`--disable-approval` on muse, `--approve-for-me` on
+    // codex); Claude's flag is broader because its bash-running lane needs more
+    // than auto-accepted edits, and the lane is already the trust boundary's
+    // narrow side (ADR-0152): a scrubbed environment, no credentials, a scratch
+    // worktree, and every capture, commit, and push host-side.
+    let mut argv = vec!["-p".to_owned(), "--dangerously-skip-permissions".to_owned()];
     if let Some(model) = model {
         argv.push("--model".to_owned());
         argv.push(model.to_owned());
@@ -248,6 +259,10 @@ mod tests {
         assert_eq!(argv[effort_at + 1], "high", "the resolved effort rides argv, not an unread env var");
         // The stream-json transcript is what the result-record derivation reads.
         assert!(argv.windows(2).any(|w| w == ["--output-format", "stream-json"]), "emits the stream-json transcript");
+        // Tripwire: without the permission bypass, headless `claude -p` denies
+        // every write and the lane wedges on `produced_candidate: false`
+        // (bloom `73d025b42e0a`).
+        assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"), "headless needs the write gate open");
     }
 
     #[test]
