@@ -32,16 +32,22 @@
 //! - [`claim_release`] — runs the expected-holder compare-and-swap that retires
 //!   an authorized orphan claim ref (ADR-0179). Mounted only on the GitHub
 //!   branch: there is no ref namespace to release without one.
+//! - [`janitor`] — reclaims leftover worktrees, consumed evidence, idle
+//!   over-budget lane targets, and a terminal bloom's ephemeral repository
+//!   refs. Journal-driven, not topic-driven: a kill or crash is a reclaimable
+//!   fact the happy-path release misses.
 
 mod claim_release;
 mod executor;
 mod integrate;
+mod janitor;
 mod land;
 mod mirror;
 
 pub use claim_release::{
     ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick,
 };
+pub use janitor::{JanitorReactorCapability, JanitorReactorSetup, JanitorReactorState, JanitorTick};
 // `pub` because `reactor` is a private module — see the note in `executor`.
 pub use executor::default_candidate_push;
 pub use executor::{

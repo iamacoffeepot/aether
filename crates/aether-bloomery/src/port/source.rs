@@ -526,4 +526,17 @@ pub trait SourceBackend {
         expected_holder: Option<&BloomId>,
         ref_kind: &ClaimRefKind,
     ) -> Result<ClaimReleaseOutcome, Self::Error>;
+
+    /// Delete `bloom`'s ephemeral repository refs — the candidate, integration,
+    /// and checkpoint names under its per-bloom namespace, plus the landing and
+    /// attempt siblings that share that prefix.
+    ///
+    /// Claim refs (`refs/bloomery/claims/…`, `refs/bloomery/admission/…`) live
+    /// in a different namespace and are never touched: those have their own
+    /// release reactor (ADR-0150 / ADR-0179). Idempotent: an already-absent
+    /// namespace is success, not a fault.
+    ///
+    /// # Errors
+    /// Backend-defined — a transport or backend fault listing or deleting a ref.
+    fn prune_ephemeral_refs(&self, bloom: &BloomId) -> Result<(), Self::Error>;
 }

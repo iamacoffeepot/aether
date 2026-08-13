@@ -43,8 +43,8 @@ mod reconcile;
 mod routing;
 
 pub use local::{
-    CaptureIdentity, DEFAULT_LANE_PROGRAM, LaneProgram, LocalExecutor, LocalExecutorError, OrphanedRun,
-    ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, TransformRunner, mock_lane,
+    CaptureIdentity, CapturedObjects, DEFAULT_LANE_PROGRAM, LaneProgram, LocalExecutor, LocalExecutorError,
+    OrphanedRun, ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, TransformRunner, mock_lane,
 };
 pub use reconcile::{LocalLane, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 pub use routing::RoutingExecutor;
@@ -147,6 +147,10 @@ pub struct ExecutorShell {
     // state lives on GitHub's side of the wire and resolves from the nonce alone,
     // so a restart costs it nothing.
     reconciler: Option<Arc<dyn ReconcileLanes>>,
+    // The local-lane backend the janitor reclaims through. `None` when the
+    // local lane is disabled. The same `Arc` the router holds, so occupied-lane
+    // counts and on-disk paths agree.
+    local: Option<Arc<LocalExecutor>>,
 }
 
 // Adapt a backend whose error merely converts into `ExecutorPortError` (a bare
@@ -190,7 +194,7 @@ impl ExecutorShell {
         B: ExecutorBackend + Send + Sync + 'static,
         ExecutorPortError: From<B::Error>,
     {
-        Self { backend: Arc::new(ErrorMapped(backend)), reconciler: None }
+        Self { backend: Arc::new(ErrorMapped(backend)), reconciler: None, local: None }
     }
 
     /// Mount a backend that also answers [`ReconcileLanes`], keeping its
@@ -204,7 +208,21 @@ impl ExecutorShell {
         B: ExecutorBackend + ReconcileLanes + Send + Sync + 'static,
         ExecutorPortError: From<B::Error>,
     {
-        Self { backend: Arc::new(ErrorMapped(Arc::clone(&backend))), reconciler: Some(backend) }
+        Self { backend: Arc::new(ErrorMapped(Arc::clone(&backend))), reconciler: Some(backend), local: None }
+    }
+
+    /// Remember the local-lane backend this shell routes through, so the janitor
+    /// reclaims against the same instance the dispatcher occupies.
+    #[must_use]
+    pub fn with_local(mut self, local: Arc<LocalExecutor>) -> Self {
+        self.local = Some(local);
+        self
+    }
+
+    /// The local-lane backend this shell routes through, when one is mounted.
+    #[must_use]
+    pub fn local_lane(&self) -> Option<Arc<LocalExecutor>> {
+        self.local.clone()
     }
 
     /// Connect a live executor port from resolved config. When the local model
@@ -245,9 +263,10 @@ impl ExecutorShell {
             let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence));
             return Ok(Self::reconciling(Arc::new(RoutingExecutor::new(
                 actions,
-                local,
+                Arc::clone(&local) as Arc<dyn LocalLane>,
                 coordinator.local_lane_prefixes(),
-            ))));
+            )))
+            .with_local(local));
         }
         let missing = connection.missing_connection_knobs();
         if missing.is_empty() {
@@ -267,9 +286,10 @@ impl ExecutorShell {
             let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence));
             return Ok(Self::reconciling(Arc::new(RoutingExecutor::new(
                 actions,
-                local,
+                Arc::clone(&local) as Arc<dyn LocalLane>,
                 coordinator.local_lane_prefixes(),
-            ))));
+            )))
+            .with_local(local));
         }
 
         // Unconfigured. The stub stands in for Actions either way; what the local
@@ -282,7 +302,12 @@ impl ExecutorShell {
             return Ok(Self::new(actions));
         }
         let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence));
-        Ok(Self::reconciling(Arc::new(RoutingExecutor::new(actions, local, coordinator.local_lane_prefixes()))))
+        Ok(Self::reconciling(Arc::new(RoutingExecutor::new(
+            actions,
+            Arc::clone(&local) as Arc<dyn LocalLane>,
+            coordinator.local_lane_prefixes(),
+        )))
+        .with_local(local))
     }
 
     /// Reconcile the mounted backend against `live`, the orders the store still

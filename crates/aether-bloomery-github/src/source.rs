@@ -1226,6 +1226,17 @@ impl<C: GitDataApi + PullRequestApi + GithubApi> SourceBackend for GitSource<C> 
     ) -> Result<ClaimReleaseOutcome, Self::Error> {
         self.release_target(expected_holder, &Self::ref_name(ref_kind))
     }
+
+    fn prune_ephemeral_refs(&self, bloom: &BloomId) -> Result<(), Self::Error> {
+        // The whole per-bloom `heads/bloom/<short>/` tree: candidate, integration,
+        // checkpoint, landing, and attempt. Claim refs live under `bloomery/` and
+        // cannot match this prefix.
+        let prefix = format!("heads/bloom/{}/", short_hex(&bloom.0));
+        for git_ref in self.client.list_matching_refs(&prefix)? {
+            self.client.delete_ref(&git_ref.name)?;
+        }
+        Ok(())
+    }
 }
 
 /// The landing-assembly face of the source port: what a caller that can see a

@@ -227,6 +227,43 @@ pub struct CoordinatorConfig {
     /// the GitHub connection.
     #[config(env = "AETHER_BLOOMERY_LANE_TARGET_BASE", default = "")]
     pub lane_target_base: String,
+    /// Ceiling, in gibibytes, across every per-slot cargo target directory
+    /// (`<base>/slot-<index>-target`). The janitor sweeps those directories
+    /// when the sum crosses this budget *and* no lane is running — a cold
+    /// rebuild is minutes; an overflow wedge is a member. `0` disables the
+    /// budget sweep so a host that wants to keep the trees forever can say so.
+    /// Stated in gibibytes because a byte ceiling will not fit the config
+    /// derive's integer default.
+    ///
+    /// Named `AETHER_BLOOMERY_LANE_TARGET_BUDGET_GIBIBYTES` rather than under
+    /// this struct's `AETHER_GITHUB` prefix: how much disk a host spends on
+    /// lane caches is a property of the machine, not of the GitHub connection.
+    #[config(env = "AETHER_BLOOMERY_LANE_TARGET_BUDGET_GIBIBYTES", default = 64)]
+    pub lane_target_budget_gibibytes: u64,
+    /// Days to keep a consumed evidence directory after its bloom is terminal
+    /// (`Landed` or `Superseded`). Evidence feeds intake, then forensics and
+    /// the calibration ledger's study artifacts (ADR-0184); this window is the
+    /// stated retention, not a silent default-delete. `0` reclaims consumed
+    /// evidence of a terminal bloom on the next sweep. Live blooms' evidence
+    /// is never deleted, regardless of age. The artifacts content store is
+    /// never touched.
+    ///
+    /// Named `AETHER_BLOOMERY_EVIDENCE_RETAIN_DAYS` rather than under this
+    /// struct's `AETHER_GITHUB` prefix, for the reason the other operator knobs
+    /// are: retention is a property of how the host is operated.
+    #[config(env = "AETHER_BLOOMERY_EVIDENCE_RETAIN_DAYS", default = 7)]
+    pub evidence_retain_days: u64,
+    /// Root of the per-run throwaway build trees a model lane's child writes
+    /// (`scratch-<nonce>` under this path). Empty (the default) leaves those
+    /// trees under each run's evidence directory, which the janitor reaps with
+    /// the evidence. A deployment that points lanes at a roomier volume sets
+    /// this — the same `AETHER_LANE_SCRATCH` the unit's `ExecStartPre` already
+    /// names — so the janitor can reap killed-run leftovers without a restart.
+    ///
+    /// Named `AETHER_LANE_SCRATCH` rather than under this struct's
+    /// `AETHER_GITHUB` prefix: it is the volume the lane child already reads.
+    #[config(env = "AETHER_LANE_SCRATCH", default = "")]
+    pub lane_scratch: String,
     /// How many build jobs one lane's cargo invocations may run at once — the
     /// `CARGO_BUILD_JOBS` every dispatch and the verify gates inside it run under
     /// (#4912).
@@ -339,6 +376,9 @@ impl Default for CoordinatorConfig {
             local_lane_program: DEFAULT_LANE_PROGRAM.to_owned(),
             max_concurrent_lanes: 3,
             lane_target_base: String::new(),
+            lane_target_budget_gibibytes: 64,
+            evidence_retain_days: 7,
+            lane_scratch: String::new(),
             lane_build_jobs: 8,
             stale_warn_after_secs: 1800,
             artifacts_root: None,
@@ -594,5 +634,8 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         assert_eq!(coordinator.poll_interval_secs, 5);
         assert_eq!(coordinator.local_lane_prefixes(), ["construct.", "review."]);
         assert_eq!(coordinator.store_path, ":memory:");
+        assert_eq!(coordinator.lane_target_budget_gibibytes, 64);
+        assert_eq!(coordinator.evidence_retain_days, 7);
+        assert!(coordinator.lane_scratch.is_empty());
     }
 }

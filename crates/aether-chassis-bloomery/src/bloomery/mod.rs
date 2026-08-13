@@ -41,10 +41,10 @@ pub use construct::{CONSTRUCT_IMPLEMENT_COMMAND, dispatch_model};
 pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
 #[cfg(feature = "github")]
 pub use executor::{
-    CaptureIdentity, DEFAULT_LANE_PROGRAM, ExecutorPortError, ExecutorShell, LaneProgram, LocalExecutor,
-    LocalExecutorError, LocalLane, OrphanedRun, OutstandingDispatch, ProcessTransformRunner, ReconcileLanes,
-    ReconcileReport, RoutingExecutor, RunLifecycle, RunProcess, RunSpec, TransformRunner, UnconfiguredActionsBackend,
-    mock_lane,
+    CaptureIdentity, CapturedObjects, DEFAULT_LANE_PROGRAM, ExecutorPortError, ExecutorShell, LaneProgram,
+    LocalExecutor, LocalExecutorError, LocalLane, OrphanedRun, OutstandingDispatch, ProcessTransformRunner,
+    ReconcileLanes, ReconcileReport, RoutingExecutor, RunLifecycle, RunProcess, RunSpec, TransformRunner,
+    UnconfiguredActionsBackend, mock_lane,
 };
 #[cfg(feature = "github")]
 pub use intake::{
@@ -61,8 +61,9 @@ pub(crate) use reactor::default_candidate_push;
 pub use reactor::{
     CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ClaimReleaseReactorState, ClaimReleaseTick,
     DispatchTick, DrainTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState,
-    IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, LandReactorCapability,
-    LandReactorSetup, LandReactorState, LandTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
+    IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick, JanitorReactorCapability,
+    JanitorReactorSetup, JanitorReactorState, JanitorTick, LandReactorCapability, LandReactorSetup, LandReactorState,
+    LandTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
 };
 #[cfg(feature = "github")]
 pub use source::SourceShell;

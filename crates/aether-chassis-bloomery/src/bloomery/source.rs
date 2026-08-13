@@ -367,6 +367,16 @@ impl SourceShell {
     ) -> Result<ClaimReleaseOutcome, SourceError> {
         self.backend.complete_release(expected_holder, ref_kind)
     }
+
+    /// Delete `bloom`'s candidate / integration / checkpoint refs (and the
+    /// landing / attempt siblings that share the per-bloom namespace). Claim
+    /// refs are a different namespace and are not touched.
+    ///
+    /// # Errors
+    /// A transport or backend fault listing or deleting a ref.
+    pub fn prune_ephemeral_refs(&self, bloom: &BloomId) -> Result<(), SourceError> {
+        self.backend.prune_ephemeral_refs(bloom)
+    }
 }
 
 #[cfg(test)]

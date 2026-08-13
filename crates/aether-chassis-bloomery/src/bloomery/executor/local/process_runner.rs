@@ -277,6 +277,12 @@ fn export_build_env(lane: &mut Command, spec: &RunSpec<'_>) {
     if spec.build_jobs > 0 {
         lane.env("CARGO_BUILD_JOBS", spec.build_jobs.to_string());
     }
+    // Re-export after the coordinator-env scrub: `AETHER_LANE_SCRATCH` is an
+    // `AETHER_*` knob, so without this the lane child never sees the volume
+    // the unit named and writes its throwaway trees under `--out` instead.
+    if let Some(scratch) = spec.lane_scratch {
+        lane.env("AETHER_LANE_SCRATCH", scratch);
+    }
 }
 
 /// Decode the hex object id `git rev-parse` printed into the opaque bytes the

@@ -41,6 +41,10 @@ pub struct RunSpec<'a> {
     /// (`CARGO_BUILD_JOBS`, #4912) — the cap that lets several lanes coexist in
     /// one host's memory. `0` leaves cargo's own default of one job per core.
     pub build_jobs: usize,
+    /// Root of the per-run throwaway build trees the model lane's child writes,
+    /// exported as `AETHER_LANE_SCRATCH`. `None` leaves those trees under the
+    /// run's evidence directory.
+    pub lane_scratch: Option<&'a Path>,
     /// Absolute path the run writes its `evidence.json` to (`--out`).
     pub evidence_dir: &'a Path,
     /// The idempotency nonce stamped into the evidence (`--nonce`).

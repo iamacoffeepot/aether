@@ -5,10 +5,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf, absolute};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::SystemTime;
 
 use aether_bloomery::digest::ContentAddressed;
 use aether_bloomery::{
-    BackendObjectId, CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce,
+    BackendObjectId, BloomId, CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce,
     ResolvedModel, SharedCorrespondence, StageVerdict, StudyCost, Transformation, VerifyFailureSet, WorkHandle,
     WorkOrder, digest_of, is_model_lane,
 };
@@ -71,6 +72,12 @@ const DEFAULT_LANE_BUILD_JOBS: usize = 8;
 /// directory — the durable half of the slot assignment, read back by boot
 /// reconciliation (see [`recorded_slot`]).
 const SLOT_RECORD: &str = "slot";
+
+/// The file a dispatch records its bloom id in, inside its own evidence
+/// directory — what the janitor reads after the outstanding order is consumed,
+/// so a terminal bloom's evidence can be retained by policy rather than deleted
+/// the moment intake finishes.
+const BLOOM_RECORD: &str = "bloom";
 
 /// One tracked run: the spawned child, the lane slot it holds, where its
 /// evidence lands, and the digest the returning evidence must bind to.
@@ -141,7 +148,13 @@ impl PendingRun {
     // target directory beside it. Neither build path is resolved with the rest of
     // the dispatch: both belong to the slot, and which slot this run gets is
     // decided when one frees.
-    fn spec<'a>(&'a self, worktree_dir: &'a Path, target_dir: &'a Path, build_jobs: usize) -> RunSpec<'a> {
+    fn spec<'a>(
+        &'a self,
+        worktree_dir: &'a Path,
+        target_dir: &'a Path,
+        build_jobs: usize,
+        lane_scratch: Option<&'a Path>,
+    ) -> RunSpec<'a> {
         RunSpec {
             command: &self.command,
             checkout_hex: &self.checkout_hex,
@@ -149,6 +162,7 @@ impl PendingRun {
             worktree_dir,
             target_dir,
             build_jobs,
+            lane_scratch,
             evidence_dir: &self.evidence_dir,
             nonce: &self.nonce,
             harness: self.profile.as_ref().map(|resolved| resolved.harness.as_str()),
@@ -245,6 +259,9 @@ pub struct LocalExecutor {
     // How many build jobs one lane's cargo invocations may run at once, exported
     // as `CARGO_BUILD_JOBS`. `0` leaves cargo's own default (one job per core).
     build_jobs: usize,
+    // Root of the per-run throwaway build trees a model lane's child writes.
+    // `None` leaves those trees under each run's evidence directory.
+    lane_scratch: Option<PathBuf>,
     // The store the captured candidate's commit message is filed in, keyed by the
     // member the run's order names. `None` for a backend built without one (the
     // seam tests), which simply files nothing.
@@ -280,6 +297,7 @@ impl LocalExecutor {
             registry: Mutex::new(Registry::default()),
             max_concurrent_lanes: usize::MAX,
             build_jobs: DEFAULT_LANE_BUILD_JOBS,
+            lane_scratch: None,
             messages: None,
         }
     }
@@ -295,6 +313,14 @@ impl LocalExecutor {
     pub fn with_lane_build(mut self, configured: &str, build_jobs: usize) -> Self {
         self.target_base = usable_target_base(configured, &self.base_dir);
         self.build_jobs = build_jobs;
+        self
+    }
+
+    /// Point model-lane throwaway build trees at `configured` instead of under
+    /// each run's evidence directory. Empty leaves the default arrangement.
+    #[must_use]
+    pub fn with_lane_scratch(mut self, configured: &str) -> Self {
+        self.lane_scratch = (!configured.is_empty()).then(|| PathBuf::from(configured));
         self
     }
 
@@ -346,7 +372,8 @@ impl LocalExecutor {
             config.local_worktree_base.clone(),
         )
         .with_max_concurrent_lanes(config.max_concurrent_lanes)
-        .with_lane_build(&config.lane_target_base, config.lane_build_jobs);
+        .with_lane_build(&config.lane_target_base, config.lane_build_jobs)
+        .with_lane_scratch(&config.lane_scratch);
         // A store this backend cannot open costs the landing proposal its
         // authored title, never a candidate: the capture still commits and the
         // land path still falls back, so the miss warns rather than failing boot.
@@ -368,6 +395,136 @@ impl LocalExecutor {
     // should degrade to best-effort, not take the whole coordinator down.
     fn lock(&self) -> MutexGuard<'_, Registry> {
         self.registry.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// How many lane children this backend is running or starting right now.
+    ///
+    /// The janitor's target-dir budget sweep reads this so it never deletes a
+    /// tree a live cargo still holds open.
+    #[must_use]
+    pub fn occupied_lanes(&self) -> usize {
+        self.lock().occupied()
+    }
+
+    /// Reclaim nonce-keyed leftover checkouts (and their evidence siblings)
+    /// belonging to no live order — the kill/crash leak boot reconciliation
+    /// also covers, driven here so a long-lived coordinator does not wait for
+    /// a restart.
+    #[must_use]
+    pub fn reclaim_abandoned(&self, live: &HashSet<&str>) -> usize {
+        self.sweep_abandoned(live)
+    }
+
+    /// Reclaim consumed evidence directories that the retention policy names
+    /// as deletable. A directory whose nonce is still outstanding, or whose
+    /// bloom is still live, is never touched. The artifacts content store is
+    /// not this method's to walk.
+    #[must_use]
+    pub fn reclaim_consumed_evidence(
+        &self,
+        live: &HashSet<&str>,
+        live_blooms: &HashSet<BloomId>,
+        retain_days: u64,
+        now: SystemTime,
+    ) -> usize {
+        let Ok(entries) = fs::read_dir(&self.base_dir) else {
+            return 0;
+        };
+        let mut reclaimed = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(nonce) = evidence_nonce_of(&path) else {
+                continue;
+            };
+            if live.contains(nonce.as_str()) {
+                continue;
+            }
+            if recorded_bloom(&path).is_some_and(|bloom| live_blooms.contains(&bloom)) {
+                continue;
+            }
+            if !older_than(&path, retain_days, now) {
+                continue;
+            }
+            tracing::info!(
+                %nonce,
+                evidence = %path.display(),
+                "local executor backend: reclaiming consumed evidence past the retention window",
+            );
+            remove_abandoned(&path);
+            reclaimed += 1;
+        }
+        reclaimed
+    }
+
+    /// Delete every per-slot cargo target directory when their combined size
+    /// exceeds `budget_bytes` and no lane is running. `0` is a disabled budget
+    /// — the trees stay. Returns how many directories were removed.
+    #[must_use]
+    pub fn sweep_idle_targets(&self, budget_bytes: u64) -> usize {
+        if budget_bytes == 0 || self.occupied_lanes() > 0 {
+            return 0;
+        }
+        let Ok(entries) = fs::read_dir(&self.target_base) else {
+            return 0;
+        };
+        let targets: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(is_slot_target_directory))
+            .collect();
+        let size: u64 = targets.iter().map(|path| directory_size(path)).sum();
+        if size <= budget_bytes {
+            return 0;
+        }
+        tracing::info!(
+            size_bytes = size,
+            budget_bytes,
+            targets = targets.len(),
+            "local executor backend: lane target dirs over budget and idle; sweeping",
+        );
+        let mut swept = 0;
+        for path in targets {
+            remove_abandoned(&path);
+            swept += 1;
+        }
+        swept
+    }
+
+    /// Reclaim `scratch-<nonce>` leftovers under `scratch_root` whose nonce is
+    /// not outstanding — the trees `boot.sh` / the unit's `ExecStartPre` would
+    /// otherwise only reap on coordinator restart.
+    #[must_use]
+    pub fn reclaim_lane_scratch(&self, scratch_root: &Path, live: &HashSet<&str>) -> usize {
+        let Ok(entries) = fs::read_dir(scratch_root) else {
+            return 0;
+        };
+        let mut reclaimed = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(nonce) = scratch_run_nonce_of(&path) else {
+                continue;
+            };
+            if live.contains(nonce.as_str()) {
+                continue;
+            }
+            tracing::info!(
+                %nonce,
+                scratch = %path.display(),
+                "local executor backend: reclaiming a lane scratch left by a run that is no longer outstanding",
+            );
+            remove_abandoned(&path);
+            reclaimed += 1;
+        }
+        reclaimed
+    }
+
+    // The bloom the store recorded for this nonce, when the message store is
+    // mounted and the order is still outstanding — the marker the janitor reads
+    // after consume, so write it while the row is still there.
+    fn bloom_of(&self, nonce: &str) -> Option<BloomId> {
+        let store = self.messages.as_ref()?;
+        let mut store = store.lock().unwrap_or_else(PoisonError::into_inner);
+        store.lookup_order(nonce).ok().flatten().and_then(|order| Digest::from_slice(&order.bloom).map(BloomId))
     }
 
     // The evidence output dir a run at `nonce` owns — per dispatch, because it
@@ -524,7 +681,9 @@ impl LocalExecutor {
         let worktree_dir = self.slot_dir(slot).map_err(LocalExecutorError::Io)?;
         let target_dir = self.slot_target_dir(slot).map_err(LocalExecutorError::Io)?;
         record_slot(&pending.evidence_dir, slot);
-        let started = self.runner.start(&pending.spec(&worktree_dir, &target_dir, self.build_jobs));
+        record_bloom(&pending.evidence_dir, self.bloom_of(&pending.nonce));
+        let started =
+            self.runner.start(&pending.spec(&worktree_dir, &target_dir, self.build_jobs, self.lane_scratch.as_deref()));
 
         let mut registry = self.lock();
         registry.starting -= 1;
@@ -1167,6 +1326,99 @@ fn record_slot(evidence_dir: &Path, slot: usize) {
 /// could not be written) or recorded text that is not a slot index.
 fn recorded_slot(evidence_dir: &Path) -> Option<usize> {
     fs::read_to_string(evidence_dir.join(SLOT_RECORD)).ok()?.trim().parse().ok()
+}
+
+/// Record which bloom a dispatch belongs to, beside that dispatch's own
+/// evidence. Best-effort: a missing marker costs the janitor bloom-aware
+/// retention (it falls back to age-only) and never the dispatch itself.
+fn record_bloom(evidence_dir: &Path, bloom: Option<BloomId>) {
+    let Some(bloom) = bloom else {
+        return;
+    };
+    if let Err(error) = fs::create_dir_all(evidence_dir)
+        .and_then(|()| fs::write(evidence_dir.join(BLOOM_RECORD), hex_of(bloom.0.as_bytes())))
+    {
+        tracing::warn!(
+            evidence = %evidence_dir.display(),
+            %error,
+            "local executor backend: could not record the dispatch's bloom; the janitor will retain its evidence by age only",
+        );
+    }
+}
+
+/// The bloom a dispatch recorded in its evidence directory, or `None` when it
+/// recorded none or recorded text that is not a bloom id.
+fn recorded_bloom(evidence_dir: &Path) -> Option<BloomId> {
+    Digest::from_slice(&decode_hex(fs::read_to_string(evidence_dir.join(BLOOM_RECORD)).ok()?.trim())?).map(BloomId)
+}
+
+/// The dispatch nonce an evidence directory belongs to, or `None` when the
+/// path is not one of this backend's `*-evidence` siblings.
+fn evidence_nonce_of(path: &Path) -> Option<String> {
+    path.file_name()?.to_str()?.strip_suffix(EVIDENCE_SUFFIX).filter(|nonce| !nonce.is_empty()).map(str::to_owned)
+}
+
+/// The dispatch nonce a `scratch-<nonce>` directory belongs to, or `None`
+/// when the path is not one of the lane child's throwaway trees.
+fn scratch_run_nonce_of(path: &Path) -> Option<String> {
+    path.file_name()?.to_str()?.strip_prefix("scratch-").filter(|nonce| !nonce.is_empty()).map(str::to_owned)
+}
+
+/// Whether `path` is at least `retain_days` old relative to `now`. `0` days
+/// is "old enough immediately". An unreadable mtime keeps the path.
+fn older_than(path: &Path, retain_days: u64, now: SystemTime) -> bool {
+    if retain_days == 0 {
+        return true;
+    }
+    let Ok(modified) = fs::metadata(path).and_then(|meta| meta.modified()) else {
+        return false;
+    };
+    now.duration_since(modified).is_ok_and(|age| age.as_secs() >= retain_days.saturating_mul(86_400))
+}
+
+/// Whether a directory name is a lane slot's cargo target directory.
+fn is_slot_target_directory(name: &str) -> bool {
+    name.strip_prefix(SLOT_PREFIX)
+        .and_then(|rest| rest.strip_suffix(TARGET_SUFFIX))
+        .is_some_and(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// Best-effort size of `path`. Unreadable entries contribute nothing. Iterative
+/// because a cargo target tree is deeper than a recursion budget should allow.
+fn directory_size(path: &Path) -> u64 {
+    let mut total = 0;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&next) else {
+            total += fs::metadata(&next).ok().map_or(0, |meta| meta.len());
+            continue;
+        };
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if child.is_dir() {
+                pending.push(child);
+            } else {
+                total += entry.metadata().ok().map_or(0, |meta| meta.len());
+            }
+        }
+    }
+    total
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        hex.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        hex.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
+    }
+    hex
+}
+
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len()).step_by(2).map(|index| u8::from_str_radix(&text[index..index + 2], 16).ok()).collect()
 }
 
 /// Whether a scratch-root directory name is a lane slot's canonical checkout.
