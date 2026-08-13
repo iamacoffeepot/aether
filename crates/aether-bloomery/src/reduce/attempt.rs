@@ -232,17 +232,13 @@ pub(super) fn reduce_attempt_completed(
                 candidate: current.tree,
                 evidence: proof.evidence.clone(),
             };
+            let reuse = reuse_of(*bloom, StageId::Verify, proof);
             effects.push(Decision::AdvanceStage { bloom: *bloom, workpiece: workpiece.clone(), progress });
-            effects.extend(claim_effects(record, *bloom, &claim, Some(reuse_of(*bloom, StageId::Verify, proof))));
+            effects.extend(claim_effects(snapshot, record, *bloom, &claim, Some(reuse)));
 
-            return Decisions {
-                outcome: Outcome::VerifyReused {
-                    bloom: *bloom,
-                    workpiece: workpiece.clone(),
-                    proof: proof.evidence.detail,
-                },
-                effects,
-            };
+            let outcome =
+                Outcome::VerifyReused { bloom: *bloom, workpiece: workpiece.clone(), proof: proof.evidence.detail };
+            return Decisions { outcome, effects };
         }
 
         effects.extend(move_effects_with_candidate(

@@ -157,22 +157,25 @@ fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOut
     // cannot.
     let combining = payload.members.len() > 1 || payload.adopt_from.is_some();
 
-    // An inherited claim set arrives with no refs of its own: a candidate ref is
+    // An inherited claim arrives with no ref of its own: a candidate ref is
     // addressed under the bloom that produced it, and a successor is a different
-    // bloom. Adopt them into this bloom's namespace before folding, so the fold
-    // reads only its own refs and a retired predecessor's namespace is never
-    // load-bearing for a live bloom. Idempotent, so a re-drained fold re-adopts
-    // harmlessly.
+    // bloom. Adopt into this bloom's namespace before folding, so the fold reads
+    // only its own refs and a retired predecessor's namespace is never
+    // load-bearing for a live bloom. Every member is offered, and adoption is
+    // adopt-if-absent: a re-drained fold re-adopts harmlessly, and a member that
+    // re-ran under the successor — the mixed set, where the claim completing the
+    // set is a fresh one and the predecessor is named for the inherited members
+    // beside it — keeps the capture it produced.
     if let Some(predecessor) = payload.adopt_from {
         let predecessor = BloomId(predecessor);
         for member in &payload.members {
             match source.adopt_candidate(&predecessor, &bloom, &member.workpiece.0) {
-                // A member whose predecessor ref is gone has no work to fold.
+                // A member with a ref in neither namespace has no work to fold.
                 // Refuse rather than fold a partial set: the resolve would claim
                 // an artifact that never carried that member's changes.
                 Ok(false) => {
                     return FoldOutcome::Refused(format!(
-                        "member `{}` inherited a claim but its predecessor's candidate ref is absent; \
+                        "member `{}` carries a claim but no candidate ref under this bloom or its predecessor; \
                          refusing to fold a set missing a member's work",
                         member.workpiece.0
                     ));

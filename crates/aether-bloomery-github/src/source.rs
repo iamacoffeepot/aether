@@ -998,20 +998,30 @@ impl<C: GitDataApi + PullRequestApi + GithubApi> SourceBackend for GitSource<C> 
         successor: &BloomId,
         workpiece: &str,
     ) -> Result<bool, Self::Error> {
+        // Adopt what is absent, and only that. The successor's namespace is
+        // written by its own captures and by this adoption alone, so a ref
+        // already sitting at this address is one of exactly two things, and
+        // neither wants a predecessor's sha written over it: an earlier lap's
+        // adoption, which wrote the very sha this one would write, or a capture
+        // the successor produced itself. The second is the mixed supersession
+        // (#4903) — some members re-ran under the successor while others
+        // arrived on inherited claims — where a force silently replaces fresh
+        // work with the superseded candidate it was re-run to supersede.
+        //
+        // The force this replaces existed for the re-drained fold that re-adopts
+        // a ref it already wrote; skipping is idempotent for that case too, so
+        // the guarantee is kept and the clobber is structurally unreachable
+        // rather than avoided by a caller getting the member set right.
+        let target = candidate_ref(successor, workpiece);
+        if self.client.get_ref(&target)?.is_some() {
+            return Ok(true);
+        }
+
         let Some(source) = self.client.get_ref(&candidate_ref(predecessor, workpiece))? else {
             return Ok(false);
         };
-        let target = candidate_ref(successor, workpiece);
 
-        // Force the update: a re-drained fold re-adopts, and the second write
-        // must land on the same sha rather than refuse as a non-fast-forward.
-        // The successor's own namespace is written by nothing else, so there is
-        // no concurrent advance a force could clobber.
-        match self.client.get_ref(&target)? {
-            Some(existing) if existing.sha == source.sha => Ok(true),
-            Some(_) => self.client.update_ref(&target, &source.sha, true).map(|_| true).map_err(SourceError::Github),
-            None => self.client.create_ref(&target, &source.sha).map(|_| true).map_err(SourceError::Github),
-        }
+        self.client.create_ref(&target, &source.sha).map(|_| true).map_err(SourceError::Github)
     }
 
     fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, Self::Error> {
