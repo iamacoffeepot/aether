@@ -141,10 +141,10 @@ fn seal_body(projections: Vec<MemberProjection>) -> Value {
 /// repo policy so the gate cases are deterministic.
 fn test_policy() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("approval-policy.yml");
+    let path = dir.path().join("approval-policy.toml");
     std::fs::write(
         &path,
-        "default: judge\nrules:\n  - glob: \"docs/guide/**\"\n    tier: auto\n  - glob: \"crates/aether-data/**\"\n    tier: human\n",
+        "default = \"judge\"\n[[rules]]\nglob = \"docs/guide/**\"\ntier = \"auto\"\n[[rules]]\nglob = \"crates/aether-data/**\"\ntier = \"human\"\n",
     )
     .unwrap();
     let path = path.to_str().unwrap().to_owned();

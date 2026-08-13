@@ -157,7 +157,7 @@ fn release_status_response(_result: QueryResult) -> HttpServerResponse {
 /// admitted at a tier nothing decided.
 pub struct ApiParams {
     /// Repository-relative path to the Bloomery-owned fallback tier policy
-    /// (`approval-policy.yml`).
+    /// (`approval-policy.toml`).
     pub approval_policy_file: String,
 }
 
