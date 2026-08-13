@@ -88,7 +88,7 @@ pub use error::LocalExecutorError;
 pub use lane_program::{DEFAULT_LANE_PROGRAM, LaneProgram};
 pub use orphan::OrphanedRun;
 pub use process_runner::{CaptureIdentity, ProcessTransformRunner};
-pub use runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
+pub use runner::{CapturedObjects, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 
 #[cfg(test)]
 pub mod testing;

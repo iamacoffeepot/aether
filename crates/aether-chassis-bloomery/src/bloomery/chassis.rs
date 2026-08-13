@@ -28,9 +28,9 @@ use crate::bloomery::driver::BloomeryDriverCapability;
 #[cfg(feature = "github")]
 use crate::bloomery::{
     ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ExecutorReactorCapability, ExecutorReactorSetup,
-    ExecutorShell, GithubConnectionConfig, IntegrateReactorCapability, IntegrateReactorSetup, LandReactorCapability,
-    LandReactorSetup, MirrorReactorCapability, MirrorReactorSetup, ProjectionShell, SourceShell,
-    default_candidate_push,
+    ExecutorShell, GithubConnectionConfig, IntegrateReactorCapability, IntegrateReactorSetup, JanitorReactorCapability,
+    JanitorReactorSetup, LandReactorCapability, LandReactorSetup, MirrorReactorCapability, MirrorReactorSetup,
+    ProjectionShell, SourceShell, default_candidate_push,
 };
 use crate::control::{ControlCore, ControlSetup};
 use crate::session::{SessionConfig, SessionPoolCapability};
@@ -102,6 +102,7 @@ struct BloomeryActorSetups {
     land: LandReactorSetup,
     integrate: IntegrateReactorSetup,
     claim_release: ClaimReleaseReactorSetup,
+    janitor: JanitorReactorSetup,
     source: SourceSetup,
 }
 
@@ -170,7 +171,7 @@ fn actor_setups(
             repository: repository.clone(),
         },
         executor: ExecutorReactorSetup {
-            executor,
+            executor: executor.clone(),
             correspondence: executor_correspondence,
             store_path: coordinator.store_path.clone(),
             artifacts_root: coordinator.artifacts_root.clone(),
@@ -204,6 +205,16 @@ fn actor_setups(
         claim_release: ClaimReleaseReactorSetup {
             source: configured.then(|| source.clone()),
             store_path: coordinator.store_path.clone(),
+            poll_interval_secs: coordinator.poll_interval_secs,
+        },
+        janitor: JanitorReactorSetup {
+            source: configured.then(|| source.clone()),
+            executor: executor.clone(),
+            store_path: coordinator.store_path.clone(),
+            worktree_base: coordinator.local_worktree_base.clone(),
+            target_base: coordinator.lane_target_base.clone(),
+            lane_target_budget_bytes: coordinator.lane_target_budget_bytes,
+            evidence_retention_days: coordinator.evidence_retention_days,
             poll_interval_secs: coordinator.poll_interval_secs,
         },
         source: SourceSetup { shell: source, claims_enabled: configured, mainline: coordinator.mainline() },
@@ -387,6 +398,11 @@ impl BootableChassis for BloomeryChassis {
             // source shell and its coordinator scalars.
             .with_actor::<LandReactorCapability>(setups.land)
             .with_actor::<ClaimReleaseReactorCapability>(setups.claim_release)
+            // The janitor: reconciles the journal against on-disk worktrees,
+            // evidence dirs, slot target dirs, and a terminal bloom's working
+            // refs, so a kill or crash does not wait for the next boot to
+            // reclaim what the happy-path release missed.
+            .with_actor::<JanitorReactorCapability>(setups.janitor)
             // The integrate reactor (#3650, ADR-0152): drains the reducer's
             // `aether.bloomery.integrate` decisions, folds the claimed candidate
             // onto the bloom's integration branch, and admits `Fact::Resolve`

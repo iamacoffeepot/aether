@@ -350,6 +350,25 @@ fn outstanding_order_records_looks_up_and_consumes() {
 }
 
 #[test]
+fn a_consumed_order_still_names_the_bloom_that_dispatched_it() {
+    // Tripwire: the janitor's evidence retention is per bloom, and consume
+    // deletes the outstanding row so a replayed nonce refuses. If that delete
+    // also dropped the owner, every consumed evidence directory would look
+    // ownerless and the retention window would not be enforceable.
+    let mut store = memory();
+    let recorded = order("n-1");
+    store.record_order(&recorded).unwrap();
+    store.consume_order("n-1").unwrap();
+
+    assert_eq!(
+        store.lookup_dispatch_owner("n-1").unwrap().as_deref(),
+        Some(recorded.bloom.as_slice()),
+        "consume must not drop the dispatch's owning bloom",
+    );
+    assert_eq!(store.lookup_dispatch_owner("never-dispatched").unwrap(), None);
+}
+
+#[test]
 fn recording_a_replayed_nonce_is_an_idempotent_no_op() {
     // A second record of the same nonce must not overwrite or duplicate the row.
     let mut store = memory();

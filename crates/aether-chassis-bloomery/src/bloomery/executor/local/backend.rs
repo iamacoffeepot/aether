@@ -1137,6 +1137,11 @@ impl ReconcileLanes for LocalExecutor {
             reclaimed: self.sweep_abandoned(&live.iter().map(|dispatch| dispatch.nonce.0.as_str()).collect()),
         }
     }
+
+    fn any_lane_running(&self) -> bool {
+        let registry = self.lock();
+        !registry.runs.is_empty() || registry.starting > 0
+    }
 }
 
 /// Record which lane slot a dispatch is running in, beside that dispatch's own
