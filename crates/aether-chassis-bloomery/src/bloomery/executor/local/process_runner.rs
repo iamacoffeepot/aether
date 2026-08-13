@@ -34,6 +34,25 @@ pub struct CaptureIdentity {
 /// full model run is not.
 const FALLBACK_IDENTITY: (&str, &str) = ("aether-bloomery", "bloomery@iamateapot.dev");
 
+/// The subject a capture commit falls back to when the run's lane named none —
+/// the flat literal every capture carried before the lane wrote its own message.
+const FALLBACK_CAPTURE_SUBJECT: &str = "bloomery: candidate capture";
+
+/// The subject line a capture commits under: the run's own message's first line
+/// when the lane wrote one, otherwise [`FALLBACK_CAPTURE_SUBJECT`].
+///
+/// Only the first line, because a commit subject is a line: the rest of the
+/// message is the landing proposal's body, assembled where the whole membership
+/// is in view. A message whose first line is blank names nothing, so it takes
+/// the fallback rather than committing under an empty subject git would refuse.
+fn capture_subject(message: Option<&str>) -> &str {
+    message
+        .and_then(|message| message.lines().next())
+        .map(str::trim)
+        .filter(|subject| !subject.is_empty())
+        .unwrap_or(FALLBACK_CAPTURE_SUBJECT)
+}
+
 impl CaptureIdentity {
     /// The `-c user.name=… -c user.email=…` arguments this identity contributes
     /// to the capture commit, resolved against the host.
@@ -171,7 +190,11 @@ impl TransformRunner for ProcessTransformRunner {
             .collect())
     }
 
-    fn capture(&self, worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+    fn capture(
+        &self,
+        worktree_dir: &Path,
+        message: Option<&str>,
+    ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
         // A clean worktree has nothing to capture — the caller fails the run
         // closed rather than minting an empty candidate.
         if git_in(worktree_dir, &["status", "--porcelain"])?.trim().is_empty() {
@@ -199,7 +222,8 @@ impl TransformRunner for ProcessTransformRunner {
         // (#4630 — see `CaptureIdentity`). `--no-verify` keeps repo hooks out of
         // the capture path; the run's own gates already judged the work.
         let mut commit = self.identity.overrides(worktree_dir);
-        commit.extend(["commit", "--no-verify", "--message", "bloomery: candidate capture"].map(str::to_owned));
+        commit.extend(["commit", "--no-verify", "--message"].map(str::to_owned));
+        commit.push(capture_subject(message).to_owned());
         git_in(worktree_dir, &commit.iter().map(String::as_str).collect::<Vec<_>>())?;
         let commit_hex = git_in(worktree_dir, &["rev-parse", "HEAD"])?;
         #[allow(clippy::literal_string_with_formatting_args, reason = "git revision syntax, not a format string")]
@@ -429,9 +453,56 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        CaptureIdentity, FALLBACK_IDENTITY, decode_object_hex, fetch_subject_if_absent, git_in, reclaim_worktree_path,
-        strip_hooks,
+        CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, ProcessTransformRunner, TransformRunner,
+        capture_subject, decode_object_hex, fetch_subject_if_absent, git_in, reclaim_worktree_path, strip_hooks,
     };
+
+    #[test]
+    fn a_captures_subject_is_the_lanes_own_first_line_or_the_literal() {
+        assert_eq!(
+            capture_subject(Some("feat(crate:aether-text): shelf-pack the atlas\n\nThe glyphs arrive one at a time.")),
+            "feat(crate:aether-text): shelf-pack the atlas",
+            "the message's first line is the subject; the body is the landing proposal's, not the commit's",
+        );
+        assert_eq!(capture_subject(None), FALLBACK_CAPTURE_SUBJECT, "a lane that named nothing keeps the literal");
+        assert_eq!(
+            capture_subject(Some("\n\nbody with no subject")),
+            FALLBACK_CAPTURE_SUBJECT,
+            "a blank first line names nothing, so the literal stands rather than an empty subject git refuses",
+        );
+    }
+
+    #[test]
+    fn a_capture_commits_under_the_lanes_own_subject() {
+        // The end of clause 3, over a real repo: the capture commit's subject is
+        // what a reader of the history sees, and it is now the message the model
+        // wrote rather than a flat literal every candidate shared. A message left
+        // on disk *would* enter this tree, which is why the lane deletes its
+        // deliverable before the host stages.
+        let repo = repo_with_identity(Some(("operator", "operator@example.test")));
+        run_git(repo.path(), &["commit", "--allow-empty", "--quiet", "--message", "base"]);
+        fs::write(repo.path().join("candidate.txt"), "the change\n").unwrap();
+        let runner = ProcessTransformRunner::default();
+
+        runner
+            .capture(repo.path(), Some("perf(crate:aether-mesh): fan-triangulate once\n\nThe mesher re-ran."))
+            .unwrap()
+            .expect("a dirty worktree captures");
+
+        assert_eq!(
+            git_in(repo.path(), &["log", "-1", "--format=%s"]).unwrap().trim(),
+            "perf(crate:aether-mesh): fan-triangulate once",
+            "the capture commit's subject is the lane's own first line",
+        );
+
+        fs::write(repo.path().join("candidate.txt"), "the next change\n").unwrap();
+        runner.capture(repo.path(), None).unwrap().expect("a dirty worktree captures");
+        assert_eq!(
+            git_in(repo.path(), &["log", "-1", "--format=%s"]).unwrap().trim(),
+            FALLBACK_CAPTURE_SUBJECT,
+            "a lane that named nothing still captures, under the literal",
+        );
+    }
 
     // A repo whose *local* identity is set to `identity` — local config outranks
     // whatever the developer's global git config happens to hold, so these cases

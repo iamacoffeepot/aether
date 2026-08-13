@@ -104,5 +104,8 @@ pub use inward::{
     normalize_study_result, parse_study_cost,
 };
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
-pub use projection::GithubProjection;
-pub use source::{GitSource, SourceError, candidate_ref_name, landing_branch, to_hex};
+pub use projection::{GithubProjection, canonical_issue_number};
+pub use source::{
+    GitSource, LandingProposal, LandingSource, SourceError, candidate_ref_name, landing_branch, landing_floor_title,
+    to_hex,
+};

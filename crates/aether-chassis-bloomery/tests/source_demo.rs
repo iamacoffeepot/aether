@@ -80,7 +80,7 @@ fn a_synthetic_bloom_snapshots_integrates_and_observes_gated_land() {
     assert!(reusable.iter().any(|c| c.tree == base_tree), "the successor reuses the checkpoint by digest");
 
     // Land is refused while gated, and mainline is untouched.
-    match shell.land(&bloom, &base, &digest(90)) {
+    match shell.land(&bloom, &base, &digest(90), None) {
         Err(SourceError::LandingDisabled) => {}
         other => panic!("expected LandingDisabled, got {other:?}"),
     }
@@ -97,7 +97,7 @@ fn land_proposes_the_new_head_and_observes_the_acceptance_when_enabled() {
     let enabled = SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake.clone()), true)));
     let new_head = digest(90);
     fake.seed_git_object(&new_head);
-    let number = match enabled.land(&bloom, &base, &new_head).unwrap() {
+    let number = match enabled.land(&bloom, &base, &new_head, None).unwrap() {
         LandOutcome::Proposed { number } => number,
         other @ LandOutcome::BaseMoved { .. } => panic!("expected Proposed, got {other:?}"),
     };
@@ -119,7 +119,7 @@ fn land_proposes_the_new_head_and_observes_the_acceptance_when_enabled() {
     // the proposal *did*, so refusing here would abandon the bloom at the moment
     // it succeeded.
     assert_eq!(
-        enabled.land(&bloom, &base, &new_head).unwrap(),
+        enabled.land(&bloom, &base, &new_head, None).unwrap(),
         LandOutcome::Proposed { number },
         "an open proposal is adopted rather than re-judged against the base",
     );
@@ -128,7 +128,7 @@ fn land_proposes_the_new_head_and_observes_the_acceptance_when_enabled() {
     // BaseMoved refusal, not an error — and it proposes nothing.
     fake.seed_ref_at("heads/main", &new_head);
     let successor = BloomId(digest(77));
-    match enabled.land(&successor, &base, &digest(91)).unwrap() {
+    match enabled.land(&successor, &base, &digest(91), None).unwrap() {
         LandOutcome::BaseMoved { expected, actual } => {
             assert_eq!(expected, base);
             assert_eq!(actual, new_head);

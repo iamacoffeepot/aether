@@ -44,6 +44,10 @@ use crate::source::{EMPTY_TREE, digest_from_hex, render_claim_message, render_to
 #[derive(Clone)]
 struct StoredIssue {
     number: u64,
+    /// The object's own title — human-authored, and never written by anything
+    /// here. Read by the landing assembly as the fallback for a member whose
+    /// lane named no commit message.
+    title: String,
     /// The object's own body — human-authored, and never written by the
     /// projection. Held so a test can prove it comes back unchanged.
     body: String,
@@ -86,6 +90,11 @@ struct StoredCommit {
 #[derive(Clone)]
 struct StoredPullRequest {
     number: u64,
+    /// The title and body the proposal was opened with. Neither crosses the
+    /// [`PullRequest`] projection — the land watch reads a proposal's state, not
+    /// its prose — so they are held here for the assembly assertions.
+    title: String,
+    body: String,
     head: String,
     head_sha: String,
     base: String,
@@ -201,7 +210,14 @@ impl FakeGithub {
     /// `issue-<number>` addresses. The projection opens no object, so a test
     /// that wants one places it here.
     pub fn seed_issue(&self, number: u64, body: &str) {
-        self.lock().issues.push(StoredIssue { number, body: body.to_owned() });
+        self.lock().issues.push(StoredIssue { number, title: String::new(), body: body.to_owned() });
+    }
+
+    /// Present an issue carrying a human-authored `title` as well as its body —
+    /// what the landing assembly falls back to when a member's lane named no
+    /// commit message.
+    pub fn seed_issue_with_title(&self, number: u64, title: &str, body: &str) {
+        self.lock().issues.push(StoredIssue { number, title: title.to_owned(), body: body.to_owned() });
     }
 
     /// Present a pull request the repository already holds, numbered `number`
@@ -215,6 +231,8 @@ impl FakeGithub {
         state.next_pull_request = state.next_pull_request.max(number);
         state.pull_requests.push(StoredPullRequest {
             number,
+            title: String::new(),
+            body: String::new(),
             head: head.to_owned(),
             head_sha: String::new(),
             base: "main".to_owned(),
@@ -350,6 +368,17 @@ impl FakeGithub {
     #[must_use]
     pub fn pull_request_head_sha(&self, number: u64) -> Option<String> {
         self.lock().pull_requests.iter().find(|pull| pull.number == number).map(|pull| pull.head_sha.clone())
+    }
+
+    /// The title and body pull request `number` was opened with — the landing
+    /// proposal's assembled prose, which nothing on the read path projects.
+    #[must_use]
+    pub fn pull_request_proposal(&self, number: u64) -> Option<(String, String)> {
+        self.lock()
+            .pull_requests
+            .iter()
+            .find(|pull| pull.number == number)
+            .map(|pull| (pull.title.clone(), pull.body.clone()))
     }
 
     /// Seed how the checks on commit `sha` stand — what a landing watch reads
@@ -952,6 +981,8 @@ impl PullRequestApi for FakeGithub {
         state.next_pull_request += 1;
         let stored = StoredPullRequest {
             number: state.next_pull_request,
+            title: new.title.clone(),
+            body: new.body.clone(),
             head: new.head.clone(),
             head_sha,
             base: new.base.clone(),
@@ -982,6 +1013,10 @@ impl PullRequestApi for FakeGithub {
 }
 
 impl GithubApi for FakeGithub {
+    fn issue_title(&self, number: u64) -> Result<Option<String>, GithubError> {
+        Ok(self.lock().issues.iter().find(|issue| issue.number == number).map(|issue| issue.title.clone()))
+    }
+
     fn find_comment(&self, issue_number: u64, key: &str) -> Result<Option<Comment>, GithubError> {
         let state = self.lock();
         if !comment_target_exists(&state, issue_number) {

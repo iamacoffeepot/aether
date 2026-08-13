@@ -114,9 +114,18 @@ pub trait TransformRunner: Send + Sync {
     /// worktree — and only in the host's trust domain: the child never stages,
     /// commits, or holds credentials.
     ///
+    /// `message` is the commit message the run's own lane wrote, when it wrote
+    /// one: the model that made the change names it, and the capture commits
+    /// under that message's first line instead of a flat literal. `None` falls
+    /// back to the literal, so a lane that produced no message still captures.
+    ///
     /// # Errors
     /// A git shell-out (status / add / commit / rev-parse) failed.
-    fn capture(&self, worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError>;
+    fn capture(
+        &self,
+        worktree_dir: &Path,
+        message: Option<&str>,
+    ) -> Result<Option<CapturedObjects>, LocalExecutorError>;
 }
 
 /// What [`TransformRunner::capture`] produced: the capture commit wrapping the

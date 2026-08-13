@@ -193,7 +193,13 @@ fn addressed_object(workpiece: &WorkpieceId) -> Option<u64> {
 }
 
 /// The `<N>` of a canonical `issue-<N>` id, if `id` is one.
-fn canonical_issue_number(id: &str) -> Option<u64> {
+///
+/// The one spelling of "which object does this workpiece name", so the landing
+/// assembly's `Closes #N` lines address exactly what the projection comments on
+/// — an id this refuses contributes no closing line rather than a guessed
+/// number.
+#[must_use]
+pub fn canonical_issue_number(id: &str) -> Option<u64> {
     let number = id.strip_prefix(ISSUE_PREFIX)?;
     // `str::parse` would accept `+7` and ` 7`, and would read `007` as 7 — three
     // spellings of one object, so three markers on it. Canonical or nothing.

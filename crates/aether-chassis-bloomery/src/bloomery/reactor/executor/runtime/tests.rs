@@ -1198,13 +1198,13 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
     let bloom = BloomId(digest(1));
     let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-local", 5);
     let actions = Arc::new(ActionsExecutor::new(FakeGithub::new(), Arc::clone(&correspondence), lanes(), PINNED_REF));
-    let runner = FixedRunner {
-        evidence: format!(
+    let runner = FixedRunner::new(
+        &format!(
             r#"{{"command":"construct.implement","nonce":"dispatch-{sequence}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"result":{{"num_turns":3}}}}}}"#
         ),
-        lifecycle: RunLifecycle::Exited { success: true },
-        captures: true,
-    };
+        RunLifecycle::Exited { success: true },
+        true,
+    );
     let local = Arc::new(LocalExecutor::new(Arc::new(runner), correspondence, base.path()));
     let routing = RoutingExecutor::new(actions, local, vec!["construct.".to_owned()]);
     let shell = ExecutorShell::new(Arc::new(routing));
@@ -2043,13 +2043,13 @@ fn a_local_lane_order_dispatched_before_a_restart_resolves_after_reconciliation(
 // test can stand a second process up where the first one stopped.
 fn local_lane_shell(base: &Path, correspondence: SharedCorrespondence, nonce: &str) -> ExecutorShell {
     let actions = Arc::new(ActionsExecutor::new(FakeGithub::new(), Arc::clone(&correspondence), lanes(), PINNED_REF));
-    let runner = FixedRunner {
-        evidence: format!(
+    let runner = FixedRunner::new(
+        &format!(
             r#"{{"command":"construct.implement","nonce":"{nonce}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"result":{{"num_turns":3}}}}}}"#
         ),
-        lifecycle: RunLifecycle::Exited { success: true },
-        captures: true,
-    };
+        RunLifecycle::Exited { success: true },
+        true,
+    );
     let local = Arc::new(LocalExecutor::new(Arc::new(runner), correspondence, base));
     ExecutorShell::reconciling(Arc::new(RoutingExecutor::new(actions, local, vec!["construct.".to_owned()])))
 }

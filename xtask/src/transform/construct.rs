@@ -2,6 +2,8 @@
 //! lane's in-repo instruction source plus the checked-out subject, run
 //! headless Claude, gate on a produced candidate, and stamp the evidence.
 
+use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::process::Command;
 
@@ -13,6 +15,18 @@ use crate::transform::{TransformArgs, conventions, run_model_lane, write_evidenc
 /// The typed id of the model-driven construct lane (#3511). Recognized here so
 /// an unknown id stays unmapped exactly as in the verify lane.
 pub(super) const CONSTRUCT_IMPLEMENT: &str = "construct.implement";
+
+/// The file the agent writes its commit message to, relative to the run
+/// worktree's root — the lane's one deliverable besides the candidate itself.
+///
+/// A single fixed path at the root, because the instruction text has to name it
+/// literally and an agent that must first create a directory is one more way for
+/// the deliverable to go missing. Deliberately *not* a gitignored path: the host
+/// captures the candidate with `git add --all` after this process exits, so the
+/// delete below is what keeps the deliverable out of the captured tree, and an
+/// ignored path would make that delete unfalsifiable — a regression would leave
+/// the file invisible to `git status` instead of visibly wrong.
+const COMMIT_MESSAGE_DELIVERABLE: &str = ".bloomery-commit-message";
 
 /// The lane-owned in-repo instruction source (#3572). Embedded at build time so
 /// the construct lane owns its process natively — the prompt is assembled from
@@ -29,14 +43,44 @@ const CONSTRUCT_INSTRUCTIONS: &str = include_str!("construct_instructions.md");
 fn stamp_construct_evidence(
     nonce: Option<&str>,
     produced_candidate: bool,
+    commit_message: Option<&str>,
     record: &serde_json::Value,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut evidence = serde_json::json!({
         "command": CONSTRUCT_IMPLEMENT,
         "nonce": nonce,
         "produced_candidate": produced_candidate,
         "result_record": record,
-    })
+    });
+    // Presence-driven, like the review lane's `findings`: a run that wrote no
+    // deliverable stamps no key at all, so the host reads absence as "this run
+    // named nothing" rather than as an empty message it might use as a subject.
+    if let Some(message) = commit_message
+        && let Some(object) = evidence.as_object_mut()
+    {
+        object.insert("commit_message".to_owned(), serde_json::Value::String(message.to_owned()));
+    }
+    evidence
+}
+
+/// Read the run's commit-message deliverable out of `worktree` and remove it,
+/// returning the message when the agent left a non-empty one.
+///
+/// The remove is the load-bearing half and runs whether or not the read
+/// succeeded: the host stages the whole worktree once this process exits, so a
+/// deliverable still on disk would land inside the captured candidate tree. A
+/// removal that itself fails warns rather than failing the lane — the message is
+/// already in hand, and losing the run over a stray file would cost the whole
+/// model attempt.
+fn take_commit_message(worktree: &Path) -> Option<String> {
+    let path = worktree.join(COMMIT_MESSAGE_DELIVERABLE);
+    let read = fs::read_to_string(&path);
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => eprintln!("construct lane: could not remove {}: {error}", path.display()),
+    }
+    read.ok().map(|message| message.trim().to_owned()).filter(|message| !message.is_empty())
 }
 
 /// Whether `git status --porcelain` stdout signals a candidate change in the
@@ -92,26 +136,38 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
     );
     let record = run_model_lane(&prompt, args)?;
 
+    // Take the commit-message deliverable before the candidate is inspected, and
+    // in that order for two reasons: the file is gone by the time the host stages
+    // the worktree, and a run whose only change *was* the deliverable does not
+    // read as having produced a candidate.
+    let commit_message = take_commit_message(Path::new("."));
     // Inspect the worktree (cwd) for the candidate change the run's whole job is
     // to leave (#3596): the gate demands a substantive conclusion, and an empty
     // diff is nothing to review. Captured after the child is reaped so it reflects
     // the run's final tree.
     let produced_candidate = capture_produced_candidate(&args.out);
 
-    write_evidence_json(&args.out, &stamp_construct_evidence(args.nonce.as_deref(), produced_candidate, &record))
+    write_evidence_json(
+        &args.out,
+        &stamp_construct_evidence(args.nonce.as_deref(), produced_candidate, commit_message.as_deref(), &record),
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::{env, fs, process};
 
-    use super::{CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, porcelain_signals_candidate, stamp_construct_evidence};
+    use super::{
+        COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, porcelain_signals_candidate,
+        stamp_construct_evidence, take_commit_message,
+    };
     use crate::transform::claude::assemble_construct_prompt;
 
     #[test]
     fn construct_evidence_binds_the_nonce_carries_the_record_and_the_candidate_signal() {
         let record = serde_json::json!({ "cost_usd": 0.42, "num_turns": 3, "input": 1000 });
-        let evidence = stamp_construct_evidence(Some("nonce-7"), true, &record);
+        let evidence = stamp_construct_evidence(Some("nonce-7"), true, None, &record);
         assert_eq!(evidence["command"], CONSTRUCT_IMPLEMENT);
         assert_eq!(evidence["nonce"], "nonce-7", "the broker-matched nonce binds the evidence");
         assert_eq!(
@@ -121,12 +177,70 @@ mod tests {
         assert_eq!(evidence["result_record"]["cost_usd"], 0.42, "the derived cost/turns record is carried");
         assert_eq!(evidence["result_record"]["num_turns"], 3);
 
+        assert!(
+            evidence.get("commit_message").is_none(),
+            "a run that wrote no deliverable stamps no commit_message key at all",
+        );
+
         // An empty-candidate run stamps `false` so the gate can reject it while the
         // derived record is still carried whole.
-        let no_nonce = stamp_construct_evidence(None, false, &serde_json::json!({ "no_result": true }));
+        let no_nonce = stamp_construct_evidence(None, false, None, &serde_json::json!({ "no_result": true }));
         assert!(no_nonce["nonce"].is_null());
         assert_eq!(no_nonce["produced_candidate"], false, "an empty-candidate run stamps false");
         assert_eq!(no_nonce["result_record"]["no_result"], true, "the derived record is carried whole");
+    }
+
+    // The commit-message deliverable rides the evidence envelope whole — the host
+    // reads its first line for the capture subject and the landing proposal's
+    // title, so a stamp that dropped the body would silently cost the proposal
+    // its prose.
+    #[test]
+    fn a_written_deliverable_rides_the_evidence_envelope_whole() {
+        let message = "feat(crate:aether-render): draw the overlay pass\n\nThe world pass owns depth.";
+        let evidence = stamp_construct_evidence(Some("n-1"), true, Some(message), &serde_json::json!({}));
+        assert_eq!(evidence["commit_message"], message, "the message is carried verbatim, body included");
+    }
+
+    // The deliverable is read back *and removed*: the host stages the whole
+    // worktree once this process exits, so a file left behind would land inside
+    // the captured candidate tree (acceptance 4).
+    #[test]
+    fn taking_the_deliverable_returns_the_message_and_removes_the_file() {
+        let worktree = scratch_dir("taken");
+        let path = worktree.join(COMMIT_MESSAGE_DELIVERABLE);
+        fs::write(&path, "fix(crate:aether-fs): reject a traversing path\n\nThe adapter joins.\n").expect("write");
+
+        assert_eq!(
+            take_commit_message(&worktree).as_deref(),
+            Some("fix(crate:aether-fs): reject a traversing path\n\nThe adapter joins."),
+            "the message comes back trimmed of trailing whitespace but otherwise whole",
+        );
+        assert!(!path.exists(), "the deliverable is removed before the host captures the worktree");
+    }
+
+    // Two shapes are the same absence: no file at all, and a file the agent
+    // created but left blank. Neither may present itself as a message, because a
+    // blank subject would assemble a landing title that is not lint-valid.
+    #[test]
+    fn an_absent_or_blank_deliverable_is_no_message() {
+        let worktree = scratch_dir("blank");
+        assert_eq!(take_commit_message(&worktree), None, "no deliverable is no message");
+
+        let path = worktree.join(COMMIT_MESSAGE_DELIVERABLE);
+        fs::write(&path, "  \n\n ").expect("write");
+        assert_eq!(take_commit_message(&worktree), None, "a whitespace-only deliverable is no message");
+        assert!(!path.exists(), "the blank deliverable is still removed");
+    }
+
+    /// A per-test scratch worktree under the system temp dir, unique per call so
+    /// concurrent test threads never collide — the sibling lanes' convention.
+    fn scratch_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = env::temp_dir().join(format!("aether-construct-deliverable-{tag}-{}-{seq}", process::id()));
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
     }
 
     // The candidate signal is a pure map of `git status --porcelain` stdout: a
