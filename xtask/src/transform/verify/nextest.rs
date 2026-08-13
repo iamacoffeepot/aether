@@ -12,10 +12,18 @@
 //!
 //! This module reads the captured log for what it already states. A *compile*
 //! error inside a test target still travels on the rustc channel and is still
-//! the generic distiller's to report; [`distil_test_failures`] answers `None`
-//! for such a log so the caller falls through.
+//! the generic distiller's to report; [`classify`] answers `None` for such a
+//! log so the caller falls through.
+//!
+//! It also splits what it reads (#4895). Every failing test names the package
+//! it lives in, and the umbrella asks of each one whether that package is
+//! inside the candidate's reverse-dependency closure — inside is a finding
+//! about the work, outside is a statement about the host it ran on.
+
+use std::collections::BTreeMap;
 
 use super::MAX_FINDING_LINES;
+use super::closure::Closure;
 
 /// The nextest per-test status words that mean the test did not pass.
 ///
@@ -52,17 +60,70 @@ impl Failure {
         lines.extend(self.message.iter().map(|line| format!("  {line}")));
         lines
     }
+
+    /// The workspace package this test lives in. nextest keys every test by a
+    /// `package::binary` id — a lib unit test's is the bare package name — and
+    /// the package half is the crate whose build the candidate either can or
+    /// cannot have reached.
+    fn package(&self) -> &str {
+        let binary_id = self.test.split_whitespace().next().unwrap_or_default();
+        binary_id.split("::").next().unwrap_or(binary_id)
+    }
 }
 
-/// Distil a `verify.test` log into the failing tests it names, or `None` when
+/// A failing `verify.test` run, split by whether each failing test's package
+/// lies inside the candidate's reverse-dependency closure (#4895).
+pub(super) struct ClassifiedRun {
+    in_closure: Vec<Failure>,
+    out_of_closure: Vec<Failure>,
+    /// Failures nextest's own tally counted that no status line here named — an
+    /// exotic status word, or a summary from a run cut short. Unattributable to
+    /// a package, so they are counted with the candidate's: a failure nobody
+    /// can place is not evidence that the host is at fault.
+    unattributed: usize,
+    /// The closure the split was taken against, as the evidence states it.
+    closure: Option<String>,
+}
+
+impl ClassifiedRun {
+    /// Whether this run said nothing about the candidate: every failure it
+    /// reported lies outside the closure, so none of them is the candidate's to
+    /// repair and handing them to a repair lap asks a model to fix code its
+    /// change cannot reach.
+    pub(super) fn is_environmental(&self) -> bool {
+        self.in_closure.is_empty() && self.unattributed == 0 && !self.out_of_closure.is_empty()
+    }
+
+    /// The failures a repair lap is directed by — the in-closure ones alone.
+    pub(super) fn findings(&self) -> Option<String> {
+        let total = self.in_closure.len() + self.unattributed;
+        render(&self.in_closure, total, &format!("{total} {} failed.", tests_word(total)))
+    }
+
+    /// The out-of-closure block as the lane reports it: how much was classified
+    /// out, which packages it fell in, and against which closure — the receipt
+    /// that makes a misclassification visible instead of silent.
+    pub(super) fn observation(&self) -> Option<String> {
+        let count = self.out_of_closure.len();
+        let header = format!(
+            "{count} failing {} lie outside the candidate's reverse-dependency closure: nothing this diff \
+             touched is linked by the packages they live in, so they are read as an environment fault rather \
+             than handed to a repair lap.\nClosure: {}.\nOut-of-closure failures by package: {}.",
+            tests_word(count),
+            self.closure.as_deref().unwrap_or("none computed"),
+            package_tally(&self.out_of_closure),
+        );
+        render(&self.out_of_closure, count, &header)
+    }
+}
+
+/// Split a `verify.test` log's failing tests against `closure`, or `None` when
 /// it names none — a passing run, or a run that died before any test did, both
 /// of which belong to the generic distiller.
 ///
-/// Truncation keeps whole records in run order and states the drop count, so a
-/// 34-failure run reports as "34 tests failed" with the surviving records
-/// labelled as the first of them, rather than as a silently shortened list the
-/// reader would take for the whole truth.
-pub(super) fn distil_test_failures(log: &str) -> Option<String> {
+/// A `None` closure is the unbounded one: nothing is classified out, and the
+/// run reads exactly as it did before the discrimination existed.
+pub(super) fn classify(log: &str, closure: Option<&Closure>) -> Option<ClassifiedRun> {
     let failures = parse_failures(log);
     if failures.is_empty() {
         return None;
@@ -72,10 +133,27 @@ pub(super) fn distil_test_failures(log: &str) -> Option<String> {
     // `FAILURE_STATUSES` does not carry, so trusting it keeps the "how many
     // were dropped" claim honest. Never below what we are about to print.
     let total = summary_failed_count(log).unwrap_or(failures.len()).max(failures.len());
+    let unattributed = total - failures.len();
+    let (out_of_closure, in_closure): (Vec<Failure>, Vec<Failure>) =
+        failures.into_iter().partition(|failure| closure.is_some_and(|closure| !closure.contains(failure.package())));
+
+    Some(ClassifiedRun { in_closure, out_of_closure, unattributed, closure: closure.map(Closure::describe) })
+}
+
+/// Render `failures` under `header`, keeping whole records in run order inside
+/// the findings budget and stating how many of `total` did not survive it.
+///
+/// A 34-failure run reports as "34 tests failed" with the surviving records
+/// labelled as the first of them, rather than as a silently shortened list the
+/// reader would take for the whole truth.
+fn render(failures: &[Failure], total: usize, header: &str) -> Option<String> {
+    if failures.is_empty() {
+        return None;
+    }
 
     let mut records: Vec<Vec<String>> = Vec::new();
     let mut used = 0;
-    for failure in &failures {
+    for failure in failures {
         let record = failure.render();
         let separator = usize::from(!records.is_empty());
         if used + separator + record.len() > MAX_FINDING_LINES {
@@ -95,8 +173,7 @@ pub(super) fn distil_test_failures(log: &str) -> Option<String> {
     }
 
     let body = records.iter().map(|record| record.join("\n")).collect::<Vec<String>>().join("\n\n");
-    let omitted = total - records.len();
-    let header = format!("{total} {} failed.", tests_word(total));
+    let omitted = total.saturating_sub(records.len());
     if omitted == 0 {
         return Some(format!("{header}\n\n{body}"));
     }
@@ -106,6 +183,17 @@ pub(super) fn distil_test_failures(log: &str) -> Option<String> {
         tests_word(omitted),
         records.len(),
     ))
+}
+
+/// The failures counted by package, one line — the block's shape at a glance,
+/// since a host that runs out of memory tends to take whole suites out at once.
+fn package_tally(failures: &[Failure]) -> String {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for failure in failures {
+        *counts.entry(failure.package()).or_default() += 1;
+    }
+
+    counts.iter().map(|(package, count)| format!("{package} ({count})")).collect::<Vec<String>>().join(", ")
 }
 
 /// Every failing test the log names, in the order the run reported them and
@@ -246,7 +334,15 @@ fn tests_word(count: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_FINDING_LINES, distil_test_failures};
+    use super::super::closure::Closure;
+    use super::{ClassifiedRun, MAX_FINDING_LINES, classify};
+
+    /// The findings a log distils to when nothing bounds the closure — the
+    /// pre-classification reading, which is what every case below is about
+    /// except the ones that name a closure explicitly.
+    fn distil_test_failures(log: &str) -> Option<String> {
+        classify(log, None).as_ref().and_then(ClassifiedRun::findings)
+    }
 
     /// A trimmed capture of a real failing `cargo nextest run` log: two
     /// failures, each stated once as it happens and once in the closing
@@ -391,5 +487,64 @@ error: test run failed
         let distilled = distil_test_failures(log).expect("distils");
 
         assert!(distilled.contains("aether-kit-terrain::proposal_scenario staged_capacity_cycle"));
+    }
+
+    /// A run reporting `failures` as failing tests, with a summary tallying
+    /// `tallied` of them — the two differ only when nextest counted a failure
+    /// whose status word this module does not parse.
+    fn run_reporting(failures: &[&str], tallied: usize) -> String {
+        let body = failures
+            .iter()
+            .map(|test| format!("        FAIL [   0.008s] (  1/900) {test}"))
+            .collect::<Vec<String>>()
+            .join("\n");
+        format!("{body}\n     Summary [  74.6s] 900 tests run: {tallied} failed, 0 skipped\nerror: test run failed\n")
+    }
+
+    #[test]
+    fn a_failures_package_decides_which_side_of_the_closure_it_falls_on() {
+        // Tripwire (#4895): the split keys on the *package* half of nextest's
+        // `package::binary` id, and a lib unit test's id is the bare package
+        // name with no binary half at all. Reading the whole id as the package
+        // would put `aether-data::wire` outside a closure containing
+        // `aether-data` — every integration-test failure in the workspace
+        // excused as weather, which is the direction that lands defects.
+        let log = run_reporting(
+            &[
+                "aether-data::wire round_trips_a_vec3",
+                "aether-data unit_test_in_the_lib",
+                "aether-chassis-hub::fleetharness_engines spawn_headless_connects",
+            ],
+            3,
+        );
+
+        let classified = classify(&log, Some(&Closure::of(&["aether-data"]))).expect("a failing run classifies");
+
+        assert!(!classified.is_environmental(), "two of the three failures are the candidate's");
+        let findings = classified.findings().expect("the in-closure failures reach the findings");
+        assert!(findings.contains("round_trips_a_vec3"), "the integration-test binary's package is aether-data");
+        assert!(findings.contains("unit_test_in_the_lib"), "and so is the bare-id lib test's");
+        assert!(!findings.contains("spawn_headless_connects"), "the out-of-closure failure stays out of the findings");
+        let observation = classified.observation().expect("the out-of-closure half is reported");
+        assert!(observation.contains("aether-chassis-hub (1)"), "tallied by package: {observation}");
+        assert!(observation.contains("aether-data"), "against a closure the reader can check: {observation}");
+    }
+
+    #[test]
+    fn a_failure_the_log_never_named_keeps_the_run_off_the_environmental_verdict() {
+        // Tripwire: nextest's own summary counts failures whose status word this
+        // module does not parse, and an unparsed failure cannot be attributed to
+        // a package at all. Calling such a run environmental would excuse a
+        // defect nobody ever looked at, so the unplaceable ones are counted with
+        // the candidate's.
+        let placed_and_unplaced = run_reporting(&["aether-chassis-hub::fleetharness_engines spawns"], 3);
+        let placed_only = run_reporting(&["aether-chassis-hub::fleetharness_engines spawns"], 1);
+        let closure = Closure::of(&["aether-render"]);
+
+        assert!(!classify(&placed_and_unplaced, Some(&closure)).expect("classifies").is_environmental());
+        assert!(
+            classify(&placed_only, Some(&closure)).expect("classifies").is_environmental(),
+            "with every counted failure placed and every one of them outside, the run judged nothing",
+        );
     }
 }

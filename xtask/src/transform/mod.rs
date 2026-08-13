@@ -112,6 +112,16 @@ struct Evidence {
     /// present and nonempty on a failed umbrella run.
     #[serde(skip_serializing_if = "Option::is_none")]
     failed_verifiers: Option<VerifyFailureSet>,
+    /// What the run declined to charge the candidate for, and why (#4895): the
+    /// failures it read as the host's rather than the work's, the closure it
+    /// judged them against, and what the rerun then said.
+    ///
+    /// Its own channel rather than a section of `findings`, because the two are
+    /// read by different parties. Findings are handed to a repair lap as work;
+    /// this is a receipt for the lane, and a model given it would spend a
+    /// bounded repair roll on a host it cannot reach.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    environment: Option<String>,
 }
 
 /// Assembles the evidence record from a captured run's status — pure
@@ -128,6 +138,9 @@ fn build_evidence(
     Evidence {
         findings,
         failed_verifiers,
+        // The single-command path discriminates nothing: only the umbrella
+        // resolves a closure, so only the umbrella can report against one.
+        environment: None,
         command: command.to_string(),
         nonce,
         status: if passed {
