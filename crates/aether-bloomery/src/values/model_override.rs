@@ -27,6 +27,7 @@ use alloc::string::String;
 use serde::{Deserialize, Serialize};
 
 use crate::ids::StageId;
+use crate::values::stage::dispatched_command;
 use crate::values::{AgentProfile, Harness, ReasoningEffort, StageCatalog, is_model_lane};
 
 /// A per-workpiece override of *how* the model lanes run for this workpiece
@@ -135,25 +136,32 @@ impl ModelOverride {
 
     /// Check that every [`StageOverride`] could actually apply under `catalog`.
     ///
-    /// An entry naming a stage the catalog binds to no model lane is a refusal
-    /// rather than a value nothing reads. The operator authored a sentence about
-    /// which model runs where, and a stage that forks no agent CLI cannot honour
-    /// it — silently keeping the entry would leave them believing a model choice
-    /// took effect while the receipt attests one that never ran.
+    /// An entry naming a stage that dispatches no model transformation is a
+    /// refusal rather than a value nothing reads. The operator authored a
+    /// sentence about which model runs where, and a stage that forks no agent
+    /// cannot honour it — silently keeping the entry would leave them believing
+    /// a model choice took effect while the receipt attests one that never ran.
     ///
-    /// Judged against the sealed `catalog` rather than a fixed list of stages,
-    /// because which stages run a model is exactly what a catalog decides. A
-    /// bloom that seals a catalog moving a model lane onto another stage makes an
-    /// override for that stage meaningful, and this follows it there.
+    /// Judged by the command the stage's dispatch constructs, not by the
+    /// binding's `process`: that string names the host position (`"review"`,
+    /// `"aggregate-review"`), while the dispatched command is what
+    /// [`is_model_lane`] recognizes. The two review stages dispatch
+    /// `review.critic` and burn tokens under the resolved model; their process
+    /// vocabulary must not refuse the pin. The catalog still has to bind the
+    /// keyed stage — an unbound name is a choice nothing resolves.
     ///
     /// # Errors
     ///
-    /// [`OverrideError::StageRunsNoModel`] when `catalog` binds a keyed stage to
-    /// something no model runs.
+    /// [`OverrideError::StageRunsNoModel`] when a keyed stage is unbound or
+    /// dispatches no model transformation.
     pub fn validate(&self, catalog: &StageCatalog) -> Result<(), OverrideError> {
         self.per_stage
             .keys()
-            .find(|stage| !catalog.binding(**stage).is_some_and(|binding| is_model_lane(&binding.process)))
+            .find(|stage| {
+                !catalog
+                    .binding(**stage)
+                    .is_some_and(|binding| dispatched_command(binding.stage).is_some_and(is_model_lane))
+            })
             .map_or(Ok(()), |stage| Err(OverrideError::StageRunsNoModel(*stage)))
     }
 }
@@ -174,7 +182,8 @@ pub struct ResolvedModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::values::ToolPolicy;
+    use crate::digest::Digest;
+    use crate::values::{ToolPolicy, Transformation};
 
     fn profile(model: &str, effort: ReasoningEffort) -> AgentProfile {
         AgentProfile { harness: Harness::Claude, model: String::from(model), effort, tools: ToolPolicy::Full }
@@ -265,13 +274,15 @@ mod tests {
         assert_eq!(construct.effort, ReasoningEffort::Medium, "an unnamed stage takes the member-wide effort");
     }
 
-    // Tripwire: an entry that could never apply is refused, not carried. The
-    // catalog decides which stages fork an agent, so the check reads it rather
-    // than a second hand-maintained list — a bloom sealing a catalog that moves a
-    // model lane elsewhere makes an override for that stage legitimate, and this
-    // must follow rather than contradict it.
+    // Tripwire: the seal door and the dispatch overlay honour the same stages.
+    // A key validate admits is a key some constructor's command is a model lane,
+    // and a key some constructor's command is a model lane is a key validate
+    // admits. Review and AggregateReview dispatch `review.critic` (a model lane)
+    // even though their binding process is host-position vocabulary that
+    // `is_model_lane` rejects — judging process was the live seal bounce.
+    // Verify and the other mechanical / pre-seal stages stay refused.
     #[test]
-    fn an_entry_for_a_stage_that_runs_no_model_is_refused() {
+    fn admitted_override_keys_are_exactly_the_stages_whose_dispatch_runs_a_model() {
         let line = StageCatalog::line();
         let for_stage = |stage| ModelOverride {
             per_stage: BTreeMap::from([(
@@ -281,14 +292,53 @@ mod tests {
             ..ModelOverride::default()
         };
 
-        assert_eq!(for_stage(StageId::Construct).validate(&line), Ok(()));
-        assert_eq!(for_stage(StageId::Refine).validate(&line), Ok(()));
-        assert_eq!(
-            for_stage(StageId::Verify).validate(&line),
-            Err(OverrideError::StageRunsNoModel(StageId::Verify)),
-            "Verify is mechanical and zero-egress; naming it chooses a model nothing forks"
-        );
+        for stage in StageId::ALL {
+            let override_ = for_stage(*stage);
+            let admitted = override_.validate(&line);
+            let dispatch_runs_model =
+                command_the_stage_dispatches(*stage).is_some_and(|command| is_model_lane(&command));
+
+            match (admitted, dispatch_runs_model) {
+                (Ok(()), true) => {
+                    let resolved = override_.resolve(*stage, &StageCatalog::profile_of(*stage));
+                    assert_eq!(
+                        (resolved.harness, resolved.model.as_str()),
+                        (Harness::Claude, "claude-opus-5"),
+                        "{stage:?} must resolve the keyed agent its dispatch runs"
+                    );
+                }
+                (Err(OverrideError::StageRunsNoModel(refused)), false) => {
+                    assert_eq!(refused, *stage);
+                }
+                (admitted, dispatch_runs_model) => {
+                    panic!(
+                        "{stage:?}: validate returned {admitted:?}, but dispatch model-lane is {dispatch_runs_model}"
+                    );
+                }
+            }
+        }
+
         assert_eq!(ModelOverride::default().validate(&line), Ok(()), "overriding nothing is always sealable");
+    }
+
+    fn command_the_stage_dispatches(stage: StageId) -> Option<String> {
+        let binding = StageCatalog::binding_of(stage);
+        let digest = Digest::from_bytes([0; 32]);
+        match stage {
+            StageId::Construct | StageId::Refine | StageId::Review | StageId::Verify => {
+                Some(Transformation::for_member_stage(&binding, digest, digest, digest).command)
+            }
+            StageId::AggregateReview => {
+                Some(Transformation::for_aggregate_review(&binding, digest, digest, digest).command)
+            }
+            StageId::AggregateVerify => Some(Transformation::for_aggregate_verify(&binding, digest, digest).command),
+            StageId::Sketch
+            | StageId::Scope
+            | StageId::Approve
+            | StageId::Integrate
+            | StageId::Land
+            | StageId::Study => None,
+        }
     }
 
     // Tripwire: harness and model move as one, in both directions. An override
