@@ -1,6 +1,6 @@
 # ADR-0190: The journal records its decisions
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-13
 
 ## Context
