@@ -58,9 +58,11 @@ use aether_bloomery::{
 use serde::Serialize;
 
 use crate::client::{
-    ChecksState, GitDataApi, GithubApi, GithubError, MergeResult, NewPullRequest, PullRequestApi, PullRequestState,
+    ChecksState, GitDataApi, GitRef, GithubApi, GithubError, MergeResult, NewPullRequest, PullRequestApi,
+    PullRequestState,
 };
 use crate::correspondence::GitObjectId;
+use crate::mainline::MainlineRef;
 use crate::short_hex;
 
 /// The value the integrated-head digest content-addresses (issue #3615): a
@@ -220,18 +222,6 @@ impl From<CorrespondenceError> for SourceError {
     }
 }
 
-/// The mainline ref this backend reads to check a bloom's sealed base on
-/// `land`. It is never written: a protected mainline moves only when a landing
-/// proposal is accepted.
-const MAINLINE_REF: &str = "heads/main";
-
-/// The mainline branch name a landing is proposed onto — [`MAINLINE_REF`]
-/// without its `heads/` prefix, derived rather than spelled twice so the two
-/// cannot drift onto different branches.
-fn mainline_branch() -> &'static str {
-    MAINLINE_REF.strip_prefix("heads/").unwrap_or(MAINLINE_REF)
-}
-
 /// The content-derived address of the commit mainline became when a landing
 /// was accepted. The accepting backend produces that commit (a squash accept
 /// produces one that is *not* the proposed head), so nothing on our side has
@@ -283,10 +273,20 @@ pub fn landing_floor_title(bloom: &BloomId) -> String {
 /// it names the bloom and both ends of the swap rather than restating the whole
 /// spec, and it sits below the assembled body because the change is what a
 /// reader came for and the provenance is what they check afterwards.
-fn render_provenance_footer(bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> String {
+///
+/// It names the mainline ref alongside the two digests (ADR-0186): which branch
+/// bloomery integrates on is boot configuration and moves per day, so a reader
+/// of an older proposal should not have to reconstruct which ref it was aimed at
+/// from the coordinator's configuration at the time.
+fn render_provenance_footer(
+    bloom: &BloomId,
+    expected_base: &Digest,
+    new_head: &Digest,
+    mainline: &MainlineRef,
+) -> String {
     format!(
         "---\n\n\
-         Landing bloom `{}`.\n\n\
+         Landing bloom `{}` onto `{mainline}`.\n\n\
          - sealed base: `{}`\n\
          - resolved head: `{}`\n\n\
          Bloomery opened this proposal after the bloom resolved and its aggregate \
@@ -306,9 +306,10 @@ fn render_landing_proposal(
     bloom: &BloomId,
     expected_base: &Digest,
     new_head: &Digest,
+    mainline: &MainlineRef,
     proposal: Option<&LandingProposal>,
 ) -> (String, String) {
-    let footer = render_provenance_footer(bloom, expected_base, new_head);
+    let footer = render_provenance_footer(bloom, expected_base, new_head, mainline);
     let title = proposal.and_then(|proposal| proposal.title.clone()).unwrap_or_else(|| landing_floor_title(bloom));
     let body = match proposal.map(|proposal| proposal.body.trim()) {
         Some(assembled) if !assembled.is_empty() => format!("{assembled}\n\n{footer}"),
@@ -428,15 +429,26 @@ pub struct GitSource<C: GitDataApi + PullRequestApi + GithubApi> {
     client: C,
     correspondence: SharedCorrespondence,
     cas_land_enabled: bool,
+    mainline: MainlineRef,
 }
 
 impl<C: GitDataApi + PullRequestApi + GithubApi> GitSource<C> {
     /// Build a source backend over `client` and `correspondence`, with mainline
     /// landing gated by `cas_land_enabled` (`false` is the kill switch under
     /// which `land` refuses; production wires it on, per ADR-0149 migration
-    /// step 3).
-    pub fn new(client: C, correspondence: SharedCorrespondence, cas_land_enabled: bool) -> Self {
-        Self { client, correspondence, cas_land_enabled }
+    /// step 3) and every mainline read aimed at `mainline` (ADR-0186 — the host
+    /// resolves which ref that is at boot).
+    pub fn new(client: C, correspondence: SharedCorrespondence, cas_land_enabled: bool, mainline: MainlineRef) -> Self {
+        Self { client, correspondence, cas_land_enabled, mainline }
+    }
+
+    // The live mainline ref, or the clean `MissingRef` naming the ref that is
+    // not there — the one read every mainline path goes through, so observation
+    // and the land compare can never end up aimed at different branches.
+    fn mainline_head(&self) -> Result<GitRef, SourceError> {
+        self.client
+            .get_ref(self.mainline.git_ref())?
+            .ok_or_else(|| SourceError::MissingRef(self.mainline.git_ref().to_owned()))
     }
 
     /// Borrow the underlying client (test introspection).
@@ -814,9 +826,7 @@ impl<C: GitDataApi + PullRequestApi + GithubApi> SourceBackend for GitSource<C> 
         // Read the live mainline ref, resolving no correspondence — the genesis
         // reconcile seeds the base↔head correspondence *from* this sha, so it
         // cannot itself depend on a recorded correspondence (#3615).
-        let current =
-            self.client.get_ref(MAINLINE_REF)?.ok_or_else(|| SourceError::MissingRef(MAINLINE_REF.to_owned()))?;
-        Ok(current.sha)
+        Ok(self.mainline_head()?.sha)
     }
 
     fn observe_mainline_head(&self) -> Result<Digest, Self::Error> {
@@ -1272,12 +1282,10 @@ impl<C: GitDataApi + PullRequestApi + GithubApi> LandingSource for GitSource<C> 
             return Ok(LandOutcome::Proposed { number: existing.number });
         }
 
-        let current =
-            self.client.get_ref(MAINLINE_REF)?.ok_or_else(|| SourceError::MissingRef(MAINLINE_REF.to_owned()))?;
         // Reverse-resolve the real mainline object (a sha1/40-hex on a real repo,
         // which the old fixed-64-hex gate rejected as `Malformed` before any swap)
         // to the base digest, then compare against the sealed base.
-        let actual = self.mainline_digest(&current.sha)?;
+        let actual = self.mainline_digest(&self.mainline_head()?.sha)?;
 
         if actual != *expected_base {
             return Ok(LandOutcome::BaseMoved { expected: *expected_base, actual });
@@ -1286,8 +1294,8 @@ impl<C: GitDataApi + PullRequestApi + GithubApi> LandingSource for GitSource<C> 
         // Forward-resolve the new head digest to its real git object, point the
         // bloom's landing branch at it, and propose that branch onto mainline.
         self.point_landing_branch(bloom, &self.resolve_git_sha(new_head, "land new head digest")?)?;
-        let (title, body) = render_landing_proposal(bloom, expected_base, new_head, proposal);
-        let opening = NewPullRequest { title, body, head: branch.clone(), base: mainline_branch().to_owned() };
+        let (title, body) = render_landing_proposal(bloom, expected_base, new_head, &self.mainline, proposal);
+        let opening = NewPullRequest { title, body, head: branch.clone(), base: self.mainline.branch().to_owned() };
         match self.client.create_pull_request(&opening) {
             Ok(opened) => Ok(LandOutcome::Proposed { number: opened.number }),
             // A 422 is the duplicate-head refusal: something opened a proposal
@@ -1322,8 +1330,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        ADMISSION_REF, EMPTY_TREE, GitSource, SourceError, landing_branch, parse_bloom_line, render_claim_message,
-        render_tombstone_message, to_hex,
+        ADMISSION_REF, EMPTY_TREE, GitSource, MainlineRef, SourceError, landing_branch, parse_bloom_line,
+        render_claim_message, render_tombstone_message, to_hex,
     };
     use crate::client::{GitDataApi, PullRequestApi};
     use crate::short_hex;
@@ -1342,9 +1350,15 @@ mod tests {
 
     // A `GitSource` over `fake` as both its git-data client and its correspondence
     // store — one in-process double serves both seams, so a test seeds git objects
-    // and their correspondences into the same fake.
+    // and their correspondences into the same fake. On the default mainline, which
+    // is what `seeded` and every unconfigured deployment operate on.
     fn git_source(fake: &FakeGithub, cas_land_enabled: bool) -> GitSource<FakeGithub> {
-        GitSource::new(fake.clone(), Arc::new(fake.clone()), cas_land_enabled)
+        git_source_on(fake, cas_land_enabled, MainlineRef::default())
+    }
+
+    // The same double, pointed at an explicitly configured mainline (ADR-0186).
+    fn git_source_on(fake: &FakeGithub, cas_land_enabled: bool, mainline: MainlineRef) -> GitSource<FakeGithub> {
+        GitSource::new(fake.clone(), Arc::new(fake.clone()), cas_land_enabled, mainline)
     }
 
     fn bloom() -> BloomId {
@@ -1602,7 +1616,8 @@ mod tests {
         let candidate = digest(50);
         fake.seed_git_object(&candidate);
 
-        let faulting = GitSource::new(fake.clone(), Arc::new(RecordFaults(fake.clone())), false);
+        let faulting =
+            GitSource::new(fake.clone(), Arc::new(RecordFaults(fake.clone())), false, MainlineRef::default());
         assert!(faulting.integrate(&bloom, &candidate, &expected).is_err(), "the store fault surfaces");
 
         // The retry runs against a working store and still sees its own
@@ -1710,6 +1725,60 @@ mod tests {
         // a failure no fake-backed test would otherwise catch.
         assert_eq!(fake.ref_target("heads/main"), Some(mainline_sha1), "land never writes mainline");
         assert!(fake.get_pull_request(number).unwrap().is_some(), "the proposal exists");
+    }
+
+    // Tripwire: a repoint moves every mainline read at once (ADR-0186). The
+    // observation, the compare-and-swap base check, and the proposal's base are
+    // three separate reads of the same ref, and a slip back to `main` on any one
+    // of them is silent: the observation would name a head the day branch never
+    // held, the compare would refuse a base that had not moved, and the proposal
+    // would aim yesterday's landing at the branch bloomery no longer owns. So
+    // `main` is seeded here too, at a different commit, and every assertion is
+    // one the default ref would fail.
+    #[test]
+    fn a_repointed_mainline_observes_compares_and_proposes_against_the_configured_ref() {
+        let fake = FakeGithub::new();
+        let bloom = bloom();
+        let day = MainlineRef::new("refs/heads/bloomery/daily/2026-08-13");
+        let base = digest(10);
+        let day_sha = "a1".repeat(20);
+        fake.seed_ref(day.git_ref(), &day_sha);
+        fake.seed_correspondence(&base, &day_sha);
+        fake.seed_ref("heads/main", &"b2".repeat(20));
+        let new_head = digest(90);
+        fake.seed_git_object(&new_head);
+
+        let source = git_source_on(&fake, true, day.clone());
+
+        assert_eq!(source.mainline_head_sha().unwrap(), day_sha, "the observation reads the configured ref");
+        assert_eq!(source.observe_mainline_head().unwrap(), base, "and names the base the day branch sits at");
+
+        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head).unwrap() else {
+            panic!("the sealed base is what the day branch holds, so the land proposes");
+        };
+        assert_eq!(
+            fake.get_pull_request(number).unwrap().expect("the proposal exists").base,
+            day.branch(),
+            "the landing is proposed onto the day branch",
+        );
+        let (_, body) = fake.pull_request_proposal(number).expect("the proposal's prose is recorded");
+        assert!(body.contains(&day.to_string()), "the provenance footer names the ref it lands onto: {body}");
+    }
+
+    // Tripwire: a mainline ref that is not there names *itself* in the refusal.
+    // An operator who repoints at a branch they have not cut yet reads this
+    // message, and a stale `heads/main` in it would send them looking at a ref
+    // that is present and fine.
+    #[test]
+    fn an_absent_configured_mainline_names_the_ref_it_looked_for() {
+        let fake = FakeGithub::new();
+        let day = MainlineRef::new("refs/heads/bloomery/daily/2026-08-13");
+        fake.seed_ref("heads/main", &"b2".repeat(20));
+
+        match git_source_on(&fake, true, day.clone()).mainline_head_sha() {
+            Err(SourceError::MissingRef(name)) => assert_eq!(name, day.git_ref()),
+            other => panic!("expected MissingRef naming the configured ref, got {other:?}"),
+        }
     }
 
     // Tripwire: issuing a land is idempotent. The land outbox re-drains on any

@@ -44,8 +44,8 @@ use aether_bloomery::{
     ResolutionClaim, ResolvedConfigs, SealConflict, SealError, Snapshot, SupersedeError, TransferSeal, WorkpieceId,
     reduce,
 };
-use aether_bloomery_github::GitSource;
 use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::{GitSource, MainlineRef};
 use aether_chassis_bloomery::bloomery::SourceShell;
 use aether_chassis_bloomery::source::SourceCapabilityState;
 use aether_chassis_bloomery::source::kinds::{ClaimResult, CompleteReleaseResult};
@@ -148,7 +148,7 @@ fn land(snapshot: Snapshot, spec: &BloomSpec, tree: u8, head: u8) -> (Snapshot, 
 /// The source capability over a fresh in-process fake, claims live.
 fn claim_state() -> (SourceCapabilityState, FakeGithub) {
     let fake = FakeGithub::new();
-    let backend = GitSource::new(fake.clone(), Arc::new(fake.clone()), false);
+    let backend = GitSource::new(fake.clone(), Arc::new(fake.clone()), false, MainlineRef::default());
     (SourceCapabilityState::new(SourceShell::new(Arc::new(backend))), fake)
 }
 
