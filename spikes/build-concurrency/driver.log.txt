@@ -1,0 +1,17 @@
+10:18:25 == cellB-start ==
+10:22:08 cellB exit=0
+10:22:08 == cellB-end ==
+10:22:09 target size 100G, free 171G -> cold concurrency N=2
+10:22:15 == cellC-start ==
+10:27:55 cellC exit=0
+10:27:55 == cellC-end ==
+10:27:55 == cellD-start ==
+10:31:04 cellD exit=0
+10:31:04 == cellD-end ==
+10:31:08 == cellA-start ==
+10:34:11 cellA exit=0 (137/oom = the uncapped build does not fit under 26G)
+10:34:11 == cellA-end ==
+100	/mnt/dev/tmp/build-spike/c1
+104	/mnt/dev/tmp/build-spike/c2
+/dev/nvme1n1p3  499G  426G   68G  87% /mnt/dev
+10:34:12 DONE
