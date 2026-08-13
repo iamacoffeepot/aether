@@ -24,15 +24,19 @@
 //!   What it cannot say is whether a dispatch ever got as far as materializing
 //!   anything locally.
 //! - The scratch root is authoritative for **what was materialized locally**. A
-//!   directory under the local backend's `base_dir` is the dispatch's own record
-//!   that it went to the local lane, surviving independently of any process
-//!   memory. What it cannot say is whether the order that made it is still live
-//!   — a directory name is a nonce, not a claim.
+//!   dispatch's evidence directory under the local backend's `base_dir` is its
+//!   own record that it went to the local lane, surviving independently of any
+//!   process memory — and it names the lane slot the dispatch was building in,
+//!   which is what a re-adopted run needs in order to hold that slot again
+//!   instead of leaving it to be handed out under a live child. What it cannot
+//!   say is whether the order that made it is still live: a directory name is a
+//!   nonce, not a claim.
 //!
 //! Intersected, the two answer the question either one leaves open. A live order
-//! with a local footprint is a run to re-adopt; a footprint with no live order is
-//! an abandoned checkout to reclaim; a live order with no footprint has nothing
-//! local to reclaim and keeps the Actions fallback, which is where it went.
+//! with a local footprint is a run to re-adopt; a nonce-keyed checkout with no
+//! live order is an abandoned one to reclaim; a live order with no footprint has
+//! nothing local to reclaim and keeps the Actions fallback, which is where it
+//! went.
 //!
 //! # The child process is out of reach, deliberately
 //!

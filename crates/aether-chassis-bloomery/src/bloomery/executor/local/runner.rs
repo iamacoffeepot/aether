@@ -11,8 +11,8 @@ use aether_bloomery::BackendObjectId;
 
 use super::error::LocalExecutorError;
 
-/// The fully-resolved spawn request a [`TransformRunner`] materializes: the
-/// scratch worktree to check the subject into, the evidence dir the run writes
+/// The fully-resolved spawn request a [`TransformRunner`] materializes: the lane
+/// slot's checkout to bring to the subject, the evidence dir the run writes
 /// `evidence.json` to, and the `cargo xtask transform` argv shape.
 pub struct RunSpec<'a> {
     /// The typed transform command id (`verify.*` or `construct.implement`).
@@ -25,7 +25,8 @@ pub struct RunSpec<'a> {
     /// working-tree contract every member lane runs under; `Some` is the
     /// committed range an aggregate review judges.
     pub diff_base_hex: Option<&'a str>,
-    /// Absolute path the scratch worktree is created at (keyed by nonce).
+    /// Absolute path of the lane slot's canonical checkout — where this dispatch
+    /// builds, and where every later dispatch in the same slot builds too.
     pub worktree_dir: &'a Path,
     /// Absolute path the run writes its `evidence.json` to (`--out`).
     pub evidence_dir: &'a Path,
@@ -84,10 +85,14 @@ pub trait TransformRunner: Send + Sync {
     /// The worktree checkout or the child spawn failed.
     fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError>;
 
-    /// Release a run's scratch worktree once it reaches a terminal state — a
-    /// cancel, or a consumed evidence read. Best-effort teardown that the backend
-    /// logs on failure rather than propagating, so a leaked-worktree cleanup miss
-    /// never fails the cancel the kill already completed or the evidence stream.
+    /// Tear down an abandoned checkout: remove the directory and the `git
+    /// worktree` registration together.
+    ///
+    /// Boot reconciliation's reclaim, and only that. A run's own terminal path
+    /// releases the lane *slot* rather than the checkout in it — the path is
+    /// canonical and the next dispatch to hold the slot resets the tree — so what
+    /// reaches this seam is a checkout no order is waiting on and no slot claims:
+    /// a nonce-keyed one left by a coordinator from before that layout.
     ///
     /// # Errors
     /// The worktree teardown (the `git worktree remove` shell-out) failed.
@@ -97,10 +102,11 @@ pub trait TransformRunner: Send + Sync {
     ///
     /// The boot reconciliation's discriminator (issue #4847): the scratch root is
     /// a configured path, so a directory listing of it proves nothing about who
-    /// made an entry, while a registration at `base_dir/<nonce>` can only have
-    /// come from this backend's own [`start`](Self::start). Paths outside the
-    /// root are the caller's to filter — this seam reports what the repository
-    /// knows, not what the backend owns.
+    /// made an entry, while a registration under `base_dir` can only have come
+    /// from this backend's own [`start`](Self::start). Which of those are the
+    /// lane slots' — reused rather than reclaimable — and which are abandoned is
+    /// the caller's to tell apart, as are paths outside the root: this seam
+    /// reports what the repository knows, not what the backend owns.
     ///
     /// # Errors
     /// The registration read (the `git worktree list` shell-out) failed.
@@ -110,9 +116,10 @@ pub trait TransformRunner: Send + Sync {
     /// (ADR-0152): stage and commit everything in the run worktree under the
     /// bloomery's own identity and return the produced commit + tree object ids,
     /// or `Ok(None)` when the worktree is clean (nothing to capture). Runs on
-    /// the run's terminal path, before [`release`](Self::release) discards the
-    /// worktree — and only in the host's trust domain: the child never stages,
-    /// commits, or holds credentials.
+    /// the run's terminal path, while the slot's checkout still holds the work —
+    /// which is until the next dispatch takes that slot and resets it — and only
+    /// in the host's trust domain: the child never stages, commits, or holds
+    /// credentials.
     ///
     /// `message` is the commit message the run's own lane wrote, when it wrote
     /// one: the model that made the change names it, and the capture commits
