@@ -289,7 +289,7 @@ impl LocalExecutor {
     /// `build_jobs` (`0` leaves cargo's own default).
     ///
     /// An empty `configured` keeps the default arrangement, and so does one that
-    /// resolves inside a slot checkout — see [`usable_target_base`], which is
+    /// resolves inside a slot checkout — see `usable_target_base`, which is
     /// where the refusal and its reason live.
     #[must_use]
     pub fn with_lane_build(mut self, configured: &str, build_jobs: usize) -> Self {
