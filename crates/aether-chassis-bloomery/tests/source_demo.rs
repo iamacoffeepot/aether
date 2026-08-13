@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use aether_bloomery::{BloomId, Digest, IntegrateOutcome, LandOutcome, LandProposal};
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GitSource, SourceError};
+use aether_bloomery_github::{GitSource, MainlineRef, SourceError};
 use aether_chassis_bloomery::bloomery::SourceShell;
 
 fn digest(seed: u8) -> Digest {
@@ -43,7 +43,7 @@ fn demo() -> (SourceShell, FakeGithub, BloomId, Digest) {
     fake.seed_ref_at("heads/main", &base);
 
     let bloom = BloomId(digest(1));
-    let backend = GitSource::new(fake.clone(), Arc::new(fake.clone()), false);
+    let backend = GitSource::new(fake.clone(), Arc::new(fake.clone()), false, MainlineRef::default());
     backend.create_namespace(&bloom, &base).unwrap();
     (SourceShell::new(Arc::new(backend)), fake, bloom, base)
 }
@@ -94,7 +94,8 @@ fn land_proposes_the_new_head_and_observes_the_acceptance_when_enabled() {
     // A second shell over the same fake with the gate enabled: the guard passes
     // against the expected base and a landing proposal is opened. The new head's
     // git-object correspondence is seeded so the landing branch resolves.
-    let enabled = SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake.clone()), true)));
+    let enabled =
+        SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake.clone()), true, MainlineRef::default())));
     let new_head = digest(90);
     fake.seed_git_object(&new_head);
     let number = match enabled.land(&bloom, &base, &new_head, None).unwrap() {

@@ -441,6 +441,7 @@ impl NativeActor for SourceCapability {
         tracing::info!(
             target: "aether_chassis_bloomery::source",
             claims_enabled,
+            mainline_ref = %config.mainline,
             "source shell connected"
         );
         Ok(SourceCapabilityState { shell, claims_enabled })

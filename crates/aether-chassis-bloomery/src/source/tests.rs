@@ -12,8 +12,8 @@
 use std::sync::Arc;
 
 use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind, ClaimRefState, Digest, WorkpieceId};
-use aether_bloomery_github::GitSource;
 use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::{GitSource, MainlineRef};
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::kinds::{ClaimResult, CompleteReleaseResult, EnumerateClaimsResult, LandResult, SnapshotResult};
@@ -33,7 +33,7 @@ fn workpiece(id: &str) -> WorkpieceId {
 /// branch, so they need no base commit.
 fn claim_state() -> SourceCapabilityState {
     let fake = FakeGithub::new();
-    let backend = GitSource::new(fake.clone(), Arc::new(fake), false);
+    let backend = GitSource::new(fake.clone(), Arc::new(fake), false, MainlineRef::default());
     SourceCapabilityState::new(SourceShell::new(Arc::new(backend)))
 }
 
@@ -47,7 +47,7 @@ fn state_over_fake(cas_land_enabled: bool) -> (SourceCapabilityState, FakeGithub
     fake.seed_ref_at("heads/main", &base);
 
     let bloom = BloomId(digest(1));
-    let backend = GitSource::new(fake.clone(), Arc::new(fake.clone()), cas_land_enabled);
+    let backend = GitSource::new(fake.clone(), Arc::new(fake.clone()), cas_land_enabled, MainlineRef::default());
     backend.create_namespace(&bloom, &base).unwrap();
     (SourceCapabilityState::new(SourceShell::new(Arc::new(backend))), fake, bloom, base)
 }

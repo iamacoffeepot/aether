@@ -14,8 +14,8 @@ use aether_bloomery::{
     BloomId, ClaimHolder, ClaimOutcome, ClaimRefKind, Digest, Event, Fact, OrphanClaimRelease,
     OrphanClaimReleaseCompletion, OrphanClaimReleasePayload, Topic, WorkpieceId,
 };
-use aether_bloomery_github::GitSource;
 use aether_bloomery_github::testing::FakeGithub;
+use aether_bloomery_github::{GitSource, MainlineRef};
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::runtime::drain_and_release;
@@ -33,7 +33,7 @@ fn workpiece(name: &str) -> WorkpieceId {
 
 fn shell() -> SourceShell {
     let fake = FakeGithub::new();
-    SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), true)))
+    SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), true, MainlineRef::default())))
 }
 
 // Enqueue one authorized release on the release topic — the bytes the reducer's

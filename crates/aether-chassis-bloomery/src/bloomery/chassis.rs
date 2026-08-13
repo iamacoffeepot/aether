@@ -124,14 +124,15 @@ fn correspondence_store(
 #[cfg(feature = "github")]
 fn source_shell(
     github: &GithubConnectionConfig,
+    coordinator: &CoordinatorConfig,
     correspondence: SharedCorrespondence,
 ) -> Result<SourceShell, BootError> {
     #[cfg(any(test, feature = "testing"))]
     if github.uses_fixture() {
-        return Ok(github.fixture_source(correspondence));
+        return Ok(github.fixture_source(coordinator.mainline(), correspondence));
     }
 
-    SourceShell::connect(github, correspondence).map_err(|error| BootError::Other(Box::new(error)))
+    SourceShell::connect(github, coordinator, correspondence).map_err(|error| BootError::Other(Box::new(error)))
 }
 
 #[cfg(feature = "github")]
@@ -154,7 +155,7 @@ fn actor_setups(
     let configured = github.uses_fixture() || github.missing_connection_knobs().is_empty();
     let repository = configured.then(|| (github.owner.clone(), github.repo.clone()));
     let correspondence = correspondence_store(github, &coordinator.store_path)?;
-    let source = source_shell(github, Arc::clone(&correspondence))?;
+    let source = source_shell(github, coordinator, Arc::clone(&correspondence))?;
     let executor = (!(!configured && !coordinator.local_lane_enabled))
         .then(|| ExecutorShell::connect(github, coordinator, Arc::clone(&correspondence)))
         .transpose()
@@ -205,7 +206,7 @@ fn actor_setups(
             store_path: coordinator.store_path.clone(),
             poll_interval_secs: coordinator.poll_interval_secs,
         },
-        source: SourceSetup { shell: source, claims_enabled: configured },
+        source: SourceSetup { shell: source, claims_enabled: configured, mainline: coordinator.mainline() },
     })
 }
 

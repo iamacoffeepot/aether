@@ -28,7 +28,7 @@ use aether_bloomery::{
 };
 use aether_bloomery_github::{GitObjectId, GitSource, GithubError, LandingProposal, LandingSource, SourceError};
 
-use super::GithubConnectionConfig;
+use super::{CoordinatorConfig, GithubConnectionConfig};
 
 /// The source cap shell: the git source backend behind an `Arc<dyn …>`, so no
 /// core module ever names the concrete github-crate type. A live (connected)
@@ -68,14 +68,29 @@ impl SourceShell {
     /// Connect a live GitHub-backed source port from resolved config, over the
     /// persisted correspondence (ADR-0150). The `cas_land_enabled` knob gates
     /// `land` — on by default since ADR-0149 migration step 3 made the CAS `land`
-    /// the landing of record; a `false` knob is the explicit kill switch.
+    /// the landing of record; a `false` knob is the explicit kill switch. The
+    /// coordinator's `mainline_ref` says which branch every mainline read
+    /// addresses (ADR-0186).
+    ///
+    /// Takes both configs the way [`ExecutorShell::connect`](super::ExecutorShell::connect)
+    /// does: the connection knobs say where the port talks, the coordinator knobs
+    /// say how this deployment is being operated, and the port needs one of each.
     ///
     /// # Errors
     /// The underlying `reqwest` client or the correspondence store could not be
     /// constructed.
-    pub fn connect(config: &GithubConnectionConfig, correspondence: SharedCorrespondence) -> Result<Self, GithubError> {
+    pub fn connect(
+        config: &GithubConnectionConfig,
+        coordinator: &CoordinatorConfig,
+        correspondence: SharedCorrespondence,
+    ) -> Result<Self, GithubError> {
         let client = config.connect_client()?;
-        let backend = Arc::new(GitSource::new(client, Arc::clone(&correspondence), config.cas_land_enabled));
+        let backend = Arc::new(GitSource::new(
+            client,
+            Arc::clone(&correspondence),
+            config.cas_land_enabled,
+            coordinator.mainline(),
+        ));
         Ok(Self { backend, correspondence: Some(correspondence) })
     }
 
@@ -358,7 +373,7 @@ impl SourceShell {
 mod tests {
     use aether_bloomery::{BackendObjectId, SharedCorrespondence};
     use aether_bloomery_github::testing::FakeGithub;
-    use aether_bloomery_github::{GitObjectId, GitSource};
+    use aether_bloomery_github::{GitObjectId, GitSource, MainlineRef};
 
     use super::{
         Arc, BloomId, Digest, IntegrateOutcome, LandOutcome, LandProposal, LandingSource, Snapshot, SourceError,
@@ -373,7 +388,7 @@ mod tests {
         // without the live mainline read that supplies the sha.
         let fake = FakeGithub::new();
         let correspondence: SharedCorrespondence = Arc::new(fake.clone());
-        let backend = Arc::new(GitSource::new(fake, Arc::clone(&correspondence), true));
+        let backend = Arc::new(GitSource::new(fake, Arc::clone(&correspondence), true, MainlineRef::default()));
         let shell = SourceShell { backend, correspondence: Some(Arc::clone(&correspondence)) };
 
         let base = Digest::from_bytes([7; 32]);
@@ -409,7 +424,7 @@ mod tests {
 
         let opening_head = fake.seed_commit_with_message("opening", &tree_sha);
         fake.seed_ref("heads/main", &opening_head);
-        let backend = Arc::new(GitSource::new(fake.clone(), Arc::clone(&correspondence), true));
+        let backend = Arc::new(GitSource::new(fake.clone(), Arc::clone(&correspondence), true, MainlineRef::default()));
         let shell = SourceShell { backend, correspondence: Some(Arc::clone(&correspondence)) };
         shell.reconcile_genesis_mainline().unwrap();
 
@@ -432,11 +447,45 @@ mod tests {
     }
 
     #[test]
+    fn genesis_binds_to_the_configured_mainline_ref_rather_than_the_default_branch() {
+        // Tripwire: the base every bloom seals against is whatever the configured
+        // mainline ref holds (ADR-0186). A reconcile that read the default branch
+        // on a repointed coordinator would bind `GENESIS_MAINLINE` to a commit the
+        // day branch never held, and the first land's base check would then refuse
+        // every bloom of the day as moved.
+        let fake = FakeGithub::new();
+        let correspondence: SharedCorrespondence = Arc::new(fake.clone());
+        let tree = Digest::from_bytes([10; 32]);
+        fake.seed_git_object(&tree);
+        let tree_sha =
+            GitObjectId::try_from(correspondence.resolve_backend_object(&tree).unwrap().unwrap()).unwrap().to_hex();
+
+        let day = MainlineRef::new("refs/heads/bloomery/daily/2026-08-13");
+        let day_head = fake.seed_commit_with_message("the day branch", &tree_sha);
+        fake.seed_ref(day.git_ref(), &day_head);
+        fake.seed_ref("heads/main", &fake.seed_commit_with_message("main moved on", &tree_sha));
+
+        let backend = Arc::new(GitSource::new(fake, Arc::clone(&correspondence), true, day));
+        let shell = SourceShell { backend, correspondence: Some(Arc::clone(&correspondence)) };
+        shell.reconcile_genesis_mainline().unwrap();
+
+        assert_eq!(
+            GitObjectId::try_from(
+                correspondence.resolve_backend_object(&Snapshot::GENESIS_MAINLINE).unwrap().unwrap(),
+            )
+            .unwrap()
+            .to_hex(),
+            day_head,
+            "the sealing base is the head of the branch the coordinator operates on",
+        );
+    }
+
+    #[test]
     fn genesis_reconcile_rejects_a_non_git_backend_binding() {
         let fake = FakeGithub::new();
         let correspondence: SharedCorrespondence = Arc::new(fake.clone());
         correspondence.record(&Snapshot::GENESIS_MAINLINE, &BackendObjectId::new(vec![0xAB; 17])).unwrap();
-        let backend = Arc::new(GitSource::new(fake, Arc::clone(&correspondence), true));
+        let backend = Arc::new(GitSource::new(fake, Arc::clone(&correspondence), true, MainlineRef::default()));
         let shell = SourceShell { backend, correspondence: Some(correspondence) };
 
         assert!(
@@ -472,7 +521,8 @@ mod tests {
         let head_sha = fake.seed_commit(&tree_sha);
         fake.seed_ref("heads/main", &head_sha);
 
-        let concrete = Arc::new(GitSource::new(fake.clone(), Arc::clone(&correspondence), true));
+        let concrete =
+            Arc::new(GitSource::new(fake.clone(), Arc::clone(&correspondence), true, MainlineRef::default()));
         let backend: Arc<dyn LandingSource + Send + Sync> = concrete.clone();
         let bloom = BloomId(Digest::from_bytes([1; 32]));
         let shell = SourceShell { backend, correspondence: Some(Arc::clone(&correspondence)) };
@@ -536,7 +586,8 @@ mod tests {
         // Tripwire: a fake-backed shell (`new`) carries no correspondence store, so
         // seed_mainline refuses cleanly rather than silently no-op-ing the record.
         let fake = FakeGithub::new();
-        let shell = SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), true)));
+        let shell =
+            SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), true, MainlineRef::default())));
         assert!(shell.seed_mainline(&Digest::from_bytes([7; 32]), "3a3f8c0b9e1d2a4f6b8c0e2d4a6f8b0c1e3d5a7f").is_err());
     }
 }
