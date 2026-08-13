@@ -160,7 +160,8 @@ fn record_cost(
     let (Some(cost), Some(artifacts)) = (upload.cost, artifacts) else {
         return false;
     };
-    let record = UploadedStudyRecord { nonce: upload.nonce.clone(), subject: upload.subject, cost };
+    let record =
+        UploadedStudyRecord { nonce: upload.nonce.clone(), subject: upload.subject, cost, calls: upload.calls.clone() };
 
     match admit_study(store, artifacts, &record) {
         Ok(StudyAdmitDecision::Admitted(_)) => true,

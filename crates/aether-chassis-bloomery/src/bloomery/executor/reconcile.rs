@@ -99,6 +99,15 @@ pub trait ReconcileLanes: Send + Sync {
     /// best-effort cleanup miss that is logged and stepped over, never a reason
     /// to fail a boot that would otherwise run blooms.
     fn reconcile(&self, live: &[OutstandingDispatch]) -> ReconcileReport;
+
+    /// Whether this backend currently has a lane child in flight. The janitor
+    /// will not sweep slot target directories while this is true — a cold
+    /// rebuild is minutes; deleting a live `CARGO_TARGET_DIR` is a wedged
+    /// member. Default is idle: backends with no local children (Actions) never
+    /// block that sweep.
+    fn any_lane_running(&self) -> bool {
+        false
+    }
 }
 
 /// The local lane as the router fronts it: the executor port plus the

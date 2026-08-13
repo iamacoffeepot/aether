@@ -18,8 +18,10 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+use aether_data::wire::{Error as WireError, from_bytes};
+
 use super::config::{ConfigScopes, ResolvedConfigs};
-use super::study::StudyCost;
+use super::study::{StudyCall, StudyCost};
 use crate::digest::{ContentAddressed, Digest, digest_of};
 
 /// The rate divisor: every rate is quoted per **one million** tokens, and token
@@ -60,6 +62,39 @@ pub struct PriceRow {
     /// leaves this unused.
     pub cache_write: u64,
     /// Micro-USD per million output tokens.
+    pub output: u64,
+    /// When set, a call whose prompt is at or above [`LongContextBand::prompt_tokens`]
+    /// prices at that block's rates instead of the fields above.
+    ///
+    /// Absent on a flat vendor and on every table sealed before this field
+    /// existed. The field is additive: a row without a band prices exactly as
+    /// it did, and [`PriceTable::from_sealed`] still reads those earlier bytes.
+    #[serde(default)]
+    pub long_context: Option<LongContextBand>,
+}
+
+/// The second rate block a [`PriceRow`] applies once a call's prompt crosses
+/// [`prompt_tokens`](Self::prompt_tokens).
+///
+/// Explicit rates, not a multiplier. Vendors do not scale every column
+/// uniformly — xAI's card doubles all of them today, but a row that baked
+/// "×2" in would misprice the next vendor that only lifts output, or the next
+/// card that does not.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct LongContextBand {
+    /// Prompt-token threshold. This block applies to a call at or above it.
+    pub prompt_tokens: u64,
+    /// Micro-USD per million uncached input tokens in this band.
+    pub input: u64,
+    /// Micro-USD per million cache-read tokens in this band.
+    pub cache_read: u64,
+    /// Micro-USD per million 5-minute-TTL cache-write tokens in this band.
+    pub cache_write_5m: u64,
+    /// Micro-USD per million 1-hour-TTL cache-write tokens in this band.
+    pub cache_write_1h: u64,
+    /// Micro-USD per million unstated-TTL cache-write tokens in this band.
+    pub cache_write: u64,
+    /// Micro-USD per million output tokens in this band.
     pub output: u64,
 }
 
@@ -107,8 +142,30 @@ impl PriceTable {
         self.rows.iter().find(|row| row.model == model)
     }
 
+    /// Decode a table from sealed bytes, accepting both today's shape and a
+    /// table authored before [`PriceRow::long_context`] existed.
+    ///
+    /// The wire is positional, so an additive trailing `Option` is not
+    /// self-describing inside `Vec<PriceRow>`. Trying the current shape first
+    /// and the pre-band shape second is what keeps a bloom that sealed rates
+    /// last week priced at those rates rather than suddenly unpriced.
+    ///
+    /// # Errors
+    /// [`WireError`] when `bytes` are neither shape.
+    pub fn from_sealed(bytes: &[u8]) -> Result<Self, WireError> {
+        from_bytes::<Self>(bytes).or_else(|_| {
+            from_bytes::<LegacyPriceTable>(bytes)
+                .map(|legacy| Self { rows: legacy.rows.into_iter().map(PriceRow::from_legacy).collect() })
+        })
+    }
+
     /// What `cost`'s token columns are worth under this table, in micro-USD, or
     /// `None` when the table prices no such model.
+    ///
+    /// Always the row's sub-band rates. A long-context band is not consulted
+    /// here — selecting one from a dispatch-aggregate prompt would overcount
+    /// every multi-call lap whose *sum* crossed the threshold. Per-call
+    /// charging is [`price_dispatch`](Self::price_dispatch).
     ///
     /// `None` is *unpriced*, never free — the same distinction the token columns
     /// draw between unmeasured and zero. A caller that flattens it to `0` makes
@@ -120,29 +177,128 @@ impl PriceTable {
     /// number, so a nonsense price stays visibly nonsense.
     #[must_use]
     pub fn price(&self, model: &str, cost: &StudyCost) -> Option<u64> {
+        Some(charge(self.row(model)?, cost))
+    }
+
+    /// What one dispatch is worth, charging each call at the band its own
+    /// prompt selects.
+    ///
+    /// A row with no band, or a dispatch that reported no per-call usage,
+    /// prices at the sub-band rate over the aggregate columns — the same
+    /// number [`price`](Self::price) returns. The ledger treats the missing-usage
+    /// case as a defect and surfaces it; this method does not, so an unbanded
+    /// row and a banded row whose calls were lost stay distinguishable at the
+    /// call site rather than collapsed here.
+    #[must_use]
+    pub fn price_dispatch(&self, model: &str, cost: &StudyCost, calls: Option<&[StudyCall]>) -> Option<u64> {
         let row = self.row(model)?;
-        let column = |tokens: u64, rate: u64| tokens.saturating_mul(rate) / PER;
+        let Some(band) = row.long_context.as_ref() else {
+            return Some(charge(row, cost));
+        };
+        let Some(calls) = calls.filter(|calls| !calls.is_empty()) else {
+            return Some(charge(row, cost));
+        };
+        Some(calls.iter().fold(0, |sum, call| {
+            let rates = if call.prompt_tokens() >= band.prompt_tokens {
+                Rates::from_band(band)
+            } else {
+                Rates::from_row(row)
+            };
+            sum.saturating_add(charge_at(rates, &call.as_cost()))
+        }))
+    }
+}
 
-        // The two TTL splits price at their own rates, and only what they do not
-        // account for falls through to the undifferentiated rate. Adding all
-        // three columns outright would double-count every Claude attempt, whose
-        // `cache_write_tokens` is the *total* the splits sum to; pricing the
-        // total alone would lose the 5m/1h distinction the record measured.
-        // Saturating subtraction, so a harness whose splits exceed its own total
-        // reports zero remainder instead of wrapping to an enormous one.
-        let untiered = cost
-            .cache_write_tokens
-            .saturating_sub(cost.cache_write_5m_tokens)
-            .saturating_sub(cost.cache_write_1h_tokens);
+/// The six rate columns, so a row and a band share one charge helper.
+#[derive(Clone, Copy)]
+struct Rates {
+    input: u64,
+    cache_read: u64,
+    cache_write_5m: u64,
+    cache_write_1h: u64,
+    cache_write: u64,
+    output: u64,
+}
 
-        Some(
-            column(cost.input_tokens, row.input)
-                .saturating_add(column(cost.cache_read_tokens, row.cache_read))
-                .saturating_add(column(cost.cache_write_5m_tokens, row.cache_write_5m))
-                .saturating_add(column(cost.cache_write_1h_tokens, row.cache_write_1h))
-                .saturating_add(column(untiered, row.cache_write))
-                .saturating_add(column(cost.output_tokens, row.output)),
-        )
+impl Rates {
+    fn from_row(row: &PriceRow) -> Self {
+        Self {
+            input: row.input,
+            cache_read: row.cache_read,
+            cache_write_5m: row.cache_write_5m,
+            cache_write_1h: row.cache_write_1h,
+            cache_write: row.cache_write,
+            output: row.output,
+        }
+    }
+
+    fn from_band(band: &LongContextBand) -> Self {
+        Self {
+            input: band.input,
+            cache_read: band.cache_read,
+            cache_write_5m: band.cache_write_5m,
+            cache_write_1h: band.cache_write_1h,
+            cache_write: band.cache_write,
+            output: band.output,
+        }
+    }
+}
+
+fn charge(row: &PriceRow, cost: &StudyCost) -> u64 {
+    charge_at(Rates::from_row(row), cost)
+}
+
+fn charge_at(rates: Rates, cost: &StudyCost) -> u64 {
+    let column = |tokens: u64, rate: u64| tokens.saturating_mul(rate) / PER;
+
+    // The two TTL splits price at their own rates, and only what they do not
+    // account for falls through to the undifferentiated rate. Adding all
+    // three columns outright would double-count every Claude attempt, whose
+    // `cache_write_tokens` is the *total* the splits sum to; pricing the
+    // total alone would lose the 5m/1h distinction the record measured.
+    // Saturating subtraction, so a harness whose splits exceed its own total
+    // reports zero remainder instead of wrapping to an enormous one.
+    let untiered =
+        cost.cache_write_tokens.saturating_sub(cost.cache_write_5m_tokens).saturating_sub(cost.cache_write_1h_tokens);
+
+    column(cost.input_tokens, rates.input)
+        .saturating_add(column(cost.cache_read_tokens, rates.cache_read))
+        .saturating_add(column(cost.cache_write_5m_tokens, rates.cache_write_5m))
+        .saturating_add(column(cost.cache_write_1h_tokens, rates.cache_write_1h))
+        .saturating_add(column(untiered, rates.cache_write))
+        .saturating_add(column(cost.output_tokens, rates.output))
+}
+
+/// The pre-band row shape, used only to decode tables sealed before
+/// [`PriceRow::long_context`] existed.
+#[derive(Serialize, Deserialize)]
+struct LegacyPriceRow {
+    model: String,
+    input: u64,
+    cache_read: u64,
+    cache_write_5m: u64,
+    cache_write_1h: u64,
+    cache_write: u64,
+    output: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LegacyPriceTable {
+    rows: Vec<LegacyPriceRow>,
+}
+
+impl PriceRow {
+    fn from_legacy(row: LegacyPriceRow) -> Self {
+        Self {
+            model: row.model,
+            input: row.input,
+            cache_read: row.cache_read,
+            cache_write_5m: row.cache_write_5m,
+            cache_write_1h: row.cache_write_1h,
+            cache_write: row.cache_write,
+            output: row.output,
+            long_context: None,
+        }
     }
 }
 
@@ -150,8 +306,9 @@ impl PriceTable {
 mod tests {
     use alloc::vec;
 
-    use super::{PriceRow, PriceTable};
-    use crate::values::StudyCost;
+    use super::{LongContextBand, PriceRow, PriceTable};
+    use crate::values::{StudyCall, StudyCost};
+    use aether_data::wire::to_vec;
 
     // Claude Opus 5's published rates, so the arithmetic below is checkable
     // against a real sheet rather than invented round numbers: $5 input,
@@ -166,8 +323,39 @@ mod tests {
                 cache_write_1h: 10_000_000,
                 cache_write: 6_250_000,
                 output: 25_000_000,
+                long_context: None,
             }],
         }
+    }
+
+    fn grok_row(long_context: Option<LongContextBand>) -> PriceRow {
+        PriceRow {
+            model: String::from("grok-4.6"),
+            input: 2_000_000,
+            cache_read: 200_000,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write: 0,
+            output: 10_000_000,
+            long_context,
+        }
+    }
+
+    fn grok_band() -> LongContextBand {
+        // Explicit doubles, not a multiplier: the point of the type.
+        LongContextBand {
+            prompt_tokens: 200_000,
+            input: 4_000_000,
+            cache_read: 400_000,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            cache_write: 0,
+            output: 20_000_000,
+        }
+    }
+
+    fn call(input_tokens: u64, output_tokens: u64) -> StudyCall {
+        StudyCall { input_tokens, output_tokens, ..StudyCall::default() }
     }
 
     #[test]
@@ -236,5 +424,100 @@ mod tests {
         let cost = StudyCost { output_tokens: 250_000, ..StudyCost::default() };
 
         assert_eq!(table().price("claude-opus-5", &cost), Some(6_250_000));
+    }
+
+    #[test]
+    fn a_banded_row_prices_each_call_at_the_band_its_own_prompt_selects() {
+        // Tripwire: the whole reason the band exists. One call under the 200k
+        // cut (100k in / 1k out at $2 / $10) plus one over it (250k / 1k at
+        // $4 / $20) is $0.21 + $1.02 = $1.23. Band-selecting from the 350k
+        // aggregate would bill both at the long rate ($1.44); flattening to
+        // the sub-band would bill both cheap ($0.72). Either bias is the
+        // comparison error this field exists to close.
+        let table = PriceTable { rows: vec![grok_row(Some(grok_band()))] };
+        let under = call(100_000, 1_000);
+        let over = call(250_000, 1_000);
+        let cost = StudyCost {
+            input_tokens: under.input_tokens + over.input_tokens,
+            output_tokens: under.output_tokens + over.output_tokens,
+            ..StudyCost::default()
+        };
+
+        assert_eq!(table.price_dispatch("grok-4.6", &cost, Some(&[under, over])), Some(1_230_000));
+        assert_eq!(table.price("grok-4.6", &under.as_cost()), Some(210_000), "the under call is the sub-band alone");
+        assert_eq!(
+            table.price_dispatch("grok-4.6", &over.as_cost(), Some(&[over])),
+            Some(1_020_000),
+            "the over call is the long-context block alone",
+        );
+
+        // The threshold is prompt size, not uncached input: a warm call whose
+        // 10k fresh tokens sit on a 200k cache would stay cheap if we keyed
+        // off `input_tokens` alone, which is exactly the long-repair-lap shape.
+        let cached = StudyCall {
+            input_tokens: 10_000,
+            cache_read_tokens: 200_000,
+            output_tokens: 1_000,
+            ..StudyCall::default()
+        };
+        assert_eq!(cached.prompt_tokens(), 210_000);
+        assert_eq!(table.price_dispatch("grok-4.6", &cached.as_cost(), Some(&[cached])), Some(140_000));
+    }
+
+    #[test]
+    fn an_unbanded_row_and_a_pre_band_table_price_like_today() {
+        // Tripwire: a row without a band, and a table sealed before the field
+        // existed, must not drift from the sub-band arithmetic the ledger
+        // already published. The pre-band bytes are the current row minus the
+        // trailing Option — decode that fails here would unprice every bloom
+        // that sealed rates last week.
+        let cost = StudyCost {
+            input_tokens: 1_000_000,
+            cache_read_tokens: 1_000_000,
+            cache_write_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..StudyCost::default()
+        };
+        let today = table().price("claude-opus-5", &cost);
+
+        assert_eq!(today, Some(36_750_000));
+        assert_eq!(
+            table().price_dispatch("claude-opus-5", &cost, Some(&[call(1_000_000, 1_000_000)])),
+            today,
+            "an unbanded row ignores the call list",
+        );
+
+        let pre = table().rows.into_iter().next().expect("the fixture has one row");
+        let sealed = to_vec(&super::LegacyPriceTable {
+            rows: vec![super::LegacyPriceRow {
+                model: pre.model,
+                input: pre.input,
+                cache_read: pre.cache_read,
+                cache_write_5m: pre.cache_write_5m,
+                cache_write_1h: pre.cache_write_1h,
+                cache_write: pre.cache_write,
+                output: pre.output,
+            }],
+        })
+        .expect("a pre-band table wire-encodes");
+
+        let decoded = PriceTable::from_sealed(&sealed).expect("a pre-band table still decodes");
+        assert!(decoded.row("claude-opus-5").expect("the row survived").long_context.is_none());
+        assert_eq!(decoded.price("claude-opus-5", &cost), today);
+        assert_eq!(decoded.price_dispatch("claude-opus-5", &cost, None), today);
+    }
+
+    #[test]
+    fn a_banded_row_without_per_call_usage_stays_on_the_sub_band() {
+        // Tripwire: missing per-call usage must not band-select from the
+        // aggregate. A 250k-token dispatch billed as one long-context call
+        // would overcount the 23-turn lap whose every call stayed under the
+        // cut; the fallback is the sub-band, and the ledger names the gap.
+        let table = PriceTable { rows: vec![grok_row(Some(grok_band()))] };
+        let cost = StudyCost { input_tokens: 250_000, output_tokens: 1_000, ..StudyCost::default() };
+
+        assert_eq!(table.price_dispatch("grok-4.6", &cost, None), Some(510_000));
+        assert_eq!(table.price_dispatch("grok-4.6", &cost, Some(&[])), Some(510_000));
+        assert_eq!(table.price("grok-4.6", &cost), Some(510_000));
     }
 }

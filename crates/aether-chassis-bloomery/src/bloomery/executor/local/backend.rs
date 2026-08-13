@@ -12,7 +12,7 @@ use aether_bloomery::{
     ResolvedModel, SharedCorrespondence, StageVerdict, StudyCost, Transformation, VerifyFailureSet, WorkHandle,
     WorkOrder, digest_of, is_model_lane,
 };
-use aether_bloomery_github::parse_study_cost;
+use aether_bloomery_github::parse_study;
 use serde::Serialize;
 use std::fs;
 
@@ -1012,6 +1012,7 @@ impl ExecutorBackend for LocalExecutor {
                         // Synthesized, not reported: there are no evidence bytes
                         // to read a cost out of, so the attempt is unmeasured.
                         cost: None,
+                        calls: None,
                     }]);
                 }
                 return Err(LocalExecutorError::Evidence(format!("{}: {read_error}", evidence_path.display())));
@@ -1110,6 +1111,7 @@ impl ExecutorBackend for LocalExecutor {
             findings: nonce_matches.then(|| parse_findings(&bytes)).flatten(),
             failed_verifiers,
             cost: nonce_matches.then(|| parse_cost(&bytes)).flatten(),
+            calls: nonce_matches.then(|| parse_calls(&bytes)).flatten(),
         }])
     }
 }
@@ -1136,6 +1138,11 @@ impl ReconcileLanes for LocalExecutor {
             readopted,
             reclaimed: self.sweep_abandoned(&live.iter().map(|dispatch| dispatch.nonce.0.as_str()).collect()),
         }
+    }
+
+    fn any_lane_running(&self) -> bool {
+        let registry = self.lock();
+        !registry.runs.is_empty() || registry.starting > 0
     }
 }
 
@@ -1345,9 +1352,17 @@ fn parse_commit_message(bytes: &[u8]) -> Option<String> {
 /// the alternative, a row of zeroes, would make an unmeasured attempt
 /// indistinguishable from a free one and quietly corrupt every average taken
 /// over the ledger.
-fn parse_cost(bytes: &[u8]) -> Option<StudyCost> {
+fn parse_measured(bytes: &[u8]) -> Option<(StudyCost, Option<Vec<aether_bloomery::StudyCall>>)> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    parse_study_cost(&serde_json::to_vec(value.get("result_record")?).ok()?).ok()
+    parse_study(&serde_json::to_vec(value.get("result_record")?).ok()?).ok()
+}
+
+fn parse_cost(bytes: &[u8]) -> Option<StudyCost> {
+    parse_measured(bytes).map(|(cost, _)| cost)
+}
+
+fn parse_calls(bytes: &[u8]) -> Option<Vec<aether_bloomery::StudyCall>> {
+    parse_measured(bytes).and_then(|(_, calls)| calls)
 }
 
 /// Whether a construct lane's `evidence.json` byte string shows a **substantive

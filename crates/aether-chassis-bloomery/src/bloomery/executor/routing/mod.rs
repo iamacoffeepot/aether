@@ -167,6 +167,10 @@ impl ReconcileLanes for RoutingExecutor {
 
         report
     }
+
+    fn any_lane_running(&self) -> bool {
+        self.local.any_lane_running()
+    }
 }
 
 #[cfg(test)]

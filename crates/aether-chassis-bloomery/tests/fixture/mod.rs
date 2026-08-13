@@ -720,6 +720,7 @@ pub fn verdict(order: &OutstandingOrder, verdict: ScriptedVerdict) -> ScriptedUp
         findings: None,
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
+        calls: None,
     }
 }
 

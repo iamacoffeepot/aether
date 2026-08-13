@@ -426,6 +426,7 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
                 candidate: None,
                 findings: None,
                 cost: None,
+                calls: None,
             })
             .collect())
     }

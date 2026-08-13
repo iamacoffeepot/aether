@@ -203,6 +203,11 @@ pub trait StoreBackend: Send {
     /// restart neither extends nor resets it: the same rows select again from
     /// the same numbers.
     fn list_expired_orders(&mut self, now_unix_millis: u64) -> rusqlite::Result<Vec<OutstandingOrder>>;
+    /// The bloom that dispatched `nonce`, or `None` when this store has never
+    /// recorded that dispatch. Survives [`consume_order`](Self::consume_order):
+    /// the janitor still has to know which bloom a consumed evidence directory
+    /// belongs to so it can honour that bloom's retention window.
+    fn lookup_dispatch_owner(&mut self, nonce: &str) -> rusqlite::Result<Option<Vec<u8>>>;
 
     /// Hold a parked attempt's order under the question digest that parked it
     /// (ADR-0151, #3664) — the order is consumed from `outstanding_orders` on
@@ -545,6 +550,10 @@ CREATE TABLE IF NOT EXISTS candidate_commit_message (
     message   TEXT NOT NULL,
     PRIMARY KEY (bloom, workpiece)
 );
+CREATE TABLE IF NOT EXISTS dispatch_owners (
+    nonce TEXT PRIMARY KEY,
+    bloom BLOB NOT NULL
+);
 ";
 
 /// Is a rusqlite error a UNIQUE / PRIMARY KEY constraint violation? A seal that
@@ -623,6 +632,13 @@ impl StoreBackend for SqliteStore {
             ),
             order_params(order, &deadline).as_slice(),
         )?;
+        // The owner row outlives the outstanding row: consume deletes the
+        // latter so intake can refuse a replayed nonce, but the janitor still
+        // has to name the bloom a leftover evidence directory belongs to.
+        self.conn.execute(
+            "INSERT OR IGNORE INTO dispatch_owners (nonce, bloom) VALUES (?1, ?2)",
+            rusqlite::params![&order.nonce, &order.bloom],
+        )?;
         Ok(if changed == 0 {
             RecordOutcome::Duplicate
         } else {
@@ -647,6 +663,12 @@ impl StoreBackend for SqliteStore {
         let mut stmt = self.conn.prepare("SELECT nonce FROM outstanding_orders")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect()
+    }
+
+    fn lookup_dispatch_owner(&mut self, nonce: &str) -> rusqlite::Result<Option<Vec<u8>>> {
+        let mut stmt = self.conn.prepare("SELECT bloom FROM dispatch_owners WHERE nonce = ?1")?;
+        let mut rows = stmt.query_map(rusqlite::params![nonce], |row| row.get(0))?;
+        rows.next().transpose()
     }
 
     fn list_expired_orders(&mut self, now_unix_millis: u64) -> rusqlite::Result<Vec<OutstandingOrder>> {
