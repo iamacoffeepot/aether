@@ -168,6 +168,22 @@ pub struct StudyRow {
     pub study_artifact: String,
 }
 
+/// One journal row's content: a decided event — the idempotency key, the
+/// event bytes, the wire-encoded decisions the reducer produced for it, and
+/// the identity of the build that decided it (ADR-0190). Grouped because the
+/// four are inseparable at every write: a row without its decision cannot be
+/// replayed.
+pub struct JournalWrite<'a> {
+    /// The event's idempotency key — the inbox dedup axis.
+    pub idempotency_key: &'a str,
+    /// The event's canonical wire bytes.
+    pub event: &'a [u8],
+    /// The wire-encoded decisions the event reduced to at admission.
+    pub decisions: &'a [u8],
+    /// The identity of the build whose reducer decided the event.
+    pub decider: &'a str,
+}
+
 /// The durable store the capability drives. One method per transact-mail kind;
 /// each is one atomic `SQLite` transaction.
 ///
@@ -314,20 +330,19 @@ pub trait StoreBackend: Send {
     /// Every study index row, in (`bloom`, `attempt_digest`) order — the rebuild
     /// oracle a test folds against.
     fn study_rows(&mut self) -> rusqlite::Result<Vec<StudyRow>>;
-    /// Apply a combined commit — journal the idempotency-keyed event, apply the
+    /// Apply a combined commit — journal the decided event, apply the
     /// membership releases then claims, and enqueue the outbox payloads — in
     /// **one** transaction (ADR-0149 §The control core). A duplicate key or a
     /// membership conflict applies nothing.
     fn commit(
         &mut self,
-        idempotency_key: &str,
-        event: &[u8],
+        write: &JournalWrite<'_>,
         releases: &[MembershipMutation],
         claims: &[MembershipMutation],
         outbox: &[OutboxPayload],
     ) -> rusqlite::Result<CommitOutcome>;
-    /// Append a journal event, deduplicated by `idempotency_key`.
-    fn append_event(&mut self, idempotency_key: &str, event: &[u8]) -> rusqlite::Result<AppendOutcome>;
+    /// Append a journal row, deduplicated by its idempotency key.
+    fn append_event(&mut self, write: &JournalWrite<'_>) -> rusqlite::Result<AppendOutcome>;
     /// Claim every workpiece for `bloom` under the active-membership uniqueness
     /// constraint, all-or-nothing.
     fn claim_seal(&mut self, bloom: &[u8], members: &[String]) -> rusqlite::Result<SealOutcome>;
@@ -384,7 +399,13 @@ impl SqliteStore {
 /// `deadline_unix_millis`, and its `transformation` column's canonical bytes
 /// changed with `Transformation.limits` (#4697). Both land in this one version
 /// because both invalidate exactly the same rows.
-const SCHEMA_VERSION: i64 = 1;
+///
+/// `2` is ADR-0190: a journal row records the decision its event reduced to
+/// (`decisions` — wire-encoded `Decisions` — plus the `decider` build stamp),
+/// so boot replay folds the record instead of re-deciding under the current
+/// binary. Rows written before this version carry `NULL` decisions and refuse
+/// to replay until a backfill stamps them.
+const SCHEMA_VERSION: i64 = 2;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -434,6 +455,17 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
         }
     }
 
+    // ADR-0190 (version 2): the journal records its decisions. The columns are
+    // added without a default — pre-existing rows read back `NULL` and are
+    // refused at replay by name until a backfill stamps them, because inventing
+    // a decision here would attest an outcome no reducer produced.
+    if !has_column(&migration, "journal", "decisions")? {
+        migration.execute_batch(
+            "ALTER TABLE journal ADD COLUMN decisions BLOB;
+             ALTER TABLE journal ADD COLUMN decider TEXT;",
+        )?;
+    }
+
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     migration.commit()
 }
@@ -464,6 +496,20 @@ fn legacy_store_refusal(outstanding: u64, parked: u64) -> rusqlite::Error {
     )
 }
 
+/// The refusal a replay answers when it reaches a journal row written before
+/// ADR-0190 stamped decisions onto the journal — named, with the obligation
+/// stated, rather than silently re-deciding the row under the current reducer.
+fn unstamped_row_refusal(sequence: u64) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        SqliteFfiError::new(SQLITE_ERROR),
+        Some(format!(
+            "journal row {sequence} predates ADR-0190 and records no decision. Replaying it would re-decide \
+             history under the current reducer. Backfill the store (stamp each row with the decisions the \
+             deciding build produced) before reopening."
+        )),
+    )
+}
+
 /// The tables that carry an order row, and so carry its deadline: the live one
 /// and the ADR-0151 parked one. Both are migrated, and each on its own gate.
 const ORDER_BEARING_TABLES: [&str; 2] = ["outstanding_orders", "parked_question"];
@@ -480,7 +526,9 @@ const MIGRATIONS: &str = "\
 CREATE TABLE IF NOT EXISTS journal (
     sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
     idempotency_key TEXT NOT NULL UNIQUE,
-    event           BLOB NOT NULL
+    event           BLOB NOT NULL,
+    decisions       BLOB,
+    decider         TEXT
 );
 CREATE TABLE IF NOT EXISTS active_membership (
     workpiece TEXT PRIMARY KEY,
@@ -847,16 +895,15 @@ impl StoreBackend for SqliteStore {
 
     fn commit(
         &mut self,
-        idempotency_key: &str,
-        event: &[u8],
+        write: &JournalWrite<'_>,
         releases: &[MembershipMutation],
         claims: &[MembershipMutation],
         outbox: &[OutboxPayload],
     ) -> rusqlite::Result<CommitOutcome> {
         let tx = self.conn.transaction()?;
         let changed = tx.execute(
-            "INSERT OR IGNORE INTO journal (idempotency_key, event) VALUES (?1, ?2)",
-            rusqlite::params![idempotency_key, event],
+            "INSERT OR IGNORE INTO journal (idempotency_key, event, decisions, decider) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![write.idempotency_key, write.event, write.decisions, write.decider],
         )?;
         if changed == 0 {
             // The key was already journaled — the whole commit is a no-op. The
@@ -900,10 +947,10 @@ impl StoreBackend for SqliteStore {
         Ok(CommitOutcome::Applied(sequence))
     }
 
-    fn append_event(&mut self, idempotency_key: &str, event: &[u8]) -> rusqlite::Result<AppendOutcome> {
+    fn append_event(&mut self, write: &JournalWrite<'_>) -> rusqlite::Result<AppendOutcome> {
         let changed = self.conn.execute(
-            "INSERT OR IGNORE INTO journal (idempotency_key, event) VALUES (?1, ?2)",
-            rusqlite::params![idempotency_key, event],
+            "INSERT OR IGNORE INTO journal (idempotency_key, event, decisions, decider) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![write.idempotency_key, write.event, write.decisions, write.decider],
         )?;
         if changed == 0 {
             Ok(AppendOutcome::Duplicate)
@@ -1005,12 +1052,21 @@ impl StoreBackend for SqliteStore {
     }
 
     fn replay_journal(&mut self) -> rusqlite::Result<Vec<JournalRecord>> {
-        let mut stmt = self.conn.prepare("SELECT sequence, idempotency_key, event FROM journal ORDER BY sequence")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT sequence, idempotency_key, event, decisions, decider FROM journal ORDER BY sequence")?;
         let rows = stmt.query_map([], |row| {
+            let sequence = u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default();
+            // A pre-ADR-0190 row carries no recorded decision, and re-deciding it
+            // here is exactly the history rewrite the record exists to prevent —
+            // refuse the replay by name until a backfill stamps it.
+            let decisions = row.get::<_, Option<Vec<u8>>>(3)?.ok_or_else(|| unstamped_row_refusal(sequence))?;
             Ok(JournalRecord {
-                sequence: u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default(),
+                sequence,
                 idempotency_key: row.get(1)?,
                 event: row.get(2)?,
+                decisions,
+                decider: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
             })
         })?;
         rows.collect()
@@ -1046,8 +1102,10 @@ impl NativeActor for StoreCapability {
 
     #[handler::single]
     fn on_commit(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Commit) -> CommitResult {
-        let Commit { idempotency_key, event, releases, claims, outbox } = mail;
-        match state.backend.commit(&idempotency_key, &event, &releases, &claims, &outbox) {
+        let Commit { idempotency_key, event, decisions, decider, releases, claims, outbox } = mail;
+        let write =
+            JournalWrite { idempotency_key: &idempotency_key, event: &event, decisions: &decisions, decider: &decider };
+        match state.backend.commit(&write, &releases, &claims, &outbox) {
             Ok(CommitOutcome::Applied(sequence)) => CommitResult::Applied { idempotency_key, sequence },
             Ok(CommitOutcome::Duplicate) => CommitResult::Duplicate { idempotency_key },
             Ok(CommitOutcome::Conflict(workpiece)) => CommitResult::Conflict { idempotency_key, workpiece },
@@ -1057,8 +1115,10 @@ impl NativeActor for StoreCapability {
 
     #[handler::single]
     fn on_append_event(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: AppendEvent) -> AppendEventResult {
-        let AppendEvent { idempotency_key, event } = mail;
-        match state.backend.append_event(&idempotency_key, &event) {
+        let AppendEvent { idempotency_key, event, decisions, decider } = mail;
+        let write =
+            JournalWrite { idempotency_key: &idempotency_key, event: &event, decisions: &decisions, decider: &decider };
+        match state.backend.append_event(&write) {
             Ok(AppendOutcome::Applied(sequence)) => AppendEventResult::Applied { sequence },
             Ok(AppendOutcome::Duplicate) => AppendEventResult::Duplicate,
             Err(error) => AppendEventResult::Err { error: error.to_string() },
