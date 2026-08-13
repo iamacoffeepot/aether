@@ -8,8 +8,6 @@
 //! nonce-keyed checkouts). These tests pin that the sweep reads the journal
 //! and the stub runner, not the child's exit status.
 
-#![allow(clippy::unwrap_used)]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -51,7 +49,7 @@ fn event(key: &str, fact: Fact) -> Event {
 }
 
 fn journal(store: &mut SqliteStore, key: &str, fact: Fact) {
-    store.append_event(key, &to_vec(&event(key, fact)).unwrap()).unwrap();
+    store.append_event(key, &to_vec(&event(key, fact)).expect("the event encodes")).expect("the journal appends");
 }
 
 /// Seal a predecessor and supersede it, so the journal describes one terminal
@@ -104,7 +102,7 @@ impl TransformRunner for StubRunner {
     }
 
     fn release(&self, worktree_dir: &Path) -> Result<(), LocalExecutorError> {
-        self.released.0.lock().unwrap().push(worktree_dir.to_owned());
+        self.released.0.lock().expect("the release log is not poisoned").push(worktree_dir.to_owned());
         Ok(())
     }
 
@@ -138,13 +136,13 @@ fn policy(retention_days: u64, budget_bytes: u64) -> JanitorPolicy {
 }
 
 fn run(request: &mut SweepRequest<'_>) -> super::sweep::SweepReport {
-    sweep(request).unwrap()
+    sweep(request).expect("the sweep reads the in-memory store")
 }
 
 fn age_dir(path: &Path, now: SystemTime, days: u64) {
     let dest = now.checked_sub(retention_duration(days)).expect("the fixture clock sits after the retention window");
-    fs::write(path.join(".aged"), []).unwrap();
-    fs::File::open(path).unwrap().set_modified(dest).unwrap();
+    fs::write(path.join(".aged"), []).expect("the age marker writes");
+    fs::File::open(path).expect("the aged directory opens").set_modified(dest).expect("mtime is set");
 }
 
 #[test]
@@ -153,12 +151,12 @@ fn a_killed_runs_worktree_is_reclaimed_once_its_bloom_is_terminal() {
     // release never ran, and the bloom has since been superseded. The journal
     // already knows the run is terminal; the sweep must reclaim the checkout
     // without a coordinator restart.
-    let scratch = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
     let nonce = "killed-nonce";
     let worktree = scratch.path().join(nonce);
-    fs::create_dir_all(&worktree).unwrap();
+    fs::create_dir_all(&worktree).expect("the worktree is created");
 
-    let mut store = SqliteStore::open(":memory:").unwrap();
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
     journal_superseded(&mut store);
 
     let released = Released(Arc::new(Mutex::new(Vec::new())));
@@ -177,7 +175,7 @@ fn a_killed_runs_worktree_is_reclaimed_once_its_bloom_is_terminal() {
     });
 
     assert_eq!(report.worktrees, 1, "the killed run's checkout is reclaimed");
-    assert_eq!(released.0.lock().unwrap().as_slice(), [worktree]);
+    assert_eq!(released.0.lock().expect("the release log is not poisoned").as_slice(), [worktree]);
 }
 
 #[test]
@@ -185,11 +183,11 @@ fn a_lane_slots_checkout_is_never_reclaimed() {
     // Slot checkouts are the host's build paths, reused across dispatches.
     // Reclaiming one because no nonce names it would undo the cache layout
     // and pull the tree out from under whoever holds the slot.
-    let scratch = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
     let worktree = scratch.path().join("slot-0");
-    fs::create_dir_all(&worktree).unwrap();
+    fs::create_dir_all(&worktree).expect("the worktree is created");
 
-    let mut store = SqliteStore::open(":memory:").unwrap();
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
     journal_superseded(&mut store);
 
     let released = Released(Arc::new(Mutex::new(Vec::new())));
@@ -207,7 +205,7 @@ fn a_lane_slots_checkout_is_never_reclaimed() {
     });
 
     assert_eq!(report.worktrees, 0);
-    assert!(released.0.lock().unwrap().is_empty());
+    assert!(released.0.lock().expect("the release log is not poisoned").is_empty());
 }
 
 #[test]
@@ -215,14 +213,14 @@ fn a_live_blooms_outstanding_worktree_is_spared() {
     // A dispatch still outstanding against a sealed bloom is in flight, whether
     // or not its child is reachable. Reclaiming it is the opposite of the
     // kill/crash case: it would pull the tree out from under a live lane.
-    let scratch = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
     let nonce = "live-nonce";
     let worktree = scratch.path().join(nonce);
-    fs::create_dir_all(&worktree).unwrap();
+    fs::create_dir_all(&worktree).expect("the worktree is created");
 
-    let mut store = SqliteStore::open(":memory:").unwrap();
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
     let bloom = journal_sealed(&mut store);
-    store.record_order(&order_for(nonce, &bloom)).unwrap();
+    store.record_order(&order_for(nonce, &bloom)).expect("the order is recorded");
 
     let released = Released(Arc::new(Mutex::new(Vec::new())));
     let runner = StubRunner { registered: vec![worktree], released: Released(Arc::clone(&released.0)) };
@@ -239,7 +237,7 @@ fn a_live_blooms_outstanding_worktree_is_spared() {
     });
 
     assert_eq!(report.worktrees, 0, "a live bloom's outstanding checkout stays");
-    assert!(released.0.lock().unwrap().is_empty());
+    assert!(released.0.lock().expect("the release log is not poisoned").is_empty());
 }
 
 #[test]
@@ -247,15 +245,15 @@ fn consumed_evidence_of_a_terminal_bloom_is_kept_inside_the_retention_window() {
     // ADR-0184's calibration ledger (and forensics) read study artefacts after
     // intake. Deleting a just-consumed directory the day the bloom lands would
     // silently drop those inputs inside the configured window.
-    let scratch = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
     let nonce = "fresh-evidence";
     let evidence = scratch.path().join(format!("{nonce}-evidence"));
-    fs::create_dir_all(&evidence).unwrap();
+    fs::create_dir_all(&evidence).expect("the evidence dir is created");
 
-    let mut store = SqliteStore::open(":memory:").unwrap();
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
     let (predecessor, _) = journal_superseded(&mut store);
-    store.record_order(&order_for(nonce, &predecessor)).unwrap();
-    store.consume_order(nonce).unwrap();
+    store.record_order(&order_for(nonce, &predecessor)).expect("the order is recorded");
+    store.consume_order(nonce).expect("the order is consumed");
 
     let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
     let now = SystemTime::now();
@@ -277,15 +275,15 @@ fn consumed_evidence_of_a_terminal_bloom_is_kept_inside_the_retention_window() {
 
 #[test]
 fn consumed_evidence_of_a_terminal_bloom_is_reclaimed_after_the_retention_window() {
-    let scratch = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
     let nonce = "stale-evidence";
     let evidence = scratch.path().join(format!("{nonce}-evidence"));
-    fs::create_dir_all(&evidence).unwrap();
+    fs::create_dir_all(&evidence).expect("the evidence dir is created");
 
-    let mut store = SqliteStore::open(":memory:").unwrap();
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
     let (predecessor, _) = journal_superseded(&mut store);
-    store.record_order(&order_for(nonce, &predecessor)).unwrap();
-    store.consume_order(nonce).unwrap();
+    store.record_order(&order_for(nonce, &predecessor)).expect("the order is recorded");
+    store.consume_order(nonce).expect("the order is consumed");
 
     let now = SystemTime::now();
     age_dir(&evidence, now, 8);
@@ -309,12 +307,12 @@ fn consumed_evidence_of_a_terminal_bloom_is_reclaimed_after_the_retention_window
 
 #[test]
 fn target_dirs_are_swept_when_over_budget_and_idle() {
-    let scratch = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
     let target = scratch.path().join("slot-0-target");
-    fs::create_dir_all(&target).unwrap();
-    fs::write(target.join("cache"), vec![0_u8; 64]).unwrap();
+    fs::create_dir_all(&target).expect("the target dir is created");
+    fs::write(target.join("cache"), vec![0_u8; 64]).expect("the cache file writes");
 
-    let mut store = SqliteStore::open(":memory:").unwrap();
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
     let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
     let tight = policy(7, 16);
     let report = run(&mut SweepRequest {
@@ -334,12 +332,12 @@ fn target_dirs_are_swept_when_over_budget_and_idle() {
 
 #[test]
 fn target_dirs_are_not_swept_while_a_lane_is_running() {
-    let scratch = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
     let target = scratch.path().join("slot-0-target");
-    fs::create_dir_all(&target).unwrap();
-    fs::write(target.join("cache"), vec![0_u8; 64]).unwrap();
+    fs::create_dir_all(&target).expect("the target dir is created");
+    fs::write(target.join("cache"), vec![0_u8; 64]).expect("the cache file writes");
 
-    let mut store = SqliteStore::open(":memory:").unwrap();
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
     let runner = StubRunner { registered: vec![], released: Released(Arc::new(Mutex::new(Vec::new()))) };
     let tight = policy(7, 16);
     let report = run(&mut SweepRequest {
@@ -359,8 +357,8 @@ fn target_dirs_are_not_swept_while_a_lane_is_running() {
 
 #[test]
 fn terminal_bloom_working_refs_are_pruned_and_claim_refs_are_spared() {
-    let scratch = tempfile::tempdir().unwrap();
-    let mut store = SqliteStore::open(":memory:").unwrap();
+    let scratch = tempfile::tempdir().expect("a scratch dir is created");
+    let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
     let (predecessor, _) = journal_superseded(&mut store);
 
     let fake = FakeGithub::new();
