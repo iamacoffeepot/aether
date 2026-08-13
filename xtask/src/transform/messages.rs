@@ -21,8 +21,12 @@
 pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
     use serde_json::{Map, Value, json};
 
+    let or_zero = |value: &Value, key: &str| value.get(key).cloned().unwrap_or_else(|| json!(0));
+    let or_null = |value: &Value, key: &str| value.get(key).cloned().unwrap_or(Value::Null);
+
     let mut result: Option<Value> = None;
     let mut first_main: Option<Value> = None;
+    let mut calls = Vec::new();
     for line in transcript.lines() {
         if line.trim().is_empty() {
             continue;
@@ -32,24 +36,33 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
         };
         match event.get("type").and_then(Value::as_str) {
             Some("result") => result = Some(event),
-            Some("assistant") if first_main.is_none() => {
+            Some("assistant") => {
                 let message = event.get("message").cloned().unwrap_or(Value::Null);
                 let model = message.get("model").and_then(Value::as_str).unwrap_or_default();
                 if model.contains("haiku") {
                     continue;
                 }
-                if let Some(usage) = message.get("usage") {
+                let Some(usage) = message.get("usage") else {
+                    continue;
+                };
+                if first_main.is_none() {
                     first_main = Some(
                         json!({ "model": message.get("model").cloned().unwrap_or(Value::Null), "usage": usage.clone() }),
                     );
                 }
+                let cache_creation = usage.get("cache_creation").cloned().unwrap_or(Value::Null);
+                calls.push(json!({
+                    "input": or_zero(usage, "input_tokens"),
+                    "cache_write": or_zero(usage, "cache_creation_input_tokens"),
+                    "cache_write_1h": or_zero(&cache_creation, "ephemeral_1h_input_tokens"),
+                    "cache_write_5m": or_zero(&cache_creation, "ephemeral_5m_input_tokens"),
+                    "cache_read": or_zero(usage, "cache_read_input_tokens"),
+                    "output": or_zero(usage, "output_tokens"),
+                }));
             }
             _ => {}
         }
     }
-
-    let or_zero = |value: &Value, key: &str| value.get(key).cloned().unwrap_or_else(|| json!(0));
-    let or_null = |value: &Value, key: &str| value.get(key).cloned().unwrap_or(Value::Null);
 
     let mut record = Map::new();
     record.insert("schema".to_owned(), json!(1));
@@ -71,6 +84,15 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
             }
         }
     }
+
+    record.insert(
+        "calls".to_owned(),
+        if calls.is_empty() {
+            Value::Null
+        } else {
+            Value::Array(calls)
+        },
+    );
 
     let Some(result) = result else {
         // A run that died before the terminal record — legible, cost unknown.
@@ -122,6 +144,12 @@ mod tests {
         assert_eq!(record["first_call_model"], "claude-opus-4-8");
         assert_eq!(record["first_call_cache_read"], 40);
         assert_eq!(record["result"]["num_turns"], 3, "the terminal record is carried whole");
+        // Haiku is a side model and is skipped; the opus call is the one the
+        // ledger can band-bill. Flattening it into the aggregate alone would
+        // leave the price table choosing one band for the whole dispatch.
+        assert_eq!(record["calls"].as_array().map(Vec::len), Some(1));
+        assert_eq!(record["calls"][0]["input"], 100);
+        assert_eq!(record["calls"][0]["cache_read"], 40);
 
         // A transcript with no terminal `result` is a legible `no_result` row,
         // never an error — evidence is never dropped.

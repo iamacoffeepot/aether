@@ -1634,6 +1634,7 @@ fn park_and_answer(
         findings: None,
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
+        calls: None,
     };
     assert!(matches!(admit_uploaded(store, &upload).unwrap(), AdmitDecision::Admitted(_)), "the parked upload admits");
 

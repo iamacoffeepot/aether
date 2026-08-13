@@ -11,7 +11,7 @@
 use core::fmt;
 use std::error::Error;
 
-use aether_bloomery::StudyCost;
+use aether_bloomery::{StudyCall, StudyCost};
 use serde::Deserialize;
 
 // Re-export the platform-free verdict vocabulary from the domain crate so
@@ -71,6 +71,27 @@ struct ResultRecordJson {
     cache_read: Option<u64>,
     #[serde(default)]
     output: Option<u64>,
+    // Present when the messages-format arms derived per-call usage; null or
+    // absent on every other harness, and on any record sealed before the
+    // long-context band needed it.
+    #[serde(default)]
+    calls: Option<Vec<CallJson>>,
+}
+
+#[derive(Deserialize)]
+struct CallJson {
+    #[serde(default)]
+    input: Option<u64>,
+    #[serde(default)]
+    cache_write: Option<u64>,
+    #[serde(default)]
+    cache_write_1h: Option<u64>,
+    #[serde(default)]
+    cache_write_5m: Option<u64>,
+    #[serde(default)]
+    cache_read: Option<u64>,
+    #[serde(default)]
+    output: Option<u64>,
 }
 
 /// Parse a runner result record's JSON bytes into the gradeable [`StudyCost`]
@@ -80,9 +101,18 @@ struct ResultRecordJson {
 /// # Errors
 /// Returns [`StudyRecordError::Parse`] when `json` is not a decodable object.
 pub fn parse_study_cost(json: &[u8]) -> Result<StudyCost, StudyRecordError> {
+    Ok(parse_study(json)?.0)
+}
+
+/// Parse a runner result record into the aggregate cost columns and, when the
+/// record carried them, the per-call usages a long-context band selects on.
+///
+/// # Errors
+/// Returns [`StudyRecordError::Parse`] when `json` is not a decodable object.
+pub fn parse_study(json: &[u8]) -> Result<(StudyCost, Option<Vec<StudyCall>>), StudyRecordError> {
     let raw: ResultRecordJson =
         serde_json::from_slice(json).map_err(|error| StudyRecordError::Parse(error.to_string()))?;
-    Ok(StudyCost {
+    let cost = StudyCost {
         // Never parsed: the price is computed from the token columns against a
         // sealed `PriceTable` (#4679), because a harness's self-reported bottom
         // line is its own cost model and two of them are not comparable.
@@ -95,7 +125,21 @@ pub fn parse_study_cost(json: &[u8]) -> Result<StudyCost, StudyRecordError> {
         cache_write_5m_tokens: raw.cache_write_5m.unwrap_or(0),
         cache_read_tokens: raw.cache_read.unwrap_or(0),
         output_tokens: raw.output.unwrap_or(0),
-    })
+    };
+    let calls = raw.calls.filter(|calls| !calls.is_empty()).map(|calls| {
+        calls
+            .into_iter()
+            .map(|call| StudyCall {
+                input_tokens: call.input.unwrap_or(0),
+                cache_write_tokens: call.cache_write.unwrap_or(0),
+                cache_write_1h_tokens: call.cache_write_1h.unwrap_or(0),
+                cache_write_5m_tokens: call.cache_write_5m.unwrap_or(0),
+                cache_read_tokens: call.cache_read.unwrap_or(0),
+                output_tokens: call.output.unwrap_or(0),
+            })
+            .collect()
+    });
+    Ok((cost, calls))
 }
 
 #[cfg(test)]
@@ -163,5 +207,25 @@ mod tests {
     #[test]
     fn non_object_bytes_are_a_parse_error() {
         assert!(parse_study_cost(b"not json").is_err());
+    }
+
+    #[test]
+    fn a_record_with_per_call_usage_keeps_the_calls_off_the_aggregate() {
+        // The ledger bands per call. A record that only summed these two into
+        // the aggregate columns would force the price table to pick one band
+        // for both, which is the overcount the call list exists to prevent.
+        let json = br#"{
+            "input": 350000, "output": 2000,
+            "calls": [
+                {"input": 100000, "output": 1000},
+                {"input": 250000, "output": 1000, "cache_read": 0}
+            ]
+        }"#;
+        let (cost, calls) = super::parse_study(json).expect("a two-call record parses");
+        assert_eq!(cost.input_tokens, 350_000, "the aggregate is still the dispatch total");
+        let calls = calls.expect("the call list survived");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].input_tokens, 100_000);
+        assert_eq!(calls[1].prompt_tokens(), 250_000);
     }
 }

@@ -32,7 +32,7 @@
 //!
 //! [`admit_uploaded`]: crate::bloomery::admit_uploaded
 
-use aether_bloomery::{CandidateRef, Digest, Nonce, StageVerdict, StudyCost, VerifyFailureSet};
+use aether_bloomery::{CandidateRef, Digest, Nonce, StageVerdict, StudyCall, StudyCost, VerifyFailureSet};
 use serde::{Deserialize, Serialize};
 
 use crate::bloomery::UploadedEvidence;
@@ -96,6 +96,9 @@ pub struct ScriptedUpload {
     pub failed_verifiers: VerifyFailureSet,
     /// What the attempt cost (#4679), if the scenario measures one.
     pub cost: Option<StudyCost>,
+    /// Per-call usage when a scenario measures a banded dispatch.
+    #[serde(default)]
+    pub calls: Option<Vec<StudyCall>>,
 }
 
 impl ScriptedUpload {
@@ -111,6 +114,7 @@ impl ScriptedUpload {
             findings: self.findings,
             failed_verifiers: self.failed_verifiers,
             cost: self.cost,
+            calls: self.calls,
         }
     }
 }

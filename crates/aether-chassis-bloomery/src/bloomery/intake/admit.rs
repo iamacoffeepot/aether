@@ -7,7 +7,8 @@ use std::fmt;
 
 use aether_bloomery::{
     Admit, BloomId, CandidateRef, Digest, Event, Evidence, Fact, IdempotencyKey, InwardError, Nonce, ResolutionClaim,
-    StageCatalog, StageId, StageResult, StageVerdict, StudyCost, VerifyFailureSet, WorkpieceId, normalize_stage_result,
+    StageCatalog, StageId, StageResult, StageVerdict, StudyCall, StudyCost, VerifyFailureSet, WorkpieceId,
+    normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
@@ -61,6 +62,9 @@ pub struct UploadedEvidence {
     /// attempt's price is recorded whatever its verdict was. `None` is an
     /// unmeasured attempt, which writes no row rather than a zero one.
     pub cost: Option<StudyCost>,
+    /// Per-call usage when the harness reported it. Rides with `cost` into the
+    /// study admit so a banded price row can charge each call, not the sum.
+    pub calls: Option<Vec<StudyCall>>,
 }
 
 /// Why the broker refused an upload without touching the reducer.
