@@ -71,6 +71,26 @@ pub fn is_model_lane(command: &str) -> bool {
     command == CONSTRUCT_IMPLEMENT_COMMAND || command == REVIEW_CRITIC_COMMAND
 }
 
+/// The typed command this stage's dispatch constructs, if it dispatches a
+/// worker transformation at all.
+///
+/// Distinct from [`StageBinding::process`]: that string names the host
+/// position (`"review"`, `"aggregate-review"`), while this names the command
+/// the executor routes (`review.critic`). [`is_model_lane`] judges the latter,
+/// and so does [`ModelOverride::validate`](crate::values::ModelOverride::validate)
+/// — a key the seal door admits is a key some dispatch resolves.
+#[must_use]
+pub(super) fn dispatched_command(stage: StageId) -> Option<&'static str> {
+    match stage {
+        StageId::Construct | StageId::Refine => Some(CONSTRUCT_IMPLEMENT_COMMAND),
+        StageId::Review | StageId::AggregateReview => Some(REVIEW_CRITIC_COMMAND),
+        StageId::Verify | StageId::AggregateVerify => Some(VERIFY_CHECK_COMMAND),
+        StageId::Sketch | StageId::Scope | StageId::Approve | StageId::Integrate | StageId::Land | StageId::Study => {
+            None
+        }
+    }
+}
+
 /// Whether a binding's `process` names something an executor can actually route.
 ///
 /// The dispatched lanes are the typed commands the host routes on; the rest are
