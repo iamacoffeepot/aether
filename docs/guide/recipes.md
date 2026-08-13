@@ -75,6 +75,10 @@ current source.
 - **[Driving a bloom over the REST control API](recipes/bloomery-rest-api.md)**
   (drive-only) — boot the Bloomery coordinator, stage and seal a draft, and
   inspect its live state through the localhost control surface.
+- **[Supervising the coordinator with systemd](recipes/supervising-the-coordinator.md)**
+  (drive-only) — install the checked-in user unit and its environment-file
+  template, then start, restart, and read the coordinator through systemd and
+  journald.
 - **Debugging a hung settlement** (drive-only) — reading a stuck mail chain
   with the trace tools.
 
