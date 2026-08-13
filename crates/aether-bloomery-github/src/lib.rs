@@ -93,9 +93,9 @@ pub mod testing;
 pub use app_auth::{AppTokenSource, InstallationTokenExchange};
 pub use client::{
     ActionsApi, Artifact, CheckConclusion, CheckRun, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError,
-    HttpRequest, HttpResponse, HttpTransport, InstallationToken, MergeResult, Method, NewCheckRun, NewComment,
-    NewPullRequest, PullRequest, PullRequestApi, PullRequestState, ReqwestGithub, ReqwestTransport, RunConclusion,
-    RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
+    HttpRequest, HttpResponse, HttpTransport, InstallationToken, IssueStateApi, MergeResult, Method, NewCheckRun,
+    NewComment, NewPullRequest, PullRequest, PullRequestApi, PullRequestState, ReqwestGithub, ReqwestTransport,
+    RunConclusion, RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
 };
 pub use config::GithubConfig;
 pub use correspondence::{GitObjectFormat, GitObjectId};
