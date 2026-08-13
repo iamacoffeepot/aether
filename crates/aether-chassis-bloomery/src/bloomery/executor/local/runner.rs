@@ -28,6 +28,19 @@ pub struct RunSpec<'a> {
     /// Absolute path of the lane slot's canonical checkout — where this dispatch
     /// builds, and where every later dispatch in the same slot builds too.
     pub worktree_dir: &'a Path,
+    /// Absolute path of the lane slot's own cargo target directory (#4912) — the
+    /// `CARGO_TARGET_DIR` this dispatch and its verify gates build into, reused by
+    /// every later dispatch in the same slot and shared with no other slot.
+    ///
+    /// Never inside [`worktree_dir`](Self::worktree_dir): the checkout is reset
+    /// with `git clean --force --force -d -x` at the start of every dispatch, so a
+    /// target directory in there would be deleted once per lap and the warm
+    /// dependency tree lost with it.
+    pub target_dir: &'a Path,
+    /// How many build jobs this lane's cargo invocations may run at once
+    /// (`CARGO_BUILD_JOBS`, #4912) — the cap that lets several lanes coexist in
+    /// one host's memory. `0` leaves cargo's own default of one job per core.
+    pub build_jobs: usize,
     /// Absolute path the run writes its `evidence.json` to (`--out`).
     pub evidence_dir: &'a Path,
     /// The idempotency nonce stamped into the evidence (`--nonce`).

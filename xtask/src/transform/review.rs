@@ -8,8 +8,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::transform::claude::assemble_construct_prompt;
-use crate::transform::sccache::{self, Counters};
-use crate::transform::{TransformArgs, conventions, run_model_lane, write_evidence_json};
+use crate::transform::{Measurements, TransformArgs, conventions, run_model_lane, write_evidence_json};
 
 /// The typed id of the model-driven review lane — the member line's terminal
 /// critic (`Transformation::for_member_stage` dispatches it for the Review
@@ -135,7 +134,7 @@ fn stamp_review_evidence(
     nonce: Option<&str>,
     verdict: ReviewVerdict,
     record: &serde_json::Value,
-    served: Option<Counters>,
+    measured: Measurements,
 ) -> serde_json::Value {
     // The critic's final message IS the findings (#3656) — stamped top-level so
     // the local backend can persist it and a later Refine re-entry is directed
@@ -153,7 +152,7 @@ fn stamp_review_evidence(
         "findings": findings,
         "result_record": record,
     });
-    sccache::stamp(&mut evidence, served);
+    measured.stamp(&mut evidence);
     evidence
 }
 
@@ -192,13 +191,15 @@ pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
     let run = run_model_lane(&prompt, args)?;
     write_evidence_json(
         &args.out,
-        &stamp_review_evidence(args.nonce.as_deref(), review_conclusion(&run.record), &run.record, run.sccache),
+        &stamp_review_evidence(args.nonce.as_deref(), review_conclusion(&run.record), &run.record, run.measured),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ReviewVerdict, candidate_section, parse_review_verdict, review_conclusion, stamp_review_evidence};
+    use super::{
+        Measurements, ReviewVerdict, candidate_section, parse_review_verdict, review_conclusion, stamp_review_evidence,
+    };
     use crate::transform::messages::derive_result_record;
 
     #[test]
@@ -279,12 +280,17 @@ mod tests {
         // the verdict claim the intake admits, and the prose a Refine re-entry
         // is directed by (#3656).
         let record = serde_json::json!({"schema": 1, "result": {"result": "pillar 2: off-by-one.\nVERDICT: finding"}});
-        let passed = stamp_review_evidence(Some("n-9"), ReviewVerdict::Pass, &record, None);
+        let passed = stamp_review_evidence(Some("n-9"), ReviewVerdict::Pass, &record, Measurements::default());
         assert_eq!(passed["command"], "review.critic");
         assert_eq!(passed["nonce"], "n-9");
         assert_eq!(passed["status"], "pass");
         assert_eq!(passed["findings"], "pillar 2: off-by-one.\nVERDICT: finding");
-        let finding = stamp_review_evidence(None, ReviewVerdict::Finding, &serde_json::json!({"schema": 1}), None);
+        let finding = stamp_review_evidence(
+            None,
+            ReviewVerdict::Finding,
+            &serde_json::json!({"schema": 1}),
+            Measurements::default(),
+        );
         assert_eq!(finding["status"], "fail");
         assert!(finding["findings"].is_null(), "a dead run stamps no findings");
     }
@@ -301,7 +307,8 @@ mod tests {
             "result": {"result": "`git diff` failed: bwrap: loopback failed.\nVERDICT: environment"},
         });
 
-        let stamped = stamp_review_evidence(Some("n-env"), ReviewVerdict::Environment, &record, None);
+        let stamped =
+            stamp_review_evidence(Some("n-env"), ReviewVerdict::Environment, &record, Measurements::default());
 
         assert_eq!(stamped["status"], "environment", "a review that judged nothing reports neither pass nor fail");
         let findings = stamped["findings"].as_str().expect("an environment report stamps findings");

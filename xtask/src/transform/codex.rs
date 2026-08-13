@@ -1,12 +1,13 @@
 //! The Codex harness arm: fork `codex exec` headless and derive the shared
 //! result-record envelope from its JSONL transcript.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::Result;
 
 use crate::transform::TransformArgs;
 use crate::transform::lane::{Terminal, Usage, capture, record, write_prompt};
+use crate::transform::peak_memory::PeakMemory;
 use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::scratch::Scratch;
 
@@ -106,9 +107,10 @@ pub(super) fn run(
     args: &TransformArgs,
     scratch: &Scratch,
     cache: Option<&CompilerCache>,
+    peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
     write_prompt(&args.out, prompt)?;
-    let mut command = Command::new(CODEX);
+    let mut command = peak.command(CODEX);
     command
         .args(codex_argv(prompt, args.model.as_deref(), args.effort.as_deref()))
         .stdin(Stdio::null())
@@ -116,7 +118,7 @@ pub(super) fn run(
         .stderr(Stdio::piped());
     scratch.export(&mut command);
     sccache::export(cache, &mut command);
-    Ok(record(derive_terminal(&capture(command, &args.out, CODEX)?)))
+    Ok(record(derive_terminal(&capture(command, &args.out, CODEX, peak)?)))
 }
 
 #[cfg(test)]

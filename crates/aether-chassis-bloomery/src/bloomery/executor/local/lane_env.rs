@@ -26,10 +26,16 @@
 //! `--out`) or is set by the gate itself, so nothing scrubbed here is load-
 //! bearing for the run.
 //!
-//! Build caches are deliberately not scrubbed. `CARGO_TARGET_DIR` names no
-//! durable coordinator state — it is a cache whose worst case is a rebuild, not
-//! a mutation of production — and clearing it would cost every lane a cold
-//! compile.
+//! Build caches are deliberately not scrubbed. None of them names durable
+//! coordinator state — a cache's worst case is a rebuild, not a mutation of
+//! production — and clearing `CARGO_HOME`, the toolchain vars, or the host's
+//! `SCCACHE_*` knobs would cost every lane a cold compile for nothing.
+//!
+//! `CARGO_TARGET_DIR` is the one the dispatch answers for itself rather than by
+//! policy here: `export_build_env` overwrites it with the lane slot's own target
+//! directory (#4912) right after this scrub runs, so whatever the coordinator's
+//! boot environment named never reaches a lane — not because it was taken away,
+//! but because the dispatch names a better one.
 
 use std::env;
 use std::ffi::OsString;
@@ -114,9 +120,10 @@ mod tests {
         // Tripwire: the scrub has to be a scalpel. A lane spawns `cargo`, which
         // needs `PATH`, `HOME`, and its own toolchain vars to run at all, so a
         // broader sweep would turn every dispatch into a spawn failure — a
-        // louder bug than the one being fixed, but a bug either way.
-        // `CARGO_TARGET_DIR` is the deliberate keep: a cache, not durable
-        // coordinator state.
+        // louder bug than the one being fixed, but a bug either way. The build
+        // caches are the deliberate keep: a cache is not durable coordinator
+        // state, and taking `CARGO_HOME` or the toolchain vars away would cost
+        // every lane a cold compile for nothing.
         assert!(
             removed(&["PATH", "HOME", "CARGO_TARGET_DIR", "CARGO_HOME", "RUSTUP_TOOLCHAIN", "GITHUB_REPOSITORY"])
                 .is_empty()

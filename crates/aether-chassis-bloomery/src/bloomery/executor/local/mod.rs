@@ -49,6 +49,16 @@
 //! attempt produced — and carries the slot the dispatch ran in, so a coordinator
 //! restart can re-adopt a run without handing its build path to a stranger.
 //!
+//! The slot owns its cargo build directory too (`<base>/slot-<index>-target`,
+//! #4912), exported to the lane and every verify gate under it as
+//! `CARGO_TARGET_DIR`. One directory per slot rather than one for the host:
+//! cargo locks a build directory exclusively, so lanes sharing one build in turn
+//! however many slots are free, and its state is keyed by source path, so a
+//! shared directory accumulates a fresh artifact set per checkout path and can
+//! surface another slot's source as a compile failure. It is the checkout's
+//! *sibling*, never a directory in it — the reset each dispatch runs removes
+//! ignored files, and an in-tree build directory would be deleted every lap.
+//!
 //! # The spawn seam
 //!
 //! The git-checkout + `cargo xtask` shell-out is behind the [`TransformRunner`]

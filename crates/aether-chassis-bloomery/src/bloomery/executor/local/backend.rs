@@ -44,6 +44,29 @@ const EVIDENCE_SUFFIX: &str = "-evidence";
 /// what the first paid for.
 const SLOT_PREFIX: &str = "slot-";
 
+/// The suffix a lane slot's cargo target directory carries, completing the slot's
+/// own name (`slot-0-target`, `slot-1-target`) under the target base.
+///
+/// Per slot for the reason the checkout is (#4912): cargo takes an exclusive lock
+/// on a build directory, so lanes sharing one build strictly one at a time
+/// however many slots the ceiling allows, and its fingerprints are keyed by
+/// source path, so a directory shared across divergent checkouts both grows
+/// without bound and can surface a dependency last compiled from another slot's
+/// source as a failure that reads as a regression.
+///
+/// A **sibling** of the checkout rather than a directory inside it. A dispatch
+/// resets its slot with `git clean --force --force -d -x` (see
+/// `materialize_checkout`), which removes ignored files — an in-tree `target`
+/// would be deleted once per dispatch, and the warm dependency tree that makes a
+/// repair lap recompile nine crates instead of ninety-six is exactly what would
+/// be lost.
+const TARGET_SUFFIX: &str = "-target";
+
+/// How many build jobs a lane's cargo invocations run at once when nothing
+/// configures it — the seam default, mirroring
+/// [`CoordinatorConfig::lane_build_jobs`]'s, which is what production resolves.
+const DEFAULT_LANE_BUILD_JOBS: usize = 8;
+
 /// The file a dispatch records its lane slot in, inside its own evidence
 /// directory — the durable half of the slot assignment, read back by boot
 /// reconciliation (see [`recorded_slot`]).
@@ -114,15 +137,18 @@ struct PendingRun {
 }
 
 impl PendingRun {
-    // The spawn request, over the slot checkout the dispatch was handed. The
-    // build path is not resolved with the rest of the dispatch: it belongs to
-    // the slot, and which slot this run gets is decided when one frees.
-    fn spec<'a>(&'a self, worktree_dir: &'a Path) -> RunSpec<'a> {
+    // The spawn request, over the slot checkout the dispatch was handed and the
+    // target directory beside it. Neither build path is resolved with the rest of
+    // the dispatch: both belong to the slot, and which slot this run gets is
+    // decided when one frees.
+    fn spec<'a>(&'a self, worktree_dir: &'a Path, target_dir: &'a Path, build_jobs: usize) -> RunSpec<'a> {
         RunSpec {
             command: &self.command,
             checkout_hex: &self.checkout_hex,
             diff_base_hex: self.diff_base_hex.as_deref(),
             worktree_dir,
+            target_dir,
+            build_jobs,
             evidence_dir: &self.evidence_dir,
             nonce: &self.nonce,
             harness: self.profile.as_ref().map(|resolved| resolved.harness.as_str()),
@@ -212,6 +238,13 @@ pub struct LocalExecutor {
     // seam default; production resolves it from config through
     // `with_max_concurrent_lanes`.
     max_concurrent_lanes: usize,
+    // Where the per-slot cargo target directories live. The scratch root by
+    // default — a target dir is then the sibling of the checkout it serves — and a
+    // configured volume when the host names one it would rather build on.
+    target_base: PathBuf,
+    // How many build jobs one lane's cargo invocations may run at once, exported
+    // as `CARGO_BUILD_JOBS`. `0` leaves cargo's own default (one job per core).
+    build_jobs: usize,
     // The store the captured candidate's commit message is filed in, keyed by the
     // member the run's order names. `None` for a backend built without one (the
     // seam tests), which simply files nothing.
@@ -238,14 +271,31 @@ impl LocalExecutor {
         correspondence: SharedCorrespondence,
         base_dir: impl Into<PathBuf>,
     ) -> Self {
+        let base_dir = base_dir.into();
         Self {
             runner,
             correspondence,
-            base_dir: base_dir.into(),
+            target_base: base_dir.clone(),
+            base_dir,
             registry: Mutex::new(Registry::default()),
             max_concurrent_lanes: usize::MAX,
+            build_jobs: DEFAULT_LANE_BUILD_JOBS,
             messages: None,
         }
+    }
+
+    /// Put the per-slot cargo target directories under `configured` instead of
+    /// beside the slot checkouts, and cap one lane's cargo invocations at
+    /// `build_jobs` (`0` leaves cargo's own default).
+    ///
+    /// An empty `configured` keeps the default arrangement, and so does one that
+    /// resolves inside a slot checkout — see [`usable_target_base`], which is
+    /// where the refusal and its reason live.
+    #[must_use]
+    pub fn with_lane_build(mut self, configured: &str, build_jobs: usize) -> Self {
+        self.target_base = usable_target_base(configured, &self.base_dir);
+        self.build_jobs = build_jobs;
+        self
     }
 
     /// Cap how many lane children this backend runs at once.
@@ -295,7 +345,8 @@ impl LocalExecutor {
             correspondence,
             config.local_worktree_base.clone(),
         )
-        .with_max_concurrent_lanes(config.max_concurrent_lanes);
+        .with_max_concurrent_lanes(config.max_concurrent_lanes)
+        .with_lane_build(&config.lane_target_base, config.lane_build_jobs);
         // A store this backend cannot open costs the landing proposal its
         // authored title, never a candidate: the capture still commits and the
         // land path still falls back, so the miss warns rather than failing boot.
@@ -341,6 +392,15 @@ impl LocalExecutor {
     // that holds the slot. Absolute for the reason the evidence dir is.
     fn slot_dir(&self, slot: usize) -> io::Result<PathBuf> {
         absolute(self.base_dir.join(format!("{SLOT_PREFIX}{slot}")))
+    }
+
+    // The cargo target directory one lane slot builds into, reused by every
+    // dispatch that holds the slot exactly as its checkout is. Absolute for the
+    // reason the other two are: the child runs with `current_dir(worktree_dir)`,
+    // so a relative `CARGO_TARGET_DIR` would land inside the checkout — the one
+    // place it must never be.
+    fn slot_target_dir(&self, slot: usize) -> io::Result<PathBuf> {
+        absolute(self.target_base.join(format!("{SLOT_PREFIX}{slot}{TARGET_SUFFIX}")))
     }
 
     // Drop a terminal run from the registry and hand its slot back, so the next
@@ -462,8 +522,9 @@ impl LocalExecutor {
     // meanwhile. A spawn that fails hands the slot straight back.
     fn start_reserved(&self, pending: PendingRun, slot: usize) -> Result<(), LocalExecutorError> {
         let worktree_dir = self.slot_dir(slot).map_err(LocalExecutorError::Io)?;
+        let target_dir = self.slot_target_dir(slot).map_err(LocalExecutorError::Io)?;
         record_slot(&pending.evidence_dir, slot);
-        let started = self.runner.start(&pending.spec(&worktree_dir));
+        let started = self.runner.start(&pending.spec(&worktree_dir, &target_dir, self.build_jobs));
 
         let mut registry = self.lock();
         registry.starting -= 1;
@@ -1118,6 +1179,60 @@ fn is_slot_directory(name: &str) -> bool {
         .is_some_and(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
+/// Where the per-slot target directories may be created: `configured` when a
+/// deployment named a usable root, `scratch_root` otherwise (#4912).
+///
+/// An empty value is nothing named at all: the target dirs become siblings of
+/// the slot checkouts, which needs no configuration and is on the volume the
+/// checkouts already fit on.
+///
+/// A value inside a slot checkout is refused — in favour of that same default
+/// rather than of a failed boot, since this is a cache location and no placement
+/// of it is worth refusing to run blooms over. It is the one placement that
+/// would silently undo the whole arrangement: every dispatch resets its slot with `git clean --force
+/// --force -d -x`, which removes ignored files, so a target directory under a
+/// checkout is deleted once per dispatch: the lane still builds, the counters
+/// still read, and every lap is cold — the warm-dependency property is gone with
+/// nothing saying so. Refusing it costs a deployment its chosen volume and says
+/// why; honouring it costs every lap a full rebuild and says nothing.
+fn usable_target_base(configured: &str, scratch_root: &Path) -> PathBuf {
+    let configured = Path::new(configured);
+    if configured.as_os_str().is_empty() {
+        return scratch_root.to_path_buf();
+    }
+    if inside_a_slot_checkout(configured, scratch_root) {
+        tracing::warn!(
+            configured = %configured.display(),
+            scratch_root = %scratch_root.display(),
+            "local executor backend: the configured lane target base sits inside a slot checkout, where each \
+             dispatch's `git clean` would delete it; building beside the checkouts instead",
+        );
+        return scratch_root.to_path_buf();
+    }
+    configured.to_path_buf()
+}
+
+/// Whether `path` lies inside one of `scratch_root`'s slot checkouts — the
+/// placement [`usable_target_base`] refuses.
+///
+/// Read off the path rather than the filesystem: the checkouts a slot will use
+/// are named by construction (`slot-<index>` under the root, see
+/// [`LocalExecutor::slot_dir`]) and most of them do not exist yet at boot, so a
+/// check that asked the disk would pass and then be wrong on the first dispatch.
+/// Both sides are resolved against the cwd first, since the scratch root ships
+/// relative and a deployment states its target volume absolute — comparing the
+/// two as written would find no prefix and let the placement through.
+fn inside_a_slot_checkout(path: &Path, scratch_root: &Path) -> bool {
+    let resolved = absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let root = absolute(scratch_root).unwrap_or_else(|_| scratch_root.to_path_buf());
+    resolved
+        .strip_prefix(&root)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|component| component.as_os_str().to_str())
+        .is_some_and(is_slot_directory)
+}
+
 /// The dispatch nonce a registered worktree belongs to, or `None` when the
 /// worktree is not one of this backend's.
 ///
@@ -1256,4 +1371,59 @@ fn construct_conclusion(bytes: &[u8]) -> bool {
         value.get("result_record").and_then(|record| record.get("is_error")).and_then(serde_json::Value::as_bool)
             == Some(false);
     concluded && produced_candidate
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::usable_target_base;
+
+    /// The scratch root these cases are stated against, absolute the way a
+    /// production one is.
+    fn scratch_root() -> PathBuf {
+        PathBuf::from("/mnt/scratch/bloomery")
+    }
+
+    #[test]
+    fn an_unconfigured_target_base_puts_the_build_trees_beside_the_checkouts() {
+        assert_eq!(
+            usable_target_base("", &scratch_root()),
+            scratch_root(),
+            "nothing named means the slot's target dir is its checkout's sibling, which needs no configuration",
+        );
+        assert_eq!(
+            usable_target_base("/mnt/big/bloomery-targets", &scratch_root()),
+            Path::new("/mnt/big/bloomery-targets"),
+            "a deployment that named a roomier volume builds on it",
+        );
+    }
+
+    #[test]
+    fn a_target_base_inside_a_slot_checkout_is_refused() {
+        // Tripwire (#4912): every dispatch resets its slot with `git clean
+        // --force --force -d -x`, which removes ignored files — so a target
+        // directory anywhere under a slot checkout is deleted once per
+        // dispatch. Nothing reports that: the lane still builds, the sccache
+        // counters still read, and every lap is simply cold again, which is
+        // precisely the cost the slot layout exists to avoid. Honouring the
+        // path is silent; refusing it is one warn line.
+        for configured in ["/mnt/scratch/bloomery/slot-0/target", "/mnt/scratch/bloomery/slot-12/nested/target"] {
+            assert_eq!(
+                usable_target_base(configured, &scratch_root()),
+                scratch_root(),
+                "{configured} would be wiped by its own slot's checkout hygiene",
+            );
+        }
+
+        // The complement: a slot's own target directory is a *sibling* of the
+        // checkout, so a path merely starting with a slot's name must not be
+        // read as being inside one — that reading would refuse the default
+        // arrangement itself.
+        assert_eq!(
+            usable_target_base("/mnt/scratch/bloomery/slot-0-target", &scratch_root()),
+            Path::new("/mnt/scratch/bloomery/slot-0-target"),
+            "a slot's own target directory is its checkout's sibling, not a path inside it",
+        );
+    }
 }

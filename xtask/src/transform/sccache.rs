@@ -1,12 +1,12 @@
 //! The compiler cache every lane build runs through, when the host has one
 //! (#4894).
 //!
-//! No lane shares a target directory with another, on purpose: reusing cargo's
-//! incremental state across divergent source is unsound, and the shared
-//! directory that avoids the cold cost instead grows without bound. The verify
-//! lane builds in its checkout's own tree and a model lane's child builds in a
-//! throwaway under the run's scratch, and both start empty — every lap
-//! recompiles the whole dependency tree from the compiler's point of view.
+//! No two lanes running at once share a target directory, on purpose: reusing
+//! cargo's incremental state across divergent source is unsound, and cargo locks
+//! a build directory exclusively, so a shared one would also make two "parallel"
+//! lanes compile strictly in turn. Each lane slot owns one instead
+//! (`<scratch>/slot-<index>-target`, #4912), handed down as `CARGO_TARGET_DIR`,
+//! and a model lane's child builds in a throwaway under the run's scratch.
 //!
 //! sccache is sound exactly where a shared target directory is not. It keys each
 //! compiler invocation by content — the source bytes, the flags, the hashes of
@@ -25,10 +25,13 @@
 //! rebuild one directory over hit none. Which is why a lane builds in its lane
 //! slot's canonical checkout rather than a per-dispatch one (#4904, the local
 //! executor backend): the dispatches that share a slot share a build path, so
-//! the second one hits what the first paid for. Two lanes in *different* slots
-//! still miss each other, which is the accepted cost of not serializing them.
-//! The counters below are what make either claim measurable rather than
-//! anecdotal.
+//! the second one hits what the first paid for. Within a slot the cache is in
+//! fact the second line of defence — cargo's own fingerprints hold across
+//! dispatches there, which is cheaper than a hit — and what sccache carries is
+//! the case they cannot: a slot whose checkout moved to a different subject.
+//! Two lanes in *different* slots still miss each other, which is the accepted
+//! cost of not serializing them. The counters below are what make either claim
+//! measurable rather than anecdotal.
 //!
 //! It is host tooling, not a dependency of this workspace. A host without
 //! sccache builds exactly as it did before rather than failing a lane over a
@@ -47,12 +50,15 @@ const SCCACHE: &str = "sccache";
 /// The lane build environment sccache needs, mirroring what `ci.yml` exports for
 /// the same reason.
 ///
-/// Incremental compilation is off because sccache cannot cache an incremental
-/// artifact — with `-C incremental` in the invocation every compile is a miss,
-/// which would leave the wrapper as pure overhead. The lane gives up nothing by
-/// it: a target directory created for one lap has no prior incremental state to
-/// reuse anyway.
-const LANE_BUILD_ENV: [(&str, &str); 2] = [("RUSTC_WRAPPER", SCCACHE), ("CARGO_INCREMENTAL", "0")];
+/// Only the wrapper. Incremental compilation is the other half of what makes a
+/// cache usable — sccache cannot cache an incremental artifact, so with `-C
+/// incremental` in the invocation every compile is a miss — but which lanes give
+/// it up is a per-lane call rather than this module's (#4912): the verify gates
+/// turn it off for CI parity and cacheability over a build directory their own
+/// dispatch warmed, while a construct lane keeps it, because its child is an
+/// edit loop recompiling the same tree over and over and incremental is worth
+/// more to it than a cache hit rate would be.
+const LANE_BUILD_ENV: [(&str, &str); 1] = [("RUSTC_WRAPPER", SCCACHE)];
 
 /// The key lane evidence carries the counters under.
 const EVIDENCE_KEY: &str = "sccache";
