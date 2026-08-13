@@ -1,3 +1,4 @@
+mod closure;
 mod nextest;
 mod scope;
 mod tools;
@@ -12,6 +13,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::cargo::{WASM_TARGET, run_captured, write_json_pretty};
 use crate::transform::sccache::{self, CompilerCache};
+use crate::transform::verify::closure::Closure;
 use crate::transform::verify::scope::Scope;
 use crate::transform::{Evidence, TransformArgs, build_evidence};
 
@@ -355,18 +357,33 @@ fn verify_check_members() -> &'static [&'static str] {
     &["verify.suppress", "verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps"]
 }
 
-/// Aggregate `verify.check`'s member results: pass iff every member passed.
-/// Pure so the aggregation is testable without spawning cargo.
-fn all_passed(statuses: &[bool]) -> bool {
-    statuses.iter().all(|&passed| passed)
+/// The status the umbrella stamps, from what its members said (ADR-0176's
+/// three-valued lane vocabulary). Pure, so the aggregation is testable without
+/// spawning cargo.
+///
+/// `fail` the moment any member judged the candidate and found something,
+/// `environment` when the only thing that went wrong went wrong outside
+/// anything the candidate can reach, `pass` otherwise. The order matters in one
+/// direction: a real finding outranks an environment fault, because a run that
+/// found a defect has judged the candidate whatever else the host was doing.
+fn umbrella_status(outcomes: &[MemberOutcome]) -> &'static str {
+    if outcomes.iter().any(|outcome| matches!(outcome, MemberOutcome::Failed | MemberOutcome::Operational)) {
+        return "fail";
+    }
+    if outcomes.contains(&MemberOutcome::Environment) {
+        return "environment";
+    }
+    "pass"
 }
 
 /// What one umbrella member's run said.
 ///
-/// The third case is the one that has to exist (#4845): a member that could not
+/// The third case is the one that had to exist (#4845): a member that could not
 /// compute a verdict has said nothing about the candidate, and folding it into
 /// `Failed` charges the candidate for a broken scanner config or an unreadable
-/// blob.
+/// blob. The fourth is the same argument one level out (#4895): a member that
+/// judged something the candidate cannot reach has said nothing about it
+/// either, and the host is the one being reported on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MemberOutcome {
     /// The member ran and found nothing.
@@ -375,6 +392,10 @@ enum MemberOutcome {
     Failed,
     /// The member could not reach a verdict — a host or tooling fault.
     Operational,
+    /// The member reported only failures outside the candidate's
+    /// reverse-dependency closure, twice — an environment fault that did not
+    /// clear on its one repeat.
+    Environment,
 }
 
 impl MemberOutcome {
@@ -394,9 +415,15 @@ impl MemberOutcome {
     /// keeps the failure visible and accountable without attributing it to a
     /// candidate that could never repair it, and adds no identity, so
     /// ADR-0178's `N + B` bound is unchanged.
+    ///
+    /// An environment fault carries no identity at all: ADR-0178's set names
+    /// the verifiers that found something wrong with the candidate, and this
+    /// member found nothing wrong with it. Charging it to
+    /// [`VerifyFailure::Preflight`] would put a host outage into the repair
+    /// ledger the member's stuckness is measured from.
     fn failure(self, id: &str) -> Option<VerifyFailure> {
         match self {
-            Self::Passed => None,
+            Self::Passed | Self::Environment => None,
             Self::Failed => VerifyFailure::from_name(id),
             Self::Operational => Some(VerifyFailure::Preflight),
         }
@@ -518,16 +545,54 @@ fn operational_failure_notice(id: &str, invocation: &VerifyInvocation, code: Opt
     )
 }
 
+/// One member run's captured output, in the shape the umbrella reads it.
+///
+/// A struct rather than a [`std::process::Output`] because this is the seam a
+/// test scripts (#4895): the rerun policy's whole subject is what a *second*
+/// run of the same member said, and no fixture can make cargo say it twice.
+struct Captured {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    code: Option<i32>,
+}
+
+/// How the umbrella obtains one member's captured output.
+///
+/// `scope` rides the call rather than the runner because it is a property of
+/// *what* is run — it decides the member's argv (#4890) — while the runner's
+/// own cache is a property of *how*: the environment the spawn happens under,
+/// which a rerun repeats unchanged.
+trait MemberRunner {
+    fn run(&mut self, invocation: &VerifyInvocation, scope: &Scope) -> Result<Captured>;
+}
+
+/// The runner the lane uses: spawn the member's own command, through the host's
+/// compiler cache when it has one (#4894).
+///
+/// The cache belongs to the runner rather than to the policy above it: which
+/// environment a member is spawned under is a property of *how* it is run, and
+/// a rerun is the same spawn a second time.
+struct SpawnRunner<'a> {
+    cache: Option<&'a CompilerCache>,
+}
+
+impl MemberRunner for SpawnRunner<'_> {
+    fn run(&mut self, invocation: &VerifyInvocation, scope: &Scope) -> Result<Captured> {
+        let output = run_captured(invocation.command(scope, self.cache))
+            .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
+        Ok(Captured { stdout: output.stdout, stderr: output.stderr, code: output.status.code() })
+    }
+}
+
 /// Run one umbrella member under `scope` and reduce its output to `(outcome,
 /// log, exit_code)`.
 fn run_member(
     id: &str,
     invocation: &VerifyInvocation,
     scope: &Scope,
-    cache: Option<&CompilerCache>,
+    runner: &mut dyn MemberRunner,
 ) -> Result<(MemberOutcome, Vec<u8>, i32)> {
-    let output = run_captured(invocation.command(scope, cache))
-        .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
+    let output = runner.run(invocation, scope)?;
 
     // A JSON-format member's verdict is ours to derive: its exit status is
     // success even with lints present, because the run was not asked to deny
@@ -540,7 +605,7 @@ fn run_member(
         (true, stdout)
     };
 
-    let code = output.status.code();
+    let code = output.code;
     let outcome = member_outcome(invocation, derived_pass, code);
 
     let mut log = Vec::new();
@@ -557,6 +622,150 @@ fn run_member(
     log.extend_from_slice(&output.stderr);
 
     Ok((outcome, log, effective_exit_code(outcome.passed(), code)))
+}
+
+/// One member's contribution to the umbrella: what it concluded, the log the
+/// evidence directory keeps, the findings a repair lap is directed by, and the
+/// environment observation the lane reports *instead of* handing over.
+///
+/// The two prose channels are separate on purpose (#4895). Findings are work: a
+/// `Refine` re-entry is told to fix them. An observation is a receipt: it names
+/// what this run declined to blame the candidate for, so a misclassification is
+/// visible to a reader instead of being a silence.
+struct MemberRun {
+    id: String,
+    outcome: MemberOutcome,
+    log: Vec<u8>,
+    exit_code: i32,
+    findings: Option<String>,
+    observation: Option<String>,
+}
+
+impl MemberRun {
+    /// A member whose log the distillers read as they always have — everything
+    /// but a `verify.test` run whose failures were classified.
+    fn plain(id: &str, outcome: MemberOutcome, log: Vec<u8>, exit_code: i32) -> Self {
+        let findings = (!outcome.passed()).then(|| distil_member(id, &String::from_utf8_lossy(&log))).flatten();
+        Self { id: id.to_owned(), outcome, log, exit_code, findings, observation: None }
+    }
+}
+
+/// The classification a member's run admits, or `None` for a run there is
+/// nothing to classify: a member other than `verify.test`, an outcome that is
+/// not a finding about the candidate, or a log naming no failing test (a
+/// compile error inside a test target, which is the rustc channel's to report).
+fn classify_failures(
+    id: &str,
+    outcome: MemberOutcome,
+    log: &[u8],
+    closure: Option<&Closure>,
+) -> Option<nextest::ClassifiedRun> {
+    (id == "verify.test" && outcome == MemberOutcome::Failed)
+        .then(|| nextest::classify(&String::from_utf8_lossy(log), closure))
+        .flatten()
+}
+
+/// The line separating a member's first run from its repeat inside the one log
+/// the evidence keeps.
+///
+/// Both runs stay in that log. The receipt for a rerun is what each of the two
+/// runs said, and a log holding only the second cannot show that the first was
+/// environmental.
+fn rerun_notice(id: &str) -> String {
+    format!(
+        "\n\n{id}: every failure above lies outside the candidate's reverse-dependency closure — a transient \
+         host fault far more often than a candidate defect, so the member is being rerun once. Everything \
+         below is that second run.\n\n"
+    )
+}
+
+/// The environment observation for a member whose first run reported only
+/// out-of-closure failures, framed by what its one repeat then did.
+fn rerun_observation(outcome: MemberOutcome, block: Option<String>) -> Option<String> {
+    let verdict = match outcome {
+        MemberOutcome::Passed => {
+            "The repeat came back green, so the block did not repeat: it was the host, and the member passes \
+             without spending a repair lap."
+        }
+        MemberOutcome::Environment => {
+            "The repeat reported the same out-of-closure block, so this member escalates as an environment \
+             fault on the bloom rather than as findings against a candidate that cannot reach it."
+        }
+        _ => {
+            "The repeat reported failures inside the closure, so the member is judged on those; the block \
+             above is not among them."
+        }
+    };
+    Some(format!("{}\n\n{verdict}", block?))
+}
+
+/// Run one member, discriminating an environment fault from a candidate defect
+/// (#4895).
+///
+/// Only a failing `verify.test` run can be discriminated: a failing test names
+/// the package it lives in, and that package either links something the diff
+/// touched or it does not. Every other member reports on the workspace as a
+/// whole and has no such axis, so it passes straight through.
+///
+/// A run whose failures are *all* out of closure is worth exactly one repeat
+/// before anything is charged to anyone — the fault class is transient by
+/// nature (contention, a fork that failed, a box out of memory), so a green
+/// repeat is the honest verdict and a red one is a host still broken. A mixed
+/// run is not repeated at all: it found a real defect, and the repair lap it
+/// earns is handed the in-closure half alone.
+fn run_member_discriminated(
+    id: &str,
+    invocation: &VerifyInvocation,
+    scope: &Scope,
+    closure: Option<&Closure>,
+    runner: &mut dyn MemberRunner,
+) -> Result<MemberRun> {
+    let (outcome, log, exit_code) = run_member(id, invocation, scope, runner)?;
+    let Some(classified) = classify_failures(id, outcome, &log, closure) else {
+        return Ok(MemberRun::plain(id, outcome, log, exit_code));
+    };
+
+    if !classified.is_environmental() {
+        let findings = classified.findings().or_else(|| distil_diagnostics(&String::from_utf8_lossy(&log)));
+        return Ok(MemberRun {
+            id: id.to_owned(),
+            outcome,
+            log,
+            exit_code,
+            findings,
+            observation: classified.observation(),
+        });
+    }
+
+    let (repeat_outcome, repeat_log, repeat_exit) = run_member(id, invocation, scope, runner)?;
+    let repeat = classify_failures(id, repeat_outcome, &repeat_log, closure);
+
+    // The repeat is the run this member reports: the first one judged nothing
+    // about the candidate, whichever way the second went.
+    let outcome = if repeat_outcome.passed() {
+        MemberOutcome::Passed
+    } else if repeat.as_ref().is_some_and(nextest::ClassifiedRun::is_environmental) {
+        MemberOutcome::Environment
+    } else {
+        repeat_outcome
+    };
+    let findings = matches!(outcome, MemberOutcome::Failed | MemberOutcome::Operational)
+        .then(|| {
+            repeat
+                .as_ref()
+                .and_then(nextest::ClassifiedRun::findings)
+                .or_else(|| distil_diagnostics(&String::from_utf8_lossy(&repeat_log)))
+        })
+        .flatten();
+
+    Ok(MemberRun {
+        id: id.to_owned(),
+        outcome,
+        log: [log, rerun_notice(id).into_bytes(), repeat_log].concat(),
+        exit_code: repeat_exit,
+        findings,
+        observation: rerun_observation(outcome, classified.observation()),
+    })
 }
 
 /// The scope line this member's log opens with, when the member is one the run
@@ -649,9 +858,8 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
 
     // A failing single verify contributes its own diagnostics on the same
     // channel the umbrella uses, so a lane run alone directs a Refine too.
-    let findings = (!passed)
-        .then(|| verify_findings(&[(args.command.as_str(), outcome, String::from_utf8_lossy(&log_bytes).into_owned())]))
-        .flatten();
+    let findings =
+        (!passed).then(|| verify_findings(&[MemberRun::plain(&args.command, outcome, log_bytes, exit_code)])).flatten();
 
     let failures = outcome.failure(&args.command).map(VerifyFailureSet::one);
     let evidence =
@@ -716,9 +924,14 @@ fn distil_diagnostics(log: &str) -> Option<String> {
 /// distiller when that log names no failing test — which is what a compile
 /// error inside a test target produces, and that one *is* a rustc diagnostic
 /// arriving on the channel the openers were written for.
+///
+/// The classification is against no closure here (#4895): this is the path a
+/// member takes when the umbrella has nothing to discriminate with — a single
+/// `verify.test` invocation, or a log the classifier already read — and a run
+/// that cannot see the candidate's diff must blame the candidate.
 fn distil_member(id: &str, log: &str) -> Option<String> {
     if id == "verify.test"
-        && let Some(failures) = nextest::distil_test_failures(log)
+        && let Some(failures) = nextest::classify(log, None).as_ref().and_then(nextest::ClassifiedRun::findings)
     {
         return Some(failures);
     }
@@ -763,11 +976,14 @@ fn tail_lines(log: &str) -> Vec<&str> {
 /// — which already implements it. Without an explicit statement that the
 /// candidate failed and why, the model correctly answers that there is nothing
 /// to do, and the loop cannot converge.
-fn verify_findings(members: &[(&str, MemberOutcome, String)]) -> Option<String> {
+///
+/// A member that reported an environment fault contributes nothing here, by
+/// construction rather than by filter: its findings channel is empty, because
+/// what it saw was never the candidate's to fix (#4895).
+fn verify_findings(members: &[MemberRun]) -> Option<String> {
     let failed: Vec<String> = members
         .iter()
-        .filter(|(_, outcome, _)| !outcome.passed())
-        .filter_map(|(id, _, log)| distil_member(id, log).map(|body| format!("### {id}\n\n{body}")))
+        .filter_map(|member| member.findings.as_ref().map(|body| format!("### {}\n\n{body}", member.id)))
         .collect();
     if failed.is_empty() {
         return None;
@@ -780,12 +996,32 @@ fn verify_findings(members: &[(&str, MemberOutcome, String)]) -> Option<String> 
     ))
 }
 
+/// Assemble the members' environment observations into the evidence's own
+/// channel — the receipts for everything this run declined to charge the
+/// candidate for (#4895).
+///
+/// Deliberately not merged into `findings`: these are reported *on the lane*,
+/// and a `Refine` re-entry handed them would spend its lap chasing a host.
+fn environment_observations(members: &[MemberRun]) -> Option<String> {
+    let observed: Vec<String> = members
+        .iter()
+        .filter_map(|member| member.observation.as_ref().map(|body| format!("### {}\n\n{body}", member.id)))
+        .collect();
+
+    (!observed.is_empty()).then(|| observed.join("\n\n"))
+}
+
 /// The `verify.check` umbrella (#3626): runs every member in
 /// `verify_check_members()` unconditionally — no short-circuit on first
 /// failure, so a partial failure still leaves every member's log for
 /// diagnosis — then writes one aggregate `evidence.json` whose `status`
 /// passes only when every member passed. Exit mirrors the aggregate, exactly
 /// as the single-command path mirrors its own verify's exit.
+///
+/// The candidate's reverse-dependency closure is resolved once, before any
+/// member runs, and every member is discriminated against that one answer
+/// (#4895) — recomputing it per member would let a mid-run repository change
+/// give two members two different candidates.
 pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
@@ -806,10 +1042,17 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
             status: "fail",
             exit_code: Some(1),
             log: String::new(),
+            environment: None,
         };
         write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
         process::exit(1);
     }
+
+    // Resolved once for the whole umbrella, so the counters the evidence carries
+    // cover every member's build rather than one member's slice of it.
+    let cache = sccache::detect();
+    let closure = closure::resolve(args.diff_base.as_deref());
+    let mut runner = SpawnRunner { cache: cache.as_ref() };
 
     // Resolved once, before any member runs, and written out as its own log:
     // the compiling members are only comparable across a run if they all
@@ -820,13 +1063,8 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
     let scope_path = args.out.join(&scope_log);
     fs::write(&scope_path, scope.receipt()).with_context(|| format!("write {}", scope_path.display()))?;
 
-    // Resolved once for the whole umbrella, so the counters the evidence carries
-    // cover every member's build rather than one member's slice of it.
-    let cache = sccache::detect();
-
     let mut log_names = vec![scope_log];
-    let mut passed = Vec::with_capacity(verify_check_members().len());
-    let mut outcomes = Vec::with_capacity(verify_check_members().len());
+    let mut runs = Vec::with_capacity(verify_check_members().len());
     let mut first_failure_code: Option<i32> = None;
 
     for &id in verify_check_members() {
@@ -842,55 +1080,52 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         // it is already covered — the preflight checks the cross-target the
         // pre-build needs — so what is left is the candidate breaking its own
         // build.
-        let (outcome, log_bytes, exit_code) = match run_prepare(id, &invocation, cache.as_ref())? {
-            Some((log, code)) => (MemberOutcome::Failed, log.into_bytes(), code),
-            None => run_member(id, &invocation, &scope, cache.as_ref())?,
+        let run = match run_prepare(id, &invocation, cache.as_ref())? {
+            Some((log, code)) => MemberRun::plain(id, MemberOutcome::Failed, log.into_bytes(), code),
+            None => run_member_discriminated(id, &invocation, &scope, closure.as_ref(), &mut runner)?,
         };
 
         let log_name = format!("{id}.log");
         let log_path = args.out.join(&log_name);
-        fs::write(&log_path, &log_bytes).with_context(|| format!("write {}", log_path.display()))?;
+        fs::write(&log_path, &run.log).with_context(|| format!("write {}", log_path.display()))?;
 
-        if !outcome.passed() && first_failure_code.is_none() {
-            first_failure_code = Some(exit_code);
+        if !run.outcome.passed() && first_failure_code.is_none() {
+            first_failure_code = Some(run.exit_code);
         }
-        outcomes.push((id, outcome, String::from_utf8_lossy(&log_bytes).into_owned()));
         log_names.push(log_name);
-        passed.push(outcome.passed());
+        runs.push(run);
     }
 
-    let all_pass = all_passed(&passed);
-    let failures = failed_verifiers(outcomes.iter().map(|(id, outcome, _)| (*id, *outcome)));
+    let status = umbrella_status(&runs.iter().map(|run| run.outcome).collect::<Vec<MemberOutcome>>());
+    let failures = failed_verifiers(runs.iter().map(|run| (run.id.as_str(), run.outcome)));
     let evidence = Evidence {
-        findings: verify_findings(&outcomes),
+        findings: verify_findings(&runs),
         failed_verifiers: (!failures.is_empty()).then_some(failures),
         sccache: cache.as_ref().and_then(CompilerCache::served),
         command: VERIFY_CHECK.to_owned(),
         nonce: args.nonce.clone(),
-        status: if all_pass {
-            "pass"
-        } else {
-            "fail"
-        },
+        status,
         exit_code: Some(first_failure_code.unwrap_or(0)),
         log: log_names.join(", "),
+        environment: environment_observations(&runs),
     };
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
 
-    if all_pass {
+    if status == "pass" {
         Ok(())
     } else {
-        process::exit(first_failure_code.unwrap_or(1));
+        process::exit(first_failure_code.unwrap_or(1))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_FINDING_LINES, MemberOutcome, Scope, VERIFY_CHECK, VerifyInvocation, all_passed, clippy_verdict,
-        distil_diagnostics, effective_exit_code, failed_verifiers, member_outcome, member_scope_notice,
-        operational_failure_notice, preflight_tools, prepare_failure_log, render_diagnostics, required_targets,
-        required_tools, verify_check_members, verify_command, verify_findings, workflow,
+        Captured, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner, Scope, VERIFY_CHECK, VerifyInvocation,
+        clippy_verdict, closure, distil_diagnostics, effective_exit_code, environment_observations, failed_verifiers,
+        member_outcome, member_scope_notice, operational_failure_notice, preflight_tools, prepare_failure_log,
+        render_diagnostics, required_targets, required_tools, run_member_discriminated, umbrella_status,
+        verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::iter;
 
@@ -911,6 +1146,68 @@ mod tests {
 
     fn owned_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())).collect()
+    }
+
+    /// One member's run as the umbrella records it, from a canned log.
+    fn member(id: &str, outcome: MemberOutcome, log: &str) -> MemberRun {
+        MemberRun::plain(id, outcome, log.as_bytes().to_vec(), 1)
+    }
+
+    /// A runner that hands out canned captures in order — the seam standing in
+    /// for the member's own command, so a rerun policy whose whole subject is
+    /// the *second* run of a member is exercisable without a cargo invocation.
+    struct ScriptedRunner {
+        scripted: Vec<Captured>,
+        runs: usize,
+    }
+
+    impl ScriptedRunner {
+        /// A runner scripted with one `(log, exit code)` per run, in order.
+        fn new(scripted: &[(&str, i32)]) -> Self {
+            let scripted = scripted
+                .iter()
+                .map(|(log, code)| Captured { stdout: log.as_bytes().to_vec(), stderr: Vec::new(), code: Some(*code) })
+                .collect();
+            Self { scripted, runs: 0 }
+        }
+    }
+
+    impl MemberRunner for ScriptedRunner {
+        fn run(&mut self, _invocation: &VerifyInvocation, _scope: &Scope) -> anyhow::Result<Captured> {
+            let captured = self.scripted.get(self.runs).expect("the policy ran the member more times than scripted");
+            self.runs += 1;
+            Ok(Captured { stdout: captured.stdout.clone(), stderr: captured.stderr.clone(), code: captured.code })
+        }
+    }
+
+    /// A nextest log reporting `failures` as failing tests, in the shape the
+    /// runner prints them: a status line, a captured-output banner, and a panic.
+    fn failing_run(failures: &[&str]) -> String {
+        let body = failures
+            .iter()
+            .enumerate()
+            .map(|(index, test)| {
+                format!(
+                    "        FAIL [   0.008s] ({index:3}/900) {test}\n\n\
+                     --- STDERR:              {test} ---\n\
+                     thread 'test' panicked at crates/somewhere/src/lib.rs:{index}:9:\n\
+                     boom\n"
+                )
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        format!(
+            " Starting 900 tests across 312 binaries\n{body}\n     Summary [  74.6s] 900 tests run: {} failed, \
+             0 skipped\nerror: test run failed\n",
+            failures.len(),
+        )
+    }
+
+    /// A clean nextest run — what a repeat on a quiet box prints.
+    fn passing_run() -> String {
+        " Starting 900 tests across 312 binaries\n     Summary [  71.2s] 900 tests run: 900 passed, 0 skipped\n"
+            .to_owned()
     }
 
     #[test]
@@ -983,7 +1280,7 @@ mod tests {
     }
 
     /// A computed closure over two crates, for the argv assertions.
-    fn closure(packages: &[&str]) -> Scope {
+    fn closure_scope(packages: &[&str]) -> Scope {
         Scope::Closure {
             packages: packages.iter().map(|name| (*name).to_owned()).collect(),
             skipped: vec![String::from("aether-render")],
@@ -997,7 +1294,7 @@ mod tests {
         // both selects the whole workspace regardless — so a narrowing that
         // appended instead of replacing would compile every crate while its
         // receipt claimed a closure, which is worse than never narrowing.
-        let scope = closure(&["aether-chassis-bloomery", "aether-math"]);
+        let scope = closure_scope(&["aether-chassis-bloomery", "aether-math"]);
 
         let clippy = verify_command("verify.clippy").expect("verify.clippy mapped");
         let args = clippy.args_under(&scope);
@@ -1035,7 +1332,7 @@ mod tests {
         // narrowed run reports no duplication between a changed crate and the
         // one it was copied from; cargo-machete walks `crates/` from the
         // filesystem and has no package selection to narrow at all.
-        let scope = closure(&["aether-chassis-bloomery"]);
+        let scope = closure_scope(&["aether-chassis-bloomery"]);
 
         for id in ["verify.fmt", "verify.dup", "verify.deps", "verify.suppress"] {
             let invocation = verify_command(id).expect("member mapped");
@@ -1253,8 +1550,8 @@ mod tests {
     #[test]
     fn only_failing_members_contribute_findings() {
         let members = [
-            ("verify.fmt", MemberOutcome::Passed, String::from("error[E0001]: from a lane that passed")),
-            ("verify.clippy", MemberOutcome::Failed, String::from("error[E0308]: mismatched types")),
+            member("verify.fmt", MemberOutcome::Passed, "error[E0001]: from a lane that passed"),
+            member("verify.clippy", MemberOutcome::Failed, "error[E0308]: mismatched types"),
         ];
 
         let findings = verify_findings(&members).expect("a failing member yields findings");
@@ -1267,8 +1564,7 @@ mod tests {
     fn a_suppression_location_survives_findings_distillation() {
         let log = "scanning diff\ncrates/demo/src/lib.rs:17 — allow(clippy::all) — #[allow(clippy::all)]\ndone";
 
-        let findings =
-            verify_findings(&[("verify.suppress", MemberOutcome::Failed, log.to_owned())]).expect("findings");
+        let findings = verify_findings(&[member("verify.suppress", MemberOutcome::Failed, log)]).expect("findings");
 
         assert!(findings.contains("### verify.suppress"));
         assert!(findings.contains("crates/demo/src/lib.rs:17 — allow(clippy::all)"));
@@ -1293,7 +1589,7 @@ AETHER_REQUIRE_RUNTIME=1 but aether_test_fixtures_bundle wasm not pre-built
 error: test run failed
 ";
 
-        let findings = verify_findings(&[("verify.test", MemberOutcome::Failed, log.to_owned())]).expect("findings");
+        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)]).expect("findings");
 
         assert!(findings.contains("### verify.test"));
         assert!(findings.contains("asset_rides_a_named_custom_section_byte_exact"), "the test is named");
@@ -1315,7 +1611,7 @@ error[E0308]: mismatched types
 error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previous error
 ";
 
-        let findings = verify_findings(&[("verify.test", MemberOutcome::Failed, log.to_owned())]).expect("findings");
+        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)]).expect("findings");
 
         assert!(findings.contains("error[E0308]: mismatched types"));
         assert!(findings.contains("--> crates/aether-actor/tests/asset_sections.rs:85:9"));
@@ -1326,10 +1622,8 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // Tripwire: findings must be absent on a pass, or a Refine that never
         // happens would still carry a stale row, and `parse_findings` is
         // presence-driven with no lane flag to disambiguate.
-        let members = [
-            ("verify.fmt", MemberOutcome::Passed, String::new()),
-            ("verify.clippy", MemberOutcome::Passed, String::new()),
-        ];
+        let members =
+            [member("verify.fmt", MemberOutcome::Passed, ""), member("verify.clippy", MemberOutcome::Passed, "")];
 
         assert!(verify_findings(&members).is_none(), "a clean run stamps no findings");
     }
@@ -1340,7 +1634,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // previous candidate, so a prompt that only says "implement the work
         // order" invites the correct-but-useless "already carries it" answer
         // that wedged both real runs.
-        let members = [("verify.clippy", MemberOutcome::Failed, String::from("error[E0308]: mismatched types"))];
+        let members = [member("verify.clippy", MemberOutcome::Failed, "error[E0308]: mismatched types")];
 
         let findings = verify_findings(&members).expect("findings");
 
@@ -1385,11 +1679,166 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     }
 
     #[test]
-    fn all_passed_is_pass_only_when_every_member_passed() {
-        assert!(all_passed(&[true, true, true]));
-        assert!(!all_passed(&[true, false, true]));
-        assert!(!all_passed(&[false, false, false]));
-        assert!(all_passed(&[]), "no members is vacuously all-passed");
+    fn the_umbrella_status_passes_only_on_a_clean_run_and_never_hides_a_finding() {
+        // Tripwire: `environment` is the status that costs no repair lap, so a
+        // member that found a real defect must outrank one that reported a host
+        // fault. Ordering these the other way would stamp a candidate's own
+        // failing test as weather and integrate it.
+        assert_eq!(umbrella_status(&[MemberOutcome::Passed, MemberOutcome::Passed]), "pass");
+        assert_eq!(umbrella_status(&[]), "pass", "no members is vacuously a pass");
+        assert_eq!(umbrella_status(&[MemberOutcome::Passed, MemberOutcome::Environment]), "environment");
+        assert_eq!(
+            umbrella_status(&[MemberOutcome::Environment, MemberOutcome::Failed]),
+            "fail",
+            "a finding outranks an environment fault: that member did judge the candidate",
+        );
+        assert_eq!(
+            umbrella_status(&[MemberOutcome::Environment, MemberOutcome::Operational]),
+            "fail",
+            "an unperformed check is not a host fault the bloom may retry past",
+        );
+    }
+
+    #[test]
+    fn an_out_of_closure_block_that_clears_on_the_repeat_costs_no_repair_lap() {
+        // Acceptance 1 (#4895): 36 fleetharness failures on a memory-starved box
+        // are not a candidate defect. The member is rerun once, the repeat comes
+        // back green, and what the member reports is the repeat — no findings,
+        // no verifier identity, no repair lap — with the block kept as an
+        // observation so the excuse is on the record rather than invisible.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let mut runner = ScriptedRunner::new(&[
+            (&failing_run(&["aether-actor::fleetharness_binary_store store_round_trips"]), 100),
+            (&passing_run(), 0),
+        ]);
+
+        let run = run_member_discriminated(
+            "verify.test",
+            &invocation,
+            &Scope::resolve(None),
+            Some(&closure::Closure::of(&["aether-render"])),
+            &mut runner,
+        )
+        .expect("the policy runs");
+
+        assert_eq!(runner.runs, 2, "an out-of-closure-only run is repeated exactly once");
+        assert_eq!(run.outcome, MemberOutcome::Passed);
+        assert!(run.findings.is_none(), "a repair lap must not be handed failures the candidate cannot reach");
+        assert!(run.outcome.failure(&run.id).is_none(), "and no verifier identity is charged for a recovered host");
+        let observation = run.observation.expect("the block is reported on the lane");
+        assert!(observation.contains("aether-actor"), "the observation names what was classified out");
+        assert!(observation.contains("did not repeat"), "and what the repeat then said");
+        assert!(
+            String::from_utf8_lossy(&run.log).contains("being rerun once"),
+            "both runs stay in the log, separated by the notice that says why there are two",
+        );
+    }
+
+    #[test]
+    fn a_mixed_run_hands_the_repair_lap_only_the_in_closure_failures() {
+        // Acceptance 2 (#4895): the 2026-08-13 shape — one real defect beside a
+        // 36-test environmental block. The repair lap is warranted, and the
+        // findings it is directed by must carry the defect alone: a model asked
+        // to repair 36 red herrings reasons its way past them at best, and
+        // "fixes" tests its surface does not permit it to touch at worst.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let mut runner = ScriptedRunner::new(&[(
+            &failing_run(&[
+                "aether-render::pipeline blend_state_survives_a_resize",
+                "aether-chassis-hub::fleetharness_engines spawn_headless_connects",
+            ]),
+            100,
+        )]);
+
+        let run = run_member_discriminated(
+            "verify.test",
+            &invocation,
+            &Scope::resolve(None),
+            Some(&closure::Closure::of(&["aether-render"])),
+            &mut runner,
+        )
+        .expect("the policy runs");
+
+        assert_eq!(runner.runs, 1, "a run that found a real defect is not repeated");
+        assert_eq!(run.outcome, MemberOutcome::Failed);
+        let findings = run.findings.expect("the in-closure defect is handed over");
+        assert!(findings.contains("blend_state_survives_a_resize"), "the in-closure failure reaches the repair lap");
+        assert!(!findings.contains("spawn_headless_connects"), "and the out-of-closure block does not");
+        assert!(
+            run.observation.expect("the block is still reported").contains("spawn_headless_connects"),
+            "the out-of-closure half is an observation, not silence",
+        );
+    }
+
+    #[test]
+    fn an_out_of_closure_block_that_repeats_escalates_instead_of_blaming_the_candidate() {
+        // Acceptance 3 (#4895): a host that is still broken on the repeat is a
+        // host, not a candidate. The member reports an environment fault, which
+        // the umbrella stamps as ADR-0176's `environment` status and the local
+        // executor reads as an ExecutorFault — never as findings, and never as a
+        // verifier identity in the repair ledger a member's stuckness is
+        // measured from.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let block = failing_run(&["aether-component::fleetharness_load loads_over_the_wire"]);
+        let mut runner = ScriptedRunner::new(&[(&block, 100), (&block, 100)]);
+
+        let run = run_member_discriminated(
+            "verify.test",
+            &invocation,
+            &Scope::resolve(None),
+            Some(&closure::Closure::of(&["aether-render"])),
+            &mut runner,
+        )
+        .expect("the policy runs");
+
+        assert_eq!(runner.runs, 2, "the repeat is bounded at one — a broken host is not retried forever");
+        assert_eq!(run.outcome, MemberOutcome::Environment);
+        assert!(run.findings.is_none(), "nothing here judged the candidate");
+        assert!(run.outcome.failure(&run.id).is_none(), "so nothing is charged to a verifier identity");
+        assert_eq!(umbrella_status(&[MemberOutcome::Passed, run.outcome]), "environment");
+        let observation = run.observation.expect("the escalation states its grounds");
+        assert!(observation.contains("aether-component"), "naming the block it escalated on");
+        assert!(observation.contains("environment fault"), "and what it escalated as");
+    }
+
+    #[test]
+    fn a_run_with_no_closure_classifies_nothing_out() {
+        // Tripwire: the fail-towards-the-candidate direction. A diff nobody
+        // could resolve, an unreadable package graph, or a change whose blast
+        // radius the graph cannot bound all arrive here as `None` — and a run
+        // that cannot see the candidate must blame the candidate, because the
+        // opposite error excuses a real defect as weather and lands it.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let mut runner =
+            ScriptedRunner::new(&[(&failing_run(&["aether-actor::fleetharness_binary_store store_round_trips"]), 100)]);
+
+        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, &mut runner)
+            .expect("the policy runs");
+
+        assert_eq!(runner.runs, 1, "with no closure there is nothing to classify out, so nothing to rerun for");
+        assert_eq!(run.outcome, MemberOutcome::Failed);
+        assert!(run.findings.expect("findings").contains("store_round_trips"), "the failure is the candidate's");
+        assert!(run.observation.is_none(), "and there is no observation to make");
+    }
+
+    #[test]
+    fn observations_are_a_separate_channel_from_the_findings_a_refine_is_handed() {
+        // Tripwire: the two channels must not merge. `findings` is work — a
+        // Refine re-entry is told to fix what is in it — and an observation is a
+        // receipt. Folded together, a bounded repair roll gets spent on a host
+        // the candidate cannot reach, which is the whole failure #4895 exists to
+        // end.
+        let mut failing = member("verify.test", MemberOutcome::Failed, "error: something in closure");
+        failing.observation = Some("36 failing tests lie outside the closure".to_owned());
+
+        let observations = environment_observations(&[failing]).expect("the observation is reported");
+
+        assert!(observations.contains("### verify.test"), "attributed to the member that made it");
+        assert!(observations.contains("outside the closure"));
+        assert!(
+            environment_observations(&[member("verify.fmt", MemberOutcome::Failed, "Diff in x")]).is_none(),
+            "a member with nothing to observe contributes no channel at all",
+        );
     }
 
     #[test]
@@ -1504,7 +1953,8 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             operational_failure_notice("verify.suppress", &suppress, Some(2)),
         );
 
-        let findings = verify_findings(&[("verify.suppress", MemberOutcome::Operational, log)]).expect("findings");
+        let findings =
+            verify_findings(&[member("verify.suppress", MemberOutcome::Operational, &log)]).expect("findings");
 
         assert!(findings.contains("reported nothing about the candidate"), "the member's silence is stated");
         assert!(findings.contains("exited 2"), "with the code that said so");

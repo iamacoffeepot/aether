@@ -95,19 +95,48 @@ fn compute(args: &AffectedArgs) -> Result<AffectedResult> {
     let diff = git_stdout(&["diff", "--name-only", "-z", &base, "HEAD"], repo_root)?;
     let changed: Vec<String> = diff.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect();
 
+    Ok(AffectedResult { base, changed_count: changed.len(), selection: selection_for(&changed)? })
+}
+
+/// The selection a set of changed repository-relative paths produces: the
+/// screen for graph-shaping paths first, then the package-graph analysis.
+///
+/// Split out from [`compute`] because the diff is not the only way to name a
+/// changed set — the verify lane asks the same question of a candidate's diff
+/// to tell an environment fault from a defect (#4895).
+fn selection_for(changed: &[String]) -> Result<Selection> {
     let selection = if changed.is_empty() {
         Selection { run_all: None, packages: BTreeSet::new(), wasm_needed: false }
-    } else if let Some(hit) = global_screen(&changed) {
+    } else if let Some(hit) = global_screen(changed) {
         Selection {
             run_all: Some(format!("graph-shaping path changed: {hit}")),
             packages: BTreeSet::new(),
             wasm_needed: true,
         }
     } else {
-        Workspace::load()?.select(&changed)?
+        Workspace::load()?.select(changed)?
     };
 
-    Ok(AffectedResult { base, changed_count: changed.len(), selection })
+    Ok(selection)
+}
+
+/// The workspace packages a set of changed paths can have broken: the packages
+/// the paths belong to plus every workspace package that links one of them,
+/// transitively. `None` when the change's blast radius is not bounded by the
+/// package graph at all — a graph-shaping path, a change that reaches every
+/// package, or a changed set nobody could compute.
+///
+/// The verify lane reads this to tell a failing test that its candidate could
+/// have broken from one it could not have (#4895), so `None` is deliberately
+/// the *unbounded* answer rather than the empty one: a caller that cannot see
+/// the diff must blame the candidate, never the host.
+pub fn reverse_dependency_closure(changed: &[String]) -> Result<Option<BTreeSet<String>>> {
+    if changed.is_empty() {
+        return Ok(None);
+    }
+
+    let selection = selection_for(changed)?;
+    Ok(selection.run_all.is_none().then_some(selection.packages))
 }
 
 fn report(selection: &Selection, changed_count: usize) {
