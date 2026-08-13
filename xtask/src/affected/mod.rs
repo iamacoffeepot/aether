@@ -27,11 +27,12 @@
 //! narrowing rests on are recomputed on every push by the test-only
 //! `invariants` module rather than recorded in a comment (#4215).
 
+pub mod graph;
 #[cfg(test)]
 mod invariants;
-mod rules;
+pub mod rules;
 mod run;
-mod select;
+pub mod select;
 mod test_targets;
 
 use std::collections::BTreeSet;
@@ -42,9 +43,9 @@ use std::{env, fs};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 
+use crate::affected::graph::Workspace;
 use crate::affected::rules::global_screen;
-use crate::affected::select::{Selection, is_dist_consumer, select};
-use crate::inventory::{discover_behaviors, discover_components};
+use crate::affected::select::Selection;
 
 #[derive(Args)]
 pub struct AffectedArgs {
@@ -113,28 +114,7 @@ fn selection_for(changed: &[String]) -> Result<Selection> {
             wasm_needed: true,
         }
     } else {
-        let graph = guppy::MetadataCommand::new().build_graph().context("build guppy package graph")?;
-        let metadata =
-            cargo_metadata::MetadataCommand::new().no_deps().exec().context("run cargo metadata for inventory")?;
-        let wasm_sources: BTreeSet<String> = discover_components(&metadata)
-            .into_iter()
-            .map(|component| component.package)
-            .chain(discover_behaviors(&metadata).into_iter().map(|behavior| behavior.package))
-            .collect();
-        // A dist consumer needs the `cargo xtask dist` pre-build for either
-        // artifact class it packages: component/behavior wasm (a dep on a
-        // wasm source — the tests execute that crate's wasm), or the chassis
-        // binaries (a dep on aether-harness-fleet, whose harness forks the
-        // dist-resolved `aether-headless`; issue #3766).
-        let wasm_consumers: BTreeSet<String> = metadata
-            .packages
-            .iter()
-            .filter(|package| {
-                is_dist_consumer(package.dependencies.iter().map(|dependency| dependency.name.as_str()), &wasm_sources)
-            })
-            .map(|package| package.name.to_string())
-            .collect();
-        select(&graph, changed, &wasm_sources, &wasm_consumers)?
+        Workspace::load()?.select(changed)?
     };
 
     Ok(selection)

@@ -1,5 +1,6 @@
 mod closure;
 mod nextest;
+mod scope;
 mod tools;
 #[cfg(test)]
 mod workflow;
@@ -13,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use crate::cargo::{WASM_TARGET, run_captured, write_json_pretty};
 use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::verify::closure::Closure;
+use crate::transform::verify::scope::Scope;
 use crate::transform::{Evidence, TransformArgs, build_evidence};
 
 /// One CI-mirroring invocation for a `verify.*` command id, plus the tools it
@@ -64,20 +66,64 @@ struct VerifyInvocation {
     /// contract mis-files every one of its failures in one direction or the
     /// other.
     finding_exit_codes: &'static [i32],
+    /// How much of the workspace this member looks at when the run computed a
+    /// closure to narrow to (#4890).
+    breadth: Breadth,
+}
+
+/// Whether a member's work narrows to the candidate diff's reverse-dependency
+/// closure, or covers the workspace whatever the diff touched.
+///
+/// Stated per member rather than derived from the argv, because the reason a
+/// member stays wide is never visible in its flags: `verify.dup` compares every
+/// crate against every other and `verify.deps` walks `crates/` from the
+/// filesystem rather than from the package graph, so both are cross-crate by
+/// construction, while `verify.fmt` and `verify.suppress` are seconds either
+/// way and narrowing them would buy nothing for the risk.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Breadth {
+    /// The whole workspace, whatever the run's scope says.
+    Workspace,
+    /// The run's closure, when it computed one.
+    Closure,
 }
 
 impl VerifyInvocation {
-    /// The [`Command`] this invocation runs — program, argv, and env — handed
-    /// to [`run_captured`] for the captured-output spawn.
+    /// The [`Command`] this invocation runs under `scope` — program, argv, and
+    /// env — handed to [`run_captured`] for the captured-output spawn.
     ///
     /// The host's compiler cache rides every member rather than only the ones
     /// that compile: naming which members build would be a second list to keep
     /// true, and the wrapper is inert in a member that never invokes rustc.
-    fn command(&self, cache: Option<&CompilerCache>) -> Command {
+    fn command(&self, scope: &Scope, cache: Option<&CompilerCache>) -> Command {
         let mut cmd = Command::new(self.program);
-        cmd.args(self.args).envs(self.env.iter().copied());
+        cmd.args(self.args_under(scope)).envs(self.env.iter().copied());
         sccache::export(cache, &mut cmd);
         cmd
+    }
+
+    /// The argv this invocation runs under `scope`: the stated workspace-wide
+    /// argv, or that argv with `--workspace` traded for one `-p <crate>` per
+    /// crate in the closure.
+    ///
+    /// Traded rather than appended, because `--workspace` and `-p` are cargo's
+    /// two spellings of the same choice and a command carrying both selects the
+    /// whole workspace regardless — the run would compile every crate while
+    /// reporting itself as narrowed, which is worse than not narrowing at all.
+    /// `verify.test` states no `--workspace` (nextest's own default is the
+    /// workspace), so there the filter is a no-op and the package flags are the
+    /// whole change.
+    fn args_under(&self, scope: &Scope) -> Vec<String> {
+        let Some(packages) = scope.packages().filter(|_| self.breadth == Breadth::Closure) else {
+            return self.args.iter().map(|arg| (*arg).to_owned()).collect();
+        };
+
+        self.args
+            .iter()
+            .filter(|arg| **arg != "--workspace")
+            .map(|arg| (*arg).to_owned())
+            .chain(packages.iter().flat_map(|package| ["-p".to_owned(), package.clone()]))
+            .collect()
     }
 }
 
@@ -123,6 +169,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // forwards it. It has no second code: a manifest it cannot read
             // exits 1 too, so that conflation survives this change unresolved.
             finding_exit_codes: &[1],
+            breadth: Breadth::Workspace,
         }),
         "verify.clippy" => Some(VerifyInvocation {
             program: "cargo",
@@ -134,6 +181,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // A lint is a finding this run derives from the JSON stream at exit
             // zero; 101 is cargo's "could not compile", which is a finding too.
             finding_exit_codes: &[101],
+            breadth: Breadth::Closure,
         }),
         "verify.docs" => Some(VerifyInvocation {
             program: "cargo",
@@ -149,6 +197,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // documentation findings arrive on the same 101 a compile error
             // does.
             finding_exit_codes: &[101],
+            breadth: Breadth::Closure,
         }),
         "verify.test" => Some(VerifyInvocation {
             program: "cargo",
@@ -181,6 +230,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // unusable profile exits 96, an unparsable argv exits 2 — and none
             // of those is a statement about the candidate.
             finding_exit_codes: &[100, 101],
+            breadth: Breadth::Closure,
         }),
         "verify.dup" => Some(VerifyInvocation {
             // The settings ride the argv rather than a `.jscpd.json` (#4856).
@@ -203,6 +253,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // routing every real duplication report to the host. A bad flag is
             // exit 2, which lands on the operational side where it belongs.
             finding_exit_codes: &[1],
+            breadth: Breadth::Workspace,
         }),
         "verify.deps" => Some(VerifyInvocation {
             // Invoked as the binary rather than through `cargo machete`, which
@@ -229,6 +280,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // a path it could not walk — the same split the suppression
             // scanner draws, from a different program.
             finding_exit_codes: &[1],
+            breadth: Breadth::Workspace,
         }),
         "verify.suppress" => Some(VerifyInvocation {
             program: "python3",
@@ -242,6 +294,7 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // it cannot open — leaves by the 2 that says it never reached a
             // verdict. This is the split #4845 was filed for.
             finding_exit_codes: &[1],
+            breadth: Breadth::Workspace,
         }),
         _ => None,
     }
@@ -290,6 +343,11 @@ fn render_diagnostics(stdout: &str) -> String {
 /// Verify stage (`Transformation::for_member_stage`) — distinct from the
 /// concrete `verify.*` ids `verify_command` maps individually.
 pub(super) const VERIFY_CHECK: &str = "verify.check";
+
+/// The log the umbrella writes its computed scope to, alongside its members'
+/// own logs — the receipt that makes a wrong closure visible in the envelope
+/// rather than silent (#4890).
+const SCOPE_LOG: &str = "verify.scope.log";
 
 /// The ordered member ids `verify.check` fans out to, in CI-parity order.
 /// Pure so the umbrella membership is testable without spawning cargo; growing
@@ -499,8 +557,13 @@ struct Captured {
 }
 
 /// How the umbrella obtains one member's captured output.
+///
+/// `scope` rides the call rather than the runner because it is a property of
+/// *what* is run — it decides the member's argv (#4890) — while the runner's
+/// own cache is a property of *how*: the environment the spawn happens under,
+/// which a rerun repeats unchanged.
 trait MemberRunner {
-    fn run(&mut self, invocation: &VerifyInvocation) -> Result<Captured>;
+    fn run(&mut self, invocation: &VerifyInvocation, scope: &Scope) -> Result<Captured>;
 }
 
 /// The runner the lane uses: spawn the member's own command, through the host's
@@ -514,21 +577,22 @@ struct SpawnRunner<'a> {
 }
 
 impl MemberRunner for SpawnRunner<'_> {
-    fn run(&mut self, invocation: &VerifyInvocation) -> Result<Captured> {
-        let output = run_captured(invocation.command(self.cache))
+    fn run(&mut self, invocation: &VerifyInvocation, scope: &Scope) -> Result<Captured> {
+        let output = run_captured(invocation.command(scope, self.cache))
             .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
         Ok(Captured { stdout: output.stdout, stderr: output.stderr, code: output.status.code() })
     }
 }
 
-/// Run one umbrella member and reduce its output to `(outcome, log,
-/// exit_code)`.
+/// Run one umbrella member under `scope` and reduce its output to `(outcome,
+/// log, exit_code)`.
 fn run_member(
     id: &str,
     invocation: &VerifyInvocation,
+    scope: &Scope,
     runner: &mut dyn MemberRunner,
 ) -> Result<(MemberOutcome, Vec<u8>, i32)> {
-    let output = runner.run(invocation)?;
+    let output = runner.run(invocation, scope)?;
 
     // A JSON-format member's verdict is ours to derive: its exit status is
     // success even with lints present, because the run was not asked to deny
@@ -545,6 +609,12 @@ fn run_member(
     let outcome = member_outcome(invocation, derived_pass, code);
 
     let mut log = Vec::new();
+    // The narrowing states itself where the reader is: a log that names a
+    // handful of crates is otherwise indistinguishable from a workspace run
+    // that happened to compile nothing else.
+    if let Some(notice) = member_scope_notice(invocation, scope) {
+        log.extend_from_slice(notice.as_bytes());
+    }
     if outcome == MemberOutcome::Operational {
         log.extend_from_slice(operational_failure_notice(id, invocation, code).as_bytes());
     }
@@ -646,10 +716,11 @@ fn rerun_observation(outcome: MemberOutcome, block: Option<String>) -> Option<St
 fn run_member_discriminated(
     id: &str,
     invocation: &VerifyInvocation,
+    scope: &Scope,
     closure: Option<&Closure>,
     runner: &mut dyn MemberRunner,
 ) -> Result<MemberRun> {
-    let (outcome, log, exit_code) = run_member(id, invocation, runner)?;
+    let (outcome, log, exit_code) = run_member(id, invocation, scope, runner)?;
     let Some(classified) = classify_failures(id, outcome, &log, closure) else {
         return Ok(MemberRun::plain(id, outcome, log, exit_code));
     };
@@ -666,7 +737,7 @@ fn run_member_discriminated(
         });
     }
 
-    let (repeat_outcome, repeat_log, repeat_exit) = run_member(id, invocation, runner)?;
+    let (repeat_outcome, repeat_log, repeat_exit) = run_member(id, invocation, scope, runner)?;
     let repeat = classify_failures(id, repeat_outcome, &repeat_log, closure);
 
     // The repeat is the run this member reports: the first one judged nothing
@@ -695,6 +766,14 @@ fn run_member_discriminated(
         findings,
         observation: rerun_observation(outcome, classified.observation()),
     })
+}
+
+/// The scope line this member's log opens with, when the member is one the run
+/// narrowed. A workspace-wide member under a narrowed run gets none — claiming
+/// a closure it did not honor would misdirect the reader of a `verify.dup`
+/// failure to crates that were never the reason.
+fn member_scope_notice(invocation: &VerifyInvocation, scope: &Scope) -> Option<String> {
+    (invocation.breadth == Breadth::Closure).then(|| scope.member_notice()).flatten()
 }
 
 // A derived verdict (currently clippy's structured warning predicate) may fail
@@ -745,8 +824,13 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
         bail!("unrecognized transform command id: {}", args.command);
     };
 
+    // The same narrowing seam the umbrella runs through (#4890), so a member
+    // dispatched alone answers a work order's diff base the way it does inside
+    // `verify.check` rather than by a second rule. An order that names none —
+    // every current caller of this path — resolves the whole workspace.
+    let scope = Scope::resolve(args.diff_base.as_deref());
     let cache = sccache::detect();
-    let output = run_captured(invocation.command(cache.as_ref()))
+    let output = run_captured(invocation.command(&scope, cache.as_ref()))
         .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
 
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
@@ -759,6 +843,9 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     let log_name = format!("{}.log", args.command);
     let log_path = args.out.join(&log_name);
     let mut log_bytes = Vec::new();
+    if let Some(notice) = member_scope_notice(&invocation, &scope) {
+        log_bytes.extend_from_slice(notice.as_bytes());
+    }
     if outcome == MemberOutcome::Operational {
         log_bytes.extend_from_slice(operational_failure_notice(&args.command, &invocation, code).as_bytes());
     }
@@ -967,7 +1054,16 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
     let closure = closure::resolve(args.diff_base.as_deref());
     let mut runner = SpawnRunner { cache: cache.as_ref() };
 
-    let mut log_names = Vec::with_capacity(verify_check_members().len());
+    // Resolved once, before any member runs, and written out as its own log:
+    // the compiling members are only comparable across a run if they all
+    // narrowed to the same closure, and a receipt no one can read is not a
+    // receipt (#4890).
+    let scope = Scope::resolve(args.diff_base.as_deref());
+    let scope_log = String::from(SCOPE_LOG);
+    let scope_path = args.out.join(&scope_log);
+    fs::write(&scope_path, scope.receipt()).with_context(|| format!("write {}", scope_path.display()))?;
+
+    let mut log_names = vec![scope_log];
     let mut runs = Vec::with_capacity(verify_check_members().len());
     let mut first_failure_code: Option<i32> = None;
 
@@ -986,7 +1082,7 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         // build.
         let run = match run_prepare(id, &invocation, cache.as_ref())? {
             Some((log, code)) => MemberRun::plain(id, MemberOutcome::Failed, log.into_bytes(), code),
-            None => run_member_discriminated(id, &invocation, closure.as_ref(), &mut runner)?,
+            None => run_member_discriminated(id, &invocation, &scope, closure.as_ref(), &mut runner)?,
         };
 
         let log_name = format!("{id}.log");
@@ -1025,11 +1121,11 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Captured, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner, VERIFY_CHECK, VerifyInvocation,
+        Captured, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner, Scope, VERIFY_CHECK, VerifyInvocation,
         clippy_verdict, closure, distil_diagnostics, effective_exit_code, environment_observations, failed_verifiers,
-        member_outcome, operational_failure_notice, preflight_tools, prepare_failure_log, render_diagnostics,
-        required_targets, required_tools, run_member_discriminated, umbrella_status, verify_check_members,
-        verify_command, verify_findings, workflow,
+        member_outcome, member_scope_notice, operational_failure_notice, preflight_tools, prepare_failure_log,
+        render_diagnostics, required_targets, required_tools, run_member_discriminated, umbrella_status,
+        verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::iter;
 
@@ -1077,7 +1173,7 @@ mod tests {
     }
 
     impl MemberRunner for ScriptedRunner {
-        fn run(&mut self, _invocation: &VerifyInvocation) -> anyhow::Result<Captured> {
+        fn run(&mut self, _invocation: &VerifyInvocation, _scope: &Scope) -> anyhow::Result<Captured> {
             let captured = self.scripted.get(self.runs).expect("the policy ran the member more times than scripted");
             self.runs += 1;
             Ok(Captured { stdout: captured.stdout.clone(), stderr: captured.stderr.clone(), code: captured.code })
@@ -1180,6 +1276,82 @@ mod tests {
         );
         for pair in &ci_test.env {
             assert!(owned_pairs(test.env).contains(pair), "CI sets {pair:?} for the gate, so the lane must too");
+        }
+    }
+
+    /// A computed closure over two crates, for the argv assertions.
+    fn closure_scope(packages: &[&str]) -> Scope {
+        Scope::Closure {
+            packages: packages.iter().map(|name| (*name).to_owned()).collect(),
+            skipped: vec![String::from("aether-render")],
+        }
+    }
+
+    #[test]
+    fn a_scoped_member_trades_the_workspace_flag_for_package_flags() {
+        // Tripwire for #4890's whole mechanism. `--workspace` and `-p` are
+        // cargo's two spellings of the same choice, and a command carrying
+        // both selects the whole workspace regardless — so a narrowing that
+        // appended instead of replacing would compile every crate while its
+        // receipt claimed a closure, which is worse than never narrowing.
+        let scope = closure_scope(&["aether-chassis-bloomery", "aether-math"]);
+
+        let clippy = verify_command("verify.clippy").expect("verify.clippy mapped");
+        let args = clippy.args_under(&scope);
+        assert!(
+            !args.contains(&String::from("--workspace")),
+            "the workspace flag would re-select everything: {args:?}"
+        );
+        assert_eq!(
+            args,
+            owned(&[
+                "clippy",
+                "--all-targets",
+                "--keep-going",
+                "--message-format=json",
+                "-p",
+                "aether-chassis-bloomery",
+                "-p",
+                "aether-math",
+            ]),
+        );
+
+        // nextest states no `--workspace` at all — the workspace is its own
+        // default — so there the package flags are the entire narrowing.
+        let test = verify_command("verify.test").expect("verify.test mapped");
+        assert_eq!(
+            test.args_under(&scope),
+            [owned(test.args), owned(&["-p", "aether-chassis-bloomery", "-p", "aether-math"])].concat(),
+        );
+    }
+
+    #[test]
+    fn a_workspace_breadth_member_runs_the_whole_tree_under_a_closure() {
+        // Tripwire: the members that stay wide are wide *because* their work
+        // is cross-crate. jscpd compares every crate against every other, so a
+        // narrowed run reports no duplication between a changed crate and the
+        // one it was copied from; cargo-machete walks `crates/` from the
+        // filesystem and has no package selection to narrow at all.
+        let scope = closure_scope(&["aether-chassis-bloomery"]);
+
+        for id in ["verify.fmt", "verify.dup", "verify.deps", "verify.suppress"] {
+            let invocation = verify_command(id).expect("member mapped");
+            assert_eq!(invocation.args_under(&scope), owned(invocation.args), "{id} must not narrow");
+            assert_eq!(member_scope_notice(&invocation, &scope), None, "{id} must not claim a closure it ignored");
+        }
+    }
+
+    #[test]
+    fn a_run_without_a_closure_dispatches_every_members_stated_argv() {
+        // Tripwire for acceptance 3: the aggregate verify names no diff base,
+        // and its every member must therefore dispatch the exact argv the
+        // CI-parity assertions above pin. A narrowing that leaked into the
+        // unscoped path would move the stage that proves the landing.
+        let scope = Scope::resolve(None);
+
+        for &id in verify_check_members() {
+            let invocation = verify_command(id).expect("member mapped");
+            assert_eq!(invocation.args_under(&scope), owned(invocation.args), "{id} must dispatch its stated argv");
         }
     }
 
@@ -1543,6 +1715,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         let run = run_member_discriminated(
             "verify.test",
             &invocation,
+            &Scope::resolve(None),
             Some(&closure::Closure::of(&["aether-render"])),
             &mut runner,
         )
@@ -1580,6 +1753,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         let run = run_member_discriminated(
             "verify.test",
             &invocation,
+            &Scope::resolve(None),
             Some(&closure::Closure::of(&["aether-render"])),
             &mut runner,
         )
@@ -1611,6 +1785,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         let run = run_member_discriminated(
             "verify.test",
             &invocation,
+            &Scope::resolve(None),
             Some(&closure::Closure::of(&["aether-render"])),
             &mut runner,
         )
@@ -1637,7 +1812,8 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         let mut runner =
             ScriptedRunner::new(&[(&failing_run(&["aether-actor::fleetharness_binary_store store_round_trips"]), 100)]);
 
-        let run = run_member_discriminated("verify.test", &invocation, None, &mut runner).expect("the policy runs");
+        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, &mut runner)
+            .expect("the policy runs");
 
         assert_eq!(runner.runs, 1, "with no closure there is nothing to classify out, so nothing to rerun for");
         assert_eq!(run.outcome, MemberOutcome::Failed);

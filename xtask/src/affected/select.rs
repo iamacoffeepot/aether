@@ -36,15 +36,15 @@ pub(super) const DIST_RESOLVING_HARNESSES: &[&str] =
     &["aether-harness-fleet", "aether-harness-substrate", "aether-harness-substrate-capture"];
 
 /// The computed test selection.
-pub(super) struct Selection {
+pub struct Selection {
     /// `Some(reason)` when the whole workspace suite must run.
-    pub(super) run_all: Option<String>,
+    pub run_all: Option<String>,
     /// Affected workspace package names (empty when `run_all` is set —
     /// the full invocation ignores the list).
-    pub(super) packages: BTreeSet<String>,
+    pub packages: BTreeSet<String>,
     /// Whether the `cargo xtask dist` wasm pre-build is needed before
     /// the tests run — see [`derive_wasm_needed`].
-    pub(super) wasm_needed: bool,
+    pub wasm_needed: bool,
 }
 
 /// Map changed paths onto the package graph and take the

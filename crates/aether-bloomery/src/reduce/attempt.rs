@@ -5,11 +5,11 @@ use alloc::vec::Vec;
 
 use super::integrate::claim_effects;
 use super::verify_memo::reuse_of;
-use super::{AttemptCompletedError, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
+use super::{AttemptCompletedError, BloomRecord, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
-    CandidateRef, ConfigRegistry, Evidence, ResolutionClaim, StageBinding, StageCatalog, Transformation,
+    CandidateRef, ConfigRegistry, Evidence, Membership, ResolutionClaim, StageBinding, StageCatalog, Transformation,
     VerifyFailureSet, Wedge,
 };
 
@@ -58,7 +58,7 @@ pub(super) fn move_effects_with_candidate(
             bloom,
             workpiece: workpiece.clone(),
             stage: progress.stage,
-            transformation: Transformation::for_member_stage(&binding, targets.subject, targets.checkout),
+            transformation: Transformation::for_member_stage(&binding, targets.subject, targets.checkout, sealed.base),
             scope_revision,
             candidate,
             profile: binding.profile,
@@ -81,13 +81,31 @@ pub(super) struct DispatchTargets {
 }
 
 /// What a dispatch inherits from the bloom that sealed it (ADR-0174): the
-/// flattened configuration registry it resolves through, and the stage catalog
-/// that calibrates it. Both come off the bloom's record, so they travel together.
+/// flattened configuration registry it resolves through, the stage catalog that
+/// calibrates it, and the base its candidate is built over. All three come off
+/// the bloom's record, so they travel together.
 pub(super) struct SealedLine<'a> {
     /// The member's registry layered over the bloom's.
     pub configs: ConfigRegistry,
+    /// The git commit the bloom was sealed onto — the base every member's
+    /// candidate is built over, and so the range the mechanical `Verify` lane
+    /// reads its candidate's diff against (#4890).
+    pub base: Digest,
     /// The catalog the bloom sealed, or the compiled line when it sealed none.
     pub catalog: &'a StageCatalog,
+}
+
+impl<'a> SealedLine<'a> {
+    /// The line one member of `record` dispatches under. Every field is read
+    /// off the record and the membership, so a call site cannot assemble two
+    /// of the three from the bloom and the third from somewhere else.
+    pub(super) fn of(record: &'a BloomRecord, member: &Membership) -> Self {
+        Self {
+            configs: member.configs.layered_over(record.spec.configs()),
+            catalog: &record.stage_catalog,
+            base: record.spec.base(),
+        }
+    }
 }
 
 /// The binding a catalog gives one stage, falling back to the compiled line's
@@ -234,7 +252,7 @@ pub(super) fn reduce_attempt_completed(
             progress,
             DispatchTargets { subject, checkout },
             candidate.map(|current| current.tree),
-            SealedLine { configs: member.configs.layered_over(record.spec.configs()), catalog: &record.stage_catalog },
+            SealedLine::of(record, member),
         ));
         return Decisions {
             outcome: Outcome::AttemptAdvanced { bloom: *bloom, workpiece: workpiece.clone(), from: stage, to: next },
@@ -255,7 +273,7 @@ pub(super) fn reduce_attempt_completed(
             progress,
             DispatchTargets { subject, checkout },
             candidate.map(|current| current.tree),
-            SealedLine { configs: member.configs.layered_over(record.spec.configs()), catalog: &record.stage_catalog },
+            SealedLine::of(record, member),
         ));
         return Decisions {
             outcome: Outcome::AttemptRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, attempt },

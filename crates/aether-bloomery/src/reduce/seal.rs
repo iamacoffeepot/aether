@@ -28,7 +28,8 @@ use crate::values::{
 /// `checkout` is the git commit the attempt's worker checks out — the bloom's
 /// sealed base (`spec.base()`), threaded onto the transformation so the worker
 /// builds the candidate against the exact sealed source (ADR-0149 §Execution,
-/// #3572). It is distinct from the member's `scope_revision` subject, which is
+/// #3572). It stands in for the diff base too, which at the entry stage is the
+/// same commit: nothing has been captured on top of the base yet. It is distinct from the member's `scope_revision` subject, which is
 /// the aether content digest the returned evidence binds to.
 fn entry_dispatch_effects(
     bloom: BloomId,
@@ -56,7 +57,7 @@ fn entry_dispatch_effects(
             bloom,
             workpiece: member.workpiece.clone(),
             stage,
-            transformation: Transformation::for_member_stage(&binding, member.scope_revision, checkout),
+            transformation: Transformation::for_member_stage(&binding, member.scope_revision, checkout, checkout),
             scope_revision: member.scope_revision,
             candidate: None,
             profile: binding.profile,

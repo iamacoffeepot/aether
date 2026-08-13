@@ -229,6 +229,7 @@ fn enqueue_dispatch_with_configs(
             &StageCatalog::binding_of(stage),
             scope_revision,
             digest(0xC0),
+            digest(0xB0),
         ),
         scope_revision,
         candidate: None,
@@ -577,8 +578,12 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
 
     // A well-formed dispatch, then a subject-less one, then another well-formed one.
     let (first, _) = enqueue_construct_dispatch(&mut store, bloom, "wp-a", 5);
-    let mut subjectless =
-        Transformation::for_member_stage(&StageCatalog::binding_of(StageId::Construct), digest(9), digest(0xC0));
+    let mut subjectless = Transformation::for_member_stage(
+        &StageCatalog::binding_of(StageId::Construct),
+        digest(9),
+        digest(0xC0),
+        digest(0xB0),
+    );
     subjectless.inputs.clear();
     let payload = DispatchPayload {
         profile: StageCatalog::profile_of(StageId::Construct),
@@ -1383,6 +1388,7 @@ fn drain_stamps_the_record_axes_from_the_payload() {
             &StageCatalog::binding_of(StageId::Verify),
             candidate_tree,
             digest(0xC0),
+            digest(0xB0),
         ),
         scope_revision: digest(5),
         candidate: Some(candidate_tree),
@@ -1926,6 +1932,7 @@ fn a_local_only_boot_mounts_and_says_why_an_actions_lane_cannot_run() {
             &StageCatalog::binding_of(StageId::Verify),
             digest(0xC0),
             digest(0xC0),
+            digest(0xB0),
         ),
         nonce: Nonce("probe".to_owned()),
     };
@@ -1968,6 +1975,7 @@ fn an_unconfigured_actions_refusal_is_permanent_so_the_drain_parks_it() {
                 &StageCatalog::binding_of(StageId::Verify),
                 digest(0xC0),
                 digest(0xC0),
+                digest(0xB0),
             ),
             nonce: Nonce("probe".to_owned()),
         })
