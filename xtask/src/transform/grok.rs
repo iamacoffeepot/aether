@@ -3,7 +3,7 @@
 //!
 //! Grok Build's `--output-format streaming-messages-json` is the Anthropic
 //! Messages API wire format, terminal `result` record included, so this arm
-//! derives its record through [`messages::derive_result_record`] — the same
+//! derives its record through [`super::messages::derive_result_record`] — the same
 //! path the Claude arm reads — rather than a second parse of the same shape.
 //! The price the terminal reports rides that record as evidence; what a bloom
 //! is charged is computed host-side from the sealed price table over the token
@@ -182,7 +182,7 @@ mod tests {
         assert_eq!(record["output"], 33);
         // Recorded as evidence; the bloom's spend is computed from the sealed
         // price table over the columns above, never from this figure.
-        assert_eq!(record["cost_usd"], 0.027376);
+        assert_eq!(record["cost_usd"], 0.027_376);
         assert_eq!(record["first_call_model"], "grok-4.6", "no model here is filtered as a side model");
     }
 }
