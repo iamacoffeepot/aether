@@ -43,13 +43,16 @@ use std::error::Error;
 use std::fmt;
 use std::fmt::Write as _;
 
-use aether_bloomery::{BloomId, ConfigScopes, Digest, Nonce, PriceTable, StudyCost, StudyRecord};
+use aether_bloomery::{
+    BloomId, ConfigResolveError, ConfigScopes, Digest, Nonce, PriceTable, StudyCall, StudyCost, StudyRecord,
+};
 use aether_bloomery_github::{InwardError, StudyResult, normalize_study_result};
+use aether_data::Kind;
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
 use crate::artifacts::{ArtifactsCapabilityState, ArtifactsError, PutResult};
 use crate::bloomery::intake::DispatchRecord;
-use crate::store::{StoreBackend, resolve_config};
+use crate::store::{StoreBackend, StoreConfigError};
 
 /// A runner result record a worker uploaded for a `construct.implement` attempt:
 /// the nonce it answers, the attempt digest its cost is about, and the parsed
@@ -63,6 +66,10 @@ pub struct UploadedStudyRecord {
     pub subject: Digest,
     /// The gradeable cost columns the upload carries.
     pub cost: StudyCost,
+    /// Per-call usage when the result record carried it. Not persisted on the
+    /// study artifact — the priced dollar column is. Missing on a banded row
+    /// bills the dispatch at the sub-band rate and is named as a ledger defect.
+    pub calls: Option<Vec<StudyCall>>,
 }
 
 /// Why the study broker refused an upload without writing anything. Mirrors
@@ -194,7 +201,7 @@ pub fn admit_study(
     // resolved from the order's own config registry, so a bloom is graded at
     // the prices it sealed and a later rate change re-prices nothing that
     // already ran.
-    let cost = StudyCost { cost_micro_usd: price_of(store, &record, &cost), ..cost };
+    let cost = StudyCost { cost_micro_usd: price_of(store, &record, &cost, upload.calls.as_deref()), ..cost };
     // Normalize to the durable, content-addressed study artifact. Its bytes are
     // the truth; the index row below is a projection over them.
     let record = StudyRecord { bloom, subject: displayed, cost };
@@ -223,7 +230,12 @@ pub fn admit_study(
 /// therefore cost the record its dollar column and nothing else — failing here
 /// would discard a measurement that cannot be taken again, to protect a number
 /// that can be recomputed from the artifact whenever the rates are known.
-fn price_of(store: &mut dyn StoreBackend, record: &DispatchRecord, cost: &StudyCost) -> u64 {
+fn price_of(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    cost: &StudyCost,
+    calls: Option<&[StudyCall]>,
+) -> u64 {
     let Some(model) = record.transformation.model.as_ref() else {
         return 0;
     };
@@ -237,10 +249,43 @@ fn price_of(store: &mut dyn StoreBackend, record: &DispatchRecord, cost: &StudyC
         0
     };
 
-    match resolve_config::<PriceTable>(store, ConfigScopes::bloom_wide(&record.configs)) {
-        Ok(table) => table.unwrap_or_default().price(&model.model, cost).unwrap_or_else(|| unpriced("no price row")),
-        Err(error) => unpriced(&format!("price table unresolvable: {error}")),
+    let table = match resolve_price_table(store, ConfigScopes::bloom_wide(&record.configs)) {
+        Ok(table) => table.unwrap_or_default(),
+        Err(error) => return unpriced(&format!("price table unresolvable: {error}")),
+    };
+    let Some(row) = table.row(&model.model) else {
+        return unpriced("no price row");
+    };
+    // A banded row whose dispatch reported no per-call usage cannot choose a
+    // band honestly: selecting from the aggregate would overcount every lap
+    // whose *sum* crossed the threshold. Bill the sub-band and name the hole,
+    // the same fail-toward-visible posture as an unpriced attempt.
+    if row.long_context.is_some() && matches!(calls, None | Some([])) {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::study",
+            model = %model.model,
+            "banded price row billed at sub-band rates; per-call usage was not reported",
+        );
     }
+    table.price_dispatch(&model.model, cost, calls).unwrap_or_else(|| unpriced("no price row"))
+}
+
+/// The bloom's sealed [`PriceTable`], including tables authored before
+/// [`PriceRow::long_context`](aether_bloomery::PriceRow) existed.
+fn resolve_price_table(
+    store: &mut dyn StoreBackend,
+    scopes: ConfigScopes<'_>,
+) -> Result<Option<PriceTable>, StoreConfigError> {
+    let Some(address) = scopes.address::<PriceTable>() else {
+        return Ok(None);
+    };
+    let Some((stored_kind, bytes)) = store.lookup_config(address.as_bytes())? else {
+        return Err(ConfigResolveError::Missing { kind: PriceTable::NAME }.into());
+    };
+    if stored_kind != PriceTable::NAME {
+        return Err(ConfigResolveError::KindMismatch { expected: PriceTable::NAME, stored: stored_kind }.into());
+    }
+    PriceTable::from_sealed(&bytes).map(Some).map_err(|_| ConfigResolveError::Decode { kind: PriceTable::NAME }.into())
 }
 
 /// Rebuild the per-bloom study index from the artifact store alone (issue
@@ -355,13 +400,53 @@ mod tests {
         record_dispatch(store, &record).unwrap();
     }
 
+    fn seed_priced_order(
+        store: &mut dyn StoreBackend,
+        nonce: &str,
+        bloom: BloomId,
+        attempt: Digest,
+        table: &aether_bloomery::PriceTable,
+        model: &str,
+    ) {
+        use aether_bloomery::{ConfigKind, Harness, ReasoningEffort, ResolvedModel};
+        use aether_data::Kind;
+        use aether_data::wire::to_vec;
+
+        let bytes = to_vec(table).unwrap();
+        store.record_config(table.address().as_bytes(), aether_bloomery::PriceTable::NAME, &bytes).unwrap();
+        let mut configs = aether_bloomery::ConfigRegistry::default();
+        configs.insert::<aether_bloomery::PriceTable>(table.address());
+
+        let mut record = DispatchRecord {
+            profile: StageCatalog::profile_of(StageId::Construct),
+            nonce: Nonce(nonce.to_owned()),
+            bloom,
+            workpiece: WorkpieceId("wp-study".to_owned()),
+            scope_revision: Digest::from_bytes([2; 32]),
+            candidate: attempt,
+            displayed_digest: attempt,
+            stage: StageId::Construct,
+            transformation: aether_bloomery::Transformation::for_member_stage(
+                &StageCatalog::binding_of(StageId::Construct),
+                attempt,
+                Digest::from_bytes([0xC0; 32]),
+                Digest::from_bytes([0xB0; 32]),
+            ),
+            configs,
+        };
+        record.transformation.model =
+            Some(ResolvedModel { harness: Harness::Grok, model: model.to_owned(), effort: ReasoningEffort::Medium });
+        record_dispatch(store, &record).unwrap();
+    }
+
     fn admit(
         store: &mut dyn StoreBackend,
         artifacts: &mut ArtifactsCapabilityState,
         nonce: &str,
         attempt: Digest,
     ) -> StudyAdmission {
-        let upload = UploadedStudyRecord { nonce: Nonce(nonce.to_owned()), subject: attempt, cost: cost() };
+        let upload =
+            UploadedStudyRecord { nonce: Nonce(nonce.to_owned()), subject: attempt, cost: cost(), calls: None };
         match admit_study(store, artifacts, &upload).unwrap() {
             StudyAdmitDecision::Admitted(admission) => admission,
             StudyAdmitDecision::Refused(refusal) => panic!("expected an admission, got a refusal: {refusal:?}"),
@@ -416,6 +501,7 @@ mod tests {
             nonce: Nonce("fabricated".to_owned()),
             subject: Digest::from_bytes([5; 32]),
             cost: cost(),
+            calls: None,
         };
         assert!(matches!(
             admit_study(&mut store, &mut artifacts, &upload).unwrap(),
@@ -434,8 +520,12 @@ mod tests {
         let attempt = Digest::from_bytes([5; 32]);
         seed_order(&mut store, "n-2", bloom, attempt);
 
-        let lying =
-            UploadedStudyRecord { nonce: Nonce("n-2".to_owned()), subject: Digest::from_bytes([9; 32]), cost: cost() };
+        let lying = UploadedStudyRecord {
+            nonce: Nonce("n-2".to_owned()),
+            subject: Digest::from_bytes([9; 32]),
+            cost: cost(),
+            calls: None,
+        };
         match admit_study(&mut store, &mut artifacts, &lying).unwrap() {
             StudyAdmitDecision::Refused(StudyRefusal::DigestMismatch { displayed, claimed }) => {
                 assert_eq!(displayed, attempt);
@@ -497,7 +587,7 @@ mod tests {
         let json = br#"{"num_turns": 7, "cost_usd": 0.42, "duration_ms": 123456, "input": 1000,
             "cache_write": 200, "cache_write_1h": 150, "cache_write_5m": 50, "cache_read": 8000, "output": 900}"#;
         let cost = parse_study_cost(json).unwrap();
-        let upload = UploadedStudyRecord { nonce: Nonce("n-e2e".to_owned()), subject: attempt, cost };
+        let upload = UploadedStudyRecord { nonce: Nonce("n-e2e".to_owned()), subject: attempt, cost, calls: None };
         let StudyAdmitDecision::Admitted(admission) = admit_study(&mut store, &mut artifacts, &upload).unwrap() else {
             panic!("the matching fake record admits");
         };
@@ -519,11 +609,81 @@ mod tests {
         );
 
         // A mismatched upload → refused, store untouched.
-        let bad = UploadedStudyRecord { nonce: Nonce("n-e2e".to_owned()), subject: Digest::from_bytes([9; 32]), cost };
+        let bad = UploadedStudyRecord {
+            nonce: Nonce("n-e2e".to_owned()),
+            subject: Digest::from_bytes([9; 32]),
+            cost,
+            calls: None,
+        };
         assert!(matches!(
             admit_study(&mut store, &mut artifacts, &bad).unwrap(),
             StudyAdmitDecision::Refused(StudyRefusal::DigestMismatch { .. })
         ));
         assert_eq!(store.study_rows().unwrap().len(), 1, "the refuse added no row");
+    }
+
+    #[test]
+    fn a_banded_table_charges_each_call_and_falls_back_when_calls_are_missing() {
+        use aether_bloomery::{LongContextBand, PriceRow, PriceTable, StudyCall};
+
+        let table = PriceTable {
+            rows: vec![PriceRow {
+                model: "grok-4.6".to_owned(),
+                input: 2_000_000,
+                cache_read: 0,
+                cache_write_5m: 0,
+                cache_write_1h: 0,
+                cache_write: 0,
+                output: 10_000_000,
+                long_context: Some(LongContextBand {
+                    prompt_tokens: 200_000,
+                    input: 4_000_000,
+                    cache_read: 0,
+                    cache_write_5m: 0,
+                    cache_write_1h: 0,
+                    cache_write: 0,
+                    output: 20_000_000,
+                }),
+            }],
+        };
+        let under = StudyCall { input_tokens: 100_000, output_tokens: 1_000, ..StudyCall::default() };
+        let over = StudyCall { input_tokens: 250_000, output_tokens: 1_000, ..StudyCall::default() };
+        let cost = StudyCost { input_tokens: 350_000, output_tokens: 2_000, ..StudyCost::default() };
+
+        let bloom = BloomId(Digest::from_bytes([1; 32]));
+        let attempt = Digest::from_bytes([5; 32]);
+        let mut band_store = store();
+        let (_band_dir, mut band_artifacts) = artifacts();
+        seed_priced_order(&mut band_store, "n-band", bloom, attempt, &table, "grok-4.6");
+
+        let upload = UploadedStudyRecord {
+            nonce: Nonce("n-band".to_owned()),
+            subject: attempt,
+            cost,
+            calls: Some(vec![under, over]),
+        };
+        let StudyAdmitDecision::Admitted(admission) =
+            admit_study(&mut band_store, &mut band_artifacts, &upload).unwrap()
+        else {
+            panic!("the banded two-call upload admits");
+        };
+        let decoded: StudyRecord = from_bytes(&artifact_bytes(&mut band_artifacts, &admission.study_artifact)).unwrap();
+        assert_eq!(
+            decoded.cost.cost_micro_usd, 1_230_000,
+            "one sub-band call plus one long-context call, never the aggregate at either rate",
+        );
+
+        // Same aggregate, no per-call usage: sub-band, not the long-context
+        // rate the 350k sum would select.
+        let mut gap_store = store();
+        let (_gap_dir, mut gap_artifacts) = artifacts();
+        seed_priced_order(&mut gap_store, "n-gap", bloom, attempt, &table, "grok-4.6");
+        let gap = UploadedStudyRecord { nonce: Nonce("n-gap".to_owned()), subject: attempt, cost, calls: None };
+        let StudyAdmitDecision::Admitted(admission) = admit_study(&mut gap_store, &mut gap_artifacts, &gap).unwrap()
+        else {
+            panic!("the gap upload still admits");
+        };
+        let decoded: StudyRecord = from_bytes(&artifact_bytes(&mut gap_artifacts, &admission.study_artifact)).unwrap();
+        assert_eq!(decoded.cost.cost_micro_usd, 720_000, "missing calls bill the dispatch at the sub-band");
     }
 }

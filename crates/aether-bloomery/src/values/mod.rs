@@ -33,7 +33,7 @@ pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedM
 pub use orphan_claim::{
     ORPHAN_CLAIM_RELEASE_WORDS, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord,
 };
-pub use price::{PriceRow, PriceTable};
+pub use price::{LongContextBand, PriceRow, PriceTable};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use proof::{VerifiedTree, VerifyGateSet, VerifyProof, VerifyReuse};
 pub use question::Question;
@@ -43,7 +43,7 @@ pub use stage::{
     VERIFY_LANE_NETWORK, is_model_lane,
 };
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
-pub use study::{StudyCost, StudyRecord};
+pub use study::{StudyCall, StudyCost, StudyRecord};
 pub use timeout::TimeoutRecord;
 pub use verify::{VerifyFailure, VerifyFailureSet};
 

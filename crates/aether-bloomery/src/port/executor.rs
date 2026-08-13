@@ -17,7 +17,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::ids::Nonce;
-use crate::values::{CandidateRef, StudyCost, Transformation, VerifyFailureSet};
+use crate::values::{CandidateRef, StudyCall, StudyCost, Transformation, VerifyFailureSet};
 
 /// A fully-resolved unit of work to dispatch. The [`Transformation`] already
 /// carries the typed command id, digest-pinned inputs, declared outputs,
@@ -132,6 +132,12 @@ pub struct EvidenceRef {
     /// `None` means *unmeasured*, never *free*: the study lane writes no row
     /// rather than a row of zeroes, so a ledger gap stays legible as a gap.
     pub cost: Option<StudyCost>,
+    /// Per-call token columns when the harness reported them, so a long-context
+    /// band can charge each call at the rate its own prompt selects. `None` is
+    /// the same gap as a missing cost: the ledger bills the dispatch at the
+    /// sub-band rate and names the hole, rather than band-selecting from the
+    /// aggregate.
+    pub calls: Option<Vec<StudyCall>>,
 }
 
 /// The disposable-worker boundary (ADR-0149 §The boundary). Exactly the four

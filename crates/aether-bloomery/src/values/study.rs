@@ -49,6 +49,53 @@ pub struct StudyCost {
     pub output_tokens: u64,
 }
 
+/// One model call's token columns — the unit a long-context band selects on.
+///
+/// The dispatch-aggregate [`StudyCost`] cannot choose a band: a 23-turn lap
+/// whose *sum* crosses the threshold while every individual call stayed under
+/// it would overcount. Prompt size is the input-side total (uncached + cache
+/// read + cache write), which is the context the vendor's threshold names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct StudyCall {
+    /// Uncached input tokens.
+    pub input_tokens: u64,
+    /// Cache-write tokens.
+    pub cache_write_tokens: u64,
+    /// The 1-hour-TTL cache-write split.
+    pub cache_write_1h_tokens: u64,
+    /// The 5-minute-TTL cache-write split.
+    pub cache_write_5m_tokens: u64,
+    /// Cache-read tokens.
+    pub cache_read_tokens: u64,
+    /// Output tokens.
+    pub output_tokens: u64,
+}
+
+impl StudyCall {
+    /// The prompt this call presented, in tokens — uncached input plus both
+    /// cache classes. The long-context threshold is a prompt-size cut, not an
+    /// uncached-input cut: a warm repair lap's context is almost all cache.
+    #[must_use]
+    pub fn prompt_tokens(self) -> u64 {
+        self.input_tokens.saturating_add(self.cache_read_tokens).saturating_add(self.cache_write_tokens)
+    }
+
+    /// The same columns as a [`StudyCost`], so the per-column charge helper
+    /// can price a call without a second copy of the arithmetic.
+    #[must_use]
+    pub fn as_cost(self) -> StudyCost {
+        StudyCost {
+            input_tokens: self.input_tokens,
+            cache_write_tokens: self.cache_write_tokens,
+            cache_write_1h_tokens: self.cache_write_1h_tokens,
+            cache_write_5m_tokens: self.cache_write_5m_tokens,
+            cache_read_tokens: self.cache_read_tokens,
+            output_tokens: self.output_tokens,
+            ..StudyCost::default()
+        }
+    }
+}
+
 /// A normalized runner result record: the typed study evidence for one
 /// `construct.implement` attempt, bound to the exact attempt digest it grades.
 ///

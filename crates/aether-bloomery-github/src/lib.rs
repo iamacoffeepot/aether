@@ -102,7 +102,7 @@ pub use correspondence::{GitObjectFormat, GitObjectId};
 pub use executor::{ActionsExecutor, ExecutorError, LaneWorkflows};
 pub use inward::{
     InwardError, StageResult, StageVerdict, StudyRecordError, StudyResult, normalize_stage_result,
-    normalize_study_result, parse_study_cost,
+    normalize_study_result, parse_study, parse_study_cost,
 };
 pub use mainline::MainlineRef;
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};

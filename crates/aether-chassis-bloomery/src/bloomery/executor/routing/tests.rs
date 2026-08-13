@@ -180,6 +180,7 @@ fn stream_preserves_the_backend_failure_set_unchanged() {
         findings: None,
         failed_verifiers: failures,
         cost: None,
+        calls: None,
     };
     let (actions, _actions_seen) = Recorder::<ExecutorError>::new();
     let (local, _local_seen) = Recorder::<LocalExecutorError>::returning(vec![reference.clone()]);
