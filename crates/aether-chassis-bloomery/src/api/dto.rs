@@ -11,6 +11,12 @@
 //!
 //! They carry no `aether_data::Kind` — they are HTTP-JSON bodies, not mailbox
 //! mail, and never cross the wire codec.
+//!
+//! A digest-typed field here is a plain [`Digest`] and stays one. How it is
+//! spelled in JSON belongs to the codecs the routes read and write these
+//! through (`runtime::hex`), which take 64 hex characters or the canonical byte
+//! array on the way in and render hex on the way out — so a body agrees with
+//! the path segments beside it without any type in this file saying so.
 
 use std::collections::BTreeMap;
 
