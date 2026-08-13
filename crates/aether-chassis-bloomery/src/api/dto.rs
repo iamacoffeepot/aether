@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "github")]
 use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind};
 use aether_bloomery::{
-    ConfigRegistry, Digest, Event, Forecast, Membership, StageId, Statement, Workpiece, WorkpieceId,
+    ConfigRegistry, Digest, Event, Forecast, Membership, Outcome, StageId, Statement, Workpiece, WorkpieceId,
 };
 
 use crate::bloomery::{AdrTouch, Completeness};
@@ -184,7 +184,7 @@ pub struct GrantRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutcomeView {
     /// The reducer outcome (sealed / superseded / rejected, and why).
-    pub outcome: aether_bloomery::Outcome,
+    pub outcome: Outcome,
 }
 
 /// One decoded journal record for `GET /journal`.
@@ -196,6 +196,12 @@ pub struct JournalEntry {
     pub idempotency_key: String,
     /// The decoded event the record journaled.
     pub event: Event,
+    /// The outcome the event reduced to when it was admitted (ADR-0190) — read
+    /// from the record, so it names what was decided, not what the current
+    /// reducer would decide.
+    pub outcome: Outcome,
+    /// The identity of the build whose reducer decided the event.
+    pub decider: String,
 }
 
 /// `GET /journal` — the whole journal, oldest first, decoded.
@@ -263,7 +269,7 @@ pub struct ReleaseAcceptedView {
     /// The request digest, lowercase hex — the status route's path segment.
     pub request: String,
     /// The reducer outcome the admitted request resolved to.
-    pub outcome: aether_bloomery::Outcome,
+    pub outcome: Outcome,
 }
 
 /// A structured error body for a `4xx` / `5xx` reply.

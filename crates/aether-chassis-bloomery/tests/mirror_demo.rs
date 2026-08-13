@@ -20,12 +20,12 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomDraft, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
+    BloomDraft, ConfigRegistry, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
     ResolvedConfigs, Snapshot, WorkpieceId, reduce, view_of,
 };
 use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
 use aether_chassis_bloomery::bloomery::ProjectionShell;
-use aether_chassis_bloomery::store::{SqliteStore, StoreBackend};
+use aether_chassis_bloomery::store::{JournalWrite, SqliteStore, StoreBackend};
 use aether_data::wire::{from_bytes, to_vec};
 
 /// The two issues the synthetic bloom's members address — objects the
@@ -67,19 +67,26 @@ fn synthetic_bloom_snapshot() -> Snapshot {
     let event = Event { idempotency_key: IdempotencyKey("seal-1".into()), fact: Fact::Seal(spec) };
     let bytes = to_vec(&event).unwrap();
 
+    // Decide once at admission and journal the decision beside the event
+    // (ADR-0190) — the shape every production journal row has.
+    let decided = reduce(&Snapshot::new(base), &event, &ResolvedConfigs::default());
     let mut store = SqliteStore::open(":memory:").unwrap();
-    store.append_event("seal-1", &bytes).unwrap();
+    store
+        .append_event(&JournalWrite {
+            idempotency_key: "seal-1",
+            event: &bytes,
+            decisions: &to_vec(&decided).unwrap(),
+            decider: "mirror-demo",
+        })
+        .unwrap();
 
-    // Rebuild the snapshot purely from the journal — reduce then apply, event
-    // by event, exactly as recovery replay does.
+    // Rebuild the snapshot purely from the journal — fold each record's
+    // recorded decision, exactly as recovery replay does.
     let mut snapshot = Snapshot::new(base);
     for record in store.replay_journal().unwrap() {
         let replayed: Event = from_bytes(&record.event).unwrap();
-        snapshot = snapshot.apply(
-            &replayed,
-            &reduce(&snapshot, &replayed, &ResolvedConfigs::default()),
-            &ResolvedConfigs::default(),
-        );
+        let decisions: Decisions = from_bytes(&record.decisions).unwrap();
+        snapshot = snapshot.apply(&replayed, &decisions, &ResolvedConfigs::default());
     }
     snapshot
 }

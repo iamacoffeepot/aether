@@ -143,10 +143,10 @@ impl NativeActor for ControlCore {
 
     /// Boot: read the stored configuration first, then replay the journal from
     /// [`on_load_configs_result`](Self::on_load_configs_result). Sequenced rather
-    /// than sent together because replay *reduces* — a seal it folds back may name
-    /// configuration the reducer has to produce, and a replay that ran first would
-    /// refuse an event the original admit accepted, rebuilding a snapshot that
-    /// never existed. Lives in `wire` (post-init, mail-allowed).
+    /// than sent together because the fold reads configuration — a seal it folds
+    /// back registers the catalog content its members sealed, and a replay that
+    /// ran first would register blooms against an empty set, rebuilding a
+    /// snapshot that never existed. Lives in `wire` (post-init, mail-allowed).
     fn wire(_state: &mut ControlCoreState, ctx: &mut NativeCtx<'_>) {
         ctx.actor::<StoreCapability>().send_detached(&LoadConfigs);
     }
@@ -317,15 +317,16 @@ impl NativeActor for ControlCore {
         inbound.reply(&result);
     }
 
-    /// Boot journal replay reply: fold each record (decode the event, `reduce`,
     /// The stored-configuration read (ADR-0174). Two arrivals reach here and they
     /// resolve differently.
     ///
     /// The boot read (no held admit) fills the set and *then* sends
-    /// [`ReplayJournal`], which is the ordering that makes replay reduce against
-    /// the same content the original admits did. A read failure at boot is
-    /// unrecoverable for the same reason a failed replay is — the snapshot it
-    /// would rebuild is not the one that existed — so it fail-fasts (ADR-0063).
+    /// [`ReplayJournal`], which is the ordering that gives the fold the same
+    /// configuration content the original admits sealed against
+    /// ([`Snapshot::apply`] registers a sealed bloom's catalog from it). A read
+    /// failure at boot is unrecoverable for the same reason a failed replay is —
+    /// the snapshot it would rebuild is not the one that existed — so it
+    /// fail-fasts (ADR-0063).
     ///
     /// A re-read for a held admit refills the set and re-enters
     /// [`on_admit`](Self::on_admit) with the original bytes. The retry is not
@@ -359,9 +360,13 @@ impl NativeActor for ControlCore {
         }
     }
 
-    /// `apply`) to rebuild the snapshot. No outbox drain/ack — republish is
-    /// #3499's. A read or a corrupt record at boot is unrecoverable, so it
-    /// fail-fasts (ADR-0063) rather than coming up on a torn snapshot.
+    /// Boot journal replay reply: fold each record — decode the event and its
+    /// recorded decisions, then [`Snapshot::apply`] — to rebuild the snapshot.
+    /// The reducer is never consulted (ADR-0190): the record is what was
+    /// decided, and re-deciding under the current binary rewrites history.
+    /// No outbox drain/ack — republish is #3499's. A read or a corrupt record
+    /// at boot is unrecoverable, so it fail-fasts (ADR-0063) rather than
+    /// coming up on a torn snapshot.
     #[handler::manual]
     fn on_replay_result(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: ReplayJournalResult) {
         let records = match mail {
@@ -378,7 +383,17 @@ impl NativeActor for ControlCore {
                     record.sequence, record.idempotency_key
                 )),
             };
-            let decisions = reduce(&state.snapshot, &event, &state.configs);
+            // Fold the recorded decision — never re-decide (ADR-0190). The rules
+            // in force today govern new admissions only; re-reducing history under
+            // them resurrects rejections a looser rule now admits and re-refuses
+            // admissions a stricter rule no longer would (#4937).
+            let decisions: Decisions = match from_bytes(&record.decisions) {
+                Ok(decisions) => decisions,
+                Err(error) => ctx.fatal_abort(format!(
+                    "boot journal replay: record {} ({}) decision did not decode: {error}",
+                    record.sequence, record.idempotency_key
+                )),
+            };
             state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
         }
         state.reconcile_claim_refs(ctx);
@@ -652,10 +667,29 @@ impl ControlCoreState {
                 return;
             }
         };
+        // The decisions journal beside the event (ADR-0190): replay folds this
+        // record instead of re-deciding, so a later binary's rules cannot rewrite
+        // what this admission decided. An encode failure must reject the admit —
+        // a row without its decision cannot be replayed.
+        let recorded = match to_vec(&decisions) {
+            Ok(recorded) => recorded,
+            Err(error) => {
+                inbound.reply(&AdmitResult::Err { error: format!("admit decision encode failed: {error}") });
+                return;
+            }
+        };
         // Every non-duplicate admitted event is journaled — even a rejected one, so
         // a replay stays a no-op and the key is durably consumed. A rejection
         // carries empty membership/outbox effects, so the commit is a bare append.
-        let commit = Commit { idempotency_key: key.clone(), event: raw, releases, claims, outbox };
+        let commit = Commit {
+            idempotency_key: key.clone(),
+            event: raw,
+            decisions: recorded,
+            decider: env!("AETHER_GIT_SHA").to_owned(),
+            releases,
+            claims,
+            outbox,
+        };
         ctx.actor::<StoreCapability>().send_detached(&commit);
         self.pending.entry(key).or_default().push_back(Pending { inbound, event, decisions });
     }

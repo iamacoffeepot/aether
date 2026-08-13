@@ -503,6 +503,15 @@ pub struct Commit {
     /// [`Event`](crate::reduce::Event)) — the durable replay source.
     #[serde(with = "aether_data::bytes")]
     pub event: Vec<u8>,
+    /// The reducer's [`Decisions`](crate::reduce::Decisions) — outcome plus
+    /// ordered effects — as canonical `aether_data::wire` bytes, journaled
+    /// beside the event so replay folds the recorded decision instead of
+    /// re-deciding under whatever reducer is current (ADR-0190).
+    #[serde(with = "aether_data::bytes")]
+    pub decisions: Vec<u8>,
+    /// The identity of the build whose reducer decided this event — the
+    /// ADR-0190 decider stamp, for offline divergence audits.
+    pub decider: String,
     /// The workpieces this decision releases from their blooms. Applied before
     /// the claims, so a superseding successor can reclaim a workpiece its
     /// predecessor freed in the same transaction.
@@ -568,6 +577,12 @@ pub struct JournalRecord {
     /// The event's canonical `aether_data::wire` bytes.
     #[serde(with = "aether_data::bytes")]
     pub event: Vec<u8>,
+    /// The wire-encoded [`Decisions`](crate::reduce::Decisions) recorded when
+    /// the event was admitted (ADR-0190) — what boot replay folds.
+    #[serde(with = "aether_data::bytes")]
+    pub decisions: Vec<u8>,
+    /// The identity of the build whose reducer decided this event.
+    pub decider: String,
 }
 
 /// Reply to [`ReplayJournal`].

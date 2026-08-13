@@ -2,7 +2,7 @@
 //! dispatch to a peer cap and defer, so what lives here is the rendering half:
 //! turning the store's and the artifacts cap's replies into HTTP responses.
 
-use aether_bloomery::{Event, ReplayJournalResult};
+use aether_bloomery::{Decisions, Event, ReplayJournalResult};
 use aether_data::wire::from_bytes;
 use aether_http::HttpServerResponse;
 
@@ -17,19 +17,31 @@ pub(super) fn journal_response(result: ReplayJournalResult) -> HttpServerRespons
         ReplayJournalResult::Ok { records } => {
             let mut entries = Vec::with_capacity(records.len());
             for record in records {
-                match from_bytes::<Event>(&record.event) {
-                    Ok(event) => entries.push(JournalEntry {
-                        sequence: record.sequence,
-                        idempotency_key: record.idempotency_key,
-                        event,
-                    }),
+                let event = match from_bytes::<Event>(&record.event) {
+                    Ok(event) => event,
                     Err(error) => {
                         return error_response(
                             500,
                             &format!("journal record {} decode failed: {error}", record.sequence),
                         );
                     }
-                }
+                };
+                let decisions = match from_bytes::<Decisions>(&record.decisions) {
+                    Ok(decisions) => decisions,
+                    Err(error) => {
+                        return error_response(
+                            500,
+                            &format!("journal record {} decision decode failed: {error}", record.sequence),
+                        );
+                    }
+                };
+                entries.push(JournalEntry {
+                    sequence: record.sequence,
+                    idempotency_key: record.idempotency_key,
+                    event,
+                    outcome: decisions.outcome,
+                    decider: record.decider,
+                });
             }
             json(200, &JournalView { records: entries })
         }

@@ -32,11 +32,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    Admit, AdmitResult, BloomDraft, CONTROL_CORE_NAMESPACE, ConfigKind, ConfigRegistry, Digest, Event, Evidence,
-    EvidenceKind, Fact, IdempotencyKey, Membership, ModelOverride, Outcome, Query, QueryResult, SealError,
-    Unproducible, ViewDocument, WorkpieceId,
+    Admit, AdmitResult, BloomDraft, CONTROL_CORE_NAMESPACE, ConfigKind, ConfigRegistry, Decisions, Digest, Event,
+    Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, ModelOverride, Outcome, Query, QueryResult,
+    ResolvedConfigs, SealError, Snapshot, Unproducible, ViewDocument, WorkpieceId, reduce,
 };
-use aether_chassis_bloomery::store::{RecordConfig, RecordConfigResult};
+use aether_chassis_bloomery::store::{JournalWrite, RecordConfig, RecordConfigResult, SqliteStore, StoreBackend};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
@@ -166,7 +166,70 @@ fn query_until_blooms(stream: &mut TcpStream, cid_base: u64, control: MailboxId,
 }
 
 #[test]
-fn control_loop_converges_through_the_reducer_across_a_restart() {
+fn replay_folds_the_recorded_decision_not_the_current_reducer() {
+    // The #4937 incident, both directions (ADR-0190). Row 1: a seal the reducer
+    // of its day REJECTED — rejected events journal, the inbox dedup requires
+    // it — that today's reducer would ADMIT (the resurrection direction: a rule
+    // loosened after the row was decided). Row 2: a seal recorded as ADMITTED
+    // that today's reducer would refuse in row 1's re-decided wake, because a
+    // resurrected row 1 occupies the one active bloom (the cascade direction: a
+    // rule tightened after the row was decided). A fold reproduces the recorded
+    // history — bloom B alone; a re-decide inverts it — bloom A alone.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let db = db.to_str().unwrap();
+
+    let resurrectable = seal_event("seal-a", 0, "wp-a");
+    let control_a = reduce(&Snapshot::default(), &resurrectable, &ResolvedConfigs::default());
+    assert!(
+        matches!(control_a.outcome, Outcome::Sealed(_)),
+        "fixture control: today's reducer would admit the rejected row (else the resurrection arm tests nothing)"
+    );
+    let refusal = Decisions { outcome: Outcome::SealRejected(SealError::EmptyMembership), effects: Vec::new() };
+
+    let admitted = seal_event("seal-b", 0, "wp-b");
+    let decided_b = reduce(&Snapshot::default(), &admitted, &ResolvedConfigs::default());
+    assert!(matches!(decided_b.outcome, Outcome::Sealed(_)), "fixture control: the admitted row's record seals");
+
+    let mut store = SqliteStore::open(db).unwrap();
+    store
+        .append_event(&JournalWrite {
+            idempotency_key: "seal-a",
+            event: &to_vec(&resurrectable).unwrap(),
+            decisions: &to_vec(&refusal).unwrap(),
+            decider: "older-rules",
+        })
+        .unwrap();
+    store
+        .append_event(&JournalWrite {
+            idempotency_key: "seal-b",
+            event: &to_vec(&admitted).unwrap(),
+            decisions: &to_vec(&decided_b).unwrap(),
+            decider: "older-rules",
+        })
+        .unwrap();
+    drop(store);
+
+    let port = free_port();
+    let _coordinator = spawn(port, db);
+    let mut stream = connect(port);
+    handshake(&mut stream, "control-loop-test");
+    let control = control_mailbox();
+
+    // The admitted row folded (so the fold demonstrably ran past both rows),
+    // the rejected row stayed rejected: exactly bloom B, never bloom A.
+    let document = query_until_blooms(&mut stream, 10, control, 1);
+    assert_eq!(document.blooms.len(), 1, "one bloom folds back: {document:?}");
+    assert_eq!(document.blooms[0].members[0].workpiece.0, "wp-b", "the recorded rejection did not resurrect");
+
+    // The rejected row's key is still durably consumed: re-admitting it is a
+    // duplicate, not a fresh decision under today's rules.
+    let replayed = admit(&mut stream, 30, control, &resurrectable);
+    assert!(matches!(replayed, Outcome::Duplicate), "the refused key stays consumed: {replayed:?}");
+}
+
+#[test]
+fn control_loop_converges_across_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("bloomery.db");
     let db = db.to_str().unwrap();
@@ -194,7 +257,8 @@ fn control_loop_converges_through_the_reducer_across_a_restart() {
     handshake(&mut stream, "control-loop-test");
     let control = control_mailbox();
 
-    // Convergence through the reducer: the rebuilt snapshot names the bloom.
+    // Convergence: the rebuilt snapshot names the bloom, folded from the
+    // decisions the first boot's admission recorded (ADR-0190).
     let document = query_until_blooms(&mut stream, 10, control, 1);
     assert_eq!(document.blooms.len(), 1, "journal replay rebuilt exactly the sealed bloom");
     let bloom = &document.blooms[0];

@@ -9,9 +9,10 @@
 //!
 //! [`reduce`] *decides* — it reads a snapshot and returns [`Decisions`]. It
 //! never mutates the snapshot. [`Snapshot::apply`] *evolves* — it folds a
-//! decided event's effects into the next snapshot. Journal replay is
-//! `reduce` then `apply`, event by event; the split keeps the decision pure
-//! and the evolution mechanical.
+//! decided event's effects into the next snapshot. A live admission is
+//! `reduce` then `apply`; journal replay is `apply` alone over the decisions
+//! each row recorded at admission (ADR-0190) — the record is what was
+//! decided, and re-deciding history under a newer reducer rewrites it.
 //!
 //! The active-membership uniqueness constraint (at most one active bloom per
 //! workpiece) lives in the store in production (ADR-0149 §The control core);

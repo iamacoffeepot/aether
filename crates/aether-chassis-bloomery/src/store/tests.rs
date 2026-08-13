@@ -8,7 +8,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::runtime::{
-    AppendOutcome, CommitOutcome, OutstandingOrder, RecordOutcome, SealOutcome, SqliteStore, StoreBackend,
+    AppendOutcome, CommitOutcome, JournalWrite, OutstandingOrder, RecordOutcome, SealOutcome, SqliteStore, StoreBackend,
 };
 use aether_bloomery::{MembershipMutation, OutboxPayload};
 
@@ -24,6 +24,12 @@ fn claim(workpiece: &str, bloom: &[u8]) -> MembershipMutation {
     MembershipMutation { workpiece: workpiece.to_owned(), bloom: bloom.to_vec() }
 }
 
+/// A decided journal row for the write-path calls — the ADR-0190 shape every
+/// production write carries.
+fn write<'a>(idempotency_key: &'a str, event: &'a [u8], decisions: &'a [u8]) -> JournalWrite<'a> {
+    JournalWrite { idempotency_key, event, decisions, decider: "test-build" }
+}
+
 #[test]
 fn commit_journals_claims_and_outbox_in_one_transaction() {
     // The combined commit is the control-loop primitive: one transact-mail that
@@ -34,8 +40,7 @@ fn commit_journals_claims_and_outbox_in_one_transaction() {
     let mut store = memory();
     let outcome = store
         .commit(
-            "seal-1",
-            b"sealed-bloom-event",
+            &write("seal-1", b"sealed-bloom-event", b"decided"),
             &[],
             &[claim("wp-1", b"bloom-a"), claim("wp-2", b"bloom-a")],
             &[OutboxPayload { topic: "landing_receipt".to_owned(), payload: b"receipt".to_vec() }],
@@ -62,10 +67,13 @@ fn commit_dedupes_a_replayed_idempotency_key_and_applies_nothing() {
     // journal row, and — the point of the durable backstop — no double-applied
     // membership claim. Tripwire: a replayed commit must not re-claim membership.
     let mut store = memory();
-    assert_eq!(store.commit("dup", b"first", &[], &[claim("wp", b"bloom-a")], &[]).unwrap(), CommitOutcome::Applied(1),);
+    assert_eq!(
+        store.commit(&write("dup", b"first", b"decided"), &[], &[claim("wp", b"bloom-a")], &[]).unwrap(),
+        CommitOutcome::Applied(1),
+    );
     // Re-deliver the same key with a *different* claim: it must not apply.
     assert_eq!(
-        store.commit("dup", b"second", &[], &[claim("wp-2", b"bloom-a")], &[]).unwrap(),
+        store.commit(&write("dup", b"second", b"decided-2"), &[], &[claim("wp-2", b"bloom-a")], &[]).unwrap(),
         CommitOutcome::Duplicate,
     );
     let journal = store.replay_journal().unwrap();
@@ -90,8 +98,7 @@ fn commit_membership_conflict_rolls_back_journal_and_releases() {
     assert_eq!(
         store
             .commit(
-                "conflicted",
-                b"event-bytes",
+                &write("conflicted", b"event-bytes", b"decided"),
                 &[claim("w-held", b"pred")],
                 &[claim("free", b"succ"), claim("taken", b"succ")],
                 &[OutboxPayload { topic: "t".to_owned(), payload: b"p".to_vec() }],
@@ -122,7 +129,7 @@ fn journal_round_trips_a_real_bloom_event() {
         idempotency_key: IdempotencyKey("land-1".to_owned()),
         fact: Fact::Land { bloom: BloomId(Digest::from_bytes([7; 32])), new_head: Digest::from_bytes([9; 32]) },
     };
-    store.append_event("land-1", &to_vec(&event).unwrap()).unwrap();
+    store.append_event(&write("land-1", &to_vec(&event).unwrap(), b"decided")).unwrap();
 
     let journal = store.replay_journal().unwrap();
     assert_eq!(journal.len(), 1);
@@ -133,24 +140,53 @@ fn journal_round_trips_a_real_bloom_event() {
 #[test]
 fn append_then_replay_round_trips_in_order() {
     let mut store = memory();
-    assert_eq!(store.append_event("k1", b"alpha").unwrap(), AppendOutcome::Applied(1));
-    assert_eq!(store.append_event("k2", b"beta").unwrap(), AppendOutcome::Applied(2));
+    assert_eq!(store.append_event(&write("k1", b"alpha", b"decided-1")).unwrap(), AppendOutcome::Applied(1));
+    assert_eq!(store.append_event(&write("k2", b"beta", b"decided-2")).unwrap(), AppendOutcome::Applied(2));
 
     let journal = store.replay_journal().unwrap();
     assert_eq!(journal.len(), 2);
     assert_eq!(journal[0].idempotency_key, "k1");
     assert_eq!(journal[0].event, b"alpha");
+    // The recorded decision rides the row back byte-identical (ADR-0190) — the
+    // fold's input is exactly what admission stamped, decider included.
+    assert_eq!(journal[0].decisions, b"decided-1");
+    assert_eq!(journal[0].decider, "test-build");
     assert_eq!(journal[1].idempotency_key, "k2");
     assert_eq!(journal[1].event, b"beta");
+    assert_eq!(journal[1].decisions, b"decided-2");
+}
+
+#[test]
+fn an_unstamped_pre_adr_0190_row_refuses_replay_by_name() {
+    // A journal row written before ADR-0190 carries no recorded decision.
+    // Replaying it would re-decide history under the current reducer — the
+    // exact rewrite #4937 documents — so the read refuses, naming the row and
+    // the backfill obligation, instead of handing the fold a row it would have
+    // to invent a decision for.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bloomery.db");
+    let path = path.to_str().unwrap();
+    let mut store = SqliteStore::open(path).unwrap();
+
+    // Write the legacy shape through a side connection — the store's own write
+    // paths always stamp, so the pre-migration row must be planted raw.
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .execute("INSERT INTO journal (idempotency_key, event) VALUES ('legacy', x'01')", [])
+        .unwrap();
+
+    let error = store.replay_journal().unwrap_err().to_string();
+    assert!(error.contains("predates ADR-0190"), "the refusal names the missing record: {error}");
+    assert!(error.contains("Backfill"), "the refusal states the obligation: {error}");
 }
 
 #[test]
 fn inbox_dedup_drops_a_duplicate_idempotency_key() {
     let mut store = memory();
-    assert_eq!(store.append_event("dup", b"first").unwrap(), AppendOutcome::Applied(1));
+    assert_eq!(store.append_event(&write("dup", b"first", b"decided")).unwrap(), AppendOutcome::Applied(1));
     // A replayed key is a no-op — the second delivery of the same event does not
     // re-append, and the original bytes are untouched.
-    assert_eq!(store.append_event("dup", b"second").unwrap(), AppendOutcome::Duplicate);
+    assert_eq!(store.append_event(&write("dup", b"second", b"decided-2")).unwrap(), AppendOutcome::Duplicate);
 
     let journal = store.replay_journal().unwrap();
     assert_eq!(journal.len(), 1);
@@ -283,7 +319,7 @@ fn reopen_converges_via_journal_replay_and_outbox_republish() {
 
     {
         let mut store = SqliteStore::open(path).unwrap();
-        store.append_event("seal-1", b"sealed-bloom-event").unwrap();
+        store.append_event(&write("seal-1", b"sealed-bloom-event", b"decided")).unwrap();
         store.claim_seal(b"bloom-1", &members(&["wp"])).unwrap();
         store.enqueue_outbox("landing_receipt", b"receipt-bytes").unwrap();
         // Drop without any explicit close — a committed WAL transaction is durable.
@@ -303,7 +339,7 @@ fn reopen_converges_via_journal_replay_and_outbox_republish() {
     assert_eq!(outbox[0].topic, "landing_receipt");
     assert_eq!(outbox[0].payload, b"receipt-bytes");
     // A re-delivered seal event is deduped (inbox survived the restart).
-    assert_eq!(store.append_event("seal-1", b"anything").unwrap(), AppendOutcome::Duplicate);
+    assert_eq!(store.append_event(&write("seal-1", b"anything", b"decided-2")).unwrap(), AppendOutcome::Duplicate);
 }
 
 /// A fixed Unix-millisecond reading the deadline fixtures sit around, so an

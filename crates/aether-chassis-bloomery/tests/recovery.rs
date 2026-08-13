@@ -18,7 +18,7 @@ mod common;
 
 use std::net::TcpStream;
 
-use aether_bloomery::{BloomId, Digest, Event, Fact, IdempotencyKey};
+use aether_bloomery::{BloomId, Digest, Event, Fact, IdempotencyKey, ResolvedConfigs, Snapshot, reduce};
 use aether_chassis_bloomery::store::{
     AppendEvent, AppendEventResult, ClaimSeal, ClaimSealResult, DrainOutbox, DrainOutboxResult, EnqueueOutbox,
     EnqueueOutboxResult, ReplayJournal, ReplayJournalResult,
@@ -67,9 +67,22 @@ fn kill_and_restart_converges_over_rpc() {
         fact: Fact::Land { bloom: BloomId(Digest::from_bytes([7; 32])), new_head: Digest::from_bytes([9; 32]) },
     };
     let event_bytes = to_vec(&event).unwrap();
+    // The row journals what the reducer decided about it (ADR-0190) — here the
+    // clean rejection a land on an orphan bloom reduces to, so the restarted
+    // core's fold consumes the key and changes nothing.
+    let decisions = reduce(&Snapshot::default(), &event, &ResolvedConfigs::default());
+    let decision_bytes = to_vec(&decisions).unwrap();
 
-    let append: AppendEventResult =
-        call(&mut stream, 1, &AppendEvent { idempotency_key: "seal-1".into(), event: event_bytes.clone() });
+    let append: AppendEventResult = call(
+        &mut stream,
+        1,
+        &AppendEvent {
+            idempotency_key: "seal-1".into(),
+            event: event_bytes.clone(),
+            decisions: decision_bytes.clone(),
+            decider: "recovery-test".into(),
+        },
+    );
     assert_eq!(append, AppendEventResult::Applied { sequence: 1 });
 
     let seal: ClaimSealResult = call(&mut stream, 2, &ClaimSeal { bloom: vec![1; 32], members: vec!["wp".into()] });
@@ -96,6 +109,8 @@ fn kill_and_restart_converges_over_rpc() {
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].idempotency_key, "seal-1");
             assert_eq!(records[0].event, event_bytes);
+            assert_eq!(records[0].decisions, decision_bytes, "the recorded decision survived the crash");
+            assert_eq!(records[0].decider, "recovery-test");
         }
         ReplayJournalResult::Err { error } => panic!("journal replay failed: {error}"),
     }
