@@ -552,6 +552,31 @@ impl<C: GitDataApi + PullRequestApi + GithubApi> GitSource<C> {
         format!("heads/{}", landing_branch(bloom))
     }
 
+    fn working_ref_prefix(bloom: &BloomId) -> String {
+        format!("heads/bloom/{}/", short_hex(&bloom.0))
+    }
+
+    /// Whether `name` is a candidate, integration, or checkpoint ref under
+    /// `prefix` — the working refs a terminal bloom no longer needs. Landing
+    /// and attempt refs stay: a landing proposal may still be open, and this
+    /// issue does not retire them. Claim refs live in a different namespace
+    /// (`bloomery/claims/`, `bloomery/admission/`) and cannot match the prefix.
+    fn is_reclaimable_working_ref(name: &str, prefix: &str) -> bool {
+        name.strip_prefix(prefix).is_some_and(|rest| {
+            rest == "integration" || rest.starts_with("candidate/") || rest.starts_with("checkpoint/")
+        })
+    }
+
+    /// Delete `bloom`'s candidate, integration, and checkpoint refs. Idempotent:
+    /// a name that is already gone is a success. Does not touch claim refs
+    /// (ADR-0150 — those have their own release reactor) or the landing branch.
+    ///
+    /// # Errors
+    /// A transport or backend fault other than an already-absent ref.
+    pub fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError> {
+        LandingSource::prune_working_refs(self, bloom)
+    }
+
     // Point the bloom's landing branch at `sha`, creating it or moving it. The
     // force is deliberate and safe: this ref is per-bloom and Bloomery-owned,
     // and the only way to reach it with the branch already elsewhere is a prior
@@ -1260,6 +1285,13 @@ pub trait LandingSource: SourceBackend<Error = SourceError> {
         new_head: &Digest,
         proposal: Option<&LandingProposal>,
     ) -> Result<LandOutcome, SourceError>;
+
+    /// Delete `bloom`'s candidate, integration, and checkpoint refs. Claim refs
+    /// and the landing branch are spared. See [`GitSource::prune_working_refs`].
+    ///
+    /// # Errors
+    /// A transport or backend fault other than an already-absent ref.
+    fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError>;
 }
 
 impl<C: GitDataApi + PullRequestApi + GithubApi> LandingSource for GitSource<C> {
@@ -1321,6 +1353,19 @@ impl<C: GitDataApi + PullRequestApi + GithubApi> LandingSource for GitSource<C> 
             Err(error) => Err(SourceError::Github(error)),
         }
     }
+
+    fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError> {
+        let prefix = Self::working_ref_prefix(bloom);
+        let mut pruned = 0;
+        for git_ref in self.client.list_matching_refs(&prefix)? {
+            if !Self::is_reclaimable_working_ref(&git_ref.name, &prefix) {
+                continue;
+            }
+            self.client.delete_ref(&git_ref.name)?;
+            pruned += 1;
+        }
+        Ok(pruned)
+    }
 }
 
 #[cfg(test)]
@@ -1340,8 +1385,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        ADMISSION_REF, EMPTY_TREE, GitSource, MainlineRef, SourceError, landing_branch, parse_bloom_line,
-        render_claim_message, render_tombstone_message, to_hex,
+        ADMISSION_REF, EMPTY_TREE, GitSource, MainlineRef, SourceError, candidate_ref_name, landing_branch,
+        parse_bloom_line, render_claim_message, render_tombstone_message, to_hex,
     };
     use crate::client::{GitDataApi, PullRequestApi};
     use crate::short_hex;
@@ -1432,6 +1477,36 @@ mod tests {
         assert_eq!(first, second, "a base snapshots to a stable digest");
         assert_eq!(first.tree, tree);
         assert_eq!(first.head, base);
+    }
+
+    #[test]
+    fn prune_working_refs_deletes_candidate_integration_and_checkpoint_and_spares_the_rest() {
+        // Tripwire: a terminal bloom's working refs must go, and the claim
+        // registry plus the landing branch must not. A prune that walked the
+        // whole `heads/bloom/<short>/` prefix without filtering would delete
+        // a still-open landing proposal; one that walked `bloomery/` would
+        // clobber ADR-0150 claim refs another instance still holds.
+        let (fake, bloom, _base) = seeded();
+        let source = git_source(&fake, false);
+        let candidate = candidate_ref_name(&bloom, "wp-0").trim_start_matches("refs/").to_owned();
+        fake.seed_ref(&candidate, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        fake.seed_ref(
+            &GitSource::<FakeGithub>::checkpoint_ref(&bloom, &digest(3)),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+        fake.seed_ref(&GitSource::<FakeGithub>::landing_ref(&bloom), "cccccccccccccccccccccccccccccccccccccccc");
+        fake.seed_ref(ADMISSION_REF, "dddddddddddddddddddddddddddddddddddddddd");
+        fake.seed_ref(&claim_ref(&workpiece("wp-live")), "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+
+        let pruned = source.prune_working_refs(&bloom).unwrap();
+        assert_eq!(pruned, 3, "integration (from create_namespace) + candidate + checkpoint");
+        assert!(!fake.ref_exists(&GitSource::<FakeGithub>::integration_ref(&bloom)));
+        assert!(!fake.ref_exists(&candidate));
+        assert!(!fake.ref_exists(&GitSource::<FakeGithub>::checkpoint_ref(&bloom, &digest(3))));
+        assert!(fake.ref_exists(&GitSource::<FakeGithub>::landing_ref(&bloom)), "the landing branch stays");
+        assert!(fake.ref_exists(&GitSource::<FakeGithub>::attempt_ref(&bloom, 1)), "attempt refs stay");
+        assert!(fake.ref_exists(ADMISSION_REF), "the admission claim ref stays");
+        assert!(fake.ref_exists(&claim_ref(&workpiece("wp-live"))), "a workpiece claim ref stays");
     }
 
     #[test]

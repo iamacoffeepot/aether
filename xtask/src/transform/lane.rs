@@ -65,6 +65,7 @@ pub(super) fn record(terminal: Option<Terminal>) -> serde_json::Value {
         "first_call_cache_read",
         "first_call_cache_write",
         "first_call_input",
+        "calls",
     ] {
         record.insert(field.to_owned(), Value::Null);
     }

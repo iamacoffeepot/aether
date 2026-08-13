@@ -118,6 +118,7 @@ impl EvidenceClaims for NameEvidenceClaims {
             candidate: reference.candidate,
             findings: reference.findings.clone(),
             cost: reference.cost,
+            calls: reference.calls.clone(),
         })
     }
 }

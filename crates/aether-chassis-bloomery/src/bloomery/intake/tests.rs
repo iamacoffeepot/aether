@@ -232,6 +232,7 @@ fn a_matching_upload_admits_a_bound_integrate_fact() {
         findings: None,
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
+        calls: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching upload is admitted");
@@ -274,6 +275,7 @@ fn a_parked_upload_admits_a_question_evidence_fact_and_consumes_the_order() {
         findings: None,
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
+        calls: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching parked upload is admitted");
@@ -306,6 +308,7 @@ fn an_unknown_nonce_is_refused() {
         findings: None,
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
+        calls: None,
     };
     assert!(matches!(
         admit_uploaded(&mut store, &upload).unwrap(),
@@ -334,6 +337,7 @@ fn a_right_nonce_with_the_wrong_digest_is_refused_and_the_order_stays_live() {
         findings: None,
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
+        calls: None,
     };
     match admit_uploaded(&mut store, &lying).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::DigestMismatch { displayed, claimed }) => {
@@ -438,6 +442,7 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
             findings: None,
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
+            calls: None,
         },
     );
     let claims = SeededClaims(claims);
@@ -488,6 +493,7 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
             findings: None,
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
+            calls: None,
         },
     );
     let claims = SeededClaims(claims);
@@ -592,6 +598,7 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
         findings: None,
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
+        calls: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching Construct upload is admitted");
@@ -646,6 +653,7 @@ fn a_failing_terminal_verify_admits_typed_verify_failed_not_integrate() {
         findings: None,
         failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
         cost: None,
+        calls: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching failing-verify upload is admitted (the gate decides its fate, not the broker)");
@@ -690,6 +698,7 @@ fn invalid_verifier_sets_are_refused_without_consuming_the_order() {
             findings: None,
             failed_verifiers,
             cost: None,
+            calls: None,
         };
 
         assert!(matches!(
@@ -723,6 +732,7 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
         findings: Some("pillar 2: the members disagree about the tick order".to_owned()),
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
+        calls: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &failing).unwrap() else {
         panic!("a matching aggregate verdict is admitted");
@@ -752,6 +762,7 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
         findings: None,
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
+        calls: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &passing).unwrap() else {
         panic!("the passing aggregate verdict is admitted");
@@ -787,6 +798,7 @@ fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
         findings: Some(findings.to_owned()),
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
+        calls: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &failing).unwrap() else {
         panic!("a matching aggregate verdict is admitted");
@@ -823,6 +835,7 @@ fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
         findings: Some("[wp-a] Still leaking.".to_owned()),
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
+        calls: None,
     };
     assert!(matches!(admit_uploaded(&mut store, &delta_fail).unwrap(), AdmitDecision::Admitted(_)));
     assert_eq!(
@@ -857,6 +870,7 @@ fn an_aggregate_review_executor_fault_admits_its_own_fact_and_touches_no_finding
         findings: Some("the sandbox refused to start.\nVERDICT: environment".to_owned()),
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
+        calls: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &fault).unwrap() else {
         panic!("a matching aggregate fault is admitted");
@@ -908,6 +922,7 @@ fn an_executor_fault_on_any_other_stage_is_refused_and_the_order_stays_live() {
             findings: None,
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
+            calls: None,
         };
         assert!(
             matches!(
@@ -946,6 +961,7 @@ fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
         findings: None,
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
+        calls: None,
     };
     match admit_uploaded(&mut store, &upload).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(stage)) => {
@@ -992,6 +1008,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
             findings: None,
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost: None,
+            calls: None,
         };
 
         let decoded = claims.claim_for(&reference).expect("a well-formed attempt name decodes");
@@ -1022,6 +1039,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         findings: None,
         failed_verifiers: failures,
         cost: None,
+        calls: None,
     };
     assert_eq!(claims.claim_for(&reference).expect("typed mask decodes").failed_verifiers, failures);
 
@@ -1061,6 +1079,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         findings: None,
         failed_verifiers: VerifyFailureSet::EMPTY,
         cost: None,
+        calls: None,
     };
     assert!(claims.claim_for(&stray).is_none(), "a non-attempt name yields no claim");
 }
@@ -1133,6 +1152,7 @@ fn verify_findings_persist_on_a_failing_verify_and_clear_on_a_pass() {
             VerifyFailureSet::EMPTY
         },
         cost: None,
+        calls: None,
     };
 
     record_dispatch(&mut store, &dispatch_record("n-f1", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate))
@@ -1203,6 +1223,7 @@ fn a_measured_attempt_writes_one_priced_study_row_and_an_unmeasured_one_writes_n
             cache_write_1h: 0,
             cache_write: 0,
             output: 4_000_000,
+            long_context: None,
         }],
     };
     let bytes = to_vec(&table).unwrap();
@@ -1241,6 +1262,7 @@ fn a_measured_attempt_writes_one_priced_study_row_and_an_unmeasured_one_writes_n
             findings: None,
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost: Some(cost),
+            calls: None,
         },
     );
     let claims = SeededClaims(claims);
@@ -1337,6 +1359,7 @@ fn second_attempt(
             findings: None,
             failed_verifiers: VerifyFailureSet::EMPTY,
             cost,
+            calls: None,
         },
     );
     (handle, SeededClaims(claims))

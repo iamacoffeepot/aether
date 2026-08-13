@@ -32,10 +32,14 @@
 //! - [`claim_release`] — runs the expected-holder compare-and-swap that retires
 //!   an authorized orphan claim ref (ADR-0179). Mounted only on the GitHub
 //!   branch: there is no ref namespace to release without one.
+//! - [`janitor`] — reconciles the journal against on-disk worktrees, evidence
+//!   dirs, slot target dirs, and a terminal bloom's working refs. Drains no
+//!   topic: the reclaimable facts are already in the journal.
 
 mod claim_release;
 mod executor;
 mod integrate;
+mod janitor;
 mod land;
 mod mirror;
 
@@ -48,5 +52,9 @@ pub use executor::{
     CandidatePush, DispatchTick, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorReactorState,
 };
 pub use integrate::{IntegrateReactorCapability, IntegrateReactorSetup, IntegrateReactorState, IntegrateTick};
+pub use janitor::{
+    JanitorPolicy, JanitorReactorCapability, JanitorReactorSetup, JanitorReactorState, JanitorTick, SweepReport,
+    SweepRequest, sweep,
+};
 pub use land::{LandReactorCapability, LandReactorSetup, LandReactorState, LandTick};
 pub use mirror::{DrainTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState};

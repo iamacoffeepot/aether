@@ -391,6 +391,7 @@ fn expire_overdue_orders(
             findings: None,
             failed_verifiers,
             cost: None,
+            calls: None,
         };
         match admit_uploaded(store, &upload) {
             Ok(AdmitDecision::Admitted(admission)) => {
@@ -1742,7 +1743,12 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
     // call and names which of the three it was.
     match (upload.cost, state.artifacts.as_mut()) {
         (Some(cost), Some(artifacts)) => {
-            let record = UploadedStudyRecord { nonce: upload.nonce.clone(), subject: upload.subject, cost };
+            let record = UploadedStudyRecord {
+                nonce: upload.nonce.clone(),
+                subject: upload.subject,
+                cost,
+                calls: upload.calls.clone(),
+            };
             match admit_study(store, artifacts, &record) {
                 Ok(StudyAdmitDecision::Admitted(_)) => {}
                 Ok(StudyAdmitDecision::Refused(refusal)) => {
