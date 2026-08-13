@@ -14,7 +14,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     BloomSpec, CandidateRef, ConfigScopes, DispatchKey, Evidence, EvidenceKind, OrphanClaimReleaseRecord,
-    ResolutionClaim, ResolvedConfigs, StageCatalog, VerifyFailureSet, Wedge,
+    ResolutionClaim, ResolvedConfigs, StageCatalog, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof,
+    VerifyReuse, Wedge,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -188,6 +189,34 @@ pub struct BloomRecord {
     /// the review cycle instead of re-dispatching a member stage. `None` when
     /// the bloom is not parked.
     pub review_park: Option<Digest>,
+    /// The verify memo: every tree this bloom has a green verify verdict for,
+    /// keyed by the tree and the gate set that proved it (#4891).
+    ///
+    /// A verify reads a checked-out tree and nothing else, so its verdict is a
+    /// fact about content — which makes it answerable from a record instead of a
+    /// second run whenever a later position targets the same
+    /// [`VerifiedTree`]. The gate set is half the key, so a proof cannot answer
+    /// for a vocabulary or a lane it was not collected under.
+    ///
+    /// Scoped to the bloom rather than the snapshot: the memo's whole value is
+    /// intra-bloom (the fold of a single member, a repair lap that left the tree
+    /// unchanged), and per-bloom scope means a superseded record's proofs retire
+    /// with it and a bloom that sealed its own catalog can never read one proved
+    /// under another's. Journal-derived and replay-rebuilt like the rest of the
+    /// record.
+    #[serde(default)]
+    pub verify_proofs: BTreeMap<VerifiedTree, VerifyProof>,
+    /// Every memo hit this bloom took, in the order they happened (#4891) — the
+    /// receipt trail that keeps a pass-by-identity honest.
+    ///
+    /// A reused proof is still a claim about the bloom's work, so it is recorded
+    /// rather than merely decided: without it the journal would show a stage
+    /// that passed with no verdict of its own and no way to tell a reuse from a
+    /// skipped gate. Each entry names the position that passed and the exact
+    /// prior verdict it stood on, which is also what lets the calibration ledger
+    /// count the worker-seconds the hit reclaimed.
+    #[serde(default)]
+    pub verify_reuses: Vec<VerifyReuse>,
     /// The aggregate-review executor faults this bloom has taken on the fold it
     /// currently holds (ADR-0176); `None` until one arrives.
     ///
@@ -406,6 +435,9 @@ impl Snapshot {
                     record.aggregate_verify_rolls = *rolls;
                 }
             }
+            Decision::RecordVerifyProof { .. } | Decision::RecordVerifyReuse { .. } => {
+                self.apply_verify_memo_effect(effect);
+            }
             Decision::RecordReviewPark { bloom, question } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.review_park = *question;
@@ -483,6 +515,35 @@ impl Snapshot {
         }
     }
 
+    /// Fold the two halves of the verify memo (#4891): the proofs a green
+    /// verdict files, and the receipts a pass-by-identity leaves.
+    ///
+    /// Split out of [`apply_effect`](Self::apply_effect) for the reason its
+    /// siblings are: the pair reads as one mechanism — a record written so a
+    /// later verify can read it, and the record of that read — and only shows
+    /// that when they sit together. Any other decision is a no-op here, and an
+    /// unknown bloom is ignored exactly as every other record-scoped arm ignores
+    /// one.
+    fn apply_verify_memo_effect(&mut self, effect: &Decision) {
+        match effect {
+            Decision::RecordVerifyProof { bloom, proof } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    // Keyed by tree *and* gate set, so re-proving the same tree
+                    // under the same gates overwrites one entry rather than
+                    // accumulating beside it: two green verdicts over one key are
+                    // interchangeable by construction.
+                    record.verify_proofs.insert(proof.verified(), proof.clone());
+                }
+            }
+            Decision::RecordVerifyReuse { bloom, reuse } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.verify_reuses.push(reuse.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Fold the three decisions that move a bloom across the land boundary
     /// (#4689) — resolving onto a head, returning off one when its landing was
     /// refused, and the attempt counter that bounds the round trip.
@@ -543,9 +604,24 @@ impl BloomRecord {
             landing_rolls: 0,
             resolved_head: None,
             review_park: None,
+            verify_proofs: BTreeMap::new(),
+            verify_reuses: Vec::new(),
             aggregate_fault: None,
             superseded_by: None,
         }
+    }
+
+    /// The recorded green verdict for `tree` under the gate set the compiled
+    /// verify lane runs, or `None` when this bloom holds none (#4891).
+    ///
+    /// The one place a memo hit is decided, so every verify position asks the
+    /// question the same way and none of them can reach past the gate-set half
+    /// of the key. The current gate set is recomputed rather than remembered:
+    /// that is what makes a proof journaled under a different verify vocabulary
+    /// or lane miss instead of answering for gates that no longer exist.
+    #[must_use]
+    pub fn verify_proof_for(&self, tree: Digest) -> Option<&VerifyProof> {
+        self.verify_proofs.get(&VerifiedTree { tree, gate_set: VerifyGateSet::lane().digest() })
     }
 
     /// Fold one admitted evidence artifact into the record: the log entry, plus

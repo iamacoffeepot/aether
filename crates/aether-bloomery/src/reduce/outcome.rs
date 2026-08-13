@@ -331,4 +331,42 @@ pub enum Outcome {
         /// The sealed budget the series exhausted.
         budget: u32,
     },
+    /// A member advanced onto a tree the bloom already holds a green verify
+    /// verdict for, so its terminal `Verify` passed by identity and the member
+    /// integrated on the recorded verdict (#4891).
+    ///
+    /// Takes the place of the [`Outcome::AttemptAdvanced`] the same completion
+    /// would otherwise have returned: the cursor still lands on `Verify`, but
+    /// nothing is dispatched against it, so the member is integrated by the time
+    /// this outcome is returned. The live case is a repair lap that changed
+    /// nothing the tree records — an amended commit message leaves the candidate
+    /// its previous verify already proved.
+    VerifyReused {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The member that passed by identity.
+        workpiece: WorkpieceId,
+        /// The reused verdict's artifact digest.
+        proof: Digest,
+    },
+    /// A fold arrived on a tree the bloom already holds a green verify verdict
+    /// for, so the aggregate verify passed by identity and the critic got the
+    /// fold without the mechanical gate running again (#4891).
+    ///
+    /// The sibling of [`Outcome::AggregateVerifyDispatched`], returned by the
+    /// same resolve: a single-member fold is byte-identical to the candidate its
+    /// member verified, and re-proving it buys a verdict the journal already
+    /// holds. Distinct from [`Outcome::AggregateVerifyPassed`] because no verdict
+    /// arrived — nothing was dispatched to return one. Appended so the prior
+    /// outcomes' wire discriminants are unchanged.
+    AggregateVerifyReused {
+        /// The bloom whose fold passed by identity.
+        bloom: BloomId,
+        /// The verify verdicts consumed, this pass included — counted like a
+        /// dispatched one, so the stage's budget reads the same either way.
+        rolls: u32,
+        /// The reused verdict's artifact digest, so the caller can name the
+        /// proof this pass stood on without reading the record back.
+        proof: Digest,
+    },
 }

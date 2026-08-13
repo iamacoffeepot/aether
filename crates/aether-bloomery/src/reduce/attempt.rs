@@ -3,11 +3,14 @@
 
 use alloc::vec::Vec;
 
+use super::integrate::claim_effects;
+use super::verify_memo::reuse_of;
 use super::{AttemptCompletedError, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
-    CandidateRef, ConfigRegistry, Evidence, StageBinding, StageCatalog, Transformation, VerifyFailureSet, Wedge,
+    CandidateRef, ConfigRegistry, Evidence, ResolutionClaim, StageBinding, StageCatalog, Transformation,
+    VerifyFailureSet, Wedge,
 };
 
 /// The move-and-dispatch effect pair every cursor move of
@@ -196,6 +199,34 @@ pub(super) fn reduce_attempt_completed(
     let seen_verify_failures = cursor.seen_verify_failures;
     if let Some(next) = next.filter(|_| passed) {
         let progress = StageProgress { stage: next, attempts: 1, candidate, repair_rolls, seen_verify_failures };
+        // The member may be advancing onto a tree this bloom already proved
+        // (#4891) — a repair lap that changed nothing the tree records hands
+        // back the candidate its last verify passed. Pass by identity: the
+        // member lands on the claim a dispatched pass would have produced,
+        // carrying the same verdict, and the mechanical lane never runs.
+        if let Some((current, proof)) = candidate
+            .filter(|_| next == StageId::Verify)
+            .and_then(|current| record.verify_proof_for(current.tree).map(|proof| (current, proof)))
+        {
+            let claim = ResolutionClaim {
+                workpiece: workpiece.clone(),
+                scope_revision: member.scope_revision,
+                candidate: current.tree,
+                evidence: proof.evidence.clone(),
+            };
+            effects.push(Decision::AdvanceStage { bloom: *bloom, workpiece: workpiece.clone(), progress });
+            effects.extend(claim_effects(record, *bloom, &claim, Some(reuse_of(*bloom, StageId::Verify, proof))));
+
+            return Decisions {
+                outcome: Outcome::VerifyReused {
+                    bloom: *bloom,
+                    workpiece: workpiece.clone(),
+                    proof: proof.evidence.detail,
+                },
+                effects,
+            };
+        }
+
         effects.extend(move_effects_with_candidate(
             *bloom,
             workpiece,

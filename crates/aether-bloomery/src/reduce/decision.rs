@@ -12,7 +12,7 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::values::{
     AgentProfile, ConfigRegistry, Evidence, MemberCandidate, OrphanClaimRelease, OrphanClaimReleaseCompletion,
-    ResolutionClaim, ResolvedBloom, Transformation, Wedge,
+    ResolutionClaim, ResolvedBloom, Transformation, VerifyProof, VerifyReuse, Wedge,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -413,5 +413,38 @@ pub enum Decision {
         request: Digest,
         /// The typed ref and expected holder the compare-and-swap runs against.
         target: OrphanClaimRelease,
+    },
+    /// File a green verify verdict in the bloom's verify memo, keyed by the tree
+    /// it judged and the gate set that judged it (#4891) — see
+    /// [`BloomRecord::verify_proofs`](crate::BloomRecord::verify_proofs).
+    ///
+    /// Emitted wherever the reducer learns a tree passed its gates: a member's
+    /// passing terminal `Verify` (which arrives as its
+    /// [`Fact::Integrate`](crate::Fact::Integrate)) and a passing
+    /// [`Fact::AggregateVerifyCompleted`](crate::Fact::AggregateVerifyCompleted).
+    /// Snapshot-folding and journal-derived like every other `Record*`, so a
+    /// replay rebuilds the memo rather than carrying it forward as host state.
+    /// Appended so the prior decisions' wire discriminants are unchanged.
+    RecordVerifyProof {
+        /// The bloom whose memo the proof is filed in.
+        bloom: BloomId,
+        /// The proof, naming the gate set, the position that collected it, and
+        /// the green verdict bound to its tree.
+        proof: VerifyProof,
+    },
+    /// Record that a verify position passed by identity on an already-recorded
+    /// proof instead of dispatching its gates (#4891) — the receipt half of a
+    /// memo hit, see [`BloomRecord::verify_reuses`](crate::BloomRecord::verify_reuses).
+    ///
+    /// Emitted beside the effects the position's *pass* would have produced, so
+    /// the journal never shows a verdict that nothing accounts for: a reader
+    /// (and the calibration ledger counting reclaimed worker-seconds) can name
+    /// the exact prior verdict the pass stood on. Appended so the prior
+    /// decisions' wire discriminants are unchanged.
+    RecordVerifyReuse {
+        /// The bloom the reuse happened in.
+        bloom: BloomId,
+        /// Which position passed, and the proof it reused.
+        reuse: VerifyReuse,
     },
 }

@@ -20,9 +20,9 @@ use aether_bloomery::{
     BloomId, BloomStatus, CandidateRef, CatalogError, ClaimRefKind, Decision, Digest, DispatchKey, Event, Evidence,
     EvidenceKind, Fact, GrantAttemptsError, KeyId, LandError, LandingRejectedError, ORPHAN_CLAIM_RELEASE_WORDS,
     Observation, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseError, Outcome, Provenance,
-    Question, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId,
-    StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure, VerifyFailureSet, grade,
-    reduce,
+    Question, ResolutionClaim, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, StageCatalog,
+    StageId, StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure,
+    VerifyFailureSet, grade, reduce,
 };
 use aether_data::Kind;
 use aether_data::wire::to_vec;
@@ -3451,4 +3451,214 @@ fn a_completion_for_an_unadmitted_request_opens_no_record() {
         Outcome::OrphanClaimReleaseRejected(OrphanClaimReleaseError::UnknownRequest(request)),
     );
     assert!(after.orphan_releases.is_empty());
+}
+
+/// One member's resolution claim as production forms it (#4891): the claim a
+/// *passing terminal Verify* produces, whose evidence is the verification
+/// verdict itself, bound to the candidate tree it judged. The shared
+/// [`common::claim`] fixture carries `ResolutionClaim` evidence instead, which
+/// is not a verify verdict and so deliberately files no proof.
+fn verified_claim(name: &str, revision: u8, candidate: u8, verdict: u8) -> ResolutionClaim {
+    ResolutionClaim {
+        workpiece: workpiece(name),
+        scope_revision: digest(revision),
+        candidate: digest(candidate),
+        evidence: Evidence {
+            subject: digest(candidate),
+            kind: EvidenceKind::VerificationResult,
+            detail: digest(verdict),
+        },
+    }
+}
+
+// #4891 — a single-member fold is byte-identical to the candidate its member
+// already verified, so the aggregate verify passes on the recorded verdict
+// instead of dispatching a full mechanical run to re-derive it. The fold still
+// reaches the critic, held and unchanged.
+//
+// Tripwire on the receipt above all: a pass that dispatched nothing and recorded
+// nothing would be indistinguishable from a gate quietly skipped, which is the
+// one way this optimization could become a lie.
+#[test]
+fn a_fold_on_an_already_verified_tree_passes_the_aggregate_verify_by_identity() {
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) =
+        step(&snapshot, &event("integrate", Fact::Integrate { bloom, claim: verified_claim("wp", 10, 100, 60) }));
+
+    let (after, resolved) = step(
+        &snapshot,
+        &event("resolve", Fact::Resolve { bloom, tree: digest(100), head: digest(101), lineage: vec![] }),
+    );
+
+    assert_eq!(resolved.outcome, Outcome::AggregateVerifyReused { bloom, rolls: 1, proof: digest(60) });
+    assert!(
+        !resolved.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
+        "the gates do not run again over a tree this bloom already proved",
+    );
+    match resolved.effects.iter().find(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })) {
+        Some(Decision::DispatchAggregateReview { transformation, .. }) => {
+            assert_eq!(transformation.inputs[0], digest(100), "the critic judges the fold the memo passed");
+            assert_eq!(transformation.checkout, digest(101));
+        }
+        other => panic!("expected the critic to be dispatched, got {other:?}"),
+    }
+
+    let record = after.blooms.get(&bloom).unwrap();
+    let reuse = record.verify_reuses.first().expect("a memo hit leaves a receipt naming what it reused");
+    assert_eq!(reuse.stage, StageId::AggregateVerify);
+    assert_eq!(reuse.proof.stage, StageId::Verify, "the reused verdict is the member's own");
+    assert_eq!(reuse.proof.evidence.detail, digest(60));
+    assert_eq!(record.aggregate_verify_rolls, 1, "a pass by identity consumes its verdict like a dispatched one");
+    assert_eq!(record.integration.as_ref().unwrap().tree, digest(100), "the fold stays held for the critic");
+}
+
+// #4891 — the memo fires on tree *identity* and nothing else. A multi-member
+// fold combines candidates into a tree that never existed before, so it misses
+// and the full mechanical pass runs — even though both members' own trees are
+// proven and sitting in the memo, which is what makes this a test of the key
+// rather than of an empty map.
+#[test]
+fn a_multi_member_fold_still_runs_the_full_aggregate_verify() {
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) =
+        step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: verified_claim("alpha", 10, 100, 60) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: verified_claim("beta", 11, 101, 61) }));
+    assert_eq!(snapshot.blooms.get(&bloom).unwrap().verify_proofs.len(), 2, "both members' trees are proven");
+
+    let (after, resolved) = step(
+        &snapshot,
+        &event("resolve", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }),
+    );
+
+    assert!(matches!(resolved.outcome, Outcome::AggregateVerifyDispatched { roll: 1, .. }));
+    assert!(
+        resolved.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
+        "a combined tree has never been built, so the compiler has to build it",
+    );
+    assert!(
+        !resolved.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
+        "the critic still waits for the mechanical verdict",
+    );
+    assert!(after.blooms.get(&bloom).unwrap().verify_reuses.is_empty());
+}
+
+// #4891 — the gate set is half the memo key, so a proof collected under a
+// different verify vocabulary or lane answers for nothing. The rewritten proof
+// below is what a journal written by a binary with different gates replays as:
+// the same tree, proven, under an identity this binary no longer runs.
+//
+// Tripwire: without the gate-set half, a verifier added to the umbrella would be
+// satisfied by every verdict recorded before it existed — the gates would
+// silently stop running on exactly the trees they were added for.
+#[test]
+fn a_proof_from_another_gate_set_refuses_the_memo_and_re_proves() {
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (mut snapshot, _) =
+        step(&snapshot, &event("integrate", Fact::Integrate { bloom, claim: verified_claim("wp", 10, 100, 60) }));
+
+    let record = snapshot.blooms.get_mut(&bloom).unwrap();
+    let mut proof = record.verify_proofs.values().next().unwrap().clone();
+    proof.gate_set = digest(200);
+    record.verify_proofs.clear();
+    record.verify_proofs.insert(proof.verified(), proof);
+
+    let (after, resolved) = step(
+        &snapshot,
+        &event("resolve", Fact::Resolve { bloom, tree: digest(100), head: digest(101), lineage: vec![] }),
+    );
+
+    assert!(matches!(resolved.outcome, Outcome::AggregateVerifyDispatched { roll: 1, .. }));
+    assert!(
+        resolved.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
+        "gates this binary runs have never judged that tree, whatever else has",
+    );
+    assert!(after.blooms.get(&bloom).unwrap().verify_reuses.is_empty());
+}
+
+// #4891 — the memo is keyed by content, not by position, so it answers any
+// verify aimed at a proven tree. The live case: an aggregate review sends a
+// member back into Refine, the repair lap changes nothing the tree records (an
+// amended commit message leaves the same tree), and the member's terminal Verify
+// would otherwise re-pay the whole mechanical run for the verdict it already
+// holds. It integrates on that verdict instead.
+#[test]
+fn a_repair_lap_that_leaves_the_tree_unchanged_reuses_its_verify_verdict() {
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let candidate = CandidateRef { tree: digest(100), checkout: digest(102) };
+    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, constructed) = step(
+        &snapshot,
+        &event(
+            "construct",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(59) },
+                candidate: Some(candidate),
+            },
+        ),
+    );
+    assert!(
+        constructed.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
+        "an unproven tree dispatches its verify, which is what makes the reuse below a memo hit",
+    );
+
+    // The member verifies, integrates, and the fold reaches the critic — which
+    // sends it back for repair.
+    let (snapshot, _) =
+        step(&snapshot, &event("integrate", Fact::Integrate { bloom, claim: verified_claim("wp", 10, 100, 60) }));
+    let (snapshot, _) = step(
+        &snapshot,
+        &event("resolve", Fact::Resolve { bloom, tree: digest(100), head: digest(101), lineage: vec![] }),
+    );
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "review",
+            Fact::AggregateReviewCompleted {
+                bloom,
+                passed: false,
+                evidence: Evidence { subject: digest(100), kind: EvidenceKind::ReviewFinding, detail: digest(70) },
+                implicated: vec![],
+            },
+        ),
+    );
+    assert_eq!(snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap().stage, StageId::Refine);
+
+    let (after, repaired) = step(
+        &snapshot,
+        &event(
+            "refine",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Refine,
+                passed: true,
+                evidence: Evidence { subject: digest(100), kind: EvidenceKind::VerificationResult, detail: digest(71) },
+                candidate: None,
+            },
+        ),
+    );
+
+    assert_eq!(repaired.outcome, Outcome::VerifyReused { bloom, workpiece: workpiece("wp"), proof: digest(60) });
+    assert!(
+        !repaired.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
+        "the mechanical lane does not re-run over a tree it has already passed",
+    );
+    let record = after.blooms.get(&bloom).unwrap();
+    let claim = record.claims.get(&workpiece("wp")).expect("passing by identity integrates the member");
+    assert_eq!(claim.candidate, digest(100));
+    assert_eq!(claim.evidence.detail, digest(60), "the claim carries the verdict it stood on, not a fresh one");
+    assert_eq!(record.progress.get(&workpiece("wp")).unwrap().stage, StageId::Verify, "the cursor still lands there");
+    assert_eq!(record.verify_reuses.last().unwrap().stage, StageId::Verify);
 }
