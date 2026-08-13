@@ -230,7 +230,7 @@ pub struct StageCatalog {
 }
 
 impl ContentAddressed for StageCatalog {
-    const DOMAIN: &'static str = "aether.bloomery.stage_catalog";
+    const DOMAIN: &'static str = <Self as aether_data::Kind>::NAME;
 }
 
 impl StageCatalog {
