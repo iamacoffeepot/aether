@@ -23,6 +23,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod affected;
+mod bloom;
 mod cargo;
 mod dev_component;
 mod dist;
@@ -34,6 +35,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::affected::AffectedArgs;
+use crate::bloom::BloomArgs;
 use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
 use crate::package::PackageArgs;
@@ -67,6 +69,9 @@ enum Commands {
     /// (issue #3611): changed paths against a base ref, mapped through
     /// the workspace graph's reverse-dependency closure.
     Affected(AffectedArgs),
+    /// Drive the coordinator REST surface: list blooms, seal a draft, or
+    /// supersede a wedged predecessor onto the observed head.
+    Bloom(BloomArgs),
 }
 
 fn main() -> Result<()> {
@@ -77,5 +82,6 @@ fn main() -> Result<()> {
         Commands::Package(args) => package::run(&args),
         Commands::Transform(args) => transform::run(&args),
         Commands::Affected(args) => affected::run(&args),
+        Commands::Bloom(args) => bloom::run(&args),
     }
 }
