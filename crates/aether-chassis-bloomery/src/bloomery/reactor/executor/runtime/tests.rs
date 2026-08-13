@@ -244,6 +244,27 @@ fn enqueue_dispatch_with_configs(
     store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap()
 }
 
+// Enqueue one bloom-level aggregate-review dispatch against an explicit sealed
+// configuration — the axis a bloom-wide `ModelOverride` resolves through
+// (ADR-0174). The subject-seeded member form cannot express this: the critic
+// has no member registry, only the bloom's.
+fn enqueue_aggregate_review(store: &mut SqliteStore, bloom: BloomId, workpiece: &str, configs: ConfigRegistry) -> u64 {
+    let payload = AggregateReviewPayload {
+        profile: StageCatalog::profile_of(StageId::AggregateReview),
+        bloom: bloom.0,
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(30),
+            digest(40),
+            digest(50),
+        ),
+        pass: ReviewPass::Full,
+        configs,
+    };
+    store.claim_seal(payload.bloom.as_bytes(), &[workpiece.to_owned()]).unwrap();
+    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap()
+}
+
 // ADR-0153 — the aggregate-review topic drains into a bloom-level order: the
 // review.critic transformation submits with a task composed from every
 // member's persisted work order, and the intake record carries the
@@ -268,6 +289,7 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
             digest(50),
         ),
         pass: ReviewPass::Full,
+        configs: ConfigRegistry::default(),
     };
     // A queued review belongs to a live bloom; the drain reads its membership to
     // tell a live plan from a retired one (#4640).
@@ -321,6 +343,7 @@ fn the_second_aggregate_roll_frames_a_delta_confirm_against_the_frozen_findings(
             digest(50),
         ),
         pass: ReviewPass::DeltaConfirm,
+        configs: ConfigRegistry::default(),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
@@ -365,6 +388,7 @@ fn a_fresh_roll_one_aggregate_dispatch_clears_the_stale_frozen_row() {
             digest(50),
         ),
         pass: ReviewPass::Full,
+        configs: ConfigRegistry::default(),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
@@ -504,6 +528,7 @@ fn drain_dispatches_the_review_lane_under_its_own_calibrated_profile() {
             digest(50),
         ),
         pass: ReviewPass::Full,
+        configs: ConfigRegistry::default(),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
@@ -871,6 +896,7 @@ fn dispatch_aggregate_review(
             digest(50),
         ),
         pass: ReviewPass::Full,
+        configs: ConfigRegistry::default(),
     };
     store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
     let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
@@ -1842,6 +1868,83 @@ fn a_member_sealing_no_override_dispatches_the_calibrated_profile() {
     let dispatched = backend.orders()[0].transformation.model.clone().expect("the lane still names a profile");
     assert_eq!(dispatched.model, calibrated.model);
     assert_eq!(dispatched.effort, calibrated.effort);
+}
+
+// Tripwire: a bloom's sealed `ModelOverride` reaches the aggregate critic
+// (ADR-0174). The member lane already overlays the sealed override; the
+// critic claimed the same overlay and then hardcoded `ModelOverride::default()`,
+// so a bloom that sealed an override was judged by the catalog default and the
+// receipt attested a configuration that never ran.
+//
+// Two sealed shapes, one drain: bloom-wide agent selection, and a `per_stage`
+// entry keyed `AggregateReview`. A resolution that still hardcoded the default
+// would fail both; one that resolved bloom-wide fields but dropped the stage
+// would fail the second. The third bloom seals nothing and must keep the
+// catalog default, so an overlay that leaks across blooms also fails.
+#[test]
+fn a_sealed_model_override_reaches_the_aggregate_critic() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let calibrated = StageCatalog::profile_of(StageId::AggregateReview);
+
+    let bloom_wide = ModelOverride {
+        agent: Some(AgentSelection { harness: Harness::Claude, model: "claude-opus-5".to_owned() }),
+        reasoning_effort: Some(ReasoningEffort::Low),
+        ..ModelOverride::default()
+    };
+    let selection = bloom_wide.agent.clone().expect("the override names an agent");
+    assert_ne!(selection.model, calibrated.model, "the bloom-wide override must differ from the calibrated model");
+    assert_ne!(selection.harness, calibrated.harness, "and from the calibrated harness");
+    assert_ne!(bloom_wide.reasoning_effort, Some(calibrated.effort), "and from the calibrated effort");
+
+    let staged = ModelOverride {
+        per_stage: BTreeMap::from([(
+            StageId::AggregateReview,
+            StageOverride {
+                agent: Some(AgentSelection { harness: Harness::Claude, model: "claude-sonnet-5".to_owned() }),
+                reasoning_effort: Some(ReasoningEffort::Max),
+            },
+        )]),
+        ..ModelOverride::default()
+    };
+    assert_ne!(
+        calibrated.harness,
+        Harness::Claude,
+        "the AggregateReview entry must escalate off the calibrated harness"
+    );
+    assert_ne!(staged.per_stage[&StageId::AggregateReview].reasoning_effort, Some(calibrated.effort));
+
+    let seal = |store: &mut SqliteStore, override_: &ModelOverride| {
+        let address = override_.address();
+        store.record_config(address.as_bytes(), ModelOverride::NAME, &to_vec(override_).unwrap()).unwrap();
+        let mut configs = ConfigRegistry::default();
+        configs.insert::<ModelOverride>(address);
+        configs
+    };
+
+    let bloom_wide_configs = seal(&mut store, &bloom_wide);
+    let staged_configs = seal(&mut store, &staged);
+    enqueue_aggregate_review(&mut store, BloomId(digest(1)), "wp-wide", bloom_wide_configs);
+    enqueue_aggregate_review(&mut store, BloomId(digest(2)), "wp-staged", staged_configs);
+    enqueue_aggregate_review(&mut store, BloomId(digest(3)), "wp-default", ConfigRegistry::default());
+
+    drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    let orders = backend.orders();
+    let dispatched = |index: usize| orders[index].transformation.model.clone().expect("a model lane names its profile");
+
+    assert_eq!(dispatched(0).harness, selection.harness, "the bloom-wide harness reaches the critic");
+    assert_eq!(dispatched(0).model, selection.model, "and the bloom-wide model with it");
+    assert_eq!(dispatched(0).effort, ReasoningEffort::Low, "and the bloom-wide effort");
+
+    assert_eq!(dispatched(1).harness, Harness::Claude, "the AggregateReview entry's harness reaches the critic");
+    assert_eq!(dispatched(1).model, "claude-sonnet-5", "and its model with it");
+    assert_eq!(dispatched(1).effort, ReasoningEffort::Max, "and its effort");
+
+    assert_eq!(dispatched(2).model, calibrated.model, "a bloom sealing nothing keeps the calibrated model");
+    assert_eq!(dispatched(2).harness, calibrated.harness, "and the calibrated harness");
+    assert_eq!(dispatched(2).effort, calibrated.effort, "and the calibrated effort");
 }
 
 // Tripwire: a sealed configuration address with no stored content parks the

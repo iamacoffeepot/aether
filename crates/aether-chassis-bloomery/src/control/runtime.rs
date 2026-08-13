@@ -861,12 +861,13 @@ fn project(
                 };
                 outbox.push(OutboxPayload::new(Topic::Integrate, to_vec(&payload)?));
             }
-            Decision::DispatchAggregateReview { bloom, transformation, roll, profile } => {
+            Decision::DispatchAggregateReview { bloom, transformation, roll, profile, configs } => {
                 let payload = AggregateReviewPayload {
                     profile: profile.clone(),
                     bloom: bloom.0,
                     transformation: transformation.clone(),
                     pass: ReviewPass::from_roll(*roll),
+                    configs: configs.clone(),
                 };
                 outbox.push(OutboxPayload::new(Topic::AggregateReview, to_vec(&payload)?));
             }
