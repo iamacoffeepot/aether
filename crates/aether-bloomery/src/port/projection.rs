@@ -25,14 +25,18 @@ use crate::reduce::BloomStatus;
 use crate::values::{Evidence, LandingReceipt, ResolutionClaim, Wedge};
 
 /// The self-contained render input a reconcile pushes outward: the current
-/// mainline and every projectable bloom, each carrying its full membership.
-/// A pure projection of the journal — idempotent and rebuildable after a
-/// deletion (ADR-0149 §The boundary). An adapter renders entirely from this
-/// value and never queries back into the store.
+/// mainline, the last-reported observed head, and every projectable bloom,
+/// each carrying its full membership. A pure projection of the journal —
+/// idempotent and rebuildable after a deletion (ADR-0149 §The boundary). An
+/// adapter renders entirely from this value and never queries back into the
+/// store.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ViewDocument {
     /// The current mainline head.
     pub mainline: Digest,
+    /// The head the source last reported (#4709) — the other successor base
+    /// `reduce_supersede` admits, beside [`Self::mainline`].
+    pub observed: Digest,
     /// The blooms to mirror, each self-describing.
     pub blooms: Vec<BloomView>,
 }
