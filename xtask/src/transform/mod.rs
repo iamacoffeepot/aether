@@ -25,6 +25,7 @@ mod conventions;
 mod lane;
 mod muse;
 mod review;
+mod sccache;
 mod scratch;
 mod verify;
 
@@ -38,6 +39,7 @@ use serde::Serialize;
 use crate::cargo::write_json_pretty;
 use crate::transform::construct::CONSTRUCT_IMPLEMENT;
 use crate::transform::review::REVIEW_CRITIC;
+use crate::transform::sccache::{CompilerCache, Counters};
 use crate::transform::scratch::Scratch;
 use crate::transform::verify::VERIFY_CHECK;
 
@@ -122,6 +124,24 @@ struct Evidence {
     /// bounded repair roll on a host it cannot reach.
     #[serde(skip_serializing_if = "Option::is_none")]
     environment: Option<String>,
+    /// What sccache served this run's compilations (#4894) — the receipts that
+    /// make the reclaimed seconds countable rather than anecdotal.
+    ///
+    /// Absent on a host with no sccache, where the lane builds exactly as it did
+    /// before: a zeroed reading there would say the cache served nothing, which
+    /// is the opposite conclusion about the host from the true one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sccache: Option<Counters>,
+}
+
+impl Evidence {
+    /// Stamp what `cache` served this run onto the record. Reads the counters at
+    /// the moment it is called, so it belongs at the end of a lane rather than
+    /// beside the record's other fields.
+    fn served_by(mut self, cache: Option<&CompilerCache>) -> Self {
+        self.sccache = cache.and_then(CompilerCache::served);
+        self
+    }
 }
 
 /// Assembles the evidence record from a captured run's status — pure
@@ -141,6 +161,7 @@ fn build_evidence(
         // The single-command path discriminates nothing: only the umbrella
         // resolves a closure, so only the umbrella can report against one.
         environment: None,
+        sccache: None,
         command: command.to_string(),
         nonce,
         status: if passed {
@@ -209,16 +230,32 @@ fn resolve_harness(harness: Option<&str>) -> Result<Harness> {
 ///
 /// The run's [`Scratch`] directory is prepared here and dropped when the lane
 /// returns, so every arm hands its child the same place to build throwaway
-/// target directories and every run reaps its own.
-fn run_model_lane(prompt: &str, args: &TransformArgs) -> Result<serde_json::Value> {
+/// target directories and every run reaps its own. The host's [`CompilerCache`]
+/// is resolved beside it and rides the same child environment, so a run that
+/// builds where an earlier one did draws on what that one compiled instead of
+/// re-paying for it.
+fn run_model_lane(prompt: &str, args: &TransformArgs) -> Result<LaneRun> {
     let harness = resolve_harness(args.harness.as_deref())?;
     let scratch = Scratch::prepare(&args.out, args.nonce.as_deref())?;
+    let cache = sccache::detect();
 
-    match harness {
-        Harness::Claude => claude::run_headless_claude(prompt, args, &scratch),
-        Harness::Codex => codex::run(prompt, args, &scratch),
-        Harness::Muse => muse::run(prompt, args, &scratch),
-    }
+    let record = match harness {
+        Harness::Claude => claude::run_headless_claude(prompt, args, &scratch, cache.as_ref())?,
+        Harness::Codex => codex::run(prompt, args, &scratch, cache.as_ref())?,
+        Harness::Muse => muse::run(prompt, args, &scratch, cache.as_ref())?,
+    };
+
+    Ok(LaneRun { record, sccache: cache.as_ref().and_then(CompilerCache::served) })
+}
+
+/// What one model lane's run produced.
+///
+/// The record is the harness's, and the counters are the host's — read after the
+/// child is reaped, so they cover everything the run's agent compiled rather
+/// than only what this process did.
+struct LaneRun {
+    record: serde_json::Value,
+    sccache: Option<Counters>,
 }
 
 #[cfg(test)]

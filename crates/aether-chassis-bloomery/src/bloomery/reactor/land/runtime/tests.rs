@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use aether_bloomery::{BloomId, Correspondence, Digest, Event, Fact, LandPayload, Topic};
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GitObjectId, GitSource, PullRequestApi, short_hex, to_hex};
+use aether_bloomery_github::{GitObjectId, GitSource, MainlineRef, PullRequestApi, short_hex, to_hex};
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::drain_and_land;
@@ -24,7 +24,7 @@ fn digest(seed: u8) -> Digest {
 // A fake-GitHub-backed source shell with the land gate set explicitly, so a
 // test drives the same shell the running reactor holds.
 fn shell(fake: FakeGithub, cas_land_enabled: bool) -> SourceShell {
-    SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), cas_land_enabled)))
+    SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), cas_land_enabled, MainlineRef::default())))
 }
 
 // Seed a fake with a base commit and a mainline ref at it, returning the fake and

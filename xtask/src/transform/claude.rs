@@ -8,6 +8,7 @@ use std::{fs, thread};
 
 use anyhow::{Context, Result, bail};
 
+use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::scratch::Scratch;
 use crate::transform::{TransformArgs, conventions};
 
@@ -180,7 +181,12 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
 /// Fork headless Claude with `prompt` on stdin, capture its stream-json
 /// transcript to `<out>/transcript.jsonl`, and derive the result record — the
 /// shared body of both model lanes (`construct.implement` / `review.critic`).
-pub(super) fn run_headless_claude(prompt: &str, args: &TransformArgs, scratch: &Scratch) -> Result<serde_json::Value> {
+pub(super) fn run_headless_claude(
+    prompt: &str,
+    args: &TransformArgs,
+    scratch: &Scratch,
+    cache: Option<&CompilerCache>,
+) -> Result<serde_json::Value> {
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
     // Run headless Claude at the resolved model and reasoning effort — both the
@@ -189,6 +195,7 @@ pub(super) fn run_headless_claude(prompt: &str, args: &TransformArgs, scratch: &
     let mut claude = Command::new("claude");
     claude.args(construct_argv(args.model.as_deref(), args.effort.as_deref()));
     scratch.export(&mut claude);
+    sccache::export(cache, &mut claude);
     claude.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = claude.spawn().context("run headless claude")?;
     // Pipe the prompt on a separate thread and reap the child unconditionally: if

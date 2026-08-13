@@ -12,7 +12,7 @@ use aether_bloomery::Digest;
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 use aether_bloomery::SharedCorrespondence;
 #[cfg(feature = "github")]
-use aether_bloomery_github::{AppTokenSource, GithubConfig, GithubError, ReqwestGithub};
+use aether_bloomery_github::{AppTokenSource, GithubConfig, GithubError, MainlineRef, ReqwestGithub};
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 use aether_bloomery_github::{GitSource, testing::FakeGithub};
 
@@ -243,6 +243,27 @@ pub struct CoordinatorConfig {
     /// misconfiguration, not a request to blend the two.
     #[config(env = "AETHER_BLOOMERY_OPERATOR_EMAIL", default = "")]
     pub operator_email: String,
+    /// The ref bloomery treats as mainline: what it observes, what a bloom's
+    /// sealed base is compared against on the compare-and-swap land, and what a
+    /// landing proposal opens onto (ADR-0186).
+    ///
+    /// Boot configuration rather than a constant because bloomery operates on a
+    /// branch cut per day and repoints at the roll. Resolved rather than sealed:
+    /// a sealed base already pins the exact commit a bloom builds on, so sealing
+    /// the ref name would only freeze the roll, and the journal records observed
+    /// heads rather than ref names, so a repoint needs no migration.
+    ///
+    /// The default is the repository's own default branch — the ref the pipeline
+    /// ran on before the day branch existed, so an unconfigured deployment
+    /// behaves exactly as it did. Accepted in any of the three spellings
+    /// (`refs/heads/x`, `heads/x`, `x`); an empty value resolves to the default.
+    ///
+    /// Named `AETHER_BLOOMERY_MAINLINE_REF` rather than under this struct's
+    /// `AETHER_GITHUB` prefix, for the reason the operator and lane knobs are:
+    /// which branch bloomery integrates on is a property of how it is being
+    /// operated, not of the GitHub connection.
+    #[config(env = "AETHER_BLOOMERY_MAINLINE_REF", default = "refs/heads/main")]
+    pub mainline_ref: String,
 }
 
 #[cfg(feature = "github")]
@@ -284,11 +305,20 @@ impl Default for CoordinatorConfig {
             artifacts_root: None,
             operator_name: String::new(),
             operator_email: String::new(),
+            mainline_ref: "refs/heads/main".to_owned(),
         }
     }
 }
 
 impl CoordinatorConfig {
+    /// The resolved mainline ref, normalized into the forms the source port
+    /// addresses it by (ADR-0186).
+    #[cfg(feature = "github")]
+    #[must_use]
+    pub fn mainline(&self) -> MainlineRef {
+        MainlineRef::new(&self.mainline_ref)
+    }
+
     #[must_use]
     pub fn local_lane_prefixes(&self) -> Vec<String> {
         self.local_lane_commands
@@ -391,9 +421,16 @@ impl GithubConnectionConfig {
 
     #[cfg(all(feature = "github", any(test, feature = "testing")))]
     #[must_use]
-    pub fn fixture_source(&self, correspondence: SharedCorrespondence) -> SourceShell {
+    pub fn fixture_source(&self, mainline: MainlineRef, correspondence: SharedCorrespondence) -> SourceShell {
         let fake = self.shared_fixture();
-        let source = GitSource::new(fake, Arc::clone(&correspondence), self.cas_land_enabled);
+        // The fixture seeds the default branch. A repointed coordinator reads its
+        // own ref, so point that one at the same seeded commit — otherwise the
+        // double has no mainline at all and every fixture-backed run wedges on
+        // the repoint the knob exists to allow.
+        if let Some(seeded) = fake.ref_target("heads/main") {
+            fake.seed_ref(mainline.git_ref(), &seeded);
+        }
+        let source = GitSource::new(fake, Arc::clone(&correspondence), self.cas_land_enabled, mainline);
         SourceShell::new_with_correspondence(Arc::new(source), correspondence)
     }
 }

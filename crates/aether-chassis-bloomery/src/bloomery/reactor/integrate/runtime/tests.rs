@@ -11,7 +11,7 @@ use aether_bloomery::{
     BloomId, Digest, Event, Fact, IdempotencyKey, IntegratePayload, MemberCandidate, Topic, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GitDataApi, GitSource, short_hex};
+use aether_bloomery_github::{GitDataApi, GitSource, MainlineRef, short_hex};
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::drain_and_integrate;
@@ -25,7 +25,7 @@ fn digest(seed: u8) -> Digest {
 }
 
 fn shell(fake: FakeGithub) -> SourceShell {
-    SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), false)))
+    SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), false, MainlineRef::default())))
 }
 
 // A fake seeded with a base commit (head + tree correspondences recorded) and a
