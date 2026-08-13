@@ -285,6 +285,13 @@ pub enum Decision {
         /// takes its profile off the sealed catalog for the same reason a member
         /// lane does.
         profile: AgentProfile,
+        /// The bloom-wide configuration this review runs under (ADR-0174). The
+        /// host resolves the sealed [`ModelOverride`](crate::ModelOverride) from
+        /// this registry at dispatch — the same overlay the member lane applies
+        /// — so a bloom that sealed an override is not judged by the catalog
+        /// default. An empty registry is the no-override case and resolves to
+        /// the catalog default.
+        configs: ConfigRegistry,
     },
     /// Record (or clear) the bloom-scope park (ADR-0153): raised when the
     /// delta-confirm still fails at the two-pass ceiling, holding the failing

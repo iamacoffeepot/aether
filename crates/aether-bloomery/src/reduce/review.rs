@@ -181,6 +181,7 @@ pub(super) fn reduce_aggregate_review_executor_fault(
         ),
         roll: record.aggregate_rolls + 1,
         profile: binding.profile,
+        configs: record.spec.configs().clone(),
     });
 
     Decisions { outcome: Outcome::AggregateReviewExecutorFaulted { bloom: *bloom, fault, budget }, effects }

@@ -31,6 +31,7 @@ pub(super) fn aggregate_review_dispatch(record: &BloomRecord, bloom: BloomId, tr
         transformation: Transformation::for_aggregate_review(&binding, tree, head, record.spec.base()),
         roll: record.aggregate_rolls + 1,
         profile: binding.profile,
+        configs: record.spec.configs().clone(),
     }
 }
 

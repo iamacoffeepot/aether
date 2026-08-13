@@ -939,9 +939,27 @@ fn drain_and_dispatch_aggregate(
         let task = compose_aggregate_task(store, &payload, entry.sequence)?;
         let mut transformation = payload.transformation;
         // The aggregate critic is a model lane too, so it takes its calibrated
-        // profile on the same overlay channel as the member lane above.
-        transformation.model =
-            Some(dispatch_model(StageId::AggregateReview, &payload.profile, &ModelOverride::default()));
+        // profile on the same overlay channel as the member lane above: the
+        // bloom's sealed ModelOverride, resolved host-side so the receipt
+        // attests the agent that actually ran (ADR-0174). A sealed address
+        // that will not resolve parks rather than falling through to the
+        // catalog default — the same divergence the member lane refuses.
+        let model_override = match resolve_config::<ModelOverride>(store, ConfigScopes::bloom_wide(&payload.configs)) {
+            Ok(override_) => override_.unwrap_or_default(),
+            Err(StoreConfigError::Store(error)) => return Err(error),
+            Err(error) => {
+                tracing::error!(
+                    target: "aether_chassis_bloomery::executor",
+                    sequence = entry.sequence,
+                    bloom = %short_hex(&payload.bloom),
+                    %error,
+                    "sealed configuration did not resolve; parking the aggregate review rather than running the default",
+                );
+                ack_through = Some(entry.sequence);
+                continue;
+            }
+        };
+        transformation.model = Some(dispatch_model(StageId::AggregateReview, &payload.profile, &model_override));
         // The evidence-binding subject is the integrated tree the reducer
         // pinned as inputs[0] — also the displayed digest the returning
         // verdict must bind.
@@ -961,10 +979,9 @@ fn drain_and_dispatch_aggregate(
             displayed_digest: displayed,
             stage: StageId::AggregateReview,
             transformation,
-            // A bloom-level lane resolves no member configuration: the overlay
-            // reads a registry only for `construct.implement`, and this is the
-            // review critic's command.
-            configs: ConfigRegistry::default(),
+            // The bloom-wide registry (ADR-0174): the critic has no member
+            // axis, so this is the only scope the overlay walks.
+            configs: payload.configs,
         };
         match dispatch_and_record(executor, store, &record, now_unix_millis) {
             Ok(handle) => {

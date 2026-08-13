@@ -149,6 +149,7 @@ pub(super) fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: 
                 ),
                 roll: 1,
                 profile: binding.profile,
+                configs: record.spec.configs().clone(),
             });
         }
         return Decisions { outcome: Outcome::AnswerAdopted { bloom: *bloom, question }, effects };
