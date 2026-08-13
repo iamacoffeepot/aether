@@ -10,6 +10,7 @@ mod dto;
 mod hex;
 mod http;
 mod plan;
+mod profiles;
 mod status;
 
 use std::env;
@@ -77,6 +78,11 @@ struct SealArgs {
     #[arg(long = "config", value_parser = plan::parse_config_flag)]
     configs: Vec<(String, PathBuf)>,
 
+    /// Named bundle from the checked-in profiles file. Resolves to authored
+    /// config digests through `POST /configs`; `--config` flags overlay after.
+    #[arg(long)]
+    profile: Option<String>,
+
     /// Draft base: `observed` (default), `mainline`, or a 64-hex digest.
     #[arg(long, default_value = "observed", value_parser = BaseChoice::parse)]
     base: BaseChoice,
@@ -102,6 +108,11 @@ struct SupersedeArgs {
     /// Extra configurations to author and overlay on the predecessor's registry.
     #[arg(long = "config", value_parser = plan::parse_config_flag)]
     configs: Vec<(String, PathBuf)>,
+
+    /// Named bundle from the checked-in profiles file. Resolves and overlays
+    /// the same way `--config` does, before those flags.
+    #[arg(long)]
+    profile: Option<String>,
 
     /// Successor base: `observed` (default), `mainline`, or a 64-hex digest.
     #[arg(long, default_value = "observed", value_parser = BaseChoice::parse)]
@@ -161,9 +172,10 @@ fn run_seal(client: &Client<'_>, args: &SealArgs) -> Result<String> {
     let workpieces = plan::seal_workpieces(&args.workpiece, &args.task_file)?;
     let view = client.view()?;
     let base = plan::resolve_base(&args.base, &view);
-    let configs = plan::author_configs(client, &args.configs)?;
+    let authored = plan::author_profile_and_flags(client, args.profile.as_deref(), &args.configs)?;
     let scope_revision = plan::file_digest(&args.task_file)?;
-    let patch = plan::seal_patch(&workpieces, scope_revision, base, configs);
+    let patch =
+        plan::seal_patch(&workpieces, scope_revision, base, authored.configs, authored.forecast.unwrap_or_default());
     let draft = client.open_draft()?;
     client.patch_draft(&draft.draft_id, &patch)?;
     let members = patch.proposals.unwrap_or_default();
@@ -177,10 +189,14 @@ fn run_supersede(client: &Client<'_>, args: &SupersedeArgs) -> Result<String> {
     let view = client.view()?;
     bloom_in(&view, &args.bloom_id)?;
     let spec = client.spec_for(&args.bloom_id)?;
+    let authored = plan::author_profile_and_flags(client, args.profile.as_deref(), &args.configs)?;
     let mut configs = spec.configs.clone();
-    configs.overlay(plan::author_configs(client, &args.configs)?);
+    configs.overlay(authored.configs);
     let base = plan::resolve_base(&args.base, &view);
-    let patch = plan::successor_patch(&spec, base, configs);
+    let mut patch = plan::successor_patch(&spec, base, configs);
+    if let Some(forecast) = authored.forecast {
+        patch.forecast = Some(forecast);
+    }
     let draft = client.open_draft()?;
     client.patch_draft(&draft.draft_id, &patch)?;
     let members = patch.proposals.unwrap_or_default();
@@ -409,6 +425,7 @@ mod tests {
                         bloom_id: bloom_id.clone(),
                         task_file: task.clone(),
                         configs: Vec::new(),
+                        profile: None,
                         base: BaseChoice::Observed,
                         projection: projection_args(),
                     }),
@@ -500,6 +517,7 @@ mod tests {
                     &BloomCommand::Seal(SealArgs {
                         task_file: task.clone(),
                         configs: vec![("aether.bloomery.stage_catalog".to_owned(), config.clone())],
+                        profile: None,
                         base: BaseChoice::Observed,
                         workpiece: vec!["wp-seal".to_owned()],
                         projection: projection_args(),
@@ -518,6 +536,72 @@ mod tests {
         let seal = find(&log, "POST", "/drafts/3/seal").body.as_ref().expect("seal body");
         assert_eq!(seal["descriptions"]["wp-seal"], "build the authoring layer");
         assert_eq!(seal["projections"][0]["declared_surface"][0], "docs/guide/**");
+        assert!(output.contains("Sealed"), "outcome is printed: {output}");
+    }
+
+    #[test]
+    fn seal_resolves_a_named_profile_through_the_config_route() {
+        // Tripwire: `--profile opus-high` must be enough to seal. The client
+        // authors the profile's kinds through POST /configs and patches the
+        // returned digests — never a name, never a hand-threaded address.
+        let override_digest = hex_of(digest(0xb1));
+        let table_digest = hex_of(digest(0xb2));
+        let override_for_reply = override_digest.clone();
+        let table_for_reply = table_digest.clone();
+        let task = temp_task("profile-seal", "seal from a named profile");
+        let (output, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/view") => {
+                    (200, json!({ "mainline": hex_of(digest(1)), "observed": hex_of(digest(2)), "blooms": [] }))
+                }
+                ("POST", "/configs") => {
+                    let body = request.body.as_ref().expect("config body");
+                    let kind = body["kind"].as_str().expect("kind");
+                    assert!(body["value"].is_object(), "profile value is authored JSON, not a digest: {body}");
+                    match kind {
+                        "aether.bloomery.model_override" => {
+                            (200, json!({ "digest": override_for_reply, "kind": kind }))
+                        }
+                        "aether.bloomery.price_table" => (200, json!({ "digest": table_for_reply, "kind": kind })),
+                        other => (400, json!({ "error": format!("unexpected kind {other}") })),
+                    }
+                }
+                ("POST", "/drafts") => (201, json!({ "draft_id": "9", "draft": {} })),
+                ("PATCH", "/drafts/9") => (200, json!({ "draft_id": "9", "draft": {} })),
+                ("POST", "/drafts/9/seal") => (200, json!({ "outcome": { "Sealed": hex_of(digest(4)) } })),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &BloomCommand::Seal(SealArgs {
+                        task_file: task.clone(),
+                        configs: Vec::new(),
+                        profile: Some("opus-high".to_owned()),
+                        base: BaseChoice::Observed,
+                        workpiece: vec!["wp-profile".to_owned()],
+                        projection: projection_args(),
+                    }),
+                )
+                .expect("seal --profile against the fake coordinator")
+            },
+        );
+        fs::remove_file(&task).ok();
+
+        let authored: Vec<&str> = log
+            .iter()
+            .filter(|entry| entry.method == "POST" && entry.path == "/configs")
+            .map(|entry| entry.body.as_ref().expect("body")["kind"].as_str().expect("kind"))
+            .collect();
+        assert_eq!(
+            authored,
+            ["aether.bloomery.model_override", "aether.bloomery.price_table"],
+            "the profile authors both kinds: {log:?}"
+        );
+
+        let patch = find(&log, "PATCH", "/drafts/9").body.as_ref().expect("patch body");
+        assert_eq!(patch["configs"]["entries"]["aether.bloomery.model_override"], override_digest);
+        assert_eq!(patch["configs"]["entries"]["aether.bloomery.price_table"], table_digest);
         assert!(output.contains("Sealed"), "outcome is printed: {output}");
     }
 }

@@ -90,16 +90,50 @@ pub fn resolve_base(choice: &BaseChoice, view: &ViewDocument) -> DigestHex {
     }
 }
 
-/// Author `--config kind=file.json` entries.
+/// Configurations authored for one seal or supersede, plus any forecast
+/// the named profile supplied.
+pub struct AuthoredConfigs {
+    pub configs: ConfigRegistry,
+    pub forecast: Option<Forecast>,
+}
+
+/// Author a named profile (if any) and then `--config kind=file.json` flags.
 ///
-/// Named seal profiles resolve to this same list in front of the flag path
-/// (#4885) — this function is the seam, not a profiles file.
+/// The profile expands to the same `(kind, value)` list the flags become;
+/// both go through [`author_values`] so a profile-sealed bloom is
+/// indistinguishable from one authored by raw config POSTs.
+pub fn author_profile_and_flags(
+    client: &Client<'_>,
+    profile: Option<&str>,
+    flags: &[(String, PathBuf)],
+) -> Result<AuthoredConfigs> {
+    let mut authored = match profile {
+        Some(name) => {
+            let resolved = super::profiles::resolve_shipped(name)?;
+            AuthoredConfigs { configs: author_values(client, &resolved.configs)?, forecast: resolved.forecast }
+        }
+        None => AuthoredConfigs { configs: ConfigRegistry::default(), forecast: None },
+    };
+    authored.configs.overlay(author_configs(client, flags)?);
+    Ok(authored)
+}
+
+/// Author `--config kind=file.json` entries through [`author_values`].
 pub fn author_configs(client: &Client<'_>, specs: &[(String, PathBuf)]) -> Result<ConfigRegistry> {
-    let mut registry = ConfigRegistry::default();
+    let mut values = Vec::with_capacity(specs.len());
     for (kind, path) in specs {
         let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
         let value: Value = serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
-        let authored = client.author_config(kind, &value)?;
+        values.push((kind.clone(), value));
+    }
+    author_values(client, &values)
+}
+
+/// Author already-decoded `(kind, value)` pairs through `POST /configs`.
+pub fn author_values(client: &Client<'_>, specs: &[(String, Value)]) -> Result<ConfigRegistry> {
+    let mut registry = ConfigRegistry::default();
+    for (kind, value) in specs {
+        let authored = client.author_config(kind, value)?;
         registry.entries.insert(authored.kind, authored.digest);
     }
     Ok(registry)
@@ -135,12 +169,13 @@ pub fn seal_patch(
     scope_revision: DigestHex,
     base: DigestHex,
     configs: ConfigRegistry,
+    forecast: Forecast,
 ) -> DraftPatch {
     DraftPatch {
         proposals: Some(workpieces.iter().map(|workpiece| placeholder_member(workpiece, scope_revision)).collect()),
         configs: Some(configs),
         base: Some(base),
-        forecast: Some(Forecast::default()),
+        forecast: Some(forecast),
     }
 }
 
@@ -316,8 +351,13 @@ mod tests {
 
     #[test]
     fn seal_patch_pins_every_member_at_the_task_digest() {
-        let patch =
-            seal_patch(&["wp-a".to_owned(), "wp-b".to_owned()], digest(4), digest(2), ConfigRegistry::default());
+        let patch = seal_patch(
+            &["wp-a".to_owned(), "wp-b".to_owned()],
+            digest(4),
+            digest(2),
+            ConfigRegistry::default(),
+            Forecast::default(),
+        );
         let proposals = patch.proposals.expect("seal names its members");
         assert_eq!(proposals.len(), 2);
         assert!(proposals.iter().all(|member| member.scope_revision == digest(4)));
