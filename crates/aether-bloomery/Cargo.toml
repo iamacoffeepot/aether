@@ -44,6 +44,13 @@ ed25519-dalek = { workspace = true }
 # The seven named invariants ride property tests (ADR-0149 migration
 # step 1). Dev-only — the pure core never links a test dependency.
 proptest = { workspace = true }
+# Encoder-equivalence tripwires for sealed config kinds: `POST /configs`
+# addresses over `encode_schema` bytes; `digest_of` addresses over
+# `wire::to_vec`. Only the codec can produce the schema-driven half, so
+# the assertion runs through it. Acyclic — `aether-codec` depends on
+# `aether-data`, never on this crate.
+aether-codec = { path = "../aether-codec" }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
