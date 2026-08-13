@@ -360,6 +360,16 @@ impl SourceShell {
     /// # Errors
     /// A transport or backend fault, distinct from every clean
     /// [`ClaimReleaseOutcome`].
+    /// Delete `bloom`'s candidate, integration, and checkpoint refs. Claim refs
+    /// and the landing branch are spared (ADR-0150 — claims have their own
+    /// release reactor).
+    ///
+    /// # Errors
+    /// A transport or backend fault other than an already-absent ref.
+    pub fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError> {
+        self.backend.prune_working_refs(bloom)
+    }
+
     pub fn complete_release(
         &self,
         expected_holder: Option<&BloomId>,

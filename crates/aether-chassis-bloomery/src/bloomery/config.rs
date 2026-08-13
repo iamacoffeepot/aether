@@ -227,6 +227,29 @@ pub struct CoordinatorConfig {
     /// the GitHub connection.
     #[config(env = "AETHER_BLOOMERY_LANE_TARGET_BASE", default = "")]
     pub lane_target_base: String,
+    /// Combined size ceiling, in bytes, across every per-slot cargo target
+    /// directory (`<base>/slot-<index>-target`). The janitor sweeps those dirs
+    /// only when this total is crossed *and* no lane is running — a cold rebuild
+    /// is minutes; an overflow wedge is a member. `0` means "keep nothing": an
+    /// idle host reclaims every slot target dir.
+    ///
+    /// Named `AETHER_BLOOMERY_LANE_TARGET_BUDGET_BYTES` rather than under this
+    /// struct's `AETHER_GITHUB` prefix, for the reason the other host-resource
+    /// knobs are: the disk a build cache may fill is a property of the machine.
+    #[config(env = "AETHER_BLOOMERY_LANE_TARGET_BUDGET_BYTES", default = 68_719_476_736u64)]
+    pub lane_target_budget_bytes: u64,
+    /// How many days a consumed evidence directory of a terminal bloom is kept
+    /// after that bloom lands or is superseded. Evidence feeds intake and then
+    /// serves forensics and the calibration ledger (ADR-0184); this is the
+    /// stated retention window, not a silent default-delete. `0` reclaims as
+    /// soon as the owning bloom is terminal and the evidence is no longer
+    /// outstanding. Live blooms' evidence is never deleted.
+    ///
+    /// Named `AETHER_BLOOMERY_EVIDENCE_RETENTION_DAYS` rather than under this
+    /// struct's `AETHER_GITHUB` prefix: retention is a coordinator policy, not
+    /// a GitHub-connection property.
+    #[config(env = "AETHER_BLOOMERY_EVIDENCE_RETENTION_DAYS", default = 7)]
+    pub evidence_retention_days: u64,
     /// How many build jobs one lane's cargo invocations may run at once — the
     /// `CARGO_BUILD_JOBS` every dispatch and the verify gates inside it run under
     /// (#4912).
@@ -339,6 +362,8 @@ impl Default for CoordinatorConfig {
             local_lane_program: DEFAULT_LANE_PROGRAM.to_owned(),
             max_concurrent_lanes: 3,
             lane_target_base: String::new(),
+            lane_target_budget_bytes: 68_719_476_736,
+            evidence_retention_days: 7,
             lane_build_jobs: 8,
             stale_warn_after_secs: 1800,
             artifacts_root: None,
