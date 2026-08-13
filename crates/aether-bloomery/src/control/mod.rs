@@ -400,6 +400,11 @@ pub struct AggregateReviewPayload {
     /// The [`AgentProfile`] the bloom's sealed stage catalog calibrates
     /// `AggregateReview` at (ADR-0174).
     pub profile: AgentProfile,
+    /// The bloom-wide configuration this review runs under (ADR-0174). The
+    /// reactor resolves the sealed [`crate::ModelOverride`] from this registry
+    /// at dispatch, the same overlay the member lane applies. An empty
+    /// registry is the no-override case and resolves to the catalog default.
+    pub configs: ConfigRegistry,
 }
 
 /// The payload a [`Topic::AggregateVerify`] outbox row carries — the
