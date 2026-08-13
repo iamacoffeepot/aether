@@ -33,7 +33,7 @@ pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedM
 pub use orphan_claim::{
     ORPHAN_CLAIM_RELEASE_WORDS, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord,
 };
-pub use price::{LongContextBand, PriceRow, PriceTable};
+pub use price::{LongContextBand, PriceRates, PriceTable, PriceTableDecodeError};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use proof::{VerifiedTree, VerifyGateSet, VerifyProof, VerifyReuse};
 pub use question::Question;

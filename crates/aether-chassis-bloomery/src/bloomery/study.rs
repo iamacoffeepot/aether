@@ -270,8 +270,12 @@ fn price_of(
     table.price_dispatch(&model.model, cost, calls).unwrap_or_else(|| unpriced("no price row"))
 }
 
-/// The bloom's sealed [`PriceTable`], including tables authored before
-/// [`PriceRow::long_context`](aether_bloomery::PriceRow) existed.
+/// The bloom's sealed [`PriceTable`].
+///
+/// A decode failure is a pre-migration (vec-of-rows) table, not an empty
+/// one — [`PriceTable::from_sealed`] names the migration rather than
+/// producing a silent zero-rate table. The stored bytes stay resolvable;
+/// the record lands unpriced.
 fn resolve_price_table(
     store: &mut dyn StoreBackend,
     scopes: ConfigScopes<'_>,
@@ -624,27 +628,31 @@ mod tests {
 
     #[test]
     fn a_banded_table_charges_each_call_and_falls_back_when_calls_are_missing() {
-        use aether_bloomery::{LongContextBand, PriceRow, PriceTable, StudyCall};
+        use std::collections::BTreeMap;
+
+        use aether_bloomery::{LongContextBand, PriceRates, PriceTable, StudyCall};
 
         let table = PriceTable {
-            rows: vec![PriceRow {
-                model: "grok-4.6".to_owned(),
-                input: 2_000_000,
-                cache_read: 0,
-                cache_write_5m: 0,
-                cache_write_1h: 0,
-                cache_write: 0,
-                output: 10_000_000,
-                long_context: Some(LongContextBand {
-                    prompt_tokens: 200_000,
-                    input: 4_000_000,
+            rows: BTreeMap::from([(
+                "grok-4.6".to_owned(),
+                PriceRates {
+                    input: 2_000_000,
                     cache_read: 0,
                     cache_write_5m: 0,
                     cache_write_1h: 0,
                     cache_write: 0,
-                    output: 20_000_000,
-                }),
-            }],
+                    output: 10_000_000,
+                    long_context: Some(LongContextBand {
+                        prompt_tokens: 200_000,
+                        input: 4_000_000,
+                        cache_read: 0,
+                        cache_write_5m: 0,
+                        cache_write_1h: 0,
+                        cache_write: 0,
+                        output: 20_000_000,
+                    }),
+                },
+            )]),
         };
         let under = StudyCall { input_tokens: 100_000, output_tokens: 1_000, ..StudyCall::default() };
         let over = StudyCall { input_tokens: 250_000, output_tokens: 1_000, ..StudyCall::default() };
