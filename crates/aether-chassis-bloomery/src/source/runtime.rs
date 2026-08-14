@@ -174,7 +174,7 @@ impl SourceCapabilityState {
                 (Ok(tree), Ok(head)) => IntegrateResult::Integrated { tree, head },
                 (Err(error), _) | (_, Err(error)) => IntegrateResult::Err { error: error.to_string() },
             },
-            Ok(IntegrateOutcome::Conflict { at }) => match to_vec(&at) {
+            Ok(IntegrateOutcome::Conflict { at, .. }) => match to_vec(&at) {
                 Ok(at) => IntegrateResult::Conflict { at },
                 Err(error) => IntegrateResult::Err { error: error.to_string() },
             },

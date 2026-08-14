@@ -264,9 +264,13 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // `DispatchAttempt` already handed its layered registry on; without this the
 // critic hardcoded the catalog default and the receipt attested a configuration
 // that never ran. Only the aggregate-review decisions gain the field.
+// Repinned for ADR-0189: `StageProgress` gained the fold-checkpoint pair a
+// Reconcile dispatch checks out and wedges from, so every `AdvanceStage` in
+// the stream carries two more optional fields. An intended, coordinated
+// break, recomputed.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0xfa, 0x7e, 0xbe, 0xc0, 0x3b, 0x42, 0xcc, 0x11, 0xa9, 0x52, 0x5c, 0x1f, 0xb8, 0x23, 0x90, 0x8c, 0xf2, 0x29, 0x71,
-    0xe1, 0xf9, 0x2a, 0xf9, 0x2e, 0x03, 0xd6, 0xa1, 0x64, 0x66, 0xb2, 0x22, 0x33,
+    0xb6, 0xf1, 0x34, 0xde, 0x71, 0xf2, 0x00, 0x0a, 0xf3, 0x88, 0xd0, 0x4f, 0x45, 0xff, 0x1f, 0x9e, 0xa3, 0x59, 0x5b,
+    0x0c, 0xcb, 0xed, 0x21, 0x91, 0x01, 0x97, 0x3d, 0xab, 0xba, 0x3e, 0x9e, 0xd7,
 ];
 
 #[test]
@@ -293,7 +297,7 @@ fn fact_selector(fact: &Fact) -> u32 {
 fn appended_facts_leave_every_prior_selector_where_the_journal_left_it() {
     let bloom = BloomId(digest(2));
     let evidence = |kind| Evidence { subject: digest(30), kind, detail: digest(60) };
-    let pinned: [(u32, Fact); 8] = [
+    let pinned: [(u32, Fact); 9] = [
         (5, Fact::Land { bloom, new_head: digest(40) }),
         (
             8,
@@ -326,6 +330,16 @@ fn appended_facts_leave_every_prior_selector_where_the_journal_left_it() {
             },
         ),
         (16, Fact::AggregateReviewExecutorFault { bloom, evidence: evidence(EvidenceKind::ExecutorFault) }),
+        (
+            17,
+            Fact::FoldConflict {
+                bloom,
+                workpiece: WorkpieceId("alpha".into()),
+                checkpoint: digest(30),
+                head: digest(40),
+                evidence: evidence(EvidenceKind::FoldConflict),
+            },
+        ),
     ];
 
     for (selector, fact) in pinned {

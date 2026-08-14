@@ -64,6 +64,8 @@ pub(super) fn reduce_verify_failed(
             candidate: cursor.candidate,
             repair_rolls: rolls,
             seen_verify_failures,
+            fold_checkpoint: None,
+            fold_conflict_evidence: None,
         };
         // Persist the union even on the terminal verdict. This cursor write is
         // intentionally not paired with a dispatch; the following RecordWedge
@@ -91,6 +93,8 @@ pub(super) fn reduce_verify_failed(
         candidate: cursor.candidate,
         repair_rolls: rolls,
         seen_verify_failures,
+        fold_checkpoint: None,
+        fold_conflict_evidence: None,
     };
     effects.extend(move_effects(
         *bloom,

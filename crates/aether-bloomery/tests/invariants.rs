@@ -2010,6 +2010,8 @@ fn a_failing_attempt_retries_within_budget_then_wedges() {
                 candidate: None,
                 repair_rolls: 0,
                 seen_verify_failures: VerifyFailureSet::EMPTY,
+                fold_checkpoint: None,
+                fold_conflict_evidence: None,
             },
         }],
     };

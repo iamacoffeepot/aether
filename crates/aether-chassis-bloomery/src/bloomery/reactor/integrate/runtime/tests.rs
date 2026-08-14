@@ -17,7 +17,7 @@ use aether_data::wire::{from_bytes, to_vec};
 use super::drain_and_integrate;
 use crate::bloomery::SourceShell;
 use crate::bloomery::outbox::TopicOutbox;
-use crate::store::SqliteStore;
+use crate::store::{SqliteStore, StoreBackend};
 use aether_bloomery_github::candidate_ref_name;
 
 fn digest(seed: u8) -> Digest {
@@ -221,11 +221,13 @@ fn a_mixed_supersession_adopts_the_inherited_ref_and_keeps_the_re_run_capture() 
     assert_eq!(re_run_ref, Some(captured), "the re-run member keeps the capture it produced under the successor");
 }
 
-// A cross-member collision is refused, not re-driven: the two candidates
-// conflict until something changes one of them, which is a decision above this
-// reactor. Re-driving on a timer would spin forever on an unchanging fact.
+// ADR-0189 — a cross-member collision admits FoldConflict rather than
+// refusing in prose. The later member is the one that reconciles; the
+// folded checkpoint is the tree it collided with; the overlay names the
+// paths. Re-driving the same trees cannot resolve it, so the entry is
+// acked once the fact is admitted.
 #[test]
-fn a_conflicting_member_refuses_the_fold_rather_than_re_driving_it() {
+fn a_conflicting_member_admits_fold_conflict_instead_of_refusing() {
     let (first, second) = (digest(0xAB), digest(0xAC));
     let (fake, base) = seeded(&first);
     fake.seed_git_object(&second);
@@ -233,15 +235,74 @@ fn a_conflicting_member_refuses_the_fold_rather_than_re_driving_it() {
     seed_candidate_branch(&fake, &bloom, "wp-0", "tree-a");
     seed_candidate_branch(&fake, &bloom, "wp-1", "tree-b");
     let integration = format!("bloom/{}/integration", short_hex(&bloom.0));
-    fake.seed_merge_conflict(&integration, &format!("bloom/{}/candidate/wp-1", short_hex(&bloom.0)));
+    let candidate = format!("bloom/{}/candidate/wp-1", short_hex(&bloom.0));
+    fake.seed_merge_conflict_paths(&integration, &candidate, vec!["crates/overlap.rs".into()]);
     let source = shell(fake);
     let mut store = SqliteStore::open(":memory:").unwrap();
     let sequence = enqueue_integration(&mut store, bloom, base, vec![first, second]);
 
     let (admits, ack_through) = drain_and_integrate(&mut store, &source).unwrap();
 
-    assert!(admits.is_empty(), "a collision admits no resolve");
-    assert_eq!(ack_through, Some(sequence), "the refusal is definitive — acked, never re-driven");
+    assert_eq!(admits.len(), 1, "a collision admits FoldConflict, not a resolve");
+    assert_eq!(ack_through, Some(sequence), "the collision is acked — it is not re-driven");
+    let event: Event = from_bytes(&admits[0].event).unwrap();
+    match event.fact {
+        Fact::FoldConflict { bloom: collided, workpiece, checkpoint, evidence, .. } => {
+            assert_eq!(collided, bloom);
+            assert_eq!(workpiece.0, "wp-1", "the later-folding member absorbs reconciliation");
+            assert_ne!(checkpoint, first, "the checkpoint is the folded tree, not the colliding candidate");
+            assert_eq!(evidence.kind, aether_bloomery::EvidenceKind::FoldConflict);
+            assert_eq!(evidence.subject, checkpoint);
+        }
+        other => panic!("expected Fact::FoldConflict, got {other:?}"),
+    }
+    let overlay = store.lookup_fold_conflict(bloom.0.as_bytes(), "wp-1").unwrap().expect("the overlay was persisted");
+    assert!(overlay.contains("## Fold conflict"), "the contract is in the overlay");
+    assert!(overlay.contains("crates/overlap.rs"), "the conflicting path is in the overlay");
+    assert!(
+        !overlay.contains("ours") && !overlay.contains("theirs") && !overlay.contains("union"),
+        "textual merge strategies are not a fold-path mechanism",
+    );
+}
+
+// ADR-0189 — after the later member produces a reconciled candidate, the
+// collision is gone: the fold re-drains, merges, and admits Resolve. The
+// stub source is the seam; no operator action sits between the two drains.
+#[test]
+fn a_reconciled_candidate_re_folds_to_a_resolve() {
+    let (first, second, reconciled) = (digest(0xAB), digest(0xAC), digest(0xAD));
+    let (fake, base) = seeded(&first);
+    fake.seed_git_object(&second);
+    fake.seed_git_object(&reconciled);
+    let bloom = BloomId(digest(1));
+    seed_candidate_branch(&fake, &bloom, "wp-0", "tree-a");
+    seed_candidate_branch(&fake, &bloom, "wp-1", "tree-b");
+    let integration = format!("bloom/{}/integration", short_hex(&bloom.0));
+    let candidate = format!("bloom/{}/candidate/wp-1", short_hex(&bloom.0));
+    fake.seed_merge_conflict_paths(&integration, &candidate, vec!["crates/overlap.rs".into()]);
+    let source = shell(fake.clone());
+    let mut store = SqliteStore::open(":memory:").unwrap();
+
+    enqueue_integration(&mut store, bloom, base, vec![first, second]);
+    let (conflicted, ack) = drain_and_integrate(&mut store, &source).unwrap();
+    store.ack_topic(Topic::Integrate, ack.unwrap()).unwrap();
+    assert!(
+        matches!(from_bytes::<Event>(&conflicted[0].event).unwrap().fact, Fact::FoldConflict { .. }),
+        "the first drain journals the collision",
+    );
+
+    fake.clear_merge_conflict(&integration, &candidate);
+    seed_candidate_branch(&fake, &bloom, "wp-1", "tree-reconciled");
+    let sequence = enqueue_integration(&mut store, bloom, base, vec![first, reconciled]);
+    let (admits, ack_through) = drain_and_integrate(&mut store, &source).unwrap();
+
+    assert_eq!(ack_through, Some(sequence));
+    assert_eq!(admits.len(), 1, "the reconciled candidate folds instead of colliding again");
+    let (_, tree, head, lineage) = decoded_resolve(&admits[0]);
+    assert_ne!(tree, first, "the fold combined both members");
+    assert_ne!(tree, reconciled, "and is not a tree-replace of the later member");
+    assert_ne!(head, tree);
+    assert_eq!(lineage, vec![first, reconciled]);
 }
 
 // #4722 — an aggregate-review finding routes a member back through Refine →

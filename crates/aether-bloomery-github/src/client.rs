@@ -367,6 +367,9 @@ pub enum MergeResult {
     Conflict {
         /// The endpoint's description of the collision.
         detail: String,
+        /// Paths the merge named as colliding. Empty when the endpoint
+        /// (GitHub's 409) reports none.
+        paths: Vec<String>,
     },
 }
 
@@ -1272,7 +1275,7 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         // about the two histories rather than a transport fault.
         match response.status {
             204 => Ok(MergeResult::AlreadyUpToDate),
-            409 => Ok(MergeResult::Conflict { detail: response.body }),
+            409 => Ok(MergeResult::Conflict { detail: response.body, paths: Vec::new() }),
             status if (200..300).contains(&status) => {
                 Ok(MergeResult::Merged(decode::<GhMergeCommit>(&response)?.into_git_commit()))
             }
@@ -1636,7 +1639,7 @@ mod tests {
             MergeResult::AlreadyUpToDate,
             "204 is success with no body — it must not reach the decoder",
         );
-        let MergeResult::Conflict { detail } =
+        let MergeResult::Conflict { detail, .. } =
             client(409, r#"{"message":"Merge conflict"}"#).merge("heads/base", "heads/head", "m").unwrap()
         else {
             panic!("409 is a conflict outcome, not an error");
