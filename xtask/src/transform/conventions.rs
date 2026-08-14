@@ -32,7 +32,7 @@ pub(super) fn section(conventions: &str) -> String {
     format!(
         "## Conventions\n\n\
          The subject tree's `{CONVENTIONS_FILE}`, inlined verbatim — the conventions this repository \
-         is written to. Follow them as written. Where they and the instructions above disagree about \
+         is written to. Follow them as written. Where they and the lane instructions disagree about \
          how code in this repository is written, they win; where they describe a workflow this \
          dispatch is not running (opening pull requests, driving CI, the MCP harness), they do not \
          apply to you.\n\n\

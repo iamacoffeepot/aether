@@ -302,7 +302,7 @@ mod tests {
     fn construct_prompt_assembles_from_the_in_repo_instructions_and_subject() {
         let prompt =
             assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("abc123"), Some("thread the work order"));
-        assert!(prompt.starts_with(CONSTRUCT_INSTRUCTIONS), "the lane's own instruction source leads the prompt");
+        assert!(prompt.starts_with(CONSTRUCT_INSTRUCTIONS), "without conventions the instruction source leads");
         assert!(prompt.contains("## Subject"), "the checked-out subject is appended as its own section");
         assert!(prompt.contains("abc123"), "the exact checked-out commit is named in the prompt");
         assert!(
@@ -316,6 +316,7 @@ mod tests {
         // itself references the section name inline as a code span.
         assert!(prompt.contains("\n## Task\n"), "the work-order description is appended as its own section");
         assert!(prompt.contains("thread the work order"), "the task text is named in the prompt");
+        assert!(!prompt.contains("\n## Lane\n"), "a header-less task grows no lane tail");
 
         // With no subject supplied, the prompt still stands and names no commit.
         let subjectless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, None, Some("still has a task"));
@@ -333,9 +334,9 @@ mod tests {
 
     // The conventions the subject tree carries ride the prompt itself (#4647)
     // rather than being pointed at, because only one of the three harnesses the
-    // lane can fork reads a conventions file on its own. The order is what the
-    // instructions promise: the work order stays last, after the long general
-    // rules, so `## Task` is still the section at the end.
+    // lane can fork reads a conventions file on its own. They lead (#4985) so
+    // construct and review share the CLAUDE.md prefix; the work order follows
+    // the long general rules, and a per-lane tail may follow it.
     #[test]
     fn conventions_ride_the_prompt_ahead_of_the_work_order() {
         let prompt = assemble_construct_prompt(
@@ -345,14 +346,84 @@ mod tests {
             Some("thread the work order"),
         );
         assert!(prompt.contains("Tests must earn their place."), "the tree's conventions are carried verbatim");
-        let conventions_at = prompt.find("\n## Conventions\n").expect("the conventions get their own section");
+        assert!(prompt.starts_with("## Conventions\n"), "shared conventions lead so sibling lanes share a prefix");
+        let conventions_at = prompt.find("## Conventions\n").expect("the conventions get their own section");
+        let instructions_at = prompt.find(CONSTRUCT_INSTRUCTIONS).expect("the lane instructions still ride");
         let task_at = prompt.find("\n## Task\n").expect("the work order keeps its section");
-        assert!(conventions_at < task_at, "the work order stays last, where the instructions say it is");
+        assert!(conventions_at < instructions_at, "CLAUDE.md leads the lane-specific instructions");
+        assert!(instructions_at < task_at, "the work order stays after the long general rules");
 
         // A subject tree carrying no conventions file drops the section rather
         // than failing the dispatch or emitting an empty heading.
         let bare = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("abc123"), Some("build it"));
-        assert!(!bare.contains("\n## Conventions\n"), "no conventions file means no conventions section");
+        assert!(!bare.contains("## Conventions\n"), "no conventions file means no conventions section");
         assert!(bare.contains("\n## Task\n"), "the rest of the prompt is unaffected");
+    }
+
+    // Tripwire: prompt caching is prefix-exact. A per-member `Workpiece:` header
+    // ahead of the shared work order forfeits the cache for the whole body
+    // (#4985). Two sibling construct dispatches of one bloom must share a
+    // byte-identical prefix through the stable bulk.
+    #[test]
+    fn sibling_lane_prompts_share_a_byte_identical_prefix_through_the_work_order() {
+        let conventions = "Tests must earn their place.";
+        let body = "# Wave-3 member work order\n\nImplement the sealed plan.\n";
+        let left = assemble_construct_prompt(
+            CONSTRUCT_INSTRUCTIONS,
+            Some(conventions),
+            Some("abc123"),
+            Some(&format!("Workpiece: issue-1111\n\n{body}")),
+        );
+        let right = assemble_construct_prompt(
+            CONSTRUCT_INSTRUCTIONS,
+            Some(conventions),
+            Some("abc123"),
+            Some(&format!("Workpiece: issue-2222\n\n{body}")),
+        );
+
+        let prefix_len = left.bytes().zip(right.bytes()).take_while(|(a, b)| a == b).count();
+        let stable = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some(conventions), Some("abc123"), Some(body));
+        assert!(
+            prefix_len >= stable.len(),
+            "common prefix ({prefix_len}) must cover the stable bulk ({})",
+            stable.len(),
+        );
+        assert!(
+            left[..prefix_len].contains(body.trim_end()),
+            "the shared work order must sit inside the common prefix, not after a per-lane header",
+        );
+        assert!(left.contains("Workpiece: issue-1111"), "the left tail still names its member");
+        assert!(right.contains("Workpiece: issue-2222"), "the right tail still names its member");
+        assert!(
+            !left[..prefix_len].contains("issue-1111") && !left[..prefix_len].contains("issue-2222"),
+            "member identity belongs in the tail after the common prefix",
+        );
+        assert!(left.contains("\n## Lane\n"), "the peeled header rides its own trailing section");
+    }
+
+    // Tripwire: construct vs review used to open with different instruction
+    // files, so 99.8% overlapping ~59k-token prompts shared no cache (#4985).
+    // Conventions lead, so distinct instruction texts still share CLAUDE.md.
+    #[test]
+    fn conventions_lead_so_distinct_lane_instructions_still_share_them() {
+        let conventions = "Tests must earn their place.";
+        let construct =
+            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some(conventions), Some("abc123"), Some("shared order"));
+        let review = assemble_construct_prompt(
+            "REVIEW INSTRUCTIONS ONLY",
+            Some(conventions),
+            Some("abc123"),
+            Some("shared order"),
+        );
+        let prefix_len = construct.bytes().zip(review.bytes()).take_while(|(a, b)| a == b).count();
+        assert!(construct.starts_with("## Conventions\n"), "CLAUDE.md leads the prompt");
+        assert!(
+            construct[..prefix_len].contains(conventions),
+            "the shared conventions must sit inside the common prefix",
+        );
+        assert!(
+            prefix_len > conventions.len(),
+            "common prefix ({prefix_len}) must cover more than the raw conventions text",
+        );
     }
 }

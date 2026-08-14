@@ -600,8 +600,43 @@ fn drain_threads_the_persisted_description_onto_the_construct_order() {
     assert_eq!(orders.len(), 1, "the construct dispatch submitted");
     assert_eq!(
         orders[0].transformation.description.as_deref(),
-        Some("thread the work order into the prompt"),
-        "the persisted description reached the submitted construct order",
+        Some("Workpiece: wp-line\n\nthread the work order into the prompt"),
+        "the persisted description reached the submitted construct order, pinned to the member",
+    );
+}
+
+// Sibling members are sealed from one shared work order, so the store holds
+// byte-identical bodies. The dispatched `--task` must still name each member:
+// an unpinned overlay would send every sibling the same prompt (the identity
+// forensics tax) and collapse `pool_task` onto one session-pool key.
+#[test]
+fn two_members_of_one_bloom_receive_distinct_workpiece_pinned_descriptions() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let shared = "thread the work order into the prompt";
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-a", shared).unwrap();
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-b", shared).unwrap();
+    enqueue_construct_dispatch(&mut store, bloom, "wp-a", 5);
+    enqueue_construct_dispatch(&mut store, bloom, "wp-b", 6);
+
+    drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    let orders = backend.orders();
+    assert_eq!(orders.len(), 2, "both members dispatched");
+    let descriptions: Vec<&str> = orders
+        .iter()
+        .map(|order| order.transformation.description.as_deref().expect("a construct member carries a task"))
+        .collect();
+    assert_ne!(descriptions[0], descriptions[1], "sibling members must not share a dispatch description");
+    assert_eq!(
+        descriptions[0], "Workpiece: wp-a\n\nthread the work order into the prompt",
+        "the first line names the member this dispatch owns",
+    );
+    assert_eq!(
+        descriptions[1], "Workpiece: wp-b\n\nthread the work order into the prompt",
+        "the sibling's first line names its own workpiece, not its neighbor's",
     );
 }
 
@@ -1638,7 +1673,10 @@ fn drain_threads_persisted_findings_onto_the_construct_order() {
 
     let orders = backend.orders();
     let description = orders[0].transformation.description.as_deref().unwrap();
-    assert!(description.starts_with("the original order"), "the order text leads");
+    assert!(
+        description.starts_with("Workpiece: wp-line\n\nthe original order"),
+        "the member pin leads, then the order text",
+    );
     assert!(
         description.contains("## Findings\n\nclippy: off-by-one in the loop bound"),
         "the findings follow as their own labeled section",
@@ -1714,7 +1752,10 @@ fn an_answered_park_replays_the_held_lane_carrying_the_decision() {
     let replay = orders.last().expect("the replay reached the executor");
     assert_eq!(replay.nonce.0, format!("redispatch-{sequence}"), "the replay is its own attempt, not the spent nonce");
     let description = replay.transformation.description.as_deref().expect("the construct lane carries its prompt");
-    assert!(description.starts_with("build the widget"), "the held order's work order survives the replay");
+    assert!(
+        description.starts_with("Workpiece: wp-held\n\nbuild the widget"),
+        "the held order's work order survives the replay, still pinned to the member",
+    );
     assert!(
         description.contains("## Decision\n\ndrop the cache; ship it"),
         "the answer that released the hold reaches the lane, or it parks again on the same question",
