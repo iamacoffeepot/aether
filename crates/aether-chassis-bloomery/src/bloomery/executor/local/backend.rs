@@ -629,7 +629,10 @@ impl LocalExecutor {
         if kind != PriceTable::NAME {
             return PriceTable::default();
         }
-        let table = PriceTable::from_sealed(&bytes).unwrap_or_default();
+        let table = match PriceTable::from_sealed(&bytes) {
+            aether_bloomery::SealedPriceTable::Current(table) => table,
+            aether_bloomery::SealedPriceTable::PreMigration => PriceTable::default(),
+        };
         drop(store);
         table
     }

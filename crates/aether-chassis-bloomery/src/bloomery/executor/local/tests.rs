@@ -16,7 +16,7 @@ use tracing::{Event, Metadata, Subscriber};
 
 use aether_bloomery::{
     BackendObjectId, Conclusion, ConfigKind, ConfigRegistry, Correspondence, CorrespondenceError, Digest,
-    ExecutionStatus, ExecutorBackend, Harness, Nonce, PriceRow, PriceTable, ReasoningEffort, ResolvedModel,
+    ExecutionStatus, ExecutorBackend, Harness, Nonce, PriceRates, PriceTable, ReasoningEffort, ResolvedModel,
     StageCatalog, StageId, StageVerdict, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle,
 };
 use aether_data::Kind;
@@ -1771,9 +1771,10 @@ fn a_sealed_price_table_decides_the_lap_two_arm() {
     let store_path = store_dir.path().join("store.db");
     let mut store = SqliteStore::open(store_path.to_str().unwrap()).unwrap();
 
-    let table = PriceTable {
-        rows: vec![PriceRow {
-            model: "claude-opus-5".to_owned(),
+    let mut table = PriceTable::default();
+    table.rows.insert(
+        "claude-opus-5".to_owned(),
+        PriceRates {
             input: 1_000_000,
             cache_read: 1_000_000,
             cache_write_5m: 1_000_000,
@@ -1781,8 +1782,8 @@ fn a_sealed_price_table_decides_the_lap_two_arm() {
             cache_write: 1_000_000,
             output: 1_000_000,
             long_context: None,
-        }],
-    };
+        },
+    );
     let bytes = to_vec(&table).unwrap();
     store.record_config(table.address().as_bytes(), PriceTable::NAME, &bytes).unwrap();
     let mut configs = ConfigRegistry::default();
