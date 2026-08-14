@@ -17,7 +17,7 @@ use crate::values::{
 
 /// The ordered effects a decision applies to the projection (and, in
 /// production, the outbox/store).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Decision {
     /// Claim a workpiece's active membership for a bloom.
     ClaimMembership {

@@ -201,7 +201,7 @@ impl BloomSpec {
 /// different points — several members onto one branch, or a bloom caught up to
 /// a moved base. A tree carries no ancestry, so it cannot be merged; only the
 /// commit its ref points at can.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct MemberCandidate {
     /// The member whose candidate this is — the ref address's workpiece segment.
     pub workpiece: WorkpieceId,
@@ -211,7 +211,7 @@ pub struct MemberCandidate {
 
 /// A per-member claim that a candidate resolves its workpiece on the final
 /// tree, with evidence bound to the candidate digest (ADR-0149 §The bloom).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ResolutionClaim {
     /// The workpiece this claim resolves.
     pub workpiece: WorkpieceId,
@@ -229,7 +229,7 @@ pub struct ResolutionClaim {
 /// The one artifact a bloom's execution produces: the final tree, its
 /// integration lineage, and a resolution claim for every member workpiece
 /// (ADR-0149 §The bloom).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ResolvedBloom {
     /// The bloom that resolved.
     pub bloom: BloomId,
@@ -248,7 +248,7 @@ pub struct ResolvedBloom {
 /// The receipt of a compare-and-swap land: mainline moved from the sealed
 /// base to the new head, and the next bloom seals on this receipt (ADR-0149
 /// §The bloom).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct LandingReceipt {
     /// The bloom that landed.
     pub bloom: BloomId,

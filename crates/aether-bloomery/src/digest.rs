@@ -29,7 +29,9 @@ use sha2::{Digest as _, Sha256};
 /// The primitive of the derivation DAG: every artifact is addressed by its
 /// digest and names its parents by theirs. `Ord` (via the raw 32 bytes)
 /// gives blooms a canonical member order at seal time.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize)]
+#[derive(
+    aether_data::Schema, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default, Serialize, Deserialize,
+)]
 pub struct Digest([u8; 32]);
 
 impl Digest {

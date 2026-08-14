@@ -98,7 +98,7 @@ pub struct Workpiece {
 /// bind to *exact* digests: refinement produces a new candidate and old
 /// evidence never validates the replacement (ADR-0149 §The value
 /// vocabulary).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Evidence {
     /// The exact digest this evidence attests to. Evidence for one digest
     /// says nothing about any other.
@@ -128,7 +128,7 @@ impl Evidence {
 /// express it (a member sitting at `Verify` one roll below the ceiling is
 /// mid-flight and looks identical), and without a record the outward view
 /// reports a wedged member exactly as it reports a working one.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Wedge {
     /// The stage whose retry budget the member exhausted.
     pub stage: StageId,
@@ -143,7 +143,7 @@ pub struct Wedge {
 }
 
 /// The class of an [`Evidence`] artifact.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum EvidenceKind {
     /// An owner (or policy) approval of a scope revision.
     Approval,

@@ -157,7 +157,7 @@ pub struct PendingDecisionView {
 /// members at the moment it mints the receipt, so it carries them here rather
 /// than leaving an adapter to read them back out of the store — the
 /// self-contained-document rule this port is built on.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ProjectedReceipt {
     /// The receipt itself, unchanged.
     pub receipt: LandingReceipt,
