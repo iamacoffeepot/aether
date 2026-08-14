@@ -341,7 +341,7 @@ impl ApiCapabilityState {
 
     /// `GET /blooms` and `GET /view` — read the whole live projection.
     pub(super) fn query(bloom: Option<Vec<u8>>) -> Routed {
-        Routed::Query(Query { bloom, release: None })
+        Routed::Query(Query { bloom, release: None, calibration: false })
     }
 
     /// `GET /blooms/{id}` — read one bloom's live view by hex id.
@@ -431,11 +431,13 @@ pub(super) fn query_response(result: QueryResult) -> HttpServerResponse {
         QueryResult::NotFound => error_response(404, "no bloom with that id"),
         QueryResult::Err { error } => error_response(500, &error),
         // The shared `#[http::reply]` sends both release variants to
-        // `release_status_response` before either reaches here, so one arriving
-        // is a routing bug rather than an answer to render.
+        // `release_status_response`, and a calibration reply to its own renderer,
+        // before any of them reaches here — so one arriving is a routing bug
+        // rather than an answer to render.
         QueryResult::Release { .. } | QueryResult::ReleaseNotFound => {
             error_response(500, "projection read answered with a release record")
         }
+        QueryResult::Calibration { .. } => error_response(500, "projection read answered with a calibration document"),
     }
 }
 

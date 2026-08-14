@@ -54,6 +54,7 @@
 //! constructors and the bloom-id URL codec.
 
 mod blooms;
+mod calibration;
 #[cfg(feature = "github")]
 mod claims;
 mod configs;
@@ -83,6 +84,7 @@ pub use aether_substrate::chassis::error::BootError;
 pub use state::ApiCapabilityState;
 
 use blooms::{admit_response, query_response};
+use calibration::calibration_response;
 #[cfg(feature = "github")]
 use claims::{claims_response, release_status_response};
 use configs::{config_response, load_configs};
@@ -452,6 +454,13 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `GET /calibration` — read the measured capability ledger and the
+    /// forecast grade beside it (ADR-0184).
+    #[http::route(Get, "/calibration")]
+    fn on_get_calibration(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        finish(state, ctx, calibration::read())
+    }
+
     /// `GET /journal` — read the durable event journal from the store.
     #[http::route(Get, "/journal")]
     fn on_get_journal(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
@@ -488,12 +497,12 @@ impl NativeActor for BloomeryApiCapability {
         state.answer(ctx, &response);
     }
 
-    /// The control core's reply to a live projection read, or to an
-    /// orphan-claim release's status read (ADR-0179).
+    /// The control core's reply to a live projection read, to an orphan-claim
+    /// release's status read (ADR-0179), or to a calibration read (ADR-0184).
     ///
-    /// One `Query` kind answers both, so which read this is answering is decided
-    /// by the reply's own variant rather than by anything the route held — the
-    /// relay surfaces no correlation to key a second table on.
+    /// One `Query` kind answers all three, so which read this is answering is
+    /// decided by the reply's own variant rather than by anything the route held
+    /// — the relay surfaces no correlation to key a second table on.
     #[http::reply]
     fn on_query_result(
         _state: &mut ApiCapabilityState,
@@ -502,6 +511,7 @@ impl NativeActor for BloomeryApiCapability {
     ) -> HttpServerResponse {
         match mail {
             QueryResult::Release { .. } | QueryResult::ReleaseNotFound => release_status_response(mail),
+            QueryResult::Calibration { document } => calibration_response(&document),
             mail => query_response(mail),
         }
     }

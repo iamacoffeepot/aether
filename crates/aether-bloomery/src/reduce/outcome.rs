@@ -530,6 +530,20 @@ pub enum Outcome {
     },
     /// An operator hold or release was refused.
     OperatorHoldRejected(OperatorHoldError),
+    /// The seal door found two members declaring overlapping surfaces (#4931).
+    ///
+    /// Named as its own outcome rather than folded into
+    /// [`Outcome::Sealed`], because it is a second reading of the same
+    /// admission and not the admission's result: the seal proceeds either way,
+    /// and a bloom whose members all declare disjoint surfaces produces none of
+    /// these at all. Appended so every prior outcome keeps its wire
+    /// discriminant.
+    SurfaceOverlap {
+        /// The two members whose declared surfaces intersect.
+        members: Vec<WorkpieceId>,
+        /// The globs both declared surfaces permit.
+        intersection: Vec<String>,
+    },
 }
 
 impl Outcome {

@@ -316,7 +316,7 @@ impl FixtureHarness {
         self.cid += 1;
         // `release` reads an orphan-claim release request and takes precedence over
         // `bloom` when both are set (ADR-0179); both unset is the whole-document read.
-        let query = Query { bloom: None, release: None };
+        let query = Query { bloom: None, release: None, calibration: false };
         match call::<_, QueryResult>(&mut self.stream, self.cid, control_mailbox(), &query) {
             QueryResult::Document { document } => from_bytes(&document).expect("the projection decodes"),
             other => panic!("expected a document reply, got {other:?}"),
