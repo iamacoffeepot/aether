@@ -40,7 +40,7 @@ use aether_bloomery::control::{
 };
 use aether_bloomery::{
     BloomId, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event, Fact, IdempotencyKey, Outcome,
-    ResolvedConfigs, Snapshot, Unproducible, reduce, view_of,
+    ResolvedConfigs, Snapshot, Unproducible, decode_recorded_decisions, reduce, view_of,
 };
 
 use super::{ControlCore, ControlSetup, ObserveTick};
@@ -414,13 +414,14 @@ impl NativeActor for ControlCore {
             // in force today govern new admissions only; re-reducing history under
             // them resurrects rejections a looser rule now admits and re-refuses
             // admissions a stricter rule no longer would (#4937).
-            let decisions: Decisions = match from_bytes(&record.decisions) {
-                Ok(decisions) => decisions,
-                Err(error) => ctx.fatal_abort(format!(
-                    "boot journal replay: record {} ({}) decision did not decode: {error}",
-                    record.sequence, record.idempotency_key
-                )),
-            };
+            let decisions: Decisions =
+                match decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref()) {
+                    Ok(decisions) => decisions,
+                    Err(error) => ctx.fatal_abort(format!(
+                        "boot journal replay: record {} ({}) {error}",
+                        record.sequence, record.idempotency_key
+                    )),
+                };
             state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
         }
         state.reconcile_claim_refs(ctx);
@@ -433,7 +434,7 @@ impl NativeActor for ControlCore {
         // mainline out from under the very land the fold above is about to apply
         // — which then refuses as `BaseMismatch` and leaves a landed bloom
         // reading unlanded for the whole boot.
-        ctx.actor::<SourceCapability>().send_detached(&ObserveMainline);
+        ctx.actor::<SourceCapability>().send_detached(&observe_mail(&state.snapshot.mainline));
     }
 
     /// Poll wake: ask the source for the repository's live mainline head, so a
@@ -458,7 +459,7 @@ impl NativeActor for ControlCore {
         if !state.replayed {
             return;
         }
-        ctx.actor::<SourceCapability>().send_detached(&ObserveMainline);
+        ctx.actor::<SourceCapability>().send_detached(&observe_mail(&state.snapshot.mainline));
     }
 
     /// Admit the observed mainline head (#4667). The reply to an
@@ -482,8 +483,8 @@ impl NativeActor for ControlCore {
         ctx: &mut NativeCtx<'_, Manual>,
         mail: ObserveMainlineResult,
     ) {
-        let head = match mail {
-            ObserveMainlineResult::Ok { head } => head,
+        let (head, fast_forward) = match mail {
+            ObserveMainlineResult::Ok { head, fast_forward } => (head, fast_forward),
             ObserveMainlineResult::Err { error } => {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::control",
@@ -504,28 +505,29 @@ impl NativeActor for ControlCore {
                 return;
             }
         };
-        // Log hygiene, of the two the poll-driven observer forces a choice
-        // between: skip the admit for a head already observed, rather than keep
-        // admitting unconditionally and demote `admit_duplicate`'s warn for this
-        // key shape. An unchanged head is the ordinary case on every interval,
-        // and admitting one does no work in exchange for the warn — the key is
-        // `observe-mainline-<head>` and the journal already holds it, so the
-        // reducer answers `Outcome::Duplicate` and drops the fact. Demoting the
-        // warn was rejected because that warn is the only place a reactor's
-        // fire-and-forget admit surfaces as a discarded fact (#4722), and it is
-        // worth keeping loud for every other key.
+        // Log hygiene: skip an admit whose (head, mainline) pair is already
+        // in `seen`. That pair is the key, so a later recovery against a
+        // different mainline is a new admit (#4938). Skipping only when both
+        // pointers already name this head missed the MainlineHeld steady
+        // state — `observed == head` while mainline sits behind — and every
+        // poll re-admitted the journaled key, reduced to Duplicate, and
+        // fired `admit_duplicate`'s warn for the life of the bloom.
         //
         // Compared against the snapshot rather than a private memo of the last
-        // head sent: `observed` moves only once a commit durably landed, so a
-        // failed commit leaves it behind and the next poll re-admits, where a
-        // memo would have recorded the send and never retried.
-        if head == state.snapshot.observed {
+        // head sent: `seen` moves only once a commit durably landed, so a
+        // failed commit leaves the pair out and the next poll re-admits,
+        // where a memo would have recorded the send and never retried.
+        if observation_already_admitted(&state.snapshot, &head) {
             return;
         }
 
         let event = Event {
-            idempotency_key: IdempotencyKey(format!("observe-mainline-{}", lowercase_hex(head.as_bytes()))),
-            fact: Fact::ObserveMainline { head },
+            idempotency_key: observe_mainline_key(&head, &state.snapshot.mainline),
+            fact: if fast_forward {
+                Fact::ObserveMainline { head }
+            } else {
+                Fact::ObserveMainlineDiverged { head }
+            },
         };
         match to_vec(&event) {
             Ok(bytes) => ctx.actor::<ControlCore>().send_detached(&Admit { event: bytes }),
@@ -828,25 +830,29 @@ fn commit_key(result: &CommitResult) -> &str {
     }
 }
 
+fn membership_mutation(workpiece: &str, bloom: &BloomId) -> MembershipMutation {
+    MembershipMutation { workpiece: workpiece.to_owned(), bloom: bloom.0.as_bytes().to_vec() }
+}
+
+/// The store-commit axes [`project`] builds: membership releases, claims, and
+/// outbox payloads.
+type ProjectedAxes = (Vec<MembershipMutation>, Vec<MembershipMutation>, Vec<OutboxPayload>);
+
 /// Project a decided event's effects into the store commit's typed axes: the
 /// membership releases and claims the `active_membership` table applies, and the
 /// outbox payloads it enqueues. The snapshot-only effects carry no durable store
 /// row — they are rebuilt on replay by `reduce` + `apply` from the journaled event.
-#[allow(clippy::type_complexity)]
-fn project(
-    decisions: &Decisions,
-) -> Result<(Vec<MembershipMutation>, Vec<MembershipMutation>, Vec<OutboxPayload>), WireError> {
+fn project(decisions: &Decisions) -> Result<ProjectedAxes, WireError> {
     let mut releases = Vec::new();
     let mut claims = Vec::new();
     let mut outbox = Vec::new();
     for effect in &decisions.effects {
         match effect {
             Decision::ClaimMembership { workpiece, bloom } => {
-                claims.push(MembershipMutation { workpiece: workpiece.0.clone(), bloom: bloom.0.as_bytes().to_vec() });
+                claims.push(membership_mutation(&workpiece.0, bloom));
             }
             Decision::ReleaseMembership { workpiece, bloom } => {
-                releases
-                    .push(MembershipMutation { workpiece: workpiece.0.clone(), bloom: bloom.0.as_bytes().to_vec() });
+                releases.push(membership_mutation(&workpiece.0, bloom));
             }
             // The landing-receipt topic carries the receipt *and* the landed
             // bloom's membership: the receipt value names no members, so a
@@ -936,7 +942,8 @@ fn project(
             | Decision::RecordWedge { .. }
             | Decision::RevokeResolution { .. }
             | Decision::AdvanceMainline { .. }
-            | Decision::RecordObservation { .. } => {}
+            | Decision::RecordObservation { .. }
+            | Decision::RecordStageCatalog { .. } => {}
         }
     }
     Ok((releases, claims, outbox))
@@ -976,15 +983,88 @@ fn lowercase_hex(bytes: &[u8]) -> String {
     })
 }
 
+/// The source mail that classifies the live head against the snapshot's
+/// current mainline — genesis or an encode failure is the boot-bind path
+/// (any observed head is a fast-forward).
+fn observe_mail(mainline: &Digest) -> ObserveMainline {
+    ObserveMainline { relative_to: to_vec(mainline).unwrap_or_default() }
+}
+
+/// The admit key for one observation: the pair of observed head and the
+/// mainline it was classified against (#4938). A head already seen against a
+/// *different* mainline is a new key, so a regression can recover by
+/// re-observing the true head instead of reducing to `Duplicate` forever.
+fn observe_mainline_key(head: &Digest, mainline: &Digest) -> IdempotencyKey {
+    IdempotencyKey(format!(
+        "observe-mainline-{}-at-{}",
+        lowercase_hex(head.as_bytes()),
+        lowercase_hex(mainline.as_bytes()),
+    ))
+}
+
+/// Whether this (head, current mainline) pair has already been journaled.
+/// The poll skip consults `seen` rather than pointer equality so a
+/// `MainlineHeld` observation (recorded head, mainline still behind) is not
+/// re-admitted every interval.
+fn observation_already_admitted(snapshot: &Snapshot, head: &Digest) -> bool {
+    snapshot.seen.contains(&observe_mainline_key(head, &snapshot.mainline))
+}
+
 #[cfg(test)]
 mod tests {
-    use aether_bloomery::{QueryResult, Snapshot};
+    use aether_bloomery::{Digest, IdempotencyKey, QueryResult, Snapshot};
 
-    use super::{lowercase_hex, release_response};
+    use super::{lowercase_hex, observation_already_admitted, observe_mainline_key, release_response};
 
     #[test]
     fn observe_mainline_key_uses_lowercase_hex() {
         assert_eq!(lowercase_hex(&[0, 15, 160, 255]), "000fa0ff");
+    }
+
+    // Tripwire: the admit key names both the observed head and the mainline
+    // it was classified against (#4938). A head-only key made re-observing
+    // the true head after a regression `Duplicate` forever.
+    #[test]
+    fn observe_mainline_key_pairs_head_with_current_mainline() {
+        let head = Digest::from_bytes([0x0a; 32]);
+        let mainline = Digest::from_bytes([0x0b; 32]);
+        let other = Digest::from_bytes([0x0c; 32]);
+
+        assert_eq!(
+            observe_mainline_key(&head, &mainline),
+            IdempotencyKey(format!("observe-mainline-{}-at-{}", "0a".repeat(32), "0b".repeat(32))),
+        );
+        assert_ne!(
+            observe_mainline_key(&head, &mainline),
+            observe_mainline_key(&head, &other),
+            "the same head against a different mainline is a different key",
+        );
+    }
+
+    // Tripwire: the poll skip keys on the journaled (head, mainline) pair,
+    // not on both pointers naming the head (#4938). MainlineHeld records
+    // observed=head while mainline stays behind; skipping only when
+    // `head == observed && head == mainline` re-admitted that pair every
+    // 30s and fired `admit_duplicate` for the life of the bloom.
+    #[test]
+    fn poll_skips_a_held_head_already_admitted_against_current_mainline() {
+        let head = Digest::from_bytes([0x0a; 32]);
+        let mainline = Digest::from_bytes([0x0b; 32]);
+        let other = Digest::from_bytes([0x0c; 32]);
+        let mut snapshot = Snapshot::new(mainline);
+        snapshot.observed = head;
+        snapshot.seen.insert(observe_mainline_key(&head, &mainline));
+
+        assert!(
+            observation_already_admitted(&snapshot, &head),
+            "MainlineHeld has already journaled this (head, mainline) pair",
+        );
+
+        snapshot.mainline = other;
+        assert!(
+            !observation_already_admitted(&snapshot, &head),
+            "the same head against a different mainline is still a new admit",
+        );
     }
 
     // Tripwire: a release read that misses must answer the release-shaped miss,

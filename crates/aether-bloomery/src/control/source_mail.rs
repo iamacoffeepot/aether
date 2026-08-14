@@ -216,7 +216,13 @@ pub enum ClaimResult {
 /// under the very land the replay is about to fold.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.source.observe_mainline")]
-pub struct ObserveMainline;
+pub struct ObserveMainline {
+    /// The snapshot mainline to classify the observed head against — a
+    /// wire-encoded [`Digest`](crate::digest::Digest). Genesis or undecodable
+    /// bytes mean "any observed head is a fast-forward" (the boot bind).
+    #[serde(with = "aether_data::bytes")]
+    pub relative_to: Vec<u8>,
+}
 
 /// Reply to [`ObserveMainline`].
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -228,6 +234,12 @@ pub enum ObserveMainlineResult {
         /// correspondence-bound to the real commit.
         #[serde(with = "aether_data::bytes")]
         head: Vec<u8>,
+        /// Whether mainline may follow `head`. `true` for a descendant,
+        /// equal, the genesis bind, or an unrelated rewrite of the live
+        /// ref. `false` is the strict-ancestor case (#4938): the control
+        /// core admits [`Fact::ObserveMainlineDiverged`](crate::Fact::ObserveMainlineDiverged)
+        /// rather than advancing.
+        fast_forward: bool,
     },
     /// The observation failed.
     Err {

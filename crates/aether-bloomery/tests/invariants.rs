@@ -3367,6 +3367,71 @@ mod observed_mainline {
         assert_eq!(next.observed, digest(9), "but the repository's head is recorded for a supersession to rebase onto");
     }
 
+    // Tripwire: a stale (strict-ancestor) observation cannot move mainline
+    // (#4938). The host classifies the head as an ancestor and admits
+    // `ObserveMainlineDiverged`; the reducer must name the refusal and leave
+    // both pointers alone — recording the stale head as `observed` would
+    // poison the only base a supersession may rebase onto. A rewritten
+    // live ref is followable at the host and does not arrive here.
+    #[test]
+    fn a_stale_observation_cannot_regress_mainline() {
+        let snapshot = Snapshot::new(digest(9));
+        let stale = event("stale", Fact::ObserveMainlineDiverged { head: digest(1) });
+
+        let (next, decided) = step(&snapshot, &stale);
+
+        assert!(
+            matches!(
+                decided.outcome,
+                Outcome::MainlineDiverged { head, mainline } if head == digest(1) && mainline == digest(9)
+            ),
+            "a backward observation is a named refusal: {:?}",
+            decided.outcome,
+        );
+        assert!(decided.effects.is_empty(), "the refusal records nothing: {:?}", decided.effects);
+        assert_eq!(next.mainline, digest(9), "mainline stays on the true head");
+        assert_eq!(next.observed, Snapshot::GENESIS_MAINLINE, "and observed is not poisoned by the stale head");
+    }
+
+    // Tripwire: after a regression-shaped state, observing the true head
+    // recovers mainline (#4938). The old `observe-mainline-<digest>` key made
+    // this `Duplicate` forever; the admit key is now (head, current mainline),
+    // so a new key for the same head against the regressed pointer reaches
+    // the reducer and advances.
+    #[test]
+    fn observing_the_true_head_recovers_a_regressed_mainline() {
+        let snapshot = Snapshot::new(digest(1));
+        let first = event("observe-mainline-9-at-1", Fact::ObserveMainline { head: digest(9) });
+        let (mut snapshot, first_decided) = step(&snapshot, &first);
+        assert!(
+            matches!(first_decided.outcome, Outcome::MainlineAdvanced { to, .. } if to == digest(9)),
+            "the first observation advanced: {:?}",
+            first_decided.outcome,
+        );
+
+        // The historical bug: a later observation (or a hand fold) walked
+        // mainline back. `observed` and `seen` keep what that lap recorded.
+        snapshot.mainline = digest(1);
+
+        let recover = event("observe-mainline-9-at-1-regressed", Fact::ObserveMainline { head: digest(9) });
+        let (next, decided) = step(&snapshot, &recover);
+
+        assert!(
+            !matches!(decided.outcome, Outcome::Duplicate),
+            "the same head against a different mainline is not a duplicate: {:?}",
+            decided.outcome,
+        );
+        assert!(
+            matches!(
+                decided.outcome,
+                Outcome::MainlineAdvanced { from, to } if from == digest(1) && to == digest(9)
+            ),
+            "observing the true head recovers mainline: {:?}",
+            decided.outcome,
+        );
+        assert_eq!(next.mainline, digest(9), "and the fold lands on the recovered head");
+    }
+
     // Tripwire: a land leaves the observed head no staler than mainline. A land
     // authors a head the source has not reported yet, so recording only
     // observations would leave `observed` pointing behind mainline — and a

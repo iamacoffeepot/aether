@@ -12,7 +12,7 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::values::{
     AgentProfile, ConfigRegistry, Evidence, MemberCandidate, OrphanClaimRelease, OrphanClaimReleaseCompletion,
-    ResolutionClaim, ResolvedBloom, Transformation, VerifyProof, VerifyReuse, Wedge,
+    ResolutionClaim, ResolvedBloom, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -460,5 +460,17 @@ pub enum Decision {
         bloom: BloomId,
         /// Which position passed, and the proof it reused.
         reuse: VerifyReuse,
+    },
+    /// Record the stage catalog this bloom runs — resolved once at admission
+    /// so the fold reads the record rather than re-deriving it from the
+    /// compiled line (ADR-0174, #4944). Appended so the prior decisions' wire
+    /// discriminants are unchanged. A journal written before this variant
+    /// keeps the compiled-line fallback at `BloomRecord` construction.
+    RecordStageCatalog {
+        /// The bloom the catalog is recorded on.
+        bloom: BloomId,
+        /// The catalog admission resolved — the compiled line when the spec
+        /// sealed none, otherwise the sealed value.
+        catalog: StageCatalog,
     },
 }

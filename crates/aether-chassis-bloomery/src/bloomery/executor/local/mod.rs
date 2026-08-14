@@ -82,6 +82,7 @@ pub mod mock_lane;
 mod orphan;
 mod process_runner;
 mod runner;
+mod session_reuse;
 
 pub use backend::LocalExecutor;
 pub use error::LocalExecutorError;
@@ -89,6 +90,7 @@ pub use lane_program::{DEFAULT_LANE_PROGRAM, LaneProgram};
 pub use orphan::OrphanedRun;
 pub use process_runner::{CaptureIdentity, ProcessTransformRunner};
 pub use runner::{CapturedObjects, RunLifecycle, RunProcess, RunSpec, TransformRunner};
+pub use session_reuse::{AcquireRequest, ReusePlan, SessionReuse};
 
 #[cfg(test)]
 pub mod testing;

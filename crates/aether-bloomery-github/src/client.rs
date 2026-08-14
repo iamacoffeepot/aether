@@ -330,6 +330,18 @@ pub trait GitDataApi {
     /// A transport fault or an error status.
     fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GithubError>;
 
+    /// Whether `ancestor` is reachable from `commit` — the ancestry an
+    /// observation uses to refuse a stale or sideways mainline head (#4938).
+    ///
+    /// Equal shas are ancestors of themselves. A missing object or a
+    /// transport fault is an error, not a silent `false`: the caller would
+    /// otherwise treat an unreachable compare as a divergence and refuse a
+    /// head it could not actually classify.
+    ///
+    /// # Errors
+    /// A transport fault or an error status (including a 404 for an unknown sha).
+    fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool, GithubError>;
+
     /// Merge commit `head` into branch `base` server-side, both in the short
     /// `heads/…` / branch-name form the merge endpoint takes.
     ///
@@ -949,6 +961,8 @@ impl GhMergeCommit {
 #[derive(Deserialize)]
 struct GhCompare {
     #[serde(default)]
+    status: String,
+    #[serde(default)]
     files: Vec<GhCompareFile>,
 }
 
@@ -1311,6 +1325,18 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         let response = self.request(Method::Get, self.git_url(&format!("commits/{sha}")), None)?;
         let gh: GhCommit = decode(&response)?;
         Ok(gh.into_git_commit())
+    }
+
+    fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool, GithubError> {
+        if ancestor == commit {
+            return Ok(true);
+        }
+        // `ahead` / `identical`: `commit` contains `ancestor`. `behind` is
+        // the stale-ancestor case #4938 refuses. `diverged` is a rewrite of
+        // the live ref; observation asks this both ways and follows it.
+        let response = self.request(Method::Get, self.compare_url(ancestor, commit), None)?;
+        let compared: GhCompare = decode(&response)?;
+        Ok(matches!(compared.status.as_str(), "ahead" | "identical"))
     }
 
     fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GithubError> {

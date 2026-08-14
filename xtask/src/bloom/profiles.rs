@@ -147,7 +147,10 @@ mod tests {
         assert_eq!(override_value["reasoning_effort"], "High");
         assert_eq!(resolved.forecast, Some(Forecast::default()));
         let table = &resolved.configs[1].1;
-        assert!(table["rows"].as_array().is_some_and(|rows| !rows.is_empty()), "standard table carries rows: {table}");
+        assert!(
+            table["rows"].as_object().is_some_and(|rows| rows.contains_key("claude-opus-5")),
+            "standard table is keyed by model: {table}"
+        );
     }
 
     #[test]

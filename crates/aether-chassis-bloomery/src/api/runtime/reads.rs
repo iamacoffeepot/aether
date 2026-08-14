@@ -2,7 +2,7 @@
 //! dispatch to a peer cap and defer, so what lives here is the rendering half:
 //! turning the store's and the artifacts cap's replies into HTTP responses.
 
-use aether_bloomery::{Decisions, Event, ReplayJournalResult};
+use aether_bloomery::{Event, ReplayJournalResult, decode_recorded_decisions};
 use aether_data::wire::from_bytes;
 use aether_http::HttpServerResponse;
 
@@ -26,13 +26,10 @@ pub(super) fn journal_response(result: ReplayJournalResult) -> HttpServerRespons
                         );
                     }
                 };
-                let decisions = match from_bytes::<Decisions>(&record.decisions) {
+                let decisions = match decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref()) {
                     Ok(decisions) => decisions,
                     Err(error) => {
-                        return error_response(
-                            500,
-                            &format!("journal record {} decision decode failed: {error}", record.sequence),
-                        );
+                        return error_response(500, &format!("journal record {} {error}", record.sequence));
                     }
                 };
                 entries.push(JournalEntry {

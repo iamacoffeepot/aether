@@ -28,6 +28,21 @@ use super::kinds::{
 };
 use crate::bloomery::SourceShell;
 
+/// Whether the live head is something mainline may follow (#4938).
+///
+/// A descendant (or equal, or the genesis bind) is a git fast-forward and
+/// is followable. A strict ancestor is the stale-boot case and is not —
+/// recording it would pin `observed` to a commit the repository has left.
+/// An unrelated head is a rewrite of the live ref: refusing it leaves
+/// `mainline` and `observed` on a commit the remote no longer has, and
+/// every later poll classifies the new tip as sideways forever. Follow it.
+fn observation_is_followable(shell: &SourceShell, from: &Digest, head: &Digest) -> Result<bool, String> {
+    if shell.is_fast_forward(from, head).map_err(|error| error.to_string())? {
+        return Ok(true);
+    }
+    shell.is_fast_forward(head, from).map(|ancestor| !ancestor).map_err(|error| error.to_string())
+}
+
 /// Decode one `aether_data::wire`-encoded [`WorkpieceId`] per entry, or a
 /// [`ClaimResult::Err`] naming the first decode failure.
 fn decode_workpieces(encoded: &[Vec<u8>]) -> Result<Vec<WorkpieceId>, ClaimResult> {
@@ -86,12 +101,18 @@ impl SourceCapabilityState {
     /// (#4677) — an observation decided against a partial snapshot advances
     /// mainline out from under a land the replay has not folded yet.
     #[must_use]
-    pub fn observe_mainline_head(&self) -> ObserveMainlineResult {
-        match self.shell.observe_mainline_head() {
-            Ok(head) => match to_vec(&head) {
-                Ok(head) => ObserveMainlineResult::Ok { head },
-                Err(error) => ObserveMainlineResult::Err { error: error.to_string() },
-            },
+    pub fn observe_mainline_head(&self, relative_to: &[u8]) -> ObserveMainlineResult {
+        let head = match self.shell.observe_mainline_head() {
+            Ok(head) => head,
+            Err(error) => return ObserveMainlineResult::Err { error: error.to_string() },
+        };
+        let from = from_bytes(relative_to).unwrap_or(aether_bloomery::Snapshot::GENESIS_MAINLINE);
+        let fast_forward = match observation_is_followable(&self.shell, &from, &head) {
+            Ok(fast_forward) => fast_forward,
+            Err(error) => return ObserveMainlineResult::Err { error },
+        };
+        match to_vec(&head) {
+            Ok(head) => ObserveMainlineResult::Ok { head, fast_forward },
             Err(error) => ObserveMainlineResult::Err { error: error.to_string() },
         }
     }
@@ -494,9 +515,9 @@ impl NativeActor for SourceCapability {
     fn on_observe_mainline(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
-        _mail: ObserveMainline,
+        mail: ObserveMainline,
     ) -> ObserveMainlineResult {
-        state.observe_mainline_head()
+        state.observe_mainline_head(&mail.relative_to)
     }
 
     #[allow(clippy::needless_pass_by_value)]
