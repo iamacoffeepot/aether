@@ -41,10 +41,11 @@ fn seeded_policy_path() -> PathBuf {
 
 #[test]
 fn the_seeded_repository_policy_parses_and_guards_itself() {
-    // Tripwire: the strict parser fails closed, so a malformed edit to the real
-    // policy file would refuse every admission — this test is where that failure
-    // is loud. The guarded paths pin the constitutional carve-outs (including the
-    // policy file's own self-listing) against an accidental edit.
+    // Tripwire: the shipped fallback policy and the loader that guards it can
+    // never drift apart silently. The strict parser fails closed, so a malformed
+    // edit to the real file would refuse every admission — this test is where
+    // that failure is loud. The guarded paths pin the constitutional carve-outs
+    // (including the policy file's own self-listing) against an accidental edit.
     let policy = load_policy(&seeded_policy_path()).expect("seeded policy parses");
     for guarded in [
         "approval-policy.toml",
@@ -60,6 +61,27 @@ fn the_seeded_repository_policy_parses_and_guards_itself() {
     // The submitted-and-trusted trees still advance on their own.
     assert_eq!(policy.resolve_surface(&["docs/guide/recipes/x.md".to_owned()]), Tier::Auto);
     assert_eq!(policy.resolve_surface(&["crates/aether-kit-commons/src/lib.rs".to_owned()]), Tier::Auto);
+
+    // Mid-segment wildcards the original report worried the grammar would
+    // refuse. They must survive the file loader at the tiers the file writes.
+    // `crates/*/Cargo.toml` is more restrictive than the default, so an exact
+    // crate manifest resolves human. `crates/aether-test-fixtures-*/**` is
+    // auto, but a richer wildcard cannot prove coverage, so set-sound
+    // resolution includes the judge default and a fixtures path does not
+    // resolve auto — the pin is that the loaded rule is still auto.
+    assert!(
+        policy.rules.iter().any(|rule| rule.glob == "crates/*/Cargo.toml" && rule.tier == Tier::Human),
+        "crates/*/Cargo.toml must load as human",
+    );
+    assert!(
+        policy.rules.iter().any(|rule| rule.glob == "crates/aether-test-fixtures-*/**" && rule.tier == Tier::Auto),
+        "crates/aether-test-fixtures-*/** must load as auto",
+    );
+    assert_eq!(
+        policy.resolve_surface(&["crates/x/Cargo.toml".to_owned()]),
+        Tier::Human,
+        "crates/*/Cargo.toml must keep crate manifests at the owner",
+    );
 }
 
 /// A `Completeness` with every check satisfied — the base a completeness test
