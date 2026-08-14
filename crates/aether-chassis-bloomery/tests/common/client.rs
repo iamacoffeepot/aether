@@ -20,34 +20,8 @@ use aether_data::{Kind, MailboxId};
 use aether_rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
 use serde::Serialize;
 
-/// Connect to the bin on `port`, retrying until it has bound.
-///
-/// # Panics
-/// The bin never bound the port inside the connect deadline.
-pub fn connect(port: u16) -> TcpStream {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(stream) => {
-                stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-                return stream;
-            }
-            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
-            Err(error) => panic!("could not reach the bloomery bin on port {port}: {error}"),
-        }
-    }
-}
-
-/// Handshake as a client peer named `client_name`.
-///
-/// # Panics
-/// The bin answered something other than a matching `HelloAck`.
-pub fn handshake(stream: &mut TcpStream, client_name: &str) {
-    try_handshake(stream, client_name).unwrap_or_else(|why| panic!("handshake failed: {why}"));
-}
-
-/// [`handshake`], reporting a refusal instead of panicking — the fallible half
-/// [`connect_and_handshake`] retries on.
+/// Handshake as a client peer named `client_name`, reporting a refusal instead
+/// of panicking — the fallible half [`connect_and_handshake`] retries on.
 fn try_handshake(stream: &mut TcpStream, client_name: &str) -> Result<(), String> {
     let hello = WireFrame::Hello(Hello {
         wire_version: WIRE_VERSION,

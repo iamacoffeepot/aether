@@ -35,6 +35,47 @@ reasoning_effort = "High"
 agent = { harness = "Claude", model = "claude-sonnet-5" }
 reasoning_effort = "Medium"
 
+# The seat bundles below key every stage `is_model_lane` recognizes:
+# `Construct`, its `Refine` repair re-entry, the ADR-0189 `Reconcile`
+# fold-conflict repair, and the two review positions. That is the whole set
+# `ModelOverride::validate` admits at the seal door, and the compiled
+# `StageCatalog::line()` default for all five is muse — so a seat left unkeyed
+# dispatches muse there, and the seats are enumerated rather than carried by a
+# member-wide floor that says nothing about which model sits where. Muse is
+# retired from these active seats, not from the catalog: it remains the compiled
+# default a seal with no override still resolves, and stays selectable by raw
+# config or a profile that names it.
+#
+# Effort is pinned only on the seats that name one; the rest keep their stage's
+# calibrated tier.
+
+# Claude in every seat — the standing posture, which accepts same-model judging.
+[model_overrides.claude-every-seat.per_stage]
+Construct = { agent = { harness = "Claude", model = "claude-opus-5" } }
+Refine = { agent = { harness = "Claude", model = "claude-opus-5" } }
+Reconcile = { agent = { harness = "Claude", model = "claude-opus-5" } }
+Review = { agent = { harness = "Claude", model = "claude-opus-5" } }
+AggregateReview = { agent = { harness = "Claude", model = "claude-opus-5" } }
+
+# Opus writes, Grok judges. The judge is not the contestant's model, so the
+# independence the muse critic supplied implicitly is an explicit property of
+# the bundle. An override applied per bloom when one warrants an independent
+# judge, not the default matrix.
+[model_overrides.cross-judge-opus-construct.per_stage]
+Construct = { agent = { harness = "Claude", model = "claude-opus-5" } }
+Refine = { agent = { harness = "Claude", model = "claude-opus-5" } }
+Reconcile = { agent = { harness = "Claude", model = "claude-opus-5" } }
+Review = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = "High" }
+AggregateReview = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = "High" }
+
+# The mirror: Grok writes, Opus judges.
+[model_overrides.cross-judge-grok-construct.per_stage]
+Construct = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = "High" }
+Refine = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = "High" }
+Reconcile = { agent = { harness = "Grok", model = "grok-4.6" }, reasoning_effort = "High" }
+Review = { agent = { harness = "Claude", model = "claude-opus-5" } }
+AggregateReview = { agent = { harness = "Claude", model = "claude-opus-5" } }
+
 [forecasts.none]
 predicted_tokens = 0
 predicted_worker_secs = 0
@@ -47,5 +88,20 @@ forecast = "none"
 
 [profiles.sonnet-medium]
 model_override = "sonnet-medium"
+price_table = "standard"
+forecast = "none"
+
+[profiles.claude-every-seat]
+model_override = "claude-every-seat"
+price_table = "standard"
+forecast = "none"
+
+[profiles.cross-judge-opus-construct]
+model_override = "cross-judge-opus-construct"
+price_table = "standard"
+forecast = "none"
+
+[profiles.cross-judge-grok-construct]
+model_override = "cross-judge-grok-construct"
 price_table = "standard"
 forecast = "none"
