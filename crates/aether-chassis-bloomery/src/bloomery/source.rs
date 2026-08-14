@@ -362,13 +362,6 @@ impl SourceShell {
         self.backend.complete_transfer(predecessor, successor, ref_kind)
     }
 
-    /// Idempotent per-ref release completion: sweep a tombstoned ref (`None`
-    /// holder), release a ref held by `Some(bloom)`, or — the ADR-0179 operator
-    /// path — release one orphaned ref against its expected holder.
-    ///
-    /// # Errors
-    /// A transport or backend fault, distinct from every clean
-    /// [`ClaimReleaseOutcome`].
     /// Delete `bloom`'s candidate, integration, and checkpoint refs. Claim refs
     /// and the landing branch are spared (ADR-0150 — claims have their own
     /// release reactor).
@@ -379,6 +372,13 @@ impl SourceShell {
         self.backend.prune_working_refs(bloom)
     }
 
+    /// Idempotent per-ref release completion: sweep a tombstoned ref (`None`
+    /// holder), release a ref held by `Some(bloom)`, or — the ADR-0179 operator
+    /// path — release one orphaned ref against its expected holder.
+    ///
+    /// # Errors
+    /// A transport or backend fault, distinct from every clean
+    /// [`ClaimReleaseOutcome`].
     pub fn complete_release(
         &self,
         expected_holder: Option<&BloomId>,
