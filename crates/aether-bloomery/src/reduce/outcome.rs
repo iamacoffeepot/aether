@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
     AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, IntegrateError,
-    LandError, LandingRejectedError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealError,
-    SupersedeError, VerifyFailedError,
+    LandError, LandingRejectedError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError,
+    SealError, SupersedeError, VerifyFailedError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -509,6 +509,25 @@ pub enum Outcome {
     },
     /// An operator-supplied repair was refused.
     OperatorRepairRejected(OperatorRepairError),
+    /// A bloom's dispatch was put on the operator brake (#4976). Everything
+    /// already in flight keeps running and keeps journaling; nothing new goes
+    /// out until it is released.
+    BloomHeld {
+        /// The frozen bloom.
+        bloom: BloomId,
+    },
+    /// The operator brake came off (#4976), and the dispatches the hold
+    /// swallowed were re-derived from the record and sent.
+    BloomReleased {
+        /// The bloom let go.
+        bloom: BloomId,
+        /// The workpieces dispatched on the way out, in workpiece order. Empty
+        /// when the hold swallowed nothing — a bloom held and released while
+        /// every lap it had was still running owes no dispatch.
+        dispatched: Vec<WorkpieceId>,
+    },
+    /// An operator hold or release was refused.
+    OperatorHoldRejected(OperatorHoldError),
 }
 
 impl Outcome {
@@ -521,7 +540,7 @@ impl Outcome {
     /// the moment a third override refusal is appended.
     #[must_use]
     pub const fn is_refused_override(&self) -> bool {
-        matches!(self, Self::AdjudicationRejected(_) | Self::OperatorRepairRejected(_))
+        matches!(self, Self::AdjudicationRejected(_) | Self::OperatorRepairRejected(_) | Self::OperatorHoldRejected(_))
     }
 }
 

@@ -16,8 +16,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence, EvidenceKind,
-    OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs, StageCatalog, VerifiedTree,
-    VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
+    OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs, StageCatalog,
+    VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -263,6 +263,39 @@ pub struct BloomRecord {
     /// the same reason as [`adjudications`](Self::adjudications).
     #[serde(default)]
     pub operator_repairs: Vec<OperatorRepair>,
+    /// The operator hold currently on this bloom (#4976), or `None` while it
+    /// dispatches normally.
+    ///
+    /// The brake for a bloom that looks wrong but has not stopped: while it is
+    /// set the reducer emits no [`Decision::DispatchAttempt`] for this bloom, and
+    /// every other fact — lane completions, verify results, fold outcomes —
+    /// reduces exactly as it always did, so the work already running lands in the
+    /// journal instead of being stranded by a killed coordinator.
+    ///
+    /// Bloom-level and flat: one hold, no per-member scope, no priority, no
+    /// timed resume. It composes with the review park (`review_park`) rather than
+    /// standing in for it — holding a parked bloom leaves the park where it was,
+    /// and releasing one does not answer it. Journal-derived and replay-rebuilt;
+    /// defaulted so a journal written before the brake existed still decodes.
+    #[serde(default)]
+    pub operator_hold: Option<OperatorHold>,
+    /// The workpieces this bloom owes a dispatch, because the hold swallowed the
+    /// one their cursor move earned (#4976).
+    ///
+    /// Recorded for the reason [`wedged`](Self::wedged) is, and the reason is the
+    /// same sentence: a workpiece whose worker is still running and one whose
+    /// dispatch was swallowed sit at the same cursor. A release that read only
+    /// cursors would either strand the swallowed dispatch or put a second worker
+    /// on a running one, so what is derived at release time is the dispatch (from
+    /// the cursor, the catalog, and the configuration as they stand then) while
+    /// the *set* is recorded as it happens.
+    ///
+    /// A workpiece leaves it implicitly, when the dispatch it names actually goes
+    /// out — the same shape as leaving `wedged` on a cursor move, and the reason
+    /// the release needs no clearing decision of its own. Journal-derived and
+    /// replay-rebuilt; defaulted like its sibling.
+    #[serde(default)]
+    pub deferred_dispatches: BTreeSet<WorkpieceId>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -448,6 +481,15 @@ impl Snapshot {
             Decision::RecordWedge { bloom, workpiece, wedge } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.wedged.insert(workpiece.clone(), *wedge);
+                    // A wedged workpiece is owed nothing (#4976). It spent its
+                    // budget, and a wedge is the reducer's statement that it
+                    // stops dispatching — so a release must not hand it the lap
+                    // the hold happened to be sitting on, which would make the
+                    // brake a retry grant wearing a different name. The doors
+                    // that do hand a wedged workpiece attempts (a grant, an
+                    // operator repair) move its cursor, and that is what puts it
+                    // back in the line.
+                    record.deferred_dispatches.remove(workpiece);
                 }
             }
             Decision::DispatchAttempt { .. }
@@ -514,6 +556,9 @@ impl Snapshot {
             Decision::RecordCompositionFinding { .. }
             | Decision::RecordAdjudication { .. }
             | Decision::RecordOperatorRepair { .. } => self.apply_composition_effect(effect),
+            Decision::RecordOperatorHold { .. }
+            | Decision::RecordOperatorRelease { .. }
+            | Decision::DeferDispatch { .. } => self.apply_operator_hold_effect(effect),
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;
@@ -588,6 +633,42 @@ impl Snapshot {
         }
     }
 
+    /// Fold the three decisions that write the operator brake (#4976): raising
+    /// it, dropping it, and the deferral one raised hold records each time it
+    /// swallows a dispatch.
+    ///
+    /// Split out of [`apply_effect`](Self::apply_effect) for the reason its
+    /// siblings are: they are one mechanism — a flag, its clear, and the ledger
+    /// of what the flag cost — and that only reads as one when they sit together.
+    /// A raise that forgot the flag, or a deferral recorded against no hold,
+    /// would each look correct alone.
+    fn apply_operator_hold_effect(&mut self, effect: &Decision) {
+        match effect {
+            Decision::RecordOperatorHold { bloom, hold } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.operator_hold = Some(hold.clone());
+                }
+            }
+            // The deferrals are left standing rather than cleared here: the
+            // release emits the dispatches beside this effect, and each of those
+            // is what removes its own entry (see `apply_dispatch_effect`). A
+            // release that cleared the set itself would erase a workpiece whose
+            // dispatch the same reduction could not rebuild — an inherited claim
+            // holding no cursor — and lose it silently.
+            Decision::RecordOperatorRelease { bloom, .. } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.operator_hold = None;
+                }
+            }
+            Decision::DeferDispatch { bloom, workpiece } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.deferred_dispatches.insert(workpiece.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Fold the catalog a seal recorded (#4944). Split out of
     /// [`apply_effect`](Self::apply_effect) so adding the arm does not blow
     /// the parent match's line budget.
@@ -613,6 +694,17 @@ impl Snapshot {
     /// match. Any other decision is a no-op here, and an unknown bloom is
     /// ignored exactly as every other record-scoped arm ignores one.
     fn apply_dispatch_effect(&mut self, effect: &Decision) {
+        // A work order that actually goes out settles whatever the hold owed
+        // this workpiece, so the deferral leaves the set here rather than through
+        // a clearing decision — the same shape as `AdvanceStage` clearing a
+        // wedge. That also makes it self-correcting: a member released and
+        // dispatched, held again, and deferred again re-enters the set on its own
+        // terms rather than carrying a stale entry.
+        if let Decision::DispatchAttempt { bloom, workpiece, .. } = effect
+            && let Some(record) = self.blooms.get_mut(bloom)
+        {
+            record.deferred_dispatches.remove(workpiece);
+        }
         let (bloom, key) = match effect {
             Decision::DispatchAttempt { bloom, workpiece, stage, .. } => {
                 (bloom, DispatchKey::Member { workpiece: workpiece.clone(), stage: *stage })
@@ -728,6 +820,8 @@ impl BloomRecord {
             composition_findings: Vec::new(),
             adjudications: Vec::new(),
             operator_repairs: Vec::new(),
+            operator_hold: None,
+            deferred_dispatches: BTreeSet::new(),
             superseded_by: None,
         }
     }

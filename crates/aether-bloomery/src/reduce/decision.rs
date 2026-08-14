@@ -11,9 +11,9 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::values::{
-    Adjudication, AgentProfile, CompositionFinding, ConfigRegistry, Evidence, MemberCandidate, OperatorRepair,
-    OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, ResolvedBloom, StageCatalog, Transformation,
-    VerifyProof, VerifyReuse, Wedge,
+    Adjudication, AgentProfile, CompositionFinding, ConfigRegistry, Evidence, MemberCandidate, OperatorHold,
+    OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, ResolvedBloom, StageCatalog,
+    Transformation, VerifyProof, VerifyReuse, Wedge,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -523,5 +523,60 @@ pub enum Decision {
         bloom: BloomId,
         /// The candidate, the workpiece it is for, and who supplied it.
         repair: OperatorRepair,
+    },
+    /// Put a bloom's dispatch on the operator brake (#4976) — see
+    /// [`BloomRecord::operator_hold`](crate::BloomRecord::operator_hold).
+    ///
+    /// The flag the dispatch guard reads. While it is set the reducer emits
+    /// [`Decision::DeferDispatch`] wherever it would have emitted a
+    /// [`Decision::DispatchAttempt`], and every other decision is unchanged — a
+    /// hold is a brake on new work, not a pause on the projection. Appended so
+    /// the prior decisions' wire discriminants are unchanged.
+    RecordOperatorHold {
+        /// The bloom whose dispatch is frozen.
+        bloom: BloomId,
+        /// Why, and by whom — journaled here rather than only on the fact,
+        /// because replay folds decisions alone (ADR-0190).
+        hold: OperatorHold,
+    },
+    /// Take the operator brake back off (#4976), clearing
+    /// [`BloomRecord::operator_hold`](crate::BloomRecord::operator_hold).
+    ///
+    /// A separate variant rather than an `Option` on its sibling so the
+    /// release's own reason and operator survive into the journal: a clear that
+    /// carried `None` would record that a bloom was let go and nothing about who
+    /// let it go. The dispatches the hold swallowed ride as ordinary
+    /// [`Decision::DispatchAttempt`] effects emitted beside this one. Appended so
+    /// the prior decisions' wire discriminants are unchanged.
+    RecordOperatorRelease {
+        /// The bloom being let go.
+        bloom: BloomId,
+        /// Why, and by whom.
+        release: OperatorHold,
+    },
+    /// Record that a held bloom owes `workpiece` the dispatch its cursor move
+    /// just earned (#4976) — see
+    /// [`BloomRecord::deferred_dispatches`](crate::BloomRecord::deferred_dispatches).
+    ///
+    /// Emitted in the [`Decision::DispatchAttempt`] slot of every cursor move
+    /// made while the bloom is held, so the pair a move emits stays a pair: the
+    /// advance, and what the reducer decided to do about dispatching it.
+    ///
+    /// Recorded rather than derived for the reason
+    /// [`Decision::RecordWedge`] is. A workpiece whose worker is still running
+    /// and one whose dispatch the hold swallowed sit at the same cursor, so the
+    /// cursor cannot tell them apart — and a release that could not tell them
+    /// apart would either strand the swallowed dispatch or put a second worker on
+    /// a running one. What is *not* recorded is the dispatch itself: the release
+    /// re-derives targets, catalog, profile, and configuration from the record as
+    /// it stands then, so a held bloom that moved on in some other way dispatches
+    /// where it actually is. It leaves the set the way a wedge leaves `wedged` —
+    /// implicitly, when the dispatch it names finally goes out. Appended so the
+    /// prior decisions' wire discriminants are unchanged.
+    DeferDispatch {
+        /// The held bloom.
+        bloom: BloomId,
+        /// The workpiece owed a dispatch once the hold lifts.
+        workpiece: WorkpieceId,
     },
 }

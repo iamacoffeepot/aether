@@ -450,6 +450,43 @@ pub enum OperatorRepairError {
     /// the same refusal
     /// [`AdjudicationError::UnapprovedMember`] makes, for the same reason.
     UnapprovedMember(WorkpieceId),
+    /// The bloom is on the operator brake (#4976). A repair's entire product is
+    /// the `Verify` dispatch it emits, and a held bloom emits none — so admitting
+    /// it would record a candidate, dispatch nothing, and answer the operator as
+    /// though their fix were being judged. Refused instead: release the bloom,
+    /// then repair it. Appended so the prior refusals keep their wire
+    /// discriminants.
+    Held,
+}
+
+/// Why an operator hold or release was refused (#4976).
+///
+/// One enum for both doors because they are one mechanism with two edges and
+/// they refuse for the same four reasons, of which the last two are each other's
+/// mirror. Splitting them would be two near-identical enums whose only real
+/// difference is which of [`AlreadyHeld`](Self::AlreadyHeld) /
+/// [`NotHeld`](Self::NotHeld) is reachable.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum OperatorHoldError {
+    /// No bloom with this id, or one past holding — a landed or superseded
+    /// bloom dispatches nothing there is anything left to freeze.
+    UnknownOrInactiveBloom,
+    /// The request states no reason. Refused rather than defaulted: a brake
+    /// pulled on a running bloom is an act no verdict produced, so a record of
+    /// it that says nothing is the whole failure.
+    BlankReason,
+    /// The request names no operator, so the record would not say who pulled it.
+    BlankOperator,
+    /// The bloom is already held. Refused rather than treated as a no-op so the
+    /// journal never carries a fact that changed nothing — and so a second hold
+    /// cannot quietly overwrite the reason the first one recorded, which is the
+    /// one thing a reader of a frozen bloom is looking for.
+    AlreadyHeld,
+    /// The bloom is not held, so there is no brake to take off. Refused for the
+    /// mirror reason: a release that clears nothing and dispatches nothing is a
+    /// meaningless fact, and admitting one would let a caller "release" a bloom
+    /// that was never frozen and read the `200` as proof it is running.
+    NotHeld,
 }
 
 /// A land refused because mainline had moved off the bloom's sealed base.

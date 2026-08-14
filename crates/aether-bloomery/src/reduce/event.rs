@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    Adjudication, BloomSpec, CandidateRef, ConfigRegistry, Evidence, OperatorRepair, OrphanClaimRelease,
+    Adjudication, BloomSpec, CandidateRef, ConfigRegistry, Evidence, OperatorHold, OperatorRepair, OrphanClaimRelease,
     OrphanClaimReleaseCompletion, ResolutionClaim, Statement, VerifyFailureSet,
 };
 
@@ -416,6 +416,44 @@ pub enum Fact {
         bloom: BloomId,
         /// The candidate, the workpiece it is for, and who supplied it.
         repair: OperatorRepair,
+    },
+    /// An operator put a bloom's dispatch on the brake (#4976) — the move for a
+    /// bloom that is *suspect* rather than stopped.
+    ///
+    /// The other operator moves all act on a bloom that has already run out of
+    /// road. This one acts before that: it freezes new dispatch while the laps
+    /// already running finish and journal normally, so the choice stops being
+    /// "watch it spend against a refusal that will never clear, or kill the
+    /// coordinator and strand what is in flight".
+    ///
+    /// A hold gates [`Decision::DispatchAttempt`](crate::Decision::DispatchAttempt)
+    /// and nothing else. Claims, budgets, findings, and approval tiers are
+    /// untouched, and it composes with the review park rather than replacing it:
+    /// holding a parked bloom leaves the park exactly where it was.
+    ///
+    /// Appended past [`Fact::OperatorRepair`] so every prior fact keeps its wire
+    /// discriminant.
+    OperatorHold {
+        /// The bloom whose dispatch is frozen.
+        bloom: BloomId,
+        /// Why, and by whom.
+        hold: OperatorHold,
+    },
+    /// An operator took the brake back off (#4976).
+    ///
+    /// Reducing this clears the flag and re-derives what is due: every workpiece
+    /// whose dispatch the hold swallowed is dispatched from the cursor it is
+    /// sitting at *now*. Nothing was stored at hold time to be replayed — the
+    /// release re-reads the record, so the work that went out is the work the
+    /// bloom is actually due, neither lost nor doubled.
+    ///
+    /// Appended past [`Fact::OperatorHold`] so every prior fact keeps its wire
+    /// discriminant.
+    OperatorRelease {
+        /// The bloom being let go.
+        bloom: BloomId,
+        /// Why, and by whom.
+        release: OperatorHold,
     },
 }
 

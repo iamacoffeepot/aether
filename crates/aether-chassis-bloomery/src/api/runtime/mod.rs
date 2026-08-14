@@ -378,6 +378,32 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `POST /blooms/{id}/hold` — freeze the bloom's dispatch while the laps
+    /// already running finish and journal normally (#4976).
+    #[http::route(Post, "/blooms/{id}/hold")]
+    fn on_hold(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = ApiCapabilityState::hold(&id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /blooms/{id}/release` — take the brake off and dispatch what the
+    /// hold owes, re-derived from the bloom's cursors (#4976).
+    #[http::route(Post, "/blooms/{id}/release")]
+    fn on_release(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = ApiCapabilityState::release(&id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
     /// `POST /blooms/{id}/answer/{question}` — adopt a signed answer to the
     /// parked question `{question}` names. The question is a path segment
     /// because the signature is bound to it (ADR-0182).

@@ -282,7 +282,16 @@ impl Topic {
             // `DispatchAggregateVerify` for a repair — so a topic of its own
             // would enqueue rows nothing drains.
             | Decision::RecordAdjudication { .. }
-            | Decision::RecordOperatorRepair { .. } => None,
+            | Decision::RecordOperatorRepair { .. }
+            // Snapshot-only: the operator brake is a flag the reducer reads and
+            // a set it keeps (#4976). What a hold does is *withhold* an outbox
+            // row, so giving either edge a topic of its own would enqueue work
+            // for the one act whose entire content is that no work goes out; and
+            // the dispatches a release owes ride as ordinary `DispatchAttempt`
+            // effects emitted beside it, on the topic they always had.
+            | Decision::RecordOperatorHold { .. }
+            | Decision::RecordOperatorRelease { .. }
+            | Decision::DeferDispatch { .. } => None,
         }
     }
 }

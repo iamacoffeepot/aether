@@ -6,7 +6,7 @@
 use aether_actor::Manual;
 use aether_bloomery::{
     Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, Disposition, Event, Fact, IdempotencyKey,
-    OperatorRepair, Outcome, Query, QueryResult, Statement, ViewDocument, WorkpieceId, digest_of,
+    OperatorHold, OperatorRepair, Outcome, Query, QueryResult, Statement, ViewDocument, WorkpieceId, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
@@ -16,7 +16,7 @@ use super::hex::{self, digest_from_hex, hex_encode};
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed, VerifyPending, admit};
 use crate::api::dto::{
-    AdjudicateRequest, GrantRequest, OutcomeView, ReleaseAcceptedView, RepairRequest, SupersedeRequest,
+    AdjudicateRequest, GrantRequest, HoldRequest, OutcomeView, ReleaseAcceptedView, RepairRequest, SupersedeRequest,
 };
 use crate::control::ControlCore;
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
@@ -168,6 +168,70 @@ impl ApiCapabilityState {
         });
 
         admit(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::OperatorRepair { bloom, repair } })
+    }
+
+    /// `POST /blooms/{id}/hold` — freeze the `{id}` bloom's dispatch (#4976).
+    ///
+    /// The brake for a bloom that looks wrong but has not stopped. Journal-first
+    /// like its siblings: the route appends `Fact::OperatorHold` and nothing
+    /// else. From there the reducer emits no `DispatchAttempt` for the bloom,
+    /// while every other fact — the laps already running, their verify verdicts,
+    /// the fold outcomes — reduces and journals exactly as before. That is the
+    /// difference between this and killing the coordinator, which strands what is
+    /// in flight and re-runs it at the next boot.
+    ///
+    /// A hold on a held bloom is refused rather than absorbed: a second one would
+    /// journal a fact that changed nothing and overwrite the reason the first
+    /// recorded.
+    pub(super) fn hold(id: &str, body: &[u8]) -> Routed {
+        Self::brake(id, body, "hold", |bloom, hold| Fact::OperatorHold { bloom, hold })
+    }
+
+    /// `POST /blooms/{id}/release` — take the `{id}` bloom off the brake
+    /// (#4976).
+    ///
+    /// The reducer clears the flag and re-derives what is due, dispatching each
+    /// workpiece the hold owes from the cursor it is sitting at *now*. Nothing
+    /// was stored when the hold went on, so a bloom that moved while it was held
+    /// resumes where it actually is rather than where it was frozen.
+    ///
+    /// Releasing an unheld bloom is refused for the reason a second hold is: it
+    /// clears nothing and dispatches nothing, and a `200` on it would read as
+    /// proof the bloom is running.
+    pub(super) fn release(id: &str, body: &[u8]) -> Routed {
+        Self::brake(id, body, "release", |bloom, release| Fact::OperatorRelease { bloom, release })
+    }
+
+    /// The shared body of the two brake routes: parse, refuse a body that says
+    /// nothing, and admit the fact `edge` builds.
+    ///
+    /// Written once because the two edges differ in exactly one expression. The
+    /// route name is threaded into the default idempotency key so a hold and a
+    /// release stating identical words stay distinct acts.
+    fn brake(id: &str, body: &[u8], route: &str, edge: impl FnOnce(BloomId, OperatorHold) -> Fact) -> Routed {
+        let bloom = match digest_from_hex(id) {
+            Some(digest) => BloomId(digest),
+            None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
+        };
+        let request: HoldRequest = match hex::from_slice(body) {
+            Ok(request) => request,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid {route} body: {error}"))),
+        };
+        let HoldRequest { reason, operator, idempotency_key } = request;
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+
+        let hold = OperatorHold { reason, operator };
+        let key = idempotency_key.unwrap_or_else(|| {
+            format!(
+                "aether.bloomery.{route}:{}:{}",
+                hex_encode(bloom.0.as_bytes()),
+                hex_encode(digest_of(&hold).as_bytes())
+            )
+        });
+
+        admit(&Event { idempotency_key: IdempotencyKey(key), fact: edge(bloom, hold) })
     }
 
     /// `POST /blooms/{id}/answer/{question}` — adopt an answer to the parked
@@ -378,7 +442,10 @@ pub(super) fn query_response(result: QueryResult) -> HttpServerResponse {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use aether_bloomery::{AdjudicationError, Digest, OperatorRepairError, Outcome, WorkpieceId};
+    use aether_bloomery::{
+        AdjudicationError, BloomId, Digest, Event, Fact, OperatorHoldError, OperatorRepairError, Outcome, WorkpieceId,
+    };
+    use aether_data::wire::from_bytes;
 
     use super::{ApiCapabilityState, Routed, SupersedeRequest, admitted_response};
 
@@ -462,6 +529,73 @@ mod tests {
         // the override doors rather than a new blanket rule for every refusal
         // the reducer can return.
         assert_eq!(admitted_response(Outcome::Duplicate).status, 200);
+    }
+
+    // Tripwire (#4976): the brake routes state a reason and an operator or they
+    // are refused at the door, exactly as the other override routes are. A hold
+    // is an act no verdict produced, so a frozen bloom whose record says only
+    // that somebody stopped it is the failure the field exists to prevent — and
+    // one that says nothing about who stopped it is no better.
+    #[test]
+    fn a_brake_body_without_a_reason_or_an_operator_is_refused() {
+        let brake = |route: fn(&str, &[u8]) -> Routed, reason: &str, operator: &str| {
+            let body = serde_json::json!({ "reason": reason, "operator": operator }).to_string();
+            status(&route(BLOOM, body.as_bytes()))
+        };
+
+        for (label, route) in [
+            ("hold", ApiCapabilityState::hold as fn(&str, &[u8]) -> Routed),
+            ("release", ApiCapabilityState::release as fn(&str, &[u8]) -> Routed),
+        ] {
+            assert_eq!(brake(route, "   ", "eve"), Some(422), "{label}: a whitespace reason says nothing");
+            assert_eq!(brake(route, "wave-1 is stalled", ""), Some(422), "{label}: and it has to name who asked");
+            assert_eq!(brake(route, "wave-1 is stalled", "eve"), None, "{label}: a stated brake relays to the reducer");
+        }
+    }
+
+    // Tripwire (#4976): the two routes admit *different* facts, and a hold and a
+    // release stating identical words admit under different idempotency keys. A
+    // shared body type is what makes both mistakes possible — one copy-paste in
+    // the edge closure and `POST /release` would journal a second hold, or the
+    // content-derived default key would collapse a release onto the hold it
+    // undoes and discard it as a duplicate.
+    #[test]
+    fn hold_and_release_admit_distinct_facts_under_distinct_keys() {
+        let body = br#"{"reason":"wave-1 is stalled","operator":"eve"}"#;
+        let admitted = |routed: Routed| match routed {
+            Routed::Admit(admit) => from_bytes::<Event>(&admit.event).expect("the route encodes"),
+            _ => panic!("a stated brake body admits rather than replying"),
+        };
+
+        let held = admitted(ApiCapabilityState::hold(BLOOM, body));
+        let let_go = admitted(ApiCapabilityState::release(BLOOM, body));
+        let bloom = BloomId(Digest::from_bytes([0x11; 32]));
+
+        assert!(
+            matches!(&held.fact, Fact::OperatorHold { bloom: id, hold }
+                if *id == bloom && hold.reason == "wave-1 is stalled" && hold.operator == "eve"),
+            "got {:?}",
+            held.fact,
+        );
+        assert!(
+            matches!(&let_go.fact, Fact::OperatorRelease { bloom: id, release }
+                if *id == bloom && release.reason == "wave-1 is stalled" && release.operator == "eve"),
+            "got {:?}",
+            let_go.fact,
+        );
+        assert_ne!(held.idempotency_key, let_go.idempotency_key, "the same words on the two edges are two acts");
+    }
+
+    // Tripwire (#4976 / #4957): a refused brake answers `4xx` like every other
+    // refused override. `AlreadyHeld` and `NotHeld` are the ones that matter — a
+    // script that reads only the status would otherwise treat "this bloom was
+    // never frozen" as "this bloom is now running".
+    #[test]
+    fn a_refused_brake_answers_422() {
+        for error in [OperatorHoldError::AlreadyHeld, OperatorHoldError::NotHeld, OperatorHoldError::BlankReason] {
+            let outcome = Outcome::OperatorHoldRejected(error);
+            assert_eq!(admitted_response(outcome.clone()).status, 422, "{outcome:?} is a refused override");
+        }
     }
 
     #[test]

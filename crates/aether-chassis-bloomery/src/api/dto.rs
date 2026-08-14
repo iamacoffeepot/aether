@@ -230,6 +230,28 @@ pub struct RepairRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// `POST /blooms/{id}/hold` and `POST /blooms/{id}/release` body — the operator
+/// brake (#4976).
+///
+/// One shape for both routes because both edges say exactly the same two things
+/// and neither says anything else. A hold carries no member selector, no
+/// priority, and no expiry: it is bloom-level and flat, and the request that
+/// raises it looks like the request that drops it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HoldRequest {
+    /// Why the bloom is being frozen, or let go. Required and non-blank — a
+    /// brake pulled on a running bloom is an act no verdict produced, so a
+    /// record of it that says nothing is the whole failure. Blank is `422`.
+    pub reason: String,
+    /// Who is asking. Recorded as the decider; required and non-blank.
+    pub operator: String,
+    /// Override the admit idempotency key; defaults to the request's own
+    /// content under this route's name, so a resend is a duplicate rather than a
+    /// second brake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
 /// The reply to a write route: the reducer outcome the admitted event resolved
 /// to (decoded from the control core's wire bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
