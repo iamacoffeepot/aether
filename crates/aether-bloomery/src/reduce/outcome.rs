@@ -10,9 +10,10 @@ use aether_data::wire::{Error as WireError, from_bytes};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault, AggregateVerifyError,
-    AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, IntegrateError, LandError,
-    LandingRejectedError, OrphanClaimReleaseError, ResolveError, SealError, SupersedeError, VerifyFailedError,
+    AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
+    AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, IntegrateError,
+    LandError, LandingRejectedError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealError,
+    SupersedeError, VerifyFailedError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -480,6 +481,48 @@ pub enum Outcome {
         /// The re-woven tree the gates now run over.
         tree: Digest,
     },
+    /// An operator closed a bloom's named composition findings (#4957).
+    /// Appended so every prior outcome keeps its wire discriminant, like the
+    /// three below.
+    FindingsAdjudicated {
+        /// The bloom whose findings were closed.
+        bloom: BloomId,
+        /// The findings this adjudication closed, in the order it named them.
+        closed: Vec<Digest>,
+        /// Whether closing them let the composition proceed to its landing —
+        /// `false` when the bloom holds no weave to land, which is the state a
+        /// landing-refused composition wedges in and where the operator's next
+        /// move is a repair rather than a waiver.
+        proceeds_to_landing: bool,
+    },
+    /// An operator adjudication was refused.
+    AdjudicationRejected(AdjudicationError),
+    /// An operator-supplied repair candidate re-entered the workpiece's line at
+    /// `Verify` (#4957) — the ordinary gate run over someone else's lap.
+    OperatorRepairAccepted {
+        /// The bloom the repaired workpiece belongs to.
+        bloom: BloomId,
+        /// The repaired workpiece — a member, or the composition.
+        workpiece: WorkpieceId,
+        /// The candidate tree the gates now run over.
+        candidate: Digest,
+    },
+    /// An operator-supplied repair was refused.
+    OperatorRepairRejected(OperatorRepairError),
+}
+
+impl Outcome {
+    /// Whether this outcome is a refused manager override (#4957).
+    ///
+    /// The REST edge answers a refused override `422` rather than the `200`
+    /// every other write route answers its outcome with, so the two doors need
+    /// one place that says which outcomes those are. It lives here because the
+    /// vocabulary is this enum's: a route matching on variant names would drift
+    /// the moment a third override refusal is appended.
+    #[must_use]
+    pub const fn is_refused_override(&self) -> bool {
+        matches!(self, Self::AdjudicationRejected(_) | Self::OperatorRepairRejected(_))
+    }
 }
 
 #[cfg(test)]

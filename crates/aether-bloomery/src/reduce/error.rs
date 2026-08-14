@@ -385,6 +385,73 @@ pub enum OrphanClaimReleaseError {
     AlreadyCompleted(Digest),
 }
 
+/// Why an operator adjudication was refused (#4957).
+///
+/// The refusals split in two. Three are about the request saying nothing — a
+/// blank reason, a blank operator, a deferral naming no filed work — and exist
+/// because an override's whole product is its audit trail, so an empty one is a
+/// waiver nobody signed rather than a waiver with a default attached. The rest
+/// are about the request reaching past what an override may decide: findings the
+/// bloom never raised, and a membership that is not fully approved.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum AdjudicationError {
+    /// No bloom with this id, or one past adjudicating — a landed or superseded
+    /// bloom has no findings left to close.
+    UnknownOrInactiveBloom,
+    /// The adjudication states no reason. Refused rather than defaulted: the
+    /// reason is what the merged history names as the grounds for the waiver.
+    BlankReason,
+    /// The adjudication names no operator, so the record would not say who
+    /// decided.
+    BlankOperator,
+    /// A [`Disposition::Deferred`](crate::Disposition::Deferred) named issue
+    /// `0`, which is no issue. Deferring to nothing filed is how a waived
+    /// finding silently vanishes.
+    DeferredWithoutIssue,
+    /// The adjudication names no findings, so it closes nothing. An override
+    /// adjudicates findings; it is not a way to move a bloom past a gate that
+    /// raised none.
+    NoFindings,
+    /// The adjudication names a finding that is not open on this bloom — never
+    /// raised, or already closed by an earlier adjudication.
+    UnknownFinding(Digest),
+    /// A member's sealed approval does not bind its own subject, so letting the
+    /// bloom proceed would land work nobody approved (ADR-0181). An override
+    /// adjudicates findings and retry budgets, never approval tiers: a member
+    /// above `auto` keeps needing its signed statement, and no reason string
+    /// substitutes for one.
+    UnapprovedMember(WorkpieceId),
+}
+
+/// Why an operator-supplied repair was refused (#4957).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum OperatorRepairError {
+    /// The bloom is not known or not active — only a `Sealed` bloom runs a
+    /// line, so only one has a position a repair could re-enter.
+    UnknownOrInactiveBloom,
+    /// The repair states no reason.
+    BlankReason,
+    /// The repair names no operator.
+    BlankOperator,
+    /// The repair names a workpiece that is neither a member of the bloom nor
+    /// its composition. Repairing a stranger would add work the seal never
+    /// admitted, which is a seal's decision and an approval's, not an
+    /// override's.
+    NotAMember(WorkpieceId),
+    /// The member already carries a resolution claim: it passed its review and
+    /// is immutable (ADR-0191 §4). A defect found in it after that is filed as
+    /// new work, never repaired in place.
+    AlreadyResolved(WorkpieceId),
+    /// The workpiece is not wedged, so there is nothing stopped to restart.
+    /// Refused for the reason a grant is: a running workpiece already holds a
+    /// dispatched attempt, and a second one would put two workers on it.
+    NotWedged(WorkpieceId),
+    /// A member's sealed approval does not bind its own subject (ADR-0181) —
+    /// the same refusal
+    /// [`AdjudicationError::UnapprovedMember`] makes, for the same reason.
+    UnapprovedMember(WorkpieceId),
+}
+
 /// A land refused because mainline had moved off the bloom's sealed base.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BaseMismatch {

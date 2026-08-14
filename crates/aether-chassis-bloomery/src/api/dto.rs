@@ -25,7 +25,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "github")]
 use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind};
 use aether_bloomery::{
-    ConfigRegistry, Digest, Event, Forecast, Membership, Outcome, StageId, Statement, Workpiece, WorkpieceId,
+    CandidateRef, ConfigRegistry, Digest, Disposition, Event, Forecast, Membership, Outcome, StageId, Statement,
+    Workpiece, WorkpieceId,
 };
 
 use crate::bloomery::{AdrTouch, Completeness};
@@ -175,6 +176,56 @@ pub struct GrantRequest {
     /// same request is a no-op duplicate rather than a second grant. That also
     /// means a *deliberate* second grant of the same shape — the member wedged
     /// again and the operator is buying another round — has to name its own key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// `POST /blooms/{id}/adjudicate` body — the manager override's first move
+/// (#4957): close the composition findings the operator has read, with a stated
+/// reason, and let the bloom proceed to its landing.
+///
+/// The findings are named by the verdict artifact digest each carries. There is
+/// deliberately no workpiece field: an adjudication acts on the composition's
+/// findings channel, and a member that has passed its review is immutable
+/// (ADR-0191 §4), so there is no member for this body to reach.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdjudicateRequest {
+    /// The findings to close, by verdict artifact digest.
+    pub findings: Vec<Digest>,
+    /// Accepted as they stand, or deferred to a filed issue.
+    pub disposition: Disposition,
+    /// Why. Required and non-blank — the reason is what the landing proposal
+    /// quotes as the grounds for the waiver, so an absent one is refused (`422`)
+    /// rather than defaulted.
+    pub reason: String,
+    /// Who is adjudicating. Recorded as the decider; required and non-blank.
+    pub operator: String,
+    /// Override the admit idempotency key.
+    ///
+    /// The default is derived from the adjudication's own content, so re-POSTing
+    /// the same request is a no-op duplicate rather than a second waiver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// `POST /blooms/{id}/members/{workpiece}/repair` body — the manager override's
+/// second move (#4957): the candidate the operator pushed to the workpiece's
+/// candidate ref, offered to the ordinary gates.
+///
+/// The candidate is the (tree, commit) pair every candidate is in this
+/// vocabulary (ADR-0152): returned evidence binds the tree and the verifying
+/// lane checks out the commit, so naming one would leave the gate unable to do
+/// half its job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepairRequest {
+    /// The candidate the operator pushed.
+    pub candidate: CandidateRef,
+    /// Why the operator took the lap themselves. Required and non-blank.
+    pub reason: String,
+    /// Who supplied it. Required and non-blank.
+    pub operator: String,
+    /// Override the admit idempotency key; defaults to the repair's own content,
+    /// so a resend is a duplicate rather than a second dispatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
 }

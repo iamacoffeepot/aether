@@ -394,6 +394,17 @@ pub trait StoreBackend: Send {
     fn journal_holds_any(&mut self, keys: &[String]) -> rusqlite::Result<bool>;
     /// Read the whole journal, in sequence order — the recovery replay source.
     fn replay_journal(&mut self) -> rusqlite::Result<Vec<JournalRecord>>;
+    /// Read every journaled event's bytes, in sequence order — the facts alone,
+    /// without the recorded decisions replay folds (#4957).
+    ///
+    /// Separate from [`replay_journal`](Self::replay_journal) rather than a
+    /// projection of it, because the two answer different questions and fail
+    /// differently. Replay must refuse a row that records no decision (ADR-0190:
+    /// re-deciding it would rewrite history), which is the correct posture for
+    /// rebuilding a snapshot and the wrong one for a reader that only wants to
+    /// know what an operator said — a pre-ADR-0190 row would turn a landing into
+    /// a hard failure over a proposal-body sentence.
+    fn list_events(&mut self) -> rusqlite::Result<Vec<Vec<u8>>>;
 }
 
 /// A WAL-mode `SQLite` store. Opening runs the migrations idempotently, so
@@ -1177,6 +1188,12 @@ impl StoreBackend for SqliteStore {
                 decisions_schema: row.get(5)?,
             })
         })?;
+        rows.collect()
+    }
+
+    fn list_events(&mut self) -> rusqlite::Result<Vec<Vec<u8>>> {
+        let mut stmt = self.conn.prepare("SELECT event FROM journal ORDER BY sequence")?;
+        let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
         rows.collect()
     }
 }

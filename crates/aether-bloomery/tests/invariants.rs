@@ -16,12 +16,13 @@ mod common;
 use aether_bloomery::ConfigKind;
 use aether_bloomery::Decisions;
 use aether_bloomery::{
-    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, Artifact, AttemptCompletedError,
-    BloomId, BloomStatus, CandidateRef, CatalogError, ClaimRefKind, Decision, Digest, DispatchKey, Event, Evidence,
-    EvidenceKind, Fact, GrantAttemptsError, KeyId, LandError, LandingRejectedError, ORPHAN_CLAIM_RELEASE_WORDS,
-    Observation, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseError, Outcome, Provenance,
-    Question, ResolutionClaim, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, StageCatalog,
-    StageId, StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure,
+    Adjudication, AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
+    Artifact, AttemptCompletedError, BloomId, BloomStatus, CandidateRef, CatalogError, ClaimRefKind, ConfigRegistry,
+    Decision, Digest, DispatchKey, Disposition, Event, Evidence, EvidenceKind, Fact, GrantAttemptsError, KeyId,
+    LandError, LandingRejectedError, Membership, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OperatorRepair,
+    OperatorRepairError, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseError, Outcome,
+    Provenance, Question, ResolutionClaim, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot,
+    StageCatalog, StageId, StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure,
     VerifyFailureSet, grade, reduce,
 };
 use aether_bloomery::{BloomRecord, WorkpieceId};
@@ -37,7 +38,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// A set of distinct memberships named by their (distinct) revision seeds, so
 /// order-sensitivity is actually exercised.
-fn distinct_members() -> impl Strategy<Value = Vec<aether_bloomery::Membership>> {
+fn distinct_members() -> impl Strategy<Value = Vec<Membership>> {
     btree_set(1u8..60u8, 1..6).prop_map(|revisions: BTreeSet<u8>| {
         revisions.into_iter().map(|rev| membership(&format!("wp-{rev}"), rev)).collect()
     })
@@ -4125,4 +4126,328 @@ fn sibling_moved_folds_reopen_a_reconcile_round_while_a_standing_one_wedges() {
     assert_eq!(wedge.stage, StageId::Reconcile);
     assert_eq!(wedge.evidence, digest(99), "the wedge attaches the collision evidence a reader needs");
     assert!(!record.claims.contains_key(&workpiece("beta")), "the unfoldable claim stays revoked");
+}
+
+/// A failing composition review over `tree` whose verdict artifact is `detail`
+/// — the finding an operator later adjudicates, named apart from its siblings.
+fn review_refused(bloom: BloomId, key: &str, tree: u8, detail: u8) -> Event {
+    event(
+        key,
+        Fact::AggregateReviewCompleted {
+            bloom,
+            passed: false,
+            evidence: Evidence { subject: digest(tree), kind: EvidenceKind::ReviewFinding, detail: digest(detail) },
+            implicated: vec![workpiece("alpha")],
+        },
+    )
+}
+
+/// An operator adjudication of `findings`, accepted as they stand.
+fn adjudicated(bloom: BloomId, key: &str, findings: Vec<u8>) -> Event {
+    event(
+        key,
+        Fact::OperatorAdjudication {
+            bloom,
+            adjudication: Adjudication {
+                findings: findings.into_iter().map(digest).collect(),
+                disposition: Disposition::Accepted,
+                reason: "read the finding; it is a fixture nit and the tree is landable".into(),
+                operator: "iamacoffeepot".into(),
+            },
+        },
+    )
+}
+
+/// A bloom parked at its composition review's two-pass ceiling, with two
+/// distinct findings on the composition's channel: the first refusal's, and the
+/// delta-confirm's, which is the one the park raises.
+fn parked_at_the_review_ceiling() -> (Snapshot, BloomId) {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: claim("alpha", 10, 100) }));
+    let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
+    let (snapshot, _) = step(&snapshot, &review_refused(bloom, "refuse-1", 40, 70));
+    let (snapshot, _) = step(&snapshot, &weave_repaired(bloom, "weave-1", 40, 44, 45));
+    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v2", 44));
+    let (snapshot, _) = step(&snapshot, &review_refused(bloom, "refuse-2", 44, 71));
+    (snapshot, bloom)
+}
+
+// #4957 / ADR-0191 §4 — the manager override's first move. A bloom parked at
+// its composition review's ceiling has one finding left that no re-roll will
+// repair; an operator who has read it closes it with a stated reason and the
+// composition proceeds to its landing from the weave it already holds.
+//
+// Two tripwires ride together. The override must reach the *composition* and
+// nothing else: closing a finding is not a licence to re-open the members that
+// finding pointed at, so `assert_no_member_dispatch` is the same assertion the
+// ADR-0191 refusal paths carry — this door must not become the re-entry those
+// paths abolished. And closure must be derived rather than destructive: the
+// finding stays on the record, and what changes is that an adjudication names
+// it, so the journal still carries both the verdict and the decision to waive
+// it.
+#[test]
+fn an_adjudication_closes_the_finding_unparks_the_bloom_and_touches_no_member() {
+    let (parked, bloom) = parked_at_the_review_ceiling();
+    let before = parked.blooms.get(&bloom).unwrap();
+    assert_eq!(before.review_park, Some(digest(71)), "the delta-confirm's artifact is the parked question");
+    assert!(before.holds.contains(&digest(71)));
+    // The first refusal filed a finding and re-wove; the second spent the
+    // budget and parked, which holds its verdict artifact as the question
+    // instead of filing it. Both are the operator's to adjudicate.
+    assert_eq!(before.open_composition_findings().count(), 1, "the re-weaving refusal filed a finding");
+    let member_cursors = before.progress.clone();
+
+    // An adjudication of a finding this bloom never raised closes nothing: the
+    // override adjudicates findings, so it cannot invent one to waive.
+    assert!(matches!(
+        reduce(&parked, &adjudicated(bloom, "ghost", vec![99]), &ResolvedConfigs::default()).outcome,
+        Outcome::AdjudicationRejected(AdjudicationError::UnknownFinding(finding)) if finding == digest(99),
+    ));
+
+    let (after, decided) = step(&parked, &adjudicated(bloom, "adj", vec![70, 71]));
+
+    assert!(
+        matches!(decided.outcome, Outcome::FindingsAdjudicated { proceeds_to_landing: true, ref closed, .. }
+            if *closed == vec![digest(70), digest(71)]),
+        "got {:?}",
+        decided.outcome,
+    );
+    assert_no_member_dispatch(&decided, "an override closes a composition finding, it never re-opens a member");
+
+    let record = after.blooms.get(&bloom).unwrap();
+    assert_eq!(record.open_composition_findings().count(), 0, "the filed finding is closed");
+    assert_eq!(record.composition_findings.len(), 1, "and the verdict that raised it still stands on the record");
+    assert_eq!(record.adjudications.len(), 1, "the closure is a record of its own");
+    assert_eq!(record.adjudications[0].operator, "iamacoffeepot", "naming who decided");
+    assert_eq!(record.review_park, None, "the park is released");
+    assert!(!record.holds.contains(&digest(71)), "and so is the hold it raised");
+    assert_eq!(record.status, BloomStatus::Resolved, "the composition proceeds to its landing");
+    assert_eq!(record.claims.len(), 2, "every member's resolution stands untouched");
+    assert_eq!(record.progress.get(&workpiece("alpha")), member_cursors.get(&workpiece("alpha")), "alpha is untouched");
+    assert_eq!(record.progress.get(&workpiece("beta")), member_cursors.get(&workpiece("beta")), "beta is untouched");
+    assert_eq!(composition_cursor(record).stage, StageId::Land, "the composition is what moved");
+    assert!(record.integration.is_none(), "the weave is consumed by the resolve, as a passing review consumes it");
+    match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchLand { .. })) {
+        Some(Decision::DispatchLand { new_head, .. }) => assert_eq!(*new_head, digest(45), "landing the held weave"),
+        other => panic!("expected the land dispatch, got {other:?}"),
+    }
+}
+
+// #4957 — a deferral that names no filed issue is refused. Deferring a finding
+// to nothing filed is exactly how a waived defect silently vanishes, which is
+// the failure mode the disposition exists to prevent, so the reducer refuses it
+// rather than recording a waiver that points nowhere.
+#[test]
+fn a_deferral_naming_no_issue_is_refused() {
+    let (parked, bloom) = parked_at_the_review_ceiling();
+    let deferred = |issue: u64| {
+        event(
+            "defer",
+            Fact::OperatorAdjudication {
+                bloom,
+                adjudication: Adjudication {
+                    findings: vec![digest(71)],
+                    disposition: Disposition::Deferred { issue },
+                    reason: "filed forward".into(),
+                    operator: "iamacoffeepot".into(),
+                },
+            },
+        )
+    };
+
+    assert!(matches!(
+        reduce(&parked, &deferred(0), &ResolvedConfigs::default()).outcome,
+        Outcome::AdjudicationRejected(AdjudicationError::DeferredWithoutIssue),
+    ));
+    assert!(matches!(
+        reduce(&parked, &deferred(4957), &ResolvedConfigs::default()).outcome,
+        Outcome::FindingsAdjudicated { .. },
+    ));
+}
+
+// #4957 / ADR-0181 — Tripwire: an override adjudicates findings and retry
+// budgets, never approval tiers. Both doors refuse a bloom whose membership is
+// not fully approved rather than carrying it toward a landing, so no reason
+// string can stand in for the signed statement an above-`auto` member needs.
+//
+// The seal door already refuses such a membership, which is why this is worth
+// pinning: an override is the one act whose authority is an unsigned operator
+// identity, so it is the one place a record that reached this state by any
+// other route would convert "I read the findings" into "the approval was not
+// needed".
+#[test]
+fn an_override_refuses_a_bloom_whose_membership_is_not_approved() {
+    let unapproved = Membership {
+        workpiece: workpiece("alpha"),
+        scope_revision: digest(10),
+        configs: ConfigRegistry::default(),
+        // Bound to a digest that is not this member's subject — evidence for one
+        // digest says nothing about any other.
+        approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
+    };
+    let spec = draft(1, vec![unapproved]).seal();
+    let bloom = spec.id();
+    let mut snapshot = Snapshot::new(digest(1));
+    splice_bloom(&mut snapshot, &spec, BloomStatus::Sealed);
+
+    assert!(matches!(
+        reduce(&snapshot, &adjudicated(bloom, "adj", vec![70]), &ResolvedConfigs::default()).outcome,
+        Outcome::AdjudicationRejected(AdjudicationError::UnapprovedMember(ref wp)) if *wp == workpiece("alpha"),
+    ));
+
+    let repair = event(
+        "repair",
+        Fact::OperatorRepair {
+            bloom,
+            repair: OperatorRepair {
+                workpiece: workpiece("alpha"),
+                candidate: CandidateRef { tree: digest(60), checkout: digest(61) },
+                reason: "wrote the fix myself".into(),
+                operator: "iamacoffeepot".into(),
+            },
+        },
+    );
+    assert!(matches!(
+        reduce(&snapshot, &repair, &ResolvedConfigs::default()).outcome,
+        Outcome::OperatorRepairRejected(OperatorRepairError::UnapprovedMember(ref wp)) if *wp == workpiece("alpha"),
+    ));
+
+    // The refusal is about the approval, not about the shape of the request: an
+    // approved membership admits the very same adjudication shape (its own
+    // refusal is the absent finding, which is a different door).
+    let approved_spec = draft(1, vec![membership("alpha", 10)]).seal();
+    let mut approved_snapshot = Snapshot::new(digest(1));
+    splice_bloom(&mut approved_snapshot, &approved_spec, BloomStatus::Sealed);
+    assert!(matches!(
+        reduce(&approved_snapshot, &adjudicated(approved_spec.id(), "adj-2", vec![70]), &ResolvedConfigs::default())
+            .outcome,
+        Outcome::AdjudicationRejected(AdjudicationError::UnknownFinding(_)),
+    ));
+}
+
+// #4957 — the manager override's second move. A wedged member re-enters at
+// `Verify` on the candidate the operator pushed, and the gates still run over
+// it: the effect is a `Verify` dispatch, never a resolution claim, so the
+// mechanical suite judges the operator's tree exactly as it judges a lane's and
+// a bad operator fix bounces where a bad lane's does.
+//
+// Tripwires. The dispatch must be a `Verify` one and the member must gain no
+// claim — a repair that integrated directly would be a waiver wearing a
+// candidate's clothes. The operator must be recorded, since the dispatch it
+// produces is otherwise indistinguishable from a lane's. And the member's spent
+// counters must ride across unchanged: an operator writing the candidate buys a
+// lap, never a fresh budget.
+#[test]
+fn an_operator_repair_re_enters_a_wedged_member_at_verify_with_the_gates_intact() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let fail = |key: &str| {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: false,
+                evidence: attempt_evidence(),
+                candidate: None,
+            },
+        )
+    };
+    let (snapshot, _) = step(&snapshot, &fail("c-1"));
+    let (wedged, decided) = step(&snapshot, &fail("c-2"));
+    assert!(matches!(decided.outcome, Outcome::AttemptWedged { stage: StageId::Construct, .. }));
+
+    let repair = |key: &str, workpiece: WorkpieceId, reason: &str| {
+        event(
+            key,
+            Fact::OperatorRepair {
+                bloom,
+                repair: OperatorRepair {
+                    workpiece,
+                    candidate: CandidateRef { tree: digest(60), checkout: digest(61) },
+                    reason: reason.into(),
+                    operator: "iamacoffeepot".into(),
+                },
+            },
+        )
+    };
+
+    // A blank reason is refused rather than defaulted: the record is the whole
+    // product of an override, and one that says nothing records that a person
+    // intervened and nothing about why.
+    assert!(matches!(
+        reduce(&wedged, &repair("blank", workpiece("wp"), "   "), &ResolvedConfigs::default()).outcome,
+        Outcome::OperatorRepairRejected(OperatorRepairError::BlankReason),
+    ));
+    // A workpiece that is not stopped has nothing to restart, and a stranger to
+    // the membership is work the seal never admitted.
+    assert!(matches!(
+        reduce(&snapshot, &repair("running", workpiece("wp"), "mid-flight"), &ResolvedConfigs::default()).outcome,
+        Outcome::OperatorRepairRejected(OperatorRepairError::NotWedged(_)),
+    ));
+    assert!(matches!(
+        reduce(&wedged, &repair("stranger", workpiece("ghost"), "not a member"), &ResolvedConfigs::default()).outcome,
+        Outcome::OperatorRepairRejected(OperatorRepairError::NotWedged(_)),
+    ));
+
+    let (after, decided) = step(&wedged, &repair("repair", workpiece("wp"), "one-line fix, cheaper than a lap"));
+
+    assert!(
+        matches!(decided.outcome, Outcome::OperatorRepairAccepted { ref workpiece, candidate, .. }
+            if workpiece.0 == "wp" && candidate == digest(60)),
+        "got {:?}",
+        decided.outcome,
+    );
+    match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchAttempt { .. })) {
+        Some(Decision::DispatchAttempt { stage, candidate, transformation, .. }) => {
+            assert_eq!(*stage, StageId::Verify, "the operator skips the model lap, never the gate");
+            assert_eq!(*candidate, Some(digest(60)), "the returned evidence binds the operator's tree");
+            assert_eq!(transformation.checkout, digest(61), "and the lane checks out the commit they pushed");
+        }
+        other => panic!("expected the member's Verify dispatch, got {other:?}"),
+    }
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(effect, Decision::RecordResolution { .. })),
+        "a repair supplies a candidate for the gates to judge; it never integrates one",
+    );
+
+    let record = after.blooms.get(&bloom).unwrap();
+    assert!(record.claims.is_empty(), "the member is not resolved by the operator writing its code");
+    assert!(!record.wedged.contains_key(&workpiece("wp")), "a cursor that moves is a member dispatching again");
+    let cursor = record.progress.get(&workpiece("wp")).unwrap();
+    assert_eq!((cursor.stage, cursor.attempts), (StageId::Verify, 1));
+    assert_eq!(cursor.candidate, Some(CandidateRef { tree: digest(60), checkout: digest(61) }));
+    assert_eq!(record.operator_repairs.len(), 1, "the decider is recorded beside the dispatch");
+    assert_eq!(record.operator_repairs[0].operator, "iamacoffeepot");
+    assert_eq!(record.operator_repairs[0].reason, "one-line fix, cheaper than a lap");
+
+    // The verify gate then runs for real: a failing verdict over the operator's
+    // tree charges the repair roll and routes the member back into `Refine`,
+    // exactly as it would over a lane's.
+    let (_, judged) = step(
+        &after,
+        &event(
+            "verify-fail",
+            Fact::VerifyFailed {
+                bloom,
+                workpiece: workpiece("wp"),
+                evidence: Evidence { subject: digest(60), kind: EvidenceKind::VerificationResult, detail: digest(62) },
+                failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+            },
+        ),
+    );
+    assert!(
+        matches!(judged.outcome, Outcome::RefineReentered { .. } | Outcome::AttemptWedged { .. }),
+        "the operator's candidate faces the ordinary verdict: {:?}",
+        judged.outcome,
+    );
 }

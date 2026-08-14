@@ -11,6 +11,7 @@ mod bloom;
 mod composition;
 mod config;
 mod model_override;
+mod operator;
 mod orphan_claim;
 mod price;
 mod profile;
@@ -32,6 +33,7 @@ pub use config::{
     decode_config,
 };
 pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedModel, StageOverride};
+pub use operator::{Adjudication, Disposition, OperatorRepair};
 pub use orphan_claim::{
     ORPHAN_CLAIM_RELEASE_WORDS, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord,
 };
