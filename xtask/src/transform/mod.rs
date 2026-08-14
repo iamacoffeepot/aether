@@ -47,7 +47,7 @@ use crate::transform::sccache::{CompilerCache, Counters};
 use crate::transform::scratch::Scratch;
 use crate::transform::verify::VERIFY_CHECK;
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct TransformArgs {
     /// Typed command id — a `verify.*` mechanical id, `construct.implement`, or
     /// `review.critic`.

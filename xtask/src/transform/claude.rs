@@ -3,7 +3,7 @@
 //! `review.critic` lanes run through.
 
 use std::io::Write;
-use std::process::{Child, Stdio};
+use std::process::Stdio;
 use std::{fs, thread};
 
 use anyhow::{Context, Result, bail};
@@ -53,18 +53,12 @@ fn construct_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str
     argv
 }
 
-fn spawn_fresh_claude(
-    args: &TransformArgs,
-    scratch: &Scratch,
-    cache: Option<&CompilerCache>,
-    peak: &PeakMemory,
-) -> Result<Child> {
-    let mut fresh = peak.command("claude");
-    fresh.args(construct_argv(args.model.as_deref(), args.effort.as_deref(), None));
-    scratch.export(&mut fresh);
-    sccache::export(cache, &mut fresh);
-    fresh.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    fresh.spawn().context("run headless claude")
+/// A copy of `args` with the resume handle cleared — the fresh-launch fallback
+/// when the harness rejects `--resume`.
+fn without_resume(args: &TransformArgs) -> TransformArgs {
+    let mut args = args.clone();
+    args.resume = None;
+    args
 }
 
 /// Assemble the headless-Claude prompt for the construct lane from the lane-owned
@@ -147,7 +141,9 @@ pub(super) fn run_headless_claude(
     claude.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match claude.spawn() {
         Ok(child) => child,
-        Err(_error) if args.resume.is_some() => spawn_fresh_claude(args, scratch, cache, peak)?,
+        Err(_error) if args.resume.is_some() => {
+            return run_headless_claude(&prompt, &without_resume(args), scratch, cache, peak);
+        }
         Err(error) => return Err(error).context("run headless claude"),
     };
     // Pipe the prompt on a separate thread and reap the child unconditionally: if
@@ -177,27 +173,7 @@ pub(super) fn run_headless_claude(
         // The harness rejected the resume handle (session file gone, unknown
         // id). Degrade to a fresh launch rather than failing the dispatch.
         let _ = writer.join();
-        let mut fresh = spawn_fresh_claude(args, scratch, cache, peak)?;
-        let mut stdin = fresh.stdin.take().context("headless claude stdin was not captured")?;
-        let prompt_bytes = prompt.as_bytes().to_vec();
-        #[allow(clippy::disallowed_methods)]
-        let writer = thread::spawn(move || stdin.write_all(&prompt_bytes));
-        let run = fresh.wait_with_output().context("await headless claude")?;
-        peak.observe(&run.stderr);
-        if !run.status.success() {
-            bail!(
-                "headless claude exited {}: {}",
-                run.status.code().map_or_else(|| "by signal".to_owned(), |c| c.to_string()),
-                tail(&String::from_utf8_lossy(&run.stderr), 1000),
-            );
-        }
-        writer
-            .join()
-            .expect("prompt-writer thread panicked")
-            .context("pipe the assembled prompt to headless claude")?;
-        let transcript_path = args.out.join("transcript.jsonl");
-        fs::write(&transcript_path, &run.stdout).with_context(|| format!("write {}", transcript_path.display()))?;
-        return Ok(derive_result_record(&String::from_utf8_lossy(&run.stdout)));
+        return run_headless_claude(&prompt, &without_resume(args), scratch, cache, peak);
     }
     if !run.status.success() {
         bail!(

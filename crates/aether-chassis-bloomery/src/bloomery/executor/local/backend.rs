@@ -898,6 +898,30 @@ fn capture_commit_digest(commit: &BackendObjectId) -> Digest {
     digest_of(&CaptureCommitAddress { object: commit.as_bytes() })
 }
 
+/// Fail-closed evidence for an exited run that left no readable file — the
+/// attempt still has to feed retry/wedge rather than loop on a missing path.
+fn synthesized_missing_evidence(handle: &WorkHandle, subject: &Digest) -> Vec<EvidenceRef> {
+    vec![EvidenceRef {
+        name: NameEvidenceClaims::attempt_artifact_name(
+            &handle.nonce,
+            subject,
+            StageVerdict::VerificationFailed,
+            VerifyFailureSet::EMPTY,
+            &Digest::of_wire_bytes(&[]),
+        ),
+        nonce: handle.nonce.clone(),
+        artifact_id: 0,
+        size_bytes: 0,
+        candidate: None,
+        findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
+        // Synthesized, not reported: there are no evidence bytes to read a
+        // cost out of, so the attempt is unmeasured.
+        cost: None,
+        calls: None,
+    }]
+}
+
 /// Render a resolved backend object as the lowercase hex sha the `git` argv
 /// takes. The only place this backend spells a backend object in Git's own
 /// notation — the correspondence, the digests, and the runner seam all carry
@@ -1017,10 +1041,6 @@ impl ExecutorBackend for LocalExecutor {
     }
 
     #[allow(clippy::significant_drop_tightening, reason = "run is a &mut reborrow; the guard must outlive it")]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "terminal evidence path: reuse stamp is a few lines on an already-long gate"
-    )]
     fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
         // Pull the run's on-disk location, binding digest, and terminal exit out of
         // the guarded region, then drop the lock — the evidence read is blocking IO
@@ -1069,25 +1089,7 @@ impl ExecutorBackend for LocalExecutor {
                     // passed does, or a bloom whose lanes all fail this way wedges
                     // the queue behind them.
                     self.pump();
-                    return Ok(vec![EvidenceRef {
-                        name: NameEvidenceClaims::attempt_artifact_name(
-                            &handle.nonce,
-                            &subject,
-                            StageVerdict::VerificationFailed,
-                            VerifyFailureSet::EMPTY,
-                            &Digest::of_wire_bytes(&[]),
-                        ),
-                        nonce: handle.nonce.clone(),
-                        artifact_id: 0,
-                        size_bytes: 0,
-                        candidate: None,
-                        findings: None,
-                        failed_verifiers: VerifyFailureSet::EMPTY,
-                        // Synthesized, not reported: there are no evidence bytes
-                        // to read a cost out of, so the attempt is unmeasured.
-                        cost: None,
-                        calls: None,
-                    }]);
+                    return Ok(synthesized_missing_evidence(handle, &subject));
                 }
                 return Err(LocalExecutorError::Evidence(format!("{}: {read_error}", evidence_path.display())));
             }

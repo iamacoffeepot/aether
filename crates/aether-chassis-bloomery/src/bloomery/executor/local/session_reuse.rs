@@ -472,7 +472,6 @@ pub fn parse_actual_turns(bytes: &[u8]) -> Option<u64> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
         COLD_PREFIX_TOKENS, MissReason, ReuseArm, SEED_NAMED_SITE_TURNS, SessionReuse, resume_is_cheaper, stamp_reuse,
@@ -636,7 +635,8 @@ mod tests {
         let plan = reuse_plan_for_stamp();
         let stamped =
             stamp_reuse(br#"{"command":"construct.implement","result_record":{"num_turns":12}}"#, &plan, Some(12));
-        let value: serde_json::Value = serde_json::from_slice(&stamped).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&stamped).expect("stamp_reuse emits JSON beside the result record");
         assert_eq!(value["session_reuse"]["arm"], "resumed");
         assert_eq!(value["session_reuse"]["predicted_turns"], 15);
         assert_eq!(value["session_reuse"]["actual_turns"], 12);
