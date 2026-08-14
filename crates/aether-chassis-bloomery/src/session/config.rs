@@ -40,3 +40,25 @@ impl Default for SessionConfig {
         }
     }
 }
+
+/// Process-wide in-memory `SQLite` URI. A bare `:memory:` is private per
+/// connection, so the mounted [`SessionPoolCapability`](super::SessionPoolCapability)
+/// and the executor consumer would otherwise be two empty tables. Shared-cache
+/// keeps the default non-durable while making them the same pool.
+const SHARED_MEMORY: &str = "file:aether-session-pool?mode=memory&cache=shared";
+
+impl SessionConfig {
+    /// The `SQLite` path the pool and its in-process consumer both open.
+    ///
+    /// A configured file path is used as-is (WAL shares it). The `:memory:`
+    /// default becomes [`SHARED_MEMORY`] so the capability and the executor
+    /// see one table rather than two.
+    #[must_use]
+    pub fn store_path(&self) -> &str {
+        if self.db_path == ":memory:" {
+            SHARED_MEMORY
+        } else {
+            &self.db_path
+        }
+    }
+}

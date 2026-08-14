@@ -392,7 +392,7 @@ impl NativeActor for SessionPoolCapability {
 
     fn init(config: super::SessionConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<SessionPoolState, BootError> {
         let store = SqliteSessionStore::open(
-            &config.db_path,
+            config.store_path(),
             config.cache_ttl_cutoff_mins.saturating_mul(60),
             config.lease_ttl_mins.saturating_mul(60),
             config.context_cap_tokens,
@@ -400,7 +400,7 @@ impl NativeActor for SessionPoolCapability {
         .map_err(|error| BootError::Other(Box::new(error)))?;
         tracing::info!(
             target: "aether_chassis_bloomery::session",
-            path = %config.db_path,
+            path = %config.store_path(),
             cutoff_mins = config.cache_ttl_cutoff_mins,
             "session pool opened (WAL)"
         );
