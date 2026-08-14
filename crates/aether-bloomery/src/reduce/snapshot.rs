@@ -321,10 +321,20 @@ pub struct StageProgress {
     /// a successor gets a fresh cursor and therefore an empty set.
     pub seen_verify_failures: VerifyFailureSet,
     /// The landable head of the folded tree this member is reconciling onto
-    /// (ADR-0189). Set by [`Fact::FoldConflict`],
-    /// consumed as the Reconcile lane's checkout, cleared when the member
-    /// leaves Reconcile. `None` on every other stage. Defaulted so a journal
-    /// written before the field existed still decodes.
+    /// (ADR-0189) — the *fold round* it is in. Set by [`Fact::FoldConflict`]
+    /// and consumed as the Reconcile lane's checkout.
+    ///
+    /// It outlives the Reconcile stage on purpose (#4952). A member is in the
+    /// round until its candidate actually folds or the fold moves under it, and
+    /// a reconciled candidate has done neither at the moment the lane passes —
+    /// it still has to verify and re-integrate before the fold sees it. Wiping
+    /// the round at the stage boundary left the next collision unable to say
+    /// whether the member was colliding with the tree it had already reconciled
+    /// onto (its own inability, which the Reconcile budget guards) or with a
+    /// tree a sibling's reconcile had moved underneath it (which costs the
+    /// member nothing). Carried across advances, retries, repair re-entry, and
+    /// grants for that reason; `None` until the member's first collision.
+    /// Defaulted so a journal written before the field existed still decodes.
     #[serde(default)]
     pub fold_checkpoint: Option<Digest>,
     /// The `FoldConflict` evidence detail to attach if Reconcile exhausts.

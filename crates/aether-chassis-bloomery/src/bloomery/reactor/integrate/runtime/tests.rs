@@ -11,7 +11,7 @@ use aether_bloomery::{
     BloomId, Digest, Event, Fact, IdempotencyKey, IntegratePayload, MemberCandidate, Topic, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GitDataApi, GitSource, MainlineRef, short_hex};
+use aether_bloomery_github::{GitDataApi, GitSource, MainlineRef, MergeResult, short_hex};
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::drain_and_integrate;
@@ -268,6 +268,67 @@ fn a_conflicting_member_admits_fold_conflict_instead_of_refusing() {
         !overlay.contains("ours") && !overlay.contains("theirs") && !overlay.contains("union"),
         "textual merge strategies are not a fold-path mechanism",
     );
+}
+
+// #4952 (acceptance 1) — a fold that hits a collision finishes folding every
+// non-conflicting candidate first, and every conflicted member is then sent to
+// reconcile against that one settled tree.
+//
+// The fixture interleaves so both halves are load-bearing: wp-1 collides ahead
+// of a clean wp-2, and wp-3 collides behind it. Returning at the first collision
+// admitted one fact, left wp-2 and wp-3 unfolded, and named a checkpoint the
+// rest of the fold would then move — so wp-1 reconciled against a tree nobody
+// would land on and paid a second round for a collision it never had, which is
+// the `10a1228c` cascade.
+#[test]
+fn a_collision_settles_the_fold_before_any_member_reconciles() {
+    let candidates: Vec<Digest> = (0xA0..0xA4).map(digest).collect();
+    let (fake, base) = seeded(&candidates[0]);
+    for candidate in &candidates[1..] {
+        fake.seed_git_object(candidate);
+    }
+    let bloom = BloomId(digest(1));
+    for index in 0..candidates.len() {
+        seed_candidate_branch(&fake, &bloom, &format!("wp-{index}"), &format!("tree-{index}"));
+    }
+    let integration = format!("bloom/{}/integration", short_hex(&bloom.0));
+    let candidate_ref = |workpiece: &str| format!("bloom/{}/candidate/{workpiece}", short_hex(&bloom.0));
+    for conflicted in ["wp-1", "wp-3"] {
+        fake.seed_merge_conflict_paths(&integration, &candidate_ref(conflicted), vec!["crates/overlap.rs".into()]);
+    }
+    let source = shell(fake.clone());
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let sequence = enqueue_integration(&mut store, bloom, base, candidates);
+
+    let (admits, ack_through) = drain_and_integrate(&mut store, &source, None).unwrap();
+
+    assert_eq!(ack_through, Some(sequence), "the settled pass is acked, not re-driven");
+    let conflicts: Vec<(WorkpieceId, Digest, Digest)> = admits
+        .iter()
+        .map(|admit| match from_bytes::<Event>(&admit.event).unwrap().fact {
+            Fact::FoldConflict { workpiece, checkpoint, head, .. } => (workpiece, checkpoint, head),
+            other => panic!("expected Fact::FoldConflict, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        conflicts.iter().map(|(workpiece, ..)| workpiece.0.as_str()).collect::<Vec<_>>(),
+        vec!["wp-1", "wp-3"],
+        "every conflicted member is journaled in one pass, in member order",
+    );
+    assert_eq!(conflicts[0].1, conflicts[1].1, "both reconcile against the same settled tree");
+    assert_eq!(conflicts[0].2, conflicts[1].2, "and check out the same settled head");
+
+    // The decisive half: the clean member sitting *behind* the first collision
+    // is in the settled tree, so nothing the conflicted members reconcile onto
+    // can move underneath them.
+    assert!(
+        matches!(fake.merge(&integration, &candidate_ref("wp-2"), "probe").unwrap(), MergeResult::AlreadyUpToDate),
+        "the fold finished the non-conflicting candidates behind the collision",
+    );
+    for conflicted in ["wp-1", "wp-3"] {
+        let overlay = store.lookup_fold_conflict(bloom.0.as_bytes(), conflicted).unwrap();
+        assert!(overlay.is_some_and(|overlay| overlay.contains("crates/overlap.rs")), "{conflicted} has its overlay");
+    }
 }
 
 // A re-collision at the same folded checkpoint with a *new* candidate must

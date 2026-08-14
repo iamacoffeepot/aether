@@ -140,7 +140,12 @@ fn a_passing_reconcile_rejoins_verify_with_the_new_candidate() {
         .expect("beta still has a progress cursor");
     assert_eq!(progress.stage, StageId::Verify);
     assert_eq!(progress.candidate, Some(captured));
-    assert_eq!(progress.fold_checkpoint, None, "leaving Reconcile clears the fold checkout");
+    assert_eq!(
+        progress.fold_checkpoint,
+        Some(head),
+        "the fold round outlives the stage: the reconciled candidate has not folded yet (#4952)",
+    );
+    assert_eq!(progress.fold_conflict_evidence, None, "the wedge attachment belongs to the stage that just passed");
 }
 
 // Exhausting Reconcile's budget wedges with the collision evidence, not the

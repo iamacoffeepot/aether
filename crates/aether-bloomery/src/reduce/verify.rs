@@ -64,7 +64,7 @@ pub(super) fn reduce_verify_failed(
             candidate: cursor.candidate,
             repair_rolls: rolls,
             seen_verify_failures,
-            fold_checkpoint: None,
+            fold_checkpoint: cursor.fold_checkpoint,
             fold_conflict_evidence: None,
         };
         // Persist the union even on the terminal verdict. This cursor write is
@@ -87,13 +87,15 @@ pub(super) fn reduce_verify_failed(
         };
     }
 
+    // The member is still in whatever fold round it was in (#4952): a repair lap
+    // changes the candidate, not which folded tree the candidate has to land on.
     let progress = StageProgress {
         stage: StageId::Refine,
         attempts: 1,
         candidate: cursor.candidate,
         repair_rolls: rolls,
         seen_verify_failures,
-        fold_checkpoint: None,
+        fold_checkpoint: cursor.fold_checkpoint,
         fold_conflict_evidence: None,
     };
     effects.extend(move_effects(

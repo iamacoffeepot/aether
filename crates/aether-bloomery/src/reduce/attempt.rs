@@ -243,13 +243,18 @@ fn advance_after_pass(
     mut effects: Vec<Decision>,
 ) -> Decisions {
     let CompletionCtx { bloom, workpiece, member, cursor, candidate, targets } = *ctx;
+    // The fold round outlives the stage (#4952): a reconciled candidate has not
+    // folded yet when its lane passes, so the checkpoint it was reconciled onto
+    // stays on the cursor until the fold either takes the candidate or moves.
+    // The conflict evidence does not — it is the wedge attachment for the
+    // Reconcile stage this pass just left.
     let progress = StageProgress {
         stage: next,
         attempts: 1,
         candidate,
         repair_rolls: cursor.repair_rolls,
         seen_verify_failures: cursor.seen_verify_failures,
-        fold_checkpoint: None,
+        fold_checkpoint: cursor.fold_checkpoint,
         fold_conflict_evidence: None,
     };
     // The member may be advancing onto a tree this bloom already proved
@@ -299,7 +304,6 @@ fn retry_or_wedge(
     mut effects: Vec<Decision>,
 ) -> Decisions {
     let CompletionCtx { bloom, workpiece, member, cursor, candidate, targets } = *ctx;
-    let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile);
     let fold_conflict_evidence = cursor.fold_conflict_evidence.filter(|_| stage == StageId::Reconcile);
     let budget = record.stage_catalog.retry_budget_of(stage).unwrap_or(1);
     if cursor.attempts < budget {
@@ -310,7 +314,7 @@ fn retry_or_wedge(
             candidate,
             repair_rolls: cursor.repair_rolls,
             seen_verify_failures: cursor.seen_verify_failures,
-            fold_checkpoint,
+            fold_checkpoint: cursor.fold_checkpoint,
             fold_conflict_evidence,
         };
         effects.extend(move_effects_with_candidate(
@@ -365,7 +369,7 @@ pub(super) fn reconcile_or_line_targets(
 /// next person asking why a bloom stopped — and the stage cursor cannot stand in
 /// for it, since a member exhausted at `Verify` and one mid-flight on its last
 /// roll carry the same cursor.
-fn wedged(
+pub(super) fn wedged(
     bloom: BloomId,
     workpiece: &WorkpieceId,
     stage: StageId,
