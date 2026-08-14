@@ -61,12 +61,14 @@ fn construct_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str
 /// on; the `## Task` section carries the operator's work-order description
 /// (#3595) so the model is told *what* to build, not just *where*.
 ///
-/// Both optional sections are presence-driven: a `None` task appends none (the
-/// fail-legible path for a member with no persisted description), and `None`
-/// conventions append none (a subject tree that carries no conventions file,
-/// #4647). The order is deliberate — conventions are long and general, the work
-/// order is short and specific, so the task stays last where the instructions
-/// promise it.
+/// Prompt caching is prefix-exact (#4985). The shared bulk leads — conventions
+/// first (the same `CLAUDE.md` every lane of a bloom inlines), then the lane
+/// instructions, subject, and work-order body — and anything that varies per
+/// lane (a leading `Workpiece:` identity header, #4984) sits in a trailing
+/// `## Lane` section. Sibling lanes then share the cached prefix; each writes
+/// only the tail. A `None` task appends none (the fail-legible path for a
+/// member with no persisted description); `None` conventions append none (a
+/// subject tree that carries no conventions file, #4647).
 pub(super) fn assemble_construct_prompt(
     instructions: &str,
     conventions: Option<&str>,
@@ -83,9 +85,33 @@ pub(super) fn assemble_construct_prompt(
         },
     );
     let conventions_section =
-        conventions.map_or_else(String::new, |text| format!("\n{}\n", conventions::section(text)));
-    let task_section = task.map_or_else(String::new, |task| format!("\n## Task\n\n{task}\n"));
-    format!("{instructions}\n{conventions_section}\n## Subject\n\n{subject_line}\n{task_section}")
+        conventions.map_or_else(String::new, |text| format!("{}\n\n", conventions::section(text)));
+    let (task_body, lane_identity) = task.map_or(("", None), split_lane_identity);
+    let task_section = if task_body.is_empty() {
+        String::new()
+    } else {
+        format!("\n## Task\n\n{task_body}\n")
+    };
+    let lane_section = lane_identity.map_or_else(String::new, |id| format!("\n## Lane\n\n{id}\n"));
+    format!("{conventions_section}{instructions}\n\n## Subject\n\n{subject_line}\n{task_section}{lane_section}")
+}
+
+/// Peel a leading `Workpiece:` line off the work-order text so member identity
+/// can sit in the prompt's variant tail (#4985). The fan-out that pins each
+/// member (#4984) writes that line first on `--task`; leaving it there would
+/// forfeit the shared body for every sibling of the bloom.
+fn split_lane_identity(task: &str) -> (&str, Option<&str>) {
+    let Some((first, rest)) = task.split_once('\n') else {
+        return if task.starts_with("Workpiece:") {
+            ("", Some(task))
+        } else {
+            (task, None)
+        };
+    };
+    if !first.starts_with("Workpiece:") {
+        return (task, None);
+    }
+    (rest.strip_prefix('\n').unwrap_or(rest), Some(first))
 }
 
 /// The last `max` bytes of `s`, snapped forward to a char boundary — for
@@ -180,7 +206,7 @@ pub(super) fn run_headless_claude(
 
 #[cfg(test)]
 mod tests {
-    use super::{construct_argv, tail};
+    use super::{construct_argv, split_lane_identity, tail};
 
     #[test]
     fn tail_snaps_to_a_char_boundary_without_panicking() {
@@ -229,6 +255,27 @@ mod tests {
         assert!(
             argv.windows(2).any(|w| w == ["--output-format", "stream-json"]),
             "still emits the stream-json transcript"
+        );
+    }
+
+    // Tripwire: only a leading `Workpiece:` line is the per-lane identity. A
+    // header buried in the body must stay put, or a work order that *mentions*
+    // the pin would lose its first paragraph into the tail.
+    #[test]
+    fn split_lane_identity_peels_only_a_leading_workpiece_header() {
+        let (body, header) = split_lane_identity("Workpiece: issue-1111\n\n# Wave-3 member work order\n");
+        assert_eq!(header, Some("Workpiece: issue-1111"));
+        assert_eq!(body, "# Wave-3 member work order\n");
+
+        let (body, header) = split_lane_identity("Workpiece: issue-1111");
+        assert_eq!(header, Some("Workpiece: issue-1111"));
+        assert_eq!(body, "", "a header-only task leaves an empty body");
+
+        let intact = "Implement it.\n\nWorkpiece: issue-1111 is named in the order.";
+        assert_eq!(
+            split_lane_identity(intact),
+            (intact, None),
+            "a Workpiece: line that is not first is part of the shared body",
         );
     }
 }

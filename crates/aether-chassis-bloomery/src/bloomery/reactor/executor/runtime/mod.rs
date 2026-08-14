@@ -606,6 +606,17 @@ impl AdmitSink for CollectingSink {
     }
 }
 
+/// Pin a member's workpiece id onto the shared work-order body.
+///
+/// Sibling members of one bloom are sealed from one template, so the store
+/// holds byte-identical rows. The dispatched `--task` is what the lane reads
+/// and what `pool_task` keys the session pool on, so an unpinned body collapses
+/// every sibling onto one prompt and one pool key. The body stays the sealed
+/// shared order; the header is the first line the lane can trust.
+fn pin_workpiece_description(workpiece: &str, body: &str) -> String {
+    format!("Workpiece: {workpiece}\n\n{body}")
+}
+
 /// Thread the host-resolved axes — the stage's agent profile and the member's
 /// advisory work-order description (#3595) — onto a member `transformation`
 /// about to dispatch. Only the model-driven `construct.implement` lane reads
@@ -648,7 +659,7 @@ fn overlay_member_advisory(
         resolve_config::<ModelOverride>(store, ConfigScopes::bloom_wide(&record.configs))?.unwrap_or_default();
     record.transformation.model = Some(dispatch_model(record.stage, &record.profile, &model_override));
     if let Some(description) = store.lookup_dispatch_description(&bloom, &workpiece)? {
-        record.transformation.description = Some(description);
+        record.transformation.description = Some(pin_workpiece_description(&workpiece, &description));
     } else {
         tracing::warn!(
             target: "aether_chassis_bloomery::executor",
