@@ -1,6 +1,6 @@
 # ADR-0186: Bloomery Operates on a Per-Day Cut of Main
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-13
 
 ## Context
