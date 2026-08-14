@@ -199,6 +199,7 @@ fn actor_setups(
         integrate: IntegrateReactorSetup {
             source: configured.then(|| source.clone()),
             store_path: coordinator.store_path.clone(),
+            artifacts_root: coordinator.artifacts_root.clone(),
             poll_interval_secs: coordinator.poll_interval_secs,
             repository,
         },

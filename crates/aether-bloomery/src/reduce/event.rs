@@ -348,6 +348,28 @@ pub enum Fact {
         /// superseded fold cannot spend a newer fold's retries.
         evidence: Evidence,
     },
+    /// A cross-member fold collision (ADR-0189). The integrate reactor admits
+    /// this instead of refusing in prose: `checkpoint` is the folded tree the
+    /// candidate collided with, and `head` is the landable commit wrapping
+    /// that tree — what the reconcile lane checks out. `evidence` carries the
+    /// conflicting paths. Appended past
+    /// [`Fact::AggregateReviewExecutorFault`] so the prior facts' wire
+    /// discriminants are unchanged.
+    FoldConflict {
+        /// The bloom whose fold collided.
+        bloom: BloomId,
+        /// The later-folding member whose candidate conflicted.
+        workpiece: WorkpieceId,
+        /// The folded tree the candidate collided with.
+        checkpoint: Digest,
+        /// The landable head commit of that folded tree — the reconcile
+        /// lane's checkout, distinct from `checkpoint` the same way
+        /// [`Fact::Resolve`] carries both tree and head.
+        head: Digest,
+        /// The collision evidence; its `detail` names the conflicting-path
+        /// report and is what a Reconcile-budget wedge attaches.
+        evidence: Evidence,
+    },
 }
 
 impl Fact {

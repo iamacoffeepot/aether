@@ -384,6 +384,25 @@ pub struct BaseMismatch {
     pub actual: Digest,
 }
 
+/// Why a fold-conflict admission was refused (ADR-0189).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum FoldConflictError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The fact names a workpiece that is not a member of the bloom.
+    NotAMember(WorkpieceId),
+    /// The member has no resolution claim — nothing was being folded, so
+    /// there is no collision to reconcile.
+    NotIntegrated(WorkpieceId),
+    /// The evidence does not bind the folded checkpoint tree.
+    EvidenceNotBound {
+        /// The folded tree the collision names.
+        expected: Digest,
+        /// The subject the evidence actually names.
+        got: Digest,
+    },
+}
+
 /// Why a land was refused (ADR-0149 §The bloom).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LandError {

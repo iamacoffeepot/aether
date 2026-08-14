@@ -82,6 +82,10 @@ stage_vocabulary! {
     AggregateReview,
     Land,
     Study,
+    /// Cross-member fold-conflict repair (ADR-0189): dispatched by a
+    /// [`FoldConflict`](crate::Fact::FoldConflict) fact rather than line
+    /// progression, against the folded checkpoint rather than the sealed base.
+    Reconcile,
 }
 
 impl StageId {
@@ -107,6 +111,7 @@ impl StageId {
             Self::AggregateReview => "aggregate-review",
             Self::Land => "land",
             Self::Study => "study",
+            Self::Reconcile => "reconcile",
         };
         let mut identity = String::from("iama-");
         identity.push_str(slug);

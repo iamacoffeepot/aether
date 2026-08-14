@@ -25,6 +25,7 @@ mod decision;
 mod error;
 mod event;
 mod evidence;
+mod fold_conflict;
 mod grant;
 mod integrate;
 mod land;
@@ -42,8 +43,8 @@ mod view;
 pub use decision::Decision;
 pub use error::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError,
-    BaseMismatch, GrantAttemptsError, IntegrateError, LandError, LandingRejectedError, OrphanClaimReleaseError,
-    ResolveError, SealConflict, SealError, SupersedeError, VerifyFailedError,
+    BaseMismatch, FoldConflictError, GrantAttemptsError, IntegrateError, LandError, LandingRejectedError,
+    OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SupersedeError, VerifyFailedError,
 };
 pub use event::{Event, Fact};
 pub use outcome::{Decisions, Outcome};
@@ -56,6 +57,7 @@ use crate::values::ResolvedConfigs;
 use aggregate_verify::reduce_aggregate_verify_completed;
 use attempt::reduce_attempt_completed;
 use evidence::{reduce_admit_evidence, reduce_adopt_answer};
+use fold_conflict::reduce_fold_conflict;
 use grant::reduce_grant_attempts;
 use integrate::{reduce_integrate, reduce_resolve};
 use land::reduce_land;
@@ -118,6 +120,9 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> 
         }
         Fact::AggregateReviewExecutorFault { bloom, evidence } => {
             reduce_aggregate_review_executor_fault(snapshot, bloom, evidence)
+        }
+        Fact::FoldConflict { bloom, workpiece, checkpoint, head, evidence } => {
+            reduce_fold_conflict(snapshot, bloom, workpiece, *checkpoint, *head, evidence)
         }
     }
 }

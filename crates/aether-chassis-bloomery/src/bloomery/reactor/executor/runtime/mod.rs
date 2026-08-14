@@ -200,7 +200,7 @@ fn now_unix_millis() -> u64 {
 fn timeout_verdict(stage: StageId) -> Option<(StageVerdict, VerifyFailureSet)> {
     match stage {
         StageId::Verify => Some((StageVerdict::VerificationFailed, VerifyFailureSet::one(VerifyFailure::Preflight))),
-        StageId::Construct | StageId::Refine | StageId::AggregateVerify => {
+        StageId::Construct | StageId::Refine | StageId::Reconcile | StageId::AggregateVerify => {
             Some((StageVerdict::VerificationFailed, VerifyFailureSet::EMPTY))
         }
         // No verdict, for two different reasons. `AggregateReview`'s is deferred,
@@ -669,6 +669,16 @@ fn overlay_member_advisory(
     if let Some(findings) = findings {
         let task = record.transformation.description.take().unwrap_or_default();
         record.transformation.description = Some(format!("{task}\n\n## Findings\n\n{findings}"));
+    }
+    // A fold collision's overlay rides the same channel (ADR-0189): the
+    // original description, then the contract, the conflicting paths, and
+    // the conflicted candidate. Only Reconcile looks it up — Construct /
+    // Refine have no collision to name.
+    if record.stage == StageId::Reconcile
+        && let Some(overlay) = store.lookup_fold_conflict(&bloom, &workpiece)?
+    {
+        let task = record.transformation.description.take().unwrap_or_default();
+        record.transformation.description = Some(format!("{task}\n\n{overlay}"));
     }
     Ok(())
 }

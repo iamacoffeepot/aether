@@ -82,7 +82,7 @@ pub fn is_model_lane(command: &str) -> bool {
 #[must_use]
 pub(super) fn dispatched_command(stage: StageId) -> Option<&'static str> {
     match stage {
-        StageId::Construct | StageId::Refine => Some(CONSTRUCT_IMPLEMENT_COMMAND),
+        StageId::Construct | StageId::Refine | StageId::Reconcile => Some(CONSTRUCT_IMPLEMENT_COMMAND),
         StageId::Review | StageId::AggregateReview => Some(REVIEW_CRITIC_COMMAND),
         StageId::Verify | StageId::AggregateVerify => Some(VERIFY_CHECK_COMMAND),
         StageId::Sketch | StageId::Scope | StageId::Approve | StageId::Integrate | StageId::Land | StageId::Study => {
@@ -251,7 +251,7 @@ impl StageCatalog {
     /// invariant is one binding per stage, and it holds by construction: the
     /// catalog maps `binding_of` over the generated [`StageId::ALL`], which is
     /// complete and duplicate-free by construction, and `binding_of`'s
-    /// exhaustive match forces a binding for every variant — so a thirteenth
+    /// exhaustive match forces a binding for every variant — so a new
     /// stage enters the catalog automatically and is a compile error until its
     /// binding is authored.
     #[must_use]
@@ -259,7 +259,7 @@ impl StageCatalog {
         Self { bindings: StageId::ALL.iter().copied().map(Self::binding_of).collect() }
     }
 
-    /// The [`line`](Self::line) catalog's digest. Recomputes the twelve small
+    /// The [`line`](Self::line) catalog's digest. Recomputes the small
     /// bindings (cheap and `no_std`-clean, no lazy static).
     #[must_use]
     pub fn line_digest() -> Digest {
@@ -275,7 +275,10 @@ impl StageCatalog {
     /// integrate path rather than dispatching a further attempt. `Refine` is off
     /// the standing line: the repair re-entry, dispatched only when a failing
     /// `Verify` routes into it, its pass returning to `Verify` for the
-    /// delta-confirm. `Review` binds no dispatched member stage (the model
+    /// delta-confirm. `Reconcile` is off the standing line the same way
+    /// (ADR-0189): dispatched by a fold-conflict fact, not by line progression,
+    /// its pass returning to `Verify` so the reconciled candidate replaces the
+    /// member's resolution. `Review` binds no dispatched member stage (the model
     /// review runs once per bloom at `AggregateReview`, ADR-0153); it stays in
     /// [`StageId`] for wire stability. The bloom-level tail (`Integrate` /
     /// `AggregateVerify` / `AggregateReview` / `Land` / `Study`) is the coarse
@@ -293,8 +296,9 @@ impl StageCatalog {
     /// `None` at the per-member terminus (`Verify`) — a passing `Verify` integrates
     /// the member instead of dispatching a successor (ADR-0153). `None` for any
     /// stage outside [`MEMBER_LINE`](Self::MEMBER_LINE): the repair-only `Refine`
-    /// routes back to `Verify` in the reducer, not through the line walk, and the
-    /// bloom-level tail is not a dispatched per-member progression.
+    /// and the fold-conflict `Reconcile` route back to `Verify` in the reducer,
+    /// not through the line walk, and the bloom-level tail is not a dispatched
+    /// per-member progression.
     #[must_use]
     pub fn next_member_stage(stage: StageId) -> Option<StageId> {
         let index = Self::MEMBER_LINE.iter().position(|member_stage| *member_stage == stage)?;
@@ -439,6 +443,13 @@ impl StageCatalog {
             StageId::Refine => {
                 (&["bloom.verify_evidence"], &["bloom.candidate"], CONSTRUCT_IMPLEMENT_COMMAND, "ci-green", 3, 3_600)
             }
+            // Reconcile is off the standing line (ADR-0189): the fold-conflict
+            // repair, dispatched by `Fact::FoldConflict` rather than progression.
+            // Same construct lane as Construct/Refine; its own budget so a
+            // collision the model cannot resolve wedges instead of looping.
+            StageId::Reconcile => {
+                (&["bloom.candidate"], &["bloom.candidate"], CONSTRUCT_IMPLEMENT_COMMAND, "conflict-resolved", 2, 3_600)
+            }
             StageId::Review => (&["bloom.candidate"], &["bloom.review_rollup"], "review", "review-approved", 2, 3_600),
             StageId::Integrate => {
                 (&["bloom.candidate"], &["bloom.integration"], "integrate", "integration-checkpoint", 2, 3_600)
@@ -547,7 +558,7 @@ impl StageCatalog {
         // retry budget, so a member that cannot converge spends the whole budget
         // and wedges.
         let (harness, model, effort): (Harness, &str, ReasoningEffort) = match stage {
-            StageId::Construct | StageId::Refine | StageId::Review | StageId::AggregateReview => {
+            StageId::Construct | StageId::Refine | StageId::Reconcile | StageId::Review | StageId::AggregateReview => {
                 (Harness::Muse, Self::MUSE_MODEL, ReasoningEffort::High)
             }
             StageId::Scope | StageId::Study => (Harness::Claude, Self::OPUS_MODEL, ReasoningEffort::High),
@@ -578,8 +589,9 @@ impl StageCatalog {
 /// ledger stable across replays.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum DispatchKey {
-    /// One member's slot at one stage: `Construct`, `Verify`, or the
-    /// repair-only `Refine` re-entry (ADR-0153's dispatched member positions).
+    /// One member's slot at one stage: `Construct`, `Verify`, the
+    /// repair-only `Refine` re-entry, or the fold-conflict `Reconcile`
+    /// (ADR-0153 / ADR-0189's dispatched member positions).
     Member {
         /// The member the attempt runs against.
         workpiece: WorkpieceId,
@@ -727,6 +739,7 @@ impl Transformation {
             ),
             StageId::Construct
             | StageId::Refine
+            | StageId::Reconcile
             | StageId::Sketch
             | StageId::Approve
             | StageId::Integrate
@@ -1033,9 +1046,12 @@ mod tests {
     // vocabulary addition is an intended catalog edit — the limit that bounds a
     // stage's worker becomes something the sealed catalog attests rather than a
     // whole-bloom number nothing read.
+    // Repinned again for ADR-0189: `Reconcile` is appended to the closed
+    // vocabulary and bound in the compiled line, so the catalog's bytes gain
+    // a thirteenth binding — an intended catalog edit.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0xb3, 0x02, 0x2f, 0xfa, 0x87, 0x49, 0x0d, 0x2d, 0x8e, 0x60, 0xbb, 0x14, 0x47, 0xfa, 0x89, 0xc7, 0xdc, 0x66,
-        0xc7, 0x2f, 0xae, 0xa5, 0x83, 0xbb, 0x19, 0x7a, 0xbf, 0x08, 0xd6, 0x73, 0xf4, 0xb8,
+        0xe4, 0x97, 0x03, 0x43, 0x12, 0x86, 0x08, 0xf4, 0x56, 0x25, 0xb8, 0x83, 0x75, 0x1a, 0xfb, 0x0b, 0x29, 0x51,
+        0x00, 0x60, 0x60, 0xf3, 0x94, 0x5a, 0x72, 0xee, 0x92, 0xe5, 0x55, 0xd2, 0xf1, 0x7e,
     ];
 
     // Tripwire: the compiled line passes the same validation an authored catalog
@@ -1087,9 +1103,11 @@ mod tests {
         assert_eq!(StageCatalog::entry_stage(), StageId::Construct);
         assert_eq!(StageCatalog::next_member_stage(StageId::Construct), Some(StageId::Verify));
         assert_eq!(StageCatalog::next_member_stage(StageId::Verify), None, "Verify is the per-member terminus");
-        // The repair-only Refine and the aggregate-position Review are not on the
-        // standing line; neither is a bloom-level tail stage.
+        // The repair-only Refine, the fold-conflict Reconcile, and the
+        // aggregate-position Review are not on the standing line; neither is a
+        // bloom-level tail stage.
         assert_eq!(StageCatalog::next_member_stage(StageId::Refine), None);
+        assert_eq!(StageCatalog::next_member_stage(StageId::Reconcile), None);
         assert_eq!(StageCatalog::next_member_stage(StageId::Review), None);
         assert_eq!(StageCatalog::next_member_stage(StageId::Integrate), None);
     }
@@ -1297,7 +1315,7 @@ mod tests {
     // still named `implement` would point the lane at a skill no longer in the tree.
     #[test]
     fn construct_and_refine_bindings_name_the_native_lane_not_the_retired_skill() {
-        for stage in [StageId::Construct, StageId::Refine] {
+        for stage in [StageId::Construct, StageId::Refine, StageId::Reconcile] {
             let binding = StageCatalog::binding_of(stage);
             assert_eq!(binding.process, "construct.implement", "{stage:?} must name the native construct lane");
             assert_ne!(binding.process, "implement", "{stage:?} must not name the retired `implement` skill");

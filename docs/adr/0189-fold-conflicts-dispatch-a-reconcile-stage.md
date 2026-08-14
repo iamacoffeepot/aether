@@ -1,6 +1,6 @@
 # ADR-0189: Fold conflicts dispatch a reconcile stage
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-13
 
 ## Context

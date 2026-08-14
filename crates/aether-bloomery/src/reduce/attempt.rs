@@ -164,9 +164,10 @@ pub(super) fn reduce_attempt_completed(
     // Terminal `Verify` is a mis-route in either direction: passes integrate and
     // failures use the typed VerifyFailed fact. It is caught before the cursor
     // check so it reads as `TerminalStage` rather than a `StageMismatch`. The
-    // repair-only `Refine` sits off the standing line (ADR-0153) with an explicit
-    // successor: its pass returns the member to `Verify` for the delta-confirm.
-    let next = if stage == StageId::Refine {
+    // repair-only `Refine` and the fold-conflict `Reconcile` sit off the
+    // standing line (ADR-0153 / ADR-0189) with an explicit successor: a pass
+    // returns the member to `Verify` for the delta-confirm.
+    let next = if matches!(stage, StageId::Refine | StageId::Reconcile) {
         Some(StageId::Verify)
     } else {
         StageCatalog::next_member_stage(stage)
@@ -190,7 +191,6 @@ pub(super) fn reduce_attempt_completed(
             got: stage,
         }));
     }
-    let attempts = cursor.attempts;
     // The member's candidate after this completion (ADR-0152): a passing attempt
     // adopts the capture it carried (a mechanical lane carries none — the prior
     // candidate rides forward); a failing attempt adopts nothing, so its capture
@@ -205,78 +205,149 @@ pub(super) fn reduce_attempt_completed(
     // candidate present, the returned evidence binds its tree and the worker
     // checks out its capture commit; without one, the member's frozen scope
     // revision and the bloom's sealed base (ADR-0149 §Execution, #3572).
-    let (subject, checkout) = candidate
-        .map_or_else(|| (member.scope_revision, record.spec.base()), |current| (current.tree, current.checkout));
-    // The attempt result is journaled evidence about the member, recorded whatever
-    // the gate decides.
-    let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
-    // A passing gate advances the cursor to the next member stage and dispatches
-    // it. `next` is `Some` on this branch — a passing terminal completion was
-    // rejected above, so a passing stage always has a successor.
-    let repair_rolls = cursor.repair_rolls;
-    let seen_verify_failures = cursor.seen_verify_failures;
+    // Reconcile is the exception: a *retry* checks out the folded checkpoint
+    // the collision named (ADR-0189). A pass leaves that checkout — Verify
+    // retargets from the new candidate like any other advance.
+    let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile && !passed);
+    let targets = reconcile_or_line_targets(member.scope_revision, record.spec.base(), candidate, fold_checkpoint);
+    let ctx = CompletionCtx { bloom: *bloom, workpiece, member, cursor: &cursor, candidate, targets };
+    let effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
     if let Some(next) = next.filter(|_| passed) {
-        let progress = StageProgress { stage: next, attempts: 1, candidate, repair_rolls, seen_verify_failures };
-        // The member may be advancing onto a tree this bloom already proved
-        // (#4891) — a repair lap that changed nothing the tree records hands
-        // back the candidate its last verify passed. Pass by identity: the
-        // member lands on the claim a dispatched pass would have produced,
-        // carrying the same verdict, and the mechanical lane never runs.
-        if let Some((current, proof)) = candidate
-            .filter(|_| next == StageId::Verify)
-            .and_then(|current| record.verify_proof_for(current.tree).map(|proof| (current, proof)))
-        {
-            let claim = ResolutionClaim {
-                workpiece: workpiece.clone(),
-                scope_revision: member.scope_revision,
-                candidate: current.tree,
-                evidence: proof.evidence.clone(),
-            };
-            let reuse = reuse_of(*bloom, StageId::Verify, proof);
-            effects.push(Decision::AdvanceStage { bloom: *bloom, workpiece: workpiece.clone(), progress });
-            effects.extend(claim_effects(snapshot, record, *bloom, &claim, Some(reuse)));
+        return advance_after_pass(snapshot, record, next, &ctx, effects);
+    }
+    retry_or_wedge(record, stage, &ctx, evidence, effects)
+}
 
-            let outcome =
-                Outcome::VerifyReused { bloom: *bloom, workpiece: workpiece.clone(), proof: proof.evidence.detail };
-            return Decisions { outcome, effects };
-        }
+#[derive(Clone, Copy)]
+struct CompletionCtx<'a> {
+    bloom: BloomId,
+    workpiece: &'a WorkpieceId,
+    member: &'a Membership,
+    cursor: &'a StageProgress,
+    candidate: Option<CandidateRef>,
+    targets: DispatchTargets,
+}
 
-        effects.extend(move_effects_with_candidate(
-            *bloom,
-            workpiece,
-            member.scope_revision,
-            progress,
-            DispatchTargets { subject, checkout },
-            candidate.map(|current| current.tree),
-            SealedLine::of(record, member),
-        ));
+fn advance_after_pass(
+    snapshot: &Snapshot,
+    record: &BloomRecord,
+    next: StageId,
+    ctx: &CompletionCtx<'_>,
+    mut effects: Vec<Decision>,
+) -> Decisions {
+    let CompletionCtx { bloom, workpiece, member, cursor, candidate, targets } = *ctx;
+    let progress = StageProgress {
+        stage: next,
+        attempts: 1,
+        candidate,
+        repair_rolls: cursor.repair_rolls,
+        seen_verify_failures: cursor.seen_verify_failures,
+        fold_checkpoint: None,
+        fold_conflict_evidence: None,
+    };
+    // The member may be advancing onto a tree this bloom already proved
+    // (#4891) — a repair lap that changed nothing the tree records hands
+    // back the candidate its last verify passed. Pass by identity: the
+    // member lands on the claim a dispatched pass would have produced,
+    // carrying the same verdict, and the mechanical lane never runs.
+    if let Some((current, proof)) = candidate
+        .filter(|_| next == StageId::Verify)
+        .and_then(|current| record.verify_proof_for(current.tree).map(|proof| (current, proof)))
+    {
+        let claim = ResolutionClaim {
+            workpiece: workpiece.clone(),
+            scope_revision: member.scope_revision,
+            candidate: current.tree,
+            evidence: proof.evidence.clone(),
+        };
+        let reuse = reuse_of(bloom, StageId::Verify, proof);
+        effects.push(Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress });
+        effects.extend(claim_effects(snapshot, record, bloom, &claim, Some(reuse)));
         return Decisions {
-            outcome: Outcome::AttemptAdvanced { bloom: *bloom, workpiece: workpiece.clone(), from: stage, to: next },
+            outcome: Outcome::VerifyReused { bloom, workpiece: workpiece.clone(), proof: proof.evidence.detail },
             effects,
         };
     }
-    // A failing gate re-dispatches the same stage while its retry budget allows;
-    // an exhausted budget wedges the member — it stops dispatching rather than
-    // looping (the tripwire).
+
+    effects.extend(move_effects_with_candidate(
+        bloom,
+        workpiece,
+        member.scope_revision,
+        progress,
+        targets,
+        candidate.map(|current| current.tree),
+        SealedLine::of(record, member),
+    ));
+    Decisions {
+        outcome: Outcome::AttemptAdvanced { bloom, workpiece: workpiece.clone(), from: cursor.stage, to: next },
+        effects,
+    }
+}
+
+fn retry_or_wedge(
+    record: &BloomRecord,
+    stage: StageId,
+    ctx: &CompletionCtx<'_>,
+    evidence: &Evidence,
+    mut effects: Vec<Decision>,
+) -> Decisions {
+    let CompletionCtx { bloom, workpiece, member, cursor, candidate, targets } = *ctx;
+    let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile);
+    let fold_conflict_evidence = cursor.fold_conflict_evidence.filter(|_| stage == StageId::Reconcile);
     let budget = record.stage_catalog.retry_budget_of(stage).unwrap_or(1);
-    if attempts < budget {
-        let attempt = attempts + 1;
-        let progress = StageProgress { stage, attempts: attempt, candidate, repair_rolls, seen_verify_failures };
+    if cursor.attempts < budget {
+        let attempt = cursor.attempts + 1;
+        let progress = StageProgress {
+            stage,
+            attempts: attempt,
+            candidate,
+            repair_rolls: cursor.repair_rolls,
+            seen_verify_failures: cursor.seen_verify_failures,
+            fold_checkpoint,
+            fold_conflict_evidence,
+        };
         effects.extend(move_effects_with_candidate(
-            *bloom,
+            bloom,
             workpiece,
             member.scope_revision,
             progress,
-            DispatchTargets { subject, checkout },
+            targets,
             candidate.map(|current| current.tree),
             SealedLine::of(record, member),
         ));
         return Decisions {
-            outcome: Outcome::AttemptRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, attempt },
+            outcome: Outcome::AttemptRetried { bloom, workpiece: workpiece.clone(), stage, attempt },
             effects,
         };
     }
-    wedged(*bloom, workpiece, stage, evidence, effects)
+    // Reconcile exhaustion attaches the collision evidence, not the last
+    // attempt's — the operator (and a later grant) needs the paths that
+    // started the stage, not the lane's most recent miss.
+    let mut wedge_evidence = evidence.clone();
+    if let Some(detail) = fold_conflict_evidence {
+        wedge_evidence.detail = detail;
+    }
+    wedged(bloom, workpiece, stage, &wedge_evidence, effects)
+}
+
+/// Dispatch targets for a member-line move, or the folded checkpoint when
+/// the member is reconciling a collision (ADR-0189).
+pub(super) fn reconcile_or_line_targets(
+    scope_revision: Digest,
+    base: Digest,
+    candidate: Option<CandidateRef>,
+    fold_checkpoint: Option<Digest>,
+) -> DispatchTargets {
+    if let Some(checkpoint) = fold_checkpoint {
+        return DispatchTargets {
+            subject: candidate.map_or(scope_revision, |current| current.tree),
+            checkout: checkpoint,
+        };
+    }
+    candidate.map_or(DispatchTargets { subject: scope_revision, checkout: base }, |current| DispatchTargets {
+        subject: current.tree,
+        checkout: current.checkout,
+    })
 }
 
 /// The terminal answer for a member that has spent `stage`'s retry budget: stop
