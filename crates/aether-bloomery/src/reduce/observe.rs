@@ -61,7 +61,7 @@ pub(super) fn reduce_observe_mainline(snapshot: &Snapshot, head: &Digest) -> Dec
 /// current mainline (#4938). Record nothing: folding the stale head into
 /// `observed` would poison the only base a supersession may rebase onto.
 /// A rewritten live ref does not arrive here — the host follows it as
-/// [`Fact::ObserveMainline`].
+/// [`Fact::ObserveMainline`](crate::Fact::ObserveMainline).
 pub(super) fn reduce_observe_mainline_diverged(snapshot: &Snapshot, head: &Digest) -> Decisions {
     Decisions::rejected(Outcome::MainlineDiverged { head: *head, mainline: snapshot.mainline })
 }
