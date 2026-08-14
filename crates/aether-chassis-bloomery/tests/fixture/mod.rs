@@ -123,7 +123,9 @@ use aether_bloomery::{
     QueryResult, VerifyFailureSet, ViewDocument, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
+use aether_bloomery_github::{
+    ChecksState, GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex,
+};
 use aether_chassis_bloomery::ControlCore;
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
 use aether_chassis_bloomery::bloomery::{
@@ -585,6 +587,31 @@ impl FixtureHarness {
     /// A gate did not dispatch, a verdict was refused, or the bloom did not
     /// land.
     pub fn land_the_fold(&mut self, bloom: BloomId) -> bool {
+        let (mechanical_ran, proposal) = self.resolve_and_propose(bloom);
+
+        // A person merging the proposal out from under the coordinator, which
+        // the watch still has to observe — the gate here reports nothing, so
+        // the reactor's own acceptance never fires and this is the only way the
+        // landing happens. The coordinator merging its *own* proposal has its
+        // own scenario, which drives the gate green instead.
+        self.fake.merge_pull_request(proposal, SQUASH_COMMIT);
+        self.await_landing(bloom, BloomStatus::Landed);
+        mechanical_ran
+    }
+
+    /// The same tail up to the landing proposal being open, stopping before
+    /// anything accepts it: the fold, its aggregate gates, and the one land tick
+    /// that proposes. Returns whether the mechanical gate ran (see
+    /// [`land_the_fold`](Self::land_the_fold)) and the proposal's number.
+    ///
+    /// Split out because who merges is the variable: `land_the_fold` has a
+    /// person do it, and the acceptance scenario has the coordinator do it once
+    /// the gate goes green.
+    ///
+    /// # Panics
+    /// A gate did not dispatch, a verdict was refused, or no landing was
+    /// proposed.
+    pub fn resolve_and_propose(&mut self, bloom: BloomId) -> (bool, u64) {
         self.integrate_tick();
 
         let order = self.await_order();
@@ -602,15 +629,33 @@ impl FixtureHarness {
         }
         assert!(key.starts_with("aether.bloomery.aggregate_review:"), "the critic's gate: {key}");
 
-        // Landing is two steps, because mainline is protected: the reactor
-        // proposes, a person accepts, and the next poll observes the acceptance.
+        // Landing is a proposal and then an acceptance: the reactor proposes the
+        // resolved head, and the bloom is not landed until something merges it.
         self.land_tick();
         let proposal = self.landing_proposal(bloom).expect("a resolved bloom proposes a landing");
         assert_eq!(self.bloom(bloom).status, BloomStatus::Resolved, "a proposed bloom has not landed yet");
+        (mechanical_ran, proposal)
+    }
 
-        self.fake.merge_pull_request(proposal, SQUASH_COMMIT);
-        self.await_landing(bloom, BloomStatus::Landed);
-        mechanical_ran
+    /// Report every check on landing proposal `number`'s head as passed — the
+    /// landing gate concluding green, which is the only thing the land reactor
+    /// merges its own proposal on.
+    ///
+    /// # Panics
+    /// The fixture holds no such proposal.
+    pub fn pass_landing_checks(&self, number: u64) {
+        let head = self.fake.pull_request_head_sha(number).expect("the proposal has a head");
+        self.fake.seed_checks(&head, ChecksState::Passed);
+    }
+
+    /// Whether landing proposal `number` has merged — what a scenario asserting
+    /// the coordinator pressed its own button reads, having pressed nothing.
+    ///
+    /// # Panics
+    /// The fixture holds no such proposal.
+    #[must_use]
+    pub fn landing_merged(&self, number: u64) -> bool {
+        self.fake.pull_request_merged(number).expect("the fixture holds the proposal")
     }
 
     /// Every order the coordinator currently holds outstanding, read from its

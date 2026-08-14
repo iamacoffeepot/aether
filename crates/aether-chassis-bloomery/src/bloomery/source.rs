@@ -26,7 +26,9 @@ use aether_bloomery::{
     CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal,
     SharedCorrespondence, Snapshot, SourceSnapshot, WorkpieceId,
 };
-use aether_bloomery_github::{GitObjectId, GitSource, GithubError, LandingProposal, LandingSource, SourceError};
+use aether_bloomery_github::{
+    GitObjectId, GitSource, GithubError, LandAcceptance, LandingProposal, LandingSource, SourceError,
+};
 
 use super::{CoordinatorConfig, GithubConnectionConfig};
 
@@ -308,6 +310,25 @@ impl SourceShell {
     /// A transport or backend fault.
     pub fn poll_land(&self, bloom: &BloomId, expected_base: &Digest, number: u64) -> Result<LandProposal, SourceError> {
         self.backend.poll_land(bloom, expected_base, number)
+    }
+
+    /// Merge the landing proposal this port opened for `bloom`, once its gate is
+    /// green and it still proposes the head the bloom proved (issue #4953) —
+    /// the button press the operator used to perform by hand, under the same
+    /// compare-and-swap the proposal was opened with.
+    ///
+    /// # Errors
+    /// [`SourceError::LandingDisabled`] while the land gate is off, or a
+    /// transport/backend fault. A refusal is a clean
+    /// [`LandAcceptance::Refused`], not an error.
+    pub fn accept_land(
+        &self,
+        bloom: &BloomId,
+        expected_base: &Digest,
+        new_head: &Digest,
+        number: u64,
+    ) -> Result<LandAcceptance, SourceError> {
+        self.backend.accept_land(bloom, expected_base, new_head, number)
     }
 
     /// Acquire `bloom`'s claim refs — one per member workpiece plus the

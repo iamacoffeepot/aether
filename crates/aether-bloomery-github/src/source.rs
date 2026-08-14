@@ -59,7 +59,7 @@ use serde::Serialize;
 
 use crate::client::{
     ChecksState, GitDataApi, GitRef, GithubApi, GithubError, IssueStateApi, MergeResult, NewComment, NewPullRequest,
-    PullRequestApi, PullRequestState,
+    PullMergeResult, PullRequestApi, PullRequestState, strip_heads,
 };
 use crate::correspondence::GitObjectId;
 use crate::mainline::MainlineRef;
@@ -256,6 +256,84 @@ pub struct LandingProposal {
     /// The caller's half of the body. The provenance footer is appended below
     /// it, so an assembly never restates the digests.
     pub body: String,
+}
+
+/// What asking the port to accept a bloom's own landing proposal did
+/// (issue #4953).
+///
+/// The coordinator opens the proposal and, once its gate is green, merges it —
+/// the same trust decision the pipeline already made, since ADR-0186 gives the
+/// daily ref no required checks precisely because bloomery's own verify and
+/// aggregate gates prove each landing. What is automated is the button press,
+/// not the judgement, so this vocabulary is about whether the thing being
+/// merged is still the thing that was proven.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum LandAcceptance {
+    /// The proposal merged, or had already merged. Either way the watch's next
+    /// poll reads the commit mainline actually became; this reports only that
+    /// there is nothing left to press.
+    Accepted,
+    /// Nothing to accept yet: the proposal's gate has not reported green.
+    ///
+    /// A gate that has concluded *red* also lands here. Classifying a red gate
+    /// is [`SourceBackend::poll_land`]'s job — the watch consults it first, and
+    /// a second classification here would be a second place to keep in step.
+    /// What this answers is only whether the green a merge requires is in hand.
+    Pending,
+    /// Refused, and why. The landing does not proceed under this proposal.
+    Refused(LandingRefusal),
+}
+
+/// Why a landing acceptance refused. Each variant is a different thing for an
+/// operator to do, which is why they are not one string.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum LandingRefusal {
+    /// The proposal no longer proposes what the bloom proved — its head is not
+    /// the resolved head (it gained commits, or the branch was repointed), it
+    /// aims at a branch other than this coordinator's mainline, or it is no
+    /// longer open.
+    Drifted {
+        /// What moved, in the terms a reader of the journal needs.
+        detail: String,
+    },
+    /// Mainline is no longer the base the bloom sealed against. It moved after
+    /// the proposal was opened, so merging now would land the bloom's work onto
+    /// a base it was never built or verified against.
+    BaseMoved {
+        /// The sealed base the bloom proved against.
+        expected: Digest,
+        /// The base mainline actually stands at now.
+        actual: Digest,
+    },
+    /// The source itself refused the merge — a conflict, a protection rule, or
+    /// a head that moved between the guard read and the merge call.
+    Merge {
+        /// The refusing status.
+        status: u16,
+        /// The refusal body, verbatim.
+        detail: String,
+    },
+}
+
+/// The drift refusal, spelled once so the several ways a proposal can stop
+/// being the one that was proven all read the same in the journal.
+fn refused_drift(detail: String) -> LandAcceptance {
+    LandAcceptance::Refused(LandingRefusal::Drifted { detail })
+}
+
+impl fmt::Display for LandingRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Drifted { detail } => write!(f, "the landing proposal drifted off the proven head ({detail})"),
+            Self::BaseMoved { expected, actual } => write!(
+                f,
+                "mainline moved off the sealed base after the proposal opened (sealed `{}`, now `{}`)",
+                to_hex(expected),
+                to_hex(actual),
+            ),
+            Self::Merge { status, detail } => write!(f, "the source refused the merge with {status}: {detail}"),
+        }
+    }
 }
 
 /// The title a landing proposal falls back to: the bloom named by its short hex,
@@ -1296,6 +1374,30 @@ pub trait LandingSource: SourceBackend<Error = SourceError> {
         proposal: Option<&LandingProposal>,
     ) -> Result<LandOutcome, SourceError>;
 
+    /// Accept the landing proposal numbered `number` — merge the pull request
+    /// the port itself opened for `bloom`, once its gate is green and it still
+    /// proposes exactly what the bloom proved (issue #4953).
+    ///
+    /// Gated by the same `cas_land_enabled` kill switch
+    /// [`land_proposal`](Self::land_proposal) is, and guarded by the same
+    /// compare-and-swap the proposal was opened under: `expected_base` has to
+    /// still be mainline, `new_head` has to still be the proposal's head, and
+    /// the merge itself is issued against that head sha so the source refuses
+    /// it if the branch moves in between. Refuse-and-surface is the answer to
+    /// every one of those moving — never merge-anyway.
+    ///
+    /// # Errors
+    /// [`SourceError::LandingDisabled`] while the land gate is off, or a
+    /// transport/backend fault. A refusal is [`LandAcceptance::Refused`], not an
+    /// error: nothing about it gets better by re-driving the same call.
+    fn accept_land(
+        &self,
+        bloom: &BloomId,
+        expected_base: &Digest,
+        new_head: &Digest,
+        number: u64,
+    ) -> Result<LandAcceptance, SourceError>;
+
     /// Delete `bloom`'s candidate, integration, and checkpoint refs. Claim refs
     /// and the landing branch are spared. See [`GitSource::prune_working_refs`].
     ///
@@ -1382,6 +1484,91 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> LandingSource f
         }
     }
 
+    fn accept_land(
+        &self,
+        bloom: &BloomId,
+        expected_base: &Digest,
+        new_head: &Digest,
+        number: u64,
+    ) -> Result<LandAcceptance, SourceError> {
+        // The kill switch first, before any read and long before the write. An
+        // acceptance that consulted the gate only on the way past would be a
+        // way to land with `cas_land_enabled` off — the one thing the switch
+        // exists to make impossible.
+        if !self.cas_land_enabled {
+            return Err(SourceError::LandingDisabled);
+        }
+
+        let Some(pull) = self.client.get_pull_request(number)? else {
+            return Ok(refused_drift(format!("proposal #{number} is gone")));
+        };
+        // Already merged — by an operator, or by this very call on a pass whose
+        // observation was lost. Idempotent rather than a refusal: re-pressing a
+        // button that is already pressed is a no-op, and calling it drift would
+        // reject a bloom for having landed.
+        if pull.merged {
+            return Ok(LandAcceptance::Accepted);
+        }
+        if pull.state != PullRequestState::Open {
+            return Ok(refused_drift(format!("proposal #{number} is closed without having merged")));
+        }
+        // Only a landing this coordinator opened is accepted here, and only
+        // onto its own mainline. The pair is the identity check: a human-flow
+        // pull request proposes from a branch that is not this bloom's landing
+        // branch, so it can never be what a number resolves to here, and a
+        // landing aimed somewhere other than mainline is not the landing that
+        // was proposed whatever branch it came from.
+        let branch = landing_branch(bloom);
+        if strip_heads(&pull.head_ref) != branch {
+            return Ok(refused_drift(format!(
+                "proposal #{number} proposes `{}`, not this bloom's landing branch `{branch}`",
+                pull.head_ref,
+            )));
+        }
+        if strip_heads(&pull.base) != self.mainline.branch() {
+            return Ok(refused_drift(format!(
+                "proposal #{number} aims at `{}`, not `{}`",
+                pull.base,
+                self.mainline.branch(),
+            )));
+        }
+
+        // The head the bloom proved. A proposal whose head is anything else has
+        // gained commits nobody verified — the one shape a merge must never
+        // wave through, because every gate upstream judged the other tree.
+        let proven = self.resolve_git_sha(new_head, "landing acceptance head digest")?;
+        if pull.head_sha != proven {
+            return Ok(refused_drift(format!(
+                "proposal #{number} is at `{}`, not the proven head `{proven}`",
+                pull.head_sha,
+            )));
+        }
+
+        // The same compare-and-swap `land_proposal` opened under, re-asked at
+        // the moment of the write. `land_proposal` deliberately does not
+        // re-decide a base once a proposal is open — an open proposal's fate
+        // belongs to the proposal — but a merge *is* the write that base guards,
+        // and mainline can have moved in the ticks between opening and green.
+        let actual = self.mainline_digest(&self.mainline_head()?.sha)?;
+        if actual != *expected_base {
+            return Ok(LandAcceptance::Refused(LandingRefusal::BaseMoved { expected: *expected_base, actual }));
+        }
+
+        // Green, and only green. `Absent` reads as not-yet — a gate that has not
+        // reported is not a gate that passed — so a proposal nothing ever checks
+        // is left for a person rather than merged on an absence.
+        if self.client.checks_for_ref(&pull.head_sha)? != ChecksState::Passed {
+            return Ok(LandAcceptance::Pending);
+        }
+
+        match self.client.squash_merge_pull_request(number, &pull.head_sha)? {
+            PullMergeResult::Merged { .. } => Ok(LandAcceptance::Accepted),
+            PullMergeResult::Refused { status, detail } => {
+                Ok(LandAcceptance::Refused(LandingRefusal::Merge { status, detail }))
+            }
+        }
+    }
+
     fn prune_working_refs(&self, bloom: &BloomId) -> Result<usize, SourceError> {
         let prefix = Self::working_ref_prefix(bloom);
         let mut pruned = 0;
@@ -1413,8 +1600,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        ADMISSION_REF, EMPTY_TREE, GitSource, LandingSource, MainlineRef, SourceError, candidate_ref_name,
-        landing_branch, parse_bloom_line, render_claim_message, render_tombstone_message, to_hex,
+        ADMISSION_REF, EMPTY_TREE, GitSource, LandAcceptance, LandingRefusal, LandingSource, MainlineRef, SourceError,
+        candidate_ref_name, landing_branch, parse_bloom_line, render_claim_message, render_tombstone_message, to_hex,
     };
     use crate::client::{GitDataApi, PullRequestApi};
     use crate::short_hex;
@@ -2138,6 +2325,140 @@ mod tests {
         // A number nothing answers is terminal too — otherwise the watch spins
         // forever on a proposal that will never resolve.
         assert_eq!(source.poll_land(&bloom, &base, 9999).unwrap(), LandProposal::Declined, "vanished");
+    }
+
+    // A proposal, its head sha, and an enabled port over `fake` — the state
+    // every acceptance test starts from, since accepting is only ever asked of
+    // a landing the port itself opened.
+    fn proposed(fake: &FakeGithub, base: &Digest, new_head: &Digest) -> (GitSource<FakeGithub>, u64, String) {
+        fake.seed_ref("heads/main", &"a1".repeat(20));
+        fake.seed_correspondence(base, &"a1".repeat(20));
+        fake.seed_git_object(new_head);
+        let source = git_source(fake, true);
+        let LandOutcome::Proposed { number } = source.land(&bloom(), base, new_head).unwrap() else {
+            panic!("the port opens the proposal it is then asked to accept");
+        };
+        let head_sha = fake.pull_request_head_sha(number).expect("the proposal has a head");
+        (source, number, head_sha)
+    }
+
+    // Acceptance 1: a green landing merges with nobody pressing anything. The
+    // merge commit is what mainline became — the port never reports a landing
+    // under the head it proposed, because a squash produces neither branch's
+    // commit.
+    #[test]
+    fn a_green_proposal_is_accepted_and_mainline_becomes_the_squash_commit() {
+        let fake = FakeGithub::new();
+        let (base, new_head) = (digest(10), digest(90));
+        let (source, number, head_sha) = proposed(&fake, &base, &new_head);
+        fake.seed_checks(&head_sha, ChecksState::Passed);
+
+        assert_eq!(source.accept_land(&bloom(), &base, &new_head, number).unwrap(), LandAcceptance::Accepted);
+        assert_eq!(fake.pull_request_merged(number), Some(true), "the port merged the proposal it opened");
+
+        let LandProposal::Landed(receipt) = source.poll_land(&bloom(), &base, number).unwrap() else {
+            panic!("the accepted proposal reads as landed");
+        };
+        assert_ne!(receipt.new_head, new_head, "the receipt attests the squash commit, not the proposed head");
+    }
+
+    // Tripwire: the kill switch bounds the *merge*, not only the proposal.
+    // `cas_land_enabled` off is the one control that must make a landing
+    // impossible, and an acceptance that consulted it after opening — or not at
+    // all — would be a second door into the same write.
+    #[test]
+    fn accepting_a_landing_refuses_while_the_land_gate_is_off() {
+        let fake = FakeGithub::new();
+        let (base, new_head) = (digest(10), digest(90));
+        let (_, number, head_sha) = proposed(&fake, &base, &new_head);
+        fake.seed_checks(&head_sha, ChecksState::Passed);
+
+        match git_source(&fake, false).accept_land(&bloom(), &base, &new_head, number) {
+            Err(SourceError::LandingDisabled) => {}
+            other => panic!("expected LandingDisabled, got {other:?}"),
+        }
+        assert_eq!(fake.pull_request_merged(number), Some(false), "a gated-off port merges nothing");
+    }
+
+    // A gate that has not concluded green is not a gate that passed. `Absent`
+    // above all: a proposal nothing has checked yet reads exactly like one
+    // everything has passed if the port asks only "did anything fail".
+    #[test]
+    fn a_proposal_whose_gate_has_not_gone_green_is_not_accepted() {
+        let fake = FakeGithub::new();
+        let (base, new_head) = (digest(10), digest(90));
+        let (source, number, head_sha) = proposed(&fake, &base, &new_head);
+
+        for state in [ChecksState::Absent, ChecksState::Pending] {
+            fake.seed_checks(&head_sha, state.clone());
+            assert_eq!(
+                source.accept_land(&bloom(), &base, &new_head, number).unwrap(),
+                LandAcceptance::Pending,
+                "a {state:?} gate leaves the proposal for a later pass",
+            );
+        }
+        assert_eq!(fake.pull_request_merged(number), Some(false), "nothing merged on an unconcluded gate");
+    }
+
+    // Acceptance 2: a proposal that gained a commit nobody proved is refused,
+    // not merged. Every gate upstream judged the head the bloom resolved on, so
+    // a merge that waved a different tree through would land work under a proof
+    // that was never about it.
+    #[test]
+    fn a_proposal_whose_head_moved_off_the_proven_one_is_refused() {
+        let fake = FakeGithub::new();
+        let (base, new_head) = (digest(10), digest(90));
+        let (source, number, _) = proposed(&fake, &base, &new_head);
+
+        let pushed = "ee".repeat(20);
+        fake.push_to_pull_request(number, &pushed);
+        fake.seed_checks(&pushed, ChecksState::Passed);
+
+        match source.accept_land(&bloom(), &base, &new_head, number).unwrap() {
+            LandAcceptance::Refused(LandingRefusal::Drifted { detail }) => {
+                assert!(detail.contains(&pushed), "the refusal names the head it found: {detail}");
+            }
+            other => panic!("expected a drift refusal, got {other:?}"),
+        }
+        assert_eq!(fake.pull_request_merged(number), Some(false), "a drifted proposal is not merged");
+    }
+
+    // Acceptance 2, the other axis. `land` deliberately stops re-deciding the
+    // base once a proposal is open, so without this check the acceptance would
+    // be the one write in the landing that no base guard covers — and the
+    // window is real: a proposal sits open for as many ticks as its gate takes.
+    #[test]
+    fn a_base_that_moved_after_the_proposal_opened_refuses_the_merge() {
+        let fake = FakeGithub::new();
+        let (base, new_head) = (digest(10), digest(90));
+        let (source, number, head_sha) = proposed(&fake, &base, &new_head);
+        fake.seed_checks(&head_sha, ChecksState::Passed);
+
+        let moved = digest(77);
+        fake.seed_ref("heads/main", &"d4".repeat(20));
+        fake.seed_correspondence(&moved, &"d4".repeat(20));
+
+        match source.accept_land(&bloom(), &base, &new_head, number).unwrap() {
+            LandAcceptance::Refused(LandingRefusal::BaseMoved { expected, actual }) => {
+                assert_eq!(expected, base);
+                assert_eq!(actual, moved, "the refusal names where mainline actually stands");
+            }
+            other => panic!("expected a base-moved refusal, got {other:?}"),
+        }
+        assert_eq!(fake.pull_request_merged(number), Some(false), "a moved base is not landed onto");
+    }
+
+    // A proposal a person merged out from under the coordinator is not a
+    // refusal — the button it would press is already pressed. Calling that
+    // drift would reject a bloom for having landed.
+    #[test]
+    fn accepting_an_already_merged_proposal_is_the_idempotent_no_op() {
+        let fake = FakeGithub::new();
+        let (base, new_head) = (digest(10), digest(90));
+        let (source, number, _) = proposed(&fake, &base, &new_head);
+        fake.merge_pull_request(number, &"5c".repeat(20));
+
+        assert_eq!(source.accept_land(&bloom(), &base, &new_head, number).unwrap(), LandAcceptance::Accepted);
     }
 
     #[test]

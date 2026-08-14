@@ -92,10 +92,10 @@ pub mod testing;
 
 pub use app_auth::{AppTokenSource, InstallationTokenExchange};
 pub use client::{
-    ActionsApi, Artifact, CheckConclusion, CheckRun, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError,
-    HttpRequest, HttpResponse, HttpTransport, InstallationToken, IssueStateApi, MergeResult, Method, NewCheckRun,
-    NewComment, NewPullRequest, PullRequest, PullRequestApi, PullRequestState, ReqwestGithub, ReqwestTransport,
-    RunConclusion, RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
+    ActionsApi, Artifact, CheckConclusion, CheckRun, ChecksState, Comment, GitCommit, GitDataApi, GitRef, GithubApi,
+    GithubError, HttpRequest, HttpResponse, HttpTransport, InstallationToken, IssueStateApi, MergeResult, Method,
+    NewCheckRun, NewComment, NewPullRequest, PullMergeResult, PullRequest, PullRequestApi, PullRequestState,
+    ReqwestGithub, ReqwestTransport, RunConclusion, RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
 };
 pub use config::GithubConfig;
 pub use correspondence::{GitObjectFormat, GitObjectId};
@@ -108,6 +108,6 @@ pub use mainline::MainlineRef;
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
 pub use projection::{GithubProjection, canonical_issue_number};
 pub use source::{
-    GitSource, LandingProposal, LandingSource, SourceError, candidate_ref_name, landing_branch, landing_floor_title,
-    to_hex,
+    GitSource, LandAcceptance, LandingProposal, LandingRefusal, LandingSource, SourceError, candidate_ref_name,
+    landing_branch, landing_floor_title, to_hex,
 };
