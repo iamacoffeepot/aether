@@ -121,4 +121,5 @@ pub use values::{
     StudyRecord, SurfacePattern, Tier, TimeoutRecord, ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND,
     VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VerifiedTree, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof,
     VerifyReuse, Wedge, Workpiece, classify_findings, config_address, decode_config, is_model_lane,
+    surface_intersection,
 };

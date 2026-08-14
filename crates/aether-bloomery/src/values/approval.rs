@@ -101,11 +101,81 @@ impl SurfacePattern {
         Some(Self::Exact(String::from(raw)))
     }
 
+    /// Whether two declared-surface patterns can both match the same path.
+    ///
+    /// Inside this grammar an intersection is decidable by prefix alone, which
+    /// is the comparison the tier resolver already runs a literal policy rule
+    /// through on its way to a subtree. One implementation serves both, so the
+    /// seal door's cross-member overlap check and the tier resolver cannot drift
+    /// apart on what overlapping means.
+    #[must_use]
+    pub fn intersects(&self, other: &Self) -> bool {
+        prefixes_intersect(self.as_prefix(), other.as_prefix())
+    }
+
+    /// The paths two patterns both permit, or [`None`] when they are disjoint.
+    ///
+    /// The answer is always one of the operands: an intersecting pair nests, so
+    /// the narrower side *is* the overlap. The deeper prefix is the narrower
+    /// one, and at equal prefixes — which, for a pair that intersects at all,
+    /// means equal strings — the [`Self::Exact`] side is, since a single path is
+    /// narrower than the subtree rooted at it.
+    #[must_use]
+    pub fn intersection<'a>(&'a self, other: &'a Self) -> Option<&'a Self> {
+        if !self.intersects(other) {
+            return None;
+        }
+        let (own, peer) = (self.as_prefix().len(), other.as_prefix().len());
+        if own > peer || (own == peer && matches!(self, Self::Exact(_))) {
+            return Some(self);
+        }
+        Some(other)
+    }
+
+    /// The glob this pattern renders back to — what [`Self::parse`] reads.
+    #[must_use]
+    pub fn to_glob(&self) -> String {
+        match self {
+            Self::Exact(path) => path.clone(),
+            Self::Subtree(prefix) => format!("{prefix}/**"),
+        }
+    }
+
     fn as_prefix(&self) -> &str {
         match self {
             Self::Exact(path) | Self::Subtree(path) => path,
         }
     }
+}
+
+/// Every glob two declared surfaces both permit — the seal door's cross-member
+/// overlap check (#4931).
+///
+/// Sorted and deduplicated, so one pair of surfaces answers the same list
+/// however the two were ordered and however many globs on each side reduce to
+/// the same overlap. An empty answer means disjoint.
+///
+/// A glob outside the surface grammar is skipped rather than reported. There is
+/// no pattern to name for it, and the same gate already resolves it to
+/// [`Tier::Human`] — it stops at the owner's desk with or without a warning, so
+/// the fail-closed direction is already covered by the tier the door assigns it.
+///
+/// Quadratic in the globs handed to it. A declared surface is a short list of
+/// crate and path globs, and the pairwise member scan calling this is what
+/// bounds the whole check.
+#[must_use]
+pub fn surface_intersection(left: &[String], right: &[String]) -> Vec<String> {
+    let right: Vec<SurfacePattern> = right.iter().filter_map(|glob| SurfacePattern::parse(glob)).collect();
+
+    let mut shared = BTreeSet::new();
+    for pattern in left.iter().filter_map(|glob| SurfacePattern::parse(glob)) {
+        for peer in &right {
+            if let Some(overlap) = pattern.intersection(peer) {
+                shared.insert(overlap.to_glob());
+            }
+        }
+    }
+    shared.into_iter().collect()
 }
 
 /// A policy-rule glob, parsed once so the set-algebra helpers are total over a
@@ -263,7 +333,7 @@ fn normalise_pattern(glob: &str) -> (&str, bool) {
 fn rule_intersects_subtree(rule: &RulePattern, surface: &SurfacePattern) -> bool {
     match rule {
         RulePattern::Unanchored => true,
-        RulePattern::Surface(rule) => prefixes_intersect(rule.as_prefix(), surface.as_prefix()),
+        RulePattern::Surface(rule) => rule.intersects(surface),
         RulePattern::Glob(segments) => {
             let policy_segments: Vec<&str> = segments.iter().map(String::as_str).collect();
             let surface_prefix = surface.as_prefix();
@@ -436,8 +506,9 @@ fn match_class(pattern: &[u8], open: usize, ch: u8) -> Option<(bool, usize)> {
 mod tests {
     use alloc::string::String;
     use alloc::vec;
+    use alloc::vec::Vec;
 
-    use super::{ApprovalPolicy, ApprovalRule, Tier};
+    use super::{ApprovalPolicy, ApprovalRule, Tier, surface_intersection};
 
     /// The reference tier policy — the same rules `test-surface-match.py`'s
     /// `POLICY` used, so the resolver is checked against the same cases.
@@ -463,8 +534,13 @@ mod tests {
     }
 
     /// Resolve one surface glob to its tier through the public surface reducer.
-    fn tier(surface: &str) -> Tier {
-        policy().resolve_surface(&[String::from(surface)])
+    fn tier(glob: &str) -> Tier {
+        policy().resolve_surface(&[String::from(glob)])
+    }
+
+    /// One declared surface, as the seal door hands it to the overlap check.
+    fn surface(globs: &[&str]) -> Vec<String> {
+        globs.iter().map(|glob| String::from(*glob)).collect()
     }
 
     #[test]
@@ -540,6 +616,65 @@ mod tests {
         // human, and an unmatched top-level surface takes the judge default.
         assert_eq!(policy.resolve_surface(&[String::from("crates/aether-behavior/Cargo.toml")]), Tier::Human);
         assert_eq!(policy.resolve_surface(&[String::from("unknown-top/thing.rs")]), Tier::Judge);
+    }
+
+    #[test]
+    fn a_shared_string_prefix_is_not_a_shared_subtree() {
+        // The overlap warning's cry-wolf case. `crates/aether-bloomery-x` starts
+        // with `crates/aether-bloomery` as a string, so a plain `starts_with`
+        // reports every sibling crate as colliding and the warning stops
+        // carrying information. Only a prefix ending at a path boundary is a
+        // shared subtree.
+        assert!(
+            surface_intersection(&surface(&["crates/aether-bloomery/**"]), &surface(&["crates/aether-bloomery-x/**"]))
+                .is_empty(),
+            "a sibling crate is not a nested subtree"
+        );
+        assert!(
+            surface_intersection(&surface(&["crates/aether-bloomery/src/seal.rs"]), &surface(&["crates/aether-bloo"]))
+                .is_empty(),
+            "a truncated path is not a containing directory"
+        );
+    }
+
+    #[test]
+    fn an_overlap_reports_the_paths_both_surfaces_permit() {
+        // The operator reads the intersection to decide whether to proceed, so
+        // it has to be the narrower side — naming the wider one would report a
+        // whole crate colliding where only one file does. Both nesting
+        // directions, since which side is narrower is not which side is first.
+        assert_eq!(
+            surface_intersection(
+                &surface(&["crates/aether-bloomery/**"]),
+                &surface(&["crates/aether-bloomery/src/values/price.rs"])
+            ),
+            surface(&["crates/aether-bloomery/src/values/price.rs"])
+        );
+        assert_eq!(
+            surface_intersection(
+                &surface(&["crates/aether-bloomery/src/reduce/**"]),
+                &surface(&["crates/aether-bloomery/**"])
+            ),
+            surface(&["crates/aether-bloomery/src/reduce/**"])
+        );
+        // Several globs reducing to one overlap read as one overlap, and the
+        // order two surfaces were declared in does not change the answer.
+        assert_eq!(
+            surface_intersection(
+                &surface(&["crates/aether-bloomery/**", "crates/aether-bloomery/src/**"]),
+                &surface(&["crates/aether-bloomery/src/values/price.rs", "docs/guide/**"])
+            ),
+            surface(&["crates/aether-bloomery/src/values/price.rs"])
+        );
+    }
+
+    #[test]
+    fn disjoint_and_out_of_grammar_surfaces_intersect_in_nothing() {
+        assert!(surface_intersection(&surface(&["crates/aether-fs/**"]), &surface(&["docs/guide/**"])).is_empty());
+        // A glob outside the surface grammar names no pattern to intersect, so
+        // it contributes nothing rather than matching by raw string equality —
+        // the same gate already resolves it to `Human`, where a person reads it.
+        assert!(surface_intersection(&surface(&["docs/*"]), &surface(&["docs/*"])).is_empty());
     }
 
     #[test]

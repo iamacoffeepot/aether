@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use aether_actor::Manual;
 use aether_bloomery::{
     Admit, ApprovalPolicy, AuthorityDoor, BloomDraft, BloomId, BloomSpec, ConfigScopes, Digest, Event, Fact,
-    IdempotencyKey, Membership, Statement,
+    IdempotencyKey, Membership, Statement, WorkpieceId, surface_intersection,
 };
 use aether_data::wire::to_vec;
 use aether_http::HttpServerResponse;
@@ -138,6 +138,10 @@ impl ApiCapabilityState {
                 Ok(resolved) => resolved,
                 Err(response) => return Routed::Reply(response),
             };
+        // Every member's projection resolved, so the door now holds every
+        // declared surface at once — the one place that ever does. Journal the
+        // cross-member overlaps before the seal admits (#4931).
+        Self::journal_surface_overlaps(ctx, &draft.proposals, projections);
         let mut gated = draft;
         gated.proposals = sealed_proposals;
         // Pass 2. No above-auto member → seal synchronously (the all-auto fast
@@ -239,6 +243,40 @@ impl ApiCapabilityState {
                 .clone()
                 .ok_or_else(|| error_response(422, "approval policy unavailable; seal fails closed")),
             Err(error) => Err(error_response(422, &format!("sealed approval policy unresolvable: {error}"))),
+        }
+    }
+
+    /// Admit one [`Fact::SurfaceOverlap`] per pair of this seal's members whose
+    /// declared surfaces intersect (#4931).
+    ///
+    /// Advisory throughout: fire-and-forget to the control core, for the reason
+    /// [`persist_descriptions`](ApiCapabilityState::persist_descriptions) is —
+    /// a record *about* an admission must not be able to fail the admission it
+    /// describes. The seal's own admit follows on its own path and is unaffected
+    /// by anything here, including an overlap the reducer refuses as a duplicate.
+    ///
+    /// The idempotency key is the fact's own content digest, so an operator who
+    /// re-POSTs the same seal records each overlap once rather than once per
+    /// attempt. That is also what lets this run once here, ahead of the
+    /// synchronous and deferred admits alike, instead of at each of the two
+    /// places a seal finally lands: the warning names the membership the door
+    /// was handed, and neither depends on that seal reaching the reducer first
+    /// nor on it being admitted at all. The cost is an orphan warning when the
+    /// seal is later refused for an unverified signature — the same harmless
+    /// orphan a description row leaves, and the retry that fixes the signature
+    /// dedups onto this row rather than filing a second.
+    fn journal_surface_overlaps(ctx: &NativeCtx<'_, Manual>, members: &[Membership], projections: &[MemberProjection]) {
+        for fact in surface_overlaps(members, projections) {
+            // Advisory, so an encode fault costs the warning and not the seal —
+            // the one path here that must never become a refusal.
+            let Some(admit) = overlap_admit(fact) else {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::api",
+                    "surface-overlap warning did not encode; seal proceeds unwarned"
+                );
+                continue;
+            };
+            ctx.actor::<ControlCore>().send_detached(&admit);
         }
     }
 
@@ -428,6 +466,69 @@ fn resolve_seal_memberships(
     Ok((sealed_proposals, pending_verifications))
 }
 
+/// Every pair of this seal's members whose declared surfaces intersect, as the
+/// facts that record them (#4931).
+///
+/// The scan lives at the door because only the door can run it: a declared
+/// surface rides the seal request rather than the sealed spec, so by the time
+/// the reducer holds the membership the surfaces are gone. Both admission doors
+/// route through [`gate_and_admit`](ApiCapabilityState::gate_and_admit), so a
+/// supersession's fresh membership is scanned exactly as a first seal's is.
+///
+/// Pairs are drawn from the members forward, so each unordered pair is reported
+/// once and no member is ever compared against itself. The globs come from
+/// [`surface_intersection`], the same set algebra the tier policy resolves a
+/// rule against — the overlap the door names and the subtree the policy matches
+/// are one definition, not two.
+///
+/// Quadratic in members, over a membership `gate_and_admit` has already capped
+/// at [`MAX_SEAL_MEMBERS`], and quadratic again in each member's globs. A
+/// realistic bloom is a handful of members declaring a handful of globs each, so
+/// the product is small; the cap is what keeps the worst case bounded rather
+/// than the shape.
+fn surface_overlaps(members: &[Membership], projections: &[MemberProjection]) -> Vec<Fact> {
+    // Each member paired with the surface it was gated on. Pass 1 has already
+    // refused a member with no projection, so a miss here cannot happen on the
+    // path that calls this; skipping rather than assuming keeps the advisory
+    // scan from being the thing that panics a seal.
+    let surfaces: Vec<(&WorkpieceId, &[String])> = members
+        .iter()
+        .filter_map(|member| {
+            projections
+                .iter()
+                .find(|projection| {
+                    projection.workpiece == member.workpiece && projection.scope_revision == member.scope_revision
+                })
+                .map(|projection| (&member.workpiece, projection.declared_surface.as_slice()))
+        })
+        .collect();
+
+    let mut overlaps = Vec::new();
+    for (index, (workpiece, surface)) in surfaces.iter().enumerate() {
+        for (peer, peer_surface) in &surfaces[index + 1..] {
+            let intersection = surface_intersection(surface, peer_surface);
+            if !intersection.is_empty() {
+                overlaps
+                    .push(Fact::SurfaceOverlap { members: vec![(*workpiece).clone(), (*peer).clone()], intersection });
+            }
+        }
+    }
+    overlaps
+}
+
+/// One overlap warning as the admit that journals it, or [`None`] when it will
+/// not encode.
+///
+/// The idempotency key is the fact's own content digest, so the same observed
+/// overlap dedups across seal attempts, while two overlaps from one seal — a
+/// different pair, or the same pair at a different intersection — stay distinct
+/// rows rather than collapsing into whichever arrived first.
+fn overlap_admit(fact: Fact) -> Option<Admit> {
+    let key = hex_encode(Digest::of_wire_bytes(&to_vec(&fact).ok()?).as_bytes());
+
+    Some(Admit { event: to_vec(&Event { idempotency_key: IdempotencyKey(key), fact }).ok()? })
+}
+
 /// Parse a possibly-empty request body into a `Default` body type: an empty
 /// body is the default, a non-empty one is parsed, a malformed one is a `400`.
 fn parse_optional_body<T: DeserializeOwned + Default>(body: &[u8]) -> Result<T, HttpServerResponse> {
@@ -439,9 +540,103 @@ fn parse_optional_body<T: DeserializeOwned + Default>(body: &[u8]) -> Result<T, 
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery::{BloomDraft, BloomId, Digest, Fact};
+    use aether_bloomery::{
+        BloomDraft, BloomId, ConfigRegistry, Digest, Evidence, EvidenceKind, Fact, Membership, WorkpieceId,
+    };
 
-    use super::{SealRequest, admission_fact, parse_optional_body};
+    use super::{MemberProjection, SealRequest, admission_fact, parse_optional_body, surface_overlaps};
+    use crate::bloomery::{AdrTouch, Completeness};
+
+    /// A sealed member at `revision`. Only its workpiece and scope revision are
+    /// read by the overlap scan; the rest is what a member is made of.
+    fn member(workpiece: &str, revision: u8) -> Membership {
+        Membership {
+            workpiece: WorkpieceId(workpiece.to_owned()),
+            scope_revision: Digest::from_bytes([revision; 32]),
+            configs: ConfigRegistry::default(),
+            approval: Evidence {
+                subject: Digest::from_bytes([revision; 32]),
+                kind: EvidenceKind::Approval,
+                detail: Digest::from_bytes([revision; 32]),
+            },
+        }
+    }
+
+    /// The projection that member arrived with, declaring `surface`.
+    fn projection(workpiece: &str, revision: u8, surface: &[&str]) -> MemberProjection {
+        MemberProjection {
+            workpiece: WorkpieceId(workpiece.to_owned()),
+            scope_revision: Digest::from_bytes([revision; 32]),
+            declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
+            completeness: Completeness {
+                has_problem_statement: true,
+                has_design_notes: true,
+                has_implementation_plan: true,
+                referenced_adr_prs_merged: true,
+                model_routing_count: 1,
+                blocked: false,
+                declared_surface_fresh: true,
+                dependencies_all_closed: true,
+                umbrella_integrity: true,
+            },
+            adr_touch: AdrTouch::None,
+            pre_approved: false,
+            signed_statement: None,
+        }
+    }
+
+    /// The pair and intersection one warning names.
+    fn overlap(fact: &Fact) -> (&[WorkpieceId], &[String]) {
+        match fact {
+            Fact::SurfaceOverlap { members, intersection } => (members, intersection),
+            other => panic!("expected a surface overlap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_overlapping_pair_warns_once_and_a_disjoint_one_not_at_all() {
+        // Three things the scan's shape has to get right at once. Pairs are
+        // drawn forward from each member, which keeps a member off its own list
+        // — every surface trivially intersects itself, so a self-comparison
+        // would warn on every seal that has ever happened — and reports a
+        // genuinely overlapping pair once rather than once from each side. The
+        // emptiness guard is the third: without it the disjoint member below
+        // files two warnings naming no paths.
+        let members = [member("wp-a", 1), member("wp-b", 2), member("wp-c", 3)];
+        let projections = [
+            projection("wp-a", 1, &["crates/aether-bloomery/**"]),
+            projection("wp-b", 2, &["crates/aether-bloomery/src/values/price.rs"]),
+            projection("wp-c", 3, &["docs/guide/**"]),
+        ];
+
+        let overlaps = surface_overlaps(&members, &projections);
+
+        assert_eq!(overlaps.len(), 1, "one overlapping pair is one warning, got {overlaps:?}");
+        let (pair, intersection) = overlap(&overlaps[0]);
+        assert_eq!(pair, [WorkpieceId("wp-a".to_owned()), WorkpieceId("wp-b".to_owned())]);
+        assert_eq!(intersection, ["crates/aether-bloomery/src/values/price.rs".to_owned()]);
+    }
+
+    #[test]
+    fn each_member_is_scanned_on_the_surface_its_own_projection_declared() {
+        // The operator sends projections in whatever order they like, so the
+        // scan matches on {workpiece, scope_revision} rather than on position.
+        // Pairing by index here hands wp-a the surface wp-c declared and wp-b
+        // the one wp-a did, and warns about the wrong pair entirely.
+        let members = [member("wp-a", 1), member("wp-b", 2), member("wp-c", 3)];
+        let projections = [
+            projection("wp-c", 3, &["crates/aether-fs/src/lib.rs"]),
+            projection("wp-a", 1, &["crates/aether-fs/**"]),
+            projection("wp-b", 2, &["crates/aether-http/**"]),
+        ];
+
+        let overlaps = surface_overlaps(&members, &projections);
+
+        assert_eq!(overlaps.len(), 1, "one overlapping pair is one warning, got {overlaps:?}");
+        let (pair, intersection) = overlap(&overlaps[0]);
+        assert_eq!(pair, [WorkpieceId("wp-a".to_owned()), WorkpieceId("wp-c".to_owned())]);
+        assert_eq!(intersection, ["crates/aether-fs/src/lib.rs".to_owned()]);
+    }
 
     #[test]
     fn no_predecessor_admits_through_the_seal_door() {

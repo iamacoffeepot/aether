@@ -24,7 +24,7 @@ mod study;
 mod timeout;
 mod verify;
 
-pub use approval::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier};
+pub use approval::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, surface_intersection};
 pub use bloom::{
     BloomDraft, BloomSpec, LandingReceipt, MemberCandidate, MemberSubject, Membership, ResolutionClaim, ResolvedBloom,
 };
