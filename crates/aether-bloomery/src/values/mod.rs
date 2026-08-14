@@ -182,6 +182,17 @@ pub enum EvidenceKind {
     /// does not raise a hold. Appended past [`Self::ExecutorFault`] so the
     /// prior kinds' wire discriminants are unchanged.
     FoldConflict,
+    /// A repair lap that came back without addressing the finding it was
+    /// dispatched for (#4959) — evidence about the *lap*, returned by the host's
+    /// mechanical triage rather than by a gate.
+    ///
+    /// Its `detail` names the lane's own evidence artifact, the same one a
+    /// passing lap would have carried; what makes the row countable is the kind.
+    /// The lap admits as an ordinary failing repair, so it spends the retry
+    /// budget a refused lap spends and wedges the workpiece once that is gone.
+    /// Appended past [`Self::FoldConflict`] so the prior kinds' wire
+    /// discriminants are unchanged.
+    RepairTriage,
 }
 
 /// The sealed forecast of what a bloom's set will spend — what a study report

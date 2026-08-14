@@ -6,14 +6,16 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    Admit, BloomId, CandidateRef, Digest, Event, Evidence, Fact, InwardError, Nonce, ResolutionClaim, StageCatalog,
-    StageId, StageResult, StageVerdict, StudyCall, StudyCost, VerifyFailureSet, WorkpieceId, normalize_stage_result,
+    Admit, BloomId, CandidateRef, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, Nonce, ResolutionClaim,
+    StageCatalog, StageId, StageResult, StageVerdict, StudyCall, StudyCost, VerifyFailureSet, WorkpieceId,
+    normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
 use super::admission_key::AdmissionKey;
 use super::dispatch::DispatchRecord;
 use crate::bloomery::findings::{FindingsDecomposition, decompose_findings};
+use crate::bloomery::triage::{TriageVerdict, triage_note, triage_repair};
 use crate::store::{OutstandingOrder, StoreBackend};
 
 /// What a worker uploaded as an attempt result: the nonce it claims to answer,
@@ -338,6 +340,75 @@ fn aggregate_review_executor_fault_event(record: &DispatchRecord, evidence: Evid
     }
 }
 
+/// The finding a weave repair was dispatched to repair: the composition's own
+/// row when a previous bounce wrote one, else the bloom-scoped frozen set.
+///
+/// Exactly the resolution the work-order overlay uses when it assembles the
+/// lap's `## Findings` section, and that is the whole justification for the
+/// triage's strictness — the lap is judged against the text it was actually
+/// shown, not against something the host reconstructed differently.
+fn repair_finding(store: &mut dyn StoreBackend, record: &DispatchRecord) -> rusqlite::Result<Option<String>> {
+    let bloom = record.bloom.0.as_bytes();
+    if let Some(findings) = store.lookup_review_findings(bloom, &record.workpiece.0)? {
+        return Ok(Some(findings));
+    }
+    store.lookup_review_findings(bloom, "")
+}
+
+/// Whether this result is a **weave repair** — the one repair lap a finding
+/// written by a *judge* dispatched (#4959).
+///
+/// Two conditions, and the second is the load-bearing one.
+///
+/// `Refine` is the repair stage: for the composition, ADR-0191 §5 dispatches the
+/// weave repair there. `Reconcile` is out because a fold conflict dispatches it,
+/// not a finding (ADR-0189 §3), and a failing lap needs no triage because it is
+/// already bouncing.
+///
+/// The **composition** is out of the two workpiece kinds because, post-ADR-0191,
+/// it is the only one whose findings are prose. An aggregate refusal no longer
+/// re-opens a member (§4), so every finding that reaches a *member's* `Refine` is
+/// mechanical gate output — and a compiler diagnostic is unreliable triage input
+/// in both directions: it backticks the types and locations of the symptom
+/// (`u32`, `usize`, `lib.rs:7:20`) rather than the thing a fix has to change. The
+/// member loop does not need this anyway: ADR-0178 already prices a member that
+/// came back unrepaired by *verifier identity* — a repeat failure spends a repair
+/// roll and wedges — which is a stronger signal than text matching and costs no
+/// judge round to collect. The composition's review is the gate that has no such
+/// detector and whose every roll is an Opus lap, which is exactly why the dodge
+/// cost what it did.
+fn is_weave_repair(record: &DispatchRecord) -> bool {
+    record.stage == StageId::Refine && record.workpiece.is_composition()
+}
+
+/// Triage a passing weave repair against the finding it was dispatched for
+/// (#4959), or [`TriageVerdict::NotInspected`] when the bloom holds no finding
+/// for it to have repaired.
+fn triage_repair_lap(store: &mut dyn StoreBackend, record: &DispatchRecord) -> Result<TriageVerdict, IntakeError> {
+    let Some(finding) = repair_finding(store, record)? else {
+        return Ok(TriageVerdict::NotInspected);
+    };
+
+    Ok(triage_repair(&finding, store.lookup_capture_diff(&record.nonce.0)?.as_deref()))
+}
+
+/// Re-thread the finding for the lap that follows a bounce: the same text, plus
+/// a section naming what the bounced lap failed to touch.
+///
+/// On the workpiece's own row, never the bloom-scoped one — the frozen aggregate
+/// set is what a delta-confirm review is framed against, and a note about one
+/// lane's lap has no business in it. The next dispatch's overlay prefers the
+/// workpiece row, so the note is what that lap reads.
+fn thread_triage_note(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    finding: &str,
+    named: &[String],
+) -> rusqlite::Result<()> {
+    let threaded = format!("{finding}\n\n{}", triage_note(named));
+    store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, &threaded)
+}
+
 /// Whether a completed attempt at `stage` is a member-line result the reducer
 /// advances, retries, or wedges — Construct (a successor in the member line)
 /// and the off-line Refine / Reconcile repairs. Reconcile has no successor in
@@ -400,6 +471,17 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     // - An out-of-line stage (Review included — the model review is the
     //   bloom-level AggregateReview position, never a member dispatch) is a
     //   corrupt order and is refused, never routed to Integrate.
+    // The repair-lap triage (#4959), read before anything is consumed: a passing
+    // weave repair whose diff changes nothing its finding names is admitted as a
+    // *failing* lap instead, so the dodge spends the retry budget a refused lap
+    // spends and never buys the judge round it was trying to reach. Everything
+    // uncertain passes — see the `triage` module for the rules and the reason
+    // they lean that way.
+    let triage = if is_weave_repair(&record) && verdict_passed(upload.verdict) {
+        triage_repair_lap(store, &record)?
+    } else {
+        TriageVerdict::NotInspected
+    };
     let mut aggregate_findings: Option<FindingsDecomposition> = None;
     // The question digest a parked admission raises its hold under (the evidence
     // detail, per the reducer's `RecordEvidence` fold) — the key the held order is
@@ -441,8 +523,15 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
                 bloom: record.bloom,
                 workpiece: record.workpiece.clone(),
                 stage: record.stage,
-                passed: verdict_passed(upload.verdict),
-                evidence,
+                passed: verdict_passed(upload.verdict) && !triage.bounces(),
+                // A bounced lap's evidence is about the *lap*, not about the
+                // candidate: same subject and same supporting artifact, filed
+                // under the kind that makes a dodge countable in the journal.
+                evidence: if triage.bounces() {
+                    Evidence { kind: EvidenceKind::RepairTriage, ..evidence }
+                } else {
+                    evidence
+                },
                 candidate: upload.candidate,
             },
         }
@@ -490,10 +579,48 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     if !store.consume_order(&record.nonce.0)? {
         return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
     }
-    // A failing Verify's findings — the mechanical failure output — persist
-    // keyed by the member so the Refine repair re-entry is directed by them; a
-    // passing Verify clears the stale row (#3656, ADR-0153). Only after the
-    // consume — a refused upload writes nothing.
+    persist_consumed(store, &record, upload, &triage, aggregate_findings.as_ref())?;
+
+    Ok(AdmitDecision::Admitted(Box::new(Admission { admit, event })))
+}
+
+/// The writes a *consumed* order leaves behind — the findings channel, and the
+/// spent lap's capture diff.
+///
+/// After the consume on purpose, all of it: a refused upload writes nothing.
+///
+/// - A failing Verify's findings (the mechanical failure output) persist keyed by
+///   the member so the Refine repair re-entry is directed by them; a passing
+///   Verify clears the stale row (#3656, ADR-0153).
+/// - A failing aggregate verdict freezes its set bloom-scoped and slices it per
+///   owner. An executor fault writes none and clears none: the frozen set belongs
+///   to the last verdict that actually judged the fold, and a host outage is not
+///   a reason to lose it or to add to it.
+/// - A bounced repair lap (#4959) re-threads its finding with a section naming
+///   what it failed to touch — otherwise the next lap reads the identical prose
+///   and repeats itself until the budget is gone.
+/// - The lap's capture diff is dropped either way: it has been read, and the
+///   order it belongs to is spent.
+fn persist_consumed(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    upload: &UploadedEvidence,
+    triage: &TriageVerdict,
+    aggregate_findings: Option<&FindingsDecomposition>,
+) -> Result<(), IntakeError> {
+    store.clear_capture_diff(&record.nonce.0)?;
+    if let TriageVerdict::Dodged(named) = triage {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::intake",
+            nonce = %upload.nonce.0,
+            workpiece = %record.workpiece.0,
+            named = %named.join(", "),
+            "repair lap changed nothing its finding names; bouncing it without a re-judge",
+        );
+        if let Some(finding) = repair_finding(store, record)? {
+            thread_triage_note(store, record, &finding, named)?;
+        }
+    }
     if record.stage == StageId::Verify {
         if verdict_passed(upload.verdict) {
             store.clear_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0)?;
@@ -501,10 +628,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, findings)?;
         }
     } else if record.stage == StageId::AggregateReview && upload.verdict != StageVerdict::ExecutorFault {
-        // A fault writes no findings and clears none: the frozen set belongs to
-        // the last verdict that actually judged the fold, and a host outage is
-        // not a reason to lose it or to add to it.
-        persist_aggregate_findings(store, &record, upload, aggregate_findings.as_ref())?;
+        persist_aggregate_findings(store, record, upload, aggregate_findings)?;
     }
-    Ok(AdmitDecision::Admitted(Box::new(Admission { admit, event })))
+    Ok(())
 }

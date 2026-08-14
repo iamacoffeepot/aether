@@ -792,7 +792,8 @@ impl BloomRecord {
             | EvidenceKind::ReviewFinding
             | EvidenceKind::ResolutionClaim
             | EvidenceKind::StudyRecord
-            | EvidenceKind::FoldConflict => {}
+            | EvidenceKind::FoldConflict
+            | EvidenceKind::RepairTriage => {}
         }
     }
 }

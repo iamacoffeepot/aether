@@ -27,6 +27,7 @@ use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes, ReconcileReport};
 use crate::bloomery::intake::NameEvidenceClaims;
+use crate::bloomery::triage::MAX_TRIAGED_DIFF_BYTES;
 use crate::session::SessionConfig;
 use crate::store::{SqliteStore, StoreBackend};
 
@@ -879,11 +880,43 @@ impl LocalExecutor {
             .record(&candidate.tree, &captured.tree)
             .and_then(|()| self.correspondence.record(&candidate.checkout, &captured.commit))
         {
-            Ok(()) => Some(candidate),
+            Ok(()) => {
+                self.file_capture_diff(nonce, captured.diff.as_deref());
+                Some(candidate)
+            }
             Err(error) => {
                 tracing::warn!(nonce = %nonce.0, %error, "local executor backend: candidate correspondence write failed");
                 None
             }
+        }
+    }
+
+    // File the lap's own diff against the nonce of the order that produced it
+    // (#4959), so the intake broker can triage a passing repair lap against the
+    // finding it was dispatched for before the re-judge is bought.
+    //
+    // Keyed by nonce rather than re-keyed to the member the way the commit
+    // message is: the diff belongs to *this lap*, not to the member's current
+    // candidate, and the reader is the admission of this lap's own order.
+    //
+    // Best-effort throughout, and capped: a diff the triage would refuse to read
+    // anyway is not worth a row. A miss leaves the lap untriaged, which is the
+    // pass side of an advisory-strict check.
+    fn file_capture_diff(&self, nonce: &Nonce, diff: Option<&str>) {
+        let (Some(store), Some(diff)) = (self.messages.as_ref(), diff) else {
+            return;
+        };
+        if diff.is_empty() || diff.len() > MAX_TRIAGED_DIFF_BYTES {
+            return;
+        }
+        // The guard is dropped with the statement, before the report below.
+        let filed = store.lock().unwrap_or_else(PoisonError::into_inner).record_capture_diff(&nonce.0, diff);
+        if let Err(error) = filed {
+            tracing::warn!(
+                nonce = %nonce.0,
+                %error,
+                "local executor backend: capture diff write failed; this lap's repair will not be triaged",
+            );
         }
     }
 
