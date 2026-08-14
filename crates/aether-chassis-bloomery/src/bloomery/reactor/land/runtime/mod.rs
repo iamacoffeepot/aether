@@ -196,13 +196,15 @@ fn landing_findings(failing: &[String]) -> String {
 
 /// The findings text a refused *acceptance* leaves for the repair dispatch —
 /// the same bloom-row channel a red gate writes, so one re-entry prompt reads
-/// both. The refusal states itself: each variant names a different thing that
-/// moved, and the repair is against whatever mainline has since become.
+/// both.
+///
+/// The refusal states itself and the prompt does not restate it: each variant
+/// names a different thing that stopped the merge, and spelling one of them out
+/// here would put a wrong sentence over the other two.
 fn refusal_findings(refusal: &LandingRefusal) -> String {
     format!(
-        "The landing proposal carrying this bloom's integrated head could not be merged: {refusal}\n\nThe head that \
-         was proven is no longer the one the proposal offers, so repair this bloom against current mainline and \
-         resolve it again."
+        "The landing proposal carrying this bloom's integrated head could not be merged: {refusal}\n\nRepair this \
+         bloom against current mainline, which has moved since the bloom sealed, and resolve it again."
     )
 }
 
