@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault, AggregateVerifyError,
-    AttemptCompletedError, Decision, GrantAttemptsError, IntegrateError, LandError, LandingRejectedError,
-    OrphanClaimReleaseError, ResolveError, SealError, SupersedeError, VerifyFailedError,
+    AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, IntegrateError, LandError,
+    LandingRejectedError, OrphanClaimReleaseError, ResolveError, SealError, SupersedeError, VerifyFailedError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -369,4 +369,14 @@ pub enum Outcome {
         /// proof this pass stood on without reading the record back.
         proof: Digest,
     },
+    /// A fold collision dispatched the member's `Reconcile` stage (ADR-0189).
+    /// Appended so the prior outcomes' wire discriminants are unchanged.
+    FoldConflictDispatched {
+        /// The bloom whose fold collided.
+        bloom: BloomId,
+        /// The later-folding member now reconciling.
+        workpiece: WorkpieceId,
+    },
+    /// A fold-conflict admission was refused.
+    FoldConflictRejected(FoldConflictError),
 }

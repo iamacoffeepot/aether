@@ -123,7 +123,7 @@ use aether_bloomery::{
     QueryResult, VerifyFailureSet, ViewDocument, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, to_hex};
+use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
 use aether_chassis_bloomery::ControlCore;
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, ArtifactsConfig, GetResult};
 use aether_chassis_bloomery::bloomery::{
@@ -339,9 +339,19 @@ impl FixtureHarness {
     /// # Panics
     /// The seal was refused.
     pub fn seal_member(&mut self, workpiece: &str, scope_revision: Digest) -> BloomId {
-        let spec = draft(self.base, &[member(workpiece, scope_revision)]);
+        self.seal_members(&[(workpiece, scope_revision)])
+    }
+
+    /// Seal a multi-member bloom on the observed mainline and return its id.
+    ///
+    /// # Panics
+    /// The seal was refused.
+    pub fn seal_members(&mut self, members: &[(&str, Digest)]) -> BloomId {
+        let spec =
+            draft(self.base, &members.iter().map(|(workpiece, scope)| member(workpiece, *scope)).collect::<Vec<_>>());
         let bloom = spec.id();
-        match self.admit(&format!("fixture-seal-{workpiece}"), Fact::Seal(spec)) {
+        let key = members.iter().map(|(workpiece, _)| *workpiece).collect::<Vec<_>>().join("+");
+        match self.admit(&format!("fixture-seal-{key}"), Fact::Seal(spec)) {
             Outcome::Sealed(sealed) => assert_eq!(sealed, bloom, "the sealed id is the spec's content address"),
             other => panic!("the fixture seal must seal: {other:?}"),
         }
@@ -368,17 +378,59 @@ impl FixtureHarness {
     /// that dispatched nothing and one that dispatched twice are both the line
     /// moving somewhere it should not have.
     pub fn await_order(&mut self) -> OutstandingOrder {
+        let mut orders = self.await_orders(1);
+        orders.remove(0)
+    }
+
+    /// Wake the executor reactor until the coordinator holds exactly `count`
+    /// outstanding orders, and return them. Two members sealing together
+    /// dispatch two Construct attempts; waiting for one would panic.
+    ///
+    /// # Panics
+    /// The coordinator did not hold exactly `count` orders inside [`STEP_BUDGET`].
+    pub fn await_orders(&mut self, count: usize) -> Vec<OutstandingOrder> {
         let deadline = Instant::now() + STEP_BUDGET;
         loop {
             self.dispatch_tick();
-            let mut orders = self.orders();
-            if orders.len() == 1 {
-                return orders.remove(0);
+            let orders = self.orders();
+            if orders.len() == count {
+                return orders;
             }
-            assert!(orders.is_empty(), "expected one outstanding order, got {:?}", nonces(&orders));
+            assert!(orders.len() < count, "expected {count} outstanding orders, got {:?}", nonces(&orders));
             assert!(Instant::now() < deadline, "the coordinator dispatched nothing inside {STEP_BUDGET:?}");
             thread::sleep(POLL);
         }
+    }
+
+    /// Arm a cross-member fold collision for `workpiece` so the next integrate
+    /// drain journals `FoldConflict` instead of resolving.
+    pub fn seed_fold_conflict(&self, bloom: BloomId, workpiece: &str, paths: Vec<String>) {
+        let hex = short_hex(&bloom.0);
+        self.fake.seed_merge_conflict_paths(
+            &format!("bloom/{hex}/integration"),
+            &format!("bloom/{hex}/candidate/{workpiece}"),
+            paths,
+        );
+    }
+
+    /// Disarm a previously seeded collision so a later fold of the same
+    /// member can succeed.
+    pub fn clear_fold_conflict(&self, bloom: BloomId, workpiece: &str) {
+        let hex = short_hex(&bloom.0);
+        self.fake
+            .clear_merge_conflict(&format!("bloom/{hex}/integration"), &format!("bloom/{hex}/candidate/{workpiece}"));
+    }
+
+    /// Persist the work-order description the host threads onto a construct
+    /// (or reconcile) dispatch.
+    ///
+    /// # Panics
+    /// The coordinator's journal could not be opened or written.
+    pub fn record_description(&self, bloom: BloomId, workpiece: &str, description: &str) {
+        SqliteStore::open(&self.store_path)
+            .expect("the coordinator's journal opens for writing")
+            .record_dispatch_description(bloom.0.as_bytes(), workpiece, description)
+            .expect("the work-order description persists");
     }
 
     /// Wake the land reactor until `bloom` reaches `want`.

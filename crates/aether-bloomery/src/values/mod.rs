@@ -173,6 +173,11 @@ pub enum EvidenceKind {
     /// Appended past [`EvidenceKind::Question`] so the prior kinds' wire
     /// discriminants are unchanged.
     ExecutorFault,
+    /// A cross-member fold collision (ADR-0189). Its `detail` names the
+    /// conflicting-path report the integrate reactor persisted; admitting it
+    /// does not raise a hold. Appended past [`Self::ExecutorFault`] so the
+    /// prior kinds' wire discriminants are unchanged.
+    FoldConflict,
 }
 
 /// The sealed forecast of what a bloom's set will spend — what a study report

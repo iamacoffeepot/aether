@@ -131,7 +131,7 @@ struct State {
     // Merges armed to conflict, as (base, head) bare branch names. A fake holds
     // no real file content, so a collision cannot arise from what is seeded and
     // has to be stated outright.
-    merge_conflicts: HashSet<(String, String)>,
+    merge_conflicts: HashMap<(String, String), Vec<String>>,
     // The Actions surface the executor port drives: recorded dispatches (a
     // `workflow_dispatch` creates no resolvable run synchronously, so a
     // dispatched-but-unseeded nonce inspects `Unknown`), and the runs a test
@@ -494,7 +494,19 @@ impl FakeGithub {
     /// conflict — the cross-member collision a fold parks on, which no amount of
     /// seeded content can otherwise provoke from a fake with no real diffs.
     pub fn seed_merge_conflict(&self, base: &str, head: &str) {
-        self.lock().merge_conflicts.insert((base.to_owned(), head.to_owned()));
+        self.seed_merge_conflict_paths(base, head, Vec::new());
+    }
+
+    /// Arm a merge to conflict and name the paths that collided — what the
+    /// reconcile work order carries as the collision's evidence.
+    pub fn seed_merge_conflict_paths(&self, base: &str, head: &str, paths: Vec<String>) {
+        self.lock().merge_conflicts.insert((base.to_owned(), head.to_owned()), paths);
+    }
+
+    /// Disarm a previously seeded collision so a later fold of the same
+    /// branches can succeed — the reconcile lap's re-fold.
+    pub fn clear_merge_conflict(&self, base: &str, head: &str) {
+        self.lock().merge_conflicts.remove(&(base.to_owned(), head.to_owned()));
     }
 
     /// The commit sha `name` resolves to — a branch (bare name) through its ref,
@@ -720,16 +732,20 @@ impl GitDataApi for FakeGithub {
         // commit's tree equals neither side — so a fold resuming after a restart
         // would re-merge every member it had already folded.
         let repo = self.object_repo();
-        let collided =
-            || MergeResult::Conflict { detail: format!("{{\"message\":\"Merge conflict\"}} ({head} into {base})") };
         let already = repo
             .as_ref()
             .map_or_else(|| self.contains(&base_sha, &head_sha), |repo| real_is_ancestor(repo, &head_sha, &base_sha));
         if already {
             return Ok(MergeResult::AlreadyUpToDate);
         }
-        if self.lock().merge_conflicts.contains(&(base.to_owned(), head.to_owned())) {
-            return Ok(collided());
+        let armed = self.lock().merge_conflicts.get(&(base.to_owned(), head.to_owned())).cloned();
+        if let Some(paths) = armed {
+            let patch = self.conflict_patch(base, head, &paths);
+            return Ok(MergeResult::Conflict {
+                detail: format!("{{\"message\":\"Merge conflict\"}} ({head} into {base})"),
+                paths,
+                patch,
+            });
         }
 
         // The one property worth modelling: a merge's tree is a function of
@@ -739,10 +755,18 @@ impl GitDataApi for FakeGithub {
         // by a repository the real three-way merge answers that outright, and
         // answers the collision the armed set can only state.
         let tree = match repo.as_deref() {
-            Some(repo) => match real_merge_tree(repo, &base_sha, &head_sha)? {
-                Some(tree) => tree,
-                None => return Ok(collided()),
-            },
+            Some(repo) => {
+                let Some(tree) = real_merge_tree(repo, &base_sha, &head_sha)? else {
+                    let paths = conflicted_paths(repo, &base_sha, &head_sha).unwrap_or_default();
+                    let patch = self.conflict_patch(base, head, &paths);
+                    return Ok(MergeResult::Conflict {
+                        detail: format!("{{\"message\":\"Merge conflict\"}} ({head} into {base})"),
+                        paths,
+                        patch,
+                    });
+                };
+                tree
+            }
             None => merged_tree(&self.tree_at(base)?, &self.tree_at(head)?),
         };
         let parents = vec![base_sha, head_sha];
@@ -833,6 +857,60 @@ fn real_commit(repo: &Path, message: &str, tree: &str, parents: &[String]) -> Re
 fn real_commit_tree(repo: &Path, sha: &str) -> Result<String, GithubError> {
     git_in(repo, &["rev-parse", "--verify", "--quiet", &format!("{sha}^{{tree}}")])
         .map_err(|_| GithubError::Status { status: 404, body: format!("no commit {sha}") })
+}
+
+impl FakeGithub {
+    /// The candidate's remaining work against the fold: a real `git diff` when
+    /// this fake is backed by an object repo, otherwise a stub per named path
+    /// so the reconcile overlay is not an empty contract sentence.
+    fn conflict_patch(&self, base: &str, head: &str, paths: &[String]) -> String {
+        if let (Some(repo), Ok(base_sha), Ok(head_sha)) =
+            (self.object_repo(), self.commit_at(base), self.commit_at(head))
+            && let Ok(diff) = git_in(&repo, &["diff", &base_sha, &head_sha])
+            && !diff.is_empty()
+        {
+            return diff;
+        }
+        stub_conflict_patch(paths)
+    }
+}
+
+fn stub_conflict_patch(paths: &[String]) -> String {
+    use core::fmt::Write;
+    let mut patch = String::new();
+    for path in paths {
+        if !patch.is_empty() {
+            patch.push('\n');
+        }
+        let _ = writeln!(patch, "diff --git a/{path} b/{path}");
+        let _ = writeln!(patch, "--- a/{path}");
+        let _ = writeln!(patch, "+++ b/{path}");
+        let _ = writeln!(patch, "@@ member's change to {path}");
+    }
+    patch
+}
+
+/// Paths `git merge-tree --name-only` names as colliding. The tree oid it
+/// still prints first is skipped; anything else is a path.
+fn conflicted_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>, GithubError> {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(["merge-tree", "--write-tree", "--name-only", base, head])
+        .output()
+        .map_err(|error| {
+            GithubError::Transport(format!("git merge-tree --name-only in {}: {error}", repo.display()))
+        })?;
+    let paths = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_git_oid(line))
+        .map(ToOwned::to_owned)
+        .collect();
+    Ok(paths)
+}
+
+fn is_git_oid(line: &str) -> bool {
+    (line.len() == 40 || line.len() == 64) && line.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// The tree combining `base` and `head` in `repo`, or `None` when the two

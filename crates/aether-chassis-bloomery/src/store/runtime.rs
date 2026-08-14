@@ -324,6 +324,13 @@ pub trait StoreBackend: Send {
     /// member's lane wrote none — the landing assembly falls back rather than
     /// blocking on the absence.
     fn lookup_candidate_commit_message(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
+    /// Record the fold-conflict overlay the reconcile work order assembles
+    /// (ADR-0189): the contract, the conflicting paths, and the conflicted
+    /// candidate tree. Last-writer-wins on the key.
+    fn record_fold_conflict(&mut self, bloom: &[u8], workpiece: &str, overlay: &str) -> rusqlite::Result<()>;
+    /// The fold-conflict overlay recorded for (`bloom`, `workpiece`), or
+    /// `None` when no collision has stamped one.
+    fn lookup_fold_conflict(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
     /// Drop every study index row — the first half of a projection rebuild
     /// (`clear` then re-`record` from the artifact bytes).
     fn clear_study_index(&mut self) -> rusqlite::Result<()>;
@@ -602,6 +609,12 @@ CREATE TABLE IF NOT EXISTS dispatch_owners (
     nonce TEXT PRIMARY KEY,
     bloom BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS fold_conflict (
+    bloom     BLOB NOT NULL,
+    workpiece TEXT NOT NULL,
+    overlay   TEXT NOT NULL,
+    PRIMARY KEY (bloom, workpiece)
+);
 ";
 
 /// Is a rusqlite error a UNIQUE / PRIMARY KEY constraint violation? A seal that
@@ -875,6 +888,20 @@ impl StoreBackend for SqliteStore {
             self.conn.prepare("SELECT message FROM candidate_commit_message WHERE bloom = ?1 AND workpiece = ?2")?;
         let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| row.get::<_, String>(0))?;
         // The (bloom, workpiece) pair is the primary key, so at most one row.
+        rows.next().transpose()
+    }
+
+    fn record_fold_conflict(&mut self, bloom: &[u8], workpiece: &str, overlay: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO fold_conflict (bloom, workpiece, overlay) VALUES (?1, ?2, ?3)",
+            rusqlite::params![bloom, workpiece, overlay],
+        )?;
+        Ok(())
+    }
+
+    fn lookup_fold_conflict(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT overlay FROM fold_conflict WHERE bloom = ?1 AND workpiece = ?2")?;
+        let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| row.get::<_, String>(0))?;
         rows.next().transpose()
     }
 

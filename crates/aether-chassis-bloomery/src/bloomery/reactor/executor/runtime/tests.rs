@@ -544,6 +544,40 @@ fn drain_dispatches_the_review_lane_under_its_own_calibrated_profile() {
 }
 
 #[test]
+fn drain_assembles_the_reconcile_work_order_from_the_fold_conflict_overlay() {
+    // ADR-0189 — the host assembles the reconcile work order: the member's
+    // original description, the standing contract, the conflicting paths,
+    // and the conflicted candidate. No skill text is wired in; the overlay
+    // the integrate reactor persisted is the other half of the prompt.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-line", "build the widget").unwrap();
+    store
+        .record_fold_conflict(
+            bloom.0.as_bytes(),
+            "wp-line",
+            "## Fold conflict\n\nReproduce this member's intent on top of what the fold now contains; stay inside the declared surface.\n\n## Conflicting paths\n\n- crates/overlap.rs\n",
+        )
+        .unwrap();
+    enqueue_dispatch_at(&mut store, bloom, "wp-line", 5, StageId::Reconcile);
+
+    drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    let orders = backend.orders();
+    assert_eq!(orders.len(), 1, "the reconcile dispatch submitted");
+    let description = orders[0].transformation.description.as_deref().unwrap();
+    assert!(description.contains("build the widget"), "the original description is still the task");
+    assert!(description.contains("## Fold conflict"), "the contract is assembled in-channel");
+    assert!(description.contains("crates/overlap.rs"), "the conflicting path is named");
+    assert!(
+        !description.contains("ours") && !description.contains("theirs"),
+        "textual merge strategies are not a work-order mechanism",
+    );
+}
+
+#[test]
 fn drain_threads_the_persisted_description_onto_the_construct_order() {
     // The #3595 seal → dispatch seam over a real store + executor shell: the
     // description the coordinator persisted at seal (modeled by the store write
