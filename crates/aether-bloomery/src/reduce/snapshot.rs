@@ -15,7 +15,7 @@ use super::{Decision, Decisions, Event, Fact, Outcome};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    BloomSpec, CandidateRef, ConfigScopes, DispatchKey, Evidence, EvidenceKind, OrphanClaimReleaseRecord,
+    BloomSpec, CandidateRef, ConfigScopes, DispatchKey, Evidence, EvidenceKind, OrphanClaimReleaseRecord, PriceTable,
     ResolutionClaim, ResolvedConfigs, StageCatalog, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof,
     VerifyReuse, Wedge,
 };
@@ -601,6 +601,10 @@ impl BloomRecord {
     /// with no catalog sealed at all.
     fn sealed(spec: BloomSpec, configs: &ResolvedConfigs) -> Self {
         let stage_catalog = StageCatalog::sealed_in(ConfigScopes::bloom_wide(spec.configs()), configs);
+        // The fold reads the sealed price table the same way it reads the
+        // catalog. A pre-migration (vec-shape) table is named here rather than
+        // silently becoming an empty table or aborting boot (#4923).
+        let _price_table = PriceTable::sealed_in(ConfigScopes::bloom_wide(spec.configs()), configs);
         Self {
             spec,
             stage_catalog,

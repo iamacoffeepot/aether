@@ -20,7 +20,7 @@ use super::{ConfigKind, config_address};
 use crate::digest::digest_of;
 use crate::ids::StageId;
 use crate::values::{
-    AgentProfile, AgentSelection, ApprovalPolicy, ApprovalRule, Harness, LongContextBand, ModelOverride, PriceRow,
+    AgentProfile, AgentSelection, ApprovalPolicy, ApprovalRule, Harness, LongContextBand, ModelOverride, PriceRates,
     PriceTable, ReasoningEffort, StageBinding, StageCatalog, StageOverride, Tier, ToolPolicy,
 };
 
@@ -49,36 +49,40 @@ where
 #[test]
 fn sealed_config_kinds_share_one_address_across_encoders() {
     let price = PriceTable {
-        rows: vec![
-            PriceRow {
-                model: String::from("claude-opus-5"),
-                input: 5_000_000,
-                cache_read: 500_000,
-                cache_write_5m: 6_250_000,
-                cache_write_1h: 10_000_000,
-                cache_write: 6_250_000,
-                output: 25_000_000,
-                long_context: None,
-            },
-            PriceRow {
-                model: String::from("grok-4.6"),
-                input: 2_000_000,
-                cache_read: 200_000,
-                cache_write_5m: 0,
-                cache_write_1h: 0,
-                cache_write: 0,
-                output: 10_000_000,
-                long_context: Some(LongContextBand {
-                    prompt_tokens: 200_000,
-                    input: 4_000_000,
-                    cache_read: 400_000,
+        rows: BTreeMap::from([
+            (
+                String::from("claude-opus-5"),
+                PriceRates {
+                    input: 5_000_000,
+                    cache_read: 500_000,
+                    cache_write_5m: 6_250_000,
+                    cache_write_1h: 10_000_000,
+                    cache_write: 6_250_000,
+                    output: 25_000_000,
+                    long_context: None,
+                },
+            ),
+            (
+                String::from("grok-4.6"),
+                PriceRates {
+                    input: 2_000_000,
+                    cache_read: 200_000,
                     cache_write_5m: 0,
                     cache_write_1h: 0,
                     cache_write: 0,
-                    output: 20_000_000,
-                }),
-            },
-        ],
+                    output: 10_000_000,
+                    long_context: Some(LongContextBand {
+                        prompt_tokens: 200_000,
+                        input: 4_000_000,
+                        cache_read: 400_000,
+                        cache_write_5m: 0,
+                        cache_write_1h: 0,
+                        cache_write: 0,
+                        output: 20_000_000,
+                    }),
+                },
+            ),
+        ]),
     };
     assert_encoders_agree(&price);
     assert_eq!(digest_of(&price), price.address());
