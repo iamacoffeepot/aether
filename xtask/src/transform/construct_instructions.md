@@ -39,11 +39,30 @@ say so plainly rather than guessing at a change to make.
 3. **Keep it focused.** One concept, the fewest characters that still make sense.
    Do not refactor adjacent code, reformat untouched files, or land opportunistic
    fixes the order did not ask for.
-4. **Format before you finish.** Run `cargo fmt` so the candidate is not rejected
-   for a formatting slip. The heavier checks (clippy, docs, tests, duplicate code,
-   unused dependencies) run in the verify lane against your candidate — you do not
-   need to run them here, but do not knowingly leave the tree in a state that
-   cannot compile.
+4. **Run the gates before you finish.** These are the verify lane's, and a gate
+   you never ran here is one you discover by bouncing off it — a whole dispatch
+   round, where an in-lap fix costs a few turns. Run each with the flags stated: a
+   near-miss predicts nothing, and rustdoc without `--document-private-items`
+   passes over exactly the private items the gate fails on. Where an invocation
+   says `--workspace`, the gate trades it for a `-p <crate>` per crate your change
+   touches, and so can you.
+   - Format: `cargo fmt` to fix, then `cargo fmt --all -- --check`.
+   - Lints: `cargo clippy --workspace --all-targets --keep-going --message-format=json`.
+     Any `warning` or `error` diagnostic in that stream is a failure — the gate
+     does not pass `-D warnings`, so a zero exit is not a pass.
+   - Tests: `cargo nextest run --all-features --profile ci --no-fail-fast` plus a
+     `-p <crate>` per crate you touched, with `AETHER_REQUIRE_RUNTIME=1` and
+     `AETHER_STORE_PATH=:memory:` set. Scenario tests need `cargo xtask dist`
+     first to build the component wasm they load.
+   - Docs: `cargo doc --workspace --no-deps --document-private-items --all-features --keep-going`,
+     under `RUSTDOCFLAGS=-D rustdoc::redundant_explicit_links -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links`.
+   - Suppressions: `python3 scripts/check-suppressions.py`. It reads a committed
+     range, so your uncommitted candidate is invisible to it — read your own
+     `git diff` for what it refuses. Ship no new `#[allow]`, `#[expect]`, or
+     `#[ignore]`, test files included; state one you genuinely need in your final
+     message as a request carrying its reason, and leave it out of the diff.
+   The two remaining verify members — `verify.dup` (jscpd) and `verify.deps`
+   (cargo-machete) — stay the verify lane's.
 5. **Build scratch where the host put it.** If you do reach for a check that wants
    a `CARGO_TARGET_DIR` of its own, put it under the path the `AETHER_LANE_SCRATCH`
    environment variable names — never under `/tmp` or another default temp
