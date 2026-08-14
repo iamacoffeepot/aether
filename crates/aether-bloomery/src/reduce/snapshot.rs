@@ -792,8 +792,13 @@ impl BloomRecord {
             | EvidenceKind::ReviewFinding
             | EvidenceKind::ResolutionClaim
             | EvidenceKind::StudyRecord
+            // An advisory-carrying pass derives nothing here: the findings it
+            // records are filed by `RecordCompositionFinding` beside this row,
+            // the same decision a refusal files, so the record carries them
+            // whether the bloom went on to re-weave or to resolve.
             | EvidenceKind::FoldConflict
-            | EvidenceKind::RepairTriage => {}
+            | EvidenceKind::RepairTriage
+            | EvidenceKind::ReviewAdvisory => {}
         }
     }
 }

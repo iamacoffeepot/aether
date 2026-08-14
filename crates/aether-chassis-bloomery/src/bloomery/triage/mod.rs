@@ -44,7 +44,7 @@ mod diff;
 mod names;
 
 use diff::changed_surface;
-use names::named_surface;
+use names::{named_check_surface, named_surface};
 
 /// The largest repair diff the triage will read. Past it the lap passes
 /// untriaged: a bounded mechanical check that cannot afford to be wrong does not
@@ -92,9 +92,17 @@ impl TriageVerdict {
 ///    to edit would bounce honest laps on the highest-volume path in the loop.
 ///    Paths are still extracted — that is how a name that is a *path* is kept
 ///    from being read as a symbol, and how the bounce note says where to look.
-/// 3. **The symbols decide.** At least one must appear as a whole word in what
-///    the lap changed. A named path the lap touched does not rescue it: editing
-///    the file a finding named while leaving the thing it named alone is
+/// 3. **A named check decides, when the finding named one.** A mechanical
+///    finding states the check that would have caught it (#4961), and its
+///    repair is accepted only when the diff contains that check — so where one
+///    is named, the check's own surface is what the lap is held to and the rest
+///    of the finding's names do not substitute for it. Both halves count here,
+///    symbols *and* paths: what a mechanical finding names is a test or a gate
+///    that does not exist yet, and the file it goes in is as much the thing as
+///    the function's name.
+/// 4. **Otherwise the symbols decide.** At least one must appear as a whole word
+///    in what the lap changed. A named path the lap touched does not rescue it:
+///    editing the file a finding named while leaving the thing it named alone is
 ///    precisely the dodge.
 #[must_use]
 pub fn triage_repair(finding: &str, diff: Option<&str>) -> TriageVerdict {
@@ -105,16 +113,33 @@ pub fn triage_repair(finding: &str, diff: Option<&str>) -> TriageVerdict {
     if changed.is_empty() {
         return TriageVerdict::NotInspected;
     }
+    // The stricter gate first: a named check is the one thing a mechanical
+    // repair is *required* to carry, so it is not merely added to the pool of
+    // names any one of which would pass the lap.
+    let checks = named_check_surface(finding).named();
+    if !checks.is_empty() {
+        return decide(&changed, &checks, &checks);
+    }
     let named = named_surface(finding);
     if named.symbols.is_empty() {
         return TriageVerdict::NothingNamed;
     }
 
-    named
-        .symbols
+    decide(&changed, &named.symbols, &named.named())
+}
+
+/// The verdict `changed` earns against the `required` names: the first match
+/// credits the lap, no match bounces it carrying `reported` so the next lap is
+/// told what it missed.
+///
+/// The two lists differ on the fallback path, where the match is symbols-only
+/// and the bounce note still names the paths — what a lap has to touch and what
+/// a reader needs to find it are not the same question.
+fn decide(changed: &diff::ChangedSurface, required: &[String], reported: &[String]) -> TriageVerdict {
+    required
         .iter()
-        .find(|symbol| changed.mentions(symbol))
-        .map_or_else(|| TriageVerdict::Dodged(named.named()), |symbol| TriageVerdict::Addressed(symbol.clone()))
+        .find(|name| changed.mentions(name))
+        .map_or_else(|| TriageVerdict::Dodged(reported.to_vec()), |name| TriageVerdict::Addressed(name.clone()))
 }
 
 /// The section a bounce appends to the workpiece's own findings row, so the lap

@@ -59,6 +59,34 @@ impl NamedSurface {
     }
 }
 
+/// The surface the **named checks** of `finding`'s mechanical findings describe
+/// (#4961), or an empty surface when it states none.
+///
+/// A mechanical finding names the check that would have caught it, and the
+/// format requires that check to be spelled as the symbol or path the repair
+/// adds or changes — so it arrives here already in the shape the extraction
+/// reads, and the rules are the ones below rather than a second set. What the
+/// caller does with it is the one thing that differs: this surface is what a
+/// repair *must* contain, where the finding's own surface is only what it may
+/// contain.
+///
+/// The classification is the domain crate's, so the lane that authors the format
+/// and the triage that enforces it read it the same way.
+#[must_use]
+pub fn named_check_surface(finding: &str) -> NamedSurface {
+    let mut surface = NamedSurface::default();
+    for check in aether_bloomery::classify_findings(finding).named_checks() {
+        let named = named_surface(check);
+        for symbol in named.symbols {
+            push_unique(&mut surface.symbols, &symbol);
+        }
+        for path in named.paths {
+            push_unique(&mut surface.paths, &path);
+        }
+    }
+    surface
+}
+
 /// The surface `finding` names.
 ///
 /// Two rules, and only two.

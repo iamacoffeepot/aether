@@ -4451,3 +4451,94 @@ fn an_operator_repair_re_enters_a_wedged_member_at_verify_with_the_gates_intact(
         judged.outcome,
     );
 }
+
+/// A composition review that passed while recording judgment advisories
+/// (#4961) — the reviewer classified findings and marked none of them blocking,
+/// so the lane reported a pass and the evidence arrives kinded as the advisory
+/// it is.
+fn review_passed_with_advisories(bloom: BloomId, key: &str, tree: u8, detail: u8) -> Event {
+    event(
+        key,
+        Fact::AggregateReviewCompleted {
+            bloom,
+            passed: true,
+            evidence: Evidence { subject: digest(tree), kind: EvidenceKind::ReviewAdvisory, detail: digest(detail) },
+            implicated: vec![],
+        },
+    )
+}
+
+/// A bloom whose composite gate run is green and whose review is the next fact.
+fn awaiting_composition_review() -> (Snapshot, BloomId) {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: claim("alpha", 10, 100) }));
+    let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
+    (snapshot, bloom)
+}
+
+// #4961 — the owner's requirement, at the reducer: subjective findings must not
+// break blooms. A review whose findings are all unmarked judgment advisories
+// reports as a pass, and the pass resolves the bloom exactly as a findings-free
+// one does — while the advisories still land on the composition's own channel,
+// where an operator can adjudicate them and a study can file them forward.
+//
+// Three tripwires in one. **No repair**: a re-weave dispatch or a spent weave
+// budget here is a taste call priced at a model lap, which is the behaviour the
+// split exists to end. **No member**: ADR-0191 §4's immutability, the same
+// assertion every other composition path carries. And **not silence**: an
+// advisory that resolves the bloom without being recorded is a finding the
+// pipeline threw away, which is the failure mode on the other side of the same
+// change.
+#[test]
+fn an_advisory_only_review_records_its_findings_and_costs_the_composition_nothing() {
+    let (green, bloom) = awaiting_composition_review();
+    let (after, decided) = step(&green, &review_passed_with_advisories(bloom, "advisory", 40, 72));
+
+    assert!(matches!(decided.outcome, Outcome::Resolved(_)), "an advisory pass resolves: {:?}", decided.outcome);
+    assert_no_member_dispatch(&decided, "an advisory finding is recorded, it never re-opens a member");
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(
+            effect,
+            Decision::DispatchAttempt { workpiece, stage: StageId::Refine, .. } if workpiece.is_composition()
+        )),
+        "an advisory finding buys no weave repair: {:?}",
+        decided.effects,
+    );
+    assert!(
+        decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchLand { .. })),
+        "and it does not delay the landing either",
+    );
+
+    let record = after.blooms.get(&bloom).unwrap();
+    assert!(!record.progress.contains_key(&composition()), "no weave repair means no composition cursor moved");
+    assert!(record.wedged.is_empty(), "and nothing wedged");
+    assert_eq!(record.composition_findings.len(), 1, "the advisory is recorded, not discarded");
+    assert_eq!(record.composition_findings[0].detail, digest(72), "naming the review record that raised it");
+    assert_eq!(record.composition_findings[0].subject, digest(40), "against the weave it was raised on");
+    assert_eq!(record.open_composition_findings().count(), 1, "and it is open for an operator to answer");
+
+    // Adjudicable through #4957's ordinary door, which is what "recorded" has to
+    // mean for a finding nothing else will ever act on.
+    let (adjudged, closed) = step(&after, &adjudicated(bloom, "adj", vec![72]));
+    assert!(matches!(closed.outcome, Outcome::FindingsAdjudicated { .. }), "got {:?}", closed.outcome);
+    assert_eq!(adjudged.blooms.get(&bloom).unwrap().open_composition_findings().count(), 0);
+}
+
+// The other half of the same rule: a pass that recorded nothing files nothing.
+// Tripwire — a reducer that filed a finding on every passing review would fill
+// the channel with rows no verdict raised, and `open_composition_findings` is
+// what an operator reads to decide whether a bloom needs them at all.
+#[test]
+fn an_ordinary_passing_review_files_no_finding() {
+    let (green, bloom) = awaiting_composition_review();
+    let (after, decided) = step(&green, &review_passed(bloom, "clean", 40));
+
+    assert!(matches!(decided.outcome, Outcome::Resolved(_)), "got {:?}", decided.outcome);
+    assert!(after.blooms.get(&bloom).unwrap().composition_findings.is_empty());
+}

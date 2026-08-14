@@ -170,3 +170,72 @@ fn a_changed_files_path_is_part_of_the_changed_text() {
     assert!(changed.mentions("golden_decisions"), "the changed file's own path names the module it holds");
     assert!(!changed.mentions("aether_bloomery"), "and only the path the diff actually spells");
 }
+
+/// The same incident, restated in the classified format (#4961): a mechanical
+/// finding naming the check that would have caught it.
+const MECHANICAL_FINDING: &str = "MECHANICAL (check: `every_wire_reachable_family_is_represented` in \
+                                  `crates/aether-bloomery/tests/golden_decisions/completeness.rs`) — \
+                                  `representative()` in `crates/aether-bloomery/tests/golden_decisions/main.rs` \
+                                  does not reach every effect family.";
+
+// Tripwire (#4961): a mechanical finding is accepted only when the repair
+// contains the check it named, and that is strictly narrower than the ordinary
+// rule. This diff edits `representative` — a symbol the finding names, which is
+// what the ordinary rule asks for — and adds no check at all, so the finding
+// would come back as a review round next time instead of a red gate. Falling
+// back to the ordinary rule here is the regression: the lap passes, the judge
+// re-reads the same tree, and the mechanical class buys nothing.
+#[test]
+fn a_mechanical_repair_that_adds_no_named_check_bounces_even_when_it_edits_a_named_symbol() {
+    let repair = "--- a/crates/aether-bloomery/tests/golden_decisions/main.rs\n\
+                  +++ b/crates/aether-bloomery/tests/golden_decisions/main.rs\n\
+                  @@ -240,6 +240,7 @@ fn representative() -> Decisions {\n\
+                  +            Decision::RecordCompositionFinding { bloom, finding: finding() },\n";
+
+    let verdict = triage_repair(MECHANICAL_FINDING, Some(repair));
+
+    let TriageVerdict::Dodged(named) = &verdict else {
+        panic!("a mechanical repair without its named check must bounce, got {verdict:?}");
+    };
+    assert!(
+        named.iter().any(|name| name == "every_wire_reachable_family_is_represented"),
+        "the bounce names the check the lap owed, not the symbols it happened to touch: {named:?}",
+    );
+    assert!(
+        !named.iter().any(|name| name == "representative"),
+        "and it does not re-offer the name the lap already satisfied: {named:?}",
+    );
+}
+
+// The pass side of the same rule, and the reason the check has to be named as a
+// symbol or a path rather than described: a lap that adds the named check is
+// credited by it.
+#[test]
+fn a_mechanical_repair_that_adds_the_named_check_passes() {
+    let repair = "--- /dev/null\n\
+                  +++ b/crates/aether-bloomery/tests/golden_decisions/completeness.rs\n\
+                  @@ -0,0 +1,3 @@\n\
+                  +#[test]\n\
+                  +fn every_wire_reachable_family_is_represented() {\n";
+
+    assert_eq!(
+        triage_repair(MECHANICAL_FINDING, Some(repair)),
+        TriageVerdict::Addressed("every_wire_reachable_family_is_represented".to_owned()),
+    );
+}
+
+// A mechanical finding that named no check falls back to the ordinary rule
+// rather than bouncing everything: the class still blocks, and holding a lap to
+// a check nobody named would refuse every honest repair of it.
+#[test]
+fn a_mechanical_finding_without_a_check_is_triaged_by_the_ordinary_rule() {
+    let checkless = "MECHANICAL — `representative()` in \
+                     `crates/aether-bloomery/tests/golden_decisions/main.rs` misses a family.";
+    let repair = "--- a/crates/aether-bloomery/tests/golden_decisions/main.rs\n\
+                  +++ b/crates/aether-bloomery/tests/golden_decisions/main.rs\n\
+                  @@ -240,6 +240,7 @@ fn representative() -> Decisions {\n\
+                  +            Decision::RecordCompositionFinding { bloom, finding: finding() },\n";
+
+    assert!(!triage_repair(checkless, Some(repair)).bounces());
+    assert!(triage_repair(checkless, Some(DODGE_DIFF)).bounces(), "and the dodge still bounces");
+}

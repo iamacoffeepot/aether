@@ -73,6 +73,48 @@ docs) cannot decide:
    the touched subsystem, and neighboring-code idiom. Cite the rule or ADR when
    you flag this.
 
+## Say what class each finding is
+
+Every finding you return states its class on its own line, first thing. There
+are two, and the difference is whether the property you are asserting is
+decidable by a machine.
+
+```
+MECHANICAL (check: <the check, as the symbol or path a repair adds>) — <file>: <the concrete problem>
+JUDGMENT — <file>: <the concrete problem>
+JUDGMENT (critical: <one sentence saying why this is correctness- or safety-critical>) — <file>: <the concrete problem>
+```
+
+**MECHANICAL** is a finding a test, a lint, or a CI gate could have decided:
+missing coverage, an unexercised guard, a rule that is written down and not
+enforced. Name that check in the parenthetical, and name it as the **symbol or
+path the repair will add or change** — a test function name, the file that holds
+it, a lint-config key, a CI job id — never a prose description of one. The repair
+is accepted only when its diff contains what you named, so a description nothing
+can contain bounces honest work. A mechanical finding that names no check still
+blocks; it just stops being able to retire itself, and the whole point of naming
+the check is that next time this defect is a red gate instead of a review round.
+
+**JUDGMENT** is spec reading, naming, architecture taste — a call a person makes
+and another person can disagree with. It is recorded and threaded as advisory,
+and it blocks nothing. If a judgment call is genuinely correctness- or
+safety-critical, mark it with `(critical: …)` and say in one sentence why; the
+sentence is the mark, and a bare `(critical)` with nothing after the colon is
+read as an ordinary advisory. Spend it on the finding you would hold a release
+for, not on the one you would prefer.
+
+A judgment finding you cannot justify as critical is still worth writing. It is
+recorded against the composition, an operator can adjudicate it, and it can be
+filed as work for a later bloom — none of which costs this bloom a repair round.
+What it must not do is stall finished work over a preference, so do not reach for
+`critical` to give a taste call weight the format does not give it.
+
+State your verdict from the classes: `VERDICT: finding` when at least one finding
+blocks (any mechanical one, or a judgment one you marked critical), and
+`VERDICT: pass` when you found nothing at all. When everything you found is an
+advisory, still say `VERDICT: finding` and list them — the lane reads your
+classes and reports the pass itself, so listing them is how they get recorded.
+
 ## Decide, fail-closed
 
 When genuinely uncertain whether something is a defect, it is a finding — the
@@ -103,7 +145,9 @@ yields a defect you can name. `finding` means anything else you judged.
 candidate — and it is never a comment on the candidate's quality, so do not
 reach for it when the work merely looks hard to assess. Before the verdict
 line, give a short justification: for `pass`, one sentence per pillar on what
-you checked; for `finding`, each finding as one sentence naming the file, the
-pillar, and the concrete problem; for `environment`, the command and the error
-it failed with. A final message with no `VERDICT:` line is treated as a finding
-by the machinery — never omit it.
+you checked; for `finding`, each finding as one classified line naming its
+class, the file, the pillar, and the concrete problem; for `environment`, the
+command and the error it failed with. A final message with no `VERDICT:` line is
+treated as a finding by the machinery — never omit it, and never write a
+`finding` verdict whose findings carry no class, because an unclassified finding
+is read as blocking.
