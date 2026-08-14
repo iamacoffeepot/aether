@@ -379,13 +379,15 @@ pub enum Outcome {
     },
     /// A fold-conflict admission was refused.
     FoldConflictRejected(FoldConflictError),
-    /// An observation named a head that is an ancestor of, or unrelated to,
-    /// the current mainline correspondence (#4938). Appended so every prior
-    /// outcome keeps its wire discriminant.
+    /// An observation named a head that is a strict ancestor of the current
+    /// mainline correspondence (#4938). Appended so every prior outcome
+    /// keeps its wire discriminant.
     ///
     /// Not a hold: the head is not something mainline should follow later.
     /// Recording it as `observed` would poison the only base a supersession
-    /// may rebase onto, so the refusal carries no effects.
+    /// may rebase onto, so the refusal carries no effects. A rewritten
+    /// live ref does not land here — the host follows it as an ordinary
+    /// [`Outcome::MainlineAdvanced`] (or Held).
     MainlineDiverged {
         /// The observed head that would have moved mainline backward or sideways.
         head: Digest,

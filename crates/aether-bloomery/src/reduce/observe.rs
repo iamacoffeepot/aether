@@ -14,9 +14,13 @@
 //! An observation is the missing input: the host reads the live head, and the
 //! reducer decides what it means. The reducer stays pure — it is handed a digest
 //! and compares, never reaching for the repository itself. A head the host
-//! classified as ancestor or unrelated arrives as
+//! classified as a strict ancestor of current mainline arrives as
 //! [`Fact::ObserveMainlineDiverged`](crate::Fact::ObserveMainlineDiverged) and
-//! is refused by name (#4938); it does not advance.
+//! is refused by name (#4938); it does not advance. A rewritten (unrelated)
+//! live ref is classified as followable at the host and arrives as
+//! [`Fact::ObserveMainline`](crate::Fact::ObserveMainline), so a history
+//! rewrite recovers by observation instead of pinning both pointers to a
+//! commit the remote no longer has.
 
 use super::{Decision, Decisions, Outcome, Snapshot, seal::active_unlanded_bloom};
 use crate::digest::Digest;
@@ -53,9 +57,11 @@ pub(super) fn reduce_observe_mainline(snapshot: &Snapshot, head: &Digest) -> Dec
     Decisions { outcome: Outcome::MainlineAdvanced { from: snapshot.mainline, to: *head }, effects }
 }
 
-/// An observation the host already classified as ancestor or unrelated to
+/// An observation the host already classified as a strict ancestor of
 /// current mainline (#4938). Record nothing: folding the stale head into
 /// `observed` would poison the only base a supersession may rebase onto.
+/// A rewritten live ref does not arrive here — the host follows it as
+/// [`Fact::ObserveMainline`].
 pub(super) fn reduce_observe_mainline_diverged(snapshot: &Snapshot, head: &Digest) -> Decisions {
     Decisions::rejected(Outcome::MainlineDiverged { head: *head, mainline: snapshot.mainline })
 }

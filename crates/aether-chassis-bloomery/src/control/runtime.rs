@@ -504,21 +504,19 @@ impl NativeActor for ControlCore {
                 return;
             }
         };
-        // Log hygiene, of the two the poll-driven observer forces a choice
-        // between: skip the admit for a head mainline already sits at, rather
-        // than keep admitting unconditionally and demote `admit_duplicate`'s
-        // warn for this key shape. An unchanged head is the ordinary case on
-        // every interval, and admitting one does no work in exchange for the
-        // warn. The key is `(head, current mainline)` so a later recovery
-        // against a different mainline is a new admit (#4938); skipping only
-        // when both pointers already name this head is what keeps recovery
-        // from being silenced the way `head == observed` alone did.
+        // Log hygiene: skip an admit whose (head, mainline) pair is already
+        // in `seen`. That pair is the key, so a later recovery against a
+        // different mainline is a new admit (#4938). Skipping only when both
+        // pointers already name this head missed the MainlineHeld steady
+        // state — `observed == head` while mainline sits behind — and every
+        // poll re-admitted the journaled key, reduced to Duplicate, and
+        // fired `admit_duplicate`'s warn for the life of the bloom.
         //
         // Compared against the snapshot rather than a private memo of the last
-        // head sent: `observed` moves only once a commit durably landed, so a
-        // failed commit leaves it behind and the next poll re-admits, where a
-        // memo would have recorded the send and never retried.
-        if head == state.snapshot.observed && head == state.snapshot.mainline {
+        // head sent: `seen` moves only once a commit durably landed, so a
+        // failed commit leaves the pair out and the next poll re-admits,
+        // where a memo would have recorded the send and never retried.
+        if observation_already_admitted(&state.snapshot, &head) {
             return;
         }
 
@@ -998,11 +996,19 @@ fn observe_mainline_key(head: &Digest, mainline: &Digest) -> IdempotencyKey {
     ))
 }
 
+/// Whether this (head, current mainline) pair has already been journaled.
+/// The poll skip consults `seen` rather than pointer equality so a
+/// `MainlineHeld` observation (recorded head, mainline still behind) is not
+/// re-admitted every interval.
+fn observation_already_admitted(snapshot: &Snapshot, head: &Digest) -> bool {
+    snapshot.seen.contains(&observe_mainline_key(head, &snapshot.mainline))
+}
+
 #[cfg(test)]
 mod tests {
     use aether_bloomery::{Digest, IdempotencyKey, QueryResult, Snapshot};
 
-    use super::{lowercase_hex, observe_mainline_key, release_response};
+    use super::{lowercase_hex, observation_already_admitted, observe_mainline_key, release_response};
 
     #[test]
     fn observe_mainline_key_uses_lowercase_hex() {
@@ -1026,6 +1032,32 @@ mod tests {
             observe_mainline_key(&head, &mainline),
             observe_mainline_key(&head, &other),
             "the same head against a different mainline is a different key",
+        );
+    }
+
+    // Tripwire: the poll skip keys on the journaled (head, mainline) pair,
+    // not on both pointers naming the head (#4938). MainlineHeld records
+    // observed=head while mainline stays behind; skipping only when
+    // `head == observed && head == mainline` re-admitted that pair every
+    // 30s and fired `admit_duplicate` for the life of the bloom.
+    #[test]
+    fn poll_skips_a_held_head_already_admitted_against_current_mainline() {
+        let head = Digest::from_bytes([0x0a; 32]);
+        let mainline = Digest::from_bytes([0x0b; 32]);
+        let other = Digest::from_bytes([0x0c; 32]);
+        let mut snapshot = Snapshot::new(mainline);
+        snapshot.observed = head;
+        snapshot.seen.insert(observe_mainline_key(&head, &mainline));
+
+        assert!(
+            observation_already_admitted(&snapshot, &head),
+            "MainlineHeld has already journaled this (head, mainline) pair",
+        );
+
+        snapshot.mainline = other;
+        assert!(
+            !observation_already_admitted(&snapshot, &head),
+            "the same head against a different mainline is still a new admit",
         );
     }
 

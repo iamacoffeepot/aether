@@ -16,7 +16,9 @@ use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef};
 use aether_data::wire::{from_bytes, to_vec};
 
-use super::kinds::{ClaimResult, CompleteReleaseResult, EnumerateClaimsResult, LandResult, SnapshotResult};
+use super::kinds::{
+    ClaimResult, CompleteReleaseResult, EnumerateClaimsResult, LandResult, ObserveMainlineResult, SnapshotResult,
+};
 use super::runtime::SourceCapabilityState;
 use crate::bloomery::SourceShell;
 
@@ -50,6 +52,44 @@ fn state_over_fake(cas_land_enabled: bool) -> (SourceCapabilityState, FakeGithub
     let backend = GitSource::new(fake.clone(), Arc::new(fake.clone()), cas_land_enabled, MainlineRef::default());
     backend.create_namespace(&bloom, &base).unwrap();
     (SourceCapabilityState::new(SourceShell::new(Arc::new(backend))), fake, bloom, base)
+}
+
+#[test]
+fn observe_mainline_follows_a_rewrite_and_refuses_a_stale_ancestor() {
+    // Tripwire: a history rewrite of the live ref is followable; a strict
+    // ancestor is not (#4938). Classifying both as Diverged pinned
+    // `mainline` and `observed` to a commit the remote no longer has.
+    let (state, fake, _bloom, base) = state_over_fake(false);
+    let relative_to_base = to_vec(&base).unwrap();
+
+    let child = digest(11);
+    fake.seed_fast_forward(&child, fake.ref_target("heads/main").as_deref());
+    fake.seed_ref_at("heads/main", &child);
+    match state.observe_mainline_head(&relative_to_base) {
+        ObserveMainlineResult::Ok { fast_forward, .. } => {
+            assert!(fast_forward, "a descendant of current mainline is followable");
+        }
+        ObserveMainlineResult::Err { error } => panic!("expected Ok, got Err({error})"),
+    }
+
+    fake.seed_ref_at("heads/main", &base);
+    match state.observe_mainline_head(&to_vec(&child).unwrap()) {
+        ObserveMainlineResult::Ok { fast_forward, .. } => {
+            assert!(!fast_forward, "a strict ancestor of current mainline is refused");
+        }
+        ObserveMainlineResult::Err { error } => panic!("expected Ok, got Err({error})"),
+    }
+
+    let rewritten = digest(13);
+    fake.seed_fast_forward(&rewritten, None);
+    fake.seed_ref_at("heads/main", &rewritten);
+    match state.observe_mainline_head(&relative_to_base) {
+        ObserveMainlineResult::Ok { head, fast_forward } => {
+            assert!(fast_forward, "a rewritten live ref is followable, not Diverged");
+            assert_eq!(from_bytes::<Digest>(&head).unwrap(), rewritten);
+        }
+        ObserveMainlineResult::Err { error } => panic!("expected Ok, got Err({error})"),
+    }
 }
 
 #[test]
