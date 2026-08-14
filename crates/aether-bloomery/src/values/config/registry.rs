@@ -89,7 +89,7 @@ pub fn config_address(kind: &str, bytes: &[u8]) -> Digest {
 /// Ordered by construction — the `BTreeMap` gives the canonical order a sealed
 /// value needs for free, so two registries built by different insertion orders
 /// encode identically and seal to the same bloom id.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default, Serialize, Deserialize)]
 pub struct ConfigRegistry {
     entries: BTreeMap<String, Digest>,
 }

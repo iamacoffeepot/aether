@@ -4,6 +4,8 @@ use alloc::string::String;
 use core::fmt;
 use core::iter::FromIterator;
 
+use aether_data::Schema;
+use aether_data::schema::{LabelCell, LabelNode, SchemaCell, SchemaType};
 use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -88,6 +90,26 @@ impl Serialize for VerifyFailure {
     {
         serializer.serialize_str(self.as_str())
     }
+}
+
+// The serde impls above and below are hand-written, so the schema has to be
+// hand-written with them: an identity travels as its canonical name, not as an
+// enum discriminant, and a set travels as the ordered sequence of those names
+// rather than as the mask byte it is in memory. A derive here would describe a
+// unit enum and a newtype over `u8` — a shape the wire never carries. The
+// schema-versus-serde equivalence is asserted over the whole decisions graph in
+// `tests/golden_decisions`, so a drift between these two descriptions fails
+// there rather than silently mis-describing the column.
+impl Schema for VerifyFailure {
+    const SCHEMA: SchemaType = SchemaType::String;
+    const LABEL: Option<&'static str> = Some("aether.bloomery.verify_failure");
+    const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+}
+
+impl Schema for VerifyFailureSet {
+    const SCHEMA: SchemaType = SchemaType::Vec(SchemaCell::Static(&VerifyFailure::SCHEMA));
+    const LABEL: Option<&'static str> = Some("aether.bloomery.verify_failure_set");
+    const LABEL_NODE: LabelNode = LabelNode::Vec(LabelCell::Static(&VerifyFailure::LABEL_NODE));
 }
 
 struct VerifyFailureVisitor;

@@ -168,7 +168,7 @@ impl ModelOverride {
 
 /// The effective harness + model + reasoning effort a model-lane attempt runs
 /// under, after resolving a [`ModelOverride`] against its stage profile default.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ResolvedModel {
     /// The harness the attempt's lane forks — the stage profile's, or the one
     /// the workpiece's [`AgentSelection`] named.

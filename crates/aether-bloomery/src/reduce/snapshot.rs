@@ -267,7 +267,7 @@ impl AggregateReviewFault {
 /// The integration fold's output — the axes [`Fact::Resolve`] carries, held on
 /// the bloom record while the whole-bloom aggregate review judges the
 /// integrated head (ADR-0153).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct FoldedIntegration {
     /// The final integrated tree digest — the subject the review evidence binds.
     pub tree: Digest,
@@ -283,7 +283,7 @@ pub struct FoldedIntegration {
 /// attempt count is capped at the stage's `retry_budget`; a member at
 /// `attempts == retry_budget` whose latest attempt failed is wedged — it stops
 /// dispatching rather than looping.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct StageProgress {
     /// The stage the member currently sits at.
     pub stage: StageId,

@@ -157,7 +157,7 @@ pub enum CatalogError {
 /// [`StageCatalog`]: every [`StageBinding`] states its stage's limit and each
 /// [`Transformation`] constructor copies the resolved binding's value, so the
 /// dispatched bound is a function of the catalog the bloom attested.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ExecutionLimits {
     /// How long one dispatched attempt may run, in whole seconds.
     ///
@@ -624,7 +624,7 @@ pub struct Attempt {
 /// outputs, image, limits, and network profile — invoked identically on a
 /// laptop, on Actions, or in an isolated worker (ADR-0149 §The line). There
 /// is no arbitrary-command shape.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Transformation {
     /// The typed command name (e.g. `verify.clippy`, `construct.implement`).
     pub command: String,
@@ -886,7 +886,7 @@ impl Transformation {
 /// cursor and re-targets later dispatches from it. Content-derived, so a Refine
 /// that changes anything yields a new `tree` and prior evidence stops validating
 /// (ADR-0149 §supersession).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct CandidateRef {
     /// The produced git tree's digest — the candidate's identity.
     pub tree: Digest,
@@ -896,7 +896,7 @@ pub struct CandidateRef {
 
 /// The network posture a transformation runs under. Untrusted lanes run with
 /// no egress (ADR-0149 §Execution on Actions).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum NetworkProfile {
     /// No network at all.
     None,

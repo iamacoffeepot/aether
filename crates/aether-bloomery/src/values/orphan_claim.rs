@@ -34,7 +34,7 @@ pub const ORPHAN_CLAIM_RELEASE_WORDS: &str = "release orphan bloomery claim";
 /// [`ClaimRefKind`] rather than a ref path is what keeps the release inside the
 /// typed namespace: there is no spelling of this request that reaches an
 /// unrelated Git ref.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct OrphanClaimRelease {
     /// The typed claim ref to release.
     pub ref_kind: ClaimRefKind,
@@ -76,7 +76,7 @@ impl OrphanClaimRelease {
 /// All three are terminal and journaled. [`Changed`](Self::Changed) never
 /// retries against the holder it observed: the operator authorized releasing one
 /// named holder, and a ref that has moved is a different decision.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum OrphanClaimReleaseCompletion {
     /// The expected holder's ref was compare-and-swapped to a tombstone and
     /// deleted.

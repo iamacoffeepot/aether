@@ -111,7 +111,7 @@ pub struct VerifiedTree {
 /// reuse re-presents the exact evidence that was admitted: it already binds the
 /// tree ([`Evidence::validates`]), and no second construction can drift from
 /// what the lane actually returned.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct VerifyProof {
     /// The [`VerifyGateSet::digest`] the verdict was collected under.
     pub gate_set: Digest,
@@ -137,7 +137,7 @@ impl VerifyProof {
 /// Recorded because a landing that was proven by identity has to say so. Without
 /// it the journal shows a stage that produced a verdict nothing dispatched, and
 /// a reader cannot tell a reused proof from a gate that was quietly skipped.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct VerifyReuse {
     /// The verify position that passed without dispatching.
     pub stage: StageId,

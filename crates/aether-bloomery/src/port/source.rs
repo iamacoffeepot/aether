@@ -152,7 +152,7 @@ pub enum LandProposal {
 
 /// Which claim ref a [`ClaimOutcome::Held`] conflict is on (ADR-0150 §The claim
 /// registry): a per-workpiece claim ref, or the single mainline-admission ref.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ClaimRefKind {
     /// The per-workpiece claim ref (`refs/bloomery/claims/<workpiece-id>`).
     Workpiece(WorkpieceId),

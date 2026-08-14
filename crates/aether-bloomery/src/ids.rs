@@ -11,7 +11,7 @@ use crate::digest::Digest;
 /// A GitHub issue is one *projection* of a workpiece, not its identity — the
 /// id is a native handle that outlives any scope revision. An umbrella is a
 /// collection of workpieces, never a workpiece itself.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct WorkpieceId(pub String);
 
 /// A sealed bloom's identity: the digest of its canonical [`BloomSpec`]
@@ -19,7 +19,7 @@ pub struct WorkpieceId(pub String);
 /// a different bloom.
 ///
 /// [`BloomSpec`]: crate::values::BloomSpec
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct BloomId(pub Digest);
 
 /// A signer identity (ADR-0149 §The value vocabulary). The signature
