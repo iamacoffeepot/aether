@@ -136,5 +136,4 @@ pub fn triage_note(named: &[String]) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests;
