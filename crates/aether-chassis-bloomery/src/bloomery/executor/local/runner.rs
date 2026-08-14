@@ -59,6 +59,10 @@ pub struct RunSpec<'a> {
     /// persisted none (a subject-only prompt) or for a verify lane, which ignores
     /// it exactly as it ignores `--model`.
     pub task: Option<&'a str>,
+    /// The Claude session id a retry lap resumes (`--resume`), when the
+    /// session pool leased one. `None` launches cold. The claude arm of
+    /// `cargo xtask transform` threads this to `claude --resume`.
+    pub resume: Option<&'a str>,
 }
 
 /// A running (or finished) transform child — the lifecycle the backend maps onto

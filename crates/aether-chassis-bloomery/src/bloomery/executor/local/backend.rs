@@ -92,6 +92,10 @@ struct Run {
     // Which lane-specific evidence gates this run's verdict rides, decided from
     // the order's command.
     gates: LaneGates,
+    // The session-reuse decision taken at spawn — stamped onto evidence and
+    // used to deposit the session the attempt produced. `None` when this
+    // backend has no pool or the lane is not a Claude model lap.
+    reuse: Option<super::ReusePlan>,
 }
 
 /// Which lane-specific evidence gates a command's run rides.
@@ -141,7 +145,13 @@ impl PendingRun {
     // target directory beside it. Neither build path is resolved with the rest of
     // the dispatch: both belong to the slot, and which slot this run gets is
     // decided when one frees.
-    fn spec<'a>(&'a self, worktree_dir: &'a Path, target_dir: &'a Path, build_jobs: usize) -> RunSpec<'a> {
+    fn spec<'a>(
+        &'a self,
+        worktree_dir: &'a Path,
+        target_dir: &'a Path,
+        build_jobs: usize,
+        resume: Option<&'a str>,
+    ) -> RunSpec<'a> {
         RunSpec {
             command: &self.command,
             checkout_hex: &self.checkout_hex,
@@ -155,6 +165,7 @@ impl PendingRun {
             model: self.profile.as_ref().map(|resolved| resolved.model.as_str()),
             effort: self.profile.as_ref().map(|resolved| resolved.effort.as_str()),
             task: self.task.as_deref(),
+            resume,
         }
     }
 }
@@ -254,6 +265,9 @@ pub struct LocalExecutor {
     // journal serializes the rare concurrent write. Behind a `Mutex` because the
     // port's methods take `&self` while the store writes through `&mut`.
     messages: Option<Mutex<SqliteStore>>,
+    // The session-reuse pool this backend consumes. `None` for a backend built
+    // without one (most seam tests), which launches every lap cold.
+    sessions: Option<super::SessionReuse>,
 }
 
 impl LocalExecutor {
@@ -281,6 +295,7 @@ impl LocalExecutor {
             max_concurrent_lanes: usize::MAX,
             build_jobs: DEFAULT_LANE_BUILD_JOBS,
             messages: None,
+            sessions: None,
         }
     }
 
@@ -331,6 +346,15 @@ impl LocalExecutor {
         self
     }
 
+    /// Mount the session-reuse pool a retry lap acquires from. A backend
+    /// without one launches every attempt cold, so the seam tests that do
+    /// not care about resume need not open a pool.
+    #[must_use]
+    pub fn with_session_reuse(mut self, sessions: super::SessionReuse) -> Self {
+        self.sessions = Some(sessions);
+        self
+    }
+
     /// Build the production backend from resolved config: the real git + cargo
     /// [`ProcessTransformRunner`], the shared `correspondence` the checkout
     /// resolves through, and the config'd scratch-worktree base dir. The model a
@@ -346,7 +370,8 @@ impl LocalExecutor {
             config.local_worktree_base.clone(),
         )
         .with_max_concurrent_lanes(config.max_concurrent_lanes)
-        .with_lane_build(&config.lane_target_base, config.lane_build_jobs);
+        .with_lane_build(&config.lane_target_base, config.lane_build_jobs)
+        .with_session_reuse(super::SessionReuse::memory(aether_bloomery::PriceTable::default()));
         // A store this backend cannot open costs the landing proposal its
         // authored title, never a candidate: the capture still commits and the
         // land path still falls back, so the miss warns rather than failing boot.
@@ -520,11 +545,47 @@ impl LocalExecutor {
     // out to git — and the reservation is what keeps the slot it is spending, and
     // the build path that comes with it, from being handed to anyone else
     // meanwhile. A spawn that fails hands the slot straight back.
+    fn record_session_reuse(
+        &self,
+        evidence_path: &Path,
+        bytes: &[u8],
+        plan: &super::ReusePlan,
+        lifecycle: RunLifecycle,
+    ) -> Vec<u8> {
+        let actual_turns = super::session_reuse::parse_actual_turns(bytes);
+        let bytes = super::session_reuse::stamp_reuse(bytes, plan, actual_turns);
+        let _ = fs::write(evidence_path, &bytes);
+        if matches!(lifecycle, RunLifecycle::Exited { .. })
+            && let Some(session_id) = super::session_reuse::parse_session_id(&bytes)
+            && let Some(sessions) = self.sessions.as_ref()
+        {
+            sessions.deposit(plan, &session_id, super::session_reuse::parse_context_tokens(&bytes).unwrap_or(0));
+        }
+        bytes
+    }
+
+    fn acquire_reuse(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
+        let sessions = self.sessions.as_ref()?;
+        // Claude arm only. A grok-keyed acquire is a named miss inside the
+        // helper; other harnesses do not resume.
+        let profile = pending.profile.as_ref()?;
+        let task = pending.task.as_deref().unwrap_or(&pending.command);
+        Some(sessions.acquire(&super::AcquireRequest {
+            harness: Some(profile.harness),
+            model: &profile.model,
+            effort: profile.effort.as_str(),
+            task,
+            worktree: worktree_dir,
+        }))
+    }
+
     fn start_reserved(&self, pending: PendingRun, slot: usize) -> Result<(), LocalExecutorError> {
         let worktree_dir = self.slot_dir(slot).map_err(LocalExecutorError::Io)?;
         let target_dir = self.slot_target_dir(slot).map_err(LocalExecutorError::Io)?;
         record_slot(&pending.evidence_dir, slot);
-        let started = self.runner.start(&pending.spec(&worktree_dir, &target_dir, self.build_jobs));
+        let reuse = self.acquire_reuse(&pending, &worktree_dir);
+        let resume = reuse.as_ref().and_then(|plan| plan.resume.as_deref());
+        let started = self.runner.start(&pending.spec(&worktree_dir, &target_dir, self.build_jobs, resume));
 
         let mut registry = self.lock();
         registry.starting -= 1;
@@ -539,6 +600,7 @@ impl LocalExecutor {
                         evidence_dir: pending.evidence_dir,
                         subject: pending.subject,
                         gates: pending.gates,
+                        reuse,
                     },
                 );
                 Ok(())
@@ -643,6 +705,7 @@ impl LocalExecutor {
                 evidence_dir,
                 subject: evidence_subject(&dispatch.transformation),
                 gates: LaneGates::of(&dispatch.transformation.command),
+                reuse: None,
             },
         );
         true
@@ -954,20 +1017,31 @@ impl ExecutorBackend for LocalExecutor {
     }
 
     #[allow(clippy::significant_drop_tightening, reason = "run is a &mut reborrow; the guard must outlive it")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "terminal evidence path: reuse stamp is a few lines on an already-long gate"
+    )]
     fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
         // Pull the run's on-disk location, binding digest, and terminal exit out of
         // the guarded region, then drop the lock — the evidence read is blocking IO
         // and must not hold the registry mutex.
-        let (evidence_dir, subject, lifecycle, LaneGates { is_construct, is_verify }, worktree_dir) = {
+        let (evidence_dir, subject, lifecycle, LaneGates { is_construct, is_verify }, worktree_dir, reuse) = {
             let mut registry = self.lock();
             let Some(run) = registry.runs.get_mut(&handle.nonce.0) else {
                 return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
             };
-            (run.evidence_dir.clone(), run.subject, run.process.poll(), run.gates, run.worktree_dir.clone())
+            (
+                run.evidence_dir.clone(),
+                run.subject,
+                run.process.poll(),
+                run.gates,
+                run.worktree_dir.clone(),
+                run.reuse.clone(),
+            )
         };
         let exited_success = matches!(lifecycle, RunLifecycle::Exited { success: true });
         let evidence_path = evidence_dir.join("evidence.json");
-        let bytes = match fs::read(&evidence_path) {
+        let mut bytes = match fs::read(&evidence_path) {
             Ok(bytes) => bytes,
             // The run's own lifecycle is the terminal-vs-transient discriminator. An
             // Exited run that has left no readable evidence never will — re-driving
@@ -1018,6 +1092,9 @@ impl ExecutorBackend for LocalExecutor {
                 return Err(LocalExecutorError::Evidence(format!("{}: {read_error}", evidence_path.display())));
             }
         };
+        if let Some(plan) = reuse.as_ref() {
+            bytes = self.record_session_reuse(&evidence_path, &bytes, plan, lifecycle);
+        }
         // Evidence must identify the order that produced it before any body claim
         // is trusted. A stale or cross-wired evidence directory is otherwise able
         // to advance a different order merely by carrying a passing verdict.

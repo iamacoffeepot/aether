@@ -95,6 +95,11 @@ pub struct TransformArgs {
     /// subject-only prompt); ignored by the verify lane.
     #[arg(long)]
     task: Option<String>,
+    /// The Claude session id a retry lap resumes (`claude --resume`). Absent
+    /// launches a fresh harness. Ignored by the verify lane and by every
+    /// non-Claude model arm.
+    #[arg(long)]
+    resume: Option<String>,
 }
 
 /// `<out>/evidence.json` schema for the verify lane — the untrusted claim a
