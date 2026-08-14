@@ -17,9 +17,11 @@ tree; you do not fetch other refs.
 
 Your job: implement the work order against this checked-out subject, leaving the
 working tree carrying a focused, reviewable candidate change. The work order is
-the `## Task` section at the end of this prompt — it names what to build. If no
-`## Task` section is present, the dispatch carried no resolvable description:
-say so plainly rather than guessing at a change to make.
+the `## Task` section of this prompt — it names what to build. If no `## Task`
+section is present, the dispatch carried no resolvable description: say so
+plainly rather than guessing at a change to make. A `## Lane` section, when
+present, names this dispatch's member identity (`Workpiece: <id>`) and sits
+after the shared work order so sibling lanes share a prompt-cache prefix.
 
 ## Process
 

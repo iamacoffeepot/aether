@@ -26,8 +26,9 @@ workpiece's line, and the rubric below is the whole of it. A **composition
 review** judges the *weave* and follows the extra contract in
 `## Composition review` — read that section first when it is present.
 
-The work order the candidate was built against is the `## Task` section at the
-end of this prompt. Judge the candidate against that order and this
+The work order the candidate was built against is the `## Task` section of this
+prompt. A `## Lane` section, when present, names the member this dispatch owns
+and is not part of the order. Judge the candidate against that order and this
 repository's stated conventions — the `## Conventions` section of this prompt,
 plus the ADRs the change touches — never against preferences the order and the
 conventions do not state.
