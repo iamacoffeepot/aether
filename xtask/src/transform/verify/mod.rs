@@ -1170,7 +1170,7 @@ mod tests {
     use std::iter;
 
     use crate::cargo::WASM_TARGET;
-    use crate::transform::construct::CONSTRUCT_IMPLEMENT;
+    use crate::transform::construct::{CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS};
     use crate::transform::review::REVIEW_CRITIC;
     use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 
@@ -1316,6 +1316,40 @@ mod tests {
         );
         for pair in &ci_test.env {
             assert!(owned_pairs(test.env).contains(pair), "CI sets {pair:?} for the gate, so the lane must too");
+        }
+    }
+
+    #[test]
+    fn the_construct_instructions_state_the_gate_argv_a_lane_has_to_run() {
+        // Tripwire: the construct lane's pre-exit checklist is a second
+        // spelling of these invocations, and a near-miss one predicts nothing —
+        // rustdoc without `--document-private-items` passes over the private
+        // items the gate fails on, so the lane goes green and bounces anyway
+        // (#4951). Flags move here often (#4836, #4863) and prose nobody
+        // compiles goes stale silently, so the instructions are asserted
+        // against the arms rather than proofread against them.
+        for id in ["verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.suppress"] {
+            let invocation = verify_command(id).expect("member mapped");
+
+            let stated = argv(&invocation).join(" ");
+            assert!(
+                CONSTRUCT_INSTRUCTIONS.contains(&stated),
+                "{id} runs `{stated}`, which construct_instructions.md has to state for a lane to run it",
+            );
+            for &(key, value) in invocation.env {
+                let setting = format!("{key}={value}");
+                assert!(
+                    CONSTRUCT_INSTRUCTIONS.contains(&setting),
+                    "{id} runs under {setting}, and a lane that omits it runs a different check",
+                );
+            }
+            if let Some(prepare) = invocation.prepare {
+                let prepare = format!("cargo {}", prepare.join(" "));
+                assert!(
+                    CONSTRUCT_INSTRUCTIONS.contains(&prepare),
+                    "{id} is preceded by `{prepare}`, without which the lane's run is missing its inputs",
+                );
+            }
         }
     }
 
