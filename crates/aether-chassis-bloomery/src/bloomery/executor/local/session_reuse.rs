@@ -16,7 +16,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-use aether_bloomery::{Digest, Harness, PriceRates, PriceTable};
+use aether_bloomery::{Digest, PriceRates, PriceTable};
 
 use crate::session::{
     AcquireMiss, AcquireOutcome, LeaseToken, LeasedSession, SessionBackend, SessionConfig, SessionKey, SessionManifest,
@@ -62,8 +62,6 @@ pub enum MissReason {
     ContextCap,
     /// The static-prefix head moved since deposit.
     HeadHash,
-    /// Grok's resume story is unprobed — a grok-keyed acquire always misses.
-    Grok,
     /// The pooled session was deposited from a different lane slot.
     SlotMismatch,
 }
@@ -76,7 +74,6 @@ impl MissReason {
             Self::Age => "age",
             Self::ContextCap => "context_cap",
             Self::HeadHash => "head_hash",
-            Self::Grok => "grok",
             Self::SlotMismatch => "slot_mismatch",
         }
     }
@@ -94,7 +91,7 @@ pub struct ReusePlan {
     pub arm: ReuseArm,
     /// Why a predicted resume launched fresh, when it did.
     pub miss: Option<MissReason>,
-    /// The Claude session id to thread as `--resume`, when resuming.
+    /// The harness session id to thread as `--resume`, when resuming.
     pub resume: Option<String>,
     /// The lease to echo on deposit, when a resume leased a row.
     pub lease: Option<LeaseToken>,
@@ -201,22 +198,6 @@ impl SessionReuse {
         let prices = request.prices.unwrap_or(&self.prices);
         let head_hash = self.head_hash_for(request.worktree);
         let slot_path = canonical_slot(request.worktree);
-
-        if request.harness == Some(Harness::Grok) {
-            // Stated, not silent: Grok's resume story is unprobed and its free
-            // cache writes shrink the win.
-            return ReusePlan {
-                predicted_arm: ReuseArm::Fresh,
-                predicted_turns: SEED_NAMED_SITE_TURNS,
-                arm: ReuseArm::Fresh,
-                miss: Some(MissReason::Grok),
-                resume: None,
-                lease: None,
-                key,
-                head_hash,
-                slot_path,
-            };
-        }
 
         let (deposits, last_context) = {
             let state = lock(&self.state);
@@ -370,8 +351,6 @@ impl SessionReuse {
 
 /// What one acquire needs from the dispatch.
 pub struct AcquireRequest<'a> {
-    /// The resolved harness, when the order named one.
-    pub harness: Option<Harness>,
     /// The resolved model id.
     pub model: &'a str,
     /// The resolved effort tier.
@@ -484,7 +463,7 @@ pub fn stamp_reuse(bytes: &[u8], plan: &ReusePlan, actual_turns: Option<u64>) ->
     serde_json::to_vec_pretty(&value).unwrap_or_else(|_| bytes.to_vec())
 }
 
-/// The Claude session id the result record carried, when it carried one.
+/// The harness session id the result record carried, when it carried one.
 #[must_use]
 pub fn parse_session_id(bytes: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
@@ -523,7 +502,7 @@ mod tests {
         COLD_PREFIX_TOKENS, MissReason, ReuseArm, SEED_NAMED_SITE_TURNS, SessionReuse, resume_is_cheaper, stamp_reuse,
     };
     use crate::session::{SessionKey, SessionManifest};
-    use aether_bloomery::{Harness, PriceRates, PriceTable};
+    use aether_bloomery::{PriceRates, PriceTable};
     use std::path::Path;
 
     fn row(cache_read: u64, cache_write: u64, output: u64) -> PriceRates {
@@ -538,8 +517,28 @@ mod tests {
         }
     }
 
+    fn table(model: &str, rates: PriceRates) -> PriceTable {
+        let mut table = PriceTable::default();
+        table.rows.insert(model.to_owned(), rates);
+        table
+    }
+
     fn key() -> SessionKey {
         SessionKey { model: "claude-opus-5".to_owned(), effort: "high".to_owned(), task: "issue-4902".to_owned() }
+    }
+
+    fn grok_key() -> SessionKey {
+        SessionKey { model: "grok-4.6".to_owned(), effort: "high".to_owned(), task: "issue-4902".to_owned() }
+    }
+
+    fn grok_request() -> super::AcquireRequest<'static> {
+        super::AcquireRequest {
+            model: "grok-4.6",
+            effort: "high",
+            task: "issue-4902",
+            worktree: Path::new("/slot-0"),
+            prices: None,
+        }
     }
 
     fn manifest(head: &str, context: u64, at: u64) -> SessionManifest {
@@ -572,20 +571,32 @@ mod tests {
     }
 
     #[test]
-    fn grok_always_misses_by_name() {
-        let reuse = SessionReuse::memory(PriceTable::default());
-        reuse.set_head_hash("head-A");
-        let plan = reuse.acquire(&super::AcquireRequest {
-            harness: Some(Harness::Grok),
-            model: "grok-4.6",
-            effort: "high",
-            task: "issue-4902",
-            worktree: Path::new("/slot-0"),
-            prices: None,
-        });
-        assert_eq!(plan.arm, ReuseArm::Fresh);
-        assert_eq!(plan.miss, Some(MissReason::Grok));
-        assert!(plan.resume.is_none());
+    fn a_grok_key_is_decided_by_its_row_not_by_its_name() {
+        // Tripwire: grok used to short-circuit to a named miss before the pool
+        // was ever consulted, so the construct/refine volume seats relaunched
+        // cold on every lap. Grok keys in like any other harness now — and the
+        // arm still comes from the sealed row, so lifting the gate must not
+        // have replaced it with an unconditional resume.
+        let cheap_read = table("grok-4.6", row(500_000, 10_000_000, 25_000_000));
+        let resuming = SessionReuse::memory(cheap_read);
+        resuming.set_head_hash("head-A");
+        resuming.set_now(1_000);
+        resuming.seed(&grok_key(), "sess-1", &manifest("head-A", 8_000, 1_000), "/slot-0");
+
+        let plan = resuming.acquire(&grok_request());
+        assert_eq!(plan.arm, ReuseArm::Resumed, "a warm grok session under a cheap-read row resumes");
+        assert_eq!(plan.resume.as_deref(), Some("sess-1"));
+        assert_eq!(plan.miss, None);
+
+        let even_rates = table("grok-4.6", row(1_000_000, 1_000_000, 1_000_000));
+        let going_cold = SessionReuse::memory(even_rates);
+        going_cold.set_head_hash("head-A");
+        going_cold.set_now(1_000);
+        going_cold.seed(&grok_key(), "sess-1", &manifest("head-A", COLD_PREFIX_TOKENS, 1_000), "/slot-0");
+
+        let plan = going_cold.acquire(&grok_request());
+        assert_eq!(plan.arm, ReuseArm::Fresh, "the same warm session under a row that prices cold cheaper goes fresh");
+        assert_eq!(plan.miss, None, "a prediction, not a pool miss");
     }
 
     #[test]
@@ -596,7 +607,6 @@ mod tests {
         reuse.seed(&key(), "sess-1", &manifest("head-A", 8_000, 1_000), "/slot-0");
 
         let plan = reuse.acquire(&super::AcquireRequest {
-            harness: Some(Harness::Claude),
             model: "claude-opus-5",
             effort: "high",
             task: "issue-4902",
@@ -616,7 +626,6 @@ mod tests {
 
         reuse.set_head_hash("head-A");
         let cold = reuse.acquire(&super::AcquireRequest {
-            harness: Some(Harness::Claude),
             model: "claude-opus-5",
             effort: "high",
             task: "missing",
@@ -630,7 +639,6 @@ mod tests {
 
         reuse.set_head_hash("head-MOVED");
         let head = reuse.acquire(&super::AcquireRequest {
-            harness: Some(Harness::Claude),
             model: "claude-opus-5",
             effort: "high",
             task: "issue-4902",
@@ -643,7 +651,6 @@ mod tests {
         reuse.set_head_hash("head-A");
         reuse.set_now(1_000 + 55 * 60);
         let aged = reuse.acquire(&super::AcquireRequest {
-            harness: Some(Harness::Claude),
             model: "claude-opus-5",
             effort: "high",
             task: "issue-4902",
@@ -657,7 +664,6 @@ mod tests {
         capped.set_now(1_000);
         capped.seed(&key(), "sess-1", &manifest("head-A", 150_001, 1_000), "/slot-0");
         let over = capped.acquire(&super::AcquireRequest {
-            harness: Some(Harness::Claude),
             model: "claude-opus-5",
             effort: "high",
             task: "issue-4902",
@@ -671,7 +677,6 @@ mod tests {
         slotted.set_now(1_000);
         slotted.seed(&key(), "sess-1", &manifest("head-A", 8_000, 1_000), "/slot-0");
         let mismatch = slotted.acquire(&super::AcquireRequest {
-            harness: Some(Harness::Claude),
             model: "claude-opus-5",
             effort: "high",
             task: "issue-4902",

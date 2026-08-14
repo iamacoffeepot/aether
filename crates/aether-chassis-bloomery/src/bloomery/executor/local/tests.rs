@@ -1567,6 +1567,13 @@ fn claude_order(subject: Digest, nonce: &str, task: &str) -> aether_bloomery::Wo
     order
 }
 
+fn grok_order(subject: Digest, nonce: &str, task: &str) -> aether_bloomery::WorkOrder {
+    let mut order = claude_order(subject, nonce, task);
+    order.transformation.model =
+        Some(ResolvedModel { harness: Harness::Grok, model: "grok-4.6".to_owned(), effort: ReasoningEffort::High });
+    order
+}
+
 fn reuse_evidence(nonce: &str, session_id: &str, input_tokens: u64) -> String {
     format!(
         r#"{{"command":"construct.implement","nonce":"{nonce}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"session_id":"{session_id}","input":{input_tokens},"cache_read":0,"cache_write":4000,"output":200,"num_turns":3,"result":{{"num_turns":3,"session_id":"{session_id}"}}}}}}"#
@@ -1699,23 +1706,32 @@ fn a_named_miss_falls_back_to_fresh_and_stamps_the_reason() {
 }
 
 #[test]
-fn a_grok_lap_misses_by_name_and_never_resumes() {
+fn a_second_grok_lap_resumes_the_deposited_session() {
+    // Grok holds the volume seats, so the executor must hand a grok lap the
+    // same deposited session it hands a claude lap. The bug this catches is a
+    // harness-conditional acquire on the host path: the pool leases the row,
+    // and the spawn drops the handle for anything that is not claude — the
+    // stamped arm would say "resumed" while the process relaunched cold.
     let seen = Arc::new(Mutex::new(Vec::new()));
     let base = TempDir::new().unwrap();
     let sessions = super::SessionReuse::memory(PriceTable::default());
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
     let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
         .with_session_reuse(sessions);
 
-    let mut order = claude_order(digest(5), &test_nonce("grok"), "issue-4902");
-    order.transformation.model =
-        Some(ResolvedModel { harness: Harness::Grok, model: "grok-4.6".to_owned(), effort: ReasoningEffort::High });
-    let handle = exec.submit(&order).unwrap();
-    exec.stream_evidence(&handle).unwrap();
+    let first = exec.submit(&grok_order(digest(5), &test_nonce("grok-1"), "issue-4902")).unwrap();
+    exec.stream_evidence(&first).unwrap();
+    assert!(seen.lock().unwrap()[0].resume.is_none(), "lap 1 launches cold");
 
-    assert!(seen.lock().unwrap()[0].resume.is_none());
+    let second = exec.submit(&grok_order(digest(5), &test_nonce("grok-2"), "issue-4902")).unwrap();
+    exec.stream_evidence(&second).unwrap();
+    assert_eq!(seen.lock().unwrap()[1].resume.as_deref(), Some("sess-1"), "lap 2 threads the deposited session");
+
     let stamped: serde_json::Value =
-        serde_json::from_slice(&fs::read(base.path().join("wo-grok-evidence/evidence.json")).unwrap()).unwrap();
-    assert_eq!(stamped["session_reuse"]["miss"], "grok");
+        serde_json::from_slice(&fs::read(base.path().join("wo-grok-2-evidence/evidence.json")).unwrap()).unwrap();
+    assert_eq!(stamped["session_reuse"]["arm"], "resumed");
+    assert_eq!(stamped["session_reuse"]["miss"], serde_json::Value::Null, "no harness-named miss remains");
 }
 
 #[test]

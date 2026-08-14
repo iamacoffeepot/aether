@@ -588,15 +588,14 @@ impl LocalExecutor {
 
     fn acquire_reuse(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
         let sessions = self.sessions.as_ref()?;
-        // Claude arm only. A grok-keyed acquire is a named miss inside the
-        // helper; other harnesses do not resume.
+        // Every harness keys into the pool the same way — the arm comes from
+        // the sealed row for the resolved model, never from the harness name.
         let profile = pending.profile.as_ref()?;
         // Command + description: a critic that shares the construct lap's
         // model, effort, and work-order text must not resume the constructor.
         let task = super::session_reuse::pool_task(&pending.command, pending.task.as_deref());
         let prices = self.sealed_prices(&pending.nonce);
         Some(sessions.acquire(&super::AcquireRequest {
-            harness: Some(profile.harness),
             model: &profile.model,
             effort: profile.effort.as_str(),
             task: &task,
