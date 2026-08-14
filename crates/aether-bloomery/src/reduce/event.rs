@@ -370,6 +370,14 @@ pub enum Fact {
         /// report and is what a Reconcile-budget wedge attaches.
         evidence: Evidence,
     },
+    /// An observation the host classified as ancestor or unrelated to the
+    /// current mainline correspondence (#4938). The reducer names the
+    /// refusal; it does not advance. Appended past [`Fact::FoldConflict`]
+    /// so every prior fact keeps its wire discriminant.
+    ObserveMainlineDiverged {
+        /// The observed head that would move mainline backward or sideways.
+        head: Digest,
+    },
 }
 
 impl Fact {

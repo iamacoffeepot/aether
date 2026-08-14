@@ -62,7 +62,7 @@ use grant::reduce_grant_attempts;
 use integrate::{reduce_integrate, reduce_resolve};
 use land::reduce_land;
 use landing::reduce_landing_rejected;
-use observe::reduce_observe_mainline;
+use observe::{reduce_observe_mainline, reduce_observe_mainline_diverged};
 use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_claim_release};
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
 use seal::{reduce_seal, reduce_supersede};
@@ -106,6 +106,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> 
         Fact::LandingRejected { bloom, evidence } => reduce_landing_rejected(snapshot, bloom, evidence),
         Fact::Land { bloom, new_head } => reduce_land(snapshot, bloom, new_head),
         Fact::ObserveMainline { head } => reduce_observe_mainline(snapshot, head),
+        Fact::ObserveMainlineDiverged { head } => reduce_observe_mainline_diverged(snapshot, head),
         Fact::GrantAttempts { bloom, workpiece, stage, attempts } => {
             reduce_grant_attempts(snapshot, bloom, workpiece, *stage, *attempts)
         }

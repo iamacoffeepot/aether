@@ -479,6 +479,26 @@ impl FakeGithub {
         self.seed_correspondence(digest, &to_hex(digest));
     }
 
+    /// Record `head` as a commit whose parent is `parent_sha` (when given),
+    /// and bind the digest↔sha correspondence the observation path resolves.
+    ///
+    /// The ancestry an observation classifies against (#4938): a fixture that
+    /// moves mainline onto a new digest without a parent link reads as
+    /// unrelated, and the host would refuse a fast-forward that is exactly
+    /// what `move_mainline` means.
+    pub fn seed_fast_forward(&self, head: &Digest, parent_sha: Option<&str>) {
+        let sha = to_hex(head);
+        self.seed_correspondence(head, &sha);
+        self.lock().commits.insert(
+            sha.clone(),
+            StoredCommit {
+                tree: sha,
+                message: "fast-forward".to_owned(),
+                parents: parent_sha.map(|parent| vec![parent.to_owned()]).unwrap_or_default(),
+            },
+        );
+    }
+
     // Keep the fake faithful to the durable store's two-axis uniqueness: a new
     // digest for an existing backend object retires the old forward mapping,
     // while HashMap insertion retires the old reverse mapping for a digest.
@@ -711,6 +731,10 @@ impl GitDataApi for FakeGithub {
         let repo =
             self.object_repo().ok_or_else(|| GithubError::Status { status: 404, body: format!("no commit {sha}") })?;
         Ok(GitCommit { sha: sha.to_owned(), tree: real_commit_tree(&repo, sha)?, message: String::new() })
+    }
+
+    fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool, GithubError> {
+        Ok(self.contains(commit, ancestor))
     }
 
     fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GithubError> {

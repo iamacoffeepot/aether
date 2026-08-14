@@ -172,6 +172,14 @@ impl SourceShell {
         self.backend.observe_mainline_head()
     }
 
+    /// Whether `to` is `from` or a descendant of it (#4938).
+    ///
+    /// # Errors
+    /// A digest has no correspondence, or the ancestry query faulted.
+    pub fn is_fast_forward(&self, from: &Digest, to: &Digest) -> Result<bool, SourceError> {
+        self.backend.is_fast_forward(from, to)
+    }
+
     /// Snapshot the source at `base`.
     ///
     /// # Errors

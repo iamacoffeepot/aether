@@ -86,12 +86,18 @@ impl SourceCapabilityState {
     /// (#4677) — an observation decided against a partial snapshot advances
     /// mainline out from under a land the replay has not folded yet.
     #[must_use]
-    pub fn observe_mainline_head(&self) -> ObserveMainlineResult {
-        match self.shell.observe_mainline_head() {
-            Ok(head) => match to_vec(&head) {
-                Ok(head) => ObserveMainlineResult::Ok { head },
-                Err(error) => ObserveMainlineResult::Err { error: error.to_string() },
-            },
+    pub fn observe_mainline_head(&self, relative_to: &[u8]) -> ObserveMainlineResult {
+        let head = match self.shell.observe_mainline_head() {
+            Ok(head) => head,
+            Err(error) => return ObserveMainlineResult::Err { error: error.to_string() },
+        };
+        let from = from_bytes(relative_to).unwrap_or(aether_bloomery::Snapshot::GENESIS_MAINLINE);
+        let fast_forward = match self.shell.is_fast_forward(&from, &head) {
+            Ok(fast_forward) => fast_forward,
+            Err(error) => return ObserveMainlineResult::Err { error: error.to_string() },
+        };
+        match to_vec(&head) {
+            Ok(head) => ObserveMainlineResult::Ok { head, fast_forward },
             Err(error) => ObserveMainlineResult::Err { error: error.to_string() },
         }
     }
@@ -494,9 +500,9 @@ impl NativeActor for SourceCapability {
     fn on_observe_mainline(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
-        _mail: ObserveMainline,
+        mail: ObserveMainline,
     ) -> ObserveMainlineResult {
-        state.observe_mainline_head()
+        state.observe_mainline_head(&mail.relative_to)
     }
 
     #[allow(clippy::needless_pass_by_value)]
