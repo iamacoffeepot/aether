@@ -22,7 +22,7 @@ use crate::transform::{TransformArgs, conventions};
 /// and `claude -p` falls back to the operator's ambient defaults (#3592). Pure
 /// so the profile wiring is testable without spawning Claude; the assembled
 /// prompt is piped on the child's stdin (not an argv positional).
-fn construct_argv(model: Option<&str>, effort: Option<&str>) -> Vec<String> {
+fn construct_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str>) -> Vec<String> {
     // `--dangerously-skip-permissions` is what makes the lane actually run
     // headless: `claude -p` under the default permission mode denies every
     // `Edit`/`Write`, and a non-interactive session has no way to grant one, so
@@ -43,10 +43,22 @@ fn construct_argv(model: Option<&str>, effort: Option<&str>) -> Vec<String> {
         argv.push("--effort".to_owned());
         argv.push(effort.to_owned());
     }
+    if let Some(session) = resume {
+        argv.push("--resume".to_owned());
+        argv.push(session.to_owned());
+    }
     argv.push("--output-format".to_owned());
     argv.push("stream-json".to_owned());
     argv.push("--verbose".to_owned());
     argv
+}
+
+/// A copy of `args` with the resume handle cleared — the fresh-launch fallback
+/// when the harness rejects `--resume`.
+fn without_resume(args: &TransformArgs) -> TransformArgs {
+    let mut args = args.clone();
+    args.resume = None;
+    args
 }
 
 /// Assemble the headless-Claude prompt for the construct lane from the lane-owned
@@ -115,12 +127,25 @@ pub(super) fn run_headless_claude(
     // Under the host's peak-memory wrapper when it has one (#4912): what a
     // construct lane costs in RAM is the builds its agent drives, and the
     // wrapper's reading covers the whole reaped tree rather than this process.
+    let prompt = if args.resume.is_some() {
+        format!(
+            "{prompt}\nThe working tree was reset since the previous attempt; do not assume files you edited last time are still there.\n"
+        )
+    } else {
+        prompt.to_owned()
+    };
     let mut claude = peak.command("claude");
-    claude.args(construct_argv(args.model.as_deref(), args.effort.as_deref()));
+    claude.args(construct_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref()));
     scratch.export(&mut claude);
     sccache::export(cache, &mut claude);
     claude.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = claude.spawn().context("run headless claude")?;
+    let mut child = match claude.spawn() {
+        Ok(child) => child,
+        Err(_error) if args.resume.is_some() => {
+            return run_headless_claude(&prompt, &without_resume(args), scratch, cache, peak);
+        }
+        Err(error) => return Err(error).context("run headless claude"),
+    };
     // Pipe the prompt on a separate thread and reap the child unconditionally: if
     // the write races an early exit (broken pipe) or the prompt outgrows the OS
     // pipe buffer, returning on the write error before `wait_with_output` would
@@ -144,6 +169,12 @@ pub(super) fn run_headless_claude(
     // *before* the writer's result: an early child exit makes the stdin write race
     // a broken pipe, so joining the writer first would surface that downstream
     // symptom and mask the child's real exit cause.
+    if !run.status.success() && args.resume.is_some() {
+        // The harness rejected the resume handle (session file gone, unknown
+        // id). Degrade to a fresh launch rather than failing the dispatch.
+        let _ = writer.join();
+        return run_headless_claude(&prompt, &without_resume(args), scratch, cache, peak);
+    }
     if !run.status.success() {
         bail!(
             "headless claude exited {}: {}",
@@ -184,7 +215,7 @@ mod tests {
     // ambient effort however the profile was calibrated (#4324).
     #[test]
     fn construct_argv_carries_the_resolved_model_and_effort_and_stream_json() {
-        let argv = construct_argv(Some("claude-opus-4-8"), Some("high"));
+        let argv = construct_argv(Some("claude-opus-4-8"), Some("high"), None);
         assert_eq!(argv.first().map(String::as_str), Some("-p"), "headless, non-interactive");
         let model_at = argv.iter().position(|a| a == "--model").expect("argv pins the model");
         assert_eq!(argv[model_at + 1], "claude-opus-4-8", "the resolved model rides argv");
@@ -196,11 +227,19 @@ mod tests {
         // every write and the lane wedges on `produced_candidate: false`
         // (bloom `73d025b42e0a`).
         assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"), "headless needs the write gate open");
+        assert!(!argv.iter().any(|a| a == "--resume"), "a cold launch names no session");
+    }
+
+    #[test]
+    fn construct_argv_threads_the_resume_handle() {
+        let argv = construct_argv(Some("claude-opus-4-8"), Some("high"), Some("sess-1"));
+        let at = argv.iter().position(|a| a == "--resume").expect("a resume launch names the session");
+        assert_eq!(argv[at + 1], "sess-1");
     }
 
     #[test]
     fn construct_argv_omits_the_profile_flags_when_none_falls_back_to_ambient() {
-        let argv = construct_argv(None, None);
+        let argv = construct_argv(None, None, None);
         assert_eq!(argv.first().map(String::as_str), Some("-p"), "headless, non-interactive");
         assert!(!argv.iter().any(|a| a == "--model"), "no resolved model means no --model flag (ambient default)");
         assert!(!argv.iter().any(|a| a == "--effort"), "no resolved effort means no --effort flag (ambient default)");
