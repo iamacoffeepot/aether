@@ -631,6 +631,46 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
 }
 
 #[test]
+fn a_reconcile_result_admits_attempt_completed_not_out_of_line() {
+    // ADR-0189 — Reconcile is off MEMBER_LINE (next_member_stage is None) the
+    // same way Refine is. Routing only on a successor, or only naming Refine
+    // as the exception, refuses a completed reconcile as OutOfLineStage: the
+    // upload stays live, AttemptCompleted is never journaled, and the member
+    // never reaches Verify. The broker must admit it as AttemptCompleted.
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let workpiece = WorkpieceId("wp-overlap".to_owned());
+    let candidate = Digest::from_bytes([5; 32]);
+    let mut record = dispatch_record("n-rec", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
+    record.stage = StageId::Reconcile;
+    record_dispatch(&mut store, &record).unwrap();
+
+    let upload = UploadedEvidence {
+        nonce: Nonce("n-rec".to_owned()),
+        subject: candidate,
+        verdict: StageVerdict::VerificationPassed,
+        detail: Digest::from_bytes([7; 32]),
+        candidate: Some(aether_bloomery::CandidateRef {
+            tree: Digest::from_bytes([8; 32]),
+            checkout: Digest::from_bytes([9; 32]),
+        }),
+        findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
+        cost: None,
+        calls: None,
+    };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
+        panic!("a matching Reconcile upload is admitted");
+    };
+    let Fact::AttemptCompleted { stage, passed, .. } = &admission.event.fact else {
+        panic!("Reconcile admits AttemptCompleted, not an out-of-line refusal");
+    };
+    assert_eq!(*stage, StageId::Reconcile);
+    assert!(*passed, "a VerificationPassed verdict passes the gate");
+    assert!(store.lookup_order("n-rec").unwrap().is_none(), "the admitted order is consumed");
+}
+
+#[test]
 fn a_failing_terminal_verify_admits_typed_verify_failed_not_integrate() {
     // ADR-0178: a failing Verify upload admits through its dedicated appended
     // fact with the exact typed set — never Integrate or the stage-polymorphic
@@ -938,12 +978,13 @@ fn an_executor_fault_on_any_other_stage_is_refused_and_the_order_stays_live() {
 #[test]
 fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
     // A well-formed dispatch only ever carries a dispatched member stage
-    // (Construct / Verify / the repair-only Refine) or a bloom-level aggregate
-    // gate; an order at any other stage — the retired member Review included
-    // (ADR-0153), and the pre-seal Scope, which is an operator-harness process
-    // and never a dispatched lane — is corrupt. It is refused as OutOfLineStage
-    // rather than folded into the member's resolution, and (like a digest
-    // mismatch) the order is NOT consumed.
+    // (Construct / Verify / the repair-only Refine / the fold-conflict
+    // Reconcile) or a bloom-level aggregate gate; an order at any other
+    // stage — the retired member Review included (ADR-0153), and the pre-seal
+    // Scope, which is an operator-harness process and never a dispatched lane
+    // — is corrupt. It is refused as OutOfLineStage rather than folded into
+    // the member's resolution, and (like a digest mismatch) the order is NOT
+    // consumed.
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let workpiece = WorkpieceId("wp-off".to_owned());
