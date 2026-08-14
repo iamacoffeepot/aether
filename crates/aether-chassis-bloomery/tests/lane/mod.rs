@@ -229,7 +229,7 @@ impl LaneHarness {
             &mut self.stream,
             self.cid,
             control_mailbox(),
-            &Query { bloom: None, release: None },
+            &Query { bloom: None, release: None, calibration: false },
         ) {
             QueryResult::Document { document } => from_bytes(&document).expect("the projection decodes"),
             other => panic!("expected a document reply, got {other:?}"),
