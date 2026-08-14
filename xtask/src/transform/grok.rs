@@ -19,7 +19,7 @@ use std::process::Stdio;
 use anyhow::Result;
 
 use crate::transform::TransformArgs;
-use crate::transform::lane::{capture, write_prompt};
+use crate::transform::lane::{capture, capture_resumed, resumed_prompt, without_resume, write_prompt};
 use crate::transform::messages::derive_result_record;
 use crate::transform::peak_memory::PeakMemory;
 use crate::transform::sccache::{self, CompilerCache};
@@ -60,9 +60,14 @@ fn grok_effort(effort: &str) -> &str {
 /// ledger treats as independent, and web search would source the work from
 /// outside the sealed subject.
 ///
+/// `--resume` continues the session a previous lap left behind, and rides
+/// *alongside* `--prompt-file` rather than replacing it — the resumed run is
+/// still a headless single turn, it just starts with the prior conversation in
+/// context. Absent on a cold launch.
+///
 /// No turn cap rides here: nothing upstream seals one, and a number invented at
 /// the arm would truncate a long repair lap into a `no_result` row.
-fn grok_argv(prompt_file: &str, model: Option<&str>, effort: Option<&str>) -> Vec<String> {
+fn grok_argv(prompt_file: &str, model: Option<&str>, effort: Option<&str>, resume: Option<&str>) -> Vec<String> {
     let mut argv = vec![
         "--prompt-file".to_owned(),
         prompt_file.to_owned(),
@@ -83,10 +88,18 @@ fn grok_argv(prompt_file: &str, model: Option<&str>, effort: Option<&str>) -> Ve
         argv.push("--reasoning-effort".to_owned());
         argv.push(grok_effort(effort).to_owned());
     }
+    if let Some(session) = resume {
+        argv.push("--resume".to_owned());
+        argv.push(session.to_owned());
+    }
     argv
 }
 
 /// Run a model lane under Grok and return the shared result record.
+///
+/// The session handle a later lap resumes needs no lifting here: Grok's terminal
+/// `result` record carries its own `session_id`, and the shared
+/// [`derive_result_record`] already reads it onto the envelope.
 pub(super) fn run(
     prompt: &str,
     args: &TransformArgs,
@@ -94,17 +107,42 @@ pub(super) fn run(
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
-    let prompt_file = write_prompt(&args.out, prompt)?;
+    let Some(transcript) = launch(prompt, args, scratch, cache, peak)? else {
+        // Grok refused the handle before starting a billed turn — the session is
+        // gone, so this lap is a cold one.
+        return run(prompt, &without_resume(args), scratch, cache, peak);
+    };
+    Ok(derive_result_record(&transcript))
+}
+
+/// Fork Grok once and hand back its transcript, or `None` when a resumed launch
+/// was refused its handle before spending anything.
+fn launch(
+    prompt: &str,
+    args: &TransformArgs,
+    scratch: &Scratch,
+    cache: Option<&CompilerCache>,
+    peak: &PeakMemory,
+) -> Result<Option<String>> {
+    let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, args.resume.as_deref()))?;
     let mut command = peak.command(GROK);
     command
-        .args(grok_argv(&prompt_file.to_string_lossy(), args.model.as_deref(), args.effort.as_deref()))
+        .args(grok_argv(
+            &prompt_file.to_string_lossy(),
+            args.model.as_deref(),
+            args.effort.as_deref(),
+            args.resume.as_deref(),
+        ))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     scratch.export(&mut command);
     sccache::export(cache, &mut command);
 
-    Ok(derive_result_record(&capture(command, &args.out, GROK, peak)?))
+    if args.resume.is_some() {
+        return capture_resumed(command, &args.out, GROK, peak);
+    }
+    capture(command, &args.out, GROK, peak).map(Some)
 }
 
 #[cfg(test)]
@@ -114,7 +152,7 @@ mod tests {
 
     #[test]
     fn argv_runs_headless_and_carries_the_resolved_profile() {
-        let argv = grok_argv("/run/prompt.md", Some("grok-4.6"), Some("high"));
+        let argv = grok_argv("/run/prompt.md", Some("grok-4.6"), Some("high"), None);
         assert!(
             argv.windows(2).any(|w| w == ["--prompt-file", "/run/prompt.md"]),
             "the prompt is read from the file, never handed to argv",
@@ -137,14 +175,40 @@ mod tests {
         }
         assert!(argv.windows(2).any(|w| w == ["--model", "grok-4.6"]), "the resolved model rides argv");
         assert!(argv.windows(2).any(|w| w == ["--reasoning-effort", "high"]), "the resolved effort rides argv");
+        assert!(!argv.iter().any(|flag| flag == "--resume"), "a cold launch names no session");
     }
 
     #[test]
     fn argv_omits_the_profile_flags_when_none_falls_back_to_ambient() {
-        let argv = grok_argv("/run/prompt.md", None, None);
+        let argv = grok_argv("/run/prompt.md", None, None, None);
         assert!(!argv.iter().any(|flag| flag == "--model"), "no resolved model means the operator's default");
         assert!(!argv.iter().any(|flag| flag == "--reasoning-effort"), "no resolved effort means the same");
         assert!(argv.windows(2).any(|w| w == ["--prompt-file", "/run/prompt.md"]), "still headless");
+    }
+
+    // Tripwire: a resumed Grok lap keeps `--prompt-file`. `--resume` names the
+    // conversation to continue, not the turn to run, so an argv that swapped one
+    // for the other would resume the session and then hand it nothing to do —
+    // and the lane would read the empty lap as a member that produced no
+    // candidate rather than as a broken invocation.
+    #[test]
+    fn argv_threads_the_resume_handle_alongside_the_prompt_file() {
+        let argv = grok_argv("/run/prompt.md", Some("grok-4.6"), Some("high"), Some("sess-1"));
+        assert!(argv.windows(2).any(|w| w == ["--resume", "sess-1"]), "the handle follows its flag");
+        assert!(argv.windows(2).any(|w| w == ["--prompt-file", "/run/prompt.md"]), "a resumed lap still has a turn");
+    }
+
+    // Tripwire: the handle the pool deposits comes off Grok's own terminal
+    // record through the shared derivation. A `session_id` that failed to reach
+    // the envelope leaves the pool with nothing to key a warm lap on, so every
+    // retry relaunches cold at full price while still reporting success.
+    #[test]
+    fn the_terminals_session_id_reaches_the_envelope_the_pool_deposits() {
+        let transcript = concat!(
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"2f0c8b1e-grok","usage":{"input_tokens":13525,"output_tokens":33}}"#,
+            "\n",
+        );
+        assert_eq!(derive_result_record(transcript)["session_id"], "2f0c8b1e-grok");
     }
 
     // Tripwire: the sealed ladder's top tier against Grok's vocabulary. Grok
