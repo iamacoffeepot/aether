@@ -102,7 +102,9 @@ impl ApiCapabilityState {
     pub(super) fn query_claim_release(digest: &str) -> Routed {
         digest_from_hex(digest).map_or_else(
             || Routed::Reply(error_response(400, "release id is not a 32-byte hex digest")),
-            |digest| Routed::Query(Query { bloom: None, release: Some(digest.as_bytes().to_vec()) }),
+            |digest| {
+                Routed::Query(Query { bloom: None, release: Some(digest.as_bytes().to_vec()), calibration: false })
+            },
         )
     }
 }
@@ -139,11 +141,12 @@ pub(super) fn release_status_response(result: QueryResult) -> HttpServerResponse
         },
         QueryResult::ReleaseNotFound => error_response(404, "no orphan claim release with that request digest"),
         QueryResult::Err { error } => error_response(500, &error),
-        // A release read asks for one record; the projection variants — including
-        // the bloom-shaped `NotFound` — answer a different question and cannot
-        // arrive on this reply.
-        QueryResult::Document { .. } | QueryResult::Bloom { .. } | QueryResult::NotFound => {
-            error_response(500, "release read answered with a projection")
-        }
+        // A release read asks for one record; the projection and calibration
+        // variants — including the bloom-shaped `NotFound` — answer a different
+        // question and cannot arrive on this reply.
+        QueryResult::Document { .. }
+        | QueryResult::Bloom { .. }
+        | QueryResult::NotFound
+        | QueryResult::Calibration { .. } => error_response(500, "release read answered with a projection"),
     }
 }

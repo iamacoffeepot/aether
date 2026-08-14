@@ -39,8 +39,9 @@ use aether_bloomery::control::{
     reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
-    BloomId, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event, Fact, IdempotencyKey, Outcome,
-    ResolvedConfigs, Snapshot, Unproducible, decode_recorded_decisions, reduce, view_of,
+    BloomId, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event,
+    Fact, IdempotencyKey, Outcome, ResolvedConfigs, Snapshot, StudyRecord, Unproducible, decode_recorded_decisions,
+    grade, reduce, view_of,
 };
 
 use super::{ControlCore, ControlSetup, ObserveTick};
@@ -122,6 +123,13 @@ struct PendingConfigs {
 /// keyed by the dispatch correlation id `ClaimResult` echoes.
 pub struct ControlCoreState {
     snapshot: Snapshot,
+    /// The capability ledger, folded from the same admitted events the snapshot
+    /// is (ADR-0184). It sits here rather than being computed per read because
+    /// it is a fold over the whole journal and this cap is the only thing that
+    /// sees every admitted event exactly once — at boot replay and at each
+    /// commit — so accumulating it costs one call beside `Snapshot::apply` and
+    /// re-deriving it would cost a second whole-journal read per request.
+    calibration: CalibrationLedger,
     configs: ResolvedConfigs,
     pending: BTreeMap<String, VecDeque<Pending>>,
     pending_claims: BTreeMap<u64, PendingClaim>,
@@ -159,6 +167,7 @@ impl NativeActor for ControlCore {
         );
         Ok(ControlCoreState {
             snapshot: Snapshot::default(),
+            calibration: CalibrationLedger::default(),
             configs: ResolvedConfigs::default(),
             pending: BTreeMap::new(),
             pending_claims: BTreeMap::new(),
@@ -319,6 +328,7 @@ impl NativeActor for ControlCore {
         }
         let result = match mail {
             CommitResult::Applied { .. } => {
+                state.calibration.observe(&event, &decisions, &state.configs);
                 state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
                 // A durably-landed bloom frees its member + admission claim refs
                 // (ADR-0150) — release with the local release, fire-and-forget: the
@@ -422,6 +432,9 @@ impl NativeActor for ControlCore {
                         record.sequence, record.idempotency_key
                     )),
                 };
+            // The calibration ledger folds the same pair, so a replay rebuilds
+            // it exactly as the live commits built it (ADR-0184).
+            state.calibration.observe(&event, &decisions, &state.configs);
             state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
         }
         state.reconcile_claim_refs(ctx);
@@ -615,6 +628,13 @@ impl NativeActor for ControlCore {
             inbound.reply(&release_response(&state.snapshot, &request));
             return;
         }
+        // Calibration is a whole-fleet read over the folded ledger and every
+        // bloom's grade, so it answers before the view document is projected at
+        // all — the document would be built and thrown away (ADR-0184).
+        if mail.calibration {
+            inbound.reply(&calibration_response(&state.calibration, &state.snapshot));
+            return;
+        }
         // The live-read path holds no artifact access, so it resolves no question
         // bytes: a held member surfaces its pending decision only on the outward
         // mirror path. The digest-only hold still gates resolution in the reducer.
@@ -799,6 +819,40 @@ impl ControlCoreState {
         // above cannot see. Fire-and-forget: the reply routes back to that handler.
         ctx.actor::<SourceCapability>().send_detached(&EnumerateClaims);
     }
+}
+
+/// Answer a calibration read (ADR-0184): the folded capability ledger beside
+/// [`grade`]'s report over the same snapshot — the study report's first reader
+/// outside a test.
+///
+/// Both halves resolve study artifacts through [`unresolved_study`], which is
+/// where this read's honesty boundary sits: a study record is a standalone
+/// artifact in `aether.artifacts`, and nothing admits an
+/// `EvidenceKind::StudyRecord` verdict into the reducer yet — the intake lane
+/// writes the artifact and its index row instead. So the fold holds no study
+/// links, the resolver is never consulted, and the cost columns come back
+/// unfilled with `samples` at zero saying exactly that. The counts the journal
+/// *does* carry — attempts, rolls, the typed verifier failures — are the read's
+/// substance today.
+fn calibration_response(ledger: &CalibrationLedger, snapshot: &Snapshot) -> QueryResult {
+    let document =
+        CalibrationDocument { ledger: ledger.report(unresolved_study), study: grade(snapshot, unresolved_study) };
+    match to_vec(&document) {
+        Ok(document) => QueryResult::Calibration { document },
+        Err(error) => QueryResult::Err { error: format!("calibration document encode failed: {error}") },
+    }
+}
+
+/// The study-artifact resolver this cap can offer: none.
+///
+/// The control core owns the journal-derived snapshot and the ledger folded
+/// beside it; the artifact bytes live one capability over. Both readers take the
+/// miss the same way — [`grade`] spends the record's cost and time columns and
+/// nothing else, the ledger spends the cell's sample — so a calibration read
+/// reports what it measured with the unmeasured columns visibly empty, rather
+/// than reporting numbers nobody took.
+fn unresolved_study(_artifact: &Digest) -> Option<StudyRecord> {
+    None
 }
 
 /// Answer an orphan-claim release-status read from the snapshot's record map

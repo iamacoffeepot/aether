@@ -1,3 +1,6 @@
+//! Arm of [`super::reduce`]'s fact dispatch (`Fact::GrantAttempts`); wiring
+//! lives in `mod.rs`.
+//!
 //! The wedged-member escape hatch that does not mint a bloom: handing a member
 //! back attempts on the bloom it already belongs to (#4708).
 //!

@@ -1,3 +1,6 @@
+//! Arm of [`super::reduce`]'s fact dispatch (`Fact::Land`); wiring lives in
+//! `mod.rs`.
+//!
 //! The compare-and-swap land: mainline moves onto a resolved bloom, or the
 //! bloom is refused and a successor seals on the new head (ADR-0149 §The bloom).
 

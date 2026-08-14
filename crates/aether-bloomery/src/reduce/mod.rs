@@ -71,7 +71,7 @@ use operator::{reduce_operator_adjudication, reduce_operator_repair};
 use operator_hold::{reduce_operator_hold, reduce_operator_release};
 use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_claim_release};
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
-use seal::{reduce_seal, reduce_supersede};
+use seal::{reduce_seal, reduce_supersede, reduce_surface_overlap};
 use verify::reduce_verify_failed;
 
 /// Reduce one event against a snapshot into decisions. Pure: reads the
@@ -138,5 +138,6 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> 
         Fact::OperatorRepair { bloom, repair } => reduce_operator_repair(snapshot, bloom, repair),
         Fact::OperatorHold { bloom, hold } => reduce_operator_hold(snapshot, bloom, hold),
         Fact::OperatorRelease { bloom, release } => reduce_operator_release(snapshot, bloom, release),
+        Fact::SurfaceOverlap { members, intersection } => reduce_surface_overlap(members, intersection),
     }
 }

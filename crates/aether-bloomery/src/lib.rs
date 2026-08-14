@@ -39,6 +39,10 @@
 //!   a versioned policy artifact rejects the attempt before dispatch.
 //! - [`mod@reduce`] — the pure control core: [`reduce`](reduce::reduce) owns
 //!   every state transition, with no I/O, no engine boot, no GitHub types.
+//! - [`calibration`] — the capability ledger: [`CalibrationLedger`] folds the
+//!   journal into per-`(harness, model, effort) × stage` counts — attempts,
+//!   rolls, typed verifier failures, and study-measured cost — so which agent to
+//!   run a stage under is an evidenced choice (ADR-0184).
 //! - [`study_report`] — the pure forecast grade: [`grade`] folds a bloom's
 //!   admitted study records into actual cost and time, reads its retries off the
 //!   dispatch ledger, and grades all three against the sealed [`Forecast`]
@@ -55,6 +59,7 @@
 // See the crate docs above for why the crate is `std` at all (issue #3497).
 extern crate alloc;
 
+pub mod calibration;
 pub mod control;
 pub mod correspondence;
 pub mod digest;
@@ -67,6 +72,9 @@ pub mod sign;
 pub mod study_report;
 pub mod values;
 
+pub use calibration::{
+    CalibrationDocument, CalibrationLedger, CapabilityCell, CapabilityLedger, LEDGER_CAVEAT, VerifierFailures,
+};
 pub use control::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, CONTROL_CORE_NAMESPACE, ClaimResult, ClaimSeal,
     Commit, CommitResult, CompleteRelease, CompleteReleaseResult, CompleteTransfer, ConfigRecord, DispatchPayload,
@@ -113,4 +121,5 @@ pub use values::{
     StudyRecord, SurfacePattern, Tier, TimeoutRecord, ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND,
     VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VerifiedTree, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof,
     VerifyReuse, Wedge, Workpiece, classify_findings, config_address, decode_config, is_model_lane,
+    surface_intersection,
 };

@@ -32,9 +32,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    Admit, AdmitResult, BloomDraft, CONTROL_CORE_NAMESPACE, ConfigKind, ConfigRegistry, Decisions, Digest, Event,
-    Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, ModelOverride, Outcome, Query, QueryResult,
-    ResolvedConfigs, SealError, Snapshot, Unproducible, ViewDocument, WorkpieceId, reduce,
+    Admit, AdmitResult, BloomDraft, CONTROL_CORE_NAMESPACE, CalibrationDocument, ConfigKind, ConfigRegistry, Decisions,
+    Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, ModelOverride, Outcome, Query,
+    QueryResult, ResolvedConfigs, SealError, Snapshot, StageCatalog, StageId, Unproducible, ViewDocument, WorkpieceId,
+    reduce,
 };
 use aether_chassis_bloomery::store::{JournalWrite, RecordConfig, RecordConfigResult, SqliteStore, StoreBackend};
 use aether_codec::frame::{read_frame, write_frame};
@@ -153,7 +154,12 @@ fn query_until_blooms(stream: &mut TcpStream, cid_base: u64, control: MailboxId,
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut cid = cid_base;
     loop {
-        let document = match call::<_, QueryResult>(stream, cid, control, &Query { bloom: None, release: None }) {
+        let document = match call::<_, QueryResult>(
+            stream,
+            cid,
+            control,
+            &Query { bloom: None, release: None, calibration: false },
+        ) {
             QueryResult::Document { document } => from_bytes::<ViewDocument>(&document).expect("document decodes"),
             other => panic!("expected a document reply, got {other:?}"),
         };
@@ -267,6 +273,77 @@ fn control_loop_converges_across_a_restart() {
     // just the raw store.
     let second = admit(&mut stream, 20, control, &seal_event("seal-2", 5, "wp"));
     assert!(matches!(second, Outcome::SealRejected(_)), "the overlapping seal is refused: {second:?}");
+}
+
+/// Read the calibration document, retrying until the ledger has measured
+/// something — boot replay runs asynchronously after a component load, so a read
+/// issued immediately races the rebuild exactly as `query_until_blooms` does.
+fn calibration_until_measured(stream: &mut TcpStream, cid_base: u64, control: MailboxId) -> CalibrationDocument {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut cid = cid_base;
+    loop {
+        let read = Query { bloom: None, release: None, calibration: true };
+        let document = match call::<_, QueryResult>(stream, cid, control, &read) {
+            QueryResult::Calibration { document } => {
+                from_bytes::<CalibrationDocument>(&document).expect("calibration document decodes")
+            }
+            other => panic!("expected a calibration reply, got {other:?}"),
+        };
+        if !document.ledger.cells.is_empty() || Instant::now() >= deadline {
+            return document;
+        }
+        cid += 1;
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+// Tripwire (ADR-0184): the capability ledger is folded at *both* of the control
+// core's apply sites — the live commit and the boot replay — so a restart
+// rebuilds exactly what the crashed process had measured.
+//
+// Folding at one site only is the failure that reads as correct right up until
+// the coordinator restarts: the live path alone measures a running fleet and
+// then loses every observation the journal still holds, and the replay path
+// alone leaves a calibration read stale by however long the process has been up.
+// Reading the same cell on both sides of a `kill -9` is what tells them apart.
+#[test]
+fn the_capability_ledger_is_measured_live_and_rebuilt_on_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let db = db.to_str().unwrap();
+
+    // The agent the compiled line runs Construct under, resolved the way the
+    // ledger resolves it. Derived rather than spelled, because the line's
+    // harness/model/effort are refinable without an ADR.
+    let construct = ModelOverride::default().resolve(StageId::Construct, &StageCatalog::profile_of(StageId::Construct));
+
+    let port = free_port();
+    let coordinator = spawn(port, db);
+    let mut stream = connect_and_handshake(port, "calibration-test");
+    let control = control_mailbox();
+
+    // The seal dispatches its one member at the entry stage, which is the one
+    // measurement this bloom has made.
+    let sealed = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp"));
+    assert!(matches!(sealed, Outcome::Sealed(_)), "the seal admits: {sealed:?}");
+
+    let live = calibration_until_measured(&mut stream, 10, control);
+    assert_eq!(live.ledger.cells.len(), 1, "one model lane has dispatched, so the ledger measures one cell");
+    assert_eq!(live.ledger.cells[0].stage, StageId::Construct);
+    assert_eq!(live.ledger.cells[0].agent, construct, "the cell is keyed by the agent the sealed line resolves");
+    assert_eq!(live.ledger.cells[0].attempts, 1);
+    assert!(!live.ledger.caveat.is_empty(), "the read carries its honesty boundary");
+
+    drop(stream);
+    coordinator.kill9();
+
+    let port = free_port();
+    let _coordinator = spawn(port, db);
+    let mut stream = connect_and_handshake(port, "calibration-test");
+    let control = control_mailbox();
+
+    let replayed = calibration_until_measured(&mut stream, 30, control);
+    assert_eq!(replayed.ledger, live.ledger, "boot replay rebuilds the ledger the live fold measured");
 }
 
 #[test]
