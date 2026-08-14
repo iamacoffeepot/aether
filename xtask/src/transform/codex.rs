@@ -6,7 +6,9 @@ use std::process::Stdio;
 use anyhow::Result;
 
 use crate::transform::TransformArgs;
-use crate::transform::lane::{Terminal, Usage, capture, record, write_prompt};
+use crate::transform::lane::{
+    Terminal, Usage, capture, capture_resumed, record, resumed_prompt, without_resume, write_prompt,
+};
 use crate::transform::peak_memory::PeakMemory;
 use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::scratch::Scratch;
@@ -28,7 +30,14 @@ const CODEX: &str = "codex";
 ///
 /// Codex reads its prompt from a positional argument (it has no `--prompt-file`);
 /// the assembled prompt is still written beside the transcript by the caller.
-fn codex_argv(prompt: &str, model: Option<&str>, effort: Option<&str>) -> Vec<String> {
+///
+/// Resume is a **subcommand**, not a flag, and its placement is exact:
+/// `codex exec --json --approve-for-me [-m …] [-c …] resume <thread-id>
+/// <prompt>`. The exec-level flags must precede `resume`, and the thread id must
+/// precede the prompt positional — codex-cli rejects every other ordering, so a
+/// flag appended after `resume` or an id placed after the prompt kills the lane
+/// at fork rather than degrading.
+fn codex_argv(prompt: &str, model: Option<&str>, effort: Option<&str>, resume: Option<&str>) -> Vec<String> {
     let mut argv = vec!["exec".to_owned(), "--json".to_owned(), "--approve-for-me".to_owned()];
     if let Some(model) = model {
         argv.push("-m".to_owned());
@@ -39,8 +48,29 @@ fn codex_argv(prompt: &str, model: Option<&str>, effort: Option<&str>) -> Vec<St
         argv.push("-c".to_owned());
         argv.push(format!("model_reasoning_effort={effort}"));
     }
+    if let Some(thread) = resume {
+        argv.push("resume".to_owned());
+        argv.push(thread.to_owned());
+    }
     argv.push(prompt.to_owned());
     argv
+}
+
+/// Read the thread id `codex exec --json` announces its session under.
+///
+/// ```json
+/// {"type":"thread.started","thread_id":"019f…"}
+/// ```
+///
+/// It is the handle a later lap resumes, and it arrives before any work, so a
+/// run that died mid-lap still names the thread its retry can continue.
+pub(super) fn derive_thread_id(transcript: &str) -> Option<String> {
+    transcript.lines().find_map(|line| {
+        let event = serde_json::from_str::<serde_json::Value>(line).ok()?;
+        (event.get("type").and_then(serde_json::Value::as_str) == Some("thread.started"))
+            .then(|| event.get("thread_id")?.as_str().map(str::to_owned))
+            .flatten()
+    })
 }
 
 /// Read the run's terminal out of a `codex exec --json` JSONL `transcript`.
@@ -107,25 +137,48 @@ pub(super) fn run(
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
-    write_prompt(&args.out, prompt)?;
+    let Some(transcript) = launch(prompt, args, scratch, cache, peak)? else {
+        // Codex refused the thread before starting a billed turn — the session
+        // is gone, so this lap is a cold one.
+        return run(prompt, &without_resume(args), scratch, cache, peak);
+    };
+    Ok(record(derive_terminal(&transcript), derive_thread_id(&transcript)))
+}
+
+/// Fork Codex once and hand back its transcript, or `None` when a resumed launch
+/// was refused its thread before spending anything.
+fn launch(
+    prompt: &str,
+    args: &TransformArgs,
+    scratch: &Scratch,
+    cache: Option<&CompilerCache>,
+    peak: &PeakMemory,
+) -> Result<Option<String>> {
+    let prompt = resumed_prompt(prompt, args.resume.as_deref());
+    write_prompt(&args.out, &prompt)?;
     let mut command = peak.command(CODEX);
     command
-        .args(codex_argv(prompt, args.model.as_deref(), args.effort.as_deref()))
+        .args(codex_argv(&prompt, args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref()))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     scratch.export(&mut command);
     sccache::export(cache, &mut command);
-    Ok(record(derive_terminal(&capture(command, &args.out, CODEX, peak)?)))
+
+    if args.resume.is_some() {
+        return capture_resumed(command, &args.out, CODEX, peak);
+    }
+    capture(command, &args.out, CODEX, peak).map(Some)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{codex_argv, derive_terminal};
+    use super::{codex_argv, derive_terminal, derive_thread_id};
+    use crate::transform::lane::record;
 
     #[test]
     fn argv_runs_headless_and_carries_the_resolved_profile() {
-        let argv = codex_argv("do the thing", Some("gpt-5"), Some("high"));
+        let argv = codex_argv("do the thing", Some("gpt-5"), Some("high"), None);
         assert_eq!(argv.first().map(String::as_str), Some("exec"));
         assert!(argv.iter().any(|a| a == "--json"), "the transcript is what the record derives from");
         assert!(argv.iter().any(|a| a == "--approve-for-me"), "headless needs the approval prompt gone");
@@ -146,6 +199,47 @@ mod tests {
             "codex takes effort as a config override, not a flag",
         );
         assert_eq!(argv.last().map(String::as_str), Some("do the thing"), "the prompt is the positional");
+        assert!(!argv.iter().any(|a| a == "resume"), "a cold launch names no thread");
+    }
+
+    // Tripwire: codex-cli accepts exactly one ordering for a resumed exec —
+    // every exec-level flag before the `resume` subcommand, the thread id
+    // between `resume` and the prompt positional. A flag pushed after `resume`
+    // or an id after the prompt is not a degraded run but a parse error at fork,
+    // so the whole lane dies before a token is spent.
+    #[test]
+    fn argv_puts_the_exec_flags_before_resume_and_the_thread_before_the_prompt() {
+        let argv = codex_argv("do the thing", Some("gpt-5"), Some("high"), Some("019f"));
+        let at = |needle: &str| argv.iter().position(|a| a == needle).unwrap_or_else(|| panic!("argv has {needle}"));
+
+        assert_eq!(argv.first().map(String::as_str), Some("exec"));
+        for flag in ["--json", "--approve-for-me", "-m", "-c"] {
+            assert!(at(flag) < at("resume"), "{flag} is an exec-level flag and must precede the subcommand");
+        }
+        assert_eq!(argv[at("resume") + 1], "019f", "the thread id follows the subcommand");
+        assert_eq!(argv.last().map(String::as_str), Some("do the thing"), "the prompt stays the last positional");
+    }
+
+    // Tripwire: the thread id the pool deposits comes off `thread.started`,
+    // which codex emits before any work — so a run that died mid-lap still names
+    // the thread its retry continues. Losing it leaves the pool with nothing to
+    // key a warm lap on, and every retry relaunches cold at full price.
+    #[test]
+    fn the_started_threads_id_reaches_the_envelope_the_pool_deposits() {
+        let transcript = concat!(
+            r#"{"type":"thread.started","thread_id":"019f8c2a"}"#,
+            "\n",
+            r#"{"type":"turn.started"}"#,
+            "\n",
+            r#"{"type":"turn.completed","usage":{"input_tokens":16147,"output_tokens":5}}"#,
+        );
+        assert_eq!(derive_thread_id(transcript).as_deref(), Some("019f8c2a"));
+        assert_eq!(record(derive_terminal(transcript), derive_thread_id(transcript))["session_id"], "019f8c2a");
+
+        // A transcript that never announced a thread names none, rather than
+        // depositing an empty handle a later lap would try to resume.
+        assert_eq!(derive_thread_id(r#"{"type":"turn.started"}"#), None);
+        assert_eq!(derive_thread_id(r#"{"type":"thread.started"}"#), None);
     }
 
     // The event shape captured from a real `codex exec --json` run: the final

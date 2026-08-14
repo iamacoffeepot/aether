@@ -95,9 +95,12 @@ pub struct TransformArgs {
     /// subject-only prompt); ignored by the verify lane.
     #[arg(long)]
     task: Option<String>,
-    /// The Claude session id a retry lap resumes (`claude --resume`). Absent
-    /// launches a fresh harness. Ignored by the verify lane and by every
-    /// non-Claude model arm.
+    /// The harness session a retry lap resumes, in whatever the resolved
+    /// harness calls it — a Claude or Grok session id (`--resume`), a Codex
+    /// thread id (`exec … resume <id>`), or a Muse session uuid
+    /// (`--session-id`). Absent launches a fresh session; the Muse arm mints
+    /// its own uuid in that case, because Muse addresses a new and a continued
+    /// session through the same flag. Ignored by the verify lane.
     #[arg(long)]
     resume: Option<String>,
 }
