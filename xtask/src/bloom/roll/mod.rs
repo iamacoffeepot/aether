@@ -15,9 +15,7 @@ mod preconditions;
 mod shell;
 mod sync;
 
-use std::env;
-
-use anyhow::{Context, Result};
+use anyhow::{Result, bail};
 use clap::Args;
 
 use self::day::Day;
@@ -36,9 +34,9 @@ pub struct RollArgs {
     #[arg(long, value_parser = Day::parse)]
     date: Day,
 
-    /// The day branch to sync back. Defaults to `AETHER_BLOOMERY_MAINLINE_REF`.
+    /// The day branch to sync back, as the coordinator's mainline ref names it.
     #[arg(long)]
-    from: Option<String>,
+    from: String,
 
     /// The remote the cut is taken from and pushed to.
     #[arg(long, default_value = "origin")]
@@ -46,39 +44,32 @@ pub struct RollArgs {
 }
 
 pub fn run(client: &Client<'_>, args: &RollArgs) -> Result<String> {
-    roll(&client.view()?, &shell::Host, args, configured_mainline_ref().as_deref())
+    roll(&client.view()?, &shell::Host, args)
 }
 
-fn roll(view: &ViewDocument, shell: &impl Shell, args: &RollArgs, configured: Option<&str>) -> Result<String> {
-    let from = sync_from(args.from.as_deref(), configured)?;
+fn roll(view: &ViewDocument, shell: &impl Shell, args: &RollArgs) -> Result<String> {
+    let from = sync_from(&args.from)?;
     preconditions::screen(view, shell, &args.date, &args.remote)?;
     let synced = sync::merge(shell, &from)?;
     cut::create(shell, &args.remote, &args.date)?;
     Ok(handoff(&args.date, &synced))
 }
 
-/// The day branch the sync-back runs from: the flag, then the coordinator's own
-/// boot-resolved knob, normalized to the bare branch name `gh` and `git` take.
+/// The day branch the sync-back runs from, normalized to the bare branch name
+/// `gh` and `git` take.
 ///
-/// The knob is spelled `refs/heads/…` where a pull request's head and a push
+/// The operator reads the day off the coordinator's own boot-resolved knob,
+/// which is spelled `refs/heads/…` where a pull request's head and a push
 /// refspec both want the branch alone, and a qualified name in either position
 /// addresses something that is not there.
-fn sync_from(explicit: Option<&str>, configured: Option<&str>) -> Result<String> {
-    let named = explicit
-        .or(configured)
-        .map(str::trim)
-        .filter(|ref_name| !ref_name.is_empty())
-        .context("no day branch to sync back: pass --from <branch>, or set AETHER_BLOOMERY_MAINLINE_REF")?;
+fn sync_from(named: &str) -> Result<String> {
+    let named = named.trim();
+    if named.is_empty() {
+        bail!("--from needs the day branch to sync back, e.g. --from bloomery/daily/2026-08-14");
+    }
+
     let branch = named.strip_prefix("refs/").unwrap_or(named);
     Ok(branch.strip_prefix("heads/").unwrap_or(branch).to_owned())
-}
-
-/// The ref the coordinator boot-resolves, when the operator's shell carries it.
-fn configured_mainline_ref() -> Option<String> {
-    // Operator tooling reading the coordinator's boot-resolved mainline ref so
-    // the roll defaults to the day that is actually running — not cap config.
-    #[allow(clippy::disallowed_methods)]
-    env::var("AETHER_BLOOMERY_MAINLINE_REF").ok()
 }
 
 /// The two steps the command cannot perform, printed verbatim.
@@ -130,10 +121,10 @@ mod tests {
         }
     }
 
-    fn args(from: Option<&str>) -> RollArgs {
+    fn args(from: &str) -> RollArgs {
         RollArgs {
             date: Day::parse("2026-08-15").expect("a well-formed day"),
-            from: from.map(str::to_owned),
+            from: from.to_owned(),
             remote: "origin".to_owned(),
         }
     }
@@ -150,7 +141,7 @@ mod tests {
     fn a_green_roll_syncs_back_before_it_cuts_tomorrow() {
         let shell = green();
 
-        roll(&drained_view(), &shell, &args(Some("bloomery/daily/2026-08-14")), None).expect("a drained day rolls");
+        roll(&drained_view(), &shell, &args("bloomery/daily/2026-08-14")).expect("a drained day rolls");
 
         let calls = shell.calls();
         let merged = calls.iter().position(|line| line.starts_with("gh pr merge")).expect("the day syncs back");
@@ -166,8 +157,7 @@ mod tests {
     // ref for a day.
     #[test]
     fn the_handoff_prints_the_repoint_line_verbatim() {
-        let handoff = roll(&drained_view(), &green(), &args(Some("bloomery/daily/2026-08-14")), None)
-            .expect("a drained day rolls");
+        let handoff = roll(&drained_view(), &green(), &args("bloomery/daily/2026-08-14")).expect("a drained day rolls");
 
         assert!(
             handoff.contains("AETHER_BLOOMERY_MAINLINE_REF=refs/heads/bloomery/daily/2026-08-15"),
@@ -185,7 +175,7 @@ mod tests {
         view.blooms[0].status = BloomStatus::Sealed;
         let shell = green();
 
-        roll(&view, &shell, &args(Some("bloomery/daily/2026-08-14")), None).expect_err("an undrained day is refused");
+        roll(&view, &shell, &args("bloomery/daily/2026-08-14")).expect_err("an undrained day is refused");
 
         let calls = shell.calls();
         assert!(!calls.iter().any(|line| line.starts_with("gh pr")), "no pull request is opened or merged: {calls:?}");
@@ -193,14 +183,16 @@ mod tests {
         assert!(!calls.iter().any(|line| line.starts_with("git push")), "nothing is pushed: {calls:?}");
     }
 
+    // The operator copies the day off the coordinator's `AETHER_BLOOMERY_MAINLINE_REF`,
+    // which is qualified; `gh pr create --head` and a push refspec both want the
+    // branch alone, so a ref carried through verbatim addresses nothing and the
+    // roll dies between the sync-back and the cut.
     #[test]
-    fn the_day_branch_falls_back_to_the_configured_ref_in_either_spelling() {
+    fn the_day_branch_is_taken_bare_from_either_spelling() {
         let day = "bloomery/daily/2026-08-14";
-        for configured in [format!("refs/heads/{day}"), format!("heads/{day}"), day.to_owned()] {
-            assert_eq!(sync_from(None, Some(&configured)).expect("the knob names the day"), day);
+        for named in [format!("refs/heads/{day}"), format!("heads/{day}"), format!("  {day}  ")] {
+            assert_eq!(sync_from(&named).expect("the flag names the day"), day);
         }
-        assert_eq!(sync_from(Some(day), Some("refs/heads/main")).expect("the flag wins"), day);
-        assert!(sync_from(None, Some("  ")).is_err(), "a cleared knob is a refusal, not a roll of `main`");
-        assert!(sync_from(None, None).is_err(), "an unset knob is a refusal");
+        assert!(sync_from("   ").is_err(), "a blank --from is a refusal, not a roll of `main`");
     }
 }
