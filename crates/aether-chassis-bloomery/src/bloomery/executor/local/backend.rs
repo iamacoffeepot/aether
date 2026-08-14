@@ -364,9 +364,9 @@ impl LocalExecutor {
     /// run executes under is not config — it rides each order as the resolved
     /// agent profile the host overlaid at dispatch (ADR-0149 §The line).
     ///
-    /// `session` is the same [`SessionConfig`](crate::session::SessionConfig) the
-    /// chassis mounts on [`SessionPoolCapability`](crate::session::SessionPoolCapability):
-    /// the executor consumes that pool rather than opening a second one with
+    /// `session` is the same [`SessionConfig`] the chassis mounts on
+    /// [`SessionPoolCapability`](crate::session::SessionPoolCapability): the
+    /// executor consumes that pool rather than opening a second one with
     /// hardcoded knobs.
     #[must_use]
     pub fn from_config(

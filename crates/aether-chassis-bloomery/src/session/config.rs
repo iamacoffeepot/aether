@@ -51,8 +51,8 @@ impl SessionConfig {
     /// The `SQLite` path the pool and its in-process consumer both open.
     ///
     /// A configured file path is used as-is (WAL shares it). The `:memory:`
-    /// default becomes [`SHARED_MEMORY`] so the capability and the executor
-    /// see one table rather than two.
+    /// default becomes the process-wide shared-memory URI so the capability
+    /// and the executor see one table rather than two.
     #[must_use]
     pub fn store_path(&self) -> &str {
         if self.db_path == ":memory:" {
