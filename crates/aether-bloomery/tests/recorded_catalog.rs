@@ -2,8 +2,6 @@
 //! (#4944), and pre-existing rows without that effect keep the compiled-line
 //! fallback.
 
-#![allow(clippy::unwrap_used)]
-
 mod common;
 
 use aether_bloomery::{Decision, Decisions, Fact, Outcome, ResolvedConfigs, Snapshot, StageCatalog, StageId, reduce};
@@ -31,7 +29,12 @@ fn the_fold_reads_the_recorded_catalog_not_a_re_resolution() {
     // Plausible bug: apply keeps calling sealed_in and ignores the recorded
     // effect, so a no-catalog bloom still tracks the compiled line.
     let mut catalog = StageCatalog::line();
-    catalog.bindings.iter_mut().find(|binding| binding.stage == StageId::Construct).unwrap().retry_budget = 99;
+    catalog
+        .bindings
+        .iter_mut()
+        .find(|binding| binding.stage == StageId::Construct)
+        .expect("compiled line binds Construct")
+        .retry_budget = 99;
 
     let spec = draft(1, vec![membership("alpha", 10)]).seal();
     let bloom = spec.id();
@@ -54,7 +57,12 @@ fn the_fold_reads_the_recorded_catalog_not_a_re_resolution() {
 #[test]
 fn a_sealed_catalog_is_what_the_effect_carries() {
     let mut catalog = StageCatalog::line();
-    catalog.bindings.iter_mut().find(|binding| binding.stage == StageId::Verify).unwrap().retry_budget = 7;
+    catalog
+        .bindings
+        .iter_mut()
+        .find(|binding| binding.stage == StageId::Verify)
+        .expect("compiled line binds Verify")
+        .retry_budget = 7;
     let (draft, configs) = draft_with_catalog(1, vec![membership("alpha", 10)], &catalog);
     let spec = draft.seal();
     let bloom = spec.id();

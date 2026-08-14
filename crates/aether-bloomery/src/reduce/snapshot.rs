@@ -77,9 +77,9 @@ pub struct BloomRecord {
     /// Journal-derived: a newly sealed bloom records it as
     /// [`Decision::RecordStageCatalog`] and the fold copies that value. A
     /// pre-existing row that never carried the effect keeps the compiled-line
-    /// fallback in [`BloomRecord::sealed`] — the incident class that fold
-    /// closes, a no-catalog bloom whose recorded catalog otherwise moved with
-    /// the binary.
+    /// fallback at record construction (`StageCatalog::sealed_in`) — the
+    /// incident class that fold closes, a no-catalog bloom whose recorded
+    /// catalog otherwise moved with the binary.
     pub stage_catalog: StageCatalog,
     /// The bloom's lifecycle status.
     pub status: BloomStatus,

@@ -465,7 +465,7 @@ pub enum Decision {
     /// so the fold reads the record rather than re-deriving it from the
     /// compiled line (ADR-0174, #4944). Appended so the prior decisions' wire
     /// discriminants are unchanged. A journal written before this variant
-    /// keeps the compiled-line fallback in [`BloomRecord::sealed`](crate::BloomRecord).
+    /// keeps the compiled-line fallback at `BloomRecord` construction.
     RecordStageCatalog {
         /// The bloom the catalog is recorded on.
         bloom: BloomId,

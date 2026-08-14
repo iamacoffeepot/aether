@@ -829,25 +829,29 @@ fn commit_key(result: &CommitResult) -> &str {
     }
 }
 
+fn membership_mutation(workpiece: &str, bloom: &BloomId) -> MembershipMutation {
+    MembershipMutation { workpiece: workpiece.to_owned(), bloom: bloom.0.as_bytes().to_vec() }
+}
+
+/// The store-commit axes [`project`] builds: membership releases, claims, and
+/// outbox payloads.
+type ProjectedAxes = (Vec<MembershipMutation>, Vec<MembershipMutation>, Vec<OutboxPayload>);
+
 /// Project a decided event's effects into the store commit's typed axes: the
 /// membership releases and claims the `active_membership` table applies, and the
 /// outbox payloads it enqueues. The snapshot-only effects carry no durable store
 /// row — they are rebuilt on replay by `reduce` + `apply` from the journaled event.
-#[allow(clippy::type_complexity, clippy::too_many_lines)]
-fn project(
-    decisions: &Decisions,
-) -> Result<(Vec<MembershipMutation>, Vec<MembershipMutation>, Vec<OutboxPayload>), WireError> {
+fn project(decisions: &Decisions) -> Result<ProjectedAxes, WireError> {
     let mut releases = Vec::new();
     let mut claims = Vec::new();
     let mut outbox = Vec::new();
     for effect in &decisions.effects {
         match effect {
             Decision::ClaimMembership { workpiece, bloom } => {
-                claims.push(MembershipMutation { workpiece: workpiece.0.clone(), bloom: bloom.0.as_bytes().to_vec() });
+                claims.push(membership_mutation(&workpiece.0, bloom));
             }
             Decision::ReleaseMembership { workpiece, bloom } => {
-                releases
-                    .push(MembershipMutation { workpiece: workpiece.0.clone(), bloom: bloom.0.as_bytes().to_vec() });
+                releases.push(membership_mutation(&workpiece.0, bloom));
             }
             // The landing-receipt topic carries the receipt *and* the landed
             // bloom's membership: the receipt value names no members, so a

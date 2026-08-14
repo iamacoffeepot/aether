@@ -5,8 +5,6 @@
 //! [`Decision`] variant — must fail this fixture rather than wait for the next
 //! boot replay to abort.
 
-#![allow(clippy::unwrap_used)]
-
 use aether_bloomery::{
     BloomId, CandidateRef, Decision, Decisions, Digest, Evidence, EvidenceKind, LandingReceipt, Outcome,
     ProjectedReceipt, StageCatalog, StageId, StageProgress, VerifyFailureSet, Wedge, WorkpieceId,
@@ -124,7 +122,7 @@ const GOLDEN_DECISIONS: &[u8] = &[
 #[test]
 fn decisions_wire_bytes_match_pinned_golden() {
     let value = representative();
-    let encoded = to_vec(&value).unwrap();
+    let encoded = to_vec(&value).expect("representative decisions encode");
     assert_eq!(encoded.as_slice(), GOLDEN_DECISIONS, "decisions wire drifted; encoded={encoded:?}");
     let decoded: Decisions = from_bytes(GOLDEN_DECISIONS).expect("pinned bytes decode against HEAD types");
     assert_eq!(decoded, value);
