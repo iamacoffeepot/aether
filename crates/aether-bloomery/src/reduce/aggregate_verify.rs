@@ -8,7 +8,7 @@
 //! downstream of the point where the bloom can still route it back to an owner.
 
 use super::attempt::stage_binding;
-use super::composition::{Refusal, reweave};
+use super::composition::{Refusal, finding_of, reweave};
 use super::verify_memo::proof_of;
 use super::{AggregateVerifyError, BloomRecord, BloomStatus, Decision, Decisions, Outcome, Snapshot};
 use crate::digest::Digest;
@@ -109,7 +109,11 @@ pub(super) fn reduce_aggregate_verify_completed(
         // The budget is spent on a fold that still does not build. The fold
         // stays held as the owner's decision context — the same bloom-scope park
         // the review's ceiling raises, so an adopting answer that names the
-        // question re-arms the cycle.
+        // question re-arms the cycle. The refusal files its finding first
+        // (#4977): spending the budget does not make a refused fold any less a
+        // refusal of the composed tree, and the channel is where a refusal's
+        // evidence lives whether it goes on to re-weave or to park.
+        effects.push(finding_of(*bloom, integration.tree, evidence, &[]));
         effects.push(Decision::RecordReviewPark { bloom: *bloom, question: Some(evidence.detail) });
         return Decisions {
             outcome: Outcome::AggregateVerifyParked { bloom: *bloom, rolls, question: evidence.detail },
