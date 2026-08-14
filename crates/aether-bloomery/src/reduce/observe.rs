@@ -1,3 +1,6 @@
+//! Arms of [`super::reduce`]'s fact dispatch (`Fact::ObserveMainline`,
+//! `Fact::ObserveMainlineDiverged`); wiring lives in `mod.rs`.
+//!
 //! Mainline observation: the coordinator's mainline pointer follows the
 //! repository, not only its own lands (#4667).
 //!
