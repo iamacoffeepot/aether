@@ -41,7 +41,7 @@ use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 use aether_rpc::WireFrame;
-use common::client::{call, call_frame, connect, handshake};
+use common::client::{call, call_frame, connect_and_handshake};
 use common::{Coordinator, free_port};
 use serde::Serialize;
 
@@ -212,8 +212,7 @@ fn replay_folds_the_recorded_decision_not_the_current_reducer() {
 
     let port = free_port();
     let _coordinator = spawn(port, db);
-    let mut stream = connect(port);
-    handshake(&mut stream, "control-loop-test");
+    let mut stream = connect_and_handshake(port, "control-loop-test");
     let control = control_mailbox();
 
     // The admitted row folded (so the fold demonstrably ran past both rows),
@@ -238,8 +237,7 @@ fn control_loop_converges_across_a_restart() {
     // admit ingress — the reducer decides, the combined commit persists.
     let port = free_port();
     let coordinator = spawn(port, db);
-    let mut stream = connect(port);
-    handshake(&mut stream, "control-loop-test");
+    let mut stream = connect_and_handshake(port, "control-loop-test");
 
     let control = control_mailbox();
     let sealed = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp"));
@@ -253,8 +251,7 @@ fn control_loop_converges_across_a_restart() {
     // replays the journal to rebuild the snapshot.
     let port = free_port();
     let _coordinator = spawn(port, db);
-    let mut stream = connect(port);
-    handshake(&mut stream, "control-loop-test");
+    let mut stream = connect_and_handshake(port, "control-loop-test");
     let control = control_mailbox();
 
     // Convergence: the rebuilt snapshot names the bloom, folded from the
@@ -280,8 +277,7 @@ fn concurrent_same_key_admits_each_get_a_coherent_ok() {
 
     let port = free_port();
     let _coordinator = spawn(port, db);
-    let mut stream = connect(port);
-    handshake(&mut stream, "control-loop-test");
+    let mut stream = connect_and_handshake(port, "control-loop-test");
     let control = control_mailbox();
 
     // Two admits sharing one idempotency key, pipelined before either reply is
@@ -353,8 +349,7 @@ fn a_seal_naming_a_configuration_authored_after_boot_still_admits() {
 
     let port = free_port();
     let _coordinator = spawn(port, db);
-    let mut stream = connect(port);
-    handshake(&mut stream, "control-loop-test");
+    let mut stream = connect_and_handshake(port, "control-loop-test");
     let control = control_mailbox();
 
     let override_config = ModelOverride::default();
