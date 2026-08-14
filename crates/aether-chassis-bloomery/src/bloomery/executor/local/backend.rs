@@ -631,7 +631,9 @@ impl LocalExecutor {
         }
         let table = match PriceTable::from_sealed(&bytes) {
             aether_bloomery::SealedPriceTable::Current(table) => table,
-            aether_bloomery::SealedPriceTable::PreMigration => PriceTable::default(),
+            aether_bloomery::SealedPriceTable::PreMigration | aether_bloomery::SealedPriceTable::Unresolvable => {
+                PriceTable::default()
+            }
         };
         drop(store);
         table
