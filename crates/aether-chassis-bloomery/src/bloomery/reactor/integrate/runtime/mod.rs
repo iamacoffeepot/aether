@@ -14,8 +14,11 @@
 //!    ([`SourceShell::integration_checkpoint`], idempotent) and folds each
 //!    candidate onto the branch through the CAS-guarded
 //!    [`SourceShell::integrate`], chaining each `Integrated` outcome's tree into
-//!    the next fold's expected checkpoint. The bootstrap checkpoint also carries
-//!    resume position: a reactor restarted mid-fold reads the branch at the last
+//!    the next fold's expected checkpoint. A candidate that collides stops
+//!    itself, not the pass: the rest fold on, and the tree the pass ends at is
+//!    the settled checkpoint every conflicted member is then sent to reconcile
+//!    against (ADR-0189, #4952). The bootstrap checkpoint also carries resume
+//!    position: a reactor restarted mid-fold reads the branch at the last
 //!    integrated candidate and continues after it rather than re-folding.
 //! 3. **Admit.** After the last candidate integrates it admits a
 //!    [`Fact::Resolve`] carrying the final tree, the landable head, and the
@@ -28,6 +31,7 @@
 //! refusal, acked with a loud warn rather than re-driven forever. Config-gated
 //! exactly like the mirror / executor / land reactors.
 
+use std::mem::take;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,7 +39,7 @@ use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
     Admit, BloomId, Checkpoint, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, IntegrateOutcome,
-    IntegratePayload, Topic, WorkpieceId,
+    IntegratePayload, MemberCandidate, Topic, WorkpieceId,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
@@ -188,14 +192,39 @@ fn resolve_key(bloom: &Digest, tree: &Digest) -> IdempotencyKey {
     IdempotencyKey(key)
 }
 
+/// One member's collision, and the tree the branch stood at when the merge that
+/// produced it was attempted.
+///
+/// `at` is what decides whether the evidence still describes the settled
+/// checkpoint: a member folding behind this one moves the branch past `at`, and
+/// a collision measured against a tree the fold has left is evidence about a
+/// checkpoint nothing will reconcile onto.
+struct Collision<'a> {
+    member: &'a MemberCandidate,
+    at: Digest,
+    paths: Vec<String>,
+    diff: String,
+}
+
+/// One conflicted member's admission: the fact, the overlay bytes its Reconcile
+/// work order reads, and the workpiece whose lane resolves the seam.
+struct Conflicted {
+    event: Box<Event>,
+    overlay: String,
+    workpiece: WorkpieceId,
+    /// The settled checkpoint the evidence is bound to — the artifacts-store
+    /// parent the overlay is filed under.
+    checkpoint: Digest,
+}
+
 /// One payload's fold outcome.
 enum FoldOutcome {
     /// Every candidate integrated (or was already on the branch); the resolve
     /// fact to admit.
     Resolved(Box<Event>),
-    /// A cross-member collision (ADR-0189): admit `FoldConflict` so the
-    /// later member reconciles against the folded checkpoint.
-    Conflicted { event: Box<Event>, overlay: String, workpiece: WorkpieceId },
+    /// One or more cross-member collisions (ADR-0189): admit a `FoldConflict`
+    /// per conflicted member so each reconciles against the settled checkpoint.
+    Conflicted(Vec<Conflicted>),
     /// A definitive refusal — the branch carries a tree that matches neither
     /// the bootstrap position nor any candidate (a foreign advance). Acked with
     /// the carried reason, never re-driven.
@@ -274,59 +303,72 @@ fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOut
     // (recovering a fold interrupted after its final write), overwritten below.
     let mut expected = position.checkpoint;
     let mut head = position.head;
-    for member in &payload.members[start.min(payload.members.len())..] {
-        let folded = if combining {
-            source.integrate_merge(&bloom, &candidate_ref_name(&bloom, &member.workpiece.0), &expected)
-        } else {
-            source.integrate(&bloom, &member.candidate, &expected)
-        };
-        match folded {
-            Ok(IntegrateOutcome::Integrated { tree, head: new_head }) => {
-                expected = Checkpoint { bloom, tree };
-                head = Some(new_head);
+
+    // Settle the fold before anything reconciles (#4952). A collision stops that
+    // member, not the pass: the merge endpoint leaves the branch untouched on a
+    // 409, so the members behind it fold onto the same expected tree and the
+    // branch ends where it would have ended had nothing collided. That tree is
+    // the settled checkpoint, and every conflicted member is sent to reconcile
+    // against it. Reconciliation is not commutative — a member reconciled
+    // against an intermediate tree is correct about a checkpoint the rest of the
+    // fold then moves, and pays a second round for a collision it never had,
+    // which is the N² cascade this replaces.
+    let mut pending: Vec<&MemberCandidate> = payload.members[start.min(payload.members.len())..].iter().collect();
+    let mut collisions: Vec<Collision<'_>> = Vec::new();
+    loop {
+        let round = take(&mut pending);
+        collisions.clear();
+        for member in round {
+            let folded = if combining {
+                source.integrate_merge(&bloom, &candidate_ref_name(&bloom, &member.workpiece.0), &expected)
+            } else {
+                source.integrate(&bloom, &member.candidate, &expected)
+            };
+            match folded {
+                Ok(IntegrateOutcome::Integrated { tree, head: new_head }) => {
+                    expected = Checkpoint { bloom, tree };
+                    head = Some(new_head);
+                }
+                // A cross-member collision. Journaled as FoldConflict (ADR-0189)
+                // rather than refused in prose: the member reconciles against
+                // the folded checkpoint. Re-driving the same trees cannot
+                // resolve it; the dispatched lane can.
+                Ok(IntegrateOutcome::Conflict { paths, diff, .. }) => {
+                    collisions.push(Collision { member, at: expected.tree, paths, diff });
+                    pending.push(member);
+                }
+                Ok(other) => {
+                    return FoldOutcome::Stopped(format!(
+                        "integration fold stopped by a concurrent branch advance: {other:?}"
+                    ));
+                }
+                Err(error) => return FoldOutcome::Stopped(format!("integrate transport failed: {error}")),
             }
-            // A cross-member collision. Journaled as FoldConflict (ADR-0189)
-            // rather than refused in prose: the later member reconciles
-            // against the folded checkpoint. Re-driving the same trees
-            // cannot resolve it; the dispatched lane can.
-            Ok(IntegrateOutcome::Conflict { paths, diff, .. }) => {
-                let checkpoint = expected.tree;
-                let checkout = head.unwrap_or(payload.base);
-                let overlay = fold_conflict_overlay(&paths, &diff);
-                let evidence = Evidence {
-                    subject: checkpoint,
-                    kind: EvidenceKind::FoldConflict,
-                    detail: Digest::of_wire_bytes(overlay.as_bytes()),
-                };
-                let event = Event {
-                    idempotency_key: fold_conflict_key(
-                        &payload.bloom,
-                        &member.workpiece.0,
-                        &checkpoint,
-                        &member.candidate,
-                    ),
-                    fact: Fact::FoldConflict {
-                        bloom,
-                        workpiece: member.workpiece.clone(),
-                        checkpoint,
-                        head: checkout,
-                        evidence,
-                    },
-                };
-                return FoldOutcome::Conflicted {
-                    event: Box::new(event),
-                    overlay,
-                    workpiece: member.workpiece.clone(),
-                };
-            }
-            Ok(other) => {
-                return FoldOutcome::Stopped(format!(
-                    "integration fold stopped by a concurrent branch advance: {other:?}"
-                ));
-            }
-            Err(error) => return FoldOutcome::Stopped(format!("integrate transport failed: {error}")),
+        }
+        // Every outstanding collision measured against the tree the pass ended
+        // on already describes the settled checkpoint. Anything measured
+        // earlier was moved past by a member folding behind it, so the deferred
+        // set is re-offered against the settled tree — which is also the only
+        // way a collision a sibling's fold happened to absorb stops being one.
+        // Terminating: a pass that does not break has moved the tree, so it
+        // folded a member and `pending` is strictly shorter.
+        if collisions.iter().all(|collision| collision.at == expected.tree) {
+            break;
         }
     }
+
+    if !collisions.is_empty() {
+        let checkout = head.unwrap_or(payload.base);
+        return FoldOutcome::Conflicted(
+            collisions
+                .iter()
+                .map(|collision| {
+                    conflicted_member(&bloom, &collision.member.workpiece, collision, expected.tree, checkout)
+                })
+                .collect(),
+        );
+    }
+
     let Some(head) = head else {
         // Nothing folded this drain and the branch position recovered no head —
         // the branch sits at a candidate tree but its commit has no recorded
@@ -349,6 +391,81 @@ fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOut
         },
     };
     FoldOutcome::Resolved(Box::new(event))
+}
+
+/// Build one member's collision admission against the settled checkpoint.
+///
+/// `owner` is the workpiece whose Reconcile lane resolves this seam, passed
+/// rather than read off the collision because it is the one thing ADR-0191 §1
+/// moves: re-homing the reconcile onto the composition workpiece (#4964) changes
+/// this argument at its single call site and nothing else in the fold.
+fn conflicted_member(
+    bloom: &BloomId,
+    owner: &WorkpieceId,
+    collision: &Collision<'_>,
+    checkpoint: Digest,
+    checkout: Digest,
+) -> Conflicted {
+    let overlay = fold_conflict_overlay(&collision.paths, &collision.diff);
+    let evidence = Evidence {
+        subject: checkpoint,
+        kind: EvidenceKind::FoldConflict,
+        detail: Digest::of_wire_bytes(overlay.as_bytes()),
+    };
+    let event = Event {
+        idempotency_key: fold_conflict_key(&bloom.0, &owner.0, &checkpoint, &collision.member.candidate),
+        fact: Fact::FoldConflict { bloom: *bloom, workpiece: owner.clone(), checkpoint, head: checkout, evidence },
+    };
+
+    Conflicted { event: Box::new(event), overlay, workpiece: owner.clone(), checkpoint }
+}
+
+/// Persist each conflicted member's overlay and encode its fact, returning the
+/// [`Admit`]s to forward. `None` is a transient failure: the caller stops the
+/// ack prefix, the entry re-drains, and the same settled checkpoint re-derives
+/// the same keys.
+fn admit_conflicts(
+    store: &mut dyn StoreBackend,
+    mut artifacts: Option<&mut ArtifactsCapabilityState>,
+    bloom: &Digest,
+    sequence: u64,
+    conflicts: &[Conflicted],
+) -> Option<Vec<Admit>> {
+    let mut admits = Vec::with_capacity(conflicts.len());
+    for conflicted in conflicts {
+        let workpiece = &conflicted.workpiece.0;
+        if let Err(error) = store.record_fold_conflict(bloom.as_bytes(), workpiece, &conflicted.overlay) {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::integrate",
+                sequence,
+                %workpiece,
+                %error,
+                "fold-conflict overlay did not persist; stopping the ack prefix to re-drive",
+            );
+            return None;
+        }
+        if !store_fold_conflict_overlay(artifacts.as_deref_mut(), &conflicted.overlay, &conflicted.checkpoint) {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::integrate",
+                sequence,
+                %workpiece,
+                "fold-conflict overlay was not stored; stopping the ack prefix to re-drive",
+            );
+            return None;
+        }
+        let Ok(bytes) = to_vec(&*conflicted.event) else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::integrate",
+                sequence,
+                %workpiece,
+                "fold-conflict event did not encode; stopping the ack prefix to re-drive",
+            );
+            return None;
+        };
+        admits.push(Admit { event: bytes });
+    }
+
+    Some(admits)
 }
 
 /// Drain the integrate topic and fold each entry, returning the [`Admit`]s to
@@ -389,37 +506,13 @@ fn drain_and_integrate(
                 admits.push(Admit { event: bytes });
                 ack_through = Some(entry.sequence);
             }
-            FoldOutcome::Conflicted { event, overlay, workpiece } => {
-                if let Err(error) = store.record_fold_conflict(payload.bloom.as_bytes(), &workpiece.0, &overlay) {
-                    tracing::warn!(
-                        target: "aether_chassis_bloomery::integrate",
-                        sequence = entry.sequence,
-                        %error,
-                        "fold-conflict overlay did not persist; stopping the ack prefix to re-drive",
-                    );
-                    break;
-                }
-                let parent = match &event.fact {
-                    Fact::FoldConflict { evidence, .. } => evidence.subject,
-                    _ => payload.base,
-                };
-                if !store_fold_conflict_overlay(artifacts.as_deref_mut(), &overlay, &parent) {
-                    tracing::warn!(
-                        target: "aether_chassis_bloomery::integrate",
-                        sequence = entry.sequence,
-                        "fold-conflict overlay was not stored; stopping the ack prefix to re-drive",
-                    );
-                    break;
-                }
-                let Ok(bytes) = to_vec(&*event) else {
-                    tracing::warn!(
-                        target: "aether_chassis_bloomery::integrate",
-                        sequence = entry.sequence,
-                        "fold-conflict event did not encode; stopping the ack prefix to re-drive",
-                    );
+            FoldOutcome::Conflicted(conflicts) => {
+                let Some(conflicted) =
+                    admit_conflicts(store, artifacts.as_deref_mut(), &payload.bloom, entry.sequence, &conflicts)
+                else {
                     break;
                 };
-                admits.push(Admit { event: bytes });
+                admits.extend(conflicted);
                 ack_through = Some(entry.sequence);
             }
             FoldOutcome::Refused(reason) => {

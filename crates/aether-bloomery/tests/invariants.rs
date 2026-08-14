@@ -3945,3 +3945,184 @@ fn a_repair_lap_that_leaves_the_tree_unchanged_reuses_its_verify_verdict() {
     assert_eq!(record.progress.get(&workpiece("wp")).unwrap().stage, StageId::Verify, "the cursor still lands there");
     assert_eq!(record.verify_reuses.last().unwrap().stage, StageId::Verify);
 }
+
+/// Three members carrying verified claims — the shape a fold collision arrives
+/// at, with enough members that one can fold clean while two collide.
+fn three_members_with_claims() -> (Snapshot, BloomId) {
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11), membership("gamma", 12)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let mut snapshot = snapshot;
+    for (name, revision, candidate) in [("alpha", 10, 20), ("beta", 11, 21), ("gamma", 12, 22)] {
+        snapshot = step(
+            &snapshot,
+            &event(&format!("i-{name}"), Fact::Integrate { bloom, claim: claim(name, revision, candidate) }),
+        )
+        .0;
+    }
+    (snapshot, bloom)
+}
+
+/// A collision for `workpiece` against the settled tree `checkpoint`, whose
+/// landable head the Reconcile lane checks out.
+fn fold_conflict(bloom: BloomId, key: &str, workpiece: &str, checkpoint: u8, head: u8, detail: u8) -> Event {
+    event(
+        key,
+        Fact::FoldConflict {
+            bloom,
+            workpiece: crate::workpiece(workpiece),
+            checkpoint: digest(checkpoint),
+            head: digest(head),
+            evidence: Evidence {
+                subject: digest(checkpoint),
+                kind: EvidenceKind::FoldConflict,
+                detail: digest(detail),
+            },
+        },
+    )
+}
+
+/// A Reconcile lane that passed, capturing `tree` at `checkout`.
+fn reconciled(bloom: BloomId, key: &str, workpiece: &str, tree: u8, checkout: u8) -> Event {
+    event(
+        key,
+        Fact::AttemptCompleted {
+            bloom,
+            workpiece: crate::workpiece(workpiece),
+            stage: StageId::Reconcile,
+            passed: true,
+            evidence: Evidence { subject: digest(70), kind: EvidenceKind::VerificationResult, detail: digest(80) },
+            candidate: Some(CandidateRef { tree: digest(tree), checkout: digest(checkout) }),
+        },
+    )
+}
+
+/// How many lanes the bloom has bought for one member's stage — the ADR-0180
+/// spend ledger, which no reset inside a bloom's life hands back.
+fn lanes_bought(snapshot: &Snapshot, bloom: BloomId, workpiece: &str, stage: StageId) -> u32 {
+    snapshot
+        .blooms
+        .get(&bloom)
+        .unwrap()
+        .dispatches
+        .get(&DispatchKey::Member { workpiece: crate::workpiece(workpiece), stage })
+        .copied()
+        .unwrap_or(0)
+}
+
+// #4952 (acceptance 1) — the settled fold sends every conflicted member to
+// reconcile against one checkpoint, and buys each of them exactly one lane for
+// it. The member that folded clean is not a subject of the collision at all.
+//
+// This is the reducer half of the `10a1228c` cascade: with the fold settled
+// first, both collisions name the same tree, so neither member's reconcile can
+// be correct against a checkpoint the other one then moves.
+#[test]
+fn a_settled_fold_buys_each_conflicted_member_one_lane_against_one_checkpoint() {
+    let (snapshot, bloom) = three_members_with_claims();
+    let alpha_cursor = *snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("alpha")).unwrap();
+
+    let (snapshot, beta) = step(&snapshot, &fold_conflict(bloom, "fc-beta", "beta", 30, 31, 90));
+    let (after, gamma) = step(&snapshot, &fold_conflict(bloom, "fc-gamma", "gamma", 30, 31, 91));
+
+    for (name, decided) in [("beta", &beta), ("gamma", &gamma)] {
+        assert!(
+            matches!(&decided.outcome, Outcome::FoldConflictDispatched { workpiece: wp, .. } if wp.0 == name),
+            "{name} is dispatched, not refused: {:?}",
+            decided.outcome,
+        );
+        let dispatches: Vec<(StageId, Digest)> = decided
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::DispatchAttempt { stage, transformation, .. } => Some((*stage, transformation.checkout)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dispatches,
+            vec![(StageId::Reconcile, digest(31))],
+            "{name} reconciles once, checking out the settled head",
+        );
+    }
+
+    let record = after.blooms.get(&bloom).unwrap();
+    for name in ["beta", "gamma"] {
+        let progress = record.progress.get(&workpiece(name)).unwrap();
+        assert_eq!(progress.stage, StageId::Reconcile);
+        assert_eq!(progress.fold_checkpoint, Some(digest(31)), "{name} is in the settled round");
+        assert_eq!(lanes_bought(&after, bloom, name, StageId::Reconcile), 1, "{name} paid for one lane, not two");
+        assert!(!record.claims.contains_key(&workpiece(name)), "{name}'s unfoldable claim is revoked");
+    }
+    assert!(record.wedged.is_empty(), "a first collision wedges nobody");
+    assert!(record.claims.contains_key(&workpiece("alpha")), "the member that folded clean keeps its claim");
+    assert_eq!(
+        record.progress.get(&workpiece("alpha")).unwrap(),
+        &alpha_cursor,
+        "and is not a subject of somebody else's collision",
+    );
+}
+
+// #4952 (acceptance 2) — the Reconcile budget guards a member's own inability to
+// reproduce its intent, and nothing else. A collision whose checkpoint moved is
+// a sibling's reconciled candidate folding underneath this one: the member's
+// diff never changed and it was never asked about that tree, so it opens a fresh
+// round however many siblings ripple through. A collision with the very head the
+// member was already handed is the fold standing still while what came back
+// still does not land on it — that wedges, with the collision evidence attached.
+//
+// Both halves are one invariant and are asserted together, because either alone
+// passes a wrong rule: resetting unconditionally (the shape this replaces) buys
+// unbounded lanes against a tree two of them already failed, and charging
+// unconditionally wedges a member whose own work was never in question.
+#[test]
+fn sibling_moved_folds_reopen_a_reconcile_round_while_a_standing_one_wedges() {
+    let (snapshot, bloom) = three_members_with_claims();
+
+    // Three rounds, each on a head a sibling's fold moved to. The member's own
+    // work is never in question, so no round may spend the last.
+    let mut live = snapshot;
+    for (round, head) in [(1u8, 31u8), (2, 33), (3, 35)] {
+        let (after, decided) =
+            step(&live, &fold_conflict(bloom, &format!("fc-{round}"), "beta", head - 1, head, 90 + round));
+        assert!(
+            matches!(decided.outcome, Outcome::FoldConflictDispatched { .. }),
+            "round {round} is a fresh round, not a wedge: {:?}",
+            decided.outcome,
+        );
+        assert_eq!(
+            after.blooms.get(&bloom).unwrap().progress.get(&workpiece("beta")).unwrap().attempts,
+            1,
+            "round {round} starts beta's Reconcile attempts over",
+        );
+        assert!(after.blooms.get(&bloom).unwrap().wedged.is_empty(), "no sibling ripple wedges beta");
+
+        let (after, _) = step(&after, &reconciled(bloom, &format!("rec-{round}"), "beta", 40 + round, 50 + round));
+        live = step(
+            &after,
+            &event(&format!("re-i-{round}"), Fact::Integrate { bloom, claim: claim("beta", 11, 40 + round) }),
+        )
+        .0;
+    }
+    assert_eq!(lanes_bought(&live, bloom, "beta", StageId::Reconcile), 3, "one lane per round, never two");
+
+    // The fold has not moved since beta was handed head 35, and what came back
+    // still does not land on it. That is beta's own miss.
+    let (after, wedged) = step(&live, &fold_conflict(bloom, "fc-standing", "beta", 34, 35, 99));
+
+    assert!(
+        matches!(wedged.outcome, Outcome::AttemptWedged { stage: StageId::Reconcile, workpiece: ref wp, .. } if wp.0 == "beta"),
+        "a standing checkpoint is the member's own miss: {:?}",
+        wedged.outcome,
+    );
+    assert!(
+        !wedged.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
+        "a wedged member buys no further lane against the tree it already failed",
+    );
+    assert_eq!(lanes_bought(&after, bloom, "beta", StageId::Reconcile), 3, "and the ledger records no fourth");
+    let record = after.blooms.get(&bloom).unwrap();
+    let wedge = record.wedged.get(&workpiece("beta")).expect("the wedge is recorded");
+    assert_eq!(wedge.stage, StageId::Reconcile);
+    assert_eq!(wedge.evidence, digest(99), "the wedge attaches the collision evidence a reader needs");
+    assert!(!record.claims.contains_key(&workpiece("beta")), "the unfoldable claim stays revoked");
+}

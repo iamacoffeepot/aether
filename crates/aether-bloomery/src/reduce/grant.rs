@@ -100,7 +100,7 @@ pub(super) fn reduce_grant_attempts(
             candidate,
             repair_rolls: budget - attempts,
             seen_verify_failures: cursor.seen_verify_failures,
-            fold_checkpoint: None,
+            fold_checkpoint: cursor.fold_checkpoint,
             fold_conflict_evidence: None,
         }
     } else {
