@@ -1,3 +1,6 @@
+//! Arms of [`super::reduce`]'s fact dispatch (`Fact::RequestOrphanClaimRelease`,
+//! `Fact::CompleteOrphanClaimRelease`); wiring lives in `mod.rs`.
+//!
 //! The authorized orphan-claim release door (ADR-0179): admitting an operator's
 //! signed request, and folding the terminal result the reactor brings back.
 

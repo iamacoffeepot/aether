@@ -1,3 +1,6 @@
+//! Arm of [`super::reduce`]'s fact dispatch (`Fact::VerifyFailed`); wiring
+//! lives in `mod.rs`.
+//!
 //! Typed terminal-Verify failure accounting (ADR-0178).
 
 use super::attempt::{DispatchTargets, SealedLine, move_effects};
