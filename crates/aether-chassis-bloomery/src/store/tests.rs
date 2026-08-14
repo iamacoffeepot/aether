@@ -154,6 +154,11 @@ fn append_then_replay_round_trips_in_order() {
     assert_eq!(journal[1].idempotency_key, "k2");
     assert_eq!(journal[1].event, b"beta");
     assert_eq!(journal[1].decisions, b"decided-2");
+    assert_eq!(
+        journal[0].decisions_schema.as_deref(),
+        Some(aether_bloomery::DECISIONS_SCHEMA),
+        "a write after the column exists stamps the writing schema"
+    );
 }
 
 #[test]
@@ -178,6 +183,69 @@ fn an_unstamped_pre_adr_0190_row_refuses_replay_by_name() {
     let error = store.replay_journal().unwrap_err().to_string();
     assert!(error.contains("predates ADR-0190"), "the refusal names the missing record: {error}");
     assert!(error.contains("Backfill"), "the refusal states the obligation: {error}");
+}
+
+#[test]
+fn a_mismatched_decisions_schema_refuses_replay_by_name() {
+    // ADR-0187: a row stamped with a writing schema this binary has no upcast
+    // for must refuse at fold, naming both identities — never decode as
+    // current and never invent an empty decision.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mismatch.db");
+    let path = path.to_str().unwrap();
+    let mut store = SqliteStore::open(path).unwrap();
+    store.append_event(&write("shaped", b"event", b"decided")).unwrap();
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .execute(
+            "UPDATE journal SET decisions_schema = 'aether.bloomery.decisions.v0' WHERE idempotency_key = 'shaped'",
+            [],
+        )
+        .unwrap();
+
+    let mut store = SqliteStore::open(path).unwrap();
+    let record = store.replay_journal().unwrap().pop().expect("the row is still readable");
+    assert_eq!(record.decisions_schema.as_deref(), Some("aether.bloomery.decisions.v0"));
+    let error = aether_bloomery::decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("no migration from schema `aether.bloomery.decisions.v0`"), "{error}");
+    assert!(error.contains(aether_bloomery::DECISIONS_SCHEMA), "{error}");
+}
+
+#[test]
+fn a_v2_decided_row_is_stamped_with_the_current_schema_on_open() {
+    // ADR-0187 bootstrap: rows written before the column carry an implicit
+    // current-at-migration identity and are stamped as such, so a later
+    // reshape can still name what wrote them.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v2.db");
+    let path = path.to_str().unwrap();
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE journal (
+                 sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 idempotency_key TEXT NOT NULL UNIQUE,
+                 event           BLOB NOT NULL,
+                 decisions       BLOB,
+                 decider         TEXT
+             );
+             INSERT INTO journal (idempotency_key, event, decisions, decider)
+             VALUES ('legacy', x'01', x'02', 'old-build');
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+
+    let mut store = SqliteStore::open(path).expect("a v2 store migrates");
+    let journal = store.replay_journal().unwrap();
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].decisions, b"\x02");
+    assert_eq!(
+        journal[0].decisions_schema.as_deref(),
+        Some(aether_bloomery::DECISIONS_SCHEMA),
+        "the migration stamps the implicit current identity"
+    );
 }
 
 #[test]
@@ -852,5 +920,109 @@ mod sealed_config {
     fn the_route_and_the_typed_path_address_a_config_identically() {
         let config = LaneConfig { lane: "cheap".to_owned() };
         assert_eq!(config.address(), config_address(LaneConfig::NAME, &to_vec(&config).unwrap()));
+    }
+}
+
+// The 2026-08-14 boot-brick class: the live store holds vec-shape price-table
+// bytes under their digests. Folding a journal that sealed one of those
+// addresses must survive, and the decode is the named pre-migration posture
+// — never a silent empty table, never a fatal abort (#4923).
+mod pre_migration_price_table {
+    use aether_bloomery::{
+        BloomDraft, ConfigRegistry, ConfigScopes, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, Forecast,
+        IdempotencyKey, Membership, Outcome, PriceTable, ResolvedConfigs, SealedPriceTable, Snapshot, WorkpieceId,
+        config_address,
+    };
+    use aether_data::Kind;
+    use aether_data::wire::{from_bytes, to_vec};
+    use serde::Serialize;
+
+    use super::{memory, write};
+    use crate::store::StoreBackend;
+
+    #[derive(Serialize)]
+    struct VecShapeRow {
+        model: String,
+        input: u64,
+        cache_read: u64,
+        cache_write_5m: u64,
+        cache_write_1h: u64,
+        cache_write: u64,
+        output: u64,
+    }
+
+    #[derive(Serialize)]
+    struct VecShapeTable {
+        rows: Vec<VecShapeRow>,
+    }
+
+    #[test]
+    fn a_journal_fold_over_a_pre_migration_price_table_survives_named() {
+        // Tripwire: the shape change is visible to replay. A store holding
+        // vec-shape price-table bytes, and a journal row whose seal names
+        // that digest, must fold without aborting and must name the table
+        // pre-migration rather than treating it as unsealed/empty.
+        let mut store = memory();
+        let vec_bytes = to_vec(&VecShapeTable {
+            rows: vec![VecShapeRow {
+                model: "claude-opus-5".to_owned(),
+                input: 5_000_000,
+                cache_read: 500_000,
+                cache_write_5m: 6_250_000,
+                cache_write_1h: 10_000_000,
+                cache_write: 6_250_000,
+                output: 25_000_000,
+            }],
+        })
+        .expect("a pre-migration table wire-encodes");
+        let address = config_address(PriceTable::NAME, &vec_bytes);
+        store.record_config(address.as_bytes(), PriceTable::NAME, &vec_bytes).unwrap();
+
+        let mut configs = ConfigRegistry::default();
+        configs.insert::<PriceTable>(address);
+        let mut member = Membership {
+            workpiece: WorkpieceId("issue-4923".to_owned()),
+            scope_revision: Digest::from_bytes([2; 32]),
+            configs: ConfigRegistry::default(),
+            approval: Evidence {
+                subject: Digest::default(),
+                kind: EvidenceKind::Approval,
+                detail: Digest::from_bytes([3; 32]),
+            },
+        };
+        member.approval.subject = member.subject();
+        let spec =
+            BloomDraft { proposals: vec![member], base: Digest::default(), configs, forecast: Forecast::default() }
+                .seal();
+        let bloom = spec.id();
+        let event = Event { idempotency_key: IdempotencyKey("seal-pre-migration".to_owned()), fact: Fact::Seal(spec) };
+        let decisions = Decisions { outcome: Outcome::Sealed(bloom), effects: Vec::new() };
+        let event_bytes = to_vec(&event).expect("seal event encodes");
+        let decision_bytes = to_vec(&decisions).expect("seal decisions encode");
+        store.commit(&write("seal-pre-migration", &event_bytes, &decision_bytes), &[], &[], &[]).unwrap();
+
+        let mut resolved = ResolvedConfigs::default();
+        for record in store.load_configs().unwrap() {
+            let digest = Digest::from_slice(&record.digest).expect("stored config digest is 32 bytes");
+            resolved.insert(digest, record.kind, record.bytes);
+        }
+        let mut snapshot = Snapshot::default();
+        for record in store.replay_journal().unwrap() {
+            let event: Event = from_bytes(&record.event).expect("journaled event decodes");
+            let decisions: Decisions = from_bytes(&record.decisions).expect("journaled decisions decode");
+            snapshot = snapshot.apply(&event, &decisions, &resolved);
+        }
+
+        assert!(snapshot.blooms.contains_key(&bloom), "the fold rebuilt the sealed bloom");
+        let spec = &snapshot.blooms.get(&bloom).expect("the bloom folded").spec;
+        assert_eq!(
+            PriceTable::sealed_in(ConfigScopes::bloom_wide(spec.configs()), &resolved),
+            SealedPriceTable::PreMigration,
+            "the fold names the sealed vec-shape table; it does not silently empty it",
+        );
+        assert_ne!(
+            PriceTable::sealed_in(ConfigScopes::bloom_wide(spec.configs()), &resolved),
+            SealedPriceTable::Current(PriceTable::default()),
+        );
     }
 }

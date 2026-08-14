@@ -12,7 +12,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::kinds::{SessionKey, SessionManifest};
-use super::runtime::{ReleaseOutcome, SessionBackend, SqliteSessionStore};
+use super::runtime::{AcquireMiss, AcquireOutcome, ReleaseOutcome, SessionBackend, SqliteSessionStore};
 
 const HOUR_SECS: u64 = 3600;
 const LEASE_SECS: u64 = 900;
@@ -38,6 +38,36 @@ fn manifest(head_hash: &str, context_tokens: u64, deposited_at: u64) -> SessionM
         read_files: vec!["CLAUDE.md".to_owned()],
         deposited_at,
     }
+}
+
+#[test]
+fn acquire_explained_names_each_eligibility_miss() {
+    // The runner must not re-derive these gates. Tripwire: a miss that collapses
+    // to a bare `None` makes every fallback look like a cold key in evidence.
+    let mut seeded = store();
+    seeded.release(&key(), None, "digest-1", &manifest("head-A", 1000, 1000)).unwrap();
+
+    assert!(matches!(
+        seeded.acquire_explained(&key(), "head-MOVED", 1000).unwrap(),
+        AcquireOutcome::Missed(AcquireMiss::HeadHash)
+    ));
+    assert!(matches!(
+        seeded.acquire_explained(&key(), "head-A", 1000 + HOUR_SECS).unwrap(),
+        AcquireOutcome::Missed(AcquireMiss::Age)
+    ));
+
+    let mut over = store();
+    over.release(&key(), None, "digest-1", &manifest("head-A", CAP + 1, 1000)).unwrap();
+    assert!(matches!(
+        over.acquire_explained(&key(), "head-A", 1000).unwrap(),
+        AcquireOutcome::Missed(AcquireMiss::ContextCap)
+    ));
+
+    let mut empty = store();
+    assert!(matches!(
+        empty.acquire_explained(&key(), "head-A", 1000).unwrap(),
+        AcquireOutcome::Missed(AcquireMiss::ColdKey)
+    ));
 }
 
 #[test]

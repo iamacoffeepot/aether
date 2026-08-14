@@ -44,7 +44,8 @@ use std::fmt;
 use std::fmt::Write as _;
 
 use aether_bloomery::{
-    BloomId, ConfigResolveError, ConfigScopes, Digest, Nonce, PriceTable, StudyCall, StudyCost, StudyRecord,
+    BloomId, ConfigResolveError, ConfigScopes, Digest, Nonce, PriceTable, SealedPriceTable, StudyCall, StudyCost,
+    StudyRecord,
 };
 use aether_bloomery_github::{InwardError, StudyResult, normalize_study_result};
 use aether_data::Kind;
@@ -250,7 +251,9 @@ fn price_of(
     };
 
     let table = match resolve_price_table(store, ConfigScopes::bloom_wide(&record.configs)) {
-        Ok(table) => table.unwrap_or_default(),
+        Ok(SealedPriceTable::Current(table)) => table,
+        Ok(SealedPriceTable::PreMigration) => return unpriced("pre-migration table"),
+        Ok(SealedPriceTable::Unresolvable) => return unpriced("unresolvable price table"),
         Err(error) => return unpriced(&format!("price table unresolvable: {error}")),
     };
     let Some(row) = table.row(&model.model) else {
@@ -270,14 +273,17 @@ fn price_of(
     table.price_dispatch(&model.model, cost, calls).unwrap_or_else(|| unpriced("no price row"))
 }
 
-/// The bloom's sealed [`PriceTable`], including tables authored before
-/// [`PriceRow::long_context`](aether_bloomery::PriceRow) existed.
+/// The bloom's sealed [`PriceTable`], named under the current schema.
+///
+/// Vec-shape tables sealed before rows were keyed by model do not decode as
+/// today's map. That is [`SealedPriceTable::PreMigration`], never a silent
+/// empty table and never a hard error (#4923).
 fn resolve_price_table(
     store: &mut dyn StoreBackend,
     scopes: ConfigScopes<'_>,
-) -> Result<Option<PriceTable>, StoreConfigError> {
+) -> Result<SealedPriceTable, StoreConfigError> {
     let Some(address) = scopes.address::<PriceTable>() else {
-        return Ok(None);
+        return Ok(SealedPriceTable::Current(PriceTable::default()));
     };
     let Some((stored_kind, bytes)) = store.lookup_config(address.as_bytes())? else {
         return Err(ConfigResolveError::Missing { kind: PriceTable::NAME }.into());
@@ -285,7 +291,7 @@ fn resolve_price_table(
     if stored_kind != PriceTable::NAME {
         return Err(ConfigResolveError::KindMismatch { expected: PriceTable::NAME, stored: stored_kind }.into());
     }
-    PriceTable::from_sealed(&bytes).map(Some).map_err(|_| ConfigResolveError::Decode { kind: PriceTable::NAME }.into())
+    Ok(PriceTable::from_sealed(&bytes))
 }
 
 /// Rebuild the per-bloom study index from the artifact store alone (issue
@@ -624,27 +630,31 @@ mod tests {
 
     #[test]
     fn a_banded_table_charges_each_call_and_falls_back_when_calls_are_missing() {
-        use aether_bloomery::{LongContextBand, PriceRow, PriceTable, StudyCall};
+        use std::collections::BTreeMap;
+
+        use aether_bloomery::{LongContextBand, PriceRates, PriceTable, StudyCall};
 
         let table = PriceTable {
-            rows: vec![PriceRow {
-                model: "grok-4.6".to_owned(),
-                input: 2_000_000,
-                cache_read: 0,
-                cache_write_5m: 0,
-                cache_write_1h: 0,
-                cache_write: 0,
-                output: 10_000_000,
-                long_context: Some(LongContextBand {
-                    prompt_tokens: 200_000,
-                    input: 4_000_000,
+            rows: BTreeMap::from([(
+                "grok-4.6".to_owned(),
+                PriceRates {
+                    input: 2_000_000,
                     cache_read: 0,
                     cache_write_5m: 0,
                     cache_write_1h: 0,
                     cache_write: 0,
-                    output: 20_000_000,
-                }),
-            }],
+                    output: 10_000_000,
+                    long_context: Some(LongContextBand {
+                        prompt_tokens: 200_000,
+                        input: 4_000_000,
+                        cache_read: 0,
+                        cache_write_5m: 0,
+                        cache_write_1h: 0,
+                        cache_write: 0,
+                        output: 20_000_000,
+                    }),
+                },
+            )]),
         };
         let under = StudyCall { input_tokens: 100_000, output_tokens: 1_000, ..StudyCall::default() };
         let over = StudyCall { input_tokens: 250_000, output_tokens: 1_000, ..StudyCall::default() };

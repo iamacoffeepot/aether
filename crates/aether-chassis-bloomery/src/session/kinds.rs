@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 /// (#3264) — and `task` scopes a pooled session to its stage family. This is the
 /// full key; `head_hash` is an `acquire`-time freshness input (not a key axis),
 /// and `workspace_tree_hash` is not on the key at all (audit-only, #3341).
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionKey {
     /// The CLI model id the session ran under (e.g. `claude-opus-4-8`).
     pub model: String,

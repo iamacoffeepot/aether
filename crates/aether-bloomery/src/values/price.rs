@@ -12,13 +12,19 @@
 //! [`StageCatalog`](super::StageCatalog) (ADR-0174), rather than a constant. A
 //! bloom seals the rates it is graded at, so a later price change re-prices
 //! nothing that already ran and the ledger stays comparable across time.
+//!
+//! Rows are keyed by model (`BTreeMap`), so a duplicate model and an
+//! authoring-order-dependent digest are both unrepresentable (#4923). Tables
+//! sealed before that change do not decode under the map shape: see
+//! [`SealedPriceTable::PreMigration`].
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::vec::Vec;
+use core::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use aether_data::wire::{Error as WireError, from_bytes};
+use aether_data::wire::from_bytes;
 
 use super::config::{ConfigScopes, ResolvedConfigs};
 use super::study::{StudyCall, StudyCost};
@@ -28,18 +34,15 @@ use crate::digest::{ContentAddressed, Digest, digest_of};
 /// counts are absolute, so a column's cost is `tokens * rate / PER`.
 const PER: u64 = 1_000_000;
 
-/// What one model's tokens cost, each rate in micro-USD per million tokens — so
-/// a list price of `$3.00 / 1M input` is `3_000_000`.
+/// The rate columns for one model — the map value of [`PriceTable::rows`].
+///
+/// The model id is the map key, not a field here: that is what makes a
+/// duplicate model and a row-order-dependent digest unrepresentable.
 ///
 /// Micro-USD for the same reason [`StudyCost::cost_micro_usd`] is: a float rate
 /// is not `Eq` and so not a stable content address, and this value is sealed.
-#[derive(aether_data::Kind, aether_data::Schema, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-#[kind(name = "aether.bloomery.price_row")]
-pub struct PriceRow {
-    /// The model id these rates price — matched against the
-    /// [`ResolvedModel::model`](super::ResolvedModel) the attempt actually ran
-    /// under, not the one its stage was calibrated to.
-    pub model: String,
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct PriceRates {
     /// Micro-USD per million uncached input tokens.
     pub input: u64,
     /// Micro-USD per million cache-read tokens.
@@ -67,13 +70,12 @@ pub struct PriceRow {
     /// prices at that block's rates instead of the fields above.
     ///
     /// Absent on a flat vendor and on every table sealed before this field
-    /// existed. The field is additive: a row without a band prices exactly as
-    /// it did, and [`PriceTable::from_sealed`] still reads those earlier bytes.
+    /// existed.
     #[serde(default)]
     pub long_context: Option<LongContextBand>,
 }
 
-/// The second rate block a [`PriceRow`] applies once a call's prompt crosses
+/// The second rate block a [`PriceRates`] applies once a call's prompt crosses
 /// [`prompt_tokens`](Self::prompt_tokens).
 ///
 /// Explicit rates, not a multiplier. Vendors do not scale every column
@@ -98,7 +100,36 @@ pub struct LongContextBand {
     pub output: u64,
 }
 
-/// The rates a bloom prices its attempts at, one row per model.
+/// How sealed price-table bytes read under the current map-keyed schema.
+///
+/// The name is the load-bearing half (#4923): a decode failure of historical
+/// vec-shape bytes is a **pre-migration table**, never a silent empty
+/// (zero-rate) table and never a reason to abort an otherwise healthy boot.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum SealedPriceTable {
+    /// Decoded as today's model-keyed table. An unsealed bloom uses
+    /// [`PriceTable::default`] — empty, and honestly unpriced.
+    Current(PriceTable),
+    /// Bytes that do not decode as the map-keyed schema — a table sealed
+    /// before rows were keyed by model.
+    PreMigration,
+    /// A sealed address whose content is missing or filed under the wrong
+    /// kind. Distinct from [`SealedPriceTable::PreMigration`]: those bytes never existed as a
+    /// vec-shape table, so calling them one would hide a store fault.
+    Unresolvable,
+}
+
+impl fmt::Display for SealedPriceTable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Current(_) => write!(f, "current price table"),
+            Self::PreMigration => write!(f, "pre-migration table"),
+            Self::Unresolvable => write!(f, "unresolvable price table"),
+        }
+    }
+}
+
+/// The rates a bloom prices its attempts at, one entry per model.
 ///
 /// Sealed as a configuration rather than compiled in, for the reason the
 /// [`StageCatalog`](super::StageCatalog) is: the operator authors it, and the
@@ -106,8 +137,8 @@ pub struct LongContextBand {
 #[derive(aether_data::Kind, aether_data::Schema, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[kind(name = "aether.bloomery.price_table")]
 pub struct PriceTable {
-    /// The rows, one per priced model. A model with no row is *unpriced*.
-    pub rows: Vec<PriceRow>,
+    /// Rate columns keyed by model id. A model with no entry is *unpriced*.
+    pub rows: BTreeMap<String, PriceRates>,
 }
 
 impl ContentAddressed for PriceTable {
@@ -121,42 +152,49 @@ impl PriceTable {
         digest_of(self)
     }
 
-    /// The table `scopes` seals, or an empty one when it seals none.
+    /// The table `scopes` seals, named under the current schema.
     ///
-    /// Empty is the honest default, and deliberately not a compiled-in rate
-    /// sheet: published prices change, they differ by account tier, and the
+    /// An unsealed scope is [`SealedPriceTable::Current`] of an empty table —
+    /// the honest default, and deliberately not a compiled-in rate sheet:
+    /// published prices change, they differ by account tier, and the
     /// contributor-tier rate that makes the cheap lane cheap is not a public
-    /// number at all. A wrong rate compiled in here would render a confident
-    /// dollar figure that is silently false — worse than no figure, because
-    /// nothing downstream could tell the difference. So an unconfigured
-    /// coordinator records tokens and reports every attempt *unpriced*, and a
-    /// dollar column appears exactly when someone states the rates.
+    /// number at all. A sealed address whose bytes do not decode as today's
+    /// map shape is [`SealedPriceTable::PreMigration`]. A sealed address
+    /// whose content is missing or mis-filed is
+    /// [`SealedPriceTable::Unresolvable`] — never called pre-migration, never
+    /// a silent empty table, never a fatal abort.
     #[must_use]
-    pub fn sealed_in(scopes: ConfigScopes<'_>, configs: &ResolvedConfigs) -> Self {
-        configs.resolve::<Self>(scopes).ok().flatten().unwrap_or_default()
+    pub fn sealed_in(scopes: ConfigScopes<'_>, configs: &ResolvedConfigs) -> SealedPriceTable {
+        match configs.resolve::<Self>(scopes) {
+            Ok(Some(table)) => SealedPriceTable::Current(table),
+            Ok(None) => SealedPriceTable::Current(Self::default()),
+            // Only a decode failure is a pre-migration (vec-shape) table.
+            // Missing or mis-filed content is a store fault, named separately
+            // so a vanished row cannot hide as "the old schema".
+            Err(super::config::ConfigResolveError::Decode { .. }) => SealedPriceTable::PreMigration,
+            Err(_) => SealedPriceTable::Unresolvable,
+        }
     }
 
-    /// This table's row for `model`, or `None` when it prices none.
+    /// This table's rates for `model`, or `None` when it prices none.
     #[must_use]
-    pub fn row(&self, model: &str) -> Option<&PriceRow> {
-        self.rows.iter().find(|row| row.model == model)
+    pub fn row(&self, model: &str) -> Option<&PriceRates> {
+        self.rows.get(model)
     }
 
-    /// Decode a table from sealed bytes, accepting both today's shape and a
-    /// table authored before [`PriceRow::long_context`] existed.
+    /// Decode sealed bytes under the current schema.
     ///
-    /// The wire is positional, so an additive trailing `Option` is not
-    /// self-describing inside `Vec<PriceRow>`. Trying the current shape first
-    /// and the pre-band shape second is what keeps a bloom that sealed rates
-    /// last week priced at those rates rather than suddenly unpriced.
+    /// A table sealed before `long_context` existed (vec of rows, no trailing
+    /// Option) does not decode here. That failure is
+    /// [`SealedPriceTable::PreMigration`], named so a caller cannot confuse
+    /// it with an empty current table or treat it as a fatal decode.
     ///
-    /// # Errors
-    /// [`WireError`] when `bytes` are neither shape.
-    pub fn from_sealed(bytes: &[u8]) -> Result<Self, WireError> {
-        from_bytes::<Self>(bytes).or_else(|_| {
-            from_bytes::<LegacyPriceTable>(bytes)
-                .map(|legacy| Self { rows: legacy.rows.into_iter().map(PriceRow::from_legacy).collect() })
-        })
+    /// A later vec-shape that already carried the trailing Option is
+    /// positional-wire-identical to today's map (`model` is the first field
+    /// of each row) and decodes as [`SealedPriceTable::Current`].
+    #[must_use]
+    pub fn from_sealed(bytes: &[u8]) -> SealedPriceTable {
+        from_bytes::<Self>(bytes).map_or(SealedPriceTable::PreMigration, SealedPriceTable::Current)
     }
 
     /// What `cost`'s token columns are worth under this table, in micro-USD, or
@@ -221,7 +259,7 @@ struct Rates {
 }
 
 impl Rates {
-    fn from_row(row: &PriceRow) -> Self {
+    fn from_row(row: &PriceRates) -> Self {
         Self {
             input: row.input,
             cache_read: row.cache_read,
@@ -244,7 +282,7 @@ impl Rates {
     }
 }
 
-fn charge(row: &PriceRow, cost: &StudyCost) -> u64 {
+fn charge(row: &PriceRates, cost: &StudyCost) -> u64 {
     charge_at(Rates::from_row(row), cost)
 }
 
@@ -269,68 +307,61 @@ fn charge_at(rates: Rates, cost: &StudyCost) -> u64 {
         .saturating_add(column(cost.output_tokens, rates.output))
 }
 
-/// The pre-band row shape, used only to decode tables sealed before
-/// [`PriceRow::long_context`] existed.
-#[derive(Serialize, Deserialize)]
-struct LegacyPriceRow {
-    model: String,
-    input: u64,
-    cache_read: u64,
-    cache_write_5m: u64,
-    cache_write_1h: u64,
-    cache_write: u64,
-    output: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-struct LegacyPriceTable {
-    rows: Vec<LegacyPriceRow>,
-}
-
-impl PriceRow {
-    fn from_legacy(row: LegacyPriceRow) -> Self {
-        Self {
-            model: row.model,
-            input: row.input,
-            cache_read: row.cache_read,
-            cache_write_5m: row.cache_write_5m,
-            cache_write_1h: row.cache_write_1h,
-            cache_write: row.cache_write,
-            output: row.output,
-            long_context: None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use alloc::collections::BTreeMap;
+    use alloc::string::String;
     use alloc::vec;
+    use alloc::vec::Vec;
 
-    use super::{LongContextBand, PriceRow, PriceTable};
-    use crate::values::{StudyCall, StudyCost};
+    use super::{LongContextBand, PriceRates, PriceTable, SealedPriceTable};
+    use crate::values::{ConfigRegistry, ConfigScopes, ResolvedConfigs, StudyCall, StudyCost, config_address};
+    use aether_data::Kind;
     use aether_data::wire::to_vec;
+    use serde::{Deserialize, Serialize};
+
+    // The pre-band vec-shape: a vec of rows that carried `model` as a field
+    // and no trailing `long_context`. Those bytes do not decode as the map
+    // (the value struct now expects the Option). The later vec-shape that
+    // *did* carry the Option is positional-wire-identical to today's map —
+    // `model` is the first field — so those bytes stay `Current`.
+    #[derive(Serialize, Deserialize)]
+    struct PreBandRow {
+        model: String,
+        input: u64,
+        cache_read: u64,
+        cache_write_5m: u64,
+        cache_write_1h: u64,
+        cache_write: u64,
+        output: u64,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct PreBandTable {
+        rows: Vec<PreBandRow>,
+    }
 
     // Claude Opus 5's published rates, so the arithmetic below is checkable
     // against a real sheet rather than invented round numbers: $5 input,
     // $0.50 cache read, $6.25 5m write, $10 1h write, $25 output per MTok.
-    fn table() -> PriceTable {
-        PriceTable {
-            rows: vec![PriceRow {
-                model: String::from("claude-opus-5"),
-                input: 5_000_000,
-                cache_read: 500_000,
-                cache_write_5m: 6_250_000,
-                cache_write_1h: 10_000_000,
-                cache_write: 6_250_000,
-                output: 25_000_000,
-                long_context: None,
-            }],
+    fn opus_rates() -> PriceRates {
+        PriceRates {
+            input: 5_000_000,
+            cache_read: 500_000,
+            cache_write_5m: 6_250_000,
+            cache_write_1h: 10_000_000,
+            cache_write: 6_250_000,
+            output: 25_000_000,
+            long_context: None,
         }
     }
 
-    fn grok_row(long_context: Option<LongContextBand>) -> PriceRow {
-        PriceRow {
-            model: String::from("grok-4.6"),
+    fn table() -> PriceTable {
+        PriceTable { rows: BTreeMap::from([(String::from("claude-opus-5"), opus_rates())]) }
+    }
+
+    fn grok_rates(long_context: Option<LongContextBand>) -> PriceRates {
+        PriceRates {
             input: 2_000_000,
             cache_read: 200_000,
             cache_write_5m: 0,
@@ -434,7 +465,7 @@ mod tests {
         // aggregate would bill both at the long rate ($1.44); flattening to
         // the sub-band would bill both cheap ($0.72). Either bias is the
         // comparison error this field exists to close.
-        let table = PriceTable { rows: vec![grok_row(Some(grok_band()))] };
+        let table = PriceTable { rows: BTreeMap::from([(String::from("grok-4.6"), grok_rates(Some(grok_band())))]) };
         let under = call(100_000, 1_000);
         let over = call(250_000, 1_000);
         let cost = StudyCost {
@@ -465,12 +496,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unbanded_row_and_a_pre_band_table_price_like_today() {
-        // Tripwire: a row without a band, and a table sealed before the field
-        // existed, must not drift from the sub-band arithmetic the ledger
-        // already published. The pre-band bytes are the current row minus the
-        // trailing Option — decode that fails here would unprice every bloom
-        // that sealed rates last week.
+    fn an_unbanded_row_prices_like_today() {
+        // A row without a band must not drift from the sub-band arithmetic the
+        // ledger already published.
         let cost = StudyCost {
             input_tokens: 1_000_000,
             cache_read_tokens: 1_000_000,
@@ -486,25 +514,67 @@ mod tests {
             today,
             "an unbanded row ignores the call list",
         );
+    }
 
-        let pre = table().rows.into_iter().next().expect("the fixture has one row");
-        let sealed = to_vec(&super::LegacyPriceTable {
-            rows: vec![super::LegacyPriceRow {
-                model: pre.model,
-                input: pre.input,
-                cache_read: pre.cache_read,
-                cache_write_5m: pre.cache_write_5m,
-                cache_write_1h: pre.cache_write_1h,
-                cache_write: pre.cache_write,
-                output: pre.output,
+    #[test]
+    fn a_pre_band_vec_shape_table_is_a_named_pre_migration_table() {
+        // Tripwire: previously sealed pre-band vec-shape bytes do not decode
+        // as the map-keyed schema (the value now expects a trailing Option).
+        // That failure is "pre-migration table" — never a silent empty /
+        // zero-rate table, never a hard error that would abort a healthy boot.
+        let opus = opus_rates();
+        let sealed = to_vec(&PreBandTable {
+            rows: vec![PreBandRow {
+                model: String::from("claude-opus-5"),
+                input: opus.input,
+                cache_read: opus.cache_read,
+                cache_write_5m: opus.cache_write_5m,
+                cache_write_1h: opus.cache_write_1h,
+                cache_write: opus.cache_write,
+                output: opus.output,
             }],
         })
-        .expect("a pre-band table wire-encodes");
+        .expect("a pre-migration table wire-encodes");
 
-        let decoded = PriceTable::from_sealed(&sealed).expect("a pre-band table still decodes");
-        assert!(decoded.row("claude-opus-5").expect("the row survived").long_context.is_none());
-        assert_eq!(decoded.price("claude-opus-5", &cost), today);
-        assert_eq!(decoded.price_dispatch("claude-opus-5", &cost, None), today);
+        assert_eq!(PriceTable::from_sealed(&sealed), SealedPriceTable::PreMigration);
+        assert_ne!(
+            PriceTable::from_sealed(&sealed),
+            SealedPriceTable::Current(PriceTable::default()),
+            "pre-migration is not a silent empty table"
+        );
+        assert_ne!(
+            PriceTable::from_sealed(&sealed),
+            SealedPriceTable::Unresolvable,
+            "a vec-shape decode is pre-migration, not a missing row"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_misfiled_sealed_table_is_not_pre_migration() {
+        // Tripwire: only a decode failure of historical bytes is
+        // "pre-migration table". A sealed address with no content, or
+        // content filed under another kind, is Unresolvable — calling it
+        // pre-migration would hide a store fault as a schema epoch.
+        let mut configs = ResolvedConfigs::default();
+        let mut registry = ConfigRegistry::default();
+        let address = config_address(PriceTable::NAME, b"absent");
+        registry.insert::<PriceTable>(address);
+
+        assert_eq!(
+            PriceTable::sealed_in(ConfigScopes::bloom_wide(&registry), &configs),
+            SealedPriceTable::Unresolvable,
+        );
+        assert_ne!(
+            PriceTable::sealed_in(ConfigScopes::bloom_wide(&registry), &configs),
+            SealedPriceTable::PreMigration,
+        );
+
+        configs.insert(address, "aether.bloomery.stage_catalog", Vec::new());
+        assert_eq!(
+            PriceTable::sealed_in(ConfigScopes::bloom_wide(&registry), &configs),
+            SealedPriceTable::Unresolvable,
+            "a kind mismatch is unresolvable, not pre-migration",
+        );
     }
 
     #[test]
@@ -513,11 +583,37 @@ mod tests {
         // aggregate. A 250k-token dispatch billed as one long-context call
         // would overcount the 23-turn lap whose every call stayed under the
         // cut; the fallback is the sub-band, and the ledger names the gap.
-        let table = PriceTable { rows: vec![grok_row(Some(grok_band()))] };
+        let table = PriceTable { rows: BTreeMap::from([(String::from("grok-4.6"), grok_rates(Some(grok_band())))]) };
         let cost = StudyCost { input_tokens: 250_000, output_tokens: 1_000, ..StudyCost::default() };
 
         assert_eq!(table.price_dispatch("grok-4.6", &cost, None), Some(510_000));
         assert_eq!(table.price_dispatch("grok-4.6", &cost, Some(&[])), Some(510_000));
         assert_eq!(table.price("grok-4.6", &cost), Some(510_000));
+    }
+
+    #[test]
+    fn two_authoring_orders_of_the_same_rates_share_one_sealed_digest() {
+        // Tripwire: keyed-by-model tables must not split on authoring order.
+        // A Vec-shaped table hashed the row sequence, so the same rates in
+        // two orders sealed at two addresses and dedup split.
+        let opus = opus_rates();
+        let grok = grok_rates(None);
+        let first = serde_json::json!({
+            "rows": {
+                "claude-opus-5": opus,
+                "grok-4.6": grok,
+            }
+        });
+        let second = serde_json::json!({
+            "rows": {
+                "grok-4.6": grok,
+                "claude-opus-5": opus,
+            }
+        });
+        let first: PriceTable = serde_json::from_value(first).expect("first authoring order deserializes");
+        let second: PriceTable = serde_json::from_value(second).expect("second authoring order deserializes");
+
+        assert_eq!(first, second, "the map forgets authoring order");
+        assert_eq!(first.digest(), second.digest(), "the sealed digest is order-independent");
     }
 }

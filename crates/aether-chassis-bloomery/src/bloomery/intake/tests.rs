@@ -1236,7 +1236,7 @@ fn verify_findings_persist_on_a_failing_verify_and_clear_on_a_pass() {
 #[test]
 fn a_measured_attempt_writes_one_priced_study_row_and_an_unmeasured_one_writes_none() {
     use aether_bloomery::ConfigKind as _;
-    use aether_bloomery::{Harness, PriceRow, PriceTable, ReasoningEffort, ResolvedModel, StudyCost, StudyRecord};
+    use aether_bloomery::{Harness, PriceRates, PriceTable, ReasoningEffort, ResolvedModel, StudyCost, StudyRecord};
     use aether_data::Kind as _;
     use aether_data::wire::{from_bytes, to_vec};
 
@@ -1256,16 +1256,10 @@ fn a_measured_attempt_writes_one_priced_study_row_and_an_unmeasured_one_writes_n
     // Seal a table pricing exactly the model this order runs, the way `POST
     // /configs` would author it.
     let table = PriceTable {
-        rows: vec![PriceRow {
-            model: "muse-spark-1.2-contributor".to_owned(),
-            input: 1_000_000,
-            cache_read: 100_000,
-            cache_write_5m: 0,
-            cache_write_1h: 0,
-            cache_write: 0,
-            output: 4_000_000,
-            long_context: None,
-        }],
+        rows: BTreeMap::from([(
+            "muse-spark-1.2-contributor".to_owned(),
+            PriceRates { input: 1_000_000, cache_read: 100_000, output: 4_000_000, ..PriceRates::default() },
+        )]),
     };
     let bytes = to_vec(&table).unwrap();
     store.record_config(table.address().as_bytes(), PriceTable::NAME, &bytes).unwrap();

@@ -53,7 +53,7 @@ use std::fmt;
 use aether_bloomery::{
     BackendObjectId, BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome,
     ContentAddressed, CorrespondenceError, Digest, IntegrateOutcome, IntegrationPosition, LandOutcome, LandProposal,
-    LandingReceipt, SharedCorrespondence, SourceBackend, SourceSnapshot, WorkpieceId, digest_of,
+    LandingReceipt, SharedCorrespondence, Snapshot, SourceBackend, SourceSnapshot, WorkpieceId, digest_of,
 };
 use serde::Serialize;
 
@@ -861,6 +861,15 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
         // they must mint the same digest or the land following an observation
         // would compare-and-swap against a base it had itself just renamed.
         self.mainline_digest(&self.mainline_head_sha()?)
+    }
+
+    fn is_fast_forward(&self, from: &Digest, to: &Digest) -> Result<bool, Self::Error> {
+        if from == to || *from == Snapshot::GENESIS_MAINLINE {
+            return Ok(true);
+        }
+        let from_sha = self.resolve_git_sha(from, "mainline correspondence")?;
+        let to_sha = self.resolve_git_sha(to, "observed head")?;
+        Ok(self.client.is_ancestor(&from_sha, &to_sha)?)
     }
 
     fn checkpoint(&self, bloom: &BloomId, tree: &Digest) -> Result<Checkpoint, Self::Error> {
@@ -1771,6 +1780,37 @@ mod tests {
             resolve_git(&fake, &observed).expect("the minted digest was recorded").to_hex(),
             foreign,
             "and it forward-resolves to the commit that was actually observed",
+        );
+    }
+
+    #[test]
+    fn a_descendant_is_a_fast_forward_and_an_ancestor_or_unrelated_head_is_not() {
+        // Tripwire: the observation door classifies against git ancestry
+        // (#4938). Equal and genesis are fast-forwards without a round-trip;
+        // a child of the current tip is one; walking the other way, or
+        // naming a commit off the line, is not.
+        let (fake, _, base) = seeded();
+        let source = git_source(&fake, false);
+        let base_sha = resolve_git(&fake, &base).unwrap().to_hex();
+
+        assert!(source.is_fast_forward(&base, &base).unwrap(), "equal digests are a fast-forward");
+        assert!(
+            source.is_fast_forward(&aether_bloomery::Snapshot::GENESIS_MAINLINE, &base).unwrap(),
+            "the genesis sentinel is the boot bind, not an ancestry question",
+        );
+
+        let child_sha =
+            fake.create_commit("forward", &to_hex(&digest(10)), &[base_sha]).expect("the child commit mints").sha;
+        fake.seed_correspondence(&digest(11), &child_sha);
+
+        assert!(source.is_fast_forward(&base, &digest(11)).unwrap(), "a descendant of mainline is a fast-forward");
+        assert!(!source.is_fast_forward(&digest(11), &base).unwrap(), "an ancestor of mainline is not");
+
+        let side = fake.seed_commit_with_message("sideways", &to_hex(&digest(12)));
+        fake.seed_correspondence(&digest(13), &side);
+        assert!(
+            !source.is_fast_forward(&base, &digest(13)).unwrap(),
+            "an unrelated commit is sideways, not a fast-forward"
         );
     }
 

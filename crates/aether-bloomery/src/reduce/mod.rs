@@ -47,7 +47,7 @@ pub use error::{
     OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SupersedeError, VerifyFailedError,
 };
 pub use event::{Event, Fact};
-pub use outcome::{Decisions, Outcome};
+pub use outcome::{DECISIONS_SCHEMA, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions};
 pub use seal::is_active_unlanded;
 pub use snapshot::{AggregateReviewFault, BloomRecord, BloomStatus, FoldedIntegration, Snapshot, StageProgress};
 pub use view::view_of;
@@ -62,7 +62,7 @@ use grant::reduce_grant_attempts;
 use integrate::{reduce_integrate, reduce_resolve};
 use land::reduce_land;
 use landing::reduce_landing_rejected;
-use observe::reduce_observe_mainline;
+use observe::{reduce_observe_mainline, reduce_observe_mainline_diverged};
 use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_claim_release};
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
 use seal::{reduce_seal, reduce_supersede};
@@ -79,9 +79,10 @@ use verify::reduce_verify_failed;
 /// default, so an under-filled set is a loud caller bug rather than a bloom
 /// quietly running an unattested configuration.
 ///
-/// Only [`reduce`] takes it, not [`Snapshot::apply`]: the fold evolves the
-/// snapshot from decisions the reducer already made, and nothing in it reads
-/// configuration.
+/// [`Snapshot::apply`] still takes `configs` so a pre-[`Decision::RecordStageCatalog`]
+/// row can resolve a spec-sealed catalog the way it always did; a newly sealed
+/// bloom's catalog arrives as a recorded effect and the fold does not re-read
+/// configuration for it.
 #[must_use]
 pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> Decisions {
     if snapshot.seen.contains(&event.idempotency_key) {
@@ -106,6 +107,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> 
         Fact::LandingRejected { bloom, evidence } => reduce_landing_rejected(snapshot, bloom, evidence),
         Fact::Land { bloom, new_head } => reduce_land(snapshot, bloom, new_head),
         Fact::ObserveMainline { head } => reduce_observe_mainline(snapshot, head),
+        Fact::ObserveMainlineDiverged { head } => reduce_observe_mainline_diverged(snapshot, head),
         Fact::GrantAttempts { bloom, workpiece, stage, attempts } => {
             reduce_grant_attempts(snapshot, bloom, workpiece, *stage, *attempts)
         }
