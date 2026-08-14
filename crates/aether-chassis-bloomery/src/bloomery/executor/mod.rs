@@ -37,6 +37,7 @@ use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, SharedCorre
 use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, LaneWorkflows};
 
 use super::{CoordinatorConfig, GithubConnectionConfig};
+use crate::session::SessionConfig;
 
 pub mod local;
 mod reconcile;
@@ -226,6 +227,7 @@ impl ExecutorShell {
         connection: &GithubConnectionConfig,
         coordinator: &CoordinatorConfig,
         correspondence: SharedCorrespondence,
+        session: &SessionConfig,
     ) -> Result<Self, GithubError> {
         #[cfg(any(test, feature = "testing"))]
         if connection.uses_fixture() {
@@ -242,7 +244,7 @@ impl ExecutorShell {
             if !coordinator.local_lane_enabled {
                 return Ok(Self::new(actions));
             }
-            let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence));
+            let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence, session));
             return Ok(Self::reconciling(Arc::new(RoutingExecutor::new(
                 actions,
                 local,
@@ -264,7 +266,7 @@ impl ExecutorShell {
             if !coordinator.local_lane_enabled {
                 return Ok(Self::new(actions));
             }
-            let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence));
+            let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence, session));
             return Ok(Self::reconciling(Arc::new(RoutingExecutor::new(
                 actions,
                 local,
@@ -281,7 +283,7 @@ impl ExecutorShell {
         if !coordinator.local_lane_enabled {
             return Ok(Self::new(actions));
         }
-        let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence));
+        let local = Arc::new(LocalExecutor::from_config(coordinator, correspondence, session));
         Ok(Self::reconciling(Arc::new(RoutingExecutor::new(actions, local, coordinator.local_lane_prefixes()))))
     }
 

@@ -15,10 +15,12 @@ use tracing::subscriber::with_default;
 use tracing::{Event, Metadata, Subscriber};
 
 use aether_bloomery::{
-    BackendObjectId, Conclusion, Correspondence, CorrespondenceError, Digest, ExecutionStatus, ExecutorBackend,
-    Harness, Nonce, ReasoningEffort, ResolvedModel, StageCatalog, StageId, StageVerdict, Transformation, VerifyFailure,
-    VerifyFailureSet, WorkHandle,
+    BackendObjectId, Conclusion, ConfigKind, ConfigRegistry, Correspondence, CorrespondenceError, Digest,
+    ExecutionStatus, ExecutorBackend, Harness, Nonce, PriceRow, PriceTable, ReasoningEffort, ResolvedModel,
+    StageCatalog, StageId, StageVerdict, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle,
 };
+use aether_data::Kind;
+use aether_data::wire::to_vec;
 use tempfile::TempDir;
 
 use aether_bloomery_github::testing::FakeGithub;
@@ -29,6 +31,7 @@ use super::testing::{FixedRunner, canned_capture};
 use super::{LocalExecutor, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes};
 use crate::bloomery::intake::{EvidenceClaims, NameEvidenceClaims};
+use crate::session::{SessionKey, SessionManifest};
 use crate::store::{OutstandingOrder, SqliteStore, StoreBackend};
 
 fn digest(seed: u8) -> Digest {
@@ -610,6 +613,7 @@ struct SeenSpec {
     effort: Option<String>,
     checkout: Option<String>,
     diff_base: Option<String>,
+    resume: Option<String>,
 }
 
 // A spawn seam that records the `RunSpec` it was handed, so a test can assert what
@@ -628,6 +632,7 @@ impl TransformRunner for CapturingRunner {
             effort: spec.effort.map(str::to_owned),
             checkout: Some(spec.checkout_hex.to_owned()),
             diff_base: spec.diff_base_hex.map(str::to_owned),
+            resume: spec.resume.map(str::to_owned),
         };
         Ok(Box::new(RecordingProcess { lifecycle: RunLifecycle::Running }))
     }
@@ -1549,4 +1554,279 @@ fn a_run_that_fails_without_evidence_frees_its_slot() {
     assert_eq!(refs.len(), 1, "the failed run still synthesizes its fail-closed attempt");
     assert_eq!(spawned(&started), ["wo-failing", "wo-waiting"], "and releases its slot to the queue");
     assert_ne!(exec.inspect(&waiting).unwrap(), ExecutionStatus::Queued, "the waiting dispatch is now a live run");
+}
+
+fn claude_order(subject: Digest, nonce: &str, task: &str) -> aether_bloomery::WorkOrder {
+    let mut order = construct_order(subject, nonce);
+    order.transformation.model = Some(ResolvedModel {
+        harness: Harness::Claude,
+        model: "claude-opus-5".to_owned(),
+        effort: ReasoningEffort::High,
+    });
+    order.transformation.description = Some(task.to_owned());
+    order
+}
+
+fn reuse_evidence(nonce: &str, session_id: &str, input_tokens: u64) -> String {
+    format!(
+        r#"{{"command":"construct.implement","nonce":"{nonce}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"session_id":"{session_id}","input":{input_tokens},"cache_read":0,"cache_write":4000,"output":200,"num_turns":3,"result":{{"num_turns":3,"session_id":"{session_id}"}}}}}}"#
+    )
+}
+
+/// A stub that writes nonce-tagged evidence and records every `RunSpec`, so a
+/// two-lap fixture can deposit from lap 1 and see lap 2's resume handle.
+struct ReuseRunner {
+    seen: Arc<Mutex<Vec<SeenSpec>>>,
+    /// Uncached input tokens stamped on the result record. The default keeps
+    /// T small so the seed still resumes; a large value is what lets a
+    /// sealed even-rate table flip lap 2 cold.
+    input_tokens: u64,
+}
+
+impl ReuseRunner {
+    fn new(seen: Arc<Mutex<Vec<SeenSpec>>>) -> Self {
+        Self { seen, input_tokens: 1_000 }
+    }
+
+    fn with_input_tokens(mut self, input_tokens: u64) -> Self {
+        self.input_tokens = input_tokens;
+        self
+    }
+}
+
+impl TransformRunner for ReuseRunner {
+    fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
+        self.seen.lock().unwrap().push(SeenSpec {
+            evidence_dir: Some(spec.evidence_dir.to_owned()),
+            harness: spec.harness.map(str::to_owned),
+            model: spec.model.map(str::to_owned),
+            effort: spec.effort.map(str::to_owned),
+            checkout: Some(spec.checkout_hex.to_owned()),
+            diff_base: spec.diff_base_hex.map(str::to_owned),
+            resume: spec.resume.map(str::to_owned),
+        });
+        fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
+        fs::write(spec.evidence_dir.join("evidence.json"), reuse_evidence(spec.nonce, "sess-1", self.input_tokens))
+            .map_err(LocalExecutorError::Io)?;
+        Ok(Box::new(RecordingProcess { lifecycle: RunLifecycle::Exited { success: true } }))
+    }
+
+    fn release(&self, _worktree_dir: &Path) -> Result<(), LocalExecutorError> {
+        Ok(())
+    }
+
+    fn registered_worktrees(&self) -> Result<Vec<PathBuf>, LocalExecutorError> {
+        Ok(Vec::new())
+    }
+
+    fn capture(
+        &self,
+        _worktree_dir: &Path,
+        _message: Option<&str>,
+    ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+        Ok(Some(canned_capture()))
+    }
+}
+
+#[test]
+fn a_second_lap_resumes_the_deposited_session() {
+    // Acceptance: lap 2 acquires the session lap 1 deposited, and the spawn
+    // carries the resume handle. A miss here is the whole cost the pool exists
+    // to avoid — a cold relaunch of the exploration prefix.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let sessions = super::SessionReuse::memory(PriceTable::default());
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+        .with_session_reuse(sessions);
+
+    let first = exec.submit(&claude_order(digest(5), &test_nonce("lap-1"), "issue-4902")).unwrap();
+    exec.stream_evidence(&first).unwrap();
+    assert!(seen.lock().unwrap()[0].resume.is_none(), "lap 1 launches cold");
+
+    let second = exec.submit(&claude_order(digest(5), &test_nonce("lap-2"), "issue-4902")).unwrap();
+    let refs = exec.stream_evidence(&second).unwrap();
+    assert_eq!(seen.lock().unwrap()[1].resume.as_deref(), Some("sess-1"), "lap 2 threads the deposited session");
+
+    let stamped: serde_json::Value =
+        serde_json::from_slice(&fs::read(base.path().join("wo-lap-2-evidence/evidence.json")).unwrap()).unwrap();
+    assert_eq!(stamped["session_reuse"]["arm"], "resumed");
+    assert_eq!(stamped["session_reuse"]["predicted_arm"], "resumed");
+    assert_eq!(stamped["session_reuse"]["actual_turns"], 3);
+    assert_eq!(refs[0].nonce, Nonce(test_nonce("lap-2")));
+}
+
+#[test]
+fn a_named_miss_falls_back_to_fresh_and_stamps_the_reason() {
+    // Each stated miss reason must be visible in the journaled evidence — the
+    // reuse rate is otherwise unauditable. One fixture per reason would repeat
+    // the same predicate; the pool names them, and this stamps the host path.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let sessions = super::SessionReuse::memory(PriceTable::default());
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
+    sessions.seed(
+        &SessionKey {
+            model: "claude-opus-5".to_owned(),
+            effort: "high".to_owned(),
+            task: super::session_reuse::pool_task("construct.implement", Some("issue-4902")),
+        },
+        "sess-1",
+        &SessionManifest {
+            parent_receipt: None,
+            receipt: "receipt".to_owned(),
+            head_hash: "head-A".to_owned(),
+            context_tokens: 8_000,
+            workspace_tree_hash: String::new(),
+            read_files: Vec::new(),
+            deposited_at: 1_000,
+        },
+        "/other-slot",
+    );
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+        .with_session_reuse(sessions);
+
+    let handle = exec.submit(&claude_order(digest(5), &test_nonce("miss"), "issue-4902")).unwrap();
+    exec.stream_evidence(&handle).unwrap();
+
+    assert!(seen.lock().unwrap()[0].resume.is_none(), "a slot mismatch launches fresh");
+    let stamped: serde_json::Value =
+        serde_json::from_slice(&fs::read(base.path().join("wo-miss-evidence/evidence.json")).unwrap()).unwrap();
+    assert_eq!(stamped["session_reuse"]["arm"], "fresh");
+    assert_eq!(stamped["session_reuse"]["miss"], "slot_mismatch");
+}
+
+#[test]
+fn a_grok_lap_misses_by_name_and_never_resumes() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let sessions = super::SessionReuse::memory(PriceTable::default());
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+        .with_session_reuse(sessions);
+
+    let mut order = claude_order(digest(5), &test_nonce("grok"), "issue-4902");
+    order.transformation.model =
+        Some(ResolvedModel { harness: Harness::Grok, model: "grok-4.6".to_owned(), effort: ReasoningEffort::High });
+    let handle = exec.submit(&order).unwrap();
+    exec.stream_evidence(&handle).unwrap();
+
+    assert!(seen.lock().unwrap()[0].resume.is_none());
+    let stamped: serde_json::Value =
+        serde_json::from_slice(&fs::read(base.path().join("wo-grok-evidence/evidence.json")).unwrap()).unwrap();
+    assert_eq!(stamped["session_reuse"]["miss"], "grok");
+}
+
+#[test]
+fn a_critic_does_not_resume_the_constructors_session() {
+    // The pool key used to be (model, effort, description). A review.critic
+    // dispatch that shares the construct lap's resolved profile and work-order
+    // text would then resume the constructor and judge the candidate carrying
+    // the implementer's context.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let sessions = super::SessionReuse::memory(PriceTable::default());
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+        .with_session_reuse(sessions);
+
+    let first = exec.submit(&claude_order(digest(5), &test_nonce("construct"), "issue-4902")).unwrap();
+    exec.stream_evidence(&first).unwrap();
+
+    let mut critic = aether_bloomery::WorkOrder {
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(5),
+            digest(0xC0),
+            digest(0xC0),
+        ),
+        nonce: Nonce(test_nonce("critic")),
+    };
+    critic.transformation.model = Some(ResolvedModel {
+        harness: Harness::Claude,
+        model: "claude-opus-5".to_owned(),
+        effort: ReasoningEffort::High,
+    });
+    critic.transformation.description = Some("issue-4902".to_owned());
+    let handle = exec.submit(&critic).unwrap();
+    exec.stream_evidence(&handle).unwrap();
+
+    assert!(seen.lock().unwrap()[1].resume.is_none(), "the critic must not inherit the constructor's session");
+    let stamped: serde_json::Value =
+        serde_json::from_slice(&fs::read(base.path().join("wo-critic-evidence/evidence.json")).unwrap()).unwrap();
+    assert_eq!(stamped["session_reuse"]["arm"], "fresh");
+}
+
+#[test]
+fn a_sealed_price_table_decides_the_lap_two_arm() {
+    // Tripwire: production used to build SessionReuse over PriceTable::default(),
+    // so the acquire inequality never saw the bloom's sealed rates and lap 2
+    // always resumed. A table that makes resume dearer than cold must flip
+    // the predicted arm.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store_dir = TempDir::new().unwrap();
+    let store_path = store_dir.path().join("store.db");
+    let mut store = SqliteStore::open(store_path.to_str().unwrap()).unwrap();
+
+    let table = PriceTable {
+        rows: vec![PriceRow {
+            model: "claude-opus-5".to_owned(),
+            input: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write_5m: 1_000_000,
+            cache_write_1h: 1_000_000,
+            cache_write: 1_000_000,
+            output: 1_000_000,
+            long_context: None,
+        }],
+    };
+    let bytes = to_vec(&table).unwrap();
+    store.record_config(table.address().as_bytes(), PriceTable::NAME, &bytes).unwrap();
+    let mut configs = ConfigRegistry::default();
+    configs.insert::<PriceTable>(table.address());
+    let configs = to_vec(&configs).unwrap();
+    for nonce in [test_nonce("priced-1"), test_nonce("priced-2")] {
+        store
+            .record_order(&OutstandingOrder {
+                nonce,
+                bloom: vec![1; 32],
+                workpiece: "issue-4902".to_owned(),
+                scope_revision: vec![2; 32],
+                candidate: vec![5; 32],
+                displayed_digest: vec![5; 32],
+                stage: vec![9],
+                transformation: vec![7, 7],
+                configs: configs.clone(),
+                profile: Vec::new(),
+                deadline_unix_millis: 1_700_000_000_000,
+            })
+            .unwrap();
+    }
+
+    let sessions = super::SessionReuse::memory(PriceTable::default());
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).with_input_tokens(80_000)),
+        correspondence(),
+        base.path(),
+    )
+    .with_session_reuse(sessions)
+    .with_message_store(store);
+
+    let first = exec.submit(&claude_order(digest(5), &test_nonce("priced-1"), "issue-4902")).unwrap();
+    exec.stream_evidence(&first).unwrap();
+    let second = exec.submit(&claude_order(digest(5), &test_nonce("priced-2"), "issue-4902")).unwrap();
+    exec.stream_evidence(&second).unwrap();
+
+    let stamped: serde_json::Value =
+        serde_json::from_slice(&fs::read(base.path().join("wo-priced-2-evidence/evidence.json")).unwrap()).unwrap();
+    assert_eq!(
+        stamped["session_reuse"]["predicted_arm"], "fresh",
+        "even sealed rates against a large prior T go cold; an empty table would have resumed"
+    );
+    assert!(seen.lock().unwrap()[1].resume.is_none());
 }

@@ -47,7 +47,7 @@ use crate::transform::sccache::{CompilerCache, Counters};
 use crate::transform::scratch::Scratch;
 use crate::transform::verify::VERIFY_CHECK;
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct TransformArgs {
     /// Typed command id — a `verify.*` mechanical id, `construct.implement`, or
     /// `review.critic`.
@@ -95,6 +95,11 @@ pub struct TransformArgs {
     /// subject-only prompt); ignored by the verify lane.
     #[arg(long)]
     task: Option<String>,
+    /// The Claude session id a retry lap resumes (`claude --resume`). Absent
+    /// launches a fresh harness. Ignored by the verify lane and by every
+    /// non-Claude model arm.
+    #[arg(long)]
+    resume: Option<String>,
 }
 
 /// `<out>/evidence.json` schema for the verify lane — the untrusted claim a

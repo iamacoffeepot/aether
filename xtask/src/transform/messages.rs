@@ -111,6 +111,7 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
     record.insert("cache_write_5m".to_owned(), or_zero(&cache_creation, "ephemeral_5m_input_tokens"));
     record.insert("cache_read".to_owned(), or_zero(&usage, "cache_read_input_tokens"));
     record.insert("output".to_owned(), or_zero(&usage, "output_tokens"));
+    record.insert("session_id".to_owned(), or_null(&result, "session_id"));
     // The terminal record whole — keeps every meter on disk for downstream study.
     record.insert("result".to_owned(), result);
     Value::Object(record)

@@ -53,6 +53,14 @@ pub trait SessionBackend: Send {
         current_head_hash: &str,
         now: u64,
     ) -> rusqlite::Result<Option<LeasedSession>>;
+    /// Lease like [`acquire`](Self::acquire), but name the miss so the runner
+    /// can record it without re-deriving the eligibility rules.
+    fn acquire_explained(
+        &mut self,
+        key: &SessionKey,
+        current_head_hash: &str,
+        now: u64,
+    ) -> rusqlite::Result<AcquireOutcome>;
     /// Deposit `session_bytes` + `manifest` for `key`, unleased — upserting the
     /// one pooled session per key (a warm resume updates, a cold deposit
     /// inserts) — provided `lease` is the lease the row currently holds.
@@ -77,6 +85,33 @@ pub enum ReleaseOutcome {
     NotLeaseHolder,
 }
 
+/// Why [`SessionBackend::acquire_explained`] did not lease. The eligibility
+/// rules themselves are unchanged — this is the named miss the runner records
+/// in dispatch evidence rather than re-deriving the predicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcquireMiss {
+    /// No row exists for the key.
+    ColdKey,
+    /// The deposited session is older than the prompt-cache TTL cutoff.
+    Age,
+    /// The deposited session's terminal context exceeds the cap.
+    ContextCap,
+    /// The static-prefix `head_hash` moved since deposit.
+    HeadHash,
+    /// Another holder still holds the lease.
+    Leased,
+}
+
+/// What a [`SessionBackend::acquire_explained`] decided, with the miss named
+/// when it did not lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcquireOutcome {
+    /// An eligible session was leased.
+    Leased(LeasedSession),
+    /// No eligible session — the runner launches cold and records the reason.
+    Missed(AcquireMiss),
+}
+
 /// Is a pooled session eligible to lease? Ports `agent-pool.mjs`'s
 /// `evaluateEligibility` exactly: the caller has already matched the
 /// `{model, effort, task}` key (the `SELECT`), so this decides the remaining
@@ -90,7 +125,7 @@ pub enum ReleaseOutcome {
 /// design). Adding a tree-hash gate here would defeat the reuse this pool exists
 /// for; dropping any of the four real gates admits a stale-cache resume.
 #[allow(clippy::too_many_arguments)]
-fn eligible(
+fn ineligibility(
     head_hash: &str,
     context_tokens: u64,
     deposited_at: u64,
@@ -99,30 +134,30 @@ fn eligible(
     now: u64,
     cutoff_secs: u64,
     context_cap: u64,
-) -> bool {
+) -> Option<AcquireMiss> {
     // #3422 head-freshness: the static head (`CLAUDE.md` + skill text) is not a
     // re-derived belief but the cached prefix a resume reuses, so a moved head
     // is a real cache miss.
     if head_hash != current_head_hash {
-        return false;
+        return Some(AcquireMiss::HeadHash);
     }
     // Age bound (#3264): within the prompt-cache-TTL cutoff.
     if now.saturating_sub(deposited_at) >= cutoff_secs {
-        return false;
+        return Some(AcquireMiss::Age);
     }
     // Context cap: a session over the ceiling is retired.
     if context_tokens > context_cap {
-        return false;
+        return Some(AcquireMiss::ContextCap);
     }
     // Lazy lease expiry: free when unleased or the lease has aged past its TTL,
     // so a crashed holder never wedges the key (no background sweep needed).
     match leased_until {
-        Some(until) if until > now => return false,
+        Some(until) if until > now => return Some(AcquireMiss::Leased),
         _ => {}
     }
     // NOTE: `workspace_tree_hash` is intentionally absent from this predicate
     // (#3341) — see the doc comment's tripwire.
-    true
+    None
 }
 
 /// The schema, applied idempotently on every open. One pooled session per
@@ -182,6 +217,18 @@ impl SessionBackend for SqliteSessionStore {
         current_head_hash: &str,
         now: u64,
     ) -> rusqlite::Result<Option<LeasedSession>> {
+        match self.acquire_explained(key, current_head_hash, now)? {
+            AcquireOutcome::Leased(leased) => Ok(Some(leased)),
+            AcquireOutcome::Missed(_) => Ok(None),
+        }
+    }
+
+    fn acquire_explained(
+        &mut self,
+        key: &SessionKey,
+        current_head_hash: &str,
+        now: u64,
+    ) -> rusqlite::Result<AcquireOutcome> {
         // Read the one pooled session for the key, then decide eligibility over
         // its fields (mirroring `evaluateEligibility`). One transaction so the
         // read and the lease-marking `UPDATE` are atomic.
@@ -204,9 +251,9 @@ impl SessionBackend for SqliteSessionStore {
             )
             .optional()?;
         let Some((session_bytes, receipt, head_hash, context_tokens, deposited_at, leased_until)) = row else {
-            return Ok(None);
+            return Ok(AcquireOutcome::Missed(AcquireMiss::ColdKey));
         };
-        if !eligible(
+        if let Some(miss) = ineligibility(
             &head_hash,
             context_tokens,
             deposited_at,
@@ -216,7 +263,7 @@ impl SessionBackend for SqliteSessionStore {
             self.cutoff_secs,
             self.context_cap,
         ) {
-            return Ok(None);
+            return Ok(AcquireOutcome::Missed(miss));
         }
         let lease_expiry = now.saturating_add(self.lease_ttl_secs);
         let lease = LeaseToken(format!(
@@ -240,7 +287,7 @@ impl SessionBackend for SqliteSessionStore {
             ],
         )?;
         tx.commit()?;
-        Ok(Some(LeasedSession { lease, session_bytes, parent_receipt: receipt }))
+        Ok(AcquireOutcome::Leased(LeasedSession { lease, session_bytes, parent_receipt: receipt }))
     }
 
     fn release(
@@ -345,7 +392,7 @@ impl NativeActor for SessionPoolCapability {
 
     fn init(config: super::SessionConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<SessionPoolState, BootError> {
         let store = SqliteSessionStore::open(
-            &config.db_path,
+            config.store_path(),
             config.cache_ttl_cutoff_mins.saturating_mul(60),
             config.lease_ttl_mins.saturating_mul(60),
             config.context_cap_tokens,
@@ -353,7 +400,7 @@ impl NativeActor for SessionPoolCapability {
         .map_err(|error| BootError::Other(Box::new(error)))?;
         tracing::info!(
             target: "aether_chassis_bloomery::session",
-            path = %config.db_path,
+            path = %config.store_path(),
             cutoff_mins = config.cache_ttl_cutoff_mins,
             "session pool opened (WAL)"
         );

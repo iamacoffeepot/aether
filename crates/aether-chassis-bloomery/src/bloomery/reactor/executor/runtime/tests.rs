@@ -42,6 +42,7 @@ use crate::bloomery::{CoordinatorConfig, GithubConnectionConfig};
 use crate::bloomery::{
     ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
 };
+use crate::session::SessionConfig;
 use crate::store::{OutstandingOrder, SqliteStore, StoreBackend};
 use aether_bloomery_github::candidate_ref_name;
 
@@ -2063,8 +2064,9 @@ fn a_local_only_boot_mounts_and_says_why_an_actions_lane_cannot_run() {
     // What the mount costs an Actions-routed lane: a refusal that names the
     // knobs, rather than a dispatch into a backend with no credential.
     let fake = Arc::new(FakeGithub::new());
-    let shell = ExecutorShell::connect(&connection, &coordinator, fake as SharedCorrespondence)
-        .expect("a local-only shell connects without GitHub");
+    let shell =
+        ExecutorShell::connect(&connection, &coordinator, fake as SharedCorrespondence, &SessionConfig::default())
+            .expect("a local-only shell connects without GitHub");
     let order = WorkOrder {
         transformation: Transformation::for_member_stage(
             &StageCatalog::binding_of(StageId::Verify),

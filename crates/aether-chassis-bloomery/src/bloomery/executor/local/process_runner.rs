@@ -175,6 +175,9 @@ impl TransformRunner for ProcessTransformRunner {
             if let Some(task) = spec.task {
                 lane.args(["--task", task]);
             }
+            if let Some(session) = spec.resume {
+                lane.args(["--resume", session]);
+            }
         }
         let child = lane.spawn().map_err(LocalExecutorError::Spawn)?;
         Ok(Box::new(ChildProcess { child }))
