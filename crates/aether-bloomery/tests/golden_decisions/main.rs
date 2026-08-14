@@ -16,13 +16,19 @@
 //! That coverage is no longer maintained by eye: the [`completeness`] sibling
 //! derives the set of positions reachable from [`Decision`] out of the schema
 //! and fails naming any this value does not reach.
+//!
+//! Two surfaces sit outside that walk, and whatever they freeze here they freeze
+//! by hand. `Decisions::outcome` is one value, not a sequence, so no single
+//! fixture could enumerate it. And [`Fact`] is not under [`Decision`] at all: it
+//! is the journal's *event* column, a second wire-frozen surface the
+//! completeness walk never enters.
 
 mod completeness;
 
 use aether_bloomery::{
     Adjudication, AgentProfile, BloomId, CandidateRef, ClaimRefKind, CompositionFinding, ConfigRegistry, Decision,
-    Decisions, Digest, Disposition, Evidence, EvidenceKind, ExecutionLimits, FoldedIntegration, Harness,
-    LandingReceipt, MemberCandidate, NetworkProfile, OperatorHold, OperatorRepair, OrphanClaimRelease,
+    Decisions, Digest, Disposition, Event, Evidence, EvidenceKind, ExecutionLimits, Fact, FoldedIntegration, Harness,
+    IdempotencyKey, LandingReceipt, MemberCandidate, NetworkProfile, OperatorHold, OperatorRepair, OrphanClaimRelease,
     OrphanClaimReleaseCompletion, Outcome, ProjectedReceipt, ReasoningEffort, ResolutionClaim, ResolvedBloom,
     ResolvedModel, StageBinding, StageCatalog, StageId, StageProgress, ToolPolicy, Transformation, VerifyFailure,
     VerifyFailureSet, VerifyProof, VerifyReuse, Wedge, WorkpieceId,
@@ -578,5 +584,85 @@ fn decisions_wire_bytes_match_pinned_golden() {
     let encoded = to_vec(&value).expect("representative decisions encode");
     assert_eq!(encoded.as_slice(), GOLDEN_DECISIONS, "decisions wire drifted; encoded={encoded:?}");
     let decoded: Decisions = from_bytes(GOLDEN_DECISIONS).expect("pinned bytes decode against HEAD types");
+    assert_eq!(decoded, value);
+}
+
+// The seal door's overlap warning (#4931) writes the same two collections to
+// both persisted columns, so one payload serves both fixtures below.
+fn overlap_members() -> Vec<WorkpieceId> {
+    vec![WorkpieceId("alpha".into()), WorkpieceId("beta".into())]
+}
+
+fn overlap_intersection() -> Vec<String> {
+    vec!["crates/aether-bloomery/**".into(), "docs/adr/**".into()]
+}
+
+fn surface_overlap_decisions() -> Decisions {
+    Decisions {
+        outcome: Outcome::SurfaceOverlap { members: overlap_members(), intersection: overlap_intersection() },
+        effects: Vec::new(),
+    }
+}
+
+fn surface_overlap_event() -> Event {
+    Event {
+        idempotency_key: IdempotencyKey("seal:alpha:beta:surface-overlap".into()),
+        fact: Fact::SurfaceOverlap { members: overlap_members(), intersection: overlap_intersection() },
+    }
+}
+
+// Tripwire: `Outcome::SurfaceOverlap`'s payload shape, on the decisions column.
+// The representative above carries `Outcome::Sealed`, and the completeness
+// sibling declines the outcome position by construction, so this variant's two
+// collections are otherwise frozen by nothing: reshaping either, or inserting a
+// variant ahead of it, would leave every test in the repository green while
+// every overlap row already journaled decodes as something else on the next boot
+// replay.
+const GOLDEN_SURFACE_OVERLAP_DECISIONS: &[u8] = &[
+    0x3a, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x04, 0x00,
+    0x00, 0x00, 0x62, 0x65, 0x74, 0x61, 0x02, 0x00, 0x00, 0x00, 0x19, 0x00, 0x00, 0x00, 0x63, 0x72, 0x61, 0x74, 0x65,
+    0x73, 0x2f, 0x61, 0x65, 0x74, 0x68, 0x65, 0x72, 0x2d, 0x62, 0x6c, 0x6f, 0x6f, 0x6d, 0x65, 0x72, 0x79, 0x2f, 0x2a,
+    0x2a, 0x0b, 0x00, 0x00, 0x00, 0x64, 0x6f, 0x63, 0x73, 0x2f, 0x61, 0x64, 0x72, 0x2f, 0x2a, 0x2a, 0x00, 0x00, 0x00,
+    0x00,
+];
+
+// Tripwire: `Fact::SurfaceOverlap`'s payload shape, on the event column. `Fact`
+// is not reachable from `Decision`, so nothing in the completeness walk covers
+// it; this is the event column's only pinned shape, and the same insertion or
+// reshape fails here rather than at replay.
+const GOLDEN_SURFACE_OVERLAP_EVENT: &[u8] = &[
+    0x1f, 0x00, 0x00, 0x00, 0x73, 0x65, 0x61, 0x6c, 0x3a, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x3a, 0x62, 0x65, 0x74, 0x61,
+    0x3a, 0x73, 0x75, 0x72, 0x66, 0x61, 0x63, 0x65, 0x2d, 0x6f, 0x76, 0x65, 0x72, 0x6c, 0x61, 0x70, 0x17, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x61, 0x6c, 0x70, 0x68, 0x61, 0x04, 0x00, 0x00, 0x00, 0x62,
+    0x65, 0x74, 0x61, 0x02, 0x00, 0x00, 0x00, 0x19, 0x00, 0x00, 0x00, 0x63, 0x72, 0x61, 0x74, 0x65, 0x73, 0x2f, 0x61,
+    0x65, 0x74, 0x68, 0x65, 0x72, 0x2d, 0x62, 0x6c, 0x6f, 0x6f, 0x6d, 0x65, 0x72, 0x79, 0x2f, 0x2a, 0x2a, 0x0b, 0x00,
+    0x00, 0x00, 0x64, 0x6f, 0x63, 0x73, 0x2f, 0x61, 0x64, 0x72, 0x2f, 0x2a, 0x2a,
+];
+
+#[test]
+fn surface_overlap_outcome_wire_bytes_match_pinned_golden() {
+    let value = surface_overlap_decisions();
+    let encoded = to_vec(&value).expect("surface-overlap decisions encode");
+    assert_eq!(
+        encoded.as_slice(),
+        GOLDEN_SURFACE_OVERLAP_DECISIONS,
+        "surface-overlap outcome wire drifted; encoded={encoded:?}"
+    );
+
+    let decoded: Decisions = from_bytes(GOLDEN_SURFACE_OVERLAP_DECISIONS).expect("pinned bytes decode against HEAD");
+    assert_eq!(decoded, value);
+}
+
+#[test]
+fn surface_overlap_event_wire_bytes_match_pinned_golden() {
+    let value = surface_overlap_event();
+    let encoded = to_vec(&value).expect("surface-overlap event encodes");
+    assert_eq!(
+        encoded.as_slice(),
+        GOLDEN_SURFACE_OVERLAP_EVENT,
+        "surface-overlap event wire drifted; encoded={encoded:?}"
+    );
+
+    let decoded: Event = from_bytes(GOLDEN_SURFACE_OVERLAP_EVENT).expect("pinned bytes decode against HEAD");
     assert_eq!(decoded, value);
 }
