@@ -479,12 +479,13 @@ pub enum Decision {
     /// [`BloomRecord::composition_findings`](crate::BloomRecord::composition_findings).
     ///
     /// Every refusal of the composed tree records one, whether it goes on to
-    /// re-weave or to wedge, because the finding is what the repair reads and
-    /// what a member-scope observation becomes when there is no member to
-    /// re-open: members are immutable after review, so an observation about one
-    /// is filed as new work for a future bloom rather than routed back into
-    /// finished, reviewed code. Appended so the prior decisions' wire
-    /// discriminants are unchanged.
+    /// re-weave, to wedge, or to park at a gate's ceiling (#4977), because the
+    /// finding is what the repair reads, what an operator adjudicates, and what
+    /// a member-scope observation becomes when there is no member to re-open:
+    /// members are immutable after review, so an observation about one is filed
+    /// as new work for a future bloom rather than routed back into finished,
+    /// reviewed code. Appended so the prior decisions' wire discriminants are
+    /// unchanged.
     RecordCompositionFinding {
         /// The bloom whose composition was judged.
         bloom: BloomId,

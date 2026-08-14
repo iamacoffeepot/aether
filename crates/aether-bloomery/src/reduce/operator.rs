@@ -74,18 +74,23 @@ fn stated(text: &str) -> bool {
 /// Whether `finding` names something this bloom actually raised and has not
 /// already closed — the line between adjudicating a finding and inventing one.
 ///
-/// Two sources, because a refusal of the composed tree reaches the record by two
-/// routes. One that repairs or wedges files a
-/// [`CompositionFinding`](crate::CompositionFinding) on the composition's
-/// channel. One that spends the last of a gate's budget *parks* instead, and the
-/// park holds the failing verdict's record artifact as the question an answer
-/// must name — the same artifact a filed finding carries as its `detail`, filed
-/// nowhere because the park path returns before the re-weave that would file it.
-/// An operator reading a parked bloom is reading exactly that artifact, so
-/// refusing to let them adjudicate it would leave the one state this override
-/// exists for unreachable.
+/// The general path is the findings channel: every refusal of the composed tree
+/// files a [`CompositionFinding`](crate::CompositionFinding) on it, the three
+/// gate ceilings that park included (#4977), so the parked bloom this override
+/// most exists for is adjudicated the same way a re-weaving refusal's finding
+/// is.
+///
+/// The park marker is the second, narrow arm, for the two parks the channel does
+/// not carry. **Legacy journals**: a park written before #4977 filed no finding,
+/// and boot replay folds the decisions as they were recorded (ADR-0190), so the
+/// only artifact such a record holds is the marker. And the **admitted-question
+/// park** ([`super::evidence::reduce_admit_evidence`]), which raises the
+/// bloom-scope park from a reviewer's `Question` rather than from a gate
+/// refusing the tree, and files nothing on the channel. Either way the marker
+/// holds the verdict artifact a filed finding would carry as its `detail`, which
+/// is exactly what an operator reading a parked bloom is reading.
 fn adjudicable(record: &BloomRecord, finding: &Digest) -> bool {
-    record.review_park == Some(*finding) || record.open_composition_findings().any(|open| open.detail == *finding)
+    record.open_composition_findings().any(|open| open.detail == *finding) || record.review_park == Some(*finding)
 }
 
 /// Reduce an operator adjudication ([`Fact::OperatorAdjudication`](crate::Fact::OperatorAdjudication)).

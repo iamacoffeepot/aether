@@ -11,13 +11,13 @@
 use alloc::vec::Vec;
 
 use super::attempt::stage_binding;
-use super::composition::{Refusal, reweave};
+use super::composition::{Refusal, finding_of, reweave};
 use super::{
     AggregateReviewError, AggregateReviewFault, BloomRecord, BloomStatus, Decision, Decisions, FoldedIntegration,
     Outcome, Snapshot,
 };
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{CompositionFinding, Evidence, EvidenceKind, ResolvedBloom, Transformation};
+use crate::values::{Evidence, EvidenceKind, ResolvedBloom, Transformation};
 
 /// The bloom record and the integration fold a fold-bound aggregate-review
 /// result may act on, or the refusal it earns.
@@ -50,9 +50,9 @@ fn held_fold_under_review<'a>(
 /// verdict files the finding on the composition's channel and dispatches the
 /// weave repair against the composed tree; the fold stays held, because it is
 /// the composition's candidate under repair rather than someone else's stale
-/// artifact. The second failing verdict parks the bloom to the owner — the
-/// two-pass ceiling; the machine never buys a third roll, though an adopting
-/// answer lets the owner buy a fresh cycle.
+/// artifact. The second failing verdict files its finding the same way and
+/// parks the bloom to the owner — the two-pass ceiling; the machine never buys
+/// a third roll, though an adopting answer lets the owner buy a fresh cycle.
 ///
 /// Which of the two a verdict is, is now the *reviewer's* statement about its
 /// findings rather than the mere existence of one (#4961). A review whose
@@ -102,14 +102,7 @@ pub(super) fn reduce_aggregate_review_completed(
         // before the resolution effects so the journal shows the finding under
         // the verdict that raised it.
         if evidence.kind == EvidenceKind::ReviewAdvisory {
-            effects.push(Decision::RecordCompositionFinding {
-                bloom: *bloom,
-                finding: CompositionFinding {
-                    subject: integration.tree,
-                    detail: evidence.detail,
-                    implicated: implicated.to_vec(),
-                },
-            });
+            effects.push(finding_of(*bloom, integration.tree, evidence, implicated));
         }
         let resolution_claims = record.claims.values().cloned().collect::<Vec<_>>();
         let resolved = ResolvedBloom {
@@ -141,6 +134,13 @@ pub(super) fn reduce_aggregate_review_completed(
         // further review dispatches; the failing review's record artifact is
         // the parked question an adopting answer must name to re-arm the
         // cycle.
+        //
+        // The finding is filed first (#4977): a ceiling refusal is a refusal of
+        // the composed tree with its evidence in hand, exactly as the re-weave
+        // below is, so it belongs on the composition's channel rather than
+        // living only as the park's question. That is what an operator
+        // adjudicates and what the study counts.
+        effects.push(finding_of(*bloom, integration.tree, evidence, implicated));
         effects.push(Decision::RecordReviewPark { bloom: *bloom, question: Some(evidence.detail) });
         return Decisions {
             outcome: Outcome::AggregateReviewParked { bloom: *bloom, rolls, question: evidence.detail },

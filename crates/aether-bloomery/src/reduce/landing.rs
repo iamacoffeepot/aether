@@ -8,7 +8,7 @@
 //! of every gate inside the loop, which is why the loop needs a way back in
 //! rather than another gate.
 
-use super::composition::{Refusal, reweave};
+use super::composition::{Refusal, finding_of, reweave};
 use super::{BloomStatus, Decision, Decisions, LandingRejectedError, Outcome, Snapshot};
 use crate::ids::{BloomId, StageId};
 use crate::values::Evidence;
@@ -55,7 +55,11 @@ pub(super) fn reduce_landing_rejected(snapshot: &Snapshot, bloom: &BloomId, evid
         // The budget is spent. The bloom stays resolved — the owner's decision
         // context is the artifact that keeps being refused — and parks under
         // the rejection's record artifact, which an adopting answer must name
-        // to re-arm the cycle.
+        // to re-arm the cycle. The refusal files its finding first (#4977), on
+        // the same channel and against the same head the repair below binds: a
+        // landing that stays red is a refusal of the composed tree, and the
+        // operator reading a parked bloom is reading exactly that finding.
+        effects.push(finding_of(*bloom, head, evidence, &[]));
         effects.push(Decision::RecordReviewPark { bloom: *bloom, question: Some(evidence.detail) });
         return Decisions {
             outcome: Outcome::LandingParked { bloom: *bloom, rolls, question: evidence.detail },

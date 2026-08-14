@@ -100,6 +100,26 @@ pub(super) fn composition_line(record: &BloomRecord) -> SealedLine<'_> {
     }
 }
 
+/// The finding one refusal of the composed tree files on the composition's
+/// channel (ADR-0191 §4): what was judged, the verdict artifact that says so,
+/// and whichever members the verdict named.
+///
+/// Named once because every path that refuses the composition reaches it — the
+/// re-weave below, the three gate ceilings that park instead of repairing
+/// (#4977), and the advisory-carrying pass that files an observation on its way
+/// to the landing. A park is a refusal holding its evidence exactly as a
+/// re-weave is; what differs is that the budget is spent. So it files the same
+/// row, and the readers of the channel — the operator's adjudication door, the
+/// study that counts refusals — see a ceiling refusal the way they see a
+/// re-weave's, instead of the escalated refusals being the ones missing from
+/// the count.
+pub(super) fn finding_of(bloom: BloomId, tree: Digest, evidence: &Evidence, implicated: &[WorkpieceId]) -> Decision {
+    Decision::RecordCompositionFinding {
+        bloom,
+        finding: CompositionFinding { subject: tree, detail: evidence.detail, implicated: implicated.to_vec() },
+    }
+}
+
 /// Repair a refused composition **in the composition** (ADR-0191 §5).
 ///
 /// The effects, in order: the finding on the composition's channel, then either
@@ -113,14 +133,7 @@ pub(super) fn composition_line(record: &BloomRecord) -> SealedLine<'_> {
 /// than a stale artifact of someone else's work.
 pub(super) fn reweave(record: &BloomRecord, bloom: &BloomId, refusal: &Refusal<'_>) -> Decisions {
     let composition = WorkpieceId::composition();
-    let mut effects = alloc::vec![Decision::RecordCompositionFinding {
-        bloom: *bloom,
-        finding: CompositionFinding {
-            subject: refusal.tree,
-            detail: refusal.evidence.detail,
-            implicated: refusal.implicated.to_vec(),
-        },
-    }];
+    let mut effects = alloc::vec![finding_of(*bloom, refusal.tree, refusal.evidence, refusal.implicated)];
 
     let spent =
         cursor(record).filter(|progress| progress.stage == StageId::Refine).map_or(0, |progress| progress.attempts);

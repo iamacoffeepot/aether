@@ -852,7 +852,7 @@ fn a_refused_landing_repairs_the_weave_then_parks_at_the_budget() {
     let (snapshot, _) = step(&snapshot, &review_passed(bloom, "review", 40));
     assert_eq!(snapshot.blooms.get(&bloom).unwrap().status, BloomStatus::Resolved, "the bloom is awaiting its land");
 
-    let refused = |key: &str, head: u8| {
+    let refused = |key: &str, head: u8, detail: u8| {
         event(
             key,
             Fact::LandingRejected {
@@ -860,7 +860,7 @@ fn a_refused_landing_repairs_the_weave_then_parks_at_the_budget() {
                 evidence: Evidence {
                     subject: digest(head),
                     kind: EvidenceKind::VerificationResult,
-                    detail: digest(60),
+                    detail: digest(detail),
                 },
             },
         )
@@ -868,11 +868,11 @@ fn a_refused_landing_repairs_the_weave_then_parks_at_the_budget() {
 
     // A rejection naming a head other than the one being landed is stale.
     assert!(matches!(
-        reduce(&snapshot, &refused("stale", 99), &ResolvedConfigs::default()).outcome,
+        reduce(&snapshot, &refused("stale", 99, 60), &ResolvedConfigs::default()).outcome,
         Outcome::LandingRejectedRefused(LandingRejectedError::SubjectMismatch { .. }),
     ));
 
-    let (after1, d1) = step(&snapshot, &refused("red-1", 41));
+    let (after1, d1) = step(&snapshot, &refused("red-1", 41, 60));
     assert!(matches!(d1.outcome, Outcome::CompositionRewoven { refused_at: StageId::Land, attempt: 1, .. }));
     assert_no_member_dispatch(&d1, "a refused landing repairs the weave, never a member");
     let record = after1.blooms.get(&bloom).unwrap();
@@ -889,14 +889,26 @@ fn a_refused_landing_repairs_the_weave_then_parks_at_the_budget() {
     let (s2, _) = step(&s2, &review_passed(bloom, "review-2", 44));
     assert_eq!(s2.blooms.get(&bloom).unwrap().status, BloomStatus::Resolved);
 
-    // The second refusal spends the budget: parked, nothing dispatches.
-    let (after2, d2) = step(&s2, &refused("red-2", 45));
-    assert!(matches!(d2.outcome, Outcome::LandingParked { rolls: 2, question, .. } if question == digest(60)));
+    // The second refusal spends the budget: parked, nothing dispatches — and it
+    // files its finding on the composition's channel like the refusal it is
+    // (#4977). Spending the budget changes where the bloom goes next, not what
+    // the gate said about the composed tree.
+    let (after2, d2) = step(&s2, &refused("red-2", 45, 61));
+    assert!(matches!(d2.outcome, Outcome::LandingParked { rolls: 2, question, .. } if question == digest(61)));
     assert!(
         !d2.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. } | Decision::SetUnresolved { .. })),
         "a parked bloom dispatches nothing",
     );
-    assert_eq!(after2.blooms.get(&bloom).unwrap().review_park, Some(digest(60)));
+    let record = after2.blooms.get(&bloom).unwrap();
+    assert_eq!(record.review_park, Some(digest(61)));
+    let parked = record.composition_findings.last().expect("the ceiling refusal files a finding");
+    assert_eq!(parked.detail, digest(61), "carrying the rejection that spent the budget");
+    assert_eq!(parked.subject, digest(45), "raised against the head the landing gate refused");
+    assert!(parked.implicated.is_empty(), "a mainline that moved implicates no member");
+    assert!(
+        record.open_composition_findings().any(|open| open.detail == digest(61)),
+        "so the parked bloom is adjudicable through the findings channel, not only through its park marker",
+    );
 }
 
 // #4696 / ADR-0191 §2 — a fold that does not build is a defect of the
@@ -921,7 +933,7 @@ fn a_failing_aggregate_verify_repairs_the_weave_then_parks_at_the_ceiling() {
     let (snapshot, _) =
         step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
 
-    let failed = |key: &str, subject: u8| {
+    let failed = |key: &str, subject: u8, detail: u8| {
         event(
             key,
             Fact::AggregateVerifyCompleted {
@@ -930,7 +942,7 @@ fn a_failing_aggregate_verify_repairs_the_weave_then_parks_at_the_ceiling() {
                 evidence: Evidence {
                     subject: digest(subject),
                     kind: EvidenceKind::VerificationResult,
-                    detail: digest(52),
+                    detail: digest(detail),
                 },
             },
         )
@@ -939,11 +951,11 @@ fn a_failing_aggregate_verify_repairs_the_weave_then_parks_at_the_ceiling() {
     // A verdict bound to a tree other than the held fold's is stale — refused,
     // so a superseded fold's failure cannot act on a newer one.
     assert!(matches!(
-        reduce(&snapshot, &failed("stale", 99), &ResolvedConfigs::default()).outcome,
+        reduce(&snapshot, &failed("stale", 99, 52), &ResolvedConfigs::default()).outcome,
         Outcome::AggregateVerifyRejected(AggregateVerifyError::SubjectMismatch { .. }),
     ));
 
-    let (after1, d1) = step(&snapshot, &failed("fail-1", 40));
+    let (after1, d1) = step(&snapshot, &failed("fail-1", 40, 52));
     assert!(matches!(d1.outcome, Outcome::CompositionRewoven { refused_at: StageId::AggregateVerify, attempt: 1, .. }));
     assert_no_member_dispatch(&d1, "a fold that does not build repairs at the seam");
     let record = after1.blooms.get(&bloom).unwrap();
@@ -973,14 +985,25 @@ fn a_failing_aggregate_verify_repairs_the_weave_then_parks_at_the_ceiling() {
     assert_eq!(after2.blooms.get(&bloom).unwrap().integration.as_ref().unwrap().tree, digest(44));
 
     // The second failure spends the budget: the bloom parks and dispatches
-    // nothing further.
-    let (after3, d3) = step(&after2, &failed("fail-2", 44));
-    assert!(matches!(d3.outcome, Outcome::AggregateVerifyParked { rolls: 2, question, .. } if question == digest(52)));
+    // nothing further — and files its finding on the way, because a fold that
+    // still does not build is a refusal of the composed tree whether the budget
+    // buys another repair or not (#4977).
+    let (after3, d3) = step(&after2, &failed("fail-2", 44, 53));
+    assert!(matches!(d3.outcome, Outcome::AggregateVerifyParked { rolls: 2, question, .. } if question == digest(53)));
     assert!(
         !d3.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. } | Decision::RevokeResolution { .. })),
         "a parked bloom dispatches nothing",
     );
-    assert_eq!(after3.blooms.get(&bloom).unwrap().review_park, Some(digest(52)));
+    let record = after3.blooms.get(&bloom).unwrap();
+    assert_eq!(record.review_park, Some(digest(53)));
+    let parked = record.composition_findings.last().expect("the ceiling refusal files a finding");
+    assert_eq!(parked.detail, digest(53), "carrying the verdict that spent the budget");
+    assert_eq!(parked.subject, digest(44), "raised against the weave that still does not build");
+    assert!(parked.implicated.is_empty());
+    assert!(
+        record.open_composition_findings().any(|open| open.detail == digest(53)),
+        "so the parked bloom is adjudicable through the findings channel, not only through its park marker",
+    );
 }
 
 // ADR-0191 §3/§4/§5 — a failing composition review repairs the weave and never
@@ -1007,13 +1030,17 @@ fn a_failing_composition_review_repairs_the_weave_and_never_reopens_a_member() {
     let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
     let member_cursors = snapshot.blooms.get(&bloom).unwrap().progress.clone();
 
-    let verdict = |key: &str, subject: u8, implicated: Vec<&str>| {
+    let verdict = |key: &str, subject: u8, detail: u8, implicated: Vec<&str>| {
         event(
             key,
             Fact::AggregateReviewCompleted {
                 bloom,
                 passed: false,
-                evidence: Evidence { subject: digest(subject), kind: EvidenceKind::ReviewFinding, detail: digest(50) },
+                evidence: Evidence {
+                    subject: digest(subject),
+                    kind: EvidenceKind::ReviewFinding,
+                    detail: digest(detail),
+                },
                 implicated: implicated.into_iter().map(workpiece).collect(),
             },
         )
@@ -1021,23 +1048,23 @@ fn a_failing_composition_review_repairs_the_weave_and_never_reopens_a_member() {
 
     // A verdict bound to a tree other than the held fold's is stale — refused.
     assert!(matches!(
-        reduce(&snapshot, &verdict("stale", 99, vec!["alpha"]), &ResolvedConfigs::default()).outcome,
+        reduce(&snapshot, &verdict("stale", 99, 50, vec!["alpha"]), &ResolvedConfigs::default()).outcome,
         Outcome::AggregateReviewRejected(AggregateReviewError::SubjectMismatch { .. }),
     ));
     // A verdict naming a non-member is malformed — the label still has to name
     // real code for the follow-up it files to be findable.
     assert!(matches!(
-        reduce(&snapshot, &verdict("ghost", 40, vec!["ghost"]), &ResolvedConfigs::default()).outcome,
+        reduce(&snapshot, &verdict("ghost", 40, 50, vec!["ghost"]), &ResolvedConfigs::default()).outcome,
         Outcome::AggregateReviewRejected(AggregateReviewError::NotAMember(_)),
     ));
     // An empty implication is a finding about the weave as a whole. It is no
     // longer expanded to every member, because there is nothing to route to.
     assert!(matches!(
-        reduce(&snapshot, &verdict("empty", 40, vec![]), &ResolvedConfigs::default()).outcome,
+        reduce(&snapshot, &verdict("empty", 40, 50, vec![]), &ResolvedConfigs::default()).outcome,
         Outcome::CompositionRewoven { refused_at: StageId::AggregateReview, attempt: 1, .. },
     ));
 
-    let (after1, d1) = step(&snapshot, &verdict("fail-1", 40, vec!["alpha"]));
+    let (after1, d1) = step(&snapshot, &verdict("fail-1", 40, 50, vec!["alpha"]));
     assert!(matches!(d1.outcome, Outcome::CompositionRewoven { refused_at: StageId::AggregateReview, attempt: 1, .. }));
     assert_no_member_dispatch(&d1, "the 05b1f598 re-entry is abolished");
     match d1.effects.iter().find(|effect| matches!(effect, Decision::DispatchAttempt { .. })) {
@@ -1070,20 +1097,31 @@ fn a_failing_composition_review_repairs_the_weave_and_never_reopens_a_member() {
         "the passing re-verify dispatches the delta-confirm",
     );
 
-    // The failing delta-confirm hits the ceiling: the bloom parks to the owner.
-    let (after4, d4) = step(&after3, &verdict("fail-2", 44, vec!["alpha"]));
-    assert!(matches!(d4.outcome, Outcome::AggregateReviewParked { rolls: 2, question, .. } if question == digest(50)));
+    // The failing delta-confirm hits the ceiling: the bloom parks to the owner,
+    // and files the refusal's finding beside the park (#4977) — the two-pass
+    // ceiling is where the composition's refusals *end*, so a channel missing
+    // them would undercount exactly the ones that escalated.
+    let (after4, d4) = step(&after3, &verdict("fail-2", 44, 51, vec!["alpha"]));
+    assert!(matches!(d4.outcome, Outcome::AggregateReviewParked { rolls: 2, question, .. } if question == digest(51)));
     assert_no_member_dispatch(&d4, "a parked bloom re-opens nothing");
     let record = after4.blooms.get(&bloom).unwrap();
-    assert_eq!(record.review_park, Some(digest(50)), "the park marker names the failing review's record artifact");
-    assert!(record.holds.contains(&digest(50)), "the park raises the pending-decision hold");
+    assert_eq!(record.review_park, Some(digest(51)), "the park marker names the failing review's record artifact");
+    assert!(record.holds.contains(&digest(51)), "the park raises the pending-decision hold");
+    let parked = record.composition_findings.last().expect("the ceiling refusal files a finding");
+    assert_eq!(parked.detail, digest(51), "carrying the delta-confirm that spent the budget");
+    assert_eq!(parked.subject, digest(44), "raised against the re-woven tree it judged");
+    assert_eq!(parked.implicated, vec![workpiece("alpha")], "with the members the verdict named, recorded not routed");
+    assert!(
+        record.open_composition_findings().any(|open| open.detail == digest(51)),
+        "so the parked bloom is adjudicable through the findings channel, not only through its park marker",
+    );
     assert!(record.integration.is_some(), "the fold stays held as the owner's decision context");
     // A re-fold while parked is refused by the pending decision — the named
     // reason is the owner's open question, not a bare ceiling count.
     assert!(matches!(
         reduce(&after4, &event("r3", Fact::Resolve { bloom, tree: digest(46), head: digest(47), lineage: vec![] }), &ResolvedConfigs::default())
             .outcome,
-        Outcome::ResolveRejected(ResolveError::PendingDecision { question }) if question == digest(50),
+        Outcome::ResolveRejected(ResolveError::PendingDecision { question }) if question == digest(51),
     ));
 }
 
@@ -1347,6 +1385,16 @@ fn a_question_bound_to_the_held_fold_marks_the_review_park() {
         adopted.effects.iter().any(|e| matches!(e, Decision::DispatchAggregateReview { roll: 1, .. })),
         "adopting the contested park re-arms the review, not a member redispatch",
     );
+    // #4977 — this park files nothing on the composition's findings channel: no
+    // gate refused a tree here, a reviewer raised a question about one. So it is
+    // the live park the adjudication door's marker arm still covers, now that
+    // the three gate ceilings file their findings and adjudicate through the
+    // channel like every other refusal.
+    assert!(record.composition_findings.is_empty(), "a contested question is not a gate's refusal");
+    assert!(matches!(
+        reduce(&held, &adjudicated(bloom, "adj", vec![60]), &ResolvedConfigs::default()).outcome,
+        Outcome::FindingsAdjudicated { .. },
+    ));
 }
 
 // ADR-0151 — a study-record evidence admitted against a sealed bloom is recorded
@@ -4158,10 +4206,10 @@ fn adjudicated(bloom: BloomId, key: &str, findings: Vec<u8>) -> Event {
     )
 }
 
-/// A bloom parked at its composition review's two-pass ceiling, with two
-/// distinct findings on the composition's channel: the first refusal's, and the
-/// delta-confirm's, which is the one the park raises.
-fn parked_at_the_review_ceiling() -> (Snapshot, BloomId) {
+/// A bloom that has spent its first composition-review roll, repaired the weave,
+/// and is awaiting the delta-confirm over the re-woven tree — the position one
+/// refusal short of the two-pass ceiling.
+fn awaiting_the_delta_confirm() -> (Snapshot, BloomId) {
     let base = Snapshot::new(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
@@ -4174,6 +4222,14 @@ fn parked_at_the_review_ceiling() -> (Snapshot, BloomId) {
     let (snapshot, _) = step(&snapshot, &review_refused(bloom, "refuse-1", 40, 70));
     let (snapshot, _) = step(&snapshot, &weave_repaired(bloom, "weave-1", 40, 44, 45));
     let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v2", 44));
+    (snapshot, bloom)
+}
+
+/// A bloom parked at its composition review's two-pass ceiling, with two
+/// distinct findings on the composition's channel: the first refusal's, and the
+/// delta-confirm's, which is also the question the park raises.
+fn parked_at_the_review_ceiling() -> (Snapshot, BloomId) {
+    let (snapshot, bloom) = awaiting_the_delta_confirm();
     let (snapshot, _) = step(&snapshot, &review_refused(bloom, "refuse-2", 44, 71));
     (snapshot, bloom)
 }
@@ -4197,10 +4253,11 @@ fn an_adjudication_closes_the_finding_unparks_the_bloom_and_touches_no_member() 
     let before = parked.blooms.get(&bloom).unwrap();
     assert_eq!(before.review_park, Some(digest(71)), "the delta-confirm's artifact is the parked question");
     assert!(before.holds.contains(&digest(71)));
-    // The first refusal filed a finding and re-wove; the second spent the
-    // budget and parked, which holds its verdict artifact as the question
-    // instead of filing it. Both are the operator's to adjudicate.
-    assert_eq!(before.open_composition_findings().count(), 1, "the re-weaving refusal filed a finding");
+    // Both refusals filed a finding (#4977) — the first re-wove, the second
+    // spent the budget and parked — so the channel carries the escalated
+    // refusal as well as the repaired one, and both are the operator's to
+    // adjudicate through it.
+    assert_eq!(before.open_composition_findings().count(), 2, "every refusal of the composed tree filed one");
     let member_cursors = before.progress.clone();
 
     // An adjudication of a finding this bloom never raised closes nothing: the
@@ -4221,8 +4278,8 @@ fn an_adjudication_closes_the_finding_unparks_the_bloom_and_touches_no_member() 
     assert_no_member_dispatch(&decided, "an override closes a composition finding, it never re-opens a member");
 
     let record = after.blooms.get(&bloom).unwrap();
-    assert_eq!(record.open_composition_findings().count(), 0, "the filed finding is closed");
-    assert_eq!(record.composition_findings.len(), 1, "and the verdict that raised it still stands on the record");
+    assert_eq!(record.open_composition_findings().count(), 0, "both filed findings are closed");
+    assert_eq!(record.composition_findings.len(), 2, "and the verdicts that raised them still stand on the record");
     assert_eq!(record.adjudications.len(), 1, "the closure is a record of its own");
     assert_eq!(record.adjudications[0].operator, "iamacoffeepot", "naming who decided");
     assert_eq!(record.review_park, None, "the park is released");
@@ -4237,6 +4294,89 @@ fn an_adjudication_closes_the_finding_unparks_the_bloom_and_touches_no_member() 
         Some(Decision::DispatchLand { new_head, .. }) => assert_eq!(*new_head, digest(45), "landing the held weave"),
         other => panic!("expected the land dispatch, got {other:?}"),
     }
+}
+
+// #4977 — the park's own finding is what an operator adjudicates. The ceiling
+// refusal files it on the composition's channel like every other refusal, so
+// closing it is the general path rather than a special case over the park
+// marker: the bloom un-parks and proceeds to its landing from the weave it
+// holds, and the finding the *first* refusal filed is untouched, because an
+// adjudication closes what it names and nothing else.
+//
+// Rides with `assert_no_member_dispatch` for the same reason the sibling above
+// does: closing the finding a ceiling raised must not become a way back into
+// the members that finding pointed at (ADR-0191 §4).
+#[test]
+fn adjudicating_the_parks_own_finding_unparks_the_bloom() {
+    let (parked, bloom) = parked_at_the_review_ceiling();
+    let before = parked.blooms.get(&bloom).unwrap();
+    let parked_finding =
+        before.open_composition_findings().find(|open| open.detail == digest(71)).expect("the park filed its finding");
+    assert_eq!(parked_finding.subject, digest(44), "raised against the weave the delta-confirm judged");
+    assert_eq!(before.review_park, Some(digest(71)));
+
+    let (after, decided) = step(&parked, &adjudicated(bloom, "adj", vec![71]));
+
+    assert!(
+        matches!(decided.outcome, Outcome::FindingsAdjudicated { proceeds_to_landing: true, .. }),
+        "got {:?}",
+        decided.outcome,
+    );
+    assert_no_member_dispatch(&decided, "closing a ceiling refusal's finding re-opens no member");
+    let record = after.blooms.get(&bloom).unwrap();
+    assert_eq!(record.review_park, None, "the park the finding raised is released with it");
+    assert!(!record.holds.contains(&digest(71)));
+    assert_eq!(record.status, BloomStatus::Resolved, "and the composition proceeds to its landing");
+    assert_eq!(
+        record.open_composition_findings().map(|open| open.detail).collect::<Vec<_>>(),
+        vec![digest(70)],
+        "the re-weaving refusal's finding is not closed by an adjudication that never named it",
+    );
+}
+
+// #4977 / ADR-0190 — a journal written before the park filed its finding still
+// replays and stays adjudicable. Boot replay folds the decisions as they were
+// recorded, so such a record carries the park marker and nothing on the
+// composition's channel for it; the marker arm of the adjudication door is what
+// keeps that operator's one move reachable, and it is kept for exactly this and
+// for the admitted-question park.
+//
+// The pre-fix decision set is written out rather than reduced, because that is
+// the whole point: what the reducer emits today cannot reproduce the rows a
+// prior binary wrote, and replay never re-reduces them.
+#[test]
+fn a_pre_fix_park_still_replays_and_stays_adjudicable() {
+    let (awaiting, bloom) = awaiting_the_delta_confirm();
+    let refusal = review_refused(bloom, "refuse-2", 44, 71);
+    let evidence = Evidence { subject: digest(44), kind: EvidenceKind::ReviewFinding, detail: digest(71) };
+    let pre_fix = Decisions {
+        outcome: Outcome::AggregateReviewParked { bloom, rolls: 2, question: digest(71) },
+        effects: vec![
+            Decision::RecordEvidence { bloom, evidence },
+            Decision::RecordAggregateRoll { bloom, rolls: 2 },
+            Decision::RecordReviewPark { bloom, question: Some(digest(71)) },
+        ],
+    };
+
+    let replayed = awaiting.apply(&refusal, &pre_fix, &ResolvedConfigs::default());
+
+    let record = replayed.blooms.get(&bloom).unwrap();
+    assert_eq!(record.review_park, Some(digest(71)), "the pre-fix park projects as it always did");
+    assert!(record.holds.contains(&digest(71)));
+    assert!(
+        !record.composition_findings.iter().any(|finding| finding.detail == digest(71)),
+        "and carries no finding for it — the row the fix adds was never written",
+    );
+
+    let (after, decided) = step(&replayed, &adjudicated(bloom, "adj", vec![71]));
+
+    assert!(
+        matches!(decided.outcome, Outcome::FindingsAdjudicated { proceeds_to_landing: true, .. }),
+        "an old record's park is still the operator's to close: {:?}",
+        decided.outcome,
+    );
+    assert_no_member_dispatch(&decided, "the legacy arm is a way to close a finding, not a way into a member");
+    assert_eq!(after.blooms.get(&bloom).unwrap().review_park, None, "the park is released");
 }
 
 // #4957 — a deferral that names no filed issue is refused. Deferring a finding
