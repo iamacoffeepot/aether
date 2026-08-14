@@ -210,6 +210,21 @@ impl FixtureHarness {
     /// never bound to a commit inside [`BOOT_BUDGET`].
     #[must_use]
     pub fn start(client_name: &str) -> Self {
+        Self::start_with_poll(client_name, QUIET_POLL_SECS)
+    }
+
+    /// Boot like [`start`](Self::start), but on an explicit observer cadence.
+    ///
+    /// Scenarios that assert the timer itself — not an explicit
+    /// [`observe_tick`](Self::observe_tick) — pass a short interval. Everyone
+    /// else keeps [`start`](Self::start), whose day-long cadence never fires
+    /// inside a scenario.
+    ///
+    /// # Panics
+    /// The chassis did not boot, the RPC ingress did not answer, or mainline
+    /// never bound to a commit inside [`BOOT_BUDGET`].
+    #[must_use]
+    pub fn start_with_poll(client_name: &str, poll_interval_secs: u64) -> Self {
         let state = tempfile::tempdir().expect("a temporary root for the journal and the artifacts store");
         let store_path = state.path().join("bloomery.db").to_string_lossy().into_owned();
         let artifacts_root = state.path().join("artifacts").to_string_lossy().into_owned();
@@ -227,7 +242,7 @@ impl FixtureHarness {
             // Every lane through the one backend a scenario can script. With the
             // local lane on, `construct.*` would route to a real subprocess.
             local_lane_enabled: false,
-            poll_interval_secs: QUIET_POLL_SECS,
+            poll_interval_secs,
             ..CoordinatorConfig::default()
         };
         let env = BloomeryEnv {
@@ -490,7 +505,9 @@ impl FixtureHarness {
     /// reverse-resolves the ref to `head` instead of minting a digest of its own
     /// for an object nothing has named.
     pub fn move_mainline(&self, head: Digest) {
-        self.fake.seed_git_object(&head);
+        // Parent the new tip on the current ref so the observation classifies
+        // the move as a fast-forward rather than a sideways jump (#4938).
+        self.fake.seed_fast_forward(&head, self.fake.ref_target(MAINLINE_REF).as_deref());
         self.fake.seed_ref_at(MAINLINE_REF, &head);
     }
 

@@ -90,10 +90,10 @@ pub use port::{
 };
 pub use reduce::{
     AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault, AggregateVerifyError,
-    AttemptCompletedError, BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, FoldConflictError,
-    FoldedIntegration, GrantAttemptsError, IntegrateError, LandError, LandingRejectedError, OrphanClaimReleaseError,
-    Outcome, ResolveError, SealConflict, SealError, Snapshot, StageProgress, SupersedeError, VerifyFailedError,
-    is_active_unlanded, reduce, view_of,
+    AttemptCompletedError, BaseMismatch, BloomRecord, BloomStatus, DECISIONS_SCHEMA, Decision, Decisions,
+    DecisionsSchemaError, Event, Fact, FoldConflictError, FoldedIntegration, GrantAttemptsError, IntegrateError,
+    LandError, LandingRejectedError, OrphanClaimReleaseError, Outcome, ResolveError, SealConflict, SealError, Snapshot,
+    StageProgress, SupersedeError, VerifyFailedError, decode_recorded_decisions, is_active_unlanded, reduce, view_of,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;
@@ -105,10 +105,10 @@ pub use values::{
     ConfigScopes, DispatchKey, Evidence, EvidenceKind, ExecutionLimits, Forecast, Harness, LandingReceipt,
     LongContextBand, MemberCandidate, MemberSubject, Membership, ModelOverride, NetworkProfile,
     ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease, OrphanClaimReleaseCompletion,
-    OrphanClaimReleaseRecord, OverrideError, PriceRow, PriceTable, Provenance, Question, REVIEW_CRITIC_COMMAND,
-    ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel, StageBinding, StageCatalog,
-    StageOverride, StageReceipt, Statement, StudyCall, StudyCost, StudyRecord, SurfacePattern, Tier, TimeoutRecord,
-    ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK,
-    VerifiedTree, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Workpiece,
-    config_address, decode_config, is_model_lane,
+    OrphanClaimReleaseRecord, OverrideError, PriceRates, PriceTable, Provenance, Question, REVIEW_CRITIC_COMMAND,
+    ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel, SealedPriceTable, StageBinding,
+    StageCatalog, StageOverride, StageReceipt, Statement, StudyCall, StudyCost, StudyRecord, SurfacePattern, Tier,
+    TimeoutRecord, ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE,
+    VERIFY_LANE_NETWORK, VerifiedTree, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
+    Workpiece, config_address, decode_config, is_model_lane,
 };

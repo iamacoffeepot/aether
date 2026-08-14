@@ -16,7 +16,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-use aether_bloomery::{Digest, Harness, PriceRow, PriceTable};
+use aether_bloomery::{Digest, Harness, PriceRates, PriceTable};
 
 use crate::session::{
     AcquireMiss, AcquireOutcome, LeaseToken, LeasedSession, SessionBackend, SessionConfig, SessionKey, SessionManifest,
@@ -402,7 +402,7 @@ pub fn pool_task(command: &str, description: Option<&str>) -> String {
 /// Evaluated in integers as `2r` times both sides so the rates stay in the
 /// sealed columns and no price literal enters the predicate. `None` when the
 /// row cannot evaluate (a zero cache-read rate would divide by zero).
-pub fn resume_is_cheaper(row: &PriceRow, t_tokens: u64, n_hat: u64) -> Option<bool> {
+pub fn resume_is_cheaper(row: &PriceRates, t_tokens: u64, n_hat: u64) -> Option<bool> {
     let read = row.cache_read;
     if read == 0 {
         return None;
@@ -523,12 +523,11 @@ mod tests {
         COLD_PREFIX_TOKENS, MissReason, ReuseArm, SEED_NAMED_SITE_TURNS, SessionReuse, resume_is_cheaper, stamp_reuse,
     };
     use crate::session::{SessionKey, SessionManifest};
-    use aether_bloomery::{Harness, PriceRow, PriceTable};
+    use aether_bloomery::{Harness, PriceRates, PriceTable};
     use std::path::Path;
 
-    fn row(cache_read: u64, cache_write: u64, output: u64) -> PriceRow {
-        PriceRow {
-            model: String::from("claude-opus-5"),
+    fn row(cache_read: u64, cache_write: u64, output: u64) -> PriceRates {
+        PriceRates {
             input: 5_000_000,
             cache_read,
             cache_write_5m: cache_write,

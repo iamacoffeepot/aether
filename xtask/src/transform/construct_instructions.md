@@ -78,3 +78,18 @@ say so plainly rather than guessing at a change to make.
 - If the work order is ambiguous or cannot be implemented against this tree,
   say so plainly in your final message rather than guessing — a wrong candidate
   costs a verify round; an honest "cannot proceed, because …" is cheaper.
+
+## Persisted wire
+
+The journal's `decisions` and `event` columns are a persisted surface. Their
+reachable graph — `Decisions`, `Fact`, `Outcome`, `Decision`, `StageId`,
+`StageProgress`, and every type those contain — is wire-frozen:
+
+- Append new enum variants at the end only. Never reorder, insert, or remove.
+- Do not add, remove, or reorder struct fields anywhere in that graph outside
+  the trailing-optional additive window.
+- `#[serde(default)]` rescues JSON only. It does nothing on the positional
+  wire; a field that relies on it fatal-aborts the coordinator at boot replay.
+
+A shape change that cannot stay inside those rules is a migration, not an
+incidental edit — stop and report it rather than shipping it.

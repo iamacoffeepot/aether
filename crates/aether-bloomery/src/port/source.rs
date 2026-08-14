@@ -296,6 +296,19 @@ pub trait SourceBackend {
     /// faulted.
     fn observe_mainline_head(&self) -> Result<Digest, Self::Error>;
 
+    /// Whether `to` is `from` or a descendant of it — the fast-forward check
+    /// an observation uses to refuse a stale or sideways head (#4938).
+    ///
+    /// Equal digests and the genesis sentinel are fast-forwards without a
+    /// repository round-trip: the first observation after boot binds genesis
+    /// to the live head, and re-observing the same digest is the unchanged
+    /// case. Anything else is an ancestry question the backend answers.
+    ///
+    /// # Errors
+    /// Backend-defined — a digest has no correspondence, the source is
+    /// unreachable, or the ancestry query itself faulted.
+    fn is_fast_forward(&self, from: &Digest, to: &Digest) -> Result<bool, Self::Error>;
+
     /// Fold the candidate at `candidate_ref` into `bloom`'s integration branch
     /// by **merging** it, rather than by stating its tree the way
     /// [`integrate`](Self::integrate) does.
