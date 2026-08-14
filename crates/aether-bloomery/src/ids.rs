@@ -14,6 +14,37 @@ use crate::digest::Digest;
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct WorkpieceId(pub String);
 
+impl WorkpieceId {
+    /// The reserved id of a bloom's **composition workpiece** (ADR-0191): the
+    /// synthetic subject whose candidate is the weave of every member's
+    /// candidate, and which walks the same line members walk.
+    ///
+    /// A reserved id rather than a second identifier type, because the whole
+    /// point of ADR-0191 is one ontology: the composition takes a stage cursor
+    /// in [`BloomRecord::progress`](crate::BloomRecord::progress), a wedge in
+    /// [`BloomRecord::wedged`](crate::BloomRecord::wedged), and a slot in the
+    /// dispatch ledger through the same maps a member does, keyed the same way.
+    /// It is namespaced so a real workpiece cannot collide with it by accident,
+    /// and the seal door refuses a membership that names it anyway
+    /// ([`SealError::ReservedWorkpieceId`](crate::SealError::ReservedWorkpieceId)),
+    /// so the collision is a refusal rather than a member silently sharing the
+    /// composition's cursor.
+    pub const COMPOSITION: &'static str = "aether.bloomery.composition";
+
+    /// The composition workpiece's id.
+    #[must_use]
+    pub fn composition() -> Self {
+        Self(String::from(Self::COMPOSITION))
+    }
+
+    /// Whether this id names the synthetic composition workpiece rather than a
+    /// sealed member.
+    #[must_use]
+    pub fn is_composition(&self) -> bool {
+        self.0 == Self::COMPOSITION
+    }
+}
+
 /// A sealed bloom's identity: the digest of its canonical [`BloomSpec`]
 /// bytes (ADR-0149 §The bloom). A bloom that differs in any sealed field is
 /// a different bloom.

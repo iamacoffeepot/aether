@@ -269,7 +269,12 @@ impl Topic {
             | Decision::RecordVerifyReuse { .. }
             // Snapshot-only: the catalog a seal recorded is folded onto the
             // bloom record. Nothing is dispatched from it.
-            | Decision::RecordStageCatalog { .. } => None,
+            | Decision::RecordStageCatalog { .. }
+            // Snapshot-only: the composition's findings channel is a record an
+            // operator and the weave repair read, and the repair reaches the
+            // executor through the `DispatchAttempt` emitted beside it. A topic
+            // here would enqueue rows nothing drains.
+            | Decision::RecordCompositionFinding { .. } => None,
         }
     }
 }

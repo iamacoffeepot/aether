@@ -11,8 +11,9 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::values::{
-    AgentProfile, ConfigRegistry, Evidence, MemberCandidate, OrphanClaimRelease, OrphanClaimReleaseCompletion,
-    ResolutionClaim, ResolvedBloom, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge,
+    AgentProfile, CompositionFinding, ConfigRegistry, Evidence, MemberCandidate, OrphanClaimRelease,
+    OrphanClaimReleaseCompletion, ResolutionClaim, ResolvedBloom, StageCatalog, Transformation, VerifyProof,
+    VerifyReuse, Wedge,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -472,5 +473,23 @@ pub enum Decision {
         /// The catalog admission resolved — the compiled line when the spec
         /// sealed none, otherwise the sealed value.
         catalog: StageCatalog,
+    },
+    /// File a composition-review observation on the bloom (ADR-0191 §4) — the
+    /// findings channel the composition workpiece owns, see
+    /// [`BloomRecord::composition_findings`](crate::BloomRecord::composition_findings).
+    ///
+    /// Every refusal of the composed tree records one, whether it goes on to
+    /// re-weave or to wedge, because the finding is what the repair reads and
+    /// what a member-scope observation becomes when there is no member to
+    /// re-open: members are immutable after review, so an observation about one
+    /// is filed as new work for a future bloom rather than routed back into
+    /// finished, reviewed code. Appended so the prior decisions' wire
+    /// discriminants are unchanged.
+    RecordCompositionFinding {
+        /// The bloom whose composition was judged.
+        bloom: BloomId,
+        /// The finding: the weave it was raised against, the verdict artifact,
+        /// and the members it points at.
+        finding: CompositionFinding,
     },
 }

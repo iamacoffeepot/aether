@@ -8,25 +8,23 @@
 //! of every gate inside the loop, which is why the loop needs a way back in
 //! rather than another gate.
 
-use alloc::vec::Vec;
-
-use super::review::reenter_members;
+use super::composition::{Refusal, reweave};
 use super::{BloomStatus, Decision, Decisions, LandingRejectedError, Outcome, Snapshot};
 use crate::ids::{BloomId, StageId};
 use crate::values::Evidence;
 
 /// Reduce a refused landing.
 ///
-/// Below the `Land` binding's retry budget the bloom un-resolves and every
-/// member re-opens for repair, so the next fold is built against the mainline
-/// that refused this one. At the budget it parks to the owner: a landing branch
-/// that stays red after a repair is not something the machine can answer by
-/// trying again, and re-proposing forever is exactly the behaviour this
-/// replaces.
+/// Below the `Land` binding's retry budget the bloom un-resolves and the
+/// composition repairs its weave against the mainline that refused it. At the
+/// budget it parks to the owner: a landing branch that stays red after a repair
+/// is not something the machine can answer by trying again, and re-proposing
+/// forever is exactly the behaviour this replaces.
 ///
-/// Every member re-opens, for the same reason a failing aggregate verify
-/// re-opens every member: CI names no owners, and a conflict with a moved
-/// mainline belongs to the fold rather than to a member that passed on its own.
+/// The composition owns the repair (ADR-0191 §4): CI names no owners, and a
+/// conflict with a moved mainline belongs to the composed tree rather than to a
+/// member that passed on its own — and a member that passed its review is never
+/// re-opened by a bloom-level outcome.
 pub(super) fn reduce_landing_rejected(snapshot: &Snapshot, bloom: &BloomId, evidence: &Evidence) -> Decisions {
     let Some(record) = snapshot.blooms.get(bloom) else {
         return Decisions::rejected(Outcome::LandingRejectedRefused(LandingRejectedError::NotAwaitingLanding));
@@ -65,12 +63,18 @@ pub(super) fn reduce_landing_rejected(snapshot: &Snapshot, bloom: &BloomId, evid
         };
     }
 
-    // Un-resolve before re-opening: a resolved bloom is land-ready by
-    // definition, and leaving it resolved while its members repair would let
-    // the land reactor re-propose the head that just failed.
+    // Un-resolve before repairing: a resolved bloom is land-ready by definition,
+    // and leaving it resolved while the weave is repaired would let the land
+    // reactor re-propose the head that just failed.
     effects.push(Decision::SetUnresolved { bloom: *bloom });
-    let members: Vec<_> = record.spec.members().iter().map(|member| member.workpiece.clone()).collect();
-    effects.extend(reenter_members(record, bloom, &members, head));
+    // The refused head *is* the composition's candidate, so the repair belongs
+    // to the composition (ADR-0191 §4/§5): a conflict with a mainline that moved
+    // is a property of the weave, not of a member that passed its own review.
+    // The head stands in for both digests here — a landing rejection binds the
+    // head it judged and the bloom no longer holds the fold that produced it.
+    let repair =
+        reweave(record, bloom, &Refusal { refused_at: StageId::Land, tree: head, head, evidence, implicated: &[] });
+    effects.extend(repair.effects);
 
-    Decisions { outcome: Outcome::LandingReentered { bloom: *bloom, members, rolls }, effects }
+    Decisions { outcome: repair.outcome, effects }
 }

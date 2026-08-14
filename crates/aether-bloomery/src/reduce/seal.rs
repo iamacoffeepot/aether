@@ -147,6 +147,9 @@ fn validate_member_admission(members: &[Membership]) -> Result<(), SealError> {
     }
     let mut seen = BTreeSet::new();
     for member in members {
+        if member.workpiece.is_composition() {
+            return Err(SealError::ReservedWorkpieceId(member.workpiece.clone()));
+        }
         if !seen.insert(&member.workpiece) {
             return Err(SealError::DuplicateWorkpiece(member.workpiece.clone()));
         }

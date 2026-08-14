@@ -152,6 +152,16 @@ pub enum SealError {
         /// The bloom that landed it.
         bloom: BloomId,
     },
+    /// A member names [`WorkpieceId::COMPOSITION`](crate::WorkpieceId::COMPOSITION),
+    /// the id reserved for the bloom's synthetic composition workpiece
+    /// (ADR-0191).
+    ///
+    /// Refused at the door because the composition shares the member maps — the
+    /// stage cursor, the wedge set, the dispatch ledger — so a member holding
+    /// that key would silently share the composition's cursor and each would
+    /// move the other's line position. Appended so the prior variants' wire
+    /// discriminants are unchanged.
+    ReservedWorkpieceId(WorkpieceId),
 }
 
 /// Why a supersession was refused.

@@ -101,9 +101,9 @@ pub use sign::{AuthorityDoor, FakeKeyProvider, KeyProvider, SignatureEnvelope, a
 pub use study_report::{BloomGrade, StudyReport, grade};
 pub use values::{
     AgentProfile, AgentSelection, ApprovalPolicy, ApprovalRule, Artifact, Attempt, BloomDraft, BloomSpec,
-    CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, ConfigKind, ConfigRegistry, ConfigResolveError,
-    ConfigScopes, DispatchKey, Evidence, EvidenceKind, ExecutionLimits, Forecast, Harness, LandingReceipt,
-    LongContextBand, MemberCandidate, MemberSubject, Membership, ModelOverride, NetworkProfile,
+    CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, CompositionFinding, ConfigKind, ConfigRegistry,
+    ConfigResolveError, ConfigScopes, DispatchKey, Evidence, EvidenceKind, ExecutionLimits, Forecast, Harness,
+    LandingReceipt, LongContextBand, MemberCandidate, MemberSubject, Membership, ModelOverride, NetworkProfile,
     ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease, OrphanClaimReleaseCompletion,
     OrphanClaimReleaseRecord, OverrideError, PriceRates, PriceTable, Provenance, Question, REVIEW_CRITIC_COMMAND,
     ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel, SealedPriceTable, StageBinding,

@@ -854,99 +854,114 @@ fn project(decisions: &Decisions) -> Result<ProjectedAxes, WireError> {
             Decision::ReleaseMembership { workpiece, bloom } => {
                 releases.push(membership_mutation(&workpiece.0, bloom));
             }
-            // The landing-receipt topic carries the receipt *and* the landed
-            // bloom's membership: the receipt value names no members, so a
-            // payload without them cannot reach the objects it belongs on after
-            // a restart drains it (ADR-0149 §The receipt carries its members).
-            Decision::EmitReceipt(projected) => {
-                outbox.push(OutboxPayload::new(Topic::LandingReceipt, to_vec(projected)?));
-            }
-            Decision::RedispatchStage { bloom, question, answer, words } => {
-                let payload =
-                    RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer, words: words.clone() };
-                outbox.push(OutboxPayload::new(Topic::Redispatch, to_vec(&payload)?));
-            }
-            Decision::DispatchAttempt {
-                bloom,
-                workpiece,
-                stage,
-                transformation,
-                scope_revision,
-                candidate,
-                profile,
-                configs,
-            } => {
-                let payload = DispatchPayload {
-                    bloom: bloom.0,
-                    workpiece: workpiece.clone(),
-                    stage: *stage,
-                    transformation: transformation.clone(),
-                    scope_revision: *scope_revision,
-                    candidate: *candidate,
-                    profile: profile.clone(),
-                    configs: configs.clone(),
-                };
-                outbox.push(OutboxPayload::new(Topic::Dispatch, to_vec(&payload)?));
-            }
-            Decision::DispatchLand { bloom, expected_base, new_head } => {
-                let payload = LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head };
-                outbox.push(OutboxPayload::new(Topic::Land, to_vec(&payload)?));
-            }
-            Decision::DispatchIntegration { bloom, base, members, adopt_from } => {
-                let payload = IntegratePayload {
-                    bloom: bloom.0,
-                    base: *base,
-                    members: members.clone(),
-                    adopt_from: adopt_from.map(|predecessor| predecessor.0),
-                };
-                outbox.push(OutboxPayload::new(Topic::Integrate, to_vec(&payload)?));
-            }
-            Decision::DispatchAggregateReview { bloom, transformation, roll, profile, configs } => {
-                let payload = AggregateReviewPayload {
-                    profile: profile.clone(),
-                    bloom: bloom.0,
-                    transformation: transformation.clone(),
-                    pass: ReviewPass::from_roll(*roll),
-                    configs: configs.clone(),
-                };
-                outbox.push(OutboxPayload::new(Topic::AggregateReview, to_vec(&payload)?));
-            }
-            Decision::DispatchAggregateVerify { bloom, transformation, profile, roll: _ } => {
-                let payload = AggregateVerifyPayload {
-                    profile: profile.clone(),
-                    bloom: bloom.0,
-                    transformation: transformation.clone(),
-                };
-                outbox.push(OutboxPayload::new(Topic::AggregateVerify, to_vec(&payload)?));
-            }
-            Decision::DispatchOrphanClaimRelease { request, target } => {
-                let payload = OrphanClaimReleasePayload { request: *request, target: target.clone() };
-                outbox.push(OutboxPayload::new(Topic::OrphanClaimRelease, to_vec(&payload)?));
-            }
-            Decision::RecordOrphanClaimRelease { .. }
-            | Decision::InheritClaim { .. }
-            | Decision::RecordResolution { .. }
-            | Decision::RecordEvidence { .. }
-            | Decision::ReleaseHold { .. }
-            | Decision::AdvanceStage { .. }
-            | Decision::MarkSuperseded { .. }
-            | Decision::SetResolved { .. }
-            | Decision::RecordIntegration { .. }
-            | Decision::RecordAggregateRoll { .. }
-            | Decision::RecordAggregateVerifyRoll { .. }
-            | Decision::RecordVerifyProof { .. }
-            | Decision::RecordVerifyReuse { .. }
-            | Decision::RecordLandingRoll { .. }
-            | Decision::SetUnresolved { .. }
-            | Decision::RecordReviewPark { .. }
-            | Decision::RecordWedge { .. }
-            | Decision::RevokeResolution { .. }
-            | Decision::AdvanceMainline { .. }
-            | Decision::RecordObservation { .. }
-            | Decision::RecordStageCatalog { .. } => {}
+            other => outbox.extend(outbox_payload(other)?),
         }
     }
     Ok((releases, claims, outbox))
+}
+
+/// The outbox row one effect enqueues, or `None` for a snapshot-only effect that
+/// carries no durable row.
+///
+/// Split from [`project`] so the membership axes and the outbox axis are read
+/// separately: the two membership arms mutate a table, every arm here serializes
+/// a payload under a topic, and the classification of which effects are
+/// snapshot-only is one list rather than a tail on a longer match.
+fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError> {
+    let payload = match effect {
+        // The landing-receipt topic carries the receipt *and* the landed
+        // bloom's membership: the receipt value names no members, so a
+        // payload without them cannot reach the objects it belongs on after
+        // a restart drains it (ADR-0149 §The receipt carries its members).
+        Decision::EmitReceipt(projected) => OutboxPayload::new(Topic::LandingReceipt, to_vec(projected)?),
+        Decision::RedispatchStage { bloom, question, answer, words } => {
+            let payload =
+                RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer, words: words.clone() };
+            OutboxPayload::new(Topic::Redispatch, to_vec(&payload)?)
+        }
+        Decision::DispatchAttempt {
+            bloom,
+            workpiece,
+            stage,
+            transformation,
+            scope_revision,
+            candidate,
+            profile,
+            configs,
+        } => {
+            let payload = DispatchPayload {
+                bloom: bloom.0,
+                workpiece: workpiece.clone(),
+                stage: *stage,
+                transformation: transformation.clone(),
+                scope_revision: *scope_revision,
+                candidate: *candidate,
+                profile: profile.clone(),
+                configs: configs.clone(),
+            };
+            OutboxPayload::new(Topic::Dispatch, to_vec(&payload)?)
+        }
+        Decision::DispatchLand { bloom, expected_base, new_head } => {
+            let payload = LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head };
+            OutboxPayload::new(Topic::Land, to_vec(&payload)?)
+        }
+        Decision::DispatchIntegration { bloom, base, members, adopt_from } => {
+            let payload = IntegratePayload {
+                bloom: bloom.0,
+                base: *base,
+                members: members.clone(),
+                adopt_from: adopt_from.map(|predecessor| predecessor.0),
+            };
+            OutboxPayload::new(Topic::Integrate, to_vec(&payload)?)
+        }
+        Decision::DispatchAggregateReview { bloom, transformation, roll, profile, configs } => {
+            let payload = AggregateReviewPayload {
+                profile: profile.clone(),
+                bloom: bloom.0,
+                transformation: transformation.clone(),
+                pass: ReviewPass::from_roll(*roll),
+                configs: configs.clone(),
+            };
+            OutboxPayload::new(Topic::AggregateReview, to_vec(&payload)?)
+        }
+        Decision::DispatchAggregateVerify { bloom, transformation, profile, roll: _ } => {
+            let payload = AggregateVerifyPayload {
+                profile: profile.clone(),
+                bloom: bloom.0,
+                transformation: transformation.clone(),
+            };
+            OutboxPayload::new(Topic::AggregateVerify, to_vec(&payload)?)
+        }
+        Decision::DispatchOrphanClaimRelease { request, target } => {
+            let payload = OrphanClaimReleasePayload { request: *request, target: target.clone() };
+            OutboxPayload::new(Topic::OrphanClaimRelease, to_vec(&payload)?)
+        }
+        Decision::ClaimMembership { .. }
+        | Decision::ReleaseMembership { .. }
+        | Decision::RecordOrphanClaimRelease { .. }
+        | Decision::InheritClaim { .. }
+        | Decision::RecordResolution { .. }
+        | Decision::RecordEvidence { .. }
+        | Decision::ReleaseHold { .. }
+        | Decision::AdvanceStage { .. }
+        | Decision::MarkSuperseded { .. }
+        | Decision::SetResolved { .. }
+        | Decision::RecordIntegration { .. }
+        | Decision::RecordAggregateRoll { .. }
+        | Decision::RecordAggregateVerifyRoll { .. }
+        | Decision::RecordVerifyProof { .. }
+        | Decision::RecordVerifyReuse { .. }
+        | Decision::RecordLandingRoll { .. }
+        | Decision::SetUnresolved { .. }
+        | Decision::RecordReviewPark { .. }
+        | Decision::RecordWedge { .. }
+        | Decision::RevokeResolution { .. }
+        | Decision::AdvanceMainline { .. }
+        | Decision::RecordObservation { .. }
+        | Decision::RecordStageCatalog { .. }
+        | Decision::RecordCompositionFinding { .. } => return Ok(None),
+    };
+    Ok(Some(payload))
 }
 
 /// Answer a duplicate admission, naming the key it discarded.

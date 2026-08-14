@@ -24,6 +24,7 @@ use aether_bloomery::{
     StageId, StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure,
     VerifyFailureSet, grade, reduce,
 };
+use aether_bloomery::{BloomRecord, WorkpieceId};
 use aether_data::Kind;
 use aether_data::wire::to_vec;
 use common::{
@@ -32,7 +33,7 @@ use common::{
 };
 use proptest::collection::btree_set;
 use proptest::prelude::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A set of distinct memberships named by their (distinct) revision seeds, so
 /// order-sensitivity is actually exercised.
@@ -216,6 +217,22 @@ fn seal_rejects_duplicate_workpiece() {
     match decided.outcome {
         Outcome::SealRejected(SealError::DuplicateWorkpiece(wp)) => assert_eq!(wp, workpiece("wp")),
         other => panic!("expected DuplicateWorkpiece, got {other:?}"),
+    }
+}
+
+// Tripwire (ADR-0191): the composition workpiece shares the member maps — the
+// stage cursor, the wedge set, the dispatch ledger — so a member holding the
+// reserved id would silently share the composition's cursor and each would move
+// the other's line position. The door refuses it while the operator is still
+// holding the membership they authored.
+#[test]
+fn seal_rejects_a_member_claiming_the_reserved_composition_id() {
+    let base = Snapshot::new(digest(1));
+    let reserved = draft(1, vec![membership(WorkpieceId::COMPOSITION, 10)]).seal();
+    let decided = reduce(&base, &event("reserved", Fact::Seal(reserved)), &ResolvedConfigs::default());
+    match decided.outcome {
+        Outcome::SealRejected(SealError::ReservedWorkpieceId(wp)) => assert!(wp.is_composition()),
+        other => panic!("expected ReservedWorkpieceId, got {other:?}"),
     }
 }
 
@@ -749,17 +766,79 @@ fn verify_passed(bloom: BloomId, key: &str, tree: u8) -> Event {
     )
 }
 
-// #4689 — the landing gate is the last one, and the only one that judges the
-// bloom against a mainline that moved while it worked. A refused landing
-// un-resolves the bloom and re-opens every member for repair; the second
-// refusal spends the `Land` budget and parks it. Neither leaves the bloom
-// polling a proposal nothing will accept, which is the behaviour this replaces.
+/// A passing composition review over `tree` — the hop that resolves a bloom
+/// once its composite gate run is green.
+fn review_passed(bloom: BloomId, key: &str, tree: u8) -> Event {
+    event(
+        key,
+        Fact::AggregateReviewCompleted {
+            bloom,
+            passed: true,
+            evidence: Evidence { subject: digest(tree), kind: EvidenceKind::ReviewFinding, detail: digest(58) },
+            implicated: vec![],
+        },
+    )
+}
+
+/// A returning weave repair (ADR-0191 §5): the composition workpiece's `Refine`
+/// completing with the re-woven candidate it produced.
+fn weave_repaired(bloom: BloomId, key: &str, from: u8, tree: u8, head: u8) -> Event {
+    event(
+        key,
+        Fact::AttemptCompleted {
+            bloom,
+            workpiece: composition(),
+            stage: StageId::Refine,
+            passed: true,
+            evidence: Evidence { subject: digest(from), kind: EvidenceKind::VerificationResult, detail: digest(57) },
+            candidate: Some(CandidateRef { tree: digest(tree), checkout: digest(head) }),
+        },
+    )
+}
+
+/// The composition workpiece's id — the synthetic subject ADR-0191 gives the
+/// weave, keyed into the same member maps.
+fn composition() -> WorkpieceId {
+    WorkpieceId::composition()
+}
+
+/// The composition's stage cursor, which every repair path must write.
+fn composition_cursor(record: &BloomRecord) -> StageProgress {
+    *record.progress.get(&composition()).expect("a repairing composition carries a cursor")
+}
+
+/// Tripwire helper for ADR-0191 §4: no decision in `decided` dispatches against
+/// a member, and none revokes a member's resolution.
+///
+/// This is the exact incident shape of bloom `05b1f598` — an aggregate refusal
+/// re-entering finished members at `Construct` with fresh work orders, throwing
+/// away four reviewed candidates. Under ADR-0191 that transition does not exist,
+/// and this is what says so.
+fn assert_no_member_dispatch(decided: &Decisions, why: &str) {
+    for effect in &decided.effects {
+        if let Decision::DispatchAttempt { workpiece, stage, .. } = effect {
+            assert!(workpiece.is_composition(), "{why}: dispatched {stage:?} against member {workpiece:?}");
+        }
+        assert!(
+            !matches!(effect, Decision::RevokeResolution { .. }),
+            "{why}: revoked a member resolution ({effect:?})",
+        );
+    }
+}
+
+// #4689 / ADR-0191 — the landing gate is the last one, and the only one that
+// judges the bloom against a mainline that moved while it worked. A refused
+// landing un-resolves the bloom and repairs the *weave*; the second refusal
+// spends the `Land` budget and parks it. Neither leaves the bloom polling a
+// proposal nothing will accept, which is the behaviour this replaces.
 //
-// Tripwire on the un-resolve above all: a bloom left `Resolved` while its
-// members repair would let the land reactor re-propose the exact head the gate
-// just refused, which is an infinite loop rather than a repair.
+// Two tripwires. The un-resolve: a bloom left `Resolved` while it repairs would
+// let the land reactor re-propose the exact head the gate just refused, which is
+// an infinite loop rather than a repair. And the immutability rule (ADR-0191
+// §4): a landing rejection is a fact about the composed tree, so no member's
+// claim may be revoked and no member may be dispatched by it.
 #[test]
-fn a_refused_landing_reopens_the_line_then_parks_at_the_budget() {
+fn a_refused_landing_repairs_the_weave_then_parks_at_the_budget() {
     let base = Snapshot::new(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
@@ -769,18 +848,7 @@ fn a_refused_landing_reopens_the_line_then_parks_at_the_budget() {
     let (snapshot, _) =
         step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
     let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
-    let (snapshot, _) = step(
-        &snapshot,
-        &event(
-            "review",
-            Fact::AggregateReviewCompleted {
-                bloom,
-                passed: true,
-                evidence: Evidence { subject: digest(40), kind: EvidenceKind::ReviewFinding, detail: digest(50) },
-                implicated: vec![],
-            },
-        ),
-    );
+    let (snapshot, _) = step(&snapshot, &review_passed(bloom, "review", 40));
     assert_eq!(snapshot.blooms.get(&bloom).unwrap().status, BloomStatus::Resolved, "the bloom is awaiting its land");
 
     let refused = |key: &str, head: u8| {
@@ -804,60 +872,45 @@ fn a_refused_landing_reopens_the_line_then_parks_at_the_budget() {
     ));
 
     let (after1, d1) = step(&snapshot, &refused("red-1", 41));
-    assert!(matches!(&d1.outcome, Outcome::LandingReentered { members, rolls: 1, .. }
-        if *members == vec![workpiece("alpha"), workpiece("beta")]));
+    assert!(matches!(d1.outcome, Outcome::CompositionRewoven { refused_at: StageId::Land, attempt: 1, .. }));
+    assert_no_member_dispatch(&d1, "a refused landing repairs the weave, never a member");
     let record = after1.blooms.get(&bloom).unwrap();
     assert_eq!(record.status, BloomStatus::Sealed, "the bloom is no longer land-ready");
     assert_eq!(record.resolved_head, None, "and no longer names a head to propose");
-    assert!(record.claims.is_empty(), "every member's claim is revoked");
+    assert_eq!(record.claims.len(), 2, "every member's resolution stands — members are immutable after review");
     assert_eq!(record.landing_rolls, 1);
-    for member in ["alpha", "beta"] {
-        assert_eq!(record.progress.get(&workpiece(member)).unwrap().stage, StageId::Refine);
-    }
+    assert_eq!(composition_cursor(record).stage, StageId::Refine, "the composition is the thing that repairs");
 
-    // Repair, re-fold, re-verify, re-review, and land again — the whole cycle,
-    // because a landing rejection re-opens the line rather than short-cutting
-    // back to a fresh proposal on the same artifact.
-    let (s2, _) = step(&after1, &event("i-a2", Fact::Integrate { bloom, claim: claim("alpha", 10, 102) }));
-    let (s2, _) = step(&s2, &event("i-b2", Fact::Integrate { bloom, claim: claim("beta", 11, 103) }));
-    let (s2, _) = step(&s2, &event("r2", Fact::Resolve { bloom, tree: digest(44), head: digest(45), lineage: vec![] }));
+    // The weave repair returns a re-woven candidate, which re-enters the
+    // composition's Verify and then its Review, and the bloom proposes again.
+    let (s2, _) = step(&after1, &weave_repaired(bloom, "weave-1", 41, 44, 45));
     let (s2, _) = step(&s2, &verify_passed(bloom, "v2", 44));
-    let (s2, _) = step(
-        &s2,
-        &event(
-            "review-2",
-            Fact::AggregateReviewCompleted {
-                bloom,
-                passed: true,
-                evidence: Evidence { subject: digest(44), kind: EvidenceKind::ReviewFinding, detail: digest(51) },
-                implicated: vec![],
-            },
-        ),
-    );
+    let (s2, _) = step(&s2, &review_passed(bloom, "review-2", 44));
     assert_eq!(s2.blooms.get(&bloom).unwrap().status, BloomStatus::Resolved);
 
-    // The second refusal spends the budget: parked, nothing re-opens.
+    // The second refusal spends the budget: parked, nothing dispatches.
     let (after2, d2) = step(&s2, &refused("red-2", 45));
     assert!(matches!(d2.outcome, Outcome::LandingParked { rolls: 2, question, .. } if question == digest(60)));
     assert!(
         !d2.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. } | Decision::SetUnresolved { .. })),
-        "a parked bloom re-opens nothing",
+        "a parked bloom dispatches nothing",
     );
     assert_eq!(after2.blooms.get(&bloom).unwrap().review_park, Some(digest(60)));
 }
 
-// #4696 — a fold that does not build re-opens every member, not just an
-// implicated one: each member's own Verify passed on its own candidate, so a
-// failure that appears only in the fold belongs to the combination, and a
-// compiler names no owners to narrow it to. The stale fold clears so the
-// re-integration produces a fresh one, and the stage's own budget bounds the
-// retries — the second failure parks the bloom rather than re-folding a
-// combination that has not built yet.
+// #4696 / ADR-0191 §2 — a fold that does not build is a defect of the
+// *composition*, not of a member that passed on its own. The refusal files a
+// finding on the composition's channel and dispatches the weave repair against
+// the tree that failed to build; the held fold stays held, because it is the
+// candidate under repair. The stage's own budget bounds the retries — the second
+// failure parks the bloom rather than re-weaving a combination that has not
+// built yet.
 //
-// Tripwire for the over-routing above all: narrowing this to a subset would
-// strand a fold whose failure belongs to a member the narrowing left closed.
+// Tripwire for ADR-0191 §4 above all: the old behaviour re-opened every member
+// at `Refine` and revoked every claim, which is how a compile failure in the
+// combination came to cost five members their finished work.
 #[test]
-fn a_failing_aggregate_verify_reopens_every_member_then_parks_at_the_ceiling() {
+fn a_failing_aggregate_verify_repairs_the_weave_then_parks_at_the_ceiling() {
     let base = Snapshot::new(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
@@ -883,50 +936,65 @@ fn a_failing_aggregate_verify_reopens_every_member_then_parks_at_the_ceiling() {
     };
 
     // A verdict bound to a tree other than the held fold's is stale — refused,
-    // so a superseded fold's failure cannot re-open members under a newer one.
+    // so a superseded fold's failure cannot act on a newer one.
     assert!(matches!(
         reduce(&snapshot, &failed("stale", 99), &ResolvedConfigs::default()).outcome,
         Outcome::AggregateVerifyRejected(AggregateVerifyError::SubjectMismatch { .. }),
     ));
 
     let (after1, d1) = step(&snapshot, &failed("fail-1", 40));
-    assert!(matches!(&d1.outcome, Outcome::AggregateVerifyReentered { members, rolls: 1, .. }
-        if *members == vec![workpiece("alpha"), workpiece("beta")]));
+    assert!(matches!(d1.outcome, Outcome::CompositionRewoven { refused_at: StageId::AggregateVerify, attempt: 1, .. }));
+    assert_no_member_dispatch(&d1, "a fold that does not build repairs at the seam");
     let record = after1.blooms.get(&bloom).unwrap();
-    assert!(record.claims.is_empty(), "every member's claim is revoked, not just one");
-    assert!(record.integration.is_none(), "the stale fold is cleared");
+    assert_eq!(record.claims.len(), 2, "every member's resolution stands");
+    assert!(record.integration.is_some(), "the fold stays held — it is the composition's candidate under repair");
     assert_eq!(record.aggregate_verify_rolls, 1);
     assert_eq!(record.aggregate_rolls, 0, "a spent verify roll does not spend the critic's budget");
+    let finding = record.composition_findings.last().expect("the refusal files a finding");
+    assert_eq!(finding.subject, digest(40), "the finding names the weave it was raised against");
+    assert_eq!(finding.detail, digest(52));
+    assert!(finding.implicated.is_empty(), "a compile failure over the fold implicates no member in particular");
+    let cursor = composition_cursor(record);
+    assert_eq!(cursor.stage, StageId::Refine);
+    assert_eq!(cursor.candidate.unwrap().tree, digest(40), "the repair targets the tree that failed to build");
     for member in ["alpha", "beta"] {
-        assert_eq!(record.progress.get(&workpiece(member)).unwrap().stage, StageId::Refine);
+        assert_ne!(record.progress.get(&workpiece(member)).unwrap().stage, StageId::Refine, "{member} is untouched");
     }
 
-    // Both members repair and re-integrate; the re-fold re-dispatches the verify.
-    let (after2, _) = step(&after1, &event("i-a2", Fact::Integrate { bloom, claim: claim("alpha", 10, 102) }));
-    let (after3, _) = step(&after2, &event("i-b2", Fact::Integrate { bloom, claim: claim("beta", 11, 103) }));
-    let (after4, d2) =
-        step(&after3, &event("r2", Fact::Resolve { bloom, tree: digest(44), head: digest(45), lineage: vec![] }));
-    assert!(matches!(d2.outcome, Outcome::AggregateVerifyDispatched { roll: 2, .. }));
+    // The weave repair returns; the composition re-enters its Verify over the
+    // re-woven tree, on the stage's second roll.
+    let (after2, d2) = step(&after1, &weave_repaired(bloom, "weave-1", 40, 44, 45));
+    assert!(matches!(d2.outcome, Outcome::CompositionRepaired { tree, .. } if tree == digest(44)));
+    assert!(
+        d2.effects.iter().any(|e| matches!(e, Decision::DispatchAggregateVerify { roll: 2, .. })),
+        "the repaired weave goes straight back to the composite gate run",
+    );
+    assert_eq!(after2.blooms.get(&bloom).unwrap().integration.as_ref().unwrap().tree, digest(44));
 
-    // The second failure spends the budget: the bloom parks, re-opens nothing,
-    // and dispatches nothing further.
-    let (after5, d3) = step(&after4, &failed("fail-2", 44));
+    // The second failure spends the budget: the bloom parks and dispatches
+    // nothing further.
+    let (after3, d3) = step(&after2, &failed("fail-2", 44));
     assert!(matches!(d3.outcome, Outcome::AggregateVerifyParked { rolls: 2, question, .. } if question == digest(52)));
     assert!(
         !d3.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. } | Decision::RevokeResolution { .. })),
-        "a parked bloom re-opens nothing and dispatches nothing",
+        "a parked bloom dispatches nothing",
     );
-    assert_eq!(after5.blooms.get(&bloom).unwrap().review_park, Some(digest(52)));
+    assert_eq!(after3.blooms.get(&bloom).unwrap().review_park, Some(digest(52)));
 }
 
-// ADR-0153 — a failing aggregate review freezes into member routing: every
-// implicated member's claim is revoked and its cursor re-enters the
-// repair-only Refine (the bloom cannot resolve while any member is re-open),
-// the stale fold clears, the re-fold dispatches the delta-confirm, and the
-// second failing verdict parks the bloom at the two-pass ceiling — never a
-// third roll. Tripwire for every arm of the fail path.
+// ADR-0191 §3/§4/§5 — a failing composition review repairs the weave and never
+// re-opens a member. The implicated set is a *label on the finding* (it files
+// follow-up work and points a reader at the right code), not a routing table:
+// no claim is revoked, no member cursor moves, and no member work order is
+// dispatched. The second failing verdict parks the bloom at the two-pass
+// ceiling — never a third roll.
+//
+// This is the direct tripwire for the bloom `05b1f598` incident: an aggregate
+// refusal that dispatched member `construct.implement` orders and discarded four
+// finished, reviewed candidates. Under this model that transition does not
+// exist, so the assertion is that no member dispatch appears at all.
 #[test]
-fn a_failing_aggregate_review_reopens_members_then_parks_at_the_ceiling() {
+fn a_failing_composition_review_repairs_the_weave_and_never_reopens_a_member() {
     let base = Snapshot::new(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
@@ -935,22 +1003,15 @@ fn a_failing_aggregate_review_reopens_members_then_parks_at_the_ceiling() {
     let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
     let (snapshot, _) =
         step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
-    let (mut snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
+    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
+    let member_cursors = snapshot.blooms.get(&bloom).unwrap().progress.clone();
 
-    // Model claim-only inheritance explicitly: alpha has integrated candidate
-    // 100, but its seeded cursor carries no CandidateRef. Its repair accounting
-    // remains live independently of that absent checkout pair.
-    let alpha_progress = snapshot.blooms.get_mut(&bloom).unwrap().progress.get_mut(&workpiece("alpha")).unwrap();
-    assert_eq!(alpha_progress.candidate, None, "the repair case starts without a candidate-bearing cursor");
-    alpha_progress.repair_rolls = 2;
-    alpha_progress.seen_verify_failures = VerifyFailureSet::one(VerifyFailure::Clippy);
-
-    let verdict = |key: &str, passed: bool, subject: u8, implicated: Vec<&str>| {
+    let verdict = |key: &str, subject: u8, implicated: Vec<&str>| {
         event(
             key,
             Fact::AggregateReviewCompleted {
                 bloom,
-                passed,
+                passed: false,
                 evidence: Evidence { subject: digest(subject), kind: EvidenceKind::ReviewFinding, detail: digest(50) },
                 implicated: implicated.into_iter().map(workpiece).collect(),
             },
@@ -959,87 +1020,59 @@ fn a_failing_aggregate_review_reopens_members_then_parks_at_the_ceiling() {
 
     // A verdict bound to a tree other than the held fold's is stale — refused.
     assert!(matches!(
-        reduce(&snapshot, &verdict("stale", false, 99, vec!["alpha"]), &ResolvedConfigs::default()).outcome,
+        reduce(&snapshot, &verdict("stale", 99, vec!["alpha"]), &ResolvedConfigs::default()).outcome,
         Outcome::AggregateReviewRejected(AggregateReviewError::SubjectMismatch { .. }),
     ));
-    // A failing verdict with an empty implication routes to every member —
-    // the host admits verdicts without membership knowledge, so the reducer
-    // expands the empty set rather than stranding the verdict.
+    // A verdict naming a non-member is malformed — the label still has to name
+    // real code for the follow-up it files to be findable.
     assert!(matches!(
-        &reduce(&snapshot, &verdict("empty", false, 40, vec![]), &ResolvedConfigs::default()).outcome,
-        Outcome::AggregateReviewReentered { members, rolls: 1, .. }
-            if *members == vec![workpiece("alpha"), workpiece("beta")],
-    ));
-    // A failing verdict naming a non-member is malformed.
-    assert!(matches!(
-        reduce(&snapshot, &verdict("ghost", false, 40, vec!["ghost"]), &ResolvedConfigs::default()).outcome,
+        reduce(&snapshot, &verdict("ghost", 40, vec!["ghost"]), &ResolvedConfigs::default()).outcome,
         Outcome::AggregateReviewRejected(AggregateReviewError::NotAMember(_)),
     ));
-
-    // The first failing verdict re-opens exactly the implicated member: claim
-    // revoked, cursor into Refine, fold cleared.
-    let (after1, d1) = step(&snapshot, &verdict("fail-1", false, 40, vec!["alpha"]));
-    assert!(matches!(&d1.outcome, Outcome::AggregateReviewReentered { members, rolls: 1, .. }
-        if members == &vec![workpiece("alpha")]));
-    match d1.effects.iter().find(|effect| {
-        matches!(effect, Decision::DispatchAttempt { stage: StageId::Refine, workpiece: wp, .. }
-            if *wp == workpiece("alpha"))
-    }) {
-        Some(Decision::DispatchAttempt { transformation, candidate, .. }) => {
-            assert_eq!(*candidate, Some(digest(100)), "the dispatch displays the inherited claim's candidate");
-            assert_eq!(transformation.inputs[0], digest(100), "repair evidence binds the claimed candidate");
-            assert_eq!(transformation.checkout, digest(1), "a claim-only member repairs from the sealed base checkout");
-        }
-        other => panic!("expected alpha's Refine DispatchAttempt, got {other:?}"),
-    }
-    let record = after1.blooms.get(&bloom).unwrap();
-    assert!(!record.claims.contains_key(&workpiece("alpha")), "the implicated member's claim is revoked");
-    assert!(record.claims.contains_key(&workpiece("beta")), "an unimplicated member's claim survives");
-    assert!(record.integration.is_none(), "the stale fold is cleared");
-    assert_eq!(record.aggregate_rolls, 1);
-    let alpha_progress = record.progress.get(&workpiece("alpha")).unwrap();
-    assert_eq!(alpha_progress.stage, StageId::Refine);
-    assert_eq!(alpha_progress.candidate, None, "claim-only re-entry does not invent a checkout pair");
-    assert_eq!(alpha_progress.repair_rolls, 2, "aggregate re-entry preserves repair accounting");
-    assert_eq!(
-        alpha_progress.seen_verify_failures,
-        VerifyFailureSet::one(VerifyFailure::Clippy),
-        "aggregate re-entry preserves verifier history",
-    );
-
-    // The bloom cannot resolve while a member is re-open.
+    // An empty implication is a finding about the weave as a whole. It is no
+    // longer expanded to every member, because there is nothing to route to.
     assert!(matches!(
-        reduce(
-            &after1,
-            &event("r-open", Fact::Resolve { bloom, tree: digest(42), head: digest(43), lineage: vec![] }),
-            &ResolvedConfigs::default()
-        )
-        .outcome,
-        Outcome::ResolveRejected(ResolveError::MemberNotIntegrated { .. }),
+        reduce(&snapshot, &verdict("empty", 40, vec![]), &ResolvedConfigs::default()).outcome,
+        Outcome::CompositionRewoven { refused_at: StageId::AggregateReview, attempt: 1, .. },
     ));
 
-    // The repaired member re-integrates; the re-fold dispatches the
-    // delta-confirm (roll 2).
-    let (after2, _) = step(&after1, &event("i-a2", Fact::Integrate { bloom, claim: claim("alpha", 10, 102) }));
-    let (after3, _) =
-        step(&after2, &event("r2", Fact::Resolve { bloom, tree: digest(44), head: digest(45), lineage: vec![] }));
-    let (after3, d2) = step(&after3, &verify_passed(bloom, "v2", 44));
-    assert!(matches!(d2.outcome, Outcome::AggregateVerifyPassed { .. }));
+    let (after1, d1) = step(&snapshot, &verdict("fail-1", 40, vec!["alpha"]));
+    assert!(matches!(d1.outcome, Outcome::CompositionRewoven { refused_at: StageId::AggregateReview, attempt: 1, .. }));
+    assert_no_member_dispatch(&d1, "the 05b1f598 re-entry is abolished");
+    match d1.effects.iter().find(|effect| matches!(effect, Decision::DispatchAttempt { .. })) {
+        Some(Decision::DispatchAttempt { workpiece: wp, stage, transformation, candidate, .. }) => {
+            assert!(wp.is_composition(), "the one dispatch is the composition's");
+            assert_eq!(*stage, StageId::Refine, "and it is the weave repair");
+            assert_eq!(*candidate, Some(digest(40)), "aimed at the composed tree");
+            assert_eq!(transformation.checkout, digest(41), "checked out at the composed head");
+        }
+        other => panic!("expected the composition's weave repair, got {other:?}"),
+    }
+    let record = after1.blooms.get(&bloom).unwrap();
+    assert_eq!(record.claims.len(), 2, "a member that passed its review is done and is never touched again");
+    assert_eq!(record.progress, member_cursors_with_composition(&member_cursors, record), "no member cursor moved");
+    assert!(record.wedged.is_empty());
+    assert!(record.integration.is_some(), "the fold stays held as the composition's candidate");
+    assert_eq!(record.aggregate_rolls, 1);
+    let finding = record.composition_findings.last().expect("the refusal files a finding");
+    assert_eq!(finding.implicated, vec![workpiece("alpha")], "the member-scope observation is recorded, not routed");
+    assert_eq!(finding.detail, digest(50));
+
+    // The bloom still cannot resolve out from under the repair: the fold it
+    // holds is the one that was refused.
+    let (after2, d2) = step(&after1, &weave_repaired(bloom, "weave-1", 40, 44, 45));
+    assert!(matches!(d2.outcome, Outcome::CompositionRepaired { .. }));
+    let (after3, d3) = step(&after2, &verify_passed(bloom, "v2", 44));
+    assert!(matches!(d3.outcome, Outcome::AggregateVerifyPassed { .. }));
     assert!(
-        d2.effects.iter().any(|e| matches!(e, Decision::DispatchAggregateReview { roll: 2, .. })),
+        d3.effects.iter().any(|e| matches!(e, Decision::DispatchAggregateReview { roll: 2, .. })),
         "the passing re-verify dispatches the delta-confirm",
     );
 
-    // The failing delta-confirm hits the ceiling: the bloom parks to the owner
-    // (ADR-0151's hold vocabulary at bloom scope) — no member re-opens,
-    // nothing further dispatches, and the failing review's record artifact
-    // becomes the parked question holding the bloom.
-    let (after4, d3) = step(&after3, &verdict("fail-2", false, 44, vec!["alpha"]));
-    assert!(matches!(d3.outcome, Outcome::AggregateReviewParked { rolls: 2, question, .. } if question == digest(50)));
-    assert!(
-        !d3.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. } | Decision::RevokeResolution { .. })),
-        "a parked bloom re-opens nothing and dispatches nothing",
-    );
+    // The failing delta-confirm hits the ceiling: the bloom parks to the owner.
+    let (after4, d4) = step(&after3, &verdict("fail-2", 44, vec!["alpha"]));
+    assert!(matches!(d4.outcome, Outcome::AggregateReviewParked { rolls: 2, question, .. } if question == digest(50)));
+    assert_no_member_dispatch(&d4, "a parked bloom re-opens nothing");
     let record = after4.blooms.get(&bloom).unwrap();
     assert_eq!(record.review_park, Some(digest(50)), "the park marker names the failing review's record artifact");
     assert!(record.holds.contains(&digest(50)), "the park raises the pending-decision hold");
@@ -1051,6 +1084,20 @@ fn a_failing_aggregate_review_reopens_members_then_parks_at_the_ceiling() {
             .outcome,
         Outcome::ResolveRejected(ResolveError::PendingDecision { question }) if question == digest(50),
     ));
+}
+
+/// The member cursors as they stood, plus whatever cursor the composition now
+/// carries — so a "no member cursor moved" assertion can compare whole maps
+/// without the composition's own (expected) entry masking a member move.
+fn member_cursors_with_composition(
+    before: &BTreeMap<WorkpieceId, StageProgress>,
+    record: &BloomRecord,
+) -> BTreeMap<WorkpieceId, StageProgress> {
+    let mut expected = before.clone();
+    if let Some(progress) = record.progress.get(&composition()) {
+        expected.insert(composition(), *progress);
+    }
+    expected
 }
 
 // ADR-0176 — an aggregate review whose executor could not run is not a verdict
@@ -1242,9 +1289,8 @@ fn adopting_the_park_question_rearms_the_review_cycle() {
         )
     };
     let (snapshot, _) = step(&snapshot, &fail("f1", 40, 50));
-    let (snapshot, _) = step(&snapshot, &event("i2", Fact::Integrate { bloom, claim: claim("wp", 10, 101) }));
-    let (snapshot, _) =
-        step(&snapshot, &event("r2", Fact::Resolve { bloom, tree: digest(42), head: digest(43), lineage: vec![] }));
+    let (snapshot, _) = step(&snapshot, &weave_repaired(bloom, "weave-1", 40, 42, 43));
+    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v2", 42));
     let (parked, decided) = step(&snapshot, &fail("f2", 42, 51));
     assert!(matches!(decided.outcome, Outcome::AggregateReviewParked { question, .. } if question == digest(51)));
 
@@ -1264,10 +1310,10 @@ fn adopting_the_park_question_rearms_the_review_cycle() {
     assert_eq!(record.review_park, None, "the park marker clears");
     assert_eq!(record.aggregate_rolls, 0, "the roll cursor resets — a whole owner-bought cycle");
 
-    // The re-armed cycle runs whole: a failing verdict re-enters the member
-    // again instead of tripping the spent ceiling.
-    let reentered = reduce(&rearmed, &fail("f3", 42, 52), &ResolvedConfigs::default());
-    assert!(matches!(reentered.outcome, Outcome::AggregateReviewReentered { rolls: 1, .. }));
+    // The re-armed cycle runs whole: a failing verdict repairs the weave again
+    // instead of tripping the spent ceiling.
+    let repaired = reduce(&rearmed, &fail("f3", 42, 52), &ResolvedConfigs::default());
+    assert!(matches!(repaired.outcome, Outcome::CompositionRewoven { attempt: 1, .. }));
 }
 
 // ADR-0153 — the aggregate review itself parking ("the findings are
@@ -1385,7 +1431,7 @@ fn parked_question(workpiece: &str) -> Question {
     Question {
         stage: StageId::Construct,
         subject: digest(70),
-        workpiece: aether_bloomery::WorkpieceId(workpiece.into()),
+        workpiece: WorkpieceId(workpiece.into()),
         prompt: "tie between A and B".into(),
         options: vec!["A".into(), "B".into()],
         blocked: "construct is held".into(),
@@ -3854,23 +3900,19 @@ fn a_repair_lap_that_leaves_the_tree_unchanged_reuses_its_verify_verdict() {
         "an unproven tree dispatches its verify, which is what makes the reuse below a memo hit",
     );
 
-    // The member verifies, integrates, and the fold reaches the critic — which
-    // sends it back for repair.
+    // The member verifies and integrates, filing the proof; a later failing
+    // terminal Verify sends it back into its own repair lap.
     let (snapshot, _) =
         step(&snapshot, &event("integrate", Fact::Integrate { bloom, claim: verified_claim("wp", 10, 100, 60) }));
     let (snapshot, _) = step(
         &snapshot,
-        &event("resolve", Fact::Resolve { bloom, tree: digest(100), head: digest(101), lineage: vec![] }),
-    );
-    let (snapshot, _) = step(
-        &snapshot,
         &event(
-            "review",
-            Fact::AggregateReviewCompleted {
+            "verify-failed",
+            Fact::VerifyFailed {
                 bloom,
-                passed: false,
-                evidence: Evidence { subject: digest(100), kind: EvidenceKind::ReviewFinding, detail: digest(70) },
-                implicated: vec![],
+                workpiece: workpiece("wp"),
+                evidence: Evidence { subject: digest(100), kind: EvidenceKind::VerificationResult, detail: digest(70) },
+                failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
             },
         ),
     );

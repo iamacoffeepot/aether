@@ -15,9 +15,9 @@ use super::{Decision, Decisions, Event, Fact, Outcome};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    BloomSpec, CandidateRef, ConfigScopes, DispatchKey, Evidence, EvidenceKind, OrphanClaimReleaseRecord,
-    ResolutionClaim, ResolvedConfigs, StageCatalog, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof,
-    VerifyReuse, Wedge,
+    BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence, EvidenceKind,
+    OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs, StageCatalog, VerifiedTree, VerifyFailureSet,
+    VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -227,6 +227,20 @@ pub struct BloomRecord {
     /// the rest of the record: folded from the evidence log, so it survives a
     /// restart and a redispatch of the same fold continues the series.
     pub aggregate_fault: Option<AggregateReviewFault>,
+    /// The composition workpiece's findings channel (ADR-0191 §4 / §5): every
+    /// verdict that refused the composed tree, in admission order.
+    ///
+    /// The composition is a subject like a member, so a defect discovered in it
+    /// has an owner and a place to be recorded. Two readers: the re-weave, which
+    /// is directed by the latest finding rather than re-rolling blind, and the
+    /// operator (or the study that files the follow-up work), for the class of
+    /// finding that is genuinely about a member's code — members are immutable
+    /// after review, so that observation is filed forward instead of re-opening
+    /// finished work. Journal-derived and replay-rebuilt like the rest of the
+    /// record; defaulted so a journal written before the channel existed still
+    /// decodes.
+    #[serde(default)]
+    pub composition_findings: Vec<CompositionFinding>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -482,11 +496,25 @@ impl Snapshot {
                 self.observed = *head;
             }
             Decision::RecordStageCatalog { .. } => self.apply_catalog_effect(effect),
+            Decision::RecordCompositionFinding { .. } => self.apply_composition_effect(effect),
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;
                 }
             }
+        }
+    }
+
+    /// Append one composition-review finding to the bloom's composition channel
+    /// (ADR-0191 §4). Split out of [`apply_effect`](Self::apply_effect) for the
+    /// reason its siblings are: the parent match stays inside its line budget,
+    /// and the arm's one behaviour reads beside the doc that explains why a
+    /// finding is filed rather than routed.
+    fn apply_composition_effect(&mut self, effect: &Decision) {
+        if let Decision::RecordCompositionFinding { bloom, finding } = effect
+            && let Some(record) = self.blooms.get_mut(bloom)
+        {
+            record.composition_findings.push(finding.clone());
         }
     }
 
@@ -627,6 +655,7 @@ impl BloomRecord {
             verify_proofs: BTreeMap::new(),
             verify_reuses: Vec::new(),
             aggregate_fault: None,
+            composition_findings: Vec::new(),
             superseded_by: None,
         }
     }
