@@ -253,6 +253,7 @@ fn price_of(
     let table = match resolve_price_table(store, ConfigScopes::bloom_wide(&record.configs)) {
         Ok(SealedPriceTable::Current(table)) => table,
         Ok(SealedPriceTable::PreMigration) => return unpriced("pre-migration table"),
+        Ok(SealedPriceTable::Unresolvable) => return unpriced("unresolvable price table"),
         Err(error) => return unpriced(&format!("price table unresolvable: {error}")),
     };
     let Some(row) = table.row(&model.model) else {

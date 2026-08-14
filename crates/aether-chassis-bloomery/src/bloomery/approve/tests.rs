@@ -60,6 +60,26 @@ fn the_seeded_repository_policy_parses_and_guards_itself() {
     // The submitted-and-trusted trees still advance on their own.
     assert_eq!(policy.resolve_surface(&["docs/guide/recipes/x.md".to_owned()]), Tier::Auto);
     assert_eq!(policy.resolve_surface(&["crates/aether-kit-commons/src/lib.rs".to_owned()]), Tier::Auto);
+
+    // Tripwire: the two mid-segment-wildcard rules the original report
+    // worried about must survive the file route. `crates/*/Cargo.toml`
+    // is Human and a concrete crate manifest resolves that way;
+    // `crates/aether-test-fixtures-*/**` is Auto on the loaded rule
+    // (set-sound still folds an uncovered path with the Judge default,
+    // so the rule's own tier is what this pins).
+    assert!(
+        policy.rules.iter().any(|rule| rule.glob == "crates/*/Cargo.toml" && rule.tier == Tier::Human),
+        "the mid-segment crates/*/Cargo.toml rule must load as human",
+    );
+    assert!(
+        policy.rules.iter().any(|rule| rule.glob == "crates/aether-test-fixtures-*/**" && rule.tier == Tier::Auto),
+        "the mid-segment test-fixtures rule must load as auto",
+    );
+    assert_eq!(
+        policy.resolve_surface(&["crates/x/Cargo.toml".to_owned()]),
+        Tier::Human,
+        "crates/*/Cargo.toml must stop at the owner",
+    );
 }
 
 /// A `Completeness` with every check satisfied — the base a completeness test
