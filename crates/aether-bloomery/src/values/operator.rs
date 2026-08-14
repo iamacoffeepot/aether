@@ -1,11 +1,15 @@
-//! The manager override's vocabulary (#4957): the two moves an operator makes
-//! when the machine has run out of its own.
+//! The manager override's vocabulary (#4957, #4976): the moves an operator makes
+//! when the machine has run out of its own, or is about to spend on something
+//! that looks wrong.
 //!
 //! Every other escape from a stopped bloom is a *machine* move — another model
 //! lap, a supersession, abandonment. None of them is the move an operator
 //! actually wants when they have read the remaining defect and are prepared to
 //! answer for it: close the finding and let the bloom proceed, or supply the fix
-//! themselves and let the gates judge it exactly as they judge a lane's.
+//! themselves and let the gates judge it exactly as they judge a lane's. And
+//! none of them is the move for a bloom that has not stopped yet but should —
+//! the brake that freezes new dispatch while the laps already running finish
+//! ([`OperatorHold`]).
 //!
 //! Both are recorded rather than merely performed. An override is the one act in
 //! the pipeline whose authority is a person rather than a verdict, so what it
@@ -110,4 +114,38 @@ pub struct OperatorRepair {
 /// dispatch and a genuinely different candidate is its own.
 impl ContentAddressed for OperatorRepair {
     const DOMAIN: &'static str = "aether.bloomery.operator_repair";
+}
+
+/// One edge of an operator hold (#4976): the words and the identity behind
+/// putting a bloom's dispatch on the brake, or taking it back off.
+///
+/// The same shape serves both edges because both say exactly the same two
+/// things, and neither says anything else — a hold carries no scope, no
+/// priority, and no expiry. It is bloom-level and flat: freeze new dispatch,
+/// decide, release. What varies between raising it and dropping it is the fact
+/// that carries it, not the value.
+///
+/// [`reason`](Self::reason) and [`operator`](Self::operator) are fields rather
+/// than optional context for the reason they are on [`Adjudication`]: a brake
+/// pulled on a running bloom is an act no verdict produced, so the record of who
+/// pulled it and why is its whole product. Both doors refuse a blank one rather
+/// than defaulting it.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct OperatorHold {
+    /// Why the bloom was held, or why it is being let go — in the operator's
+    /// own words.
+    pub reason: String,
+    /// Who asked for it. An unsigned identity, exactly as
+    /// [`Adjudication::operator`] is: it records the decider, and a hold
+    /// authorizes nothing.
+    pub operator: String,
+}
+
+/// Content-addressed for the reason [`Adjudication`] is, and with the same
+/// effect: the default idempotency key is the hold's own digest, so a resent
+/// request is a duplicate rather than a second brake. The two doors prefix the
+/// key with their own route, so a hold and a release stating identical words are
+/// still distinct acts.
+impl ContentAddressed for OperatorHold {
+    const DOMAIN: &'static str = "aether.bloomery.operator_hold";
 }

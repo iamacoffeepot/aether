@@ -19,11 +19,11 @@ use aether_bloomery::{
     Adjudication, AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
     Artifact, AttemptCompletedError, BloomId, BloomStatus, CandidateRef, CatalogError, ClaimRefKind, ConfigRegistry,
     Decision, Digest, DispatchKey, Disposition, Event, Evidence, EvidenceKind, Fact, GrantAttemptsError, KeyId,
-    LandError, LandingRejectedError, Membership, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OperatorRepair,
-    OperatorRepairError, OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseError, Outcome,
-    Provenance, Question, ResolutionClaim, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot,
-    StageCatalog, StageId, StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure,
-    VerifyFailureSet, grade, reduce,
+    LandError, LandingRejectedError, Membership, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OperatorHold,
+    OperatorHoldError, OperatorRepair, OperatorRepairError, OrphanClaimRelease, OrphanClaimReleaseCompletion,
+    OrphanClaimReleaseError, Outcome, Provenance, Question, ResolutionClaim, ResolveError, ResolvedConfigs, SealError,
+    SignatureEnvelope, Snapshot, StageCatalog, StageId, StageProgress, Statement, SupersedeError, Unproducible,
+    VerifyFailedError, VerifyFailure, VerifyFailureSet, grade, reduce,
 };
 use aether_bloomery::{BloomRecord, WorkpieceId};
 use aether_data::Kind;
@@ -4541,4 +4541,467 @@ fn an_ordinary_passing_review_files_no_finding() {
 
     assert!(matches!(decided.outcome, Outcome::Resolved(_)), "got {:?}", decided.outcome);
     assert!(after.blooms.get(&bloom).unwrap().composition_findings.is_empty());
+}
+
+/// An operator hold or release edge, in the words a real one carries.
+fn brake_words(reason: &str) -> OperatorHold {
+    OperatorHold { reason: reason.into(), operator: "iamacoffeepot".into() }
+}
+
+/// A hold on `bloom`.
+fn held(bloom: BloomId, key: &str, reason: &str) -> Event {
+    event(key, Fact::OperatorHold { bloom, hold: brake_words(reason) })
+}
+
+/// A release of `bloom`.
+fn released(bloom: BloomId, key: &str, reason: &str) -> Event {
+    event(key, Fact::OperatorRelease { bloom, release: brake_words(reason) })
+}
+
+/// A completed `Construct` attempt for one member, passing or failing.
+fn construct_completed(bloom: BloomId, key: &str, name: &str, passed: bool, capture: Option<u8>) -> Event {
+    event(
+        key,
+        Fact::AttemptCompleted {
+            bloom,
+            workpiece: workpiece(name),
+            stage: StageId::Construct,
+            passed,
+            evidence: attempt_evidence(),
+            candidate: capture.map(|tree| CandidateRef { tree: digest(tree), checkout: digest(tree + 1) }),
+        },
+    )
+}
+
+/// Every member dispatch one reduction decided, as (workpiece, stage) pairs.
+fn member_dispatches(decided: &Decisions) -> Vec<(WorkpieceId, StageId)> {
+    decided
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Decision::DispatchAttempt { workpiece, stage, .. } => Some((workpiece.clone(), *stage)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A three-member bloom on the operator brake, with `alpha` and `beta`'s
+/// `Construct` laps already returned and `gamma`'s still running.
+///
+/// The shape the hold exists for: two members whose next dispatch the hold
+/// swallowed, and one whose worker is still out — which is the pair a release
+/// has to be able to tell apart.
+fn held_with_two_laps_returned() -> (Snapshot, BloomId) {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11), membership("gamma", 12)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) =
+        step(&snapshot, &held(bloom, "hold", "wave-1 is spending against a refusal that will not clear"));
+    let (snapshot, _) = step(&snapshot, &construct_completed(bloom, "alpha-pass", "alpha", true, Some(90)));
+    let (snapshot, _) = step(&snapshot, &construct_completed(bloom, "beta-fail", "beta", false, None));
+    (snapshot, bloom)
+}
+
+// #4976 acceptance 1 — a held bloom dispatches nothing, and everything else
+// about it keeps working.
+//
+// This is the whole difference between the brake and the only move that existed
+// before it, which was killing the coordinator: the laps already running finish,
+// their evidence lands in the journal, their cursors move, and a member that
+// spends its last attempt still wedges. What the hold withholds is the *next*
+// work order and nothing else.
+//
+// Tripwire on both halves. A hold that let a dispatch through spends the money
+// the operator pulled the brake to stop; a hold that swallowed the fact instead
+// of the dispatch would lose the returning lap's evidence, which is exactly the
+// stranding the kill caused.
+#[test]
+fn a_held_bloom_dispatches_nothing_while_its_running_laps_still_journal() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (sealed, seal_decided) = step(&base, &event("seal", Fact::Seal(spec)));
+    assert_eq!(member_dispatches(&seal_decided).len(), 2, "the seal door dispatched both members' entry stage");
+
+    let (snapshot, decided) = step(&sealed, &held(bloom, "hold", "the fixture stall is not going to clear"));
+    assert!(matches!(decided.outcome, Outcome::BloomHeld { .. }), "got {:?}", decided.outcome);
+    let record = snapshot.blooms.get(&bloom).unwrap();
+    assert_eq!(record.operator_hold.as_ref().map(|hold| hold.operator.as_str()), Some("iamacoffeepot"));
+    assert_eq!(record.operator_hold.as_ref().unwrap().reason, "the fixture stall is not going to clear");
+
+    // alpha's lap comes back green: its cursor advances and its evidence lands,
+    // but the Verify it earned does not go out.
+    let (snapshot, advanced) = step(&snapshot, &construct_completed(bloom, "alpha-pass", "alpha", true, Some(90)));
+    assert!(member_dispatches(&advanced).is_empty(), "a held bloom dispatches nothing: {:?}", advanced.effects);
+    assert!(
+        advanced.effects.iter().any(|effect| matches!(effect, Decision::RecordEvidence { .. })),
+        "the returning lap still journals its evidence",
+    );
+
+    // beta's comes back red inside its budget: the retry is counted and withheld
+    // the same way.
+    let (snapshot, retried) = step(&snapshot, &construct_completed(bloom, "beta-fail", "beta", false, None));
+    assert!(member_dispatches(&retried).is_empty(), "including a retry: {:?}", retried.effects);
+
+    let record = snapshot.blooms.get(&bloom).unwrap();
+    assert_eq!(record.progress.get(&workpiece("alpha")).unwrap().stage, StageId::Verify, "alpha's cursor moved");
+    assert_eq!(record.progress.get(&workpiece("beta")).unwrap().attempts, 2, "beta's attempt was counted");
+    assert_eq!(record.evidence.len(), 2, "both laps are in the evidence log");
+    assert_eq!(
+        record.deferred_dispatches,
+        BTreeSet::from([workpiece("alpha"), workpiece("beta")]),
+        "and both are owed the dispatch the hold swallowed",
+    );
+    // The ledger counts what was *spent* (ADR-0180), and a swallowed dispatch
+    // spent nothing — a hold that inflated it would corrupt every retry grade
+    // computed from it.
+    assert_eq!(
+        record.dispatches.get(&DispatchKey::Member { workpiece: workpiece("alpha"), stage: StageId::Verify }),
+        None,
+        "a deferral is not a dispatch",
+    );
+}
+
+// #4976 acceptance 2 — the release re-derives exactly what is due: none lost,
+// none doubled.
+//
+// The two failure modes are opposite and both fatal. Dispatching from every
+// cursor would put a second worker on `gamma`, whose lap never came back and
+// whose cursor therefore looks identical to a member the hold caught — that is
+// the "doubled" side, and it is why the deferrals are recorded rather than
+// inferred. Dispatching nothing, or dispatching from a position captured when
+// the brake went on, is the "lost" side: `alpha` moved *while held*, so the
+// dispatch it is owed is the `Verify` it is sitting at now, not the `Construct`
+// that was in flight when the operator pulled the brake.
+#[test]
+fn releasing_dispatches_exactly_what_the_hold_owed_and_nothing_else() {
+    let (snapshot, bloom) = held_with_two_laps_returned();
+
+    let (after, decided) = step(&snapshot, &released(bloom, "release", "the fixture is fixed; let it run"));
+
+    assert!(
+        matches!(decided.outcome, Outcome::BloomReleased { ref dispatched, .. }
+            if *dispatched == vec![workpiece("alpha"), workpiece("beta")]),
+        "got {:?}",
+        decided.outcome,
+    );
+    let mut dispatched = member_dispatches(&decided);
+    dispatched.sort_by(|left, right| left.0.0.cmp(&right.0.0));
+    assert_eq!(
+        dispatched,
+        vec![(workpiece("alpha"), StageId::Verify), (workpiece("beta"), StageId::Construct)],
+        "alpha resumes where the hold left it, beta re-runs the attempt it is owed, and gamma is untouched",
+    );
+    // The dispatch is re-derived, not recalled: alpha's returned candidate is
+    // what its Verify runs against, which is a fact the record only holds
+    // because the completion folded *during* the hold.
+    match decided
+        .effects
+        .iter()
+        .find(|effect| matches!(effect, Decision::DispatchAttempt { stage: StageId::Verify, .. }))
+    {
+        Some(Decision::DispatchAttempt { candidate, transformation, .. }) => {
+            assert_eq!(*candidate, Some(digest(90)), "the Verify binds the tree the held lap captured");
+            assert_eq!(transformation.checkout, digest(91), "and checks out the commit it captured");
+        }
+        other => panic!("expected alpha's re-derived Verify dispatch, got {other:?}"),
+    }
+
+    let record = after.blooms.get(&bloom).unwrap();
+    assert!(record.operator_hold.is_none(), "the brake is off");
+    assert!(record.deferred_dispatches.is_empty(), "and the dispatches that went out are no longer owed");
+
+    // Nothing is owed twice: releasing again is refused, and a fresh hold on the
+    // released bloom starts from an empty set rather than replaying the old one.
+    assert!(matches!(
+        reduce(&after, &released(bloom, "again", "second try"), &ResolvedConfigs::default()).outcome,
+        Outcome::OperatorHoldRejected(OperatorHoldError::NotHeld),
+    ));
+    let (rehold, _) = step(&after, &held(bloom, "hold-2", "on second thoughts"));
+    let (_, rereleased) = step(&rehold, &released(bloom, "release-2", "no, it was fine"));
+    assert!(member_dispatches(&rereleased).is_empty(), "a hold that swallowed nothing owes nothing");
+}
+
+// #4976 — the deferral ledger is journal-derived like everything else on the
+// record (ADR-0190): folding the recorded decisions alone, with no reducer in
+// the loop, rebuilds the same bloom.
+//
+// Tripwire: a set the reducer kept as host state, or one the release cleared
+// itself instead of letting each dispatch clear its own entry, would replay to a
+// different bloom — and a replayed coordinator would then either re-dispatch
+// work that already went out or sit on work it thinks it still owes.
+#[test]
+fn a_hold_and_its_release_replay_from_the_recorded_decisions_alone() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11), membership("gamma", 12)]).seal();
+    let bloom = spec.id();
+    let script = vec![
+        event("seal", Fact::Seal(spec)),
+        held(bloom, "hold", "freeze it while I read the run"),
+        construct_completed(bloom, "alpha-pass", "alpha", true, Some(90)),
+        construct_completed(bloom, "beta-fail", "beta", false, None),
+        released(bloom, "release", "read it; it is fine"),
+    ];
+
+    let mut live = base.clone();
+    let mut recorded = Vec::new();
+    for step_event in &script {
+        let decided = reduce(&live, step_event, &ResolvedConfigs::default());
+        live = live.apply(step_event, &decided, &ResolvedConfigs::default());
+        recorded.push(decided);
+    }
+
+    let mut replayed = base;
+    for (step_event, decided) in script.iter().zip(recorded.iter()) {
+        replayed = replayed.apply(step_event, decided, &ResolvedConfigs::default());
+    }
+
+    assert_eq!(replayed, live, "replay over the recorded decisions rebuilds the held-and-released bloom exactly");
+}
+
+// #4976 acceptance 3 — both edges state a reason and an operator, and both are
+// refused when they do not.
+//
+// A brake pulled on a running bloom is an act no verdict produced, so the record
+// of who pulled it and why is its whole product — the same discipline #4957's
+// doors carry, for the same reason. The idempotence answers ride here too: a
+// second hold and a release of an unheld bloom are both refused rather than
+// absorbed, so the journal never carries an edge that changed nothing and a
+// second hold cannot overwrite the reason the first recorded.
+#[test]
+fn both_brake_edges_state_a_reason_and_who_or_are_refused() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10)]).seal();
+    let bloom = spec.id();
+    let (sealed, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let blank = |key: &str, fact: Fact| reduce(&sealed, &event(key, fact), &ResolvedConfigs::default()).outcome;
+    let empty_operator = OperatorHold { reason: "stated".into(), operator: "  ".into() };
+    for (label, outcome, expected) in [
+        (
+            "a hold with a whitespace reason",
+            blank("h1", Fact::OperatorHold { bloom, hold: brake_words("   ") }),
+            OperatorHoldError::BlankReason,
+        ),
+        (
+            "a hold naming nobody",
+            blank("h2", Fact::OperatorHold { bloom, hold: empty_operator.clone() }),
+            OperatorHoldError::BlankOperator,
+        ),
+        (
+            "a release with a whitespace reason",
+            blank("r1", Fact::OperatorRelease { bloom, release: brake_words("") }),
+            OperatorHoldError::BlankReason,
+        ),
+        (
+            "a release naming nobody",
+            blank("r2", Fact::OperatorRelease { bloom, release: empty_operator }),
+            OperatorHoldError::BlankOperator,
+        ),
+        (
+            "a release of a bloom that is not held",
+            blank("r3", Fact::OperatorRelease { bloom, release: brake_words("let it go") }),
+            OperatorHoldError::NotHeld,
+        ),
+    ] {
+        assert!(
+            matches!(outcome, Outcome::OperatorHoldRejected(ref error) if *error == expected),
+            "{label} must be refused as {expected:?}, got {outcome:?}",
+        );
+    }
+
+    let (snapshot, decided) = step(&sealed, &held(bloom, "hold", "the run looks wrong; stopping the spend"));
+    assert_eq!(
+        decided.effects,
+        vec![Decision::RecordOperatorHold { bloom, hold: brake_words("the run looks wrong; stopping the spend") }],
+        "the hold's whole product is the record of it",
+    );
+    assert!(matches!(
+        reduce(&snapshot, &held(bloom, "hold-again", "again"), &ResolvedConfigs::default()).outcome,
+        Outcome::OperatorHoldRejected(OperatorHoldError::AlreadyHeld),
+    ));
+    assert_eq!(
+        snapshot.blooms.get(&bloom).unwrap().operator_hold.as_ref().unwrap().reason,
+        "the run looks wrong; stopping the spend",
+        "and the first hold's reason is what a reader of the frozen bloom finds",
+    );
+
+    let (_, released_decided) = step(&snapshot, &released(bloom, "release", "read the run; it was fine"));
+    match released_decided.effects.first() {
+        Some(Decision::RecordOperatorRelease { release, .. }) => {
+            assert_eq!(release.reason, "read the run; it was fine", "the release carries its own words");
+            assert_eq!(release.operator, "iamacoffeepot");
+        }
+        other => panic!("expected the release record, got {other:?}"),
+    }
+}
+
+// #4976 — the hold composes with the two ways a bloom already stops rather than
+// replacing either.
+//
+// A park and a wedge are the machine saying "I cannot go on"; a hold is an
+// operator saying "do not go on yet". They are independent facts about the same
+// bloom, so holding must not answer a park, releasing must not answer one, and a
+// release must not become a way to un-wedge a member that spent its budget —
+// which would make the brake a retry grant wearing a different name.
+#[test]
+fn a_hold_leaves_the_park_and_the_wedge_exactly_where_they_were() {
+    let (parked, bloom) = parked_at_the_review_ceiling();
+    let question = parked.blooms.get(&bloom).unwrap().review_park.unwrap();
+
+    let (held_parked, _) = step(&parked, &held(bloom, "hold", "freeze it while I read the review"));
+    let record = held_parked.blooms.get(&bloom).unwrap();
+    assert_eq!(record.review_park, Some(question), "holding a parked bloom is a no-op on the park");
+    assert!(record.holds.contains(&question), "and on the hold it raised");
+
+    let (let_go, decided) = step(&held_parked, &released(bloom, "release", "still thinking, but let it run"));
+    let record = let_go.blooms.get(&bloom).unwrap();
+    assert_eq!(record.review_park, Some(question), "releasing does not answer the park either");
+    assert!(record.holds.contains(&question));
+    assert!(member_dispatches(&decided).is_empty(), "the bloom comes off the brake and stops on its own question");
+
+    // The wedge half: a member that spends its last attempt while held wedges,
+    // and the release dispatches it no more than an unheld wedge would.
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let wedging = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&snapshot, &held(wedging, "hold-w", "stop it before it burns the budget"));
+    let (snapshot, _) = step(&snapshot, &construct_completed(wedging, "f1", "wp", false, None));
+    let (snapshot, wedged_decided) = step(&snapshot, &construct_completed(wedging, "f2", "wp", false, None));
+    assert!(matches!(wedged_decided.outcome, Outcome::AttemptWedged { .. }), "got {:?}", wedged_decided.outcome);
+
+    assert!(
+        snapshot.blooms.get(&wedging).unwrap().deferred_dispatches.is_empty(),
+        "the wedge cancels the deferral its earlier retry recorded",
+    );
+
+    let (after, decided) = step(&snapshot, &released(wedging, "release-w", "leave it stopped"));
+    assert!(member_dispatches(&decided).is_empty(), "a release is not a grant: a wedged member stays wedged");
+    assert!(after.blooms.get(&wedging).unwrap().wedged.contains_key(&workpiece("wp")));
+}
+
+// #4976 — every reduce path that can dispatch a member is gated, enumerated.
+//
+// The guard itself is structural: `Decision::DispatchAttempt` is built in
+// exactly two places, and the post-seal one takes its hold flag off the
+// `SealedLine` that is the only way to reach it — so a dispatch path added later
+// inherits the gate whether or not its author thought about it. (The other is
+// the seal door's entry dispatch, which no hold can reach: a hold names an
+// existing bloom and a seal is what creates one.)
+//
+// This is the behavioural half, and the bug it catches is the one the structural
+// argument cannot: a future path that builds its `SealedLine` by hand, or reaches
+// for `SealedLine::released` because a test was failing. Every fact family below
+// dispatches a member on an unheld bloom; none of them may on a held one.
+#[test]
+fn no_fact_family_dispatches_a_member_of_a_held_bloom() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (sealed, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    // A member at terminal Verify holding a candidate and a sibling still on its
+    // first `Construct` attempt — between them, the position every dispatching
+    // member fact below acts from.
+    let (running, _) = step(&sealed, &construct_completed(bloom, "alpha-pass", "alpha", true, Some(90)));
+    let (frozen, _) = step(&running, &held(bloom, "hold", "stop the spend while I read it"));
+
+    let families: Vec<(&str, Event)> = vec![
+        ("a passing attempt advancing the line", construct_completed(bloom, "f1", "beta", true, Some(92))),
+        ("a failing attempt retrying inside its budget", construct_completed(bloom, "f2", "beta", false, None)),
+        (
+            "a failing terminal Verify re-entering Refine",
+            verify_failed("f3", bloom, "alpha", digest(90), 91, verifier_set(&[VerifyFailure::Clippy])),
+        ),
+    ];
+    for (label, fact) in families {
+        let unheld = reduce(&running, &fact, &ResolvedConfigs::default());
+        assert!(!member_dispatches(&unheld).is_empty(), "fixture bug: {label} must dispatch on an unheld bloom");
+        let gated = reduce(&frozen, &fact, &ResolvedConfigs::default());
+        assert!(member_dispatches(&gated).is_empty(), "{label} dispatched on a held bloom: {:?}", gated.effects);
+    }
+
+    // A fold collision opens a reconcile round, which only an integrated member
+    // can be in — so it is enumerated from the fixture that has claims.
+    let (folding, folding_bloom) = three_members_with_claims();
+    let collision = fold_conflict(folding_bloom, "collide", "alpha", 93, 94, 95);
+    assert!(
+        !member_dispatches(&reduce(&folding, &collision, &ResolvedConfigs::default())).is_empty(),
+        "fixture bug: a fold conflict must dispatch a reconcile on an unheld bloom",
+    );
+    let (folding_frozen, _) = step(&folding, &held(folding_bloom, "hold-fold", "stop the reconcile spend"));
+    let gated = reduce(&folding_frozen, &collision, &ResolvedConfigs::default());
+    assert!(member_dispatches(&gated).is_empty(), "a reconcile dispatched on a held bloom: {:?}", gated.effects);
+
+    // A grant is a budget move, which a hold does not gate — so it is admitted
+    // and its lap is deferred by the same choke, rather than refused.
+    let (wedged, _) = step(&frozen, &construct_completed(bloom, "beta-1", "beta", false, None));
+    let (wedged, _) = step(&wedged, &construct_completed(bloom, "beta-2", "beta", false, None));
+    let grant = event(
+        "grant",
+        Fact::GrantAttempts { bloom, workpiece: workpiece("beta"), stage: StageId::Construct, attempts: 1 },
+    );
+    let (granted, decided) = step(&wedged, &grant);
+    assert!(matches!(decided.outcome, Outcome::AttemptsGranted { .. }), "got {:?}", decided.outcome);
+    assert!(member_dispatches(&decided).is_empty(), "and the lap it bought waits for the release");
+    assert!(granted.blooms.get(&bloom).unwrap().deferred_dispatches.contains(&workpiece("beta")));
+
+    // An operator repair is refused outright: its entire product is the `Verify`
+    // dispatch, so admitting it would record a candidate, dispatch nothing, and
+    // answer the operator as though their fix were being judged.
+    let repair = event(
+        "repair",
+        Fact::OperatorRepair {
+            bloom,
+            repair: OperatorRepair {
+                workpiece: workpiece("beta"),
+                candidate: CandidateRef { tree: digest(96), checkout: digest(97) },
+                reason: "one-line fix".into(),
+                operator: "iamacoffeepot".into(),
+            },
+        },
+    );
+    assert!(matches!(
+        reduce(&granted, &repair, &ResolvedConfigs::default()).outcome,
+        Outcome::OperatorRepairRejected(OperatorRepairError::Held),
+    ));
+    let (let_go, _) = step(&granted, &released(bloom, "release", "fixed"));
+    assert!(
+        matches!(reduce(&let_go, &repair, &ResolvedConfigs::default()).outcome, Outcome::OperatorRepairRejected(_)),
+        "and past the release it is judged on its own terms again",
+    );
+}
+
+// #4976 / ADR-0191 §5 — the composition is a workpiece, so its weave repair is
+// held like any other member's lap and re-derived like one.
+//
+// Tripwire on the composition's own line: the release has to rebuild a
+// bloom-wide dispatch aimed at the weave, not a member-layered one aimed at a
+// scope revision, and the composition is the one workpiece the membership list
+// cannot answer for.
+#[test]
+fn a_held_composition_defers_its_weave_repair_and_resumes_it_on_release() {
+    let (green, bloom) = awaiting_composition_review();
+    let (frozen, _) = step(&green, &held(bloom, "hold", "the critic keeps refusing; stop before the next lap"));
+
+    let (refused, decided) = step(&frozen, &review_refused(bloom, "refuse", 40, 70));
+    assert!(matches!(decided.outcome, Outcome::CompositionRewoven { .. }), "got {:?}", decided.outcome);
+    assert!(member_dispatches(&decided).is_empty(), "the weave repair is withheld like any other lap");
+    let record = refused.blooms.get(&bloom).unwrap();
+    assert_eq!(record.composition_findings.len(), 1, "the finding is still filed — a hold gates dispatch, not facts");
+    assert_eq!(composition_cursor(record).stage, StageId::Refine, "and the composition's cursor still moved");
+
+    let (after, decided) = step(&refused, &released(bloom, "release", "read it; re-weave"));
+
+    match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchAttempt { .. })) {
+        Some(Decision::DispatchAttempt { workpiece, stage, candidate, transformation, .. }) => {
+            assert!(workpiece.is_composition(), "the owed dispatch is the composition's");
+            assert_eq!(*stage, StageId::Refine, "at its weave repair");
+            assert_eq!(*candidate, Some(digest(40)), "aimed at the refused weave");
+            assert_eq!(transformation.checkout, digest(41), "checking out the commit that carries it");
+        }
+        other => panic!("expected the composition's re-derived weave repair, got {other:?}"),
+    }
+    assert!(after.blooms.get(&bloom).unwrap().deferred_dispatches.is_empty());
 }

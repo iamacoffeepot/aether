@@ -91,8 +91,13 @@ pub(super) fn composition_progress(stage: StageId, attempt: u32, weave: Candidat
 /// Bloom-wide rather than member-layered, because the composition is nobody's
 /// member — its subject is the whole weave, so a single member's registry has no
 /// standing over it.
-fn composition_line(record: &BloomRecord) -> SealedLine<'_> {
-    SealedLine { configs: record.spec.configs().clone(), catalog: &record.stage_catalog, base: record.spec.base() }
+pub(super) fn composition_line(record: &BloomRecord) -> SealedLine<'_> {
+    SealedLine {
+        configs: record.spec.configs().clone(),
+        catalog: &record.stage_catalog,
+        base: record.spec.base(),
+        held: record.operator_hold.is_some(),
+    }
 }
 
 /// Repair a refused composition **in the composition** (ADR-0191 §5).

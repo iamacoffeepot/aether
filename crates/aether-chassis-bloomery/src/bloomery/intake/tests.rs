@@ -143,6 +143,8 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
             composition_findings: Vec::new(),
             adjudications: Vec::new(),
             operator_repairs: Vec::new(),
+            operator_hold: None,
+            deferred_dispatches: BTreeSet::new(),
             superseded_by: None,
         },
     );

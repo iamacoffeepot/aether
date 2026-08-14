@@ -19,6 +19,9 @@ use crate::values::{
 /// same-stage retry all land the cursor at `progress` and dispatch the stage it
 /// names against the member's current targets (`subject` binds the returned
 /// evidence, `checkout` is the commit the worker checks out, ADR-0152).
+///
+/// Under an operator hold the second effect is a [`Decision::DeferDispatch`]
+/// instead; see [`move_effects_with_candidate`].
 pub(super) fn move_effects(
     bloom: BloomId,
     workpiece: &WorkpieceId,
@@ -42,6 +45,23 @@ pub(super) fn move_effects(
 /// checkout pair retained on the cursor. Aggregate repair re-entry uses this
 /// when an inherited resolution claim names a candidate tree but the member
 /// has no candidate-bearing cursor.
+///
+/// **The one place a post-seal [`Decision::DispatchAttempt`] is built** — every
+/// route into the line comes through here or through [`move_effects`], which
+/// delegates to it: an advance, a retry, a Refine re-entry, a reconcile, a
+/// grant, an operator repair, and the composition's weave repair. That is what
+/// makes the operator hold (#4976) one guard rather than a policy scattered over
+/// eight call sites, and what makes the guard hard to forget: the flag rides on
+/// [`SealedLine`], the only way to reach this function, and a [`SealedLine`] can
+/// only be built from a [`BloomRecord`] — so a dispatch path added later carries
+/// the hold whether or not its author thought about it.
+///
+/// Held, the pair becomes the advance plus a [`Decision::DeferDispatch`]: the
+/// cursor still moves (the fact that produced it reduces and journals exactly as
+/// it always did) and the work order is simply not written. The seal door's
+/// entry dispatch is the one dispatch outside this function, and it is
+/// structurally out of reach of a hold — a hold names an existing bloom, and a
+/// seal is what brings one into existence.
 pub(super) fn move_effects_with_candidate(
     bloom: BloomId,
     workpiece: &WorkpieceId,
@@ -51,10 +71,14 @@ pub(super) fn move_effects_with_candidate(
     candidate: Option<Digest>,
     sealed: SealedLine<'_>,
 ) -> [Decision; 2] {
+    let advance = Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress };
+    if sealed.held {
+        return [advance, Decision::DeferDispatch { bloom, workpiece: workpiece.clone() }];
+    }
     let binding = stage_binding(sealed.catalog, progress.stage);
 
     [
-        Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress },
+        advance,
         Decision::DispatchAttempt {
             bloom,
             workpiece: workpiece.clone(),
@@ -83,8 +107,9 @@ pub(super) struct DispatchTargets {
 
 /// What a dispatch inherits from the bloom that sealed it (ADR-0174): the
 /// flattened configuration registry it resolves through, the stage catalog that
-/// calibrates it, and the base its candidate is built over. All three come off
-/// the bloom's record, so they travel together.
+/// calibrates it, the base its candidate is built over — and whether that bloom
+/// is currently on the operator brake (#4976). All four come off the bloom's
+/// record, so they travel together.
 pub(super) struct SealedLine<'a> {
     /// The member's registry layered over the bloom's.
     pub configs: ConfigRegistry,
@@ -94,18 +119,40 @@ pub(super) struct SealedLine<'a> {
     pub base: Digest,
     /// The catalog the bloom sealed, or the compiled line when it sealed none.
     pub catalog: &'a StageCatalog,
+    /// Whether an operator has frozen this bloom's dispatch (#4976). Carried
+    /// here rather than passed alongside so it cannot be omitted: every
+    /// constructor reads it off the record, and this value is the only way into
+    /// [`move_effects_with_candidate`].
+    pub held: bool,
 }
 
 impl<'a> SealedLine<'a> {
     /// The line one member of `record` dispatches under. Every field is read
     /// off the record and the membership, so a call site cannot assemble two
-    /// of the three from the bloom and the third from somewhere else.
+    /// of the four from the bloom and the rest from somewhere else.
     pub(super) fn of(record: &'a BloomRecord, member: &Membership) -> Self {
         Self {
             configs: member.configs.layered_over(record.spec.configs()),
             catalog: &record.stage_catalog,
             base: record.spec.base(),
+            held: record.operator_hold.is_some(),
         }
+    }
+
+    /// The same line, read as the release itself will leave the record (#4976).
+    ///
+    /// The one caller is
+    /// [`reduce_operator_release`](super::operator_hold::reduce_operator_release),
+    /// and it needs this because the reducer is pure: it decides against the
+    /// record as it stands, where the hold is still set, while the effects it
+    /// returns include the [`Decision::RecordOperatorRelease`] that clears it.
+    /// Without lifting the flag here the release would defer the very dispatches
+    /// it exists to emit. Named rather than assembled inline so the exemption is
+    /// one greppable call with one caller, instead of a `held: false` literal
+    /// that reads like an oversight.
+    pub(super) fn released(mut self) -> Self {
+        self.held = false;
+        self
     }
 }
 

@@ -961,7 +961,10 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         | Decision::RecordStageCatalog { .. }
         | Decision::RecordCompositionFinding { .. }
         | Decision::RecordAdjudication { .. }
-        | Decision::RecordOperatorRepair { .. } => return Ok(None),
+        | Decision::RecordOperatorRepair { .. }
+        | Decision::RecordOperatorHold { .. }
+        | Decision::RecordOperatorRelease { .. }
+        | Decision::DeferDispatch { .. } => return Ok(None),
     };
     Ok(Some(payload))
 }

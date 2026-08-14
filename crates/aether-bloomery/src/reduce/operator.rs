@@ -248,6 +248,22 @@ pub(super) fn reduce_operator_repair(snapshot: &Snapshot, bloom: &BloomId, repai
     if let Some(workpiece) = unapproved_member(record) {
         return rejected(OperatorRepairError::UnapprovedMember(workpiece.clone()));
     }
+    // Held means held (#4976). A repair's entire product is the `Verify`
+    // dispatch it emits, and a held bloom emits none — so admitting one would
+    // record an operator's candidate, dispatch nothing, and answer them as
+    // though the gates were running over it. The order is the operator's to
+    // choose and it is not ambiguous: release the bloom, then repair it.
+    //
+    // The line this draws is not "every door refuses while held". A door refuses
+    // here when the dispatch is the whole of what it produces; a door whose
+    // product the hold does not gate proceeds, with any dispatch it emits
+    // deferred by the ordinary choke. A grant is a budget move and takes the
+    // deferral; an adjudication closes findings and dispatches a landing, which
+    // a hold never gated — and refusing it would freeze the one act a bloom is
+    // usually held *in order* to make.
+    if record.operator_hold.is_some() {
+        return rejected(OperatorRepairError::Held);
+    }
     // Only a stopped workpiece is repairable, for the reason only a wedged
     // member is grantable: one still holding a dispatched attempt would end up
     // with two workers on it.

@@ -92,8 +92,8 @@ pub use reduce::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
     AggregateVerifyError, AttemptCompletedError, BaseMismatch, BloomRecord, BloomStatus, DECISIONS_SCHEMA, Decision,
     Decisions, DecisionsSchemaError, Event, Fact, FoldConflictError, FoldedIntegration, GrantAttemptsError,
-    IntegrateError, LandError, LandingRejectedError, OperatorRepairError, OrphanClaimReleaseError, Outcome,
-    ResolveError, SealConflict, SealError, Snapshot, StageProgress, SupersedeError, VerifyFailedError,
+    IntegrateError, LandError, LandingRejectedError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError,
+    Outcome, ResolveError, SealConflict, SealError, Snapshot, StageProgress, SupersedeError, VerifyFailedError,
     decode_recorded_decisions, is_active_unlanded, reduce, view_of,
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -106,7 +106,7 @@ pub use values::{
     ClassifiedFindings, CompositionFinding, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, DispatchKey,
     Disposition, Evidence, EvidenceKind, ExecutionLimits, FindingClass, Forecast, Harness, JUDGMENT_TAG,
     LandingReceipt, LongContextBand, MECHANICAL_TAG, MemberCandidate, MemberSubject, Membership, ModelOverride,
-    NetworkProfile, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OperatorRepair, OrphanClaimRelease,
+    NetworkProfile, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OperatorHold, OperatorRepair, OrphanClaimRelease,
     OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord, OverrideError, PriceRates, PriceTable, Provenance,
     Question, REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel,
     SealedPriceTable, StageBinding, StageCatalog, StageOverride, StageReceipt, Statement, StudyCall, StudyCost,
