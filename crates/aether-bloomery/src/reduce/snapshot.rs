@@ -74,16 +74,12 @@ pub struct BloomRecord {
     pub spec: BloomSpec,
     /// The stage catalog this bloom runs, resolved once at seal (ADR-0174).
     ///
-    /// Derived state, not sealed content: the spec names the catalog by address
-    /// in its [`configs`](BloomSpec::configs) registry, and this is what that
-    /// address resolved to. Held rather than re-resolved per fact because the
-    /// reducer reads it to decide re-dispatch versus wedge, and that decision has
-    /// to be total — the seal door already refused a bloom whose catalog could not
-    /// be produced, so by the time any later fact arrives the answer exists.
-    ///
-    /// A bloom sealing no catalog holds [`StageCatalog::line`], the compiled
-    /// calibration, which is what makes an unconfigured bloom behave exactly as
-    /// it did before catalogs were sealable.
+    /// Journal-derived: a newly sealed bloom records it as
+    /// [`Decision::RecordStageCatalog`] and the fold copies that value. A
+    /// pre-existing row that never carried the effect keeps the compiled-line
+    /// fallback at record construction (`StageCatalog::sealed_in`) — the
+    /// incident class that fold closes, a no-catalog bloom whose recorded
+    /// catalog otherwise moved with the binary.
     pub stage_catalog: StageCatalog,
     /// The bloom's lifecycle status.
     pub status: BloomStatus,
@@ -485,11 +481,23 @@ impl Snapshot {
             Decision::RecordObservation { head } => {
                 self.observed = *head;
             }
+            Decision::RecordStageCatalog { .. } => self.apply_catalog_effect(effect),
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;
                 }
             }
+        }
+    }
+
+    /// Fold the catalog a seal recorded (#4944). Split out of
+    /// [`apply_effect`](Self::apply_effect) so adding the arm does not blow
+    /// the parent match's line budget.
+    fn apply_catalog_effect(&mut self, effect: &Decision) {
+        if let Decision::RecordStageCatalog { bloom, catalog } = effect
+            && let Some(record) = self.blooms.get_mut(bloom)
+        {
+            record.stage_catalog.clone_from(catalog);
         }
     }
 
@@ -590,16 +598,17 @@ impl Snapshot {
 }
 
 impl BloomRecord {
-    /// The record a sealed spec opens with, its stage catalog resolved.
+    /// The record a sealed spec opens with.
     ///
-    /// The resolution cannot fail here: `reduce` refused any spec whose registry
-    /// named content it was not given, and a resolved set only grows, so an
-    /// address producible at the seal door is producible at the fold. An
-    /// unresolvable catalog therefore means the two ran against different sets,
-    /// which is a broken caller rather than a state to represent — it falls back
-    /// to the compiled line and the bloom runs the calibration it would have run
-    /// with no catalog sealed at all.
+    /// A newly sealed bloom overwrites [`stage_catalog`](Self::stage_catalog)
+    /// from [`Decision::RecordStageCatalog`]. Pre-existing rows without that
+    /// effect keep this compiled-line fallback: [`StageCatalog::sealed_in`],
+    /// which is [`StageCatalog::line`] when the spec sealed no catalog. Stated
+    /// here because a later binary's edited line must not rewrite a no-catalog
+    /// bloom that never recorded one.
     fn sealed(spec: BloomSpec, configs: &ResolvedConfigs) -> Self {
+        // Pre-RecordStageCatalog fallback — compiled line when the spec sealed
+        // no catalog. New seals overwrite from the recorded effect.
         let stage_catalog = StageCatalog::sealed_in(ConfigScopes::bloom_wide(spec.configs()), configs);
         // The fold reads the sealed price table the same way it reads the
         // catalog. A pre-migration (vec-shape) table is named here rather than

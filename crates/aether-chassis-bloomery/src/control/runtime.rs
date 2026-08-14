@@ -40,7 +40,7 @@ use aether_bloomery::control::{
 };
 use aether_bloomery::{
     BloomId, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event, Fact, IdempotencyKey, Outcome,
-    ResolvedConfigs, Snapshot, Unproducible, reduce, view_of,
+    ResolvedConfigs, Snapshot, Unproducible, decode_recorded_decisions, reduce, view_of,
 };
 
 use super::{ControlCore, ControlSetup, ObserveTick};
@@ -414,13 +414,14 @@ impl NativeActor for ControlCore {
             // in force today govern new admissions only; re-reducing history under
             // them resurrects rejections a looser rule now admits and re-refuses
             // admissions a stricter rule no longer would (#4937).
-            let decisions: Decisions = match from_bytes(&record.decisions) {
-                Ok(decisions) => decisions,
-                Err(error) => ctx.fatal_abort(format!(
-                    "boot journal replay: record {} ({}) decision did not decode: {error}",
-                    record.sequence, record.idempotency_key
-                )),
-            };
+            let decisions: Decisions =
+                match decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref()) {
+                    Ok(decisions) => decisions,
+                    Err(error) => ctx.fatal_abort(format!(
+                        "boot journal replay: record {} ({}) {error}",
+                        record.sequence, record.idempotency_key
+                    )),
+                };
             state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
         }
         state.reconcile_claim_refs(ctx);
@@ -831,25 +832,29 @@ fn commit_key(result: &CommitResult) -> &str {
     }
 }
 
+fn membership_mutation(workpiece: &str, bloom: &BloomId) -> MembershipMutation {
+    MembershipMutation { workpiece: workpiece.to_owned(), bloom: bloom.0.as_bytes().to_vec() }
+}
+
+/// The store-commit axes [`project`] builds: membership releases, claims, and
+/// outbox payloads.
+type ProjectedAxes = (Vec<MembershipMutation>, Vec<MembershipMutation>, Vec<OutboxPayload>);
+
 /// Project a decided event's effects into the store commit's typed axes: the
 /// membership releases and claims the `active_membership` table applies, and the
 /// outbox payloads it enqueues. The snapshot-only effects carry no durable store
 /// row — they are rebuilt on replay by `reduce` + `apply` from the journaled event.
-#[allow(clippy::type_complexity)]
-fn project(
-    decisions: &Decisions,
-) -> Result<(Vec<MembershipMutation>, Vec<MembershipMutation>, Vec<OutboxPayload>), WireError> {
+fn project(decisions: &Decisions) -> Result<ProjectedAxes, WireError> {
     let mut releases = Vec::new();
     let mut claims = Vec::new();
     let mut outbox = Vec::new();
     for effect in &decisions.effects {
         match effect {
             Decision::ClaimMembership { workpiece, bloom } => {
-                claims.push(MembershipMutation { workpiece: workpiece.0.clone(), bloom: bloom.0.as_bytes().to_vec() });
+                claims.push(membership_mutation(&workpiece.0, bloom));
             }
             Decision::ReleaseMembership { workpiece, bloom } => {
-                releases
-                    .push(MembershipMutation { workpiece: workpiece.0.clone(), bloom: bloom.0.as_bytes().to_vec() });
+                releases.push(membership_mutation(&workpiece.0, bloom));
             }
             // The landing-receipt topic carries the receipt *and* the landed
             // bloom's membership: the receipt value names no members, so a
@@ -939,7 +944,8 @@ fn project(
             | Decision::RecordWedge { .. }
             | Decision::RevokeResolution { .. }
             | Decision::AdvanceMainline { .. }
-            | Decision::RecordObservation { .. } => {}
+            | Decision::RecordObservation { .. }
+            | Decision::RecordStageCatalog { .. } => {}
         }
     }
     Ok((releases, claims, outbox))

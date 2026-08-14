@@ -266,7 +266,10 @@ impl Topic {
             // off the record, and a memo hit's whole point is that no lane is
             // dispatched — a topic here would enqueue rows for work nobody runs.
             | Decision::RecordVerifyProof { .. }
-            | Decision::RecordVerifyReuse { .. } => None,
+            | Decision::RecordVerifyReuse { .. }
+            // Snapshot-only: the catalog a seal recorded is folded onto the
+            // bloom record. Nothing is dispatched from it.
+            | Decision::RecordStageCatalog { .. } => None,
         }
     }
 }
@@ -588,6 +591,10 @@ pub struct JournalRecord {
     pub decisions: Vec<u8>,
     /// The identity of the build whose reducer decided this event.
     pub decider: String,
+    /// The writing-schema identity stamped beside [`decisions`](Self::decisions)
+    /// (ADR-0187). `None` is a pre-stamp row: implicit current-at-migration.
+    #[serde(default)]
+    pub decisions_schema: Option<String>,
 }
 
 /// Reply to [`ReplayJournal`].
