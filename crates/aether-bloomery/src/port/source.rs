@@ -296,8 +296,10 @@ pub trait SourceBackend {
     /// faulted.
     fn observe_mainline_head(&self) -> Result<Digest, Self::Error>;
 
-    /// Whether `to` is `from` or a descendant of it — the fast-forward check
-    /// an observation uses to refuse a stale or sideways head (#4938).
+    /// Whether `to` is `from` or a descendant of it — the git fast-forward
+    /// check. Observation composes this both ways (#4938): a strict ancestor
+    /// is refused; an unrelated head is a rewrite of the live ref and is
+    /// followable.
     ///
     /// Equal digests and the genesis sentinel are fast-forwards without a
     /// repository round-trip: the first observation after boot binds genesis

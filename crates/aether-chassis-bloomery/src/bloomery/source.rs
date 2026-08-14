@@ -172,7 +172,9 @@ impl SourceShell {
         self.backend.observe_mainline_head()
     }
 
-    /// Whether `to` is `from` or a descendant of it (#4938).
+    /// Whether `to` is `from` or a descendant of it — git ancestry, not the
+    /// observation follow policy. The observe path asks this both ways
+    /// (#4938): a rewrite is followable; only a strict ancestor is refused.
     ///
     /// # Errors
     /// A digest has no correspondence, or the ancestry query faulted.

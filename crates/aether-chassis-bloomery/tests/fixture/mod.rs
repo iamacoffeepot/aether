@@ -511,6 +511,16 @@ impl FixtureHarness {
         self.fake.seed_ref_at(MAINLINE_REF, &head);
     }
 
+    /// Point the repository's mainline at `head` with no ancestry from the
+    /// current tip — a history rewrite of the ref. Distinct from
+    /// [`move_mainline`](Self::move_mainline), which parents the new tip so
+    /// the observation is a git fast-forward. A rewrite used to be refused
+    /// as sideways and then wedged permanently (#4938).
+    pub fn rewrite_mainline(&self, head: Digest) {
+        self.fake.seed_fast_forward(&head, None);
+        self.fake.seed_ref_at(MAINLINE_REF, &head);
+    }
+
     /// Wake the observer until the coordinator's mainline reads `want`.
     ///
     /// The same asynchrony [`await_order`](Self::await_order) absorbs: the

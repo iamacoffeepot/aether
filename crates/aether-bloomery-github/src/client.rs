@@ -1331,8 +1331,9 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         if ancestor == commit {
             return Ok(true);
         }
-        // `ahead` / `identical`: `commit` contains `ancestor`. `behind` /
-        // `diverged` are the backward and sideways cases #4938 refuses.
+        // `ahead` / `identical`: `commit` contains `ancestor`. `behind` is
+        // the stale-ancestor case #4938 refuses. `diverged` is a rewrite of
+        // the live ref; observation asks this both ways and follows it.
         let response = self.request(Method::Get, self.compare_url(ancestor, commit), None)?;
         let compared: GhCompare = decode(&response)?;
         Ok(matches!(compared.status.as_str(), "ahead" | "identical"))
