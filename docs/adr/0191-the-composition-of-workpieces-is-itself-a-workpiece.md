@@ -1,0 +1,40 @@
+# ADR-0191: The composition of workpieces is itself a workpiece
+
+- **Status:** Proposed
+- **Date:** 2026-08-14
+
+## Context
+
+A bloom's members construct in parallel against one sealed base (ADR-0149, ADR-0186), so integration is deferred: after every member resolves, the fold merges their candidates into one tree, and a bloom-level tail — `Integrate`, then an aggregate verify and an aggregate review — judges the result before landing. That tail treats the fold as a checkpoint over the members rather than as a thing in its own right, and two production blooms on 2026-08-14 showed both halves of the cost.
+
+Bloom `10a1228cdced` reached its aggregate review with five members individually resolved. The review's instructions had it read the full diff across every workpiece, and of the nine findings it returned, eight were member-scope correctness defects — real ones, but discovered at the one point in the pipeline where every member is coupled to every other. One member's unresolved finding then held four finished siblings hostage through three review rounds, because the repair unit at that level is the whole bloom. Its successor `05b1f598` exposed the second half: when the aggregate review refused, the coordinator re-entered the implicated members at `Construct` — fresh work orders, no findings attached, reviewed candidates discarded. Four full construct lanes were rebuilding finished work from scratch before the operator stopped the run.
+
+Neither behavior was designed so much as forced. The reducer's ontology has two kinds of things: members, which are genuine subjects — a stage line, a retry budget, a candidate, evidence, findings that can be threaded to them — and the bloom, a container with phases. The fold lives in the container's phases. It has a diff and it has an author (the reconcile lane writes real code at every seam, ADR-0189), but it is not a subject: no candidate slot, no budget, no repair lap, no channel to receive a finding. So a defect discovered in the composed tree has no owner, and the reducer's only levers are member-shaped. It scatters the refusal onto the nearest owners and re-enters them through the only door members have — the entry stage. Everything expensive about the two incidents falls out of that mismatch: defects discovered at bloom level, levers that exist only at member level.
+
+The team's own process, which the pipeline is meant to mechanize, never had this shape. Pull requests are reviewed individually; integration is paid per branch at landing time (merge current main in, prove the head again); and after any number of merges, nobody reviews main — its protection is that everything entering it proved itself against the main it entered. There has never been a post-hoc review of a composite, and there has never been a path that reopens a merged branch because the composite disappointed someone.
+
+## Decision
+
+The pipeline has one kind of thing: the workpiece. Member workpieces walk the line; the composition of their candidates is **itself a workpiece** — a synthetic one, created by the coordinator when every member resolves — and it walks the same line.
+
+1. **Its construct lane is the weave.** Folding the member candidates, with reconcile authoring the seam edits where candidates collide (ADR-0189's lane, re-homed). The weave — the fold plus every reconcile-authored edit — is this workpiece's candidate. This amends ADR-0189 §5: a reconciled seam no longer replaces the colliding member's resolution; it is composition-candidate content, and the member's resolution stands untouched.
+2. **Its verify is the composite gate run.** The full mechanical suite over the composed tree — what the aggregate verify already is, renamed to what it always was: this workpiece's `Verify`.
+3. **Its review judges intent preservation, not the members.** The question is whether each member's original intent came through the weaving. Its subject is the weave: the reconcile-authored edits, the files more than one member touched, and — per member — whether the work order's acceptance is still visibly present in the composed tree. The member work orders and candidates are reference input, not review subject; the member diffs are not re-read. Findings freeze per subject exactly as member review findings do.
+4. **Members are immutable after review.** A member workpiece that has passed its review is done and is never touched again — no stage dispatches against it, and no composition-level outcome re-enters it. A composition-review finding that is genuinely about member code rather than the weave is recorded and filed as new work for a future bloom — fix-forward, as the team process treats main — or adjudicated by the operator with a recorded reason. The refusal re-entry transition (an aggregate refusal dispatching member construct orders) is abolished.
+5. **Composition defects repair in the composition.** The synthetic workpiece has its own findings channel, refine loop, and retry budget: a weave defect is repaired by re-weaving, at the seam, without touching any member. Exhausting its budget wedges the composition with evidence — the existing wedge vocabulary, no new terminal state.
+6. **The bloom-level tail retires into the ordinary line.** `Integrate` / aggregate verify / aggregate review stop being special apparatus and become the synthetic workpiece's `Construct` / `Verify` / `Review`. The bloom returns to being a scheduling boundary. Wire changes stay inside the additive window: new decision variants append at the end of the frozen graph, and the golden fixture extends in the same diff.
+
+## Consequences
+
+- No defect can cost more than the subject it belongs to, because every defect now has a subject to belong to. A weave finding repairs at the seam; a member finding before resolution repairs in that member; a member-scope observation after resolution becomes new work. The all-day stall of `10a1228c` — one member's finding pricing five members' re-runs — is structurally impossible.
+- Review cost scales with the seams, not the tree. A bloom whose members never collide presents a small weave and a per-member acceptance check; the 55-file re-read is gone, and with it the attention drift of fresh full passes over unchanged work.
+- The landing unit is the composition workpiece's resolution, so landing inherits the standard vocabulary: its evidence, its study rows, its wedge state. Supersession gets cheaper for free — member resolutions are frozen and carry across, and only the composition re-weaves against the successor's roster.
+- The reconcile stage's accounting moves from the colliding member to the composition, which matches who owns the outcome: fold order stops charging the later-folding member for the earlier one's overlap.
+- ADR-0189 is amended as stated in §1; ADR-0153's bloom tail is reshaped by §6. Both changes are append-only on the wire.
+
+## Alternatives considered
+
+- **Keep the aggregate review as a full re-read of every member diff.** Rejected on direct evidence: it converts one reviewer's attention sampling into bloom-wide coupling, and both 2026-08-14 incidents were this alternative running as designed.
+- **Restrict the aggregate review's scope but keep the bloom-level apparatus.** The transitional form of this decision; rejected because it leaves the ontology gap in place — findings still land on a subject-less phase, so the re-entry problem needs a second, separate fix. Making the composition a workpiece solves both with vocabulary that already exists.
+- **Skip composition review entirely when reconcile authored nothing.** Rejected: even a textually clean fold can cross intents, and the per-member acceptance check is cheap. The review always runs; its cost floor is the checklist, not the tree.
+- **Re-prove each member against the composed tree instead of reviewing the composition** (the `/resolve` analog). Subsumed: that is exactly the composition workpiece's `Verify`, and it is necessary but not sufficient — it cannot see a dropped intent that still compiles.
