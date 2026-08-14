@@ -19,6 +19,11 @@ pub trait TopicOutbox {
     /// Mark `topic`'s entries at or below `through_sequence` delivered;
     /// returns how many were newly acknowledged.
     fn ack_topic(&mut self, topic: Topic, through_sequence: u64) -> rusqlite::Result<u32>;
+    /// Read `topic`'s acknowledged entries, in sequence order.
+    fn delivered_topic(&mut self, topic: Topic) -> rusqlite::Result<Vec<OutboxEntry>>;
+    /// Return one of `topic`'s acknowledged entries to the undelivered queue;
+    /// `true` when a row moved.
+    fn redeliver_topic(&mut self, topic: Topic, sequence: u64) -> rusqlite::Result<bool>;
     /// Enqueue `payload` under `topic`; returns its sequence. Test seeding —
     /// production enqueue rides the combined `Commit` via `OutboxPayload::new`.
     fn enqueue_topic(&mut self, topic: Topic, payload: &[u8]) -> rusqlite::Result<u64>;
@@ -31,6 +36,14 @@ impl<S: StoreBackend + ?Sized> TopicOutbox for S {
 
     fn ack_topic(&mut self, topic: Topic, through_sequence: u64) -> rusqlite::Result<u32> {
         self.ack_outbox(Some(topic.as_str()), through_sequence)
+    }
+
+    fn delivered_topic(&mut self, topic: Topic) -> rusqlite::Result<Vec<OutboxEntry>> {
+        self.delivered_outbox(topic.as_str())
+    }
+
+    fn redeliver_topic(&mut self, topic: Topic, sequence: u64) -> rusqlite::Result<bool> {
+        self.redeliver_outbox(topic.as_str(), sequence)
     }
 
     fn enqueue_topic(&mut self, topic: Topic, payload: &[u8]) -> rusqlite::Result<u64> {

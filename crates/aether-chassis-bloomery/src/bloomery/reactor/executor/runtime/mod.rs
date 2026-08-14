@@ -67,7 +67,7 @@ use crate::bloomery::dispatch_model;
 use crate::bloomery::executor::OutstandingDispatch;
 use crate::bloomery::intake::{
     Admission, AdmitDecision, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims, UploadedEvidence,
-    admit_uploaded, dispatch_and_record, run_intake_cycle,
+    admit_uploaded, dispatch_and_record, dispatch_nonce, run_intake_cycle,
 };
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
@@ -78,6 +78,10 @@ use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult, Scripte
 use crate::bloomery::{CoordinatorConfig, ExecutorReactorSetup};
 use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend, StoreConfigError, resolve_config};
+
+mod strand;
+
+use strand::readopt_stranded_dispatches;
 
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the dispatch topic and pulls matched results. Zero-field — the timer carries
@@ -754,7 +758,7 @@ fn drain_and_dispatch(
         // the displayed digest by reducer construction.
         let displayed = payload.candidate.unwrap_or(payload.scope_revision);
         let mut record = DispatchRecord {
-            nonce: Nonce(format!("dispatch-{}", entry.sequence)),
+            nonce: dispatch_nonce(entry.sequence),
             bloom: BloomId(payload.bloom),
             workpiece: payload.workpiece,
             scope_revision: payload.scope_revision,
@@ -979,7 +983,7 @@ fn drain_and_dispatch_aggregate(
             transformation.description = Some(task);
         }
         let record = DispatchRecord {
-            nonce: Nonce(format!("dispatch-{}", entry.sequence)),
+            nonce: dispatch_nonce(entry.sequence),
             bloom: BloomId(payload.bloom),
             // A bloom-level order has no member axis (ADR-0153): the stage
             // discriminates at intake, and the empty workpiece never routes.
@@ -1080,7 +1084,7 @@ fn drain_and_dispatch_aggregate_verify(
         // inputs[0] — also the displayed digest the returning verdict must bind.
         let displayed = payload.transformation.inputs[0];
         let record = DispatchRecord {
-            nonce: Nonce(format!("dispatch-{}", entry.sequence)),
+            nonce: dispatch_nonce(entry.sequence),
             bloom: BloomId(payload.bloom),
             // A bloom-level order has no member axis: the stage discriminates at
             // intake, and the empty workpiece never routes.
@@ -1858,6 +1862,12 @@ impl NativeActor for ExecutorReactorCapability {
         // outstanding. A read fault fails boot for the same reason `seed_tracked`'s
         // does — mounting with a silently empty recovery set is the bug, not the fix.
         let reconciled = executor.reconcile(&seed_dispatches(&mut store).map_err(|e| BootError::Other(Box::new(e)))?);
+        // The third leg (issue #4956): both legs above are scoped to the orders
+        // the store still holds, so a dispatch whose order was spent without its
+        // fact reaching the journal leaves them nothing to find and the member
+        // permanently parked. Re-queue those for the ordinary drain. A read
+        // fault fails boot for the same reason the two above do.
+        let restranded = readopt_stranded_dispatches(&mut store).map_err(|e| BootError::Other(Box::new(e)))?;
         let interval = Duration::from_secs(config.poll_interval_secs.max(1));
         let timer = spawn_timer(
             Arc::clone(&mailer),
@@ -1874,6 +1884,7 @@ impl NativeActor for ExecutorReactorCapability {
             retracked = tracked.len(),
             readopted = reconciled.readopted.len(),
             reclaimed = reconciled.reclaimed,
+            requeued = restranded.len(),
             "executor dispatch reactor mounted; polling the store for dispatch decisions",
         );
         // The push side resolves an admitted capture's commit through its own

@@ -6,12 +6,12 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    Admit, BloomId, CandidateRef, Digest, Event, Evidence, Fact, IdempotencyKey, InwardError, Nonce, ResolutionClaim,
-    StageCatalog, StageId, StageResult, StageVerdict, StudyCall, StudyCost, VerifyFailureSet, WorkpieceId,
-    normalize_stage_result,
+    Admit, BloomId, CandidateRef, Digest, Event, Evidence, Fact, InwardError, Nonce, ResolutionClaim, StageCatalog,
+    StageId, StageResult, StageVerdict, StudyCall, StudyCost, VerifyFailureSet, WorkpieceId, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
+use super::admission_key::AdmissionKey;
 use super::dispatch::DispatchRecord;
 use crate::bloomery::findings::{FindingsDecomposition, decompose_findings};
 use crate::store::{OutstandingOrder, StoreBackend};
@@ -317,7 +317,7 @@ fn aggregate_review_event(
     };
 
     let event = Event {
-        idempotency_key: IdempotencyKey(format!("aether.bloomery.aggregate_review:{}", record.nonce.0)),
+        idempotency_key: AdmissionKey::AggregateReview.of(&record.nonce.0),
         fact: Fact::AggregateReviewCompleted { bloom: record.bloom, passed, evidence, implicated },
     };
     Ok((event, decomposition))
@@ -333,7 +333,7 @@ fn aggregate_review_event(
 /// the completion key a later real verdict on the same order would carry.
 fn aggregate_review_executor_fault_event(record: &DispatchRecord, evidence: Evidence) -> Event {
     Event {
-        idempotency_key: IdempotencyKey(format!("aether.bloomery.aggregate_review_executor_fault:{}", record.nonce.0)),
+        idempotency_key: AdmissionKey::AggregateReviewExecutorFault.of(&record.nonce.0),
         fact: Fact::AggregateReviewExecutorFault { bloom: record.bloom, evidence },
     }
 }
@@ -408,7 +408,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     let event = if upload.verdict == StageVerdict::Parked {
         parked_under = Some(evidence.detail);
         Event {
-            idempotency_key: IdempotencyKey(format!("aether.bloomery.park:{}", record.nonce.0)),
+            idempotency_key: AdmissionKey::Park.of(&record.nonce.0),
             fact: Fact::AdmitEvidence { bloom: record.bloom, evidence },
         }
     } else if record.stage == StageId::Verify {
@@ -420,12 +420,12 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
                 evidence,
             };
             Event {
-                idempotency_key: IdempotencyKey(format!("aether.bloomery.integrate:{}", record.nonce.0)),
+                idempotency_key: AdmissionKey::Integrate.of(&record.nonce.0),
                 fact: Fact::Integrate { bloom: record.bloom, claim },
             }
         } else {
             Event {
-                idempotency_key: IdempotencyKey(format!("aether.bloomery.verify_failed:{}", record.nonce.0)),
+                idempotency_key: AdmissionKey::VerifyFailed.of(&record.nonce.0),
                 fact: Fact::VerifyFailed {
                     bloom: record.bloom,
                     workpiece: record.workpiece.clone(),
@@ -436,7 +436,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
         }
     } else if admits_as_attempt_completed(record.stage) {
         Event {
-            idempotency_key: IdempotencyKey(format!("aether.bloomery.attempt:{}", record.nonce.0)),
+            idempotency_key: AdmissionKey::Attempt.of(&record.nonce.0),
             fact: Fact::AttemptCompleted {
                 bloom: record.bloom,
                 workpiece: record.workpiece.clone(),
@@ -459,7 +459,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
         // axis and no implication: a compiler names no owners, so the reducer
         // re-opens every member on a failure.
         Event {
-            idempotency_key: IdempotencyKey(format!("aether.bloomery.aggregate_verify:{}", record.nonce.0)),
+            idempotency_key: AdmissionKey::AggregateVerify.of(&record.nonce.0),
             fact: Fact::AggregateVerifyCompleted {
                 bloom: record.bloom,
                 passed: verdict_passed(upload.verdict),
