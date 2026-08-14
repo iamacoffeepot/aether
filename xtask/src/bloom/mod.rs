@@ -41,10 +41,9 @@ impl Endpoint {
 
 /// `AETHER_HTTP_PORT`, then the coordinator's compiled default.
 fn coordinator_port() -> u16 {
-    env::vars()
-        .find_map(|(name, value)| (name == "AETHER_HTTP_PORT").then_some(value))
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_HTTP_PORT)
+    // Operator tooling reading the coordinator's REST bind — not cap config.
+    #[allow(clippy::disallowed_methods)]
+    env::var("AETHER_HTTP_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(DEFAULT_HTTP_PORT)
 }
 
 /// Drive the Bloomery coordinator REST surface.
