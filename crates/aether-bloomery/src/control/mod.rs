@@ -735,6 +735,16 @@ pub struct Query {
     /// request digest is the more specific read.
     #[serde(default)]
     pub release: Option<Vec<u8>>,
+    /// Read the calibration document instead of a projection (ADR-0184): the
+    /// capability ledger the control core folded beside its snapshot, paired
+    /// with the forecast grade of every bloom in it.
+    ///
+    /// A flag rather than a third digest field because it selects a whole-fleet
+    /// read with nothing to name. It takes precedence over
+    /// [`bloom`](Self::bloom) and yields to [`release`](Self::release), which is
+    /// the same most-specific-first order those two already resolve in.
+    #[serde(default)]
+    pub calibration: bool,
 }
 
 /// Reply to [`Query`]: the requested projection as canonical
@@ -786,6 +796,15 @@ pub enum QueryResult {
     /// keeps the answer side honest too. Appended so the prior variants' wire
     /// discriminants are unchanged.
     ReleaseNotFound,
+    /// The calibration read, wire-encoded
+    /// [`CalibrationDocument`](crate::calibration::CalibrationDocument)
+    /// (ADR-0184). Appended so the prior variants' wire discriminants are
+    /// unchanged.
+    Calibration {
+        /// The wire-encoded `CalibrationDocument`.
+        #[serde(with = "aether_data::bytes")]
+        document: Vec<u8>,
+    },
 }
 
 /// The `aether.source.*` claim transact-mail kinds the control core sends to

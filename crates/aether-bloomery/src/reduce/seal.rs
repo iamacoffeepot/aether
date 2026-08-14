@@ -13,7 +13,7 @@ use super::{
     BloomStatus, Decision, Decisions, Outcome, SealConflict, SealError, Snapshot, StageProgress, SupersedeError,
 };
 use crate::digest::Digest;
-use crate::ids::BloomId;
+use crate::ids::{BloomId, WorkpieceId};
 use crate::values::{
     BloomSpec, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, EvidenceKind, MemberCandidate, Membership,
     ModelOverride, ResolvedConfigs, StageCatalog, Transformation, Unproducible, VerifyFailureSet,
@@ -129,6 +129,25 @@ pub(super) fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec, configs: &Resol
         effects.extend(entry_dispatch_effects(bloom, member, spec.base(), spec.configs(), &catalog));
     }
     Decisions { outcome: Outcome::Sealed(bloom), effects }
+}
+
+/// Record a cross-member declared-surface overlap the seal door observed
+/// (#4931).
+///
+/// A record and nothing else — no effects, no projection change. The overlap is
+/// advice the operator acts on, so the reducer's job is to put what the door saw
+/// where a replay will find it, next to the seal it was observed at. The
+/// admission this warns about is decided by [`reduce_seal`] on its own terms and
+/// is not consulted here: a warning that could refuse a seal would be the gate
+/// the issue deliberately did not build.
+///
+/// The pairwise scan itself stays at the door because a sealed [`Membership`]
+/// carries no declared surface — see [`crate::Fact::SurfaceOverlap`].
+pub(super) fn reduce_surface_overlap(members: &[WorkpieceId], intersection: &[String]) -> Decisions {
+    Decisions {
+        outcome: Outcome::SurfaceOverlap { members: members.to_vec(), intersection: intersection.to_vec() },
+        effects: Vec::new(),
+    }
 }
 
 /// The per-member admission checks a bloom's membership must pass before it can

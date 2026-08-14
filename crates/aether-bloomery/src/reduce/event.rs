@@ -1,6 +1,7 @@
 //! The reducer's input vocabulary: the closed set of admitted facts and the
 //! idempotency key each arrives under (ADR-0149 §The control core).
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
@@ -454,6 +455,31 @@ pub enum Fact {
         bloom: BloomId,
         /// Why, and by whom.
         release: OperatorHold,
+    },
+    /// Two members of one seal declared surfaces that overlap (#4931).
+    ///
+    /// The door is the only place that can see this. A declared surface rides
+    /// the seal *request* rather than the sealed spec — `BloomSpec` is
+    /// content-addressed, so a member cannot carry one without re-digesting
+    /// every bloom id — which leaves the reducer holding both memberships and
+    /// neither surface. So the host, which holds every member's projection at
+    /// once, intersects the pairs and states what it found; the reducer records
+    /// it.
+    ///
+    /// A warning, never a refusal. Coarse globs over-predict — two members
+    /// declaring the same crate glob routinely fold clean — so an overlap that
+    /// blocked would refuse far more seals than it saved. It is journaled beside
+    /// the seal so the operator deciding whether to proceed, and anyone reading
+    /// back a fold conflict afterwards, sees that the door named it first.
+    ///
+    /// Appended past [`Fact::OperatorRelease`] so every prior fact keeps its
+    /// wire discriminant.
+    SurfaceOverlap {
+        /// The two members whose declared surfaces intersect, in sealed
+        /// membership order.
+        members: Vec<WorkpieceId>,
+        /// The globs both declared surfaces permit, sorted and deduplicated.
+        intersection: Vec<String>,
     },
 }
 
