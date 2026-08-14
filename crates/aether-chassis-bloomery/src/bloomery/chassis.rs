@@ -152,13 +152,14 @@ fn projection_shell(github: &GithubConnectionConfig, configured: bool) -> Result
 fn actor_setups(
     github: &GithubConnectionConfig,
     coordinator: &CoordinatorConfig,
+    session: &SessionConfig,
 ) -> Result<BloomeryActorSetups, BootError> {
     let configured = github.uses_fixture() || github.missing_connection_knobs().is_empty();
     let repository = configured.then(|| (github.owner.clone(), github.repo.clone()));
     let correspondence = correspondence_store(github, &coordinator.store_path)?;
     let source = source_shell(github, coordinator, Arc::clone(&correspondence))?;
     let executor = (!(!configured && !coordinator.local_lane_enabled))
-        .then(|| ExecutorShell::connect(github, coordinator, Arc::clone(&correspondence)))
+        .then(|| ExecutorShell::connect(github, coordinator, Arc::clone(&correspondence), session))
         .transpose()
         .map_err(|error| BootError::Other(Box::new(error)))?;
     let executor_correspondence = mounted_correspondence(executor.as_ref(), &correspondence);
@@ -369,7 +370,7 @@ impl BootableChassis for BloomeryChassis {
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
         };
-        let setups = actor_setups(&github, &coordinator)?;
+        let setups = actor_setups(&github, &coordinator, &session)?;
 
         // #3947's explicit `with_aborter` is superseded by the seam inversion:
         // `composed` (which `build` routes through) installs `OutboundFatalAborter`
@@ -520,7 +521,8 @@ mod tests {
             "the default config names no fixture backend; configuration alone would not refuse"
         );
 
-        let setups = actor_setups(&github, &CoordinatorConfig::default()).expect("actor setups resolve under defaults");
+        let setups = actor_setups(&github, &CoordinatorConfig::default(), &SessionConfig::default())
+            .expect("actor setups resolve under defaults");
         let refusal = setups
             .executor
             .pusher

@@ -3,7 +3,7 @@
 //! `review.critic` lanes run through.
 
 use std::io::Write;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::{fs, thread};
 
 use anyhow::{Context, Result, bail};
@@ -59,6 +59,24 @@ fn without_resume(args: &TransformArgs) -> TransformArgs {
     let mut args = args.clone();
     args.resume = None;
     args
+}
+
+/// Did the CLI refuse the `--resume` handle *before* starting a billed turn?
+///
+/// A non-zero exit after the CLI emitted a transcript is an operational
+/// failure (auth, crash, SIGKILL) — not a missing session file — and must
+/// not launch a second full-cost cold run. Spawn failures never reach here.
+fn resume_handle_rejected(status: ExitStatus, stdout: &[u8], stderr: &[u8]) -> bool {
+    if status.success() || !stdout.is_empty() {
+        return false;
+    }
+    let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    let names_the_handle = stderr.contains("session") || stderr.contains("resume") || stderr.contains("conversation");
+    let rejected = stderr.contains("not found")
+        || stderr.contains("unknown")
+        || stderr.contains("invalid")
+        || stderr.contains("no conversation");
+    names_the_handle && rejected
 }
 
 /// Assemble the headless-Claude prompt for the construct lane from the lane-owned
@@ -139,13 +157,7 @@ pub(super) fn run_headless_claude(
     scratch.export(&mut claude);
     sccache::export(cache, &mut claude);
     claude.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = match claude.spawn() {
-        Ok(child) => child,
-        Err(_error) if args.resume.is_some() => {
-            return run_headless_claude(&prompt, &without_resume(args), scratch, cache, peak);
-        }
-        Err(error) => return Err(error).context("run headless claude"),
-    };
+    let mut child = claude.spawn().context("run headless claude")?;
     // Pipe the prompt on a separate thread and reap the child unconditionally: if
     // the write races an early exit (broken pipe) or the prompt outgrows the OS
     // pipe buffer, returning on the write error before `wait_with_output` would
@@ -169,9 +181,11 @@ pub(super) fn run_headless_claude(
     // *before* the writer's result: an early child exit makes the stdin write race
     // a broken pipe, so joining the writer first would surface that downstream
     // symptom and mask the child's real exit cause.
-    if !run.status.success() && args.resume.is_some() {
-        // The harness rejected the resume handle (session file gone, unknown
-        // id). Degrade to a fresh launch rather than failing the dispatch.
+    if args.resume.is_some() && resume_handle_rejected(run.status, &run.stdout, &run.stderr) {
+        // Session file gone / unknown id — the CLI never started the billed
+        // turn. Any other non-zero (auth, crash after tokens, SIGKILL) is
+        // the operational failure the comment above names; retrying that
+        // cold would double the spend this pool exists to cut.
         let _ = writer.join();
         return run_headless_claude(&prompt, &without_resume(args), scratch, cache, peak);
     }
@@ -197,7 +211,9 @@ pub(super) fn run_headless_claude(
 
 #[cfg(test)]
 mod tests {
-    use super::{construct_argv, tail};
+    use super::{construct_argv, resume_handle_rejected, tail};
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
 
     #[test]
     fn tail_snaps_to_a_char_boundary_without_panicking() {
@@ -235,6 +251,26 @@ mod tests {
         let argv = construct_argv(Some("claude-opus-4-8"), Some("high"), Some("sess-1"));
         let at = argv.iter().position(|a| a == "--resume").expect("a resume launch names the session");
         assert_eq!(argv[at + 1], "sess-1");
+    }
+
+    #[test]
+    fn a_missing_session_is_a_resume_reject_and_a_crash_after_tokens_is_not() {
+        // Tripwire: a non-zero exit used to relaunch cold whenever `--resume`
+        // was on argv, so an auth failure or a crash that had already billed
+        // doubled the spend. Only a handle the CLI refused *before* emitting
+        // a transcript degrades.
+        let failed = ExitStatus::from_raw(1 << 8);
+        assert!(resume_handle_rejected(failed, b"", b"No conversation found with session ID sess-1"));
+        assert!(resume_handle_rejected(failed, b"", b"error: unknown session"));
+        assert!(
+            !resume_handle_rejected(failed, br#"{"type":"result"}"#, b"No conversation found"),
+            "a transcript means the CLI ran — do not double-spend"
+        );
+        assert!(
+            !resume_handle_rejected(failed, b"", b"authentication failed"),
+            "an auth failure is not a missing session file"
+        );
+        assert!(!resume_handle_rejected(ExitStatus::from_raw(0), b"", b"No conversation found"));
     }
 
     #[test]

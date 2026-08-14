@@ -19,7 +19,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 use aether_bloomery::{Digest, Harness, PriceRates, PriceTable};
 
 use crate::session::{
-    AcquireMiss, AcquireOutcome, LeaseToken, LeasedSession, SessionBackend, SessionKey, SessionManifest,
+    AcquireMiss, AcquireOutcome, LeaseToken, LeasedSession, SessionBackend, SessionConfig, SessionKey, SessionManifest,
     SqliteSessionStore,
 };
 
@@ -139,11 +139,35 @@ impl SessionReuse {
     }
 
     /// An in-memory pool with the capability's default eligibility knobs.
+    ///
+    /// Isolated (`:memory:`), so tests do not share a table with the mounted
+    /// capability or with each other. Production opens through
+    /// [`from_config`](Self::from_config).
     #[must_use]
     pub fn memory(prices: PriceTable) -> Self {
-        let pool =
-            SqliteSessionStore::open(":memory:", 55 * 60, 15 * 60, 150_000).expect("an in-memory session pool opens");
+        let defaults = SessionConfig::default();
+        let pool = SqliteSessionStore::open(
+            ":memory:",
+            defaults.cache_ttl_cutoff_mins.saturating_mul(60),
+            defaults.lease_ttl_mins.saturating_mul(60),
+            defaults.context_cap_tokens,
+        )
+        .expect("an in-memory session pool opens");
         Self::new(Box::new(pool), prices)
+    }
+
+    /// Open the same pool the mounted [`SessionPoolCapability`](crate::session::SessionPoolCapability)
+    /// opened: the operator's `SessionConfig` path and eligibility knobs, not
+    /// literals. The acquire inequality still needs the bloom's sealed rates,
+    /// which ride each [`AcquireRequest`] rather than this constructor.
+    pub fn from_config(session: &SessionConfig) -> rusqlite::Result<Self> {
+        let pool = SqliteSessionStore::open(
+            session.store_path(),
+            session.cache_ttl_cutoff_mins.saturating_mul(60),
+            session.lease_ttl_mins.saturating_mul(60),
+            session.context_cap_tokens,
+        )?;
+        Ok(Self::new(Box::new(pool), PriceTable::default()))
     }
 
     /// Pin the clock the next acquire/deposit stamps — tests only.
@@ -174,6 +198,7 @@ impl SessionReuse {
             effort: request.effort.to_owned(),
             task: request.task.to_owned(),
         };
+        let prices = request.prices.unwrap_or(&self.prices);
         let head_hash = self.head_hash_for(request.worktree);
         let slot_path = canonical_slot(request.worktree);
 
@@ -198,7 +223,7 @@ impl SessionReuse {
             (state.deposits.get(&key).copied().unwrap_or(0), state.last_context.get(&key).copied())
         };
         let predicted_turns = SEED_NAMED_SITE_TURNS;
-        let predicted_arm = self.predicted_arm(request.model, deposits, last_context, predicted_turns);
+        let predicted_arm = Self::predicted_arm(prices, request.model, deposits, last_context, predicted_turns);
 
         if predicted_arm == ReuseArm::Fresh {
             return ReusePlan {
@@ -280,7 +305,13 @@ impl SessionReuse {
         state.slot.insert(plan.key.clone(), plan.slot_path.clone());
     }
 
-    fn predicted_arm(&self, model: &str, deposits: u32, last_context: Option<u64>, n_hat: u64) -> ReuseArm {
+    fn predicted_arm(
+        prices: &PriceTable,
+        model: &str,
+        deposits: u32,
+        last_context: Option<u64>,
+        n_hat: u64,
+    ) -> ReuseArm {
         // Retry-index seed: resume on lap 2, cold on lap 3+ — a session that
         // failed twice is carrying a wrong theory. Yields to the inequality
         // once a prior lap left a T and the sealed table prices this model.
@@ -293,7 +324,7 @@ impl SessionReuse {
         let Some(t_tokens) = last_context else {
             return ReuseArm::Resumed;
         };
-        let Some(row) = self.prices.row(model) else {
+        let Some(row) = prices.row(model) else {
             return ReuseArm::Resumed;
         };
         match resume_is_cheaper(row, t_tokens, n_hat) {
@@ -345,10 +376,25 @@ pub struct AcquireRequest<'a> {
     pub model: &'a str,
     /// The resolved effort tier.
     pub effort: &'a str,
-    /// The pool task axis — the work-order description, or the command.
+    /// The pool task axis — command plus work-order description, so a critic
+    /// cannot resume the constructor that shares its model, effort, and text.
     pub task: &'a str,
     /// The slot checkout this lap builds in.
     pub worktree: &'a Path,
+    /// The bloom's sealed price table, when the host resolved one. `None`
+    /// falls back to the table this [`SessionReuse`] was built with (tests).
+    pub prices: Option<&'a PriceTable>,
+}
+
+/// The pool `task` axis: the lane command, then the work-order description.
+///
+/// Command first so `construct.implement` and `review.critic` never share a
+/// session even when they carry the same description; the description keeps
+/// cross-work-order reuse out. A description-less order keys on the command
+/// alone.
+#[must_use]
+pub fn pool_task(command: &str, description: Option<&str>) -> String {
+    description.filter(|task| !task.is_empty()).map_or_else(|| command.to_owned(), |task| format!("{command}\n{task}"))
 }
 
 /// Resume iff `n̂·T < (w/r)·Ŵ + 0.5·n̂·Ŵ + (o/r)·Δn̂·v̂`.
@@ -535,6 +581,7 @@ mod tests {
             effort: "high",
             task: "issue-4902",
             worktree: Path::new("/slot-0"),
+            prices: None,
         });
         assert_eq!(plan.arm, ReuseArm::Fresh);
         assert_eq!(plan.miss, Some(MissReason::Grok));
@@ -554,6 +601,7 @@ mod tests {
             effort: "high",
             task: "issue-4902",
             worktree: Path::new("/slot-0"),
+            prices: None,
         });
         assert_eq!(plan.arm, ReuseArm::Resumed, "lap 2 resumes the deposited session");
         assert_eq!(plan.resume.as_deref(), Some("sess-1"));
@@ -573,6 +621,7 @@ mod tests {
             effort: "high",
             task: "missing",
             worktree: Path::new("/slot-0"),
+            prices: None,
         });
         assert_eq!(cold.miss, None, "lap 1 is a seed-cold, not a pool miss");
         assert_eq!(cold.arm, ReuseArm::Fresh);
@@ -586,6 +635,7 @@ mod tests {
             effort: "high",
             task: "issue-4902",
             worktree: Path::new("/slot-0"),
+            prices: None,
         });
         assert_eq!(head.miss, Some(MissReason::HeadHash));
         assert!(head.resume.is_none());
@@ -598,6 +648,7 @@ mod tests {
             effort: "high",
             task: "issue-4902",
             worktree: Path::new("/slot-0"),
+            prices: None,
         });
         assert_eq!(aged.miss, Some(MissReason::Age));
 
@@ -611,6 +662,7 @@ mod tests {
             effort: "high",
             task: "issue-4902",
             worktree: Path::new("/slot-0"),
+            prices: None,
         });
         assert_eq!(over.miss, Some(MissReason::ContextCap));
 
@@ -624,6 +676,7 @@ mod tests {
             effort: "high",
             task: "issue-4902",
             worktree: Path::new("/slot-1"),
+            prices: None,
         });
         assert_eq!(mismatch.miss, Some(MissReason::SlotMismatch));
         assert!(mismatch.resume.is_none());

@@ -8,11 +8,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::digest::ContentAddressed;
 use aether_bloomery::{
-    BackendObjectId, CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce,
-    ResolvedModel, SharedCorrespondence, StageVerdict, StudyCost, Transformation, VerifyFailureSet, WorkHandle,
-    WorkOrder, digest_of, is_model_lane,
+    BackendObjectId, CandidateRef, Conclusion, ConfigRegistry, ConfigScopes, Digest, EvidenceRef, ExecutionStatus,
+    ExecutorBackend, Nonce, PriceTable, ResolvedModel, SharedCorrespondence, StageVerdict, StudyCost, Transformation,
+    VerifyFailureSet, WorkHandle, WorkOrder, digest_of, is_model_lane,
 };
 use aether_bloomery_github::parse_study;
+use aether_data::Kind;
+use aether_data::wire::from_bytes;
 use serde::Serialize;
 use std::fs;
 
@@ -25,6 +27,7 @@ use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes, ReconcileReport};
 use crate::bloomery::intake::NameEvidenceClaims;
+use crate::session::SessionConfig;
 use crate::store::{SqliteStore, StoreBackend};
 
 /// The suffix distinguishing a run's evidence directory from the lane slot
@@ -360,8 +363,17 @@ impl LocalExecutor {
     /// resolves through, and the config'd scratch-worktree base dir. The model a
     /// run executes under is not config — it rides each order as the resolved
     /// agent profile the host overlaid at dispatch (ADR-0149 §The line).
+    ///
+    /// `session` is the same [`SessionConfig`] the chassis mounts on
+    /// [`SessionPoolCapability`](crate::session::SessionPoolCapability): the
+    /// executor consumes that pool rather than opening a second one with
+    /// hardcoded knobs.
     #[must_use]
-    pub fn from_config(config: &CoordinatorConfig, correspondence: SharedCorrespondence) -> Self {
+    pub fn from_config(
+        config: &CoordinatorConfig,
+        correspondence: SharedCorrespondence,
+        session: &SessionConfig,
+    ) -> Self {
         let identity = CaptureIdentity { name: config.operator_name.clone(), email: config.operator_email.clone() };
 
         let backend = Self::new(
@@ -370,8 +382,18 @@ impl LocalExecutor {
             config.local_worktree_base.clone(),
         )
         .with_max_concurrent_lanes(config.max_concurrent_lanes)
-        .with_lane_build(&config.lane_target_base, config.lane_build_jobs)
-        .with_session_reuse(super::SessionReuse::memory(aether_bloomery::PriceTable::default()));
+        .with_lane_build(&config.lane_target_base, config.lane_build_jobs);
+        let backend = match super::SessionReuse::from_config(session) {
+            Ok(sessions) => backend.with_session_reuse(sessions),
+            Err(error) => {
+                tracing::warn!(
+                    path = %session.store_path(),
+                    %error,
+                    "local executor backend: session pool unavailable; every lap launches cold",
+                );
+                backend
+            }
+        };
         // A store this backend cannot open costs the landing proposal its
         // authored title, never a candidate: the capture still commits and the
         // land path still falls back, so the miss warns rather than failing boot.
@@ -569,14 +591,47 @@ impl LocalExecutor {
         // Claude arm only. A grok-keyed acquire is a named miss inside the
         // helper; other harnesses do not resume.
         let profile = pending.profile.as_ref()?;
-        let task = pending.task.as_deref().unwrap_or(&pending.command);
+        // Command + description: a critic that shares the construct lap's
+        // model, effort, and work-order text must not resume the constructor.
+        let task = super::session_reuse::pool_task(&pending.command, pending.task.as_deref());
+        let prices = self.sealed_prices(&pending.nonce);
         Some(sessions.acquire(&super::AcquireRequest {
             harness: Some(profile.harness),
             model: &profile.model,
             effort: profile.effort.as_str(),
-            task,
+            task: &task,
             worktree: worktree_dir,
+            prices: Some(&prices),
         }))
+    }
+
+    // The bloom's sealed price table, looked up from the outstanding order
+    // the reactor recorded. An empty table (no store, no sealed rates, a
+    // decode miss) leaves the seed to decide — resume on lap 2 — rather
+    // than inventing rates.
+    fn sealed_prices(&self, nonce: &str) -> PriceTable {
+        let Some(messages) = self.messages.as_ref() else {
+            return PriceTable::default();
+        };
+        let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
+        let Ok(Some(order)) = store.lookup_order(nonce) else {
+            return PriceTable::default();
+        };
+        let Ok(registry) = from_bytes::<ConfigRegistry>(&order.configs) else {
+            return PriceTable::default();
+        };
+        let Some(address) = ConfigScopes::bloom_wide(&registry).address::<PriceTable>() else {
+            return PriceTable::default();
+        };
+        let Ok(Some((kind, bytes))) = store.lookup_config(address.as_bytes()) else {
+            return PriceTable::default();
+        };
+        if kind != PriceTable::NAME {
+            return PriceTable::default();
+        }
+        let table = PriceTable::from_sealed(&bytes).unwrap_or_default();
+        drop(store);
+        table
     }
 
     fn start_reserved(&self, pending: PendingRun, slot: usize) -> Result<(), LocalExecutorError> {
