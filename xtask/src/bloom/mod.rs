@@ -11,6 +11,7 @@ mod hex;
 mod http;
 mod plan;
 mod profiles;
+mod roll;
 mod status;
 
 use std::env;
@@ -21,6 +22,7 @@ use clap::{Args, Subcommand};
 
 use crate::bloom::client::{Client, bloom_in};
 use crate::bloom::plan::{BaseChoice, ProjectionInput};
+use crate::bloom::roll::RollArgs;
 
 /// Coordinator REST bind when `AETHER_HTTP_PORT` is unset — the same default
 /// `aether-chassis-bloomery` uses (`DEFAULT_HTTP_PORT`).
@@ -65,6 +67,9 @@ enum BloomCommand {
     Seal(SealArgs),
     /// Seal a successor on the current observed head and transfer the claim.
     Supersede(SupersedeArgs),
+    /// Drive the ADR-0186 day roll: quiesce, sync the day back to main,
+    /// cut tomorrow from post-sync main, and hand over the repoint.
+    Roll(RollArgs),
 }
 
 #[derive(Args, Debug)]
@@ -162,6 +167,7 @@ fn run_on(endpoint: &Endpoint, command: &BloomCommand) -> Result<String> {
         BloomCommand::Status => Ok(status::render(&client.view()?)),
         BloomCommand::Seal(args) => run_seal(&client, args),
         BloomCommand::Supersede(args) => run_supersede(&client, args),
+        BloomCommand::Roll(args) => roll::run(&client, args),
     }
 }
 

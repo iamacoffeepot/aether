@@ -113,20 +113,63 @@ fn join_names<'a>(names: impl Iterator<Item = &'a String>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::env;
     use std::fs;
     use std::path::PathBuf;
     use std::process;
 
-    use aether_bloomery::{Forecast, ModelOverride, PriceTable};
+    use aether_bloomery::{Forecast, Harness, ModelOverride, PriceTable, StageCatalog, StageId, StageOverride};
     use aether_data::Kind;
 
     use super::{resolve, shipped_path};
+
+    /// The three seat bundles: the standing all-Claude posture and the two
+    /// cross-judge overrides.
+    const SEAT_BUNDLES: [&str; 3] = ["claude-every-seat", "cross-judge-opus-construct", "cross-judge-grok-construct"];
 
     fn write_profiles(stem: &str, text: &str) -> PathBuf {
         let path = env::temp_dir().join(format!("aether-xtask-profiles-{stem}-{}", process::id()));
         fs::write(&path, text).expect("write profiles fixture");
         path
+    }
+
+    /// The typed override a shipped profile authors, back through the same
+    /// value the seal door receives.
+    fn shipped_override(profile: &str) -> ModelOverride {
+        let resolved = resolve(profile, &shipped_path()).unwrap_or_else(|error| panic!("shipped {profile}: {error:#}"));
+        let Some((_, value)) = resolved.configs.iter().find(|(kind, _)| kind == ModelOverride::NAME) else {
+            panic!("profile {profile} authors no model override");
+        };
+        serde_json::from_value(value.clone())
+            .unwrap_or_else(|error| panic!("{profile} is not a model override: {error}"))
+    }
+
+    /// The seats a bundle has to key, computed from the catalog rather than
+    /// restated: exactly the stages the seal door admits an entry for. A stage
+    /// that becomes a model lane later joins this set on its own, so the
+    /// bundles are told to cover it instead of quietly falling back.
+    fn model_lane_seats() -> Vec<StageId> {
+        let line = StageCatalog::line();
+        StageId::ALL
+            .iter()
+            .copied()
+            .filter(|stage| {
+                ModelOverride {
+                    per_stage: BTreeMap::from([(*stage, StageOverride::default())]),
+                    ..ModelOverride::default()
+                }
+                .validate(&line)
+                .is_ok()
+            })
+            .collect()
+    }
+
+    /// The harness and model one seat of `override_` resolves to, against that
+    /// stage's own calibrated profile — the resolution the coordinator runs.
+    fn seat(override_: &ModelOverride, stage: StageId) -> (&'static str, String) {
+        let resolved = override_.resolve(stage, &StageCatalog::profile_of(stage));
+        (resolved.harness.as_str(), resolved.model)
     }
 
     #[test]
@@ -167,6 +210,88 @@ mod tests {
             opus.configs.iter().find(|(kind, _)| kind == ModelOverride::NAME).map(|(_, value)| value),
             sonnet.configs.iter().find(|(kind, _)| kind == ModelOverride::NAME).map(|(_, value)| value),
             "the two profiles still differ on the model they select"
+        );
+    }
+
+    // Tripwire: a seat bundle that leaves a model lane unkeyed dispatches the
+    // compiled `StageCatalog::line()` default there, and that default is muse
+    // for every one of the five — so an omitted seat (`Reconcile`, dispatched
+    // only by a fold conflict, is the one that hides) runs muse in production
+    // while the bundle still seals, validates, and looks complete. A misspelled
+    // `agent` key inside a kept seat lands in the same place: unknown TOML keys
+    // are ignored, the entry deserializes with no agent, and it falls through.
+    #[test]
+    fn every_seat_bundle_keys_all_the_model_lanes_and_none_resolve_muse() {
+        let line = StageCatalog::line();
+        let seats = model_lane_seats();
+        for profile in SEAT_BUNDLES {
+            let override_ = shipped_override(profile);
+
+            assert_eq!(
+                override_.per_stage.keys().copied().collect::<Vec<_>>(),
+                seats,
+                "{profile} must key every model-lane seat"
+            );
+            if let Err(error) = override_.validate(&line) {
+                panic!("{profile} keys a stage the seal door refuses: {error:?}");
+            }
+
+            for stage in &seats {
+                let resolved = override_.resolve(*stage, &StageCatalog::profile_of(*stage));
+                assert_ne!(resolved.harness, Harness::Muse, "{profile} still resolves muse at {stage:?}");
+            }
+        }
+    }
+
+    // Tripwire: the property the cross-judge bundles exist for — the judge is
+    // never the contestant's model. Stated as a relation over what the file
+    // resolves rather than against literal ids, so it holds through a model
+    // swap and still fails on the copy-paste that matters: a review seat left
+    // on the construct side's agent (or a `Reconcile` left on the judge's)
+    // seals, validates, and resolves off muse with the independence gone.
+    #[test]
+    fn a_cross_judge_bundle_seats_a_judge_no_contestant_shares() {
+        // The construct-side harness each name promises. A wholesale swap of
+        // the two bundles' contents leaves both internally consistent and
+        // disjoint, so only reading the name back catches it.
+        for (profile, writes) in
+            [("cross-judge-opus-construct", Harness::Claude), ("cross-judge-grok-construct", Harness::Grok)]
+        {
+            let override_ = shipped_override(profile);
+            let contestants = [StageId::Construct, StageId::Refine, StageId::Reconcile]
+                .iter()
+                .map(|stage| seat(&override_, *stage))
+                .collect::<BTreeSet<_>>();
+            let judges = [StageId::Review, StageId::AggregateReview]
+                .iter()
+                .map(|stage| seat(&override_, *stage))
+                .collect::<BTreeSet<_>>();
+
+            assert_eq!(contestants.len(), 1, "{profile}: the construct-side seats disagree: {contestants:?}");
+            assert_eq!(judges.len(), 1, "{profile}: the two review seats disagree: {judges:?}");
+            assert!(judges.is_disjoint(&contestants), "{profile}: the judge is the contestant's own model: {judges:?}");
+            assert_eq!(
+                contestants.iter().next().map(|(harness, _)| *harness),
+                Some(writes.as_str()),
+                "{profile} names its construct-side harness: {contestants:?}"
+            );
+        }
+    }
+
+    // Tripwire: the standing posture is one model in every seat. The three
+    // bundles are near-identical blocks, so a line copied from a cross-judge
+    // bundle into this one would route every default bloom's review to the
+    // other harness — a routing change nothing else here would notice.
+    #[test]
+    fn the_default_bundle_seats_one_claude_model_in_every_lane() {
+        let override_ = shipped_override("claude-every-seat");
+        let seats = model_lane_seats().iter().map(|stage| seat(&override_, *stage)).collect::<BTreeSet<_>>();
+
+        assert_eq!(seats.len(), 1, "the default bundle must seat one model in every lane: {seats:?}");
+        assert_eq!(
+            seats.iter().next().map(|(harness, _)| *harness),
+            Some(Harness::Claude.as_str()),
+            "the default bundle seats claude: {seats:?}"
         );
     }
 

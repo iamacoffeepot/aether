@@ -25,7 +25,7 @@ use aether_chassis_bloomery::store::{
 };
 use aether_data::wire::to_vec;
 use aether_data::{Kind, mailbox_id_from_path};
-use common::client::{self, connect, handshake};
+use common::client::{self, connect_and_handshake};
 use common::{Coordinator, free_port};
 use serde::Serialize;
 
@@ -53,8 +53,7 @@ fn kill_and_restart_converges_over_rpc() {
     // First boot: seal a synthetic single-workpiece bloom through typed mail.
     let port = free_port();
     let coordinator = spawn(port, db);
-    let mut stream = connect(port);
-    handshake(&mut stream, "recovery-test");
+    let mut stream = connect_and_handshake(port, "recovery-test");
 
     // A real, wire-encoded bloom-protocol event — the shape the host journals.
     // The control core replays this journal at boot and decodes each record as an
@@ -99,8 +98,7 @@ fn kill_and_restart_converges_over_rpc() {
     // Restart against the same database file.
     let port = free_port();
     let _coordinator = spawn(port, db);
-    let mut stream = connect(port);
-    handshake(&mut stream, "recovery-test");
+    let mut stream = connect_and_handshake(port, "recovery-test");
 
     // Journal replay: the sealed event survived the crash.
     let replay: ReplayJournalResult = call(&mut stream, 1, &ReplayJournal);
