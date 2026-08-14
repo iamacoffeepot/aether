@@ -234,9 +234,10 @@ pub enum ObserveMainlineResult {
         /// correspondence-bound to the real commit.
         #[serde(with = "aether_data::bytes")]
         head: Vec<u8>,
-        /// Whether `head` equals `relative_to` or is a descendant of it.
-        /// `false` is the backward/sideways case (#4938): the control core
-        /// admits [`Fact::ObserveMainlineDiverged`](crate::Fact::ObserveMainlineDiverged)
+        /// Whether mainline may follow `head`. `true` for a descendant,
+        /// equal, the genesis bind, or an unrelated rewrite of the live
+        /// ref. `false` is the strict-ancestor case (#4938): the control
+        /// core admits [`Fact::ObserveMainlineDiverged`](crate::Fact::ObserveMainlineDiverged)
         /// rather than advancing.
         fast_forward: bool,
     },

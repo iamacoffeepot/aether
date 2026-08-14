@@ -3367,11 +3367,12 @@ mod observed_mainline {
         assert_eq!(next.observed, digest(9), "but the repository's head is recorded for a supersession to rebase onto");
     }
 
-    // Tripwire: a stale or sideways observation cannot move mainline (#4938).
-    // The host classifies the head as ancestor/unrelated and admits
+    // Tripwire: a stale (strict-ancestor) observation cannot move mainline
+    // (#4938). The host classifies the head as an ancestor and admits
     // `ObserveMainlineDiverged`; the reducer must name the refusal and leave
     // both pointers alone — recording the stale head as `observed` would
-    // poison the only base a supersession may rebase onto.
+    // poison the only base a supersession may rebase onto. A rewritten
+    // live ref is followable at the host and does not arrive here.
     #[test]
     fn a_stale_observation_cannot_regress_mainline() {
         let snapshot = Snapshot::new(digest(9));
