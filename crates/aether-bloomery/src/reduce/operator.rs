@@ -96,7 +96,7 @@ fn adjudicable(record: &BloomRecord, finding: &Digest) -> bool {
 /// authority instead of a verdict's.
 ///
 /// What it never emits is a member dispatch or a
-/// [`Decision::RevokeResolution`](crate::Decision::RevokeResolution). An
+/// [`Decision::RevokeResolution`]. An
 /// adjudication is a statement about the composition's findings, and a member
 /// that has passed its review is done (ADR-0191 §4).
 pub(super) fn reduce_operator_adjudication(
@@ -222,7 +222,7 @@ fn proceed_to_landing(record: &BloomRecord, bloom: &BloomId, effects: &mut Vec<D
 ///
 /// The candidate re-enters the workpiece's line at `Verify`. For a member that
 /// is the ordinary
-/// [`Decision::DispatchAttempt`](crate::Decision::DispatchAttempt) pair every
+/// [`Decision::DispatchAttempt`] pair every
 /// other cursor move emits — a `Verify` dispatch, not a claim — so the
 /// mechanical suite runs, a failure routes through
 /// [`Fact::VerifyFailed`](crate::Fact::VerifyFailed) and charges the repair roll
