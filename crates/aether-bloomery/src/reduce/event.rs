@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    BloomSpec, CandidateRef, ConfigRegistry, Evidence, OrphanClaimRelease, OrphanClaimReleaseCompletion,
-    ResolutionClaim, Statement, VerifyFailureSet,
+    Adjudication, BloomSpec, CandidateRef, ConfigRegistry, Evidence, OperatorRepair, OrphanClaimRelease,
+    OrphanClaimReleaseCompletion, ResolutionClaim, Statement, VerifyFailureSet,
 };
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
@@ -379,6 +379,43 @@ pub enum Fact {
     ObserveMainlineDiverged {
         /// The observed head that would move mainline backward.
         head: Digest,
+    },
+    /// An operator adjudicated a bloom's open composition findings (#4957) —
+    /// the manager override's first move, and the only one that closes a
+    /// finding without repairing it.
+    ///
+    /// The subject is the composition's findings channel, never a member:
+    /// members are immutable after review (ADR-0191 §4), so this neither
+    /// reopens nor dispatches one. Closing the findings that parked the bloom
+    /// releases the park and lets the composition proceed to landing — the same
+    /// place a passing review would have sent it, on the operator's authority
+    /// rather than a verdict's. The reason and the operator are recorded
+    /// because they are the whole audit trail of an act no gate produced.
+    ///
+    /// Appended past [`Fact::ObserveMainlineDiverged`] so every prior fact keeps
+    /// its wire discriminant.
+    OperatorAdjudication {
+        /// The bloom whose findings are adjudicated.
+        bloom: BloomId,
+        /// What was closed, how, why, and by whom.
+        adjudication: Adjudication,
+    },
+    /// An operator supplied a repair candidate for a wedged workpiece (#4957) —
+    /// the manager override's second move: do the fix ourselves, keep the gates.
+    ///
+    /// The candidate re-enters at `Verify` and faces the ordinary chain, so a
+    /// bad operator fix bounces exactly where a bad lane's does; only the model
+    /// lap is skipped. Refused for a workpiece that has already resolved, which
+    /// is the same immutability rule ADR-0191 §4 states — a repair is for work
+    /// still in the line, never a second pass over finished, reviewed code.
+    ///
+    /// Appended past [`Fact::OperatorAdjudication`] so every prior fact keeps
+    /// its wire discriminant.
+    OperatorRepair {
+        /// The bloom the repaired workpiece belongs to.
+        bloom: BloomId,
+        /// The candidate, the workpiece it is for, and who supplied it.
+        repair: OperatorRepair,
     },
 }
 

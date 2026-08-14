@@ -5,8 +5,8 @@
 
 use aether_actor::Manual;
 use aether_bloomery::{
-    Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, Event, Fact, IdempotencyKey, Outcome, Query, QueryResult,
-    Statement, ViewDocument, digest_of,
+    Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, Disposition, Event, Fact, IdempotencyKey,
+    OperatorRepair, Outcome, Query, QueryResult, Statement, ViewDocument, WorkpieceId, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
@@ -15,7 +15,9 @@ use aether_substrate::actor::native::NativeCtx;
 use super::hex::{self, digest_from_hex, hex_encode};
 use super::response::{error_response, json};
 use super::state::{ApiCapabilityState, Routed, VerifyPending, admit};
-use crate::api::dto::{GrantRequest, OutcomeView, ReleaseAcceptedView, SupersedeRequest};
+use crate::api::dto::{
+    AdjudicateRequest, GrantRequest, OutcomeView, ReleaseAcceptedView, RepairRequest, SupersedeRequest,
+};
 use crate::control::ControlCore;
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
 
@@ -77,6 +79,95 @@ impl ApiCapabilityState {
             idempotency_key: IdempotencyKey(key),
             fact: Fact::GrantAttempts { bloom, workpiece, stage, attempts },
         })
+    }
+
+    /// `POST /blooms/{id}/adjudicate` — close the composition findings the
+    /// operator has read, with a stated reason, and let the bloom proceed
+    /// (#4957).
+    ///
+    /// Journal-first, like `grant`: the route's only effect is appending
+    /// `Fact::OperatorAdjudication`. Every state movement — closing the
+    /// findings, releasing the park they raised, resolving the composition from
+    /// the weave it holds, dispatching the land — is the reducer's, so an
+    /// operator override replays exactly as it happened rather than as the
+    /// current binary would re-decide it (ADR-0190).
+    ///
+    /// What the route decides for itself is only what it can see in the request:
+    /// a body that says nothing. A blank reason, a blank operator, and a
+    /// deferral naming no issue are `422` here rather than a round trip to the
+    /// reducer, because each is a malformed override rather than a refused one —
+    /// and the operator gets the same status either way, since a refused
+    /// override renders `422` too (see [`admitted_response`]).
+    pub(super) fn adjudicate(id: &str, body: &[u8]) -> Routed {
+        let bloom = match digest_from_hex(id) {
+            Some(digest) => BloomId(digest),
+            None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
+        };
+        let request: AdjudicateRequest = match hex::from_slice(body) {
+            Ok(request) => request,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid adjudicate body: {error}"))),
+        };
+        let AdjudicateRequest { findings, disposition, reason, operator, idempotency_key } = request;
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+        if disposition == (Disposition::Deferred { issue: 0 }) {
+            return Routed::Reply(error_response(
+                422,
+                "a deferred adjudication must name the filed issue it defers to, so the finding does not vanish",
+            ));
+        }
+
+        let adjudication = Adjudication { findings, disposition, reason, operator };
+        let key = idempotency_key.unwrap_or_else(|| {
+            format!(
+                "aether.bloomery.adjudicate:{}:{}",
+                hex_encode(bloom.0.as_bytes()),
+                hex_encode(digest_of(&adjudication).as_bytes())
+            )
+        });
+
+        admit(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::OperatorAdjudication { bloom, adjudication } })
+    }
+
+    /// `POST /blooms/{id}/members/{workpiece}/repair` — hand the wedged
+    /// `{workpiece}` the candidate the operator pushed to its candidate ref, and
+    /// let the ordinary gates judge it (#4957).
+    ///
+    /// The path names the workpiece for the reason the grant body does: the
+    /// reducer refuses one that is not wedged, so a stale read cannot act. The
+    /// reserved composition id is accepted here too — a composition whose weave
+    /// repair wedged is repaired the same way a member is, by someone supplying
+    /// the candidate its own lane could not.
+    ///
+    /// Journal-first and gate-preserving: the appended fact is the whole effect,
+    /// and the reducer re-enters the workpiece at `Verify`, so the mechanical
+    /// suite and the delta-confirm review still run over the operator's tree.
+    /// Only the model lap is skipped.
+    pub(super) fn repair(id: &str, workpiece: &str, body: &[u8]) -> Routed {
+        let bloom = match digest_from_hex(id) {
+            Some(digest) => BloomId(digest),
+            None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
+        };
+        let request: RepairRequest = match hex::from_slice(body) {
+            Ok(request) => request,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid repair body: {error}"))),
+        };
+        let RepairRequest { candidate, reason, operator, idempotency_key } = request;
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+
+        let repair = OperatorRepair { workpiece: WorkpieceId(workpiece.to_owned()), candidate, reason, operator };
+        let key = idempotency_key.unwrap_or_else(|| {
+            format!(
+                "aether.bloomery.repair:{}:{}",
+                hex_encode(bloom.0.as_bytes()),
+                hex_encode(digest_of(&repair).as_bytes())
+            )
+        });
+
+        admit(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::OperatorRepair { bloom, repair } })
     }
 
     /// `POST /blooms/{id}/answer/{question}` — adopt an answer to the parked
@@ -198,6 +289,24 @@ impl ApiCapabilityState {
     }
 }
 
+/// The `422` a manager-override body earns by saying nothing (#4957), or `None`
+/// when it states both.
+///
+/// Both override routes ask for the same two things and refuse an absent one the
+/// same way, so the check lives once. Blank is refused rather than defaulted
+/// because an override's whole product is its audit trail: a waiver with a
+/// default reason and no named operator records that something was waived and
+/// nothing about who or why.
+fn unstated(reason: &str, operator: &str) -> Option<HttpServerResponse> {
+    if reason.trim().is_empty() {
+        return Some(error_response(422, "an override must state a reason; a blank one is refused, never defaulted"));
+    }
+    if operator.trim().is_empty() {
+        return Some(error_response(422, "an override must name the operator making it"));
+    }
+    None
+}
+
 /// Render a write route's [`AdmitResult`] into its HTTP response: the reducer
 /// outcome (decoded from the wire bytes the admit reply carries), or the error.
 pub(super) fn admit_response(result: AdmitResult) -> HttpServerResponse {
@@ -212,19 +321,33 @@ pub(super) fn admit_response(result: AdmitResult) -> HttpServerResponse {
 
 /// Render one admitted reducer outcome into the write route's response.
 ///
-/// Every write route answers `200` with the outcome it produced, except the one
-/// whose admission only *accepts* work: an authorized orphan-claim release is
-/// durably queued for the release reactor rather than performed, so it answers
-/// `202` and hands back the request digest `GET /claims/releases/{digest}` reads
-/// by (ADR-0179). The digest rides the outcome itself, so the route holds
-/// nothing across the admit to report it — the same reason `RecordConfigResult`
-/// carries its stored bytes rather than the authoring route keeping a
-/// correlation map (ADR-0154 §3).
+/// Every write route answers `200` with the outcome it produced, with two
+/// exceptions.
+///
+/// An authorized orphan-claim release only *accepts* work: it is durably queued
+/// for the release reactor rather than performed, so it answers `202` and hands
+/// back the request digest `GET /claims/releases/{digest}` reads by (ADR-0179).
+/// The digest rides the outcome itself, so the route holds nothing across the
+/// admit to report it — the same reason `RecordConfigResult` carries its stored
+/// bytes rather than the authoring route keeping a correlation map (ADR-0154
+/// §3).
+///
+/// A **refused manager override** answers `422` (#4957). Every other refusal
+/// this renders is the reducer declining a request about the pipeline's own
+/// state, which an operator reads and re-aims; an override refusal is the
+/// reducer declining the operator's *authority* — a finding that was never
+/// raised, a workpiece that is not stopped, a membership that is not approved
+/// (ADR-0181). Answering those `200` would let a script that only checks the
+/// status treat a refused waiver as an applied one, which is the one place in
+/// this API where that mistake lands unapproved work on mainline. The route's
+/// own synchronous refusals use the same status, so the operator sees one
+/// answer for a refused override whichever side caught it.
 fn admitted_response(outcome: Outcome) -> HttpServerResponse {
     match &outcome {
         Outcome::OrphanClaimReleaseRequested { request } => {
             json(202, &ReleaseAcceptedView { request: hex_encode(request.as_bytes()), outcome })
         }
+        refused if refused.is_refused_override() => json(422, &OutcomeView { outcome }),
         _ => json(200, &OutcomeView { outcome }),
     }
 }
@@ -255,7 +378,91 @@ pub(super) fn query_response(result: QueryResult) -> HttpServerResponse {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::SupersedeRequest;
+    use aether_bloomery::{AdjudicationError, Digest, OperatorRepairError, Outcome, WorkpieceId};
+
+    use super::{ApiCapabilityState, Routed, SupersedeRequest, admitted_response};
+
+    /// A bloom id in the spelling the routes take.
+    const BLOOM: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    /// A finding digest in the same spelling.
+    const FINDING: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    /// The status one route helper answered with, or `None` when it relayed
+    /// instead of replying — a relayed request reached the reducer, which is
+    /// exactly what "the route did not refuse this" means here.
+    fn status(routed: &Routed) -> Option<u16> {
+        match routed {
+            Routed::Reply(response) => Some(response.status),
+            _ => None,
+        }
+    }
+
+    // Tripwire (#4957): an override that states no reason is refused, not
+    // defaulted. The reason is what the landing proposal quotes as the grounds
+    // for a waiver, so a body without one would land a bloom whose merged
+    // history records that something was overridden and nothing about why —
+    // which is the failure this route exists to prevent, not a nicety.
+    #[test]
+    fn an_override_body_without_a_reason_is_refused() {
+        let adjudicate = |reason: &str, operator: &str| {
+            let body = serde_json::json!({
+                "findings": [FINDING],
+                "disposition": "Accepted",
+                "reason": reason,
+                "operator": operator,
+            })
+            .to_string();
+            status(&ApiCapabilityState::adjudicate(BLOOM, body.as_bytes()))
+        };
+
+        assert_eq!(adjudicate("  ", "eve"), Some(422), "a whitespace reason says nothing");
+        assert_eq!(adjudicate("read it", ""), Some(422), "and an override has to name who made it");
+        assert_eq!(adjudicate("read it", "eve"), None, "a stated override relays to the reducer");
+    }
+
+    // Tripwire (#4957): a deferral that names no filed issue is refused at the
+    // door. `Deferred` exists so a waived finding cannot silently vanish, and
+    // issue `0` is no issue — accepting it would make the disposition
+    // decorative.
+    #[test]
+    fn a_deferral_naming_no_issue_is_refused_at_the_door() {
+        let deferred = |issue: u64| {
+            let body = serde_json::json!({
+                "findings": [FINDING],
+                "disposition": { "Deferred": { "issue": issue } },
+                "reason": "filed forward",
+                "operator": "eve",
+            })
+            .to_string();
+            status(&ApiCapabilityState::adjudicate(BLOOM, body.as_bytes()))
+        };
+
+        assert_eq!(deferred(0), Some(422), "issue 0 is no issue");
+        assert_eq!(deferred(4957), None, "a named issue relays to the reducer");
+    }
+
+    // Tripwire (#4957 / ADR-0181): a refused override answers `4xx`, not the
+    // `200` every other write route answers its outcome with. Answering `200`
+    // would let a script that checks only the status treat a refused waiver as
+    // an applied one — and the refusal this most matters for is the approval
+    // one, where the mistake lands work nobody approved.
+    #[test]
+    fn a_refused_override_answers_422() {
+        let workpiece = WorkpieceId("alpha".to_owned());
+
+        for outcome in [
+            Outcome::AdjudicationRejected(AdjudicationError::UnapprovedMember(workpiece.clone())),
+            Outcome::OperatorRepairRejected(OperatorRepairError::UnapprovedMember(workpiece)),
+            Outcome::AdjudicationRejected(AdjudicationError::UnknownFinding(Digest::from_bytes([2; 32]))),
+        ] {
+            assert_eq!(admitted_response(outcome.clone()).status, 422, "{outcome:?} is a refused override");
+        }
+
+        // And an ordinary admitted outcome is untouched: the `422` is scoped to
+        // the override doors rather than a new blanket rule for every refusal
+        // the reducer can return.
+        assert_eq!(admitted_response(Outcome::Duplicate).status, 200);
+    }
 
     #[test]
     fn a_supersede_body_without_descriptions_still_parses() {

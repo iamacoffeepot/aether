@@ -89,26 +89,27 @@ pub use port::{
     SourceBackend, SourceSnapshot, ViewDocument, WorkHandle, WorkOrder,
 };
 pub use reduce::{
-    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault, AggregateVerifyError,
-    AttemptCompletedError, BaseMismatch, BloomRecord, BloomStatus, DECISIONS_SCHEMA, Decision, Decisions,
-    DecisionsSchemaError, Event, Fact, FoldConflictError, FoldedIntegration, GrantAttemptsError, IntegrateError,
-    LandError, LandingRejectedError, OrphanClaimReleaseError, Outcome, ResolveError, SealConflict, SealError, Snapshot,
-    StageProgress, SupersedeError, VerifyFailedError, decode_recorded_decisions, is_active_unlanded, reduce, view_of,
+    AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
+    AggregateVerifyError, AttemptCompletedError, BaseMismatch, BloomRecord, BloomStatus, DECISIONS_SCHEMA, Decision,
+    Decisions, DecisionsSchemaError, Event, Fact, FoldConflictError, FoldedIntegration, GrantAttemptsError,
+    IntegrateError, LandError, LandingRejectedError, OperatorRepairError, OrphanClaimReleaseError, Outcome,
+    ResolveError, SealConflict, SealError, Snapshot, StageProgress, SupersedeError, VerifyFailedError,
+    decode_recorded_decisions, is_active_unlanded, reduce, view_of,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;
 pub use sign::{AuthorityDoor, FakeKeyProvider, KeyProvider, SignatureEnvelope, authorization_message};
 pub use study_report::{BloomGrade, StudyReport, grade};
 pub use values::{
-    AgentProfile, AgentSelection, ApprovalPolicy, ApprovalRule, Artifact, Attempt, BloomDraft, BloomSpec,
+    Adjudication, AgentProfile, AgentSelection, ApprovalPolicy, ApprovalRule, Artifact, Attempt, BloomDraft, BloomSpec,
     CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, CompositionFinding, ConfigKind, ConfigRegistry,
-    ConfigResolveError, ConfigScopes, DispatchKey, Evidence, EvidenceKind, ExecutionLimits, Forecast, Harness,
-    LandingReceipt, LongContextBand, MemberCandidate, MemberSubject, Membership, ModelOverride, NetworkProfile,
-    ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease, OrphanClaimReleaseCompletion,
-    OrphanClaimReleaseRecord, OverrideError, PriceRates, PriceTable, Provenance, Question, REVIEW_CRITIC_COMMAND,
-    ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel, SealedPriceTable, StageBinding,
-    StageCatalog, StageOverride, StageReceipt, Statement, StudyCall, StudyCost, StudyRecord, SurfacePattern, Tier,
-    TimeoutRecord, ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE,
-    VERIFY_LANE_NETWORK, VerifiedTree, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
-    Workpiece, config_address, decode_config, is_model_lane,
+    ConfigResolveError, ConfigScopes, DispatchKey, Disposition, Evidence, EvidenceKind, ExecutionLimits, Forecast,
+    Harness, LandingReceipt, LongContextBand, MemberCandidate, MemberSubject, Membership, ModelOverride,
+    NetworkProfile, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OperatorRepair, OrphanClaimRelease,
+    OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord, OverrideError, PriceRates, PriceTable, Provenance,
+    Question, REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel,
+    SealedPriceTable, StageBinding, StageCatalog, StageOverride, StageReceipt, Statement, StudyCall, StudyCost,
+    StudyRecord, SurfacePattern, Tier, TimeoutRecord, ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND,
+    VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VerifiedTree, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof,
+    VerifyReuse, Wedge, Workpiece, config_address, decode_config, is_model_lane,
 };

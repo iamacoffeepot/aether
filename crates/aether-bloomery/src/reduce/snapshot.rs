@@ -15,9 +15,9 @@ use super::{Decision, Decisions, Event, Fact, Outcome};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence, EvidenceKind,
-    OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs, StageCatalog, VerifiedTree, VerifyFailureSet,
-    VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
+    Adjudication, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence, EvidenceKind,
+    OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs, StageCatalog, VerifiedTree,
+    VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -241,6 +241,28 @@ pub struct BloomRecord {
     /// decodes.
     #[serde(default)]
     pub composition_findings: Vec<CompositionFinding>,
+    /// The operator adjudications recorded against this bloom (#4957), in
+    /// admission order — which composition findings were closed, how, why, and
+    /// by whom.
+    ///
+    /// The closure half of [`composition_findings`](Self::composition_findings):
+    /// a finding is closed by being named here, never by being edited or
+    /// dropped, so the record still carries the verdict beside the decision to
+    /// waive it. [`open_composition_findings`](Self::open_composition_findings)
+    /// is what reads the two together. Journal-derived and replay-rebuilt;
+    /// defaulted so a journal written before the override existed still decodes.
+    #[serde(default)]
+    pub adjudications: Vec<Adjudication>,
+    /// The operator-supplied repair candidates recorded against this bloom
+    /// (#4957), in admission order.
+    ///
+    /// Recorded for the reason a [`Wedge`] is: the dispatch a repair emits is an
+    /// ordinary `Verify` dispatch, indistinguishable from a lane's, so without
+    /// this row nothing in the projection would say a person wrote the candidate
+    /// the gates then judged. Journal-derived and replay-rebuilt; defaulted for
+    /// the same reason as [`adjudications`](Self::adjudications).
+    #[serde(default)]
+    pub operator_repairs: Vec<OperatorRepair>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -412,11 +434,7 @@ impl Snapshot {
                     record.record_evidence(evidence);
                 }
             }
-            Decision::ReleaseHold { bloom, question } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.holds.remove(question);
-                }
-            }
+            Decision::ReleaseHold { .. } | Decision::RecordReviewPark { .. } => self.apply_hold_effect(effect),
             Decision::AdvanceStage { bloom, workpiece, progress } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.progress.insert(workpiece.clone(), *progress);
@@ -471,19 +489,6 @@ impl Snapshot {
             Decision::RecordVerifyProof { .. } | Decision::RecordVerifyReuse { .. } => {
                 self.apply_verify_memo_effect(effect);
             }
-            Decision::RecordReviewPark { bloom, question } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.review_park = *question;
-                    // Recording raises the hold in the same fold (idempotent
-                    // when an admitted Question already inserted it through
-                    // RecordEvidence — the marker then only classifies it);
-                    // clearing leaves the release to the adopting answer's
-                    // ReleaseHold.
-                    if let Some(question) = question {
-                        record.holds.insert(*question);
-                    }
-                }
-            }
             Decision::RevokeResolution { bloom, workpiece } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.claims.remove(workpiece);
@@ -506,7 +511,9 @@ impl Snapshot {
                 self.observed = *head;
             }
             Decision::RecordStageCatalog { .. } => self.apply_catalog_effect(effect),
-            Decision::RecordCompositionFinding { .. } => self.apply_composition_effect(effect),
+            Decision::RecordCompositionFinding { .. }
+            | Decision::RecordAdjudication { .. }
+            | Decision::RecordOperatorRepair { .. } => self.apply_composition_effect(effect),
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;
@@ -515,16 +522,69 @@ impl Snapshot {
         }
     }
 
-    /// Append one composition-review finding to the bloom's composition channel
-    /// (ADR-0191 §4). Split out of [`apply_effect`](Self::apply_effect) for the
-    /// reason its siblings are: the parent match stays inside its line budget,
-    /// and the arm's one behaviour reads beside the doc that explains why a
-    /// finding is filed rather than routed.
+    /// Fold the two decisions that write a bloom's pending-decision holds: the
+    /// bloom-scope park that raises one, and the release that drops it.
+    ///
+    /// Split out of [`apply_effect`](Self::apply_effect) for the reason its
+    /// siblings are: they are a raise/release pair over one set, and that is
+    /// only visible when they sit together — a park that recorded its marker
+    /// without raising the hold, or a release that dropped the hold and left the
+    /// marker, would each read as correct in isolation.
+    fn apply_hold_effect(&mut self, effect: &Decision) {
+        match effect {
+            Decision::ReleaseHold { bloom, question } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.holds.remove(question);
+                }
+            }
+            Decision::RecordReviewPark { bloom, question } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.review_park = *question;
+                    // Recording raises the hold in the same fold (idempotent
+                    // when an admitted Question already inserted it through
+                    // RecordEvidence — the marker then only classifies it);
+                    // clearing leaves the release to whichever door answers the
+                    // park: an adopting answer's `ReleaseHold`, or an operator
+                    // adjudication's (#4957).
+                    if let Some(question) = question {
+                        record.holds.insert(*question);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Append to one of the composition workpiece's three append-only channels:
+    /// the findings its gates raised (ADR-0191 §4), the operator adjudications
+    /// that closed some of them, and the operator-supplied repairs (#4957).
+    ///
+    /// Split out of [`apply_effect`](Self::apply_effect) for the reason its
+    /// siblings are: the parent match stays inside its line budget, and the
+    /// three arms read as one mechanism — a defect discovered in the
+    /// composition, the person who answered for it, and the candidate they
+    /// supplied — which is only visible when they sit together. Each is
+    /// append-only on purpose: closure is derived by
+    /// [`BloomRecord::open_composition_findings`], never written back over the
+    /// verdict that raised the finding.
     fn apply_composition_effect(&mut self, effect: &Decision) {
-        if let Decision::RecordCompositionFinding { bloom, finding } = effect
-            && let Some(record) = self.blooms.get_mut(bloom)
-        {
-            record.composition_findings.push(finding.clone());
+        match effect {
+            Decision::RecordCompositionFinding { bloom, finding } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.composition_findings.push(finding.clone());
+                }
+            }
+            Decision::RecordAdjudication { bloom, adjudication } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.adjudications.push(adjudication.clone());
+                }
+            }
+            Decision::RecordOperatorRepair { bloom, repair } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.operator_repairs.push(repair.clone());
+                }
+            }
+            _ => {}
         }
     }
 
@@ -666,8 +726,24 @@ impl BloomRecord {
             verify_reuses: Vec::new(),
             aggregate_fault: None,
             composition_findings: Vec::new(),
+            adjudications: Vec::new(),
+            operator_repairs: Vec::new(),
             superseded_by: None,
         }
+    }
+
+    /// The composition findings no operator adjudication has closed (#4957).
+    ///
+    /// The one place closure is decided, so the adjudication door and every
+    /// later reader agree on which findings are still open. Derived rather than
+    /// stored because a finding is a verdict: a closed one still happened, and
+    /// what changed is that somebody answered for it. A finding named by any
+    /// adjudication is closed — an override is not undone by a later one, and a
+    /// finding raised twice under the same verdict artifact closes once.
+    pub fn open_composition_findings(&self) -> impl Iterator<Item = &CompositionFinding> {
+        self.composition_findings.iter().filter(|finding| {
+            !self.adjudications.iter().any(|adjudication| adjudication.findings.contains(&finding.detail))
+        })
     }
 
     /// The recorded green verdict for `tree` under the gate set the compiled

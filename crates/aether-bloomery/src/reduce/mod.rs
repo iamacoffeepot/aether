@@ -32,6 +32,7 @@ mod integrate;
 mod land;
 mod landing;
 mod observe;
+mod operator;
 mod orphan_claim;
 mod outcome;
 mod review;
@@ -43,9 +44,10 @@ mod view;
 
 pub use decision::Decision;
 pub use error::{
-    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError, AttemptCompletedError,
-    BaseMismatch, FoldConflictError, GrantAttemptsError, IntegrateError, LandError, LandingRejectedError,
-    OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SupersedeError, VerifyFailedError,
+    AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
+    AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, IntegrateError, LandError,
+    LandingRejectedError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealConflict, SealError,
+    SupersedeError, VerifyFailedError,
 };
 pub use event::{Event, Fact};
 pub use outcome::{DECISIONS_SCHEMA, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions};
@@ -64,6 +66,7 @@ use integrate::{reduce_integrate, reduce_resolve};
 use land::reduce_land;
 use landing::reduce_landing_rejected;
 use observe::{reduce_observe_mainline, reduce_observe_mainline_diverged};
+use operator::{reduce_operator_adjudication, reduce_operator_repair};
 use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_claim_release};
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
 use seal::{reduce_seal, reduce_supersede};
@@ -127,5 +130,9 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> 
         Fact::FoldConflict { bloom, workpiece, checkpoint, head, evidence } => {
             reduce_fold_conflict(snapshot, bloom, workpiece, *checkpoint, *head, evidence)
         }
+        Fact::OperatorAdjudication { bloom, adjudication } => {
+            reduce_operator_adjudication(snapshot, bloom, adjudication)
+        }
+        Fact::OperatorRepair { bloom, repair } => reduce_operator_repair(snapshot, bloom, repair),
     }
 }

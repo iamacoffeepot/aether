@@ -11,8 +11,9 @@
 //! title` check would refuse, an issue the repository no longer holds, a source
 //! that will not answer — each drops one rung and lands anyway.
 
-use aether_bloomery::BloomId;
+use aether_bloomery::{Adjudication, BloomId, Disposition, Event, Fact};
 use aether_bloomery_github::{LandingProposal, canonical_issue_number};
+use aether_data::wire::from_bytes;
 
 use crate::bloomery::SourceShell;
 use crate::store::StoreBackend;
@@ -48,7 +49,68 @@ pub(super) fn assemble(
     bloom: &BloomId,
 ) -> rusqlite::Result<LandingProposal> {
     let members = roster(store, bloom)?;
-    Ok(LandingProposal { title: title_for(source, &members), body: body_for(&members) })
+    let waived = adjudications(store, bloom)?;
+    Ok(LandingProposal { title: title_for(source, &members), body: body_for(&members, &waived) })
+}
+
+/// The operator adjudications this bloom carries, oldest first (#4957).
+///
+/// Read out of the journal rather than a projection of it, because the journal
+/// is where the operator's words are: the adjudication fact carries the reason
+/// verbatim, and nothing else in the store does. The scan is a whole-table read,
+/// which is affordable exactly here — a bloom lands once, and a coordinator's
+/// journal is the events of the blooms it has run, not a growing log of every
+/// attempt.
+///
+/// A row that does not decode is skipped rather than propagated. This is the
+/// proposal's prose, and the same rule the title fallbacks follow applies: a
+/// malformed row costs the body a sentence, never the bloom its landing.
+fn adjudications(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec<Adjudication>> {
+    Ok(store
+        .list_events()?
+        .iter()
+        .filter_map(|bytes| from_bytes::<Event>(bytes).ok())
+        .filter_map(|event| match event.fact {
+            Fact::OperatorAdjudication { bloom: admitted, adjudication } if admitted == *bloom => Some(adjudication),
+            _ => None,
+        })
+        .collect())
+}
+
+/// The waived-findings section, or `None` when the bloom was never adjudicated.
+///
+/// The point of carrying it into the proposal is that the merged history names
+/// what was waived and why: a landing that only its coordinator knows was
+/// overridden reads, forever after, as a landing that passed its gates.
+fn waivers_section(waived: &[Adjudication]) -> Option<String> {
+    if waived.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = waived
+        .iter()
+        .map(|adjudication| {
+            let disposition = match adjudication.disposition {
+                Disposition::Accepted => "accepted".to_owned(),
+                Disposition::Deferred { issue } => format!("deferred to #{issue}"),
+            };
+            format!(
+                "- {} by {} ({disposition}): {}",
+                finding_count(adjudication),
+                adjudication.operator,
+                adjudication.reason
+            )
+        })
+        .collect();
+
+    Some(format!("### Adjudicated findings\n\n{}", lines.join("\n")))
+}
+
+/// How many composition findings one adjudication closed, spelled for prose.
+fn finding_count(adjudication: &Adjudication) -> String {
+    match adjudication.findings.len() {
+        1 => "1 composition finding".to_owned(),
+        count => format!("{count} composition findings"),
+    }
 }
 
 /// The bloom's members, in workpiece order, each with whatever its lane left.
@@ -113,10 +175,10 @@ fn fallback_title(source: &SourceShell, member: &Member) -> Option<String> {
     }
 }
 
-/// The proposal's body: what the lanes wrote, then one closing line per member
-/// that addresses an object. The provenance footer is the source port's and is
-/// appended below this.
-fn body_for(members: &[Member]) -> String {
+/// The proposal's body: what the lanes wrote, then whatever an operator waived
+/// to get here, then one closing line per member that addresses an object. The
+/// provenance footer is the source port's and is appended below this.
+fn body_for(members: &[Member], waived: &[Adjudication]) -> String {
     let mut sections: Vec<String> = match members {
         // One member: the title already carries its subject, so the body is the
         // message's prose and nothing else.
@@ -125,6 +187,7 @@ fn body_for(members: &[Member]) -> String {
         // its subject, because no single one of them is the title.
         members => members.iter().filter_map(|member| member.message.as_deref()).map(section_of).collect(),
     };
+    sections.extend(waivers_section(waived));
     sections.extend(members.iter().filter_map(|member| member.issue).map(|issue| format!("Closes #{issue}")));
     sections.join("\n\n")
 }

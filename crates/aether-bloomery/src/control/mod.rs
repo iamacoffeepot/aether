@@ -274,7 +274,15 @@ impl Topic {
             // operator and the weave repair read, and the repair reaches the
             // executor through the `DispatchAttempt` emitted beside it. A topic
             // here would enqueue rows nothing drains.
-            | Decision::RecordCompositionFinding { .. } => None,
+            | Decision::RecordCompositionFinding { .. }
+            // Snapshot-only: an override's record is what the projection and
+            // the landing proposal read. Everything an override actually
+            // *drives* rides the effects emitted beside it — a `DispatchLand`
+            // for an adjudication that proceeds, a `DispatchAttempt` or a
+            // `DispatchAggregateVerify` for a repair — so a topic of its own
+            // would enqueue rows nothing drains.
+            | Decision::RecordAdjudication { .. }
+            | Decision::RecordOperatorRepair { .. } => None,
         }
     }
 }

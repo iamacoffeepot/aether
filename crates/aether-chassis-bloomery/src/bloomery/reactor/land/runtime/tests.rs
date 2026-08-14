@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{BloomId, Correspondence, Digest, Event, Fact, LandPayload, Topic};
+use aether_bloomery::{
+    Adjudication, BloomId, Correspondence, Digest, Disposition, Event, Fact, IdempotencyKey, LandPayload, Topic,
+};
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{ChecksState, GitObjectId, GitSource, MainlineRef, PullRequestApi, short_hex, to_hex};
 use aether_data::wire::{from_bytes, to_vec};
@@ -15,7 +17,7 @@ use aether_data::wire::{from_bytes, to_vec};
 use super::drain_and_land;
 use crate::bloomery::SourceShell;
 use crate::bloomery::outbox::TopicOutbox;
-use crate::store::{SqliteStore, StoreBackend};
+use crate::store::{JournalWrite, SqliteStore, StoreBackend};
 
 fn digest(seed: u8) -> Digest {
     Digest::from_bytes([seed; 32])
@@ -479,4 +481,81 @@ fn a_gated_off_land_is_a_transient_fault_that_re_drains() {
     assert!(admits.is_empty(), "a gated-off land admits nothing");
     assert_eq!(ack_through, None, "the gated entry is not acked; it re-drains");
     let _ = sequence;
+}
+
+// Journal one operator adjudication of `bloom`, the way the admit path does —
+// the row the proposal assembly reads the operator's own words out of.
+fn journal_adjudication(store: &mut SqliteStore, bloom: BloomId, reason: &str, disposition: Disposition) {
+    let event = Event {
+        idempotency_key: IdempotencyKey(format!("adj-{reason}")),
+        fact: Fact::OperatorAdjudication {
+            bloom,
+            adjudication: Adjudication {
+                findings: vec![digest(70)],
+                disposition,
+                reason: reason.to_owned(),
+                operator: "iamacoffeepot".to_owned(),
+            },
+        },
+    };
+    let bytes = to_vec(&event).unwrap();
+    let write = JournalWrite {
+        idempotency_key: &event.idempotency_key.0,
+        event: &bytes,
+        decisions: b"decided",
+        decider: "test",
+    };
+    store.append_event(&write).unwrap();
+}
+
+#[test]
+fn an_adjudicated_bloom_lands_naming_what_was_waived_and_why() {
+    // Tripwire (#4957): a landing an operator overrode must say so in the
+    // proposal that becomes the mainline commit. Without this the merged history
+    // reads, forever after, as a landing that passed its gates — the override is
+    // known only to the coordinator that ran it, which is exactly the side
+    // channel the journal-first design exists to avoid.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    seed_member(&mut store, bloom, "issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nprose."));
+    journal_adjudication(&mut store, bloom, "the fixture nit is filed forward", Disposition::Deferred { issue: 4958 });
+    // A second bloom's adjudication is not this bloom's: the scan binds on the
+    // bloom the fact names, so a coordinator running many blooms does not quote
+    // one landing's waiver into another's.
+    journal_adjudication(&mut store, BloomId(digest(2)), "somebody else's waiver", Disposition::Accepted);
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+
+    let (_, body) = proposal_of(&fake, bloom);
+    assert!(body.contains("### Adjudicated findings"), "the waiver has its own section: {body}");
+    assert!(body.contains("the fixture nit is filed forward"), "in the operator's own words: {body}");
+    assert!(body.contains("iamacoffeepot"), "naming who decided: {body}");
+    assert!(body.contains("deferred to #4958"), "and where the finding went: {body}");
+    assert!(!body.contains("somebody else's waiver"), "another bloom's waiver stays out of this body: {body}");
+    assert!(body.contains("\nCloses #4242"), "the closing lines still come last: {body}");
+}
+
+#[test]
+fn an_unadjudicated_bloom_lands_with_no_waiver_section() {
+    // The other half of the tripwire: the section appears only when there is
+    // something to say. An empty "Adjudicated findings" heading on every landing
+    // would train a reader to skip the one place an override is announced.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    seed_member(&mut store, bloom, "issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nprose."));
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+
+    let (_, body) = proposal_of(&fake, bloom);
+    assert!(!body.contains("Adjudicated findings"), "no override, no section: {body}");
 }

@@ -70,7 +70,7 @@ fn repair_budget(record: &BloomRecord) -> u32 {
 
 /// The composition's stage cursor after a move to `stage` on its `attempt`th
 /// try, carrying `weave` as the candidate every later dispatch re-targets from.
-fn composition_progress(stage: StageId, attempt: u32, weave: CandidateRef) -> StageProgress {
+pub(super) fn composition_progress(stage: StageId, attempt: u32, weave: CandidateRef) -> StageProgress {
     StageProgress {
         stage,
         attempts: attempt,

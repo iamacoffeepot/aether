@@ -11,9 +11,9 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::values::{
-    AgentProfile, CompositionFinding, ConfigRegistry, Evidence, MemberCandidate, OrphanClaimRelease,
-    OrphanClaimReleaseCompletion, ResolutionClaim, ResolvedBloom, StageCatalog, Transformation, VerifyProof,
-    VerifyReuse, Wedge,
+    Adjudication, AgentProfile, CompositionFinding, ConfigRegistry, Evidence, MemberCandidate, OperatorRepair,
+    OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, ResolvedBloom, StageCatalog, Transformation,
+    VerifyProof, VerifyReuse, Wedge,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -491,5 +491,37 @@ pub enum Decision {
         /// The finding: the weave it was raised against, the verdict artifact,
         /// and the members it points at.
         finding: CompositionFinding,
+    },
+    /// File an operator adjudication on the bloom (#4957) — the closure record
+    /// for the composition findings it names, see
+    /// [`BloomRecord::adjudications`](crate::BloomRecord::adjudications).
+    ///
+    /// Closure is *derived* from this record rather than written into the
+    /// finding: a [`CompositionFinding`] is what a verdict said, and editing it
+    /// to say it was waived would lose the verdict. So the finding stands and
+    /// [`BloomRecord::open_composition_findings`](crate::BloomRecord::open_composition_findings)
+    /// filters it out, which is also what keeps replay honest — the journal
+    /// still carries both halves in the order they happened. Appended so the
+    /// prior decisions' wire discriminants are unchanged.
+    RecordAdjudication {
+        /// The bloom whose findings were adjudicated.
+        bloom: BloomId,
+        /// What was closed, how, why, and by whom.
+        adjudication: Adjudication,
+    },
+    /// File an operator-supplied repair on the bloom (#4957) — the decider
+    /// record beside the ordinary cursor move and `Verify` dispatch the same
+    /// reduction emits, see
+    /// [`BloomRecord::operator_repairs`](crate::BloomRecord::operator_repairs).
+    ///
+    /// Recorded rather than merely decided, for the reason a wedge is: the
+    /// dispatch that follows is indistinguishable from a lane's, so without this
+    /// row the journal would show a candidate nobody accounts for. Appended so
+    /// the prior decisions' wire discriminants are unchanged.
+    RecordOperatorRepair {
+        /// The bloom the repaired workpiece belongs to.
+        bloom: BloomId,
+        /// The candidate, the workpiece it is for, and who supplied it.
+        repair: OperatorRepair,
     },
 }

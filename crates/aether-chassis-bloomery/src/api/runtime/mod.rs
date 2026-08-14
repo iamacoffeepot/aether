@@ -348,6 +348,36 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
+    /// `POST /blooms/{id}/adjudicate` — close the composition findings the
+    /// operator has read, with a stated reason, and let the bloom proceed to
+    /// its landing (#4957).
+    #[http::route(Post, "/blooms/{id}/adjudicate")]
+    fn on_adjudicate(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = ApiCapabilityState::adjudicate(&id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /blooms/{id}/members/{workpiece}/repair` — re-enter a wedged
+    /// workpiece at `Verify` on the candidate the operator pushed (#4957). The
+    /// gates still run; only the model lap is skipped.
+    #[http::route(Post, "/blooms/{id}/members/{workpiece}/repair")]
+    fn on_repair(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+        workpiece: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let workpiece = workpiece.0;
+        let routed = ApiCapabilityState::repair(&id, &workpiece, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
     /// `POST /blooms/{id}/answer/{question}` — adopt a signed answer to the
     /// parked question `{question}` names. The question is a path segment
     /// because the signature is bound to it (ADR-0182).
