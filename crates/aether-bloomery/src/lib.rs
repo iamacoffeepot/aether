@@ -102,14 +102,15 @@ pub use sign::{AuthorityDoor, FakeKeyProvider, KeyProvider, SignatureEnvelope, a
 pub use study_report::{BloomGrade, StudyReport, grade};
 pub use values::{
     Adjudication, AgentProfile, AgentSelection, ApprovalPolicy, ApprovalRule, Artifact, Attempt, BloomDraft, BloomSpec,
-    CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, CompositionFinding, ConfigKind, ConfigRegistry,
-    ConfigResolveError, ConfigScopes, DispatchKey, Disposition, Evidence, EvidenceKind, ExecutionLimits, Forecast,
-    Harness, LandingReceipt, LongContextBand, MemberCandidate, MemberSubject, Membership, ModelOverride,
+    CHECK_KEY, CONSTRUCT_IMPLEMENT_COMMAND, CRITICAL_KEY, CandidateRef, CatalogError, ClassifiedFinding,
+    ClassifiedFindings, CompositionFinding, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, DispatchKey,
+    Disposition, Evidence, EvidenceKind, ExecutionLimits, FindingClass, Forecast, Harness, JUDGMENT_TAG,
+    LandingReceipt, LongContextBand, MECHANICAL_TAG, MemberCandidate, MemberSubject, Membership, ModelOverride,
     NetworkProfile, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OperatorRepair, OrphanClaimRelease,
     OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord, OverrideError, PriceRates, PriceTable, Provenance,
     Question, REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel,
     SealedPriceTable, StageBinding, StageCatalog, StageOverride, StageReceipt, Statement, StudyCall, StudyCost,
     StudyRecord, SurfacePattern, Tier, TimeoutRecord, ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND,
     VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VerifiedTree, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof,
-    VerifyReuse, Wedge, Workpiece, config_address, decode_config, is_model_lane,
+    VerifyReuse, Wedge, Workpiece, classify_findings, config_address, decode_config, is_model_lane,
 };

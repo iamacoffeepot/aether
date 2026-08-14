@@ -1696,3 +1696,64 @@ fn a_members_repair_lap_is_not_triaged_against_mechanical_diagnostics() {
     assert!(*passed, "a member's repair lap keeps its verdict; the triage does not read mechanical findings");
     assert_eq!(evidence.kind, EvidenceKind::VerificationResult);
 }
+
+// #4961 — the advisory half of the classification, at the trust boundary. The
+// review lane already decided the verdict from the classes the critic stated, so
+// what arrives here is a *pass* whose prose still carries judgment findings; the
+// broker re-kinds it so the reducer files them on the composition's channel on
+// the way to the landing.
+//
+// Two tripwires. Re-kinding a pass that carries no advisories would file a
+// finding on every clean review, filling the channel an operator reads with rows
+// no verdict raised. And *not* re-kinding an advisory-carrying pass is the
+// silent-loss direction — the bloom resolves, the findings evaporate, and the
+// reviewer's judgment call was written for nobody.
+#[test]
+fn a_passing_review_carrying_advisories_is_kinded_as_one() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let tree = Digest::from_bytes([30; 32]);
+    let admit_pass = |store: &mut SqliteStore, nonce: &str, findings: Option<&str>| {
+        let mut record = dispatch_record(nonce, bloom, &WorkpieceId(String::new()), tree, tree);
+        record.stage = StageId::AggregateReview;
+        record_dispatch(store, &record).unwrap();
+        let upload = UploadedEvidence {
+            nonce: Nonce(nonce.to_owned()),
+            subject: tree,
+            verdict: StageVerdict::Approved,
+            detail: Digest::from_bytes([9; 32]),
+            candidate: None,
+            findings: findings.map(str::to_owned),
+            failed_verifiers: VerifyFailureSet::EMPTY,
+            cost: None,
+            calls: None,
+        };
+        let AdmitDecision::Admitted(admission) = admit_uploaded(store, &upload).unwrap() else {
+            panic!("a matching passing aggregate verdict is admitted");
+        };
+        let Fact::AggregateReviewCompleted { passed, evidence, .. } = admission.event.fact else {
+            panic!("an AggregateReview order admits AggregateReviewCompleted");
+        };
+        assert!(passed, "the lane's own verdict stands; the broker only re-kinds it");
+        evidence.kind
+    };
+
+    assert_eq!(
+        admit_pass(&mut store, "n-adv", Some("- JUDGMENT — src/reduce.rs: `weave` would read better here.")),
+        EvidenceKind::ReviewAdvisory,
+        "a pass whose prose records judgment findings is an advisory pass",
+    );
+    // `Approval` is what `normalize_stage_result` gives an approving verdict;
+    // these two are the untouched shape, and the point is that the re-kinding
+    // never reaches them.
+    assert_eq!(
+        admit_pass(&mut store, "n-clean", Some("all five pillars clean; the seam preserves both intents.")),
+        EvidenceKind::Approval,
+        "a pass whose prose classifies nothing files nothing",
+    );
+    assert_eq!(
+        admit_pass(&mut store, "n-blocking", Some("- JUDGMENT (critical: it drops the budget) — src/reduce.rs")),
+        EvidenceKind::Approval,
+        "a blocking class on a passing verdict is not an advisory — the lane would have reported a fail",
+    );
+}

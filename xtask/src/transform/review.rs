@@ -149,6 +149,11 @@ fn final_text(record: &serde_json::Value) -> Option<&str> {
 /// fail-closed (a wrongly passed defect integrates; a wrong finding just
 /// retries).
 ///
+/// A `finding` verdict is then read by class (#4961): the critic states what
+/// each finding is, and a report whose findings are all non-blocking advisories
+/// folds to `Pass`. See [`advisory_only`] — the fail-closed direction is
+/// preserved there too.
+///
 /// `Environment` survives the fold rather than collapsing into `Finding`
 /// (ADR-0176): the critic judged no candidate, so the result is a claim about
 /// the host, and flattening it here is what charged a member repair lap for an
@@ -163,7 +168,39 @@ fn review_conclusion(record: &serde_json::Value) -> ReviewVerdict {
     if !completed_clean {
         return ReviewVerdict::Finding;
     }
-    final_text(record).and_then(parse_review_verdict).unwrap_or(ReviewVerdict::Finding)
+    match final_text(record).and_then(parse_review_verdict) {
+        Some(ReviewVerdict::Finding) => advisory_only(final_text(record).unwrap_or_default()),
+        Some(other) => other,
+        None => ReviewVerdict::Finding,
+    }
+}
+
+/// The terminal verdict a `finding` report earns once its findings are read by
+/// class (#4961): `Pass` when the reviewer classified findings and marked none
+/// of them blocking, `Finding` otherwise.
+///
+/// This is where "subjective findings must not break blooms" is actually
+/// decided. The critic states a class per finding — mechanical, which asserts a
+/// decidable property and blocks, or judgment, which is advisory unless the
+/// critic marked it critical with a justification — and the lane derives what it
+/// reports from those statements rather than from the bare existence of a
+/// finding. The advisories still ride out in the stamped `findings` prose, so a
+/// downgraded review records what it saw; it just stops pricing a taste call at
+/// a repair round.
+///
+/// Fail-closed in the one direction that matters: a report with **no** classified
+/// finding under a `finding` verdict stays a finding. That is the critic that
+/// ignored the format, and reading unclassified prose as advisory would land
+/// every defect a non-conforming reviewer names. The parse is the domain crate's
+/// (`aether_bloomery::classify_findings`) rather than a local re-spelling, so the
+/// lane that writes the format and the chassis that reads it cannot drift.
+fn advisory_only(report: &str) -> ReviewVerdict {
+    let classified = aether_bloomery::classify_findings(report);
+    if classified.is_empty() || classified.any_blocking() {
+        return ReviewVerdict::Finding;
+    }
+
+    ReviewVerdict::Pass
 }
 
 /// Stamp the broker-matched `nonce` and the lane's terminal `verdict` onto the
@@ -346,6 +383,65 @@ mod tests {
         // But only from a run that concluded: a dead run's claim about the host
         // is no more trustworthy than its claim about the candidate.
         assert_eq!(review_conclusion(&record(true, "VERDICT: environment")), Finding);
+    }
+
+    #[test]
+    fn a_finding_verdict_reports_a_pass_when_every_finding_is_an_advisory() {
+        use ReviewVerdict::{Finding, Pass};
+        use serde_json::json;
+        let clean = |text: &str| {
+            derive_result_record(&format!("{}\n", json!({"type": "result", "is_error": false, "result": text})))
+        };
+
+        // Tripwire (#4961): the owner's requirement lives on this line —
+        // subjective findings must not break blooms. A critic that classified
+        // its findings and marked none of them blocking reports as a pass, so
+        // the composition never re-weaves over a naming preference; the prose
+        // still rides out for the record.
+        assert_eq!(
+            review_conclusion(&clean(
+                "- JUDGMENT — src/reduce.rs: `weave` would read better as `composition`.\n\
+                 - JUDGMENT — src/lib.rs: the module doc buries its rule.\n\
+                 VERDICT: finding"
+            )),
+            Pass,
+        );
+        // A judgment call the critic marked critical *and* justified blocks
+        // exactly as it always did.
+        assert_eq!(
+            review_conclusion(&clean(
+                "- JUDGMENT (critical: the seam drops the retry budget, so a wedge lands silently) — src/reduce.rs\n\
+                 VERDICT: finding"
+            )),
+            Finding,
+        );
+        // The marker without the sentence is not the mark. Its own tripwire:
+        // reading a bare `(critical)` as blocking hands every taste call a
+        // one-word escalation and re-opens the door this change closes.
+        assert_eq!(
+            review_conclusion(&clean("- JUDGMENT (critical) — src/reduce.rs: I feel strongly.\nVERDICT: finding")),
+            Pass,
+        );
+        // Mechanical blocks, with or without its named check — a decidable
+        // defect is a defect, and a formatting slip must never land one.
+        assert_eq!(
+            review_conclusion(&clean(
+                "- MECHANICAL (check: `representative_covers_every_decision`) — the fixture omits it.\n\
+                 VERDICT: finding"
+            )),
+            Finding,
+        );
+        assert_eq!(
+            review_conclusion(&clean("- MECHANICAL — src/lib.rs: the guard is unexercised.\nVERDICT: finding")),
+            Finding,
+        );
+        // And the fail-closed floor: a `finding` verdict whose prose classifies
+        // nothing is a critic that ignored the format, not a set of advisories.
+        assert_eq!(
+            review_conclusion(&clean("src/lib.rs: an empty list makes this index panic.\nVERDICT: finding")),
+            Finding,
+            "an unclassified finding is read as blocking",
+        );
     }
 
     #[test]

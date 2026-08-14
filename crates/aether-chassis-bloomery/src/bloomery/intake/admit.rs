@@ -8,7 +8,7 @@ use std::fmt;
 use aether_bloomery::{
     Admit, BloomId, CandidateRef, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, Nonce, ResolutionClaim,
     StageCatalog, StageId, StageResult, StageVerdict, StudyCall, StudyCost, VerifyFailureSet, WorkpieceId,
-    normalize_stage_result,
+    classify_findings, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
@@ -320,9 +320,38 @@ fn aggregate_review_event(
 
     let event = Event {
         idempotency_key: AdmissionKey::AggregateReview.of(&record.nonce.0),
-        fact: Fact::AggregateReviewCompleted { bloom: record.bloom, passed, evidence, implicated },
+        fact: Fact::AggregateReviewCompleted {
+            bloom: record.bloom,
+            passed,
+            evidence: advisory_evidence(upload, passed, evidence),
+            implicated,
+        },
     };
     Ok((event, decomposition))
+}
+
+/// Re-kind a *passing* composition review that still returned judgment findings
+/// (#4961), so the reducer files them on the composition's findings channel on
+/// its way to resolving the bloom.
+///
+/// The lane already decided the verdict from the classes the reviewer stated: a
+/// review whose findings are all non-blocking advisories reports as a pass, and
+/// what reaches here is that pass plus the prose it recorded. Read back through
+/// the same domain-crate parser the lane derived the verdict with, so the format
+/// has one spelling and this cannot disagree with the decision that produced it.
+///
+/// Only the kind moves — the same subject, the same detail artifact — exactly as
+/// a bounced repair lap re-kinds its evidence. A pass with no advisories, and any
+/// non-passing verdict, is untouched.
+fn advisory_evidence(upload: &UploadedEvidence, passed: bool, evidence: Evidence) -> Evidence {
+    let advisory = passed
+        && upload.findings.as_deref().is_some_and(|prose| classify_findings(prose).advisories().next().is_some());
+
+    if advisory {
+        Evidence { kind: EvidenceKind::ReviewAdvisory, ..evidence }
+    } else {
+        evidence
+    }
 }
 
 /// The admission event for an aggregate review whose executor could not judge

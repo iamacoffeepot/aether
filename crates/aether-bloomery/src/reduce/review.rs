@@ -17,7 +17,7 @@ use super::{
     Outcome, Snapshot,
 };
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{Evidence, ResolvedBloom, Transformation};
+use crate::values::{CompositionFinding, Evidence, EvidenceKind, ResolvedBloom, Transformation};
 
 /// The bloom record and the integration fold a fold-bound aggregate-review
 /// result may act on, or the refusal it earns.
@@ -53,6 +53,13 @@ fn held_fold_under_review<'a>(
 /// artifact. The second failing verdict parks the bloom to the owner — the
 /// two-pass ceiling; the machine never buys a third roll, though an adopting
 /// answer lets the owner buy a fresh cycle.
+///
+/// Which of the two a verdict is, is now the *reviewer's* statement about its
+/// findings rather than the mere existence of one (#4961). A review whose
+/// findings are all judgment advisories reports as a pass and arrives here as
+/// one, carrying [`EvidenceKind::ReviewAdvisory`] — so the observations are
+/// filed on the composition's channel on the way to the landing, and a
+/// subjective finding costs a bloom nothing.
 pub(super) fn reduce_aggregate_review_completed(
     snapshot: &Snapshot,
     bloom: &BloomId,
@@ -64,12 +71,46 @@ pub(super) fn reduce_aggregate_review_completed(
         Ok(held) => held,
         Err(refusal) => return Decisions::rejected(Outcome::AggregateReviewRejected(refusal)),
     };
+    // The implication is a *label on the finding*, not a routing table: it names
+    // which members' intent the verdict thinks the weave lost, so the recorded
+    // finding points a reader (and any follow-up work filed from it) at the right
+    // code. A named non-member is malformed and is validated before any effect
+    // applies, so such a verdict changes nothing — checked ahead of the verdict
+    // split because a passing verdict can carry an advisory finding now, and a
+    // label the record cannot resolve is no better on that row than on a refusal's.
+    // An empty implication is never expanded to every member: under ADR-0191 there
+    // is nothing to over-route *to*, and a verdict about the weave as a whole is
+    // exactly a finding that names nobody.
+    if let Some(stranger) =
+        implicated.iter().find(|wp| !record.spec.members().iter().any(|member| member.workpiece == **wp))
+    {
+        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::NotAMember(
+            stranger.clone(),
+        )));
+    }
     let rolls = record.aggregate_rolls + 1;
     let mut effects = alloc::vec![
         Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() },
         Decision::RecordAggregateRoll { bloom: *bloom, rolls },
     ];
     if passed {
+        // A pass that still recorded judgment findings (#4961). The reviewer
+        // marked none of them blocking, so nothing here re-weaves, spends the
+        // repair budget, or delays the landing — and the observations still land
+        // on the composition's own channel, where an operator can adjudicate
+        // them and the study that files fix-forward work can read them. Filed
+        // before the resolution effects so the journal shows the finding under
+        // the verdict that raised it.
+        if evidence.kind == EvidenceKind::ReviewAdvisory {
+            effects.push(Decision::RecordCompositionFinding {
+                bloom: *bloom,
+                finding: CompositionFinding {
+                    subject: integration.tree,
+                    detail: evidence.detail,
+                    implicated: implicated.to_vec(),
+                },
+            });
+        }
         let resolution_claims = record.claims.values().cloned().collect::<Vec<_>>();
         let resolved = ResolvedBloom {
             bloom: *bloom,
@@ -93,21 +134,6 @@ pub(super) fn reduce_aggregate_review_completed(
         });
         return Decisions { outcome: Outcome::Resolved(resolved), effects };
     }
-    // The implication is now a *label on the finding*, not a routing table: it
-    // names which members' intent the verdict thinks the weave lost, so the
-    // recorded finding points a reader (and any follow-up work filed from it) at
-    // the right code. A named non-member is still malformed and is validated
-    // before any effect applies, so such a verdict changes nothing. An empty
-    // implication is no longer expanded to every member — under ADR-0191 there
-    // is nothing to over-route *to*, and a verdict about the weave as a whole is
-    // exactly a finding that names nobody.
-    if let Some(stranger) =
-        implicated.iter().find(|wp| !record.spec.members().iter().any(|member| member.workpiece == **wp))
-    {
-        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::NotAMember(
-            stranger.clone(),
-        )));
-    }
     if rolls >= record.stage_catalog.retry_budget_of(StageId::AggregateReview).unwrap_or(1) {
         // The delta-confirm still failed: the two-pass ceiling parks the bloom
         // to the owner (ADR-0151's hold vocabulary at bloom scope). The fold
@@ -121,7 +147,7 @@ pub(super) fn reduce_aggregate_review_completed(
             effects,
         };
     }
-    // First failing verdict: repair in the composition (ADR-0191 §4/§5). The
+    // First blocking verdict: repair in the composition (ADR-0191 §4/§5). The
     // implicated set is recorded on the finding — it files follow-up work for a
     // member whose code the verdict genuinely names, and it directs the reader —
     // but nothing is dispatched against a member and no claim is revoked. A

@@ -10,6 +10,7 @@ mod approval;
 mod bloom;
 mod composition;
 mod config;
+mod finding;
 mod model_override;
 mod operator;
 mod orphan_claim;
@@ -31,6 +32,10 @@ pub use composition::CompositionFinding;
 pub use config::{
     ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, ResolvedConfigs, Unproducible, config_address,
     decode_config,
+};
+pub use finding::{
+    CHECK_KEY, CRITICAL_KEY, ClassifiedFinding, ClassifiedFindings, FindingClass, JUDGMENT_TAG, MECHANICAL_TAG,
+    classify_findings,
 };
 pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedModel, StageOverride};
 pub use operator::{Adjudication, Disposition, OperatorRepair};
@@ -193,6 +198,18 @@ pub enum EvidenceKind {
     /// Appended past [`Self::FoldConflict`] so the prior kinds' wire
     /// discriminants are unchanged.
     RepairTriage,
+    /// A composition review that **passed** while still recording judgment
+    /// findings the reviewer did not mark blocking (#4961).
+    ///
+    /// Its `detail` names the review record the pass was stamped from, exactly
+    /// as a [`ReviewFinding`](Self::ReviewFinding) would — what makes the row
+    /// distinct is the kind, which is what tells the reducer to file the
+    /// advisories on the composition's findings channel on its way to resolving
+    /// the bloom. A subjective finding must not break a bloom, and it must not
+    /// evaporate either: this is the second half. Appended past
+    /// [`Self::RepairTriage`] so the prior kinds' wire discriminants are
+    /// unchanged.
+    ReviewAdvisory,
 }
 
 /// The sealed forecast of what a bloom's set will spend — what a study report
