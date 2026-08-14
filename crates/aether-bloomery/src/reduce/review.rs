@@ -1,17 +1,23 @@
-//! The whole-bloom aggregate review: one verdict over the integrated head,
-//! bounded by the two-pass ceiling that parks the bloom to the owner rather
-//! than buying a third roll (ADR-0153).
+//! The composition workpiece's `Review` (ADR-0191 §3): one verdict over the
+//! composed head, bounded by the two-pass ceiling that parks the bloom to the
+//! owner rather than buying a third roll (ADR-0153).
+//!
+//! Its subject is the weave — the reconcile-authored seam edits, the files more
+//! than one member touched, and whether each member's work order is still
+//! visibly satisfied in the composed tree. The member work orders and candidates
+//! are reference input; the member diffs are not re-read. So a refusal repairs
+//! the weave and never re-opens a member.
 
 use alloc::vec::Vec;
 
-use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate, stage_binding};
+use super::attempt::stage_binding;
+use super::composition::{Refusal, reweave};
 use super::{
     AggregateReviewError, AggregateReviewFault, BloomRecord, BloomStatus, Decision, Decisions, FoldedIntegration,
-    Outcome, Snapshot, StageProgress,
+    Outcome, Snapshot,
 };
-use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{ConfigRegistry, Evidence, ResolvedBloom, Transformation, VerifyFailureSet};
+use crate::values::{Evidence, ResolvedBloom, Transformation};
 
 /// The bloom record and the integration fold a fold-bound aggregate-review
 /// result may act on, or the refusal it earns.
@@ -38,16 +44,15 @@ fn held_fold_under_review<'a>(
     Ok((record, integration))
 }
 
-/// Reduce a whole-bloom aggregate-review verdict (ADR-0153). A passing verdict
-/// resolves the bloom from its held fold — [`Decision::SetResolved`] plus the
-/// [`Decision::DispatchLand`] the land reactor consumes. A failing verdict
-/// freezes into member routing: every implicated member's claim is revoked and
-/// its cursor re-enters the repair-only `Refine` (the host threads the
-/// findings slice onto the dispatch), the stale fold is cleared, and the
-/// re-fold that follows re-integration dispatches the delta-confirm. The
-/// second failing verdict parks the bloom to the owner — the two-pass
-/// ceiling; the machine never buys a third roll, though an adopting answer
-/// lets the owner buy a fresh cycle.
+/// Reduce a composition-review verdict (ADR-0153, ADR-0191 §3). A passing
+/// verdict resolves the bloom from its held fold — [`Decision::SetResolved`]
+/// plus the [`Decision::DispatchLand`] the land reactor consumes. A failing
+/// verdict files the finding on the composition's channel and dispatches the
+/// weave repair against the composed tree; the fold stays held, because it is
+/// the composition's candidate under repair rather than someone else's stale
+/// artifact. The second failing verdict parks the bloom to the owner — the
+/// two-pass ceiling; the machine never buys a third roll, though an adopting
+/// answer lets the owner buy a fresh cycle.
 pub(super) fn reduce_aggregate_review_completed(
     snapshot: &Snapshot,
     bloom: &BloomId,
@@ -88,13 +93,14 @@ pub(super) fn reduce_aggregate_review_completed(
         });
         return Decisions { outcome: Outcome::Resolved(resolved), effects };
     }
-    // A failing verdict routes to owners. A named non-member is malformed —
-    // validated before any effect applies, so such a verdict changes nothing.
-    // An *empty* implication routes to every member: the host admits the
-    // verdict without membership knowledge (only the reducer holds the sealed
-    // set), and over-routing is the fail-closed direction — a failing verdict
-    // must never strand for want of an owner. The findings decomposition
-    // (ADR-0153 §Findings freeze) narrows the set where ownership is parsed.
+    // The implication is now a *label on the finding*, not a routing table: it
+    // names which members' intent the verdict thinks the weave lost, so the
+    // recorded finding points a reader (and any follow-up work filed from it) at
+    // the right code. A named non-member is still malformed and is validated
+    // before any effect applies, so such a verdict changes nothing. An empty
+    // implication is no longer expanded to every member — under ADR-0191 there
+    // is nothing to over-route *to*, and a verdict about the weave as a whole is
+    // exactly a finding that names nobody.
     if let Some(stranger) =
         implicated.iter().find(|wp| !record.spec.members().iter().any(|member| member.workpiece == **wp))
     {
@@ -102,11 +108,6 @@ pub(super) fn reduce_aggregate_review_completed(
             stranger.clone(),
         )));
     }
-    let implicated: Vec<WorkpieceId> = if implicated.is_empty() {
-        record.spec.members().iter().map(|member| member.workpiece.clone()).collect()
-    } else {
-        implicated.to_vec()
-    };
     if rolls >= record.stage_catalog.retry_budget_of(StageId::AggregateReview).unwrap_or(1) {
         // The delta-confirm still failed: the two-pass ceiling parks the bloom
         // to the owner (ADR-0151's hold vocabulary at bloom scope). The fold
@@ -120,15 +121,26 @@ pub(super) fn reduce_aggregate_review_completed(
             effects,
         };
     }
-    // First failing verdict: re-open every implicated member — revoke its
-    // claim and route it into the repair-only Refine against its own claimed
-    // candidate (the fold's tree is the whole bloom's, never one member's
-    // repair target). The cleared fold marks the integration stale; when the
-    // re-opened members re-integrate, the completing claim re-dispatches the
-    // fold and the fresh head gets the delta-confirm.
-    effects.extend(reenter_members(record, bloom, &implicated, integration.tree));
+    // First failing verdict: repair in the composition (ADR-0191 §4/§5). The
+    // implicated set is recorded on the finding — it files follow-up work for a
+    // member whose code the verdict genuinely names, and it directs the reader —
+    // but nothing is dispatched against a member and no claim is revoked. A
+    // member that passed its review is done; the weave is what repairs, at the
+    // seam, against the composed tree that was refused.
+    let repair = reweave(
+        record,
+        bloom,
+        &Refusal {
+            refused_at: StageId::AggregateReview,
+            tree: integration.tree,
+            head: integration.head,
+            evidence,
+            implicated,
+        },
+    );
+    effects.extend(repair.effects);
 
-    Decisions { outcome: Outcome::AggregateReviewReentered { bloom: *bloom, members: implicated, rolls }, effects }
+    Decisions { outcome: repair.outcome, effects }
 }
 
 /// Reduce an aggregate-review executor environment fault (ADR-0176) — the
@@ -185,58 +197,4 @@ pub(super) fn reduce_aggregate_review_executor_fault(
     });
 
     Decisions { outcome: Outcome::AggregateReviewExecutorFaulted { bloom: *bloom, fault, budget }, effects }
-}
-
-/// Clear the stale fold and route every named member back into the repair-only
-/// `Refine` against its own claimed candidate.
-///
-/// Shared by both aggregate gates because the routing is the same regardless of
-/// which one refused the fold: the claim is revoked (a bloom with a revoked
-/// claim cannot resolve), the cursor re-enters `Refine`, and the cleared fold
-/// marks the integration stale so the completing re-integration dispatches a
-/// fresh one. `fold` is the fold's tree, used only as the last-resort subject
-/// for a member carrying neither a cursor candidate nor a claim.
-pub(super) fn reenter_members(
-    record: &BloomRecord,
-    bloom: &BloomId,
-    members: &[WorkpieceId],
-    fold: Digest,
-) -> Vec<Decision> {
-    let mut effects = alloc::vec![Decision::RecordIntegration { bloom: *bloom, integration: None }];
-    for workpiece in members {
-        effects.push(Decision::RevokeResolution { bloom: *bloom, workpiece: workpiece.clone() });
-        let member = record.spec.members().iter().find(|member| member.workpiece == *workpiece);
-        let claimed_candidate = record.claims.get(workpiece).map(|claim| claim.candidate);
-        let cursor = record.progress.get(workpiece).copied();
-        let progress = StageProgress {
-            stage: StageId::Refine,
-            attempts: 1,
-            candidate: cursor.and_then(|progress| progress.candidate),
-            repair_rolls: cursor.map_or(0, |progress| progress.repair_rolls),
-            seen_verify_failures: cursor.map_or(VerifyFailureSet::EMPTY, |progress| progress.seen_verify_failures),
-            fold_checkpoint: None,
-            fold_conflict_evidence: None,
-        };
-        // The dispatch targets re-resolve like a member-line move (ADR-0152):
-        // the claimed candidate tree binds the evidence and its capture commit
-        // is the checkout; the cursor's candidate carries the checkout pair.
-        let (subject, checkout) = progress.candidate.map_or_else(
-            || (claimed_candidate.or_else(|| member.map(|m| m.scope_revision)).unwrap_or(fold), record.spec.base()),
-            |current| (current.tree, current.checkout),
-        );
-        effects.extend(move_effects_with_candidate(
-            *bloom,
-            workpiece,
-            member.map_or(fold, |m| m.scope_revision),
-            progress,
-            DispatchTargets { subject, checkout },
-            progress.candidate.map(|current| current.tree).or(claimed_candidate),
-            SealedLine {
-                configs: member.map_or_else(ConfigRegistry::default, |m| m.configs.layered_over(record.spec.configs())),
-                catalog: &record.stage_catalog,
-                base: record.spec.base(),
-            },
-        ));
-    }
-    effects
 }

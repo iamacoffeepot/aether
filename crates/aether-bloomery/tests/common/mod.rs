@@ -198,6 +198,7 @@ pub fn splice_bloom(snapshot: &mut Snapshot, spec: &BloomSpec, status: BloomStat
             verify_proofs: BTreeMap::new(),
             verify_reuses: Vec::new(),
             aggregate_fault: None,
+            composition_findings: Vec::new(),
             superseded_by: None,
         },
     );

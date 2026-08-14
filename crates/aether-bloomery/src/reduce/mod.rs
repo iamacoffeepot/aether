@@ -21,6 +21,7 @@
 
 mod aggregate_verify;
 mod attempt;
+mod composition;
 mod decision;
 mod error;
 mod event;

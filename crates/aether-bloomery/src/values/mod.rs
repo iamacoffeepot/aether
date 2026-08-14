@@ -8,6 +8,7 @@
 
 mod approval;
 mod bloom;
+mod composition;
 mod config;
 mod model_override;
 mod orphan_claim;
@@ -25,6 +26,7 @@ pub use approval::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier};
 pub use bloom::{
     BloomDraft, BloomSpec, LandingReceipt, MemberCandidate, MemberSubject, Membership, ResolutionClaim, ResolvedBloom,
 };
+pub use composition::CompositionFinding;
 pub use config::{
     ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, ResolvedConfigs, Unproducible, config_address,
     decode_config,

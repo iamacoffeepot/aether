@@ -443,6 +443,43 @@ pub enum Outcome {
         /// The mainline the observation was classified against.
         mainline: Digest,
     },
+    /// A refused composition dispatched the weave repair (ADR-0191 §5) — the
+    /// composition workpiece's own `Refine`, against the composed tree that was
+    /// refused. No member's claim is revoked and no member is dispatched:
+    /// members are immutable after review, and a defect discovered in the
+    /// composition belongs to the composition. Appended so every prior outcome
+    /// keeps its wire discriminant, like the two below.
+    CompositionRewoven {
+        /// The bloom whose composition is repairing.
+        bloom: BloomId,
+        /// The stage whose verdict refused the composition — its `Verify` (the
+        /// composite gate run), its `Review` (the intent-preservation judgment),
+        /// or `Land` when the landing gate refused the weave.
+        refused_at: StageId,
+        /// The weave-repair attempt this dispatch is, against the composition's
+        /// own retry budget.
+        attempt: u32,
+    },
+    /// The composition spent its weave-repair budget and stopped (ADR-0191 §5):
+    /// the wedge an operator reads, in the existing wedge vocabulary. Recovery
+    /// is the ordinary one — an attempt grant against the composition, or a
+    /// successor — never a member re-entry.
+    CompositionWedged {
+        /// The wedged bloom.
+        bloom: BloomId,
+        /// The stage whose verdict spent the last of the budget.
+        refused_at: StageId,
+        /// The finding artifact the wedge carries.
+        question: Digest,
+    },
+    /// A weave repair returned and the composition advanced back to its
+    /// `Verify`, re-dispatching the composite gate run over the re-woven tree.
+    CompositionRepaired {
+        /// The bloom whose composition repaired.
+        bloom: BloomId,
+        /// The re-woven tree the gates now run over.
+        tree: Digest,
+    },
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 
 use alloc::vec::Vec;
 
+use super::composition::reduce_composition_attempt;
 use super::integrate::claim_effects;
 use super::verify_memo::reuse_of;
 use super::{AttemptCompletedError, BloomRecord, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
@@ -150,6 +151,12 @@ pub(super) fn reduce_attempt_completed(
     evidence: &Evidence,
     captured: Option<CandidateRef>,
 ) -> Decisions {
+    // The composition workpiece is a subject like a member but not *of* the
+    // membership, so it is routed before the member lookup that would otherwise
+    // refuse it as a stranger (ADR-0191).
+    if workpiece.is_composition() {
+        return reduce_composition_attempt(snapshot, bloom, stage, passed, evidence, captured);
+    }
     let Some(record) = snapshot.blooms.get(bloom) else {
         return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::UnknownOrInactiveBloom));
     };

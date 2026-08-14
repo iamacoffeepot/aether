@@ -75,6 +75,53 @@ fn candidate_section(diff_base: Option<&str>) -> String {
     )
 }
 
+/// The `## Composition review` section, present only when the order names a diff
+/// base (ADR-0191 §3).
+///
+/// The diff base is what tells the two reviews apart, and it is not an incidental
+/// signal: a member's candidate is the uncommitted change its lane left behind,
+/// while the composition's candidate is the committed weave the fold produced. So
+/// the order that names a range is exactly the order whose subject is the weave.
+///
+/// The contract this states is the whole point of ADR-0191. The composition
+/// review is not a second pass over the members: they have each already passed
+/// their own review, they are immutable, and re-reading their diffs here is what
+/// turned one reviewer's attention sampling into bloom-wide coupling (bloom
+/// `10a1228c` spent three judge rounds and eight of nine findings that way). The
+/// question is narrower and answerable: did each member's intent survive the
+/// weaving?
+fn composition_contract(diff_base: Option<&str>) -> String {
+    let Some(base) = diff_base else {
+        return String::new();
+    };
+
+    format!(
+        "\n## Composition review\n\n\
+         This is a **composition review**. The candidate is the *weave*: the fold of several members' \
+         already-reviewed candidates, plus every edit authored at a seam where they collided. Each member \
+         passed its own review before it entered this tree, and each is finished and immutable. Your subject \
+         is the weaving, not the members.\n\n\
+         Judge exactly three things:\n\n\
+         1. **The seam edits.** Every change in the range that no member authored — the reconciliation work. \
+         Read these in full, on all five pillars below.\n\
+         2. **The files more than one member touched.** Find them with \
+         `git log --format='%H' {base}..HEAD | while read c; do git diff-tree --no-commit-id --name-only -r \"$c\"; \
+         done | sort | uniq -d`. A file two members changed is where one intent can quietly overwrite another.\n\
+         3. **Per-member acceptance.** For each work order in the `## Task` section, check that what it promised \
+         is still visibly present in the composed tree. This is a presence check against the order, not a re-review \
+         of how the member implemented it.\n\n\
+         **Do not re-read the member diffs.** The member work orders and candidates are reference input — they \
+         tell you what each member set out to do, so you can tell whether the weave preserved it. A defect in a \
+         member's own code that the weave faithfully carried through is *not* a finding of this review: it belongs \
+         to a member that is already done, and it is filed as new work rather than reopening finished work. If you \
+         see one and it is serious, name it in your justification prose as an observation and say plainly that it \
+         is member-scope; do not let it decide your verdict.\n\n\
+         Findings freeze per subject, exactly as member review findings do: on a re-review of a repaired weave, \
+         discharge the frozen findings you were given and judge only what changed. Do not open a fresh full pass \
+         over work you already judged.\n"
+    )
+}
+
 /// The findings prose an `environment` verdict produces: the critic's own report
 /// under an operator-directed framing.
 ///
@@ -182,8 +229,15 @@ pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
     // The instruction text arrives with the `## Candidate` section the order's
     // diff source composes (#4723): what the critic runs to see the candidate is
     // a property of the work order, not something the prompt asks it to infer.
+    // The same signal carries the composition contract (ADR-0191 §3) — an order
+    // whose candidate is a committed range is the composition's review, and its
+    // subject is the weave rather than the members.
     let prompt = assemble_construct_prompt(
-        &format!("{REVIEW_INSTRUCTIONS}{}", candidate_section(args.diff_base.as_deref())),
+        &format!(
+            "{REVIEW_INSTRUCTIONS}{}{}",
+            candidate_section(args.diff_base.as_deref()),
+            composition_contract(args.diff_base.as_deref()),
+        ),
         conventions::read(Path::new(".")).as_deref(),
         args.subject.as_deref(),
         args.task.as_deref(),
@@ -198,7 +252,8 @@ pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Measurements, ReviewVerdict, candidate_section, parse_review_verdict, review_conclusion, stamp_review_evidence,
+        Measurements, ReviewVerdict, candidate_section, composition_contract, parse_review_verdict, review_conclusion,
+        stamp_review_evidence,
     };
     use crate::transform::messages::derive_result_record;
 
@@ -242,6 +297,26 @@ mod tests {
         assert!(working_tree.contains("git diff HEAD"));
         assert!(working_tree.contains("git status --porcelain"));
         assert!(!working_tree.contains(".."), "a working-tree candidate names no range");
+    }
+
+    #[test]
+    fn only_a_composition_review_is_told_to_judge_the_weave() {
+        // Tripwire (ADR-0191 §3): the composition review's whole cost argument is
+        // that it does not re-read the member diffs. A contract that leaked onto
+        // the member review would tell a member critic its subject is a weave
+        // that does not exist there; a contract missing from the composition
+        // review is the 10a1228c behaviour — a full re-read of every member,
+        // eight member-scope findings out of nine, and three judge rounds.
+        let composition = composition_contract(Some("abc123"));
+
+        assert!(composition.contains("## Composition review"), "{composition}");
+        assert!(composition.contains("Do not re-read the member diffs"), "{composition}");
+        assert!(composition.contains("reference input"), "the member work orders are reference: {composition}");
+        assert!(composition.contains("abc123..HEAD"), "the overlap probe spans the weave's range: {composition}");
+        assert!(composition.contains("immutable"), "members are done: {composition}");
+        assert!(composition.contains("freeze"), "findings discharge rather than re-open: {composition}");
+
+        assert!(composition_contract(None).is_empty(), "a member review carries no composition contract");
     }
 
     #[test]

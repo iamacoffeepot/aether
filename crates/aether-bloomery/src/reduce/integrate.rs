@@ -3,8 +3,7 @@
 
 use alloc::vec::Vec;
 
-use super::aggregate_verify::aggregate_review_dispatch;
-use super::attempt::stage_binding;
+use super::aggregate_verify::{aggregate_review_dispatch, aggregate_verify_dispatch};
 use super::verify_memo::{proof_of, reuse_of};
 use super::{
     BloomRecord, BloomStatus, Decision, Decisions, FoldedIntegration, IntegrateError, Outcome, ResolveError, Snapshot,
@@ -12,7 +11,7 @@ use super::{
 use crate::digest::Digest;
 use crate::ids::BloomId;
 use crate::ids::StageId;
-use crate::values::{MemberCandidate, ResolutionClaim, Transformation};
+use crate::values::{MemberCandidate, ResolutionClaim};
 
 /// The effects one member's resolution claim produces: the claim itself, the
 /// `provenance` note for the verdict it carries, and — when it completes the
@@ -193,18 +192,8 @@ pub(super) fn reduce_resolve(
         };
     }
 
-    let binding = stage_binding(&record.stage_catalog, StageId::AggregateVerify);
-
     Decisions {
         outcome: Outcome::AggregateVerifyDispatched { bloom: *bloom, roll },
-        effects: alloc::vec![
-            hold,
-            Decision::DispatchAggregateVerify {
-                bloom: *bloom,
-                transformation: Transformation::for_aggregate_verify(&binding, *tree, *head),
-                roll,
-                profile: binding.profile,
-            },
-        ],
+        effects: alloc::vec![hold, aggregate_verify_dispatch(record, *bloom, *tree, *head)],
     }
 }

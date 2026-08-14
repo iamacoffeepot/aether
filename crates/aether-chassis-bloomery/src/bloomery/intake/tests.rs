@@ -139,6 +139,7 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
             verify_proofs: BTreeMap::new(),
             verify_reuses: Vec::new(),
             aggregate_fault: None,
+            composition_findings: Vec::new(),
             superseded_by: None,
         },
     );

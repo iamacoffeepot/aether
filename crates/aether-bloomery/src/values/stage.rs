@@ -589,11 +589,17 @@ impl StageCatalog {
 /// ledger stable across replays.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum DispatchKey {
-    /// One member's slot at one stage: `Construct`, `Verify`, the
+    /// One workpiece's slot at one stage: `Construct`, `Verify`, the
     /// repair-only `Refine` re-entry, or the fold-conflict `Reconcile`
     /// (ADR-0153 / ADR-0189's dispatched member positions).
+    ///
+    /// The synthetic composition workpiece keys here too
+    /// ([`WorkpieceId::COMPOSITION`], ADR-0191): its weave repair is a `Refine`
+    /// dispatch like any other, so the ledger counts it without a slot shape of
+    /// its own — which is the point of giving the composition the same identity
+    /// space a member has.
     Member {
-        /// The member the attempt runs against.
+        /// The workpiece the attempt runs against.
         workpiece: WorkpieceId,
         /// The stage dispatched against it.
         stage: StageId,
