@@ -17,6 +17,7 @@ use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
     ActionsExecutor, Artifact, ExecutorError, GithubError, LaneWorkflows, RunConclusion, RunStatus,
 };
+use aether_data::wire::from_bytes;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::subscriber::with_default;
@@ -1401,4 +1402,297 @@ fn second_attempt(
         },
     );
     (handle, SeededClaims(claims))
+}
+
+/// The finding from bloom `10a1228c` (#4959): a coverage gap that fails no
+/// mechanical gate, naming one symbol and the file it lives in — a judge's
+/// prose, which post-ADR-0191 lands on the composition's channel.
+const REPAIR_FINDING: &str = "[wp-golden] `representative()` in \
+                              `crates/aether-bloomery/tests/golden_decisions/main.rs` does not reach every effect \
+                              family, so the pinned bytes freeze less than the graph.";
+
+/// The dodge the refine lane returned, twice: a real edit, in the file the
+/// finding named, changing nothing the finding is about.
+const DODGE_DIFF: &str = "--- a/crates/aether-bloomery/tests/golden_decisions/main.rs\n\
+                          +++ b/crates/aether-bloomery/tests/golden_decisions/main.rs\n\
+                          @@ -530,7 +530,7 @@ fn the_decisions_graph_is_wire_frozen() {\n\
+                          -    let encoded = to_vec(&decisions).unwrap();\n\
+                          +    let encoded = to_vec(&decisions).expect(\"a fixture value wire-encodes\");\n";
+
+/// A repair that actually reaches the named symbol.
+const REAL_REPAIR_DIFF: &str = "--- a/crates/aether-bloomery/tests/golden_decisions/main.rs\n\
+                                +++ b/crates/aether-bloomery/tests/golden_decisions/main.rs\n\
+                                @@ -240,6 +240,7 @@ fn representative() -> Decisions {\n\
+                                +            record_operator_repair(bloom, workpiece.clone()),\n";
+
+/// A bloom whose composition sits mid-weave-repair on its `attempt`th lap, with
+/// the refused weave to repair from (ADR-0191 §5) — where a weave repair's
+/// result lands.
+fn composition_reweaving(
+    member: &WorkpieceId,
+    scope_revision: Digest,
+    weave: Digest,
+    attempt: u32,
+) -> (Snapshot, BloomId) {
+    let (mut snapshot, bloom) = sealed_via_reducer(member, scope_revision);
+    let record = snapshot.blooms.get_mut(&bloom).expect("the sealed bloom");
+    record.progress.insert(
+        WorkpieceId::composition(),
+        aether_bloomery::StageProgress {
+            stage: StageId::Refine,
+            attempts: attempt,
+            candidate: Some(aether_bloomery::CandidateRef { tree: weave, checkout: weave }),
+            repair_rolls: 0,
+            seen_verify_failures: VerifyFailureSet::EMPTY,
+            fold_checkpoint: None,
+            fold_conflict_evidence: None,
+        },
+    );
+    (snapshot, bloom)
+}
+
+/// The outstanding `Refine` order a weave repair answers.
+fn weave_repair_record(nonce: &str, bloom: BloomId, scope_revision: Digest, weave: Digest) -> DispatchRecord {
+    let mut record = dispatch_record(nonce, bloom, &WorkpieceId::composition(), scope_revision, weave);
+    record.stage = StageId::Refine;
+    record
+}
+
+/// Stage a repair lap: the finding that dispatched it, the diff it captured, and
+/// its outstanding order. The finding is filed bloom-scoped, which is where a
+/// failing composition review freezes it and what the weave repair's prompt reads.
+fn stage_repair_lap(store: &mut SqliteStore, record: &DispatchRecord, finding: &str, diff: Option<&str>) {
+    store.record_review_findings(record.bloom.0.as_bytes(), "", finding).unwrap();
+    if let Some(diff) = diff {
+        store.record_capture_diff(&record.nonce.0, diff).unwrap();
+    }
+    record_dispatch(store, record).unwrap();
+}
+
+/// The passing repair-lap upload a lane returns: a conclusive verdict plus the
+/// candidate it captured.
+fn repair_upload(nonce: &str, subject: Digest) -> UploadedEvidence {
+    UploadedEvidence {
+        nonce: Nonce(nonce.to_owned()),
+        subject,
+        verdict: StageVerdict::VerificationPassed,
+        detail: Digest::from_bytes([7; 32]),
+        candidate: Some(aether_bloomery::CandidateRef {
+            tree: Digest::from_bytes([8; 32]),
+            checkout: Digest::from_bytes([9; 32]),
+        }),
+        findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
+        cost: None,
+        calls: None,
+    }
+}
+
+// Tripwire: the incident (#4959, bloom `10a1228c`), in its post-ADR-0191 shape.
+// A weave repair that edits the file its finding named while leaving the named
+// symbol alone must be bounced by the host before anything is re-judged — and the
+// bounce must be a *failing* lap, so it spends the budget a refused lap spends
+// instead of opening a second loop. If this ever admits `passed: true`, the dodge
+// buys a whole-bloom Opus review round again.
+#[test]
+fn a_weave_repair_that_dodges_its_finding_bounces_without_a_re_judge_and_spends_a_retry() {
+    let mut store = store();
+    let member = WorkpieceId("wp-golden".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+    let weave = Digest::from_bytes([5; 32]);
+    let (snapshot, bloom) = composition_reweaving(&member, scope_revision, weave, 1);
+    let record = weave_repair_record("n-dodge", bloom, scope_revision, weave);
+    stage_repair_lap(&mut store, &record, REPAIR_FINDING, Some(DODGE_DIFF));
+
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &repair_upload("n-dodge", weave)).unwrap()
+    else {
+        panic!("the lap admits — as a failing one");
+    };
+    let Fact::AttemptCompleted { workpiece, stage, passed, evidence, .. } = &admission.event.fact else {
+        panic!("a Refine result admits AttemptCompleted");
+    };
+    assert!(workpiece.is_composition());
+    assert_eq!(*stage, StageId::Refine);
+    assert!(!*passed, "the lane's conclusive verdict is downgraded: the repair changed nothing the finding named");
+    assert_eq!(
+        evidence.kind,
+        EvidenceKind::RepairTriage,
+        "the bounce is filed under its own kind so the study layer can count dodges",
+    );
+
+    // The reducer charges the ordinary weave-repair retry and re-weaves — the
+    // composite gate run is never dispatched, so no aggregate review behind it.
+    let decisions = reduce(&snapshot, &admission.event, &ResolvedConfigs::default());
+    assert!(
+        matches!(decisions.outcome, Outcome::CompositionRewoven { refused_at: StageId::Refine, attempt: 2, .. }),
+        "the bounce spends a weave-repair retry, got {:?}",
+        decisions.outcome,
+    );
+    assert!(
+        !decisions.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
+        "nothing is re-judged: the dodging weave never reaches the composite gate run",
+    );
+
+    // The journal carries the verdict, and the admitted bytes replay to it.
+    assert!(
+        decisions.effects.iter().any(
+            |effect| matches!(effect, Decision::RecordEvidence { evidence, .. } if evidence.kind == EvidenceKind::RepairTriage),
+        ),
+        "the triage verdict is journaled with the dispatch",
+    );
+    assert_eq!(
+        from_bytes::<Event>(&admission.admit.event).unwrap(),
+        admission.event,
+        "the admitted event round-trips the wire, so the bounce replays",
+    );
+
+    // The dodging capture is discarded and the finding is re-threaded, with a
+    // section naming what the bounced lap missed — on the composition's own row,
+    // leaving the frozen set a delta-confirm is framed against untouched.
+    let next = snapshot.apply(&admission.event, &decisions, &ResolvedConfigs::default());
+    let cursor = next.blooms.get(&bloom).unwrap().progress.get(&WorkpieceId::composition()).copied().unwrap();
+    assert_eq!(cursor.stage, StageId::Refine);
+    assert_eq!(cursor.candidate.map(|current| current.tree), Some(weave), "the dodge's capture is not adopted");
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap().as_deref(),
+        Some(REPAIR_FINDING),
+        "the frozen aggregate set is left verbatim",
+    );
+    let threaded = store.lookup_review_findings(bloom.0.as_bytes(), &WorkpieceId::composition().0).unwrap().unwrap();
+    assert!(threaded.starts_with(REPAIR_FINDING), "the original finding is re-threaded verbatim");
+    assert!(threaded.contains("## Repair triage"), "the next lap is told what the last one missed");
+    assert!(threaded.contains("`representative`"), "the note names the symbol that went untouched");
+}
+
+#[test]
+fn a_weave_repair_that_touches_its_finding_passes_to_the_re_judge() {
+    let mut store = store();
+    let member = WorkpieceId("wp-golden".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+    let weave = Digest::from_bytes([5; 32]);
+    let (snapshot, bloom) = composition_reweaving(&member, scope_revision, weave, 1);
+    let record = weave_repair_record("n-real", bloom, scope_revision, weave);
+    stage_repair_lap(&mut store, &record, REPAIR_FINDING, Some(REAL_REPAIR_DIFF));
+
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &repair_upload("n-real", weave)).unwrap()
+    else {
+        panic!("the lap admits");
+    };
+    let Fact::AttemptCompleted { passed, evidence, .. } = &admission.event.fact else {
+        panic!("a Refine result admits AttemptCompleted");
+    };
+    assert!(*passed, "a repair that reaches the named symbol keeps its passing verdict");
+    assert_eq!(evidence.kind, EvidenceKind::VerificationResult, "an addressed lap is filed as the verdict it is");
+
+    let decisions = reduce(&snapshot, &admission.event, &ResolvedConfigs::default());
+    assert!(
+        matches!(decisions.outcome, Outcome::CompositionRepaired { .. }),
+        "the repair hands the re-woven tree to the composite gate run, got {:?}",
+        decisions.outcome,
+    );
+    assert!(
+        decisions.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
+        "the re-judge is dispatched",
+    );
+}
+
+#[test]
+fn a_finding_that_names_nothing_never_bounces_a_lap() {
+    let mut store = store();
+    let member = WorkpieceId("wp-vague".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+    let weave = Digest::from_bytes([5; 32]);
+    let (_snapshot, bloom) = composition_reweaving(&member, scope_revision, weave, 1);
+    let record = weave_repair_record("n-vague", bloom, scope_revision, weave);
+    stage_repair_lap(
+        &mut store,
+        &record,
+        "The retry loop feels wrong and the naming could be clearer throughout.",
+        Some(DODGE_DIFF),
+    );
+
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &repair_upload("n-vague", weave)).unwrap()
+    else {
+        panic!("the lap admits");
+    };
+    let Fact::AttemptCompleted { passed, .. } = &admission.event.fact else {
+        panic!("a Refine result admits AttemptCompleted");
+    };
+    assert!(*passed, "a finding that names no symbol has no claim to test, so the lap passes");
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), &WorkpieceId::composition().0).unwrap(),
+        None,
+        "a passing lap threads no note",
+    );
+}
+
+// Tripwire: a lane that dodges repeatedly must reach the operator rather than
+// ping-ponging. The bounce is an ordinary failing lap, so the sealed `Refine`
+// budget is what ends it — a triage that spent no budget would loop forever, and
+// #4957's manager override is the escape hatch from the wedge, not a second loop.
+#[test]
+fn repeated_dodges_exhaust_the_repair_budget_and_wedge_the_composition() {
+    let mut store = store();
+    let member = WorkpieceId("wp-golden".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+    let weave = Digest::from_bytes([5; 32]);
+    let budget = StageCatalog::line().retry_budget_of(StageId::Refine).unwrap();
+    let (snapshot, bloom) = composition_reweaving(&member, scope_revision, weave, budget);
+    let record = weave_repair_record("n-last", bloom, scope_revision, weave);
+    stage_repair_lap(&mut store, &record, REPAIR_FINDING, Some(DODGE_DIFF));
+
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &repair_upload("n-last", weave)).unwrap()
+    else {
+        panic!("the lap admits");
+    };
+    let decisions = reduce(&snapshot, &admission.event, &ResolvedConfigs::default());
+    assert!(
+        matches!(decisions.outcome, Outcome::CompositionWedged { refused_at: StageId::Refine, .. }),
+        "the last dodge exhausts the budget and stops the composition, got {:?}",
+        decisions.outcome,
+    );
+    let next = snapshot.apply(&admission.event, &decisions, &ResolvedConfigs::default());
+    assert!(
+        next.blooms.get(&bloom).unwrap().wedged.contains_key(&WorkpieceId::composition()),
+        "the operator sees a wedged composition",
+    );
+}
+
+// Tripwire: a *member's* repair lap is never triaged. Post-ADR-0191 an aggregate
+// refusal does not re-open a member, so every finding reaching a member's Refine
+// is mechanical gate output — a compiler diagnostic backticks the symptom's types
+// and locations, not the thing a fix has to change, so triaging on it would bounce
+// honest laps on the loop's highest-volume path. ADR-0178's repeated-verifier
+// accounting is the member side's own unrepaired-candidate detector.
+#[test]
+fn a_members_repair_lap_is_not_triaged_against_mechanical_diagnostics() {
+    let mut store = store();
+    let workpiece = WorkpieceId("wp-member".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+    let candidate = Digest::from_bytes([5; 32]);
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let mut record = dispatch_record("n-member", bloom, &workpiece, scope_revision, candidate);
+    record.stage = StageId::Refine;
+    // A rustc diagnostic: it backticks `u32` and `usize` and names the file the
+    // symptom surfaced in, none of which a fix elsewhere has to mention.
+    store
+        .record_review_findings(
+            bloom.0.as_bytes(),
+            &workpiece.0,
+            "verify.check failed.\n\nerror[E0308]: mismatched types\n  --> crates/mock/src/lib.rs:7:20\n   \
+             |                --- ^^^^^^^ expected `u32`, found `usize`",
+        )
+        .unwrap();
+    store.record_capture_diff("n-member", DODGE_DIFF).unwrap();
+    record_dispatch(&mut store, &record).unwrap();
+
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &repair_upload("n-member", candidate)).unwrap()
+    else {
+        panic!("the lap admits");
+    };
+    let Fact::AttemptCompleted { passed, evidence, .. } = &admission.event.fact else {
+        panic!("a Refine result admits AttemptCompleted");
+    };
+    assert!(*passed, "a member's repair lap keeps its verdict; the triage does not read mechanical findings");
+    assert_eq!(evidence.kind, EvidenceKind::VerificationResult);
 }

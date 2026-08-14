@@ -325,6 +325,18 @@ pub trait StoreBackend: Send {
     /// member's lane wrote none — the landing assembly falls back rather than
     /// blocking on the absence.
     fn lookup_candidate_commit_message(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
+    /// Record the diff a lane's captured candidate carries, keyed by the nonce
+    /// of the order that produced it (#4959) — what the repair-lap triage reads
+    /// before a passing `Refine` result is admitted. Written by an executor
+    /// backend that commits the capture itself and so holds the diff; a backend
+    /// that captures nothing writes nothing, and the triage passes untriaged.
+    fn record_capture_diff(&mut self, nonce: &str, diff: &str) -> rusqlite::Result<()>;
+    /// The capture diff recorded for `nonce`, or `None` when the lap's backend
+    /// filed none.
+    fn lookup_capture_diff(&mut self, nonce: &str) -> rusqlite::Result<Option<String>>;
+    /// Drop the capture diff for `nonce` — the order it belongs to has been
+    /// consumed, so nothing will read it again.
+    fn clear_capture_diff(&mut self, nonce: &str) -> rusqlite::Result<()>;
     /// Record the fold-conflict overlay the reconcile work order assembles
     /// (ADR-0189): the contract, the conflicting paths, and the conflicted
     /// candidate tree. Last-writer-wins on the key.
@@ -663,6 +675,10 @@ CREATE TABLE IF NOT EXISTS dispatch_owners (
     nonce TEXT PRIMARY KEY,
     bloom BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS capture_diff (
+    nonce TEXT PRIMARY KEY,
+    diff  TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS fold_conflict (
     bloom     BLOB NOT NULL,
     workpiece TEXT NOT NULL,
@@ -943,6 +959,26 @@ impl StoreBackend for SqliteStore {
         let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| row.get::<_, String>(0))?;
         // The (bloom, workpiece) pair is the primary key, so at most one row.
         rows.next().transpose()
+    }
+
+    fn record_capture_diff(&mut self, nonce: &str, diff: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO capture_diff (nonce, diff) VALUES (?1, ?2)",
+            rusqlite::params![nonce, diff],
+        )?;
+        Ok(())
+    }
+
+    fn lookup_capture_diff(&mut self, nonce: &str) -> rusqlite::Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT diff FROM capture_diff WHERE nonce = ?1")?;
+        let mut rows = stmt.query_map(rusqlite::params![nonce], |row| row.get::<_, String>(0))?;
+        // The nonce is the primary key, so at most one row.
+        rows.next().transpose()
+    }
+
+    fn clear_capture_diff(&mut self, nonce: &str) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM capture_diff WHERE nonce = ?1", rusqlite::params![nonce])?;
+        Ok(())
     }
 
     fn record_fold_conflict(&mut self, bloom: &[u8], workpiece: &str, overlay: &str) -> rusqlite::Result<()> {

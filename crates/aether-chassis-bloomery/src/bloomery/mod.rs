@@ -27,6 +27,8 @@ mod source;
 mod study;
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 mod testing;
+#[cfg(feature = "github")]
+mod triage;
 
 pub use approve::{
     AdmissionRequest, AdrTouch, ApprovalPolicy, Completeness, Decision, Gate, Incompleteness, PolicyError,

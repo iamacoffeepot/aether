@@ -254,7 +254,33 @@ impl TransformRunner for ProcessTransformRunner {
         })?;
         let tree = decode_object_hex(tree_hex.trim())
             .ok_or_else(|| LocalExecutorError::Worktree(format!("malformed capture tree sha `{}`", tree_hex.trim())))?;
-        Ok(Some(CapturedObjects { commit, tree }))
+        Ok(Some(CapturedObjects { commit, tree, diff: capture_diff(worktree_dir) }))
+    }
+}
+
+/// The capture commit's own diff against the checkout it was built on (#4959) —
+/// what the repair-lap triage reads.
+///
+/// Taken here rather than reconstructed later because this is the one moment the
+/// two commits are both local and the worktree is still the lap's: the coordinator
+/// holds the capture only as a correspondence row, and a later `git show` would
+/// have to resolve it back through that.
+///
+/// Best-effort, exactly like the `cargo fmt` pass above: the triage passes a lap
+/// whose diff it does not hold, so a failure here costs one mechanical check and
+/// never a captured candidate. `--no-ext-diff` and `--no-color` keep a
+/// developer's own git configuration out of text the host is going to parse.
+fn capture_diff(worktree_dir: &Path) -> Option<String> {
+    match git_in(worktree_dir, &["diff", "--no-ext-diff", "--no-color", "HEAD~1", "HEAD"]) {
+        Ok(diff) => Some(diff),
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                %error,
+                "could not read the capture commit's diff; this lap's repair will not be triaged",
+            );
+            None
+        }
     }
 }
 

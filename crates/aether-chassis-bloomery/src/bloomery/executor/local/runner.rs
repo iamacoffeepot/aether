@@ -166,4 +166,12 @@ pub struct CapturedObjects {
     pub commit: BackendObjectId,
     /// The captured tree's object id — the candidate's content identity.
     pub tree: BackendObjectId,
+    /// The lap's own unified diff — the capture commit against the checkout it
+    /// was built on (#4959), which for a repair lap is exactly what that lap
+    /// changed. Read by the repair-lap triage, and by nothing else: a candidate
+    /// is identified by its tree, never by this text.
+    ///
+    /// `None` when the runner could not produce one. The triage passes a lap it
+    /// cannot inspect, so a shortfall here costs a check and never a candidate.
+    pub diff: Option<String>,
 }

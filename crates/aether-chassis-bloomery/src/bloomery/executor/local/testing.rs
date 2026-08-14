@@ -20,7 +20,13 @@ use super::{LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunn
 /// capture against today's git produces.
 #[must_use]
 pub fn canned_capture() -> CapturedObjects {
-    CapturedObjects { commit: BackendObjectId::new(vec![0xcc; 20]), tree: BackendObjectId::new(vec![0xdd; 20]) }
+    CapturedObjects {
+        commit: BackendObjectId::new(vec![0xcc; 20]),
+        tree: BackendObjectId::new(vec![0xdd; 20]),
+        // The seam stub commits nothing, so it holds no diff: a lap the triage
+        // cannot inspect is a lap it passes (#4959).
+        diff: None,
+    }
 }
 
 /// A runner that writes `evidence` and returns a process fixed at `lifecycle`.
