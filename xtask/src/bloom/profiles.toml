@@ -7,10 +7,13 @@
 # Shared sub-bundles (`price_tables`, `model_overrides`, `forecasts`) are
 # referenced by name from `[profiles.*]`, so a rate change is one edit.
 
-# Micro-USD per million tokens. Opus 5 and Grok 4.6 figures are the ones
-# already pinned in-tree (`aether-bloomery` price-table tests); a model
-# with no row stays unpriced rather than silently free. Keyed by model so
-# a duplicate and an authoring-order-dependent digest cannot exist.
+# Micro-USD per million tokens, from the vendor price cards; a model with
+# no row stays unpriced rather than silently free. Keyed by model so a
+# duplicate and an authoring-order-dependent digest cannot exist. The
+# grok-4.6 figures match the published card and were confirmed against
+# billed laps (computed == billed to the cent, including a lap that
+# crossed the 200k band); the band bills the whole request at the higher
+# rates once the prompt reaches the threshold.
 [price_tables.standard.rows."claude-opus-5"]
 input = 5000000
 cache_read = 500000
@@ -21,11 +24,20 @@ output = 25000000
 
 [price_tables.standard.rows."grok-4.6"]
 input = 2000000
-cache_read = 200000
+cache_read = 500000
 cache_write_5m = 0
 cache_write_1h = 0
 cache_write = 0
-output = 10000000
+output = 6000000
+
+[price_tables.standard.rows."grok-4.6".long_context]
+prompt_tokens = 200000
+input = 4000000
+cache_read = 1000000
+cache_write_5m = 0
+cache_write_1h = 0
+cache_write = 0
+output = 12000000
 
 [model_overrides.opus-high]
 agent = { harness = "Claude", model = "claude-opus-5" }
