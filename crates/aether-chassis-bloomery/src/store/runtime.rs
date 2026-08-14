@@ -24,6 +24,7 @@ use aether_bloomery::{
     Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, JournalRecord, LoadConfigs, LoadConfigsResult,
     MembershipMutation, OutboxPayload, ReplayJournal, ReplayJournalResult,
 };
+use std::iter::repeat_n;
 use std::time::Duration;
 
 use rusqlite::Connection;
@@ -367,6 +368,30 @@ pub trait StoreBackend: Send {
     /// `topic` when `Some`, across every topic when `None`; returns how many
     /// were newly acknowledged.
     fn ack_outbox(&mut self, topic: Option<&str>, through_sequence: u64) -> rusqlite::Result<u32>;
+    /// Read `topic`'s *acknowledged* entries, in sequence order — the drain's
+    /// mirror image (#4956).
+    ///
+    /// An ack says the reactor took responsibility for the entry, not that
+    /// anything came of it: the payload stays on the row, so a boot that finds
+    /// the responsibility unmet can re-derive the dispatch from the same bytes
+    /// the first drain read. Nothing else needs delivered rows, which is why the
+    /// ordinary drain is undelivered-only.
+    fn delivered_outbox(&mut self, topic: &str) -> rusqlite::Result<Vec<OutboxEntry>>;
+    /// Return one acknowledged entry to the undelivered queue, so the ordinary
+    /// drain picks it up again; `true` when a row moved.
+    ///
+    /// Scoped to a single sequence rather than a prefix because an unearned ack
+    /// is a statement about one entry — its neighbours were acked on their own
+    /// merits, and a prefix reset would re-run them too.
+    fn redeliver_outbox(&mut self, topic: &str, sequence: u64) -> rusqlite::Result<bool>;
+    /// Whether the journal holds a row under any of `keys` — the "has this been
+    /// accounted for" read (#4956).
+    ///
+    /// Takes the whole candidate set in one query because the caller's question
+    /// is about the set, not any one key: a dispatch admits under exactly one of
+    /// several shapes, and asking key-by-key would let a caller stop early and
+    /// call a completed dispatch unaccounted for.
+    fn journal_holds_any(&mut self, keys: &[String]) -> rusqlite::Result<bool>;
     /// Read the whole journal, in sequence order — the recovery replay source.
     fn replay_journal(&mut self) -> rusqlite::Result<Vec<JournalRecord>>;
 }
@@ -1096,6 +1121,40 @@ impl StoreBackend for SqliteStore {
             )?,
         };
         Ok(u32::try_from(acked).unwrap_or(u32::MAX))
+    }
+
+    fn delivered_outbox(&mut self, topic: &str) -> rusqlite::Result<Vec<OutboxEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sequence, topic, payload FROM outbox WHERE delivered = 1 AND topic = ?1 ORDER BY sequence",
+        )?;
+        stmt.query_map(rusqlite::params![topic], |row| {
+            Ok(OutboxEntry {
+                sequence: u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default(),
+                topic: row.get(1)?,
+                payload: row.get(2)?,
+            })
+        })?
+        .collect()
+    }
+
+    fn redeliver_outbox(&mut self, topic: &str, sequence: u64) -> rusqlite::Result<bool> {
+        let sequence = i64::try_from(sequence).unwrap_or(i64::MAX);
+        let moved = self.conn.execute(
+            "UPDATE outbox SET delivered = 0 WHERE sequence = ?1 AND delivered = 1 AND topic = ?2",
+            rusqlite::params![sequence, topic],
+        )?;
+        Ok(moved > 0)
+    }
+
+    fn journal_holds_any(&mut self, keys: &[String]) -> rusqlite::Result<bool> {
+        if keys.is_empty() {
+            return Ok(false);
+        }
+        // `idempotency_key` is UNIQUE, so each arm of the `IN` is an index probe.
+        let placeholders = repeat_n("?", keys.len()).collect::<Vec<_>>().join(", ");
+        self.conn
+            .prepare(&format!("SELECT 1 FROM journal WHERE idempotency_key IN ({placeholders}) LIMIT 1"))?
+            .exists(rusqlite::params_from_iter(keys))
     }
 
     fn replay_journal(&mut self) -> rusqlite::Result<Vec<JournalRecord>> {

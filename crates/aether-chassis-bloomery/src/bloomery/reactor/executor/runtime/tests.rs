@@ -26,6 +26,7 @@ use aether_data::{Kind, MailboxId};
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::registry::Registry;
 
+use super::strand::readopt_stranded_dispatches;
 use super::{
     BACKOFF_CAP, CandidatePush, ExecutorReactorState, GitCandidatePush, NameEvidenceClaims, Stores, TickClock,
     TrackedHandle, backoff_delay, default_candidate_push, drain_and_dispatch, drain_and_dispatch_aggregate,
@@ -35,7 +36,8 @@ use super::{
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
 use crate::bloomery::intake::{
-    Admission, AdmitDecision, DispatchError, UploadedEvidence, admit_uploaded, attempt_artifact_name,
+    Admission, AdmissionKey, AdmitDecision, DispatchError, UploadedEvidence, admit_uploaded, attempt_artifact_name,
+    dispatch_nonce,
 };
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::{CoordinatorConfig, GithubConnectionConfig};
@@ -43,7 +45,7 @@ use crate::bloomery::{
     ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
 };
 use crate::session::SessionConfig;
-use crate::store::{OutstandingOrder, SqliteStore, StoreBackend};
+use crate::store::{JournalWrite, OutstandingOrder, SqliteStore, StoreBackend};
 use aether_bloomery_github::candidate_ref_name;
 
 // A capturing executor backend: it records every submitted `WorkOrder` so a test
@@ -2200,4 +2202,143 @@ fn local_lane_shell(base: &Path, correspondence: SharedCorrespondence, nonce: &s
     );
     let local = Arc::new(LocalExecutor::new(Arc::new(runner), correspondence, base));
     ExecutorShell::reconciling(Arc::new(RoutingExecutor::new(actions, local, vec!["construct.".to_owned()])))
+}
+
+// Issue #4956 — the stranding shape, reproduced through the real admit path.
+//
+// `admit_uploaded` deletes the outstanding order the instant its admission is
+// constructed; the reactor then mails the resulting `Admit` to the control core
+// fire-and-forget, so the fact becomes durable only when *that* actor commits
+// it. Dropping the returned `Admit` is exactly a coordinator that stopped inside
+// that window: the order is spent, the journal holds nothing, and the acked
+// outbox row is the only surviving trace of a dispatch the fold still expects to
+// be in flight.
+//
+// Catches the whole boot recovery being scoped to `outstanding_orders`: both
+// existing legs read an empty table and truthfully report nothing to do, which
+// is what let a live bloom sit healthy-looking and permanently parked.
+#[test]
+fn a_dispatch_whose_fact_never_reached_the_journal_is_re_queued_at_boot() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bloomery.db").to_str().unwrap().to_owned();
+    let bloom = BloomId(digest(1));
+
+    let nonce = {
+        let mut store = SqliteStore::open(&path).unwrap();
+        let backend = Arc::new(CapturingBackend::default());
+        let shell = ExecutorShell::new(Arc::clone(&backend));
+        let (sequence, subject) = enqueue_dispatch_at(&mut store, bloom, "wp-refine", 5, StageId::Refine);
+        let (_handles, ack_through, _transient) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+        store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
+
+        let nonce = dispatch_nonce(sequence);
+        let upload = UploadedEvidence {
+            nonce: nonce.clone(),
+            subject: digest(subject),
+            verdict: StageVerdict::VerificationPassed,
+            detail: digest(9),
+            candidate: None,
+            findings: None,
+            failed_verifiers: VerifyFailureSet::EMPTY,
+            cost: None,
+            calls: None,
+        };
+        // The admission is built and the order spent — and then the process
+        // stops, so the `Admit` this returns never reaches the control core.
+        assert!(matches!(admit_uploaded(&mut store, &upload).unwrap(), AdmitDecision::Admitted(_)));
+        nonce
+    };
+
+    let mut store = SqliteStore::open(&path).unwrap();
+    assert!(store.list_outstanding_nonces().unwrap().is_empty(), "the order was spent before the process stopped");
+    assert!(seed_tracked(&mut store).unwrap().is_empty(), "the #3641 leg has nothing to re-track");
+    assert!(seed_dispatches(&mut store).unwrap().is_empty(), "the #4847 leg has nothing to re-adopt");
+
+    assert_eq!(
+        readopt_stranded_dispatches(&mut store).unwrap(),
+        vec![nonce.clone()],
+        "the acked dispatch nothing ever accounted for is put back in flight",
+    );
+
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let (handles, _ack_through, _transient) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    assert_eq!(handles.len(), 1, "the re-queued entry dispatches on the ordinary drain");
+    assert_eq!(
+        backend.orders().iter().map(|order| order.nonce.clone()).collect::<Vec<_>>(),
+        vec![nonce.clone()],
+        "re-dispatched under the same nonce, so it spends no fresh idempotency and no fresh retry budget",
+    );
+    assert!(store.lookup_order(&nonce.0).unwrap().is_some(), "the order is outstanding again");
+}
+
+// The false-positive guard on the same pass: a dispatch whose admission *did*
+// reach the journal must never be re-driven, or every boot would re-run every
+// completed lane in the bloom's history. The discriminator is the nonce-keyed
+// journal row, so the vocabulary in `AdmissionKey` is what this pins.
+#[test]
+fn a_dispatch_whose_admission_reached_the_journal_is_left_alone() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let (sequence, _subject) = enqueue_dispatch_at(&mut store, BloomId(digest(1)), "wp-refine", 5, StageId::Refine);
+    let (_handles, ack_through, _transient) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
+
+    let nonce = dispatch_nonce(sequence);
+    store.consume_order(&nonce.0).unwrap();
+    store
+        .append_event(&JournalWrite {
+            idempotency_key: &AdmissionKey::Attempt.of(&nonce.0).0,
+            event: &[1],
+            decisions: &[2],
+            decider: "test-build",
+        })
+        .unwrap();
+
+    assert!(
+        readopt_stranded_dispatches(&mut store).unwrap().is_empty(),
+        "an accounted-for dispatch is complete, not stranded",
+    );
+}
+
+// A dispatch the drain acked *without* ever submitting it — a retired plan, a
+// permanent submit refusal, a sealed configuration that would not resolve — left
+// no order behind to be spent, and each of those paths logged the reason it
+// acked. Re-driving one would re-run the decision that parked it, once per boot,
+// forever.
+#[test]
+fn an_entry_acked_without_ever_recording_an_order_is_not_re_queued() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let (sequence, _subject) = enqueue_dispatch_at(&mut store, BloomId(digest(1)), "wp-refine", 5, StageId::Refine);
+    // No drain at all: the ack stands in for every path that disposes of an
+    // entry without reaching `record_order`.
+    store.ack_topic(Topic::Dispatch, sequence).unwrap();
+
+    assert!(
+        readopt_stranded_dispatches(&mut store).unwrap().is_empty(),
+        "an entry that never reached a worker lane has no order to strand",
+    );
+}
+
+// A superseded plan's stranded dispatch is dead work, not recoverable work: the
+// supersession released every membership the bloom held, which is the reducer's
+// own statement that this plan is no longer live.
+#[test]
+fn a_stranded_dispatch_of_a_retired_bloom_is_not_re_queued() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let (sequence, _subject) = enqueue_dispatch_at(&mut store, bloom, "wp-refine", 5, StageId::Refine);
+    let (_handles, ack_through, _transient) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
+    store.consume_order(&dispatch_nonce(sequence).0).unwrap();
+    store.release_membership(bloom.0.as_bytes()).unwrap();
+
+    assert!(
+        readopt_stranded_dispatches(&mut store).unwrap().is_empty(),
+        "a retired plan's dispatch is not resumed by a restart",
+    );
 }

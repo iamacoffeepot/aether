@@ -13,6 +13,22 @@ use aether_data::wire::to_vec;
 use crate::bloomery::executor::{ExecutorPortError, ExecutorShell};
 use crate::store::{OutstandingOrder, RecordOutcome, StoreBackend};
 
+/// The idempotency nonce a drained outbox entry dispatches under.
+///
+/// A pure function of the entry's outbox sequence, which is what makes a
+/// dispatch *addressable from the outbox row alone*: a re-drive of the same
+/// entry submits under the same nonce, so it collides with the order already
+/// recorded rather than opening a second one, and a boot-time reader can name
+/// the order an acked entry produced without holding any of the process state
+/// that produced it. Every drain — member line, aggregate review, aggregate
+/// verify — mints through here, so the three cannot drift into separate
+/// spellings of the one convention the store's `dispatch_owners` and
+/// `outstanding_orders` rows are keyed by.
+#[must_use]
+pub fn dispatch_nonce(sequence: u64) -> Nonce {
+    Nonce(format!("dispatch-{sequence}"))
+}
+
 /// A work order's reducer context, captured host-side at dispatch time — the
 /// typed form of an [`OutstandingOrder`] registry
 /// row. The caller (the reducer's dispatch path in production, a test here)
