@@ -16,22 +16,20 @@ const CODEX: &str = "codex";
 
 /// The `codex exec` argv for a model-lane run.
 ///
-/// `-s workspace-write` plus `--approve-for-me` is the narrowest pair that runs
-/// headless: approvals are routed through automatic review instead of a prompt,
-/// and writes stay inside the run's scratch worktree. The blanket
-/// `--dangerously-bypass-approvals-and-sandbox` would also drop the sandbox,
-/// which is more than a lane needs.
+/// `--approve-for-me` alone is what runs the lane headless: it routes approvals
+/// through automatic review instead of a prompt *and* implies the
+/// workspace-write sandbox, so writes still stay inside the run's scratch
+/// worktree. Naming the sandbox explicitly alongside it is not redundant but
+/// fatal — codex-cli rejects the pair before the run starts ("the argument
+/// `--sandbox <SANDBOX_MODE>` cannot be used with `--approve-for-me`"), which
+/// would kill every codex lane at fork. The blanket
+/// `--dangerously-bypass-approvals-and-sandbox` would drop the sandbox
+/// altogether, which is more than a lane needs.
 ///
 /// Codex reads its prompt from a positional argument (it has no `--prompt-file`);
 /// the assembled prompt is still written beside the transcript by the caller.
 fn codex_argv(prompt: &str, model: Option<&str>, effort: Option<&str>) -> Vec<String> {
-    let mut argv = vec![
-        "exec".to_owned(),
-        "--json".to_owned(),
-        "-s".to_owned(),
-        "workspace-write".to_owned(),
-        "--approve-for-me".to_owned(),
-    ];
+    let mut argv = vec!["exec".to_owned(), "--json".to_owned(), "--approve-for-me".to_owned()];
     if let Some(model) = model {
         argv.push("-m".to_owned());
         argv.push(model.to_owned());
@@ -130,10 +128,17 @@ mod tests {
         let argv = codex_argv("do the thing", Some("gpt-5"), Some("high"));
         assert_eq!(argv.first().map(String::as_str), Some("exec"));
         assert!(argv.iter().any(|a| a == "--json"), "the transcript is what the record derives from");
-        assert!(argv.windows(2).any(|w| w == ["-s", "workspace-write"]), "writes stay in the run's worktree");
         assert!(argv.iter().any(|a| a == "--approve-for-me"), "headless needs the approval prompt gone");
-        // The blanket bypass would drop the sandbox too, which is more than a
-        // lane needs.
+        // Tripwire: `--approve-for-me` already implies the workspace-write
+        // sandbox, and codex-cli refuses to start when `--sandbox` is also
+        // named — so re-adding the flag for defense in depth kills every codex
+        // lane at fork, before a token is spent.
+        assert!(
+            !argv.iter().any(|a| a == "-s" || a == "--sandbox"),
+            "codex-cli rejects an explicit sandbox alongside --approve-for-me",
+        );
+        // The blanket bypass would drop the implied sandbox too, which is more
+        // than a lane needs.
         assert!(!argv.iter().any(|a| a == "--dangerously-bypass-approvals-and-sandbox"), "the sandbox stays on");
         assert!(argv.windows(2).any(|w| w == ["-m", "gpt-5"]), "the resolved model rides argv");
         assert!(
