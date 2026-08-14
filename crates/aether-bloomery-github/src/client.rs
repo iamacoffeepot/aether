@@ -367,9 +367,12 @@ pub enum MergeResult {
     Conflict {
         /// The endpoint's description of the collision.
         detail: String,
-        /// Paths the merge named as colliding. Empty when the endpoint
-        /// (GitHub's 409) reports none.
+        /// Paths the merge named as colliding. Empty when neither the merge
+        /// nor a follow-up compare named any.
         paths: Vec<String>,
+        /// Unified diff of `head` against `base`. Empty when the compare
+        /// produced none.
+        patch: String,
     },
 }
 
@@ -736,6 +739,50 @@ impl<T: HttpTransport> ReqwestGithub<T> {
     fn merges_url(&self) -> String {
         format!("{}/repos/{}/merges", self.api_base, self.repo_path)
     }
+
+    fn compare_url(&self, base: &str, head: &str) -> String {
+        format!("{}/repos/{}/compare/{}...{}", self.api_base, self.repo_path, strip_heads(base), strip_heads(head))
+    }
+
+    /// Files that differ between `base` and `head`, plus their concatenated
+    /// patches. A compare fault returns empty rather than turning a known
+    /// collision into a transport error — the merge already answered.
+    fn compare_conflict(&self, base: &str, head: &str) -> (Vec<String>, String) {
+        let Ok(response) = self.request(Method::Get, self.compare_url(base, head), None) else {
+            return (Vec::new(), String::new());
+        };
+        let Ok(compared) = decode::<GhCompare>(&response) else {
+            return (Vec::new(), String::new());
+        };
+        render_compare(compared.files)
+    }
+}
+
+/// Turn GitHub compare-file rows into colliding paths and a unified patch
+/// the reconcile overlay can quote. Binary files (no `patch`) still name
+/// the path so the work order is not silent about them.
+fn render_compare(files: Vec<GhCompareFile>) -> (Vec<String>, String) {
+    use core::fmt::Write;
+    let mut paths = Vec::with_capacity(files.len());
+    let mut patch = String::new();
+    for file in files {
+        if file.filename.is_empty() {
+            continue;
+        }
+        paths.push(file.filename.clone());
+        let Some(hunk) = file.patch.filter(|hunk| !hunk.is_empty()) else {
+            continue;
+        };
+        if !patch.is_empty() {
+            patch.push('\n');
+        }
+        let _ = writeln!(patch, "diff --git a/{0} b/{0}", file.filename);
+        patch.push_str(&hunk);
+        if !hunk.ends_with('\n') {
+            patch.push('\n');
+        }
+    }
+    (paths, patch)
 }
 
 impl ReqwestGithub<ReqwestTransport> {
@@ -895,6 +942,22 @@ impl GhMergeCommit {
     fn into_git_commit(self) -> GitCommit {
         GitCommit { sha: self.sha, tree: self.commit.tree.sha, message: self.commit.message }
     }
+}
+
+/// `GET /repos/{owner}/{repo}/compare/{base}...{head}` — the follow-up a
+/// merge 409 needs, because that status names no files.
+#[derive(Deserialize)]
+struct GhCompare {
+    #[serde(default)]
+    files: Vec<GhCompareFile>,
+}
+
+#[derive(Deserialize)]
+struct GhCompareFile {
+    #[serde(default)]
+    filename: String,
+    #[serde(default)]
+    patch: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1275,7 +1338,14 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         // about the two histories rather than a transport fault.
         match response.status {
             204 => Ok(MergeResult::AlreadyUpToDate),
-            409 => Ok(MergeResult::Conflict { detail: response.body, paths: Vec::new() }),
+            409 => {
+                // GitHub's merge 409 body is a bare "Merge conflict" with no
+                // file list. The compare of the same two refs names the files
+                // that differ and carries their patches — the collision
+                // evidence the reconcile overlay needs.
+                let (paths, patch) = self.compare_conflict(base, head);
+                Ok(MergeResult::Conflict { detail: response.body, paths, patch })
+            }
             status if (200..300).contains(&status) => {
                 Ok(MergeResult::Merged(decode::<GhMergeCommit>(&response)?.into_git_commit()))
             }
@@ -1413,8 +1483,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        GithubApi, GithubError, HttpRequest, HttpResponse, HttpTransport, IssueStateApi, Method, NewComment,
-        ReqwestGithub, StaticTokenSource, TokenSource,
+        GitDataApi, GithubApi, GithubError, HttpRequest, HttpResponse, HttpTransport, IssueStateApi, MergeResult,
+        Method, NewComment, ReqwestGithub, StaticTokenSource, TokenSource,
     };
 
     // Records the last request and replays a queued response — the seam that
@@ -1435,6 +1505,30 @@ mod tests {
         fn execute(&self, request: HttpRequest) -> Result<HttpResponse, GithubError> {
             *self.last.borrow_mut() = Some(request);
             Ok(self.response.clone())
+        }
+    }
+
+    // A merge 409 is two requests (the merge, then the compare). One canned
+    // body cannot answer both, so this walks a queue.
+    struct QueuedTransport {
+        last: RefCell<Option<HttpRequest>>,
+        responses: RefCell<Vec<HttpResponse>>,
+    }
+
+    impl QueuedTransport {
+        fn new(responses: Vec<HttpResponse>) -> Self {
+            Self { last: RefCell::new(None), responses: RefCell::new(responses) }
+        }
+    }
+
+    impl HttpTransport for QueuedTransport {
+        fn execute(&self, request: HttpRequest) -> Result<HttpResponse, GithubError> {
+            *self.last.borrow_mut() = Some(request);
+            let mut responses = self.responses.borrow_mut();
+            if responses.is_empty() {
+                return Err(GithubError::Transport("queued transport exhausted".to_owned()));
+            }
+            Ok(responses.remove(0))
         }
     }
 
@@ -1601,8 +1695,6 @@ mod tests {
         }
     }
 
-    use super::{GitDataApi, MergeResult};
-
     #[test]
     fn merge_reads_the_repository_commit_shape_not_the_git_data_one() {
         // Tripwire: the merges endpoint answers with a *repository* commit,
@@ -1651,6 +1743,41 @@ mod tests {
                 Err(GithubError::Status { status: 404, .. })
             ),
             "a missing base or head is a fault, not a conflict",
+        );
+    }
+
+    #[test]
+    fn a_merge_conflict_fills_paths_and_patch_from_the_compare() {
+        // GitHub's merge 409 names no files. The follow-up compare is what
+        // populates the collision evidence; without it a production fold
+        // dispatches a reconcile order that cannot see the member's work.
+        let transport = QueuedTransport::new(vec![
+            HttpResponse { status: 409, body: r#"{"message":"Merge conflict"}"#.to_owned() },
+            HttpResponse {
+                status: 200,
+                body: r#"{"files":[{"filename":"crates/overlap.rs","patch":"@@ -1 +1,2 @@\n keep\n+added"}]}"#
+                    .to_owned(),
+            },
+        ]);
+        let github = ReqwestGithub::with_transport(
+            transport,
+            Arc::new(StaticTokenSource::new("t0ken".to_owned())),
+            "https://api.github.com",
+            "octo/shadow",
+        );
+        let MergeResult::Conflict { paths, patch, .. } =
+            github.merge("heads/bloom/x/integration", "heads/cand", "fold").unwrap()
+        else {
+            panic!("409 is a conflict outcome");
+        };
+        assert_eq!(paths, vec!["crates/overlap.rs"]);
+        assert!(patch.contains("diff --git a/crates/overlap.rs b/crates/overlap.rs"), "{patch}");
+        assert!(patch.contains("+added"), "{patch}");
+        let last = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(last.method, Method::Get);
+        assert_eq!(
+            last.url, "https://api.github.com/repos/octo/shadow/compare/bloom/x/integration...cand",
+            "the follow-up is the compare of the same two refs the merge named",
         );
     }
 

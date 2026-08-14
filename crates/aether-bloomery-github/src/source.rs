@@ -997,11 +997,10 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
                 return Ok(IntegrateOutcome::Integrated { tree: current_tree, head });
             }
             // A cross-member collision: an owner decision, not a fault to
-            // retry. GitHub's 409 body is a bare "Merge conflict" with no file
-            // list, so there is nothing to carry beyond the point it happened —
-            // the caller names the member from its own fold position.
-            MergeResult::Conflict { paths, .. } => {
-                return Ok(IntegrateOutcome::Conflict { at: current_tree, paths });
+            // retry. The client follows a 409 with a compare so the paths and
+            // the candidate's remaining diff reach the reconcile overlay.
+            MergeResult::Conflict { paths, patch, .. } => {
+                return Ok(IntegrateOutcome::Conflict { at: current_tree, paths, diff: patch });
             }
         };
 

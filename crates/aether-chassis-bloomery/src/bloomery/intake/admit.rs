@@ -83,9 +83,10 @@ pub enum IntakeRefusal {
         /// The digest the upload actually claimed.
         claimed: Digest,
     },
-    /// The order's stage is not in the dispatched member line (Construct / Verify /
-    /// Refine / Review) — a well-formed dispatch only ever carries a member-line
-    /// stage, so this is a corrupt order. Refused rather than silently integrated.
+    /// The order's stage is not a dispatched member stage (Construct / Verify /
+    /// the repair-only Refine / the fold-conflict Reconcile) or a bloom-level
+    /// aggregate gate — a well-formed dispatch only ever carries one of those,
+    /// so this is a corrupt order. Refused rather than silently integrated.
     OutOfLineStage(StageId),
     /// The typed verifier set disagrees with the stored stage/verdict: only a
     /// failed member Verify may carry a set, and that case must carry one.
@@ -337,6 +338,15 @@ fn aggregate_review_executor_fault_event(record: &DispatchRecord, evidence: Evid
     }
 }
 
+/// Whether a completed attempt at `stage` is a member-line result the reducer
+/// advances, retries, or wedges — Construct (a successor in the member line)
+/// and the off-line Refine / Reconcile repairs. Reconcile has no successor in
+/// `MEMBER_LINE`; naming it here is what stops a passing candidate being
+/// refused as [`IntakeRefusal::OutOfLineStage`].
+fn admits_as_attempt_completed(stage: StageId) -> bool {
+    StageCatalog::next_member_stage(stage).is_some() || matches!(stage, StageId::Refine | StageId::Reconcile)
+}
+
 pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -> Result<AdmitDecision, IntakeError> {
     let Some(stored) = store.lookup_order(&upload.nonce.0)? else {
         // Fabricated, or the order was already consumed (a replay).
@@ -383,7 +393,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     //   distinguish a new identity from a repeated defect and account the
     //   member's repair roll deterministically.
     // - Any other dispatched member stage (Construct — one with a successor in
-    //   the member line — or the repair-only Refine) admits as
+    //   the member line — or the off-line Refine / Reconcile repairs) admits as
     //   Fact::AttemptCompleted: the reducer advances the member's cursor on a
     //   passing verdict, re-dispatches the stage within its retry budget on a
     //   failing one, and wedges once the budget is exhausted.
@@ -424,7 +434,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
                 },
             }
         }
-    } else if StageCatalog::next_member_stage(record.stage).is_some() || record.stage == StageId::Refine {
+    } else if admits_as_attempt_completed(record.stage) {
         Event {
             idempotency_key: IdempotencyKey(format!("aether.bloomery.attempt:{}", record.nonce.0)),
             fact: Fact::AttemptCompleted {

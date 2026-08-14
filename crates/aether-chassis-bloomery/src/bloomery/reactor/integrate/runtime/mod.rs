@@ -46,6 +46,7 @@ use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
 use super::IntegrateReactorCapability;
+use crate::artifacts::{ArtifactsCapabilityState, PutResult, resolve_root};
 use crate::bloomery::IntegrateReactorSetup;
 use crate::bloomery::SourceShell;
 use crate::bloomery::outbox::TopicOutbox;
@@ -70,6 +71,10 @@ pub struct IntegrateTick {}
 pub struct IntegrateReactorState {
     source: Option<SourceShell>,
     store: Option<SqliteStore>,
+    // Where a fold-conflict overlay is filed so a wedge's evidence detail
+    // resolves against the artifacts store (ADR-0189). `None` when the store
+    // would not open; the fact still admits, the bytes are unretrievable.
+    artifacts: Option<ArtifactsCapabilityState>,
     control_mailbox: MailboxId,
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
@@ -93,12 +98,69 @@ impl IntegrateReactorState {
         Self {
             source,
             store,
+            artifacts: None,
             control_mailbox: <ControlCore as Addressable>::resolve(0, ()),
             mailer,
             self_mailbox,
             _timer: None,
         }
     }
+}
+
+/// The idempotency key a bloom's fold-conflict admits under.
+///
+/// Keyed by the conflicted candidate as well as `(bloom, workpiece, checkpoint)`,
+/// because the checkpoint is the folded tree of the *earlier* members and does
+/// not change between laps. A member that reconciles, verifies, and re-collides
+/// with the same fold produces a new candidate; without that tree in the key
+/// the second collision reduces to `AppendOutcome::Duplicate` and the bloom
+/// stops with the entry acked. The sibling [`resolve_key`] carries the tree
+/// for the same reason (#4722).
+fn fold_conflict_key(bloom: &Digest, workpiece: &str, checkpoint: &Digest, candidate: &Digest) -> IdempotencyKey {
+    use core::fmt::Write;
+    let mut key = String::with_capacity(32 + 64 + 1 + workpiece.len() + 1 + 64 + 1 + 64);
+    key.push_str("aether.bloomery.fold-conflict:");
+    for byte in bloom.as_bytes() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    key.push(':');
+    key.push_str(workpiece);
+    key.push(':');
+    for byte in checkpoint.as_bytes() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    key.push(':');
+    for byte in candidate.as_bytes() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    IdempotencyKey(key)
+}
+
+/// The reconcile work-order overlay: the standing contract, the colliding
+/// paths, and the conflicted candidate's own diff. The lane checks out the
+/// folded head, so the member's work lives here rather than in the tree.
+fn fold_conflict_overlay(paths: &[String], diff: &str) -> String {
+    use core::fmt::Write;
+    let mut overlay = String::from(
+        "## Fold conflict\n\nReproduce this member's intent on top of what the fold now contains; stay inside the \
+         declared surface.\n",
+    );
+    if !paths.is_empty() {
+        overlay.push_str("\n## Conflicting paths\n\n");
+        for path in paths {
+            let _ = writeln!(overlay, "- {path}");
+        }
+    }
+    let trimmed = diff.trim();
+    if !trimmed.is_empty() {
+        overlay.push_str("\n## Conflicted candidate\n\n```diff\n");
+        overlay.push_str(trimmed);
+        if !trimmed.ends_with('\n') {
+            overlay.push('\n');
+        }
+        overlay.push_str("```\n");
+    }
+    overlay
 }
 
 /// The idempotency key a bloom's resolve admits under.
@@ -112,43 +174,6 @@ impl IntegrateReactorState {
 /// the lap that follows integrates a different tree under the same bloom
 /// (#4722). Under the bloom-only key that second resolve was swallowed as a
 /// replay and the run stopped dead.
-fn fold_conflict_key(bloom: &Digest, workpiece: &str, checkpoint: &Digest) -> IdempotencyKey {
-    use core::fmt::Write;
-    let mut key = String::with_capacity(32 + 64 + 1 + workpiece.len() + 1 + 64);
-    key.push_str("aether.bloomery.fold-conflict:");
-    for byte in bloom.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
-    key.push(':');
-    key.push_str(workpiece);
-    key.push(':');
-    for byte in checkpoint.as_bytes() {
-        let _ = write!(key, "{byte:02x}");
-    }
-    IdempotencyKey(key)
-}
-
-fn fold_conflict_overlay(paths: &[String], candidate: Digest) -> String {
-    use core::fmt::Write;
-    let mut overlay = String::from(
-        "## Fold conflict\n\nReproduce this member's intent on top of what the fold now contains; stay inside the \
-         declared surface.\n",
-    );
-    if !paths.is_empty() {
-        overlay.push_str("\n## Conflicting paths\n\n");
-        for path in paths {
-            let _ = writeln!(overlay, "- {path}");
-        }
-    }
-    overlay.push_str("\n## Conflicted candidate\n\n");
-    let _ = write!(overlay, "tree: ");
-    for byte in candidate.as_bytes() {
-        let _ = write!(overlay, "{byte:02x}");
-    }
-    overlay.push('\n');
-    overlay
-}
-
 fn resolve_key(bloom: &Digest, tree: &Digest) -> IdempotencyKey {
     use core::fmt::Write;
     let mut key = String::with_capacity(24 + 64 + 1 + 64);
@@ -264,17 +289,22 @@ fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOut
             // rather than refused in prose: the later member reconciles
             // against the folded checkpoint. Re-driving the same trees
             // cannot resolve it; the dispatched lane can.
-            Ok(IntegrateOutcome::Conflict { paths, .. }) => {
+            Ok(IntegrateOutcome::Conflict { paths, diff, .. }) => {
                 let checkpoint = expected.tree;
                 let checkout = head.unwrap_or(payload.base);
-                let overlay = fold_conflict_overlay(&paths, member.candidate);
+                let overlay = fold_conflict_overlay(&paths, &diff);
                 let evidence = Evidence {
                     subject: checkpoint,
                     kind: EvidenceKind::FoldConflict,
                     detail: Digest::of_wire_bytes(overlay.as_bytes()),
                 };
                 let event = Event {
-                    idempotency_key: fold_conflict_key(&payload.bloom, &member.workpiece.0, &checkpoint),
+                    idempotency_key: fold_conflict_key(
+                        &payload.bloom,
+                        &member.workpiece.0,
+                        &checkpoint,
+                        &member.candidate,
+                    ),
                     fact: Fact::FoldConflict {
                         bloom,
                         workpiece: member.workpiece.clone(),
@@ -332,6 +362,7 @@ fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOut
 fn drain_and_integrate(
     store: &mut dyn StoreBackend,
     source: &SourceShell,
+    mut artifacts: Option<&mut ArtifactsCapabilityState>,
 ) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
     let entries = store.drain_topic(Topic::Integrate)?;
     let mut admits = Vec::new();
@@ -365,6 +396,18 @@ fn drain_and_integrate(
                         sequence = entry.sequence,
                         %error,
                         "fold-conflict overlay did not persist; stopping the ack prefix to re-drive",
+                    );
+                    break;
+                }
+                let parent = match &event.fact {
+                    Fact::FoldConflict { evidence, .. } => evidence.subject,
+                    _ => payload.base,
+                };
+                if !store_fold_conflict_overlay(artifacts.as_deref_mut(), &overlay, &parent) {
+                    tracing::warn!(
+                        target: "aether_chassis_bloomery::integrate",
+                        sequence = entry.sequence,
+                        "fold-conflict overlay was not stored; stopping the ack prefix to re-drive",
                     );
                     break;
                 }
@@ -402,6 +445,60 @@ fn drain_and_integrate(
     Ok((admits, ack_through))
 }
 
+fn digest_hex(digest: &Digest) -> String {
+    use core::fmt::Write;
+    let mut out = String::with_capacity(64);
+    for byte in digest.as_bytes() {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// File the overlay under the same sha256 `detail` the fold-conflict evidence
+/// names, so a wedge later resolves against the artifacts store. A missing
+/// store still admits (the address is a pure function of the bytes); a store
+/// that faults is transient and must not ack.
+fn store_fold_conflict_overlay(
+    artifacts: Option<&mut ArtifactsCapabilityState>,
+    overlay: &str,
+    parent: &Digest,
+) -> bool {
+    let Some(artifacts) = artifacts else {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::integrate",
+            "no artifacts store configured; the fold-conflict overlay is unretrievable",
+        );
+        return true;
+    };
+    match artifacts.put(overlay.as_bytes(), &[digest_hex(parent)]) {
+        PutResult::Ok { .. } => true,
+        PutResult::Err { error } => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::integrate",
+                ?error,
+                "fold-conflict overlay was not stored",
+            );
+            false
+        }
+    }
+}
+
+fn open_artifacts(configured: Option<&str>) -> Option<ArtifactsCapabilityState> {
+    let root = resolve_root(configured);
+    match ArtifactsCapabilityState::open(&root) {
+        Ok(artifacts) => Some(artifacts),
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::integrate",
+                root = %root.display(),
+                %error,
+                "artifacts store did not open; fold-conflict evidence will be unretrievable this session",
+            );
+            None
+        }
+    }
+}
+
 #[runtime]
 impl NativeActor for IntegrateReactorCapability {
     type State = IntegrateReactorState;
@@ -430,6 +527,7 @@ impl NativeActor for IntegrateReactorCapability {
             return Ok(IntegrateReactorState {
                 source: None,
                 store: None,
+                artifacts: None,
                 control_mailbox,
                 mailer,
                 self_mailbox,
@@ -456,6 +554,7 @@ impl NativeActor for IntegrateReactorCapability {
         Ok(IntegrateReactorState {
             source: Some(source),
             store: Some(store),
+            artifacts: open_artifacts(config.artifacts_root.as_deref()),
             control_mailbox,
             mailer,
             self_mailbox,
@@ -491,7 +590,7 @@ impl NativeActor for IntegrateReactorCapability {
             return;
         };
 
-        match drain_and_integrate(store, &source) {
+        match drain_and_integrate(store, &source, state.artifacts.as_mut()) {
             Ok((admits, ack_through)) => {
                 if let Some(sequence) = ack_through
                     && let Err(error) = store.ack_topic(Topic::Integrate, sequence)

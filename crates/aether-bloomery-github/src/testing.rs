@@ -740,9 +740,11 @@ impl GitDataApi for FakeGithub {
         }
         let armed = self.lock().merge_conflicts.get(&(base.to_owned(), head.to_owned())).cloned();
         if let Some(paths) = armed {
+            let patch = self.conflict_patch(base, head, &paths);
             return Ok(MergeResult::Conflict {
                 detail: format!("{{\"message\":\"Merge conflict\"}} ({head} into {base})"),
                 paths,
+                patch,
             });
         }
 
@@ -753,15 +755,18 @@ impl GitDataApi for FakeGithub {
         // by a repository the real three-way merge answers that outright, and
         // answers the collision the armed set can only state.
         let tree = match repo.as_deref() {
-            Some(repo) => match real_merge_tree(repo, &base_sha, &head_sha)? {
-                Some(tree) => tree,
-                None => {
+            Some(repo) => {
+                let Some(tree) = real_merge_tree(repo, &base_sha, &head_sha)? else {
+                    let paths = conflicted_paths(repo, &base_sha, &head_sha).unwrap_or_default();
+                    let patch = self.conflict_patch(base, head, &paths);
                     return Ok(MergeResult::Conflict {
                         detail: format!("{{\"message\":\"Merge conflict\"}} ({head} into {base})"),
-                        paths: Vec::new(),
+                        paths,
+                        patch,
                     });
-                }
-            },
+                };
+                tree
+            }
             None => merged_tree(&self.tree_at(base)?, &self.tree_at(head)?),
         };
         let parents = vec![base_sha, head_sha];
@@ -852,6 +857,60 @@ fn real_commit(repo: &Path, message: &str, tree: &str, parents: &[String]) -> Re
 fn real_commit_tree(repo: &Path, sha: &str) -> Result<String, GithubError> {
     git_in(repo, &["rev-parse", "--verify", "--quiet", &format!("{sha}^{{tree}}")])
         .map_err(|_| GithubError::Status { status: 404, body: format!("no commit {sha}") })
+}
+
+impl FakeGithub {
+    /// The candidate's remaining work against the fold: a real `git diff` when
+    /// this fake is backed by an object repo, otherwise a stub per named path
+    /// so the reconcile overlay is not an empty contract sentence.
+    fn conflict_patch(&self, base: &str, head: &str, paths: &[String]) -> String {
+        if let (Some(repo), Ok(base_sha), Ok(head_sha)) =
+            (self.object_repo(), self.commit_at(base), self.commit_at(head))
+            && let Ok(diff) = git_in(&repo, &["diff", &base_sha, &head_sha])
+            && !diff.is_empty()
+        {
+            return diff;
+        }
+        stub_conflict_patch(paths)
+    }
+}
+
+fn stub_conflict_patch(paths: &[String]) -> String {
+    use core::fmt::Write;
+    let mut patch = String::new();
+    for path in paths {
+        if !patch.is_empty() {
+            patch.push('\n');
+        }
+        let _ = writeln!(patch, "diff --git a/{path} b/{path}");
+        let _ = writeln!(patch, "--- a/{path}");
+        let _ = writeln!(patch, "+++ b/{path}");
+        let _ = writeln!(patch, "@@ member's change to {path}");
+    }
+    patch
+}
+
+/// Paths `git merge-tree --name-only` names as colliding. The tree oid it
+/// still prints first is skipped; anything else is a path.
+fn conflicted_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>, GithubError> {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(["merge-tree", "--write-tree", "--name-only", base, head])
+        .output()
+        .map_err(|error| {
+            GithubError::Transport(format!("git merge-tree --name-only in {}: {error}", repo.display()))
+        })?;
+    let paths = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_git_oid(line))
+        .map(ToOwned::to_owned)
+        .collect();
+    Ok(paths)
+}
+
+fn is_git_oid(line: &str) -> bool {
+    (line.len() == 40 || line.len() == 64) && line.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// The tree combining `base` and `head` in `repo`, or `None` when the two

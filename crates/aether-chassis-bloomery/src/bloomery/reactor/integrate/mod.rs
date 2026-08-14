@@ -19,6 +19,7 @@ pub use runtime::{IntegrateReactorState, IntegrateTick};
 pub struct IntegrateReactorSetup {
     pub source: Option<SourceShell>,
     pub store_path: String,
+    pub artifacts_root: Option<String>,
     pub poll_interval_secs: u64,
     pub repository: Option<(String, String)>,
 }

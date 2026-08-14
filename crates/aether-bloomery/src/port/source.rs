@@ -66,10 +66,16 @@ pub enum IntegrateOutcome {
         /// The conflicting tree/point — the folded tree the candidate collided with.
         at: Digest,
         /// The paths the merge reported as colliding. Empty when the source
-        /// (GitHub's 409) names none; the reconcile work order still carries
-        /// the member's original description and the standing contract.
+        /// names none; the reconcile work order still carries the member's
+        /// original description and the standing contract.
         #[serde(default)]
         paths: Vec<String>,
+        /// Unified diff of the conflicted candidate against the fold. Empty
+        /// when the source could not produce one. The reconcile overlay
+        /// carries this so the lane sitting on the folded head can see the
+        /// member's work.
+        #[serde(default)]
+        diff: String,
     },
     /// The expected checkpoint was stale — the integration branch has
     /// advanced past it, so the single-writer CAS is refused rather than
