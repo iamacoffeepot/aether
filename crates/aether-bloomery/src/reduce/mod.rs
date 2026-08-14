@@ -47,7 +47,7 @@ pub use error::{
     OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SupersedeError, VerifyFailedError,
 };
 pub use event::{Event, Fact};
-pub use outcome::{Decisions, Outcome};
+pub use outcome::{DECISIONS_SCHEMA, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions};
 pub use seal::is_active_unlanded;
 pub use snapshot::{AggregateReviewFault, BloomRecord, BloomStatus, FoldedIntegration, Snapshot, StageProgress};
 pub use view::view_of;
@@ -79,9 +79,10 @@ use verify::reduce_verify_failed;
 /// default, so an under-filled set is a loud caller bug rather than a bloom
 /// quietly running an unattested configuration.
 ///
-/// Only [`reduce`] takes it, not [`Snapshot::apply`]: the fold evolves the
-/// snapshot from decisions the reducer already made, and nothing in it reads
-/// configuration.
+/// [`Snapshot::apply`] still takes `configs` so a pre-[`Decision::RecordStageCatalog`]
+/// row can resolve a spec-sealed catalog the way it always did; a newly sealed
+/// bloom's catalog arrives as a recorded effect and the fold does not re-read
+/// configuration for it.
 #[must_use]
 pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> Decisions {
     if snapshot.seen.contains(&event.idempotency_key) {

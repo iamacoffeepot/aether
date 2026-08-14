@@ -21,8 +21,8 @@ use aether_actor::runtime;
 // package cycle (the actor lives there; host depends on it). Host imports them
 // inward for its `StoreCapability` handlers (issue #3497).
 use aether_bloomery::{
-    Commit, CommitResult, ConfigRecord, JournalRecord, LoadConfigs, LoadConfigsResult, MembershipMutation,
-    OutboxPayload, ReplayJournal, ReplayJournalResult,
+    Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, JournalRecord, LoadConfigs, LoadConfigsResult,
+    MembershipMutation, OutboxPayload, ReplayJournal, ReplayJournalResult,
 };
 use std::time::Duration;
 
@@ -412,7 +412,12 @@ impl SqliteStore {
 /// so boot replay folds the record instead of re-deciding under the current
 /// binary. Rows written before this version carry `NULL` decisions and refuse
 /// to replay until a backfill stamps them.
-const SCHEMA_VERSION: i64 = 2;
+///
+/// `3` is ADR-0187's journal half: a decided row names the writing schema of
+/// its `decisions` blob. Pre-existing decided rows are stamped with the
+/// identity current at migration — they already decode under it, and leaving
+/// them unstamped would treat every later reshape as implicit-current.
+const SCHEMA_VERSION: i64 = 3;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -470,6 +475,18 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
         migration.execute_batch(
             "ALTER TABLE journal ADD COLUMN decisions BLOB;
              ALTER TABLE journal ADD COLUMN decider TEXT;",
+        )?;
+    }
+
+    // ADR-0187 (version 3): decided rows name the schema that wrote them.
+    // Existing decided rows are stamped with the identity current at this
+    // migration — they already decode under it. Unstamped (NULL decisions)
+    // rows stay NULL and still refuse as pre-ADR-0190.
+    if !has_column(&migration, "journal", "decisions_schema")? {
+        migration.execute_batch("ALTER TABLE journal ADD COLUMN decisions_schema TEXT;")?;
+        migration.execute(
+            "UPDATE journal SET decisions_schema = ?1 WHERE decisions_schema IS NULL AND decisions IS NOT NULL",
+            rusqlite::params![DECISIONS_SCHEMA],
         )?;
     }
 
@@ -535,7 +552,8 @@ CREATE TABLE IF NOT EXISTS journal (
     idempotency_key TEXT NOT NULL UNIQUE,
     event           BLOB NOT NULL,
     decisions       BLOB,
-    decider         TEXT
+    decider         TEXT,
+    decisions_schema TEXT
 );
 CREATE TABLE IF NOT EXISTS active_membership (
     workpiece TEXT PRIMARY KEY,
@@ -929,8 +947,9 @@ impl StoreBackend for SqliteStore {
     ) -> rusqlite::Result<CommitOutcome> {
         let tx = self.conn.transaction()?;
         let changed = tx.execute(
-            "INSERT OR IGNORE INTO journal (idempotency_key, event, decisions, decider) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![write.idempotency_key, write.event, write.decisions, write.decider],
+            "INSERT OR IGNORE INTO journal (idempotency_key, event, decisions, decider, decisions_schema) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![write.idempotency_key, write.event, write.decisions, write.decider, DECISIONS_SCHEMA],
         )?;
         if changed == 0 {
             // The key was already journaled — the whole commit is a no-op. The
@@ -976,8 +995,9 @@ impl StoreBackend for SqliteStore {
 
     fn append_event(&mut self, write: &JournalWrite<'_>) -> rusqlite::Result<AppendOutcome> {
         let changed = self.conn.execute(
-            "INSERT OR IGNORE INTO journal (idempotency_key, event, decisions, decider) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![write.idempotency_key, write.event, write.decisions, write.decider],
+            "INSERT OR IGNORE INTO journal (idempotency_key, event, decisions, decider, decisions_schema) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![write.idempotency_key, write.event, write.decisions, write.decider, DECISIONS_SCHEMA],
         )?;
         if changed == 0 {
             Ok(AppendOutcome::Duplicate)
@@ -1079,9 +1099,10 @@ impl StoreBackend for SqliteStore {
     }
 
     fn replay_journal(&mut self) -> rusqlite::Result<Vec<JournalRecord>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT sequence, idempotency_key, event, decisions, decider FROM journal ORDER BY sequence")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT sequence, idempotency_key, event, decisions, decider, decisions_schema FROM journal \
+             ORDER BY sequence",
+        )?;
         let rows = stmt.query_map([], |row| {
             let sequence = u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default();
             // A pre-ADR-0190 row carries no recorded decision, and re-deciding it
@@ -1094,6 +1115,7 @@ impl StoreBackend for SqliteStore {
                 event: row.get(2)?,
                 decisions,
                 decider: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                decisions_schema: row.get(5)?,
             })
         })?;
         rows.collect()

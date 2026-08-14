@@ -154,6 +154,11 @@ fn append_then_replay_round_trips_in_order() {
     assert_eq!(journal[1].idempotency_key, "k2");
     assert_eq!(journal[1].event, b"beta");
     assert_eq!(journal[1].decisions, b"decided-2");
+    assert_eq!(
+        journal[0].decisions_schema.as_deref(),
+        Some(aether_bloomery::DECISIONS_SCHEMA),
+        "a write after the column exists stamps the writing schema"
+    );
 }
 
 #[test]
@@ -178,6 +183,69 @@ fn an_unstamped_pre_adr_0190_row_refuses_replay_by_name() {
     let error = store.replay_journal().unwrap_err().to_string();
     assert!(error.contains("predates ADR-0190"), "the refusal names the missing record: {error}");
     assert!(error.contains("Backfill"), "the refusal states the obligation: {error}");
+}
+
+#[test]
+fn a_mismatched_decisions_schema_refuses_replay_by_name() {
+    // ADR-0187: a row stamped with a writing schema this binary has no upcast
+    // for must refuse at fold, naming both identities — never decode as
+    // current and never invent an empty decision.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mismatch.db");
+    let path = path.to_str().unwrap();
+    let mut store = SqliteStore::open(path).unwrap();
+    store.append_event(&write("shaped", b"event", b"decided")).unwrap();
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .execute(
+            "UPDATE journal SET decisions_schema = 'aether.bloomery.decisions.v0' WHERE idempotency_key = 'shaped'",
+            [],
+        )
+        .unwrap();
+
+    let mut store = SqliteStore::open(path).unwrap();
+    let record = store.replay_journal().unwrap().pop().expect("the row is still readable");
+    assert_eq!(record.decisions_schema.as_deref(), Some("aether.bloomery.decisions.v0"));
+    let error = aether_bloomery::decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("no migration from schema `aether.bloomery.decisions.v0`"), "{error}");
+    assert!(error.contains(aether_bloomery::DECISIONS_SCHEMA), "{error}");
+}
+
+#[test]
+fn a_v2_decided_row_is_stamped_with_the_current_schema_on_open() {
+    // ADR-0187 bootstrap: rows written before the column carry an implicit
+    // current-at-migration identity and are stamped as such, so a later
+    // reshape can still name what wrote them.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v2.db");
+    let path = path.to_str().unwrap();
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE journal (
+                 sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 idempotency_key TEXT NOT NULL UNIQUE,
+                 event           BLOB NOT NULL,
+                 decisions       BLOB,
+                 decider         TEXT
+             );
+             INSERT INTO journal (idempotency_key, event, decisions, decider)
+             VALUES ('legacy', x'01', x'02', 'old-build');
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+
+    let mut store = SqliteStore::open(path).expect("a v2 store migrates");
+    let journal = store.replay_journal().unwrap();
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].decisions, b"\x02");
+    assert_eq!(
+        journal[0].decisions_schema.as_deref(),
+        Some(aether_bloomery::DECISIONS_SCHEMA),
+        "the migration stamps the implicit current identity"
+    );
 }
 
 #[test]

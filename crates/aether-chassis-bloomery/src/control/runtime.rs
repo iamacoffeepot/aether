@@ -40,7 +40,7 @@ use aether_bloomery::control::{
 };
 use aether_bloomery::{
     BloomId, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event, Fact, IdempotencyKey, Outcome,
-    ResolvedConfigs, Snapshot, Unproducible, reduce, view_of,
+    ResolvedConfigs, Snapshot, Unproducible, decode_recorded_decisions, reduce, view_of,
 };
 
 use super::{ControlCore, ControlSetup, ObserveTick};
@@ -414,13 +414,14 @@ impl NativeActor for ControlCore {
             // in force today govern new admissions only; re-reducing history under
             // them resurrects rejections a looser rule now admits and re-refuses
             // admissions a stricter rule no longer would (#4937).
-            let decisions: Decisions = match from_bytes(&record.decisions) {
-                Ok(decisions) => decisions,
-                Err(error) => ctx.fatal_abort(format!(
-                    "boot journal replay: record {} ({}) decision did not decode: {error}",
-                    record.sequence, record.idempotency_key
-                )),
-            };
+            let decisions: Decisions =
+                match decode_recorded_decisions(&record.decisions, record.decisions_schema.as_deref()) {
+                    Ok(decisions) => decisions,
+                    Err(error) => ctx.fatal_abort(format!(
+                        "boot journal replay: record {} ({}) {error}",
+                        record.sequence, record.idempotency_key
+                    )),
+                };
             state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
         }
         state.reconcile_claim_refs(ctx);
@@ -832,7 +833,7 @@ fn commit_key(result: &CommitResult) -> &str {
 /// membership releases and claims the `active_membership` table applies, and the
 /// outbox payloads it enqueues. The snapshot-only effects carry no durable store
 /// row — they are rebuilt on replay by `reduce` + `apply` from the journaled event.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_lines)]
 fn project(
     decisions: &Decisions,
 ) -> Result<(Vec<MembershipMutation>, Vec<MembershipMutation>, Vec<OutboxPayload>), WireError> {
@@ -936,7 +937,8 @@ fn project(
             | Decision::RecordWedge { .. }
             | Decision::RevokeResolution { .. }
             | Decision::AdvanceMainline { .. }
-            | Decision::RecordObservation { .. } => {}
+            | Decision::RecordObservation { .. }
+            | Decision::RecordStageCatalog { .. } => {}
         }
     }
     Ok((releases, claims, outbox))

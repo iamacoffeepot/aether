@@ -118,10 +118,13 @@ pub(super) fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec, configs: &Resol
     // first attempt — a sealed bloom's members enter the line at `Construct`
     // (ADR-0149 §The line). The claims come first so the dispatch effects attach
     // to a member already in `active`.
-    let mut effects = Vec::with_capacity(spec.members().len() * 3);
+    let mut effects = Vec::with_capacity(spec.members().len() * 3 + 1);
     for member in spec.members() {
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom });
     }
+    // Record the catalog admission resolved so the fold reads the record, not
+    // a later binary's compiled line (#4944).
+    effects.push(Decision::RecordStageCatalog { bloom, catalog: catalog.clone() });
     for member in spec.members() {
         effects.extend(entry_dispatch_effects(bloom, member, spec.base(), spec.configs(), &catalog));
     }
@@ -380,6 +383,7 @@ pub(super) fn reduce_supersede(
     for member in successor.members() {
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom: successor_id });
     }
+    effects.push(Decision::RecordStageCatalog { bloom: successor_id, catalog: catalog.clone() });
     // Inherit only a claim whose workpiece the successor re-admits at the same
     // scope revision — an ejected or scope-changed workpiece drops its stale
     // claim (ADR-0149 §The bloom).

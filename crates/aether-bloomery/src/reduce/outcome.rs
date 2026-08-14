@@ -1,8 +1,12 @@
 //! The reducer's result vocabulary: what one event resolved to, paired with
 //! the ordered effects it decided.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
+use core::fmt;
+
+use aether_data::wire::{Error as WireError, from_bytes};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -28,6 +32,51 @@ pub struct Decisions {
 impl Decisions {
     pub(super) fn rejected(outcome: Outcome) -> Self {
         Self { outcome, effects: Vec::new() }
+    }
+}
+
+/// The writing-schema identity this binary stamps beside every journaled
+/// [`Decisions`] blob (ADR-0187). A row whose stamp is not this value has no
+/// upcast here and refuses replay by name.
+pub const DECISIONS_SCHEMA: &str = "aether.bloomery.decisions.v1";
+
+/// Why recorded decisions could not be folded (ADR-0187).
+#[derive(Debug)]
+pub enum DecisionsSchemaError {
+    /// The bytes did not decode as the current [`Decisions`] shape.
+    Decode(WireError),
+    /// The row names a writing schema this binary has no upcast for.
+    Unknown {
+        /// The identity stamped beside the bytes.
+        found: String,
+        /// The identity this binary writes and can decode.
+        current: &'static str,
+    },
+}
+
+impl fmt::Display for DecisionsSchemaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Decode(error) => write!(f, "decision did not decode: {error}"),
+            Self::Unknown { found, current } => {
+                write!(f, "no migration from schema `{found}` to current `{current}` for kind decisions")
+            }
+        }
+    }
+}
+
+/// Decode journaled [`Decisions`] under the writing-schema identity stamped
+/// beside them (ADR-0187).
+///
+/// The current identity decodes as today. A missing stamp is the implicit
+/// current-at-migration identity — rows written before the column existed,
+/// named here rather than treated as a zero-effect table or a fatal abort of
+/// an otherwise healthy shape. Any other identity is a named refusal: this
+/// binary has no upcast for it.
+pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&str>) -> Result<Decisions, DecisionsSchemaError> {
+    match schema {
+        None | Some(DECISIONS_SCHEMA) => from_bytes(bytes).map_err(DecisionsSchemaError::Decode),
+        Some(found) => Err(DecisionsSchemaError::Unknown { found: String::from(found), current: DECISIONS_SCHEMA }),
     }
 }
 
@@ -379,4 +428,37 @@ pub enum Outcome {
     },
     /// A fold-conflict admission was refused.
     FoldConflictRejected(FoldConflictError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::digest::Digest;
+    use crate::ids::BloomId;
+    use aether_data::wire::to_vec;
+
+    fn sealed() -> Decisions {
+        Decisions { outcome: Outcome::Sealed(BloomId(Digest::from_bytes([1; 32]))), effects: Vec::new() }
+    }
+
+    #[test]
+    fn current_and_missing_schema_decode() {
+        // A missing stamp is the implicit current-at-migration identity — the
+        // posture that lets a v2 store fold after the column appears.
+        let bytes = to_vec(&sealed()).expect("decisions encode");
+        decode_recorded_decisions(&bytes, Some(DECISIONS_SCHEMA)).expect("current identity decodes");
+        decode_recorded_decisions(&bytes, None).expect("missing stamp decodes as implicit current");
+    }
+
+    #[test]
+    fn unknown_schema_refuses_by_name() {
+        // The incident this names: a reshape without an upcast must refuse
+        // replay by the identities involved, never silently invent a value.
+        let error = decode_recorded_decisions(b"x", Some("aether.bloomery.decisions.v0"))
+            .expect_err("an unknown identity must refuse");
+        let text = format!("{error}");
+        assert!(text.contains("no migration from schema `aether.bloomery.decisions.v0`"), "{text}");
+        assert!(text.contains(DECISIONS_SCHEMA), "{text}");
+        assert!(text.contains("kind decisions"), "{text}");
+    }
 }
