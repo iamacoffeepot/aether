@@ -113,6 +113,10 @@ pub enum SealedPriceTable {
     /// Bytes that do not decode as the map-keyed schema — a table sealed
     /// before rows were keyed by model.
     PreMigration,
+    /// A sealed address whose content is missing or filed under the wrong
+    /// kind. Distinct from [`SealedPriceTable::PreMigration`]: those bytes never existed as a
+    /// vec-shape table, so calling them one would hide a store fault.
+    Unresolvable,
 }
 
 impl fmt::Display for SealedPriceTable {
@@ -120,6 +124,7 @@ impl fmt::Display for SealedPriceTable {
         match self {
             Self::Current(_) => write!(f, "current price table"),
             Self::PreMigration => write!(f, "pre-migration table"),
+            Self::Unresolvable => write!(f, "unresolvable price table"),
         }
     }
 }
@@ -154,19 +159,20 @@ impl PriceTable {
     /// published prices change, they differ by account tier, and the
     /// contributor-tier rate that makes the cheap lane cheap is not a public
     /// number at all. A sealed address whose bytes do not decode as today's
-    /// map shape is [`SealedPriceTable::PreMigration`]: never a silent empty
-    /// table (that would unprice a bloom that *did* seal rates) and never a
-    /// fatal abort (the incident class this names).
+    /// map shape is [`SealedPriceTable::PreMigration`]. A sealed address
+    /// whose content is missing or mis-filed is
+    /// [`SealedPriceTable::Unresolvable`] — never called pre-migration, never
+    /// a silent empty table, never a fatal abort.
     #[must_use]
     pub fn sealed_in(scopes: ConfigScopes<'_>, configs: &ResolvedConfigs) -> SealedPriceTable {
         match configs.resolve::<Self>(scopes) {
             Ok(Some(table)) => SealedPriceTable::Current(table),
             Ok(None) => SealedPriceTable::Current(Self::default()),
-            // A sealed address that cannot be produced is not "no table".
-            // Decode failure (the vec-shape bytes still in the store) and
-            // missing/mis-filed content take the same named posture so the
-            // fold stays up and does not silently empty the rates.
-            Err(_) => SealedPriceTable::PreMigration,
+            // Only a decode failure is a pre-migration (vec-shape) table.
+            // Missing or mis-filed content is a store fault, named separately
+            // so a vanished row cannot hide as "the old schema".
+            Err(super::config::ConfigResolveError::Decode { .. }) => SealedPriceTable::PreMigration,
+            Err(_) => SealedPriceTable::Unresolvable,
         }
     }
 
@@ -309,7 +315,8 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::{LongContextBand, PriceRates, PriceTable, SealedPriceTable};
-    use crate::values::{StudyCall, StudyCost};
+    use crate::values::{ConfigRegistry, ConfigScopes, ResolvedConfigs, StudyCall, StudyCost, config_address};
+    use aether_data::Kind;
     use aether_data::wire::to_vec;
     use serde::{Deserialize, Serialize};
 
@@ -534,6 +541,39 @@ mod tests {
             PriceTable::from_sealed(&sealed),
             SealedPriceTable::Current(PriceTable::default()),
             "pre-migration is not a silent empty table"
+        );
+        assert_ne!(
+            PriceTable::from_sealed(&sealed),
+            SealedPriceTable::Unresolvable,
+            "a vec-shape decode is pre-migration, not a missing row"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_misfiled_sealed_table_is_not_pre_migration() {
+        // Tripwire: only a decode failure of historical bytes is
+        // "pre-migration table". A sealed address with no content, or
+        // content filed under another kind, is Unresolvable — calling it
+        // pre-migration would hide a store fault as a schema epoch.
+        let mut configs = ResolvedConfigs::default();
+        let mut registry = ConfigRegistry::default();
+        let address = config_address(PriceTable::NAME, b"absent");
+        registry.insert::<PriceTable>(address);
+
+        assert_eq!(
+            PriceTable::sealed_in(ConfigScopes::bloom_wide(&registry), &configs),
+            SealedPriceTable::Unresolvable,
+        );
+        assert_ne!(
+            PriceTable::sealed_in(ConfigScopes::bloom_wide(&registry), &configs),
+            SealedPriceTable::PreMigration,
+        );
+
+        configs.insert(address, "aether.bloomery.stage_catalog", Vec::new());
+        assert_eq!(
+            PriceTable::sealed_in(ConfigScopes::bloom_wide(&registry), &configs),
+            SealedPriceTable::Unresolvable,
+            "a kind mismatch is unresolvable, not pre-migration",
         );
     }
 
