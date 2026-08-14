@@ -145,7 +145,7 @@ pub(super) fn run_headless_claude(
     // Under the host's peak-memory wrapper when it has one (#4912): what a
     // construct lane costs in RAM is the builds its agent drives, and the
     // wrapper's reading covers the whole reaped tree rather than this process.
-    let prompt = if args.resume.is_some() {
+    let resumed_prompt = if args.resume.is_some() {
         format!(
             "{prompt}\nThe working tree was reset since the previous attempt; do not assume files you edited last time are still there.\n"
         )
@@ -165,7 +165,7 @@ pub(super) fn run_headless_claude(
     // zombie (or a live, still-billing process) behind. Waiting first, then
     // surfacing the writer's error, guarantees the child is reaped on every path.
     let mut stdin = child.stdin.take().context("headless claude stdin was not captured")?;
-    let prompt_bytes = prompt.as_bytes().to_vec();
+    let prompt_bytes = resumed_prompt.as_bytes().to_vec();
     // Infra thread in a build tool — no settlement/trace umbrella applies here;
     // it exists only to pipe stdin while the main thread reaps the child.
     #[allow(clippy::disallowed_methods)]
@@ -187,7 +187,7 @@ pub(super) fn run_headless_claude(
         // the operational failure the comment above names; retrying that
         // cold would double the spend this pool exists to cut.
         let _ = writer.join();
-        return run_headless_claude(&prompt, &without_resume(args), scratch, cache, peak);
+        return run_headless_claude(prompt, &without_resume(args), scratch, cache, peak);
     }
     if !run.status.success() {
         bail!(
