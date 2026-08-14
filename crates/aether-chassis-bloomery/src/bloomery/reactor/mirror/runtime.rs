@@ -401,7 +401,7 @@ mod tests {
         let mut snapshot = Snapshot::new(base);
         snapshot = snapshot.apply(
             &event,
-            &reduce(&snapshot, &event, &ResolvedConfigs::default()),
+            &reduce(&snapshot, &event, &ResolvedConfigs::default(), &aether_bloomery::SpendWindow::default()),
             &ResolvedConfigs::default(),
         );
         to_vec(&view_of(&snapshot, |_| None)).unwrap()

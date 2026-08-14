@@ -18,6 +18,7 @@ mod price;
 mod profile;
 mod proof;
 mod question;
+mod spend;
 mod stage;
 mod statement;
 mod study;
@@ -46,6 +47,7 @@ pub use price::{LongContextBand, PriceRates, PriceTable, SealedPriceTable};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use proof::{VerifiedTree, VerifyGateSet, VerifyProof, VerifyReuse};
 pub use question::Question;
+pub use spend::{SpendCeiling, SpendQuiesce, SpendWindow};
 pub use stage::{
     Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, DispatchKey, ExecutionLimits, NetworkProfile,
     REVIEW_CRITIC_COMMAND, StageBinding, StageCatalog, Transformation, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE,

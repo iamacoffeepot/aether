@@ -16,8 +16,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence, EvidenceKind,
-    OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs, StageCatalog,
-    VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
+    OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs, SpendQuiesce,
+    StageCatalog, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -54,6 +54,16 @@ pub struct Snapshot {
     /// reactor's completion folds a terminal result in.
     #[serde(default)]
     pub orphan_releases: BTreeMap<Digest, OrphanClaimReleaseRecord>,
+    /// The spend-quiesce marker the last crossing recorded (ADR-0192).
+    ///
+    /// Snapshot-level rather than per-bloom: the door that closed is the
+    /// fleet's, and `/view` renders one marker rather than one per bloom.
+    /// `#[serde(default)]` is the `observed` / `orphan_releases` precedent —
+    /// a JSON reader that predates the field still decodes. The positional
+    /// wire never sees this field: a journaled
+    /// [`Decision::RecordSpendQuiesce`] folds it back on replay.
+    #[serde(default)]
+    pub spend_quiesce: Option<SpendQuiesce>,
 }
 
 impl Snapshot {
@@ -559,6 +569,9 @@ impl Snapshot {
             Decision::RecordOperatorHold { .. }
             | Decision::RecordOperatorRelease { .. }
             | Decision::DeferDispatch { .. } => self.apply_operator_hold_effect(effect),
+            Decision::RecordSpendQuiesce { quiesce } => {
+                self.spend_quiesce.clone_from(quiesce);
+            }
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;

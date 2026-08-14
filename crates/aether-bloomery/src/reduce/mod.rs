@@ -56,7 +56,7 @@ pub use seal::is_active_unlanded;
 pub use snapshot::{AggregateReviewFault, BloomRecord, BloomStatus, FoldedIntegration, Snapshot, StageProgress};
 pub use view::view_of;
 
-use crate::values::ResolvedConfigs;
+use crate::values::{ResolvedConfigs, SpendWindow};
 
 use aggregate_verify::reduce_aggregate_verify_completed;
 use attempt::reduce_attempt_completed;
@@ -85,17 +85,24 @@ use verify::reduce_verify_failed;
 /// default, so an under-filled set is a loud caller bug rather than a bloom
 /// quietly running an unattested configuration.
 ///
+/// `spend` is the window's measured spend the caller resolved before reducing
+/// (ADR-0192). The reducer compares two numbers at the seal door but cannot
+/// fetch the priced column behind a study-record digest, so the measurement
+/// arrives as an argument — see [`SpendWindow`]. A caller with nothing to
+/// measure passes the default, which is an empty window that never quiesces
+/// against a present positive ceiling.
+///
 /// [`Snapshot::apply`] still takes `configs` so a pre-[`Decision::RecordStageCatalog`]
 /// row can resolve a spec-sealed catalog the way it always did; a newly sealed
 /// bloom's catalog arrives as a recorded effect and the fold does not re-read
 /// configuration for it.
 #[must_use]
-pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs) -> Decisions {
+pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spend: &SpendWindow) -> Decisions {
     if snapshot.seen.contains(&event.idempotency_key) {
         return Decisions::rejected(Outcome::Duplicate);
     }
     match &event.fact {
-        Fact::Seal(spec) => reduce_seal(snapshot, spec, configs),
+        Fact::Seal(spec) => reduce_seal(snapshot, spec, configs, spend),
         Fact::Supersede { predecessor, successor } => reduce_supersede(snapshot, predecessor, successor, configs),
         Fact::Integrate { bloom, claim } => reduce_integrate(snapshot, bloom, claim),
         Fact::AdmitEvidence { bloom, evidence } => reduce_admit_evidence(snapshot, bloom, evidence),

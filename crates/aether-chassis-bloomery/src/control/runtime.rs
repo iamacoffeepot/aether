@@ -40,8 +40,8 @@ use aether_bloomery::control::{
 };
 use aether_bloomery::{
     BloomId, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event,
-    Fact, IdempotencyKey, Outcome, ResolvedConfigs, Snapshot, StudyRecord, Unproducible, decode_recorded_decisions,
-    grade, reduce, view_of,
+    Fact, IdempotencyKey, Outcome, ResolvedConfigs, Snapshot, SpendWindow, StudyRecord, Unproducible,
+    decode_recorded_decisions, grade, measure, reduce, view_of,
 };
 
 use super::{ControlCore, ControlSetup, ObserveTick};
@@ -131,6 +131,11 @@ pub struct ControlCoreState {
     /// re-deriving it would cost a second whole-journal read per request.
     calibration: CalibrationLedger,
     configs: ResolvedConfigs,
+    /// The window's measured spend, refreshed whenever the snapshot's study
+    /// evidence could have changed. The reducer cannot fetch study-record
+    /// bytes, so this is the argument `reduce` reads the way it reads
+    /// `configs` (ADR-0192).
+    spend: SpendWindow,
     pending: BTreeMap<String, VecDeque<Pending>>,
     pending_claims: BTreeMap<u64, PendingClaim>,
     pending_configs: BTreeMap<u64, PendingConfigs>,
@@ -169,6 +174,7 @@ impl NativeActor for ControlCore {
             snapshot: Snapshot::default(),
             calibration: CalibrationLedger::default(),
             configs: ResolvedConfigs::default(),
+            spend: SpendWindow::default(),
             pending: BTreeMap::new(),
             pending_claims: BTreeMap::new(),
             pending_configs: BTreeMap::new(),
@@ -225,7 +231,7 @@ impl NativeActor for ControlCore {
             state.pending_configs.insert(mail_id.correlation_id, PendingConfigs { inbound, raw });
             return;
         }
-        let decisions = reduce(&state.snapshot, &event, &state.configs);
+        let decisions = reduce(&state.snapshot, &event, &state.configs, &state.spend);
         // A duplicate key is already applied (in this process's life or rebuilt by
         // replay), so it needs no durable commit — reply immediately.
         if matches!(decisions.outcome, Outcome::Duplicate) {
@@ -249,7 +255,7 @@ impl NativeActor for ControlCore {
                 return;
             }
         };
-        let decisions = reduce(&state.snapshot, &event, &state.configs);
+        let decisions = reduce(&state.snapshot, &event, &state.configs, &state.spend);
         if matches!(decisions.outcome, Outcome::Duplicate) {
             inbound.reply(&admit_duplicate(&event.idempotency_key.0));
             return;
@@ -330,6 +336,7 @@ impl NativeActor for ControlCore {
             CommitResult::Applied { .. } => {
                 state.calibration.observe(&event, &decisions, &state.configs);
                 state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
+                state.refresh_spend();
                 // A durably-landed bloom frees its member + admission claim refs
                 // (ADR-0150) — release with the local release, fire-and-forget: the
                 // boot reconcile re-releases any ref an interrupted release stranded.
@@ -437,6 +444,7 @@ impl NativeActor for ControlCore {
             state.calibration.observe(&event, &decisions, &state.configs);
             state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
         }
+        state.refresh_spend();
         state.reconcile_claim_refs(ctx);
         state.replayed = true;
         // Only now is the snapshot the one the journal describes, so only now can
@@ -726,6 +734,17 @@ impl ControlCoreState {
                     .insert(mail_id.correlation_id, PendingClaim { inbound, raw, event, decisions, kind });
             }
         }
+    }
+
+    /// Re-measure the window from the live snapshot's study evidence.
+    ///
+    /// Called wherever that evidence can change — a landed commit that
+    /// admitted a study record, and the boot replay that rebuilds the same
+    /// log. The resolver this cap can offer is still none (the artifact
+    /// bytes live one capability over), so an unadmitted or unresolvable
+    /// record raises the unaccounted count rather than a guessed price.
+    fn refresh_spend(&mut self) {
+        self.spend = measure(&self.snapshot, unresolved_study);
     }
 
     fn inflight_for_key(&self, key: &str) -> usize {
@@ -1018,7 +1037,8 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         | Decision::RecordOperatorRepair { .. }
         | Decision::RecordOperatorHold { .. }
         | Decision::RecordOperatorRelease { .. }
-        | Decision::DeferDispatch { .. } => return Ok(None),
+        | Decision::DeferDispatch { .. }
+        | Decision::RecordSpendQuiesce { .. } => return Ok(None),
     };
     Ok(Some(payload))
 }

@@ -41,8 +41,8 @@ use aether_bloomery::control::{
 use aether_bloomery::{
     BloomDraft, BloomId, BloomSpec, ClaimRefKind, ClaimRefState, ClaimSeal, ConfigRegistry, Decisions, Digest,
     EnumerateClaimsResult, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, ReleaseSeal,
-    ResolutionClaim, ResolvedConfigs, SealConflict, SealError, Snapshot, SupersedeError, TransferSeal, WorkpieceId,
-    reduce,
+    ResolutionClaim, ResolvedConfigs, SealConflict, SealError, Snapshot, SpendWindow, SupersedeError, TransferSeal,
+    WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitSource, MainlineRef};
@@ -87,7 +87,7 @@ fn event(key: &str, fact: Fact) -> Event {
 /// Reduce and evolve in one step — the same fold boot journal replay runs, so a
 /// snapshot built this way IS the replay-rebuilt snapshot a restart sees.
 fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
-    let decisions = reduce(snapshot, event, &ResolvedConfigs::default());
+    let decisions = reduce(snapshot, event, &ResolvedConfigs::default(), &SpendWindow::default());
     (snapshot.apply(event, &decisions, &ResolvedConfigs::default()), decisions)
 }
 
