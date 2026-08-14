@@ -33,8 +33,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::client::{
     ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, IssueStateApi,
-    MergeResult, NewComment, NewPullRequest, PullRequest, PullRequestApi, PullRequestState, RunConclusion, RunStatus,
-    WorkflowRun, strip_heads,
+    MergeResult, NewComment, NewPullRequest, PullMergeResult, PullRequest, PullRequestApi, PullRequestState,
+    RunConclusion, RunStatus, WorkflowRun, strip_heads,
 };
 use crate::correspondence::GitObjectId;
 use crate::executor::INPUT_NONCE;
@@ -110,6 +110,7 @@ impl StoredPullRequest {
         PullRequest {
             number: self.number,
             head_sha: self.head_sha.clone(),
+            head_ref: self.head.clone(),
             base: self.base.clone(),
             state: self.state,
             merged: self.merged,
@@ -311,9 +312,9 @@ impl FakeGithub {
     }
 
     /// Merge pull request `number` at `merge_commit_sha` — the fake's stand-in
-    /// for the person who merges a landing proposal. Bloomery never merges (the
-    /// client has no verb for it), so a land-watch test cannot reach this state
-    /// through the port and drives it from here instead.
+    /// for a person merging a landing proposal out from under the coordinator,
+    /// which the watch still has to observe. The coordinator's own acceptance
+    /// goes through [`PullRequestApi::squash_merge_pull_request`] instead.
     ///
     /// The sha is the caller's to choose precisely because a squash merge — what
     /// this repository requires — produces a mainline commit that is *not* the
@@ -326,6 +327,29 @@ impl FakeGithub {
             pull.merged = true;
             pull.merge_commit_sha = Some(merge_commit_sha.to_owned());
         }
+    }
+
+    /// Whether pull request `number` has merged, and `None` when the fake holds
+    /// no such proposal — what a test asserting the coordinator merged its own
+    /// landing reads, with nothing in the scenario having pressed the button.
+    #[must_use]
+    pub fn pull_request_merged(&self, number: u64) -> Option<bool> {
+        self.lock().pull_requests.iter().find(|pull| pull.number == number).map(|pull| pull.merged)
+    }
+
+    /// Push `sha` onto pull request `number`'s proposing branch — a commit the
+    /// coordinator did not author arriving on a landing it opened. Moves the
+    /// branch ref as well as the recorded head, because the acceptance guard
+    /// compares the proposal's head against the head the bloom proved and a
+    /// fake that moved only one of the two would leave that comparison passing.
+    pub fn push_to_pull_request(&self, number: u64, sha: &str) {
+        let mut state = self.lock();
+        let Some(pull) = state.pull_requests.iter_mut().find(|pull| pull.number == number) else {
+            return;
+        };
+        sha.clone_into(&mut pull.head_sha);
+        let head = format!("heads/{}", strip_heads(&pull.head.clone()));
+        state.refs.insert(head, sha.to_owned());
     }
 
     /// Close pull request `number` without merging — the operator declining a
@@ -1120,6 +1144,45 @@ impl PullRequestApi for FakeGithub {
 
     fn checks_for_ref(&self, sha: &str) -> Result<ChecksState, GithubError> {
         Ok(self.lock().checks.get(sha).cloned().unwrap_or(ChecksState::Absent))
+    }
+
+    fn squash_merge_pull_request(&self, number: u64, expected_head_sha: &str) -> Result<PullMergeResult, GithubError> {
+        let mut state = self.lock();
+        let Some(pull) = state.pull_requests.iter().find(|pull| pull.number == number).cloned() else {
+            return Err(GithubError::Status { status: 404, body: format!("no pull request {number}") });
+        };
+        // The endpoint's own compare-and-swap. Modelled rather than assumed,
+        // because it is the guard the landing acceptance rests on: a caller
+        // that checked the head itself and then merged unguarded would pass
+        // every test that skipped this and still lose the race in production.
+        if pull.head_sha != expected_head_sha {
+            return Ok(PullMergeResult::Refused {
+                status: 409,
+                detail: format!("head is {}, not {expected_head_sha}", pull.head_sha),
+            });
+        }
+        if pull.state != PullRequestState::Open {
+            return Ok(PullMergeResult::Refused { status: 405, detail: "pull request is not open".to_owned() });
+        }
+
+        // A squash produces a commit neither branch carried, so the fake mints
+        // one rather than reusing the head — the same distinction
+        // `merge_pull_request` exists to preserve for the hand-merge path.
+        let message = format!("squash {}", pull.head_sha);
+        let merge_commit_sha = commit_sha(&message, EMPTY_TREE, &[]);
+        let base = format!("heads/{}", strip_heads(&pull.base));
+        let parents = state.refs.get(&base).cloned().into_iter().collect();
+        state.commits.insert(merge_commit_sha.clone(), StoredCommit { tree: EMPTY_TREE.to_owned(), message, parents });
+        // The base branch moves, as it does on the real surface. A fake that
+        // merged without moving it would let a test assert a landing while
+        // mainline still stood where the bloom sealed.
+        state.refs.insert(base, merge_commit_sha.clone());
+        if let Some(stored) = state.pull_requests.iter_mut().find(|stored| stored.number == number) {
+            stored.state = PullRequestState::Closed;
+            stored.merged = true;
+            stored.merge_commit_sha = Some(merge_commit_sha.clone());
+        }
+        Ok(PullMergeResult::Merged { merge_commit_sha })
     }
 }
 

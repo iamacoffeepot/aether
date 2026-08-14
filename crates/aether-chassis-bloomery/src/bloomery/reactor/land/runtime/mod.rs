@@ -2,11 +2,13 @@
 //! issue #3559).
 //!
 //! A poll-driven loop that turns the reducer's land decisions into a landing
-//! proposal on the source port, and watches that proposal to its terminal.
+//! proposal on the source port, and carries that proposal to its terminal.
 //!
-//! Mainline is protected, so landing is two steps rather than one write: the
-//! port proposes the resolved head, a person accepts it, and the reactor admits
-//! the landing it observes.
+//! Landing is a proposal and then an acceptance rather than one write, because
+//! the pull request is where a landing becomes correspondence a person can read.
+//! Both halves are the reactor's (issue #4953): it proposes the resolved head,
+//! merges its own proposal once the gate is green, and admits the landing it
+//! then observes.
 //!
 //! 1. **Drain.** Each tick drains the store's `aether.bloomery.land` outbox topic
 //!    (its own connection, mirroring the executor reactor's store ownership) and
@@ -19,9 +21,18 @@
 //!    bloom stays `Resolved` and thus supersedable through the intent-native
 //!    supersede path — a reactor has no re-authored successor spec to fabricate,
 //!    and the ADR's successor-seal is a caller act, not a reactor one.
-//! 3. **Watch.** On [`LandOutcome::Proposed`] it polls the proposal in the same
-//!    pass. Accepted, it admits a [`Fact::Land`] back to the control core —
-//!    where [`reduce_land`](aether_bloomery) advances the mainline and emits the
+//! 3. **Accept.** On [`LandOutcome::Proposed`] it polls the proposal in the same
+//!    pass, and while that proposal is open it asks
+//!    [`SourceShell::accept_land`] to merge it. That merge happens only on a
+//!    green gate and only while the proposal still offers the exact head the
+//!    bloom proved onto the exact base it sealed against; anything moved refuses
+//!    and surfaces instead. A refusal that says mainline moved leaves the bloom
+//!    where a moved base always leaves it — `Resolved` and supersedable; every
+//!    other refusal admits a [`Fact::LandingRejected`], which is what renders as
+//!    a blocked landing in the outward view rather than a bloom sitting quietly.
+//! 4. **Observe.** Once the proposal reads merged it admits a [`Fact::Land`]
+//!    back to the control core — where [`reduce_land`](aether_bloomery) advances
+//!    the mainline and emits the
 //!    [`LandingReceipt`](aether_bloomery::LandingReceipt) the mirror reactor
 //!    projects outward — carrying the head the *receipt* attests, since a squash
 //!    accept makes mainline a commit that is not the one proposed. Declined, the
@@ -57,7 +68,7 @@ use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
 use super::LandReactorCapability;
-use aether_bloomery_github::{SourceError, canonical_issue_number, short_hex};
+use aether_bloomery_github::{LandAcceptance, LandingRefusal, SourceError, canonical_issue_number, short_hex};
 
 use crate::bloomery::LandReactorSetup;
 use crate::bloomery::SourceShell;
@@ -128,18 +139,43 @@ fn land_key(bloom: &Digest) -> IdempotencyKey {
 
 /// The idempotency key a landing rejection admits under.
 ///
-/// Keyed by the failing set as well as the bloom, so the *same* red gate
-/// re-observed on the next tick reduces to a duplicate, while a repaired bloom
-/// whose landing fails a different way still admits. Without the failing set a
-/// second, genuinely new rejection would be swallowed as a replay.
-fn rejected_key(bloom: &Digest, failing: &[String]) -> IdempotencyKey {
+/// Keyed by `cause` as well as the bloom, so the *same* refusal re-observed on
+/// the next tick reduces to a duplicate, while a repaired bloom whose landing
+/// fails a different way still admits. Without the cause a second, genuinely
+/// new rejection would be swallowed as a replay.
+fn rejected_key(bloom: &Digest, cause: &str) -> IdempotencyKey {
     use core::fmt::Write;
     let mut key = String::from("aether.bloomery.landing_rejected:");
     for byte in bloom.as_bytes() {
         let _ = write!(key, "{byte:02x}");
     }
-    let _ = write!(key, ":{}", failing.join(","));
+    let _ = write!(key, ":{cause}");
     IdempotencyKey(key)
+}
+
+/// The [`Watched::Rejected`] a refused landing folds to: a `Fact::LandingRejected`
+/// keyed by `cause`, carrying `findings` for the repair the admit dispatches.
+///
+/// The rejection binds the head that was proposed — the reducer refuses one
+/// naming any other head, so a rejection left over from a superseded landing
+/// cannot re-open members under a newer one. The detail artifact is the same
+/// head: the findings are persisted beside the bloom rather than
+/// content-addressed here.
+fn rejected(bloom: &BloomId, payload: &LandPayload, cause: String, findings: String) -> Result<Watched, SourceError> {
+    let event = Event {
+        idempotency_key: rejected_key(&payload.bloom, &cause),
+        fact: Fact::LandingRejected {
+            bloom: *bloom,
+            evidence: Evidence {
+                subject: payload.new_head,
+                kind: EvidenceKind::VerificationResult,
+                detail: payload.new_head,
+            },
+        },
+    };
+    to_vec(&event)
+        .map(|bytes| Watched::Rejected { admit: Admit { event: bytes }, cause, findings })
+        .map_err(|error| SourceError::Malformed(format!("landing rejection did not encode: {error}")))
 }
 
 /// The findings text a landing rejection leaves for the repair dispatch — the
@@ -158,26 +194,46 @@ fn landing_findings(failing: &[String]) -> String {
     findings
 }
 
+/// The findings text a refused *acceptance* leaves for the repair dispatch —
+/// the same bloom-row channel a red gate writes, so one re-entry prompt reads
+/// both. The refusal states itself: each variant names a different thing that
+/// moved, and the repair is against whatever mainline has since become.
+fn refusal_findings(refusal: &LandingRefusal) -> String {
+    format!(
+        "The landing proposal carrying this bloom's integrated head could not be merged: {refusal}\n\nThe head that \
+         was proven is no longer the one the proposal offers, so repair this bloom against current mainline and \
+         resolve it again."
+    )
+}
+
 /// What watching an issued land proposal told the drain loop to do with its
 /// outbox entry.
 enum Watched {
     /// Still open — leave the entry unacked so it re-drains next tick.
     Open,
-    /// Terminal with nothing to admit: the proposal was declined, the same place
-    /// a moved base leaves the bloom.
-    Declined,
+    /// Terminal with nothing to admit: the proposal was declined, or the merge
+    /// refused because mainline moved off the sealed base. Both leave the bloom
+    /// `Resolved` and supersedable. Carries the line the drain journals.
+    Declined(String),
     /// Terminal — mainline moved; admit this and ack the entry.
     Landed(Admit),
-    /// The proposal's checks failed (#4689). Terminal *for this entry* — the
-    /// admit routes the bloom back into repair or parks it — so the entry is
-    /// acked rather than left polling a proposal nothing will accept. Carries
-    /// the failing check names, which the caller persists as the findings the
-    /// repair dispatch is directed by.
-    Rejected(Admit, Vec<String>),
+    /// The landing was refused: its checks failed (#4689), or its proposal
+    /// drifted off the head the bloom proved (#4953). Terminal *for this entry*
+    /// — the admit routes the bloom back into repair or parks it — so the entry
+    /// is acked rather than left polling a proposal nothing will accept.
+    Rejected {
+        /// The `Fact::LandingRejected` to forward.
+        admit: Admit,
+        /// A one-line reason, for the journal line the drain writes.
+        cause: String,
+        /// The findings the repair dispatch is directed by, which the caller
+        /// persists beside the bloom.
+        findings: String,
+    },
 }
 
-/// Poll an issued land proposal and fold its state into the drain loop's three
-/// outcomes.
+/// Poll an issued land proposal, accept it when its gate has gone green, and
+/// fold what happened into the drain loop's outcomes.
 fn watch_proposal(
     source: &SourceShell,
     bloom: &BloomId,
@@ -185,45 +241,62 @@ fn watch_proposal(
     number: u64,
 ) -> Result<Watched, SourceError> {
     match source.poll_land(bloom, &payload.expected_base, number)? {
-        LandProposal::Open => Ok(Watched::Open),
-        LandProposal::Declined => Ok(Watched::Declined),
+        LandProposal::Open => accept_proposal(source, bloom, payload, number),
+        LandProposal::Declined => Ok(Watched::Declined("the landing proposal was declined".to_owned())),
         LandProposal::ChecksFailed { failing } => {
-            // The rejection binds the head that was proposed — the reducer
-            // refuses one naming any other head, so a rejection left over from
-            // a superseded landing cannot re-open members under a newer one.
-            // The detail artifact is the same head: the failing check names are
-            // the findings, and they are persisted beside the bloom rather than
-            // content-addressed here.
-            let event = Event {
-                idempotency_key: rejected_key(&payload.bloom, &failing),
-                fact: Fact::LandingRejected {
-                    bloom: *bloom,
-                    evidence: Evidence {
-                        subject: payload.new_head,
-                        kind: EvidenceKind::VerificationResult,
-                        detail: payload.new_head,
-                    },
-                },
-            };
-            to_vec(&event)
-                .map(|bytes| Watched::Rejected(Admit { event: bytes }, failing))
-                .map_err(|error| SourceError::Malformed(format!("landing rejection did not encode: {error}")))
+            rejected(bloom, payload, failing.join(","), landing_findings(&failing))
         }
-        LandProposal::Landed(receipt) => {
-            // Mainline actually moved. Admit `Fact::Land` carrying the head the
-            // receipt attests — the commit mainline *became*, which under a
-            // squash accept is not the head that was proposed. Re-deriving it
-            // from the payload would record a mainline that exists nowhere and
-            // seal the next bloom on it.
-            let event = Event {
-                idempotency_key: land_key(&payload.bloom),
-                fact: Fact::Land { bloom: *bloom, new_head: receipt.new_head },
-            };
-            to_vec(&event)
-                .map(|bytes| Watched::Landed(Admit { event: bytes }))
-                .map_err(|error| SourceError::Malformed(format!("land event did not encode: {error}")))
-        }
+        LandProposal::Landed(receipt) => landed(bloom, payload, receipt.new_head),
     }
+}
+
+/// Accept the still-open proposal: merge it, once its gate is green and it
+/// still offers the head this bloom proved (issue #4953).
+///
+/// The merge used to be an operator's — the one human action left in an
+/// otherwise unattended loop, invisible while it was owed. It is the same trust
+/// decision the pipeline already made: ADR-0186 gives the daily ref no required
+/// checks because bloomery's own gates prove each landing, so the proposal is
+/// correspondence ceremony rather than a review surface.
+fn accept_proposal(
+    source: &SourceShell,
+    bloom: &BloomId,
+    payload: &LandPayload,
+    number: u64,
+) -> Result<Watched, SourceError> {
+    match source.accept_land(bloom, &payload.expected_base, &payload.new_head, number)? {
+        // Nothing green to press yet. The entry stays unacked and the poll
+        // cadence — not this function — decides when to look again, which is
+        // what keeps a waiting gate from becoming a spin.
+        LandAcceptance::Pending => Ok(Watched::Open),
+        LandAcceptance::Accepted => match source.poll_land(bloom, &payload.expected_base, number)? {
+            LandProposal::Landed(receipt) => landed(bloom, payload, receipt.new_head),
+            // Accepted, but the proposal does not read merged back yet. Leave
+            // the entry unacked: the acceptance is idempotent, so the next pass
+            // observes the landing rather than pressing anything twice.
+            _ => Ok(Watched::Open),
+        },
+        // A moved mainline forces supersession, never a land onto the new head
+        // (ADR-0149 §The bloom) — the same answer `LandOutcome::BaseMoved` gets
+        // when the base moves before the proposal is opened rather than after.
+        LandAcceptance::Refused(refusal @ LandingRefusal::BaseMoved { .. }) => {
+            Ok(Watched::Declined(refusal.to_string()))
+        }
+        LandAcceptance::Refused(refusal) => rejected(bloom, payload, refusal.to_string(), refusal_findings(&refusal)),
+    }
+}
+
+/// The [`Watched::Landed`] a merged proposal folds to.
+///
+/// `new_head` is the head the *receipt* attests — the commit mainline actually
+/// became, which under a squash accept is not the head that was proposed.
+/// Re-deriving it from the payload would record a mainline that exists nowhere
+/// and seal the next bloom on it.
+fn landed(bloom: &BloomId, payload: &LandPayload, new_head: Digest) -> Result<Watched, SourceError> {
+    let event = Event { idempotency_key: land_key(&payload.bloom), fact: Fact::Land { bloom: *bloom, new_head } };
+    to_vec(&event)
+        .map(|bytes| Watched::Landed(Admit { event: bytes }))
+        .map_err(|error| SourceError::Malformed(format!("land event did not encode: {error}")))
 }
 
 /// Drain the land topic and issue each entry's compare-and-swap, returning the
@@ -260,29 +333,30 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
                         admits.push(admit);
                         ack_through = Some(entry.sequence);
                     }
-                    Ok(Watched::Rejected(admit, failing)) => {
-                        // Persist the failing set on the bloom row before the
-                        // ack, so the repair dispatch the admit triggers finds
-                        // its findings already there. The empty workpiece key
-                        // is the bloom-scope row a failing aggregate verdict
-                        // uses, and every re-opened member reads it.
-                        store.record_review_findings(payload.bloom.as_bytes(), "", &landing_findings(&failing))?;
+                    Ok(Watched::Rejected { admit, cause, findings }) => {
+                        // Persist the findings on the bloom row before the ack,
+                        // so the repair dispatch the admit triggers finds them
+                        // already there. The empty workpiece key is the
+                        // bloom-scope row a failing aggregate verdict uses, and
+                        // every re-opened member reads it.
+                        store.record_review_findings(payload.bloom.as_bytes(), "", &findings)?;
                         tracing::warn!(
                             target: "aether_chassis_bloomery::land",
                             sequence = entry.sequence,
                             number,
-                            failing = %failing.join(", "),
-                            "landing checks failed; routing the bloom back into the line",
+                            %cause,
+                            "the landing was refused; routing the bloom back into the line",
                         );
                         admits.push(admit);
                         ack_through = Some(entry.sequence);
                     }
-                    Ok(Watched::Declined) => {
+                    Ok(Watched::Declined(why)) => {
                         tracing::warn!(
                             target: "aether_chassis_bloomery::land",
                             sequence = entry.sequence,
                             number,
-                            "landing proposal was declined; the resolved bloom stays supersedable",
+                            %why,
+                            "the landing did not proceed; the resolved bloom stays supersedable",
                         );
                         ack_through = Some(entry.sequence);
                     }

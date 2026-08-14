@@ -2,14 +2,14 @@
 //! fake-GitHub-backed `SourceShell` — the network side the running capability
 //! drives, without the mail harness. `init` / the timer / the ctx send are the
 //! thin glue the chassis-boot test and compilation cover; this pins the loop that
-//! turns a land decision into a landing proposal, watches it, and admits the
-//! `Fact::Land` it observes.
+//! turns a land decision into a landing proposal, merges that proposal once its
+//! gate is green, and admits the `Fact::Land` it then observes.
 
 use std::sync::Arc;
 
 use aether_bloomery::{BloomId, Correspondence, Digest, Event, Fact, LandPayload, Topic};
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{GitObjectId, GitSource, MainlineRef, PullRequestApi, short_hex, to_hex};
+use aether_bloomery_github::{ChecksState, GitObjectId, GitSource, MainlineRef, PullRequestApi, short_hex, to_hex};
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::drain_and_land;
@@ -341,6 +341,128 @@ fn landing_closes_member_issues_best_effort() {
     assert_eq!(fake.issue_is_closed(42), Some(false), "an issue that is not a member is left alone");
     assert!(fake.comments_on(42).is_empty(), "an issue that is not a member is not commented");
     assert_eq!(fake.issue_is_closed(9999), None, "a workpiece naming no object does not fabricate one");
+}
+
+// The number of the proposal the drain opened for `bloom`.
+fn proposal_number(fake: &FakeGithub, bloom: BloomId) -> u64 {
+    fake.find_pull_request_for_head(&format!("bloom/{}/landing", short_hex(&bloom.0)))
+        .unwrap()
+        .expect("the drain proposed one")
+        .number
+}
+
+// Report every check on the proposal's head as passed — the landing gate going
+// green, which is the only thing the reactor merges on.
+fn pass_checks(fake: &FakeGithub, number: u64) {
+    fake.seed_checks(&fake.pull_request_head_sha(number).expect("the proposal has a head"), ChecksState::Passed);
+}
+
+#[test]
+fn the_reactor_merges_its_own_green_proposal_and_admits_the_land() {
+    // Acceptance 1 (#4953). The middle step used to be a person: the reactor
+    // proposed and then sat until somebody merged, which is minutes to hours of
+    // latency per bloom in a loop that is otherwise unattended. Nothing in this
+    // scenario presses the button, and the bloom still lands.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    let sequence = enqueue_land(&mut store, bloom, base, new_head);
+
+    // The first pass proposes; its gate has reported nothing yet.
+    assert_eq!(drain_and_land(&mut store, &source).unwrap().1, None, "an unconcluded gate is not merged on");
+    let number = proposal_number(&fake, bloom);
+    pass_checks(&fake, number);
+
+    let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
+
+    assert!(fake.pull_request_merged(number).unwrap(), "the reactor merged the proposal it opened");
+    assert_eq!(ack_through, Some(sequence), "the landed entry is acked");
+    assert_eq!(admits.len(), 1, "the merge and its observation settle in one pass");
+    match from_bytes::<Event>(&admits[0].event).unwrap().fact {
+        Fact::Land { bloom: landed, new_head: head } => {
+            assert_eq!(landed, bloom);
+            // Tripwire: even when the reactor merged it itself, the admitted
+            // head is what mainline *became*. A squash produces a commit that is
+            // not the proposed head, and deriving it from the payload rather
+            // than the receipt would seal the next bloom on a commit that is on
+            // no branch.
+            assert_ne!(head, new_head, "the admitted head is the squash commit, not the proposed head");
+        }
+        other => panic!("expected Fact::Land, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_landing_whose_proposal_drifted_is_refused_and_journaled_rather_than_merged() {
+    // Acceptance 2. Every gate upstream judged the head the bloom resolved on,
+    // so a proposal that has since gained a commit is proving nothing about
+    // what a merge would land. The refusal is the existing landing-blocked
+    // vocabulary — a `LandingRejected` the outward view renders — rather than a
+    // silent sit or a retry of a decision that cannot change.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    let sequence = enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+    let number = proposal_number(&fake, bloom);
+    let pushed = "ee".repeat(20);
+    fake.push_to_pull_request(number, &pushed);
+    fake.seed_checks(&pushed, ChecksState::Passed);
+
+    let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
+
+    assert_eq!(fake.pull_request_merged(number), Some(false), "a drifted proposal is not merged");
+    assert_eq!(ack_through, Some(sequence), "the refusal is definitive, so it is acked rather than re-driven");
+    assert_eq!(admits.len(), 1, "the refusal is journaled, not swallowed");
+    match from_bytes::<Event>(&admits[0].event).unwrap().fact {
+        Fact::LandingRejected { bloom: refused, evidence } => {
+            assert_eq!(refused, bloom);
+            assert_eq!(evidence.subject, new_head, "the rejection binds the head that was proposed");
+        }
+        other => panic!("expected Fact::LandingRejected, got {other:?}"),
+    }
+    // The findings the repair dispatch reads, on the bloom-scope row a failing
+    // aggregate verdict uses — a refusal an operator has to read the host log
+    // to understand is the invisible wait in another costume.
+    let findings = store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap().expect("the refusal left findings");
+    assert!(findings.contains(&pushed), "the findings name the head that was found: {findings}");
+}
+
+#[test]
+fn a_base_that_moved_under_an_open_proposal_leaves_the_bloom_supersedable() {
+    // A moved mainline forces supersession, never a land onto the new head
+    // (ADR-0149 §The bloom) — and that has to hold at the merge as much as at
+    // the propose, because the base check `land` runs deliberately stops
+    // re-deciding once a proposal is open. So this refusal is *not* a
+    // `LandingRejected`: the bloom stays Resolved and supersedable, exactly
+    // where a base that moved before the proposal opened leaves it.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    let sequence = enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+    let number = proposal_number(&fake, bloom);
+    pass_checks(&fake, number);
+    // Mainline moves between the proposal opening and its gate going green.
+    fake.seed_ref_at("heads/main", &digest(77));
+    fake.seed_git_object(&digest(77));
+
+    let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
+
+    assert_eq!(fake.pull_request_merged(number), Some(false), "a moved base is not landed onto");
+    assert!(admits.is_empty(), "a moved base admits nothing; supersession is a caller act");
+    assert_eq!(ack_through, Some(sequence), "the definitive refusal is acked");
 }
 
 #[test]

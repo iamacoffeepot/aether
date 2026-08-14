@@ -134,6 +134,10 @@ pub struct PullRequest {
     pub number: u64,
     /// The sha at the head of the proposing branch.
     pub head_sha: String,
+    /// The branch proposing the change. What tells a landing pull request the
+    /// coordinator opened from a human-flow one that happens to be numbered
+    /// nearby: only a bloom's own landing branch proposes a bloom's landing.
+    pub head_ref: String,
     /// The branch being merged into (`main` for a landing).
     pub base: String,
     /// Whether it is still open.
@@ -388,20 +392,40 @@ pub enum MergeResult {
     },
 }
 
+/// What asking the source to merge a pull request did.
+///
+/// A refusal is an outcome here rather than a [`GithubError`], because the two
+/// statuses this folds are decisions and not faults: nothing about them gets
+/// better by re-driving the same request, and the caller has to journal them
+/// rather than retry them.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum PullMergeResult {
+    /// Merged. The base branch became `merge_commit_sha` — under a squash that
+    /// is a commit no branch previously carried.
+    Merged {
+        /// The commit the base branch became.
+        merge_commit_sha: String,
+    },
+    /// Refused. GitHub answers 405 when the pull request is not in a mergeable
+    /// state (a conflict with the base, a protection rule) and 409 when the
+    /// head has moved off the sha the merge was guarded by.
+    Refused {
+        /// The refusing status, so a reader can tell the two apart.
+        status: u16,
+        /// The refusal body, kept verbatim for the journal.
+        detail: String,
+    },
+}
+
 /// The pull-request surface the land path drives — Bloomery proposes a
-/// resolved bloom by opening one, then watches it to observe the landing
-/// (ADR-0149 §The bloom).
+/// resolved bloom by opening one, watches its gate, and merges the proposal it
+/// opened once that gate is green (ADR-0149 §The bloom, issue #4953).
 ///
 /// A third sibling of [`GithubApi`] and [`GitDataApi`] for the reason those two
 /// are separate: the projection has no use for pull requests and the land path
 /// has no use for issues, so each backend stays generic over only the surface
 /// it touches. Both [`ReqwestGithub`] and the test `FakeGithub` implement it,
 /// so the land path is exercised with no token and no network.
-///
-/// There is no merge verb. Bloomery opens the pull request and observes the
-/// outcome; a person merges it. Landing on a protected mainline is a decision
-/// the repository's own review gate owns, and a verb with no caller would be an
-/// unexercised path into the one operation that cannot be undone.
 pub trait PullRequestApi {
     /// Open a pull request.
     ///
@@ -441,6 +465,24 @@ pub trait PullRequestApi {
     /// # Errors
     /// The source surface is unreachable or returned an error status.
     fn checks_for_ref(&self, sha: &str) -> Result<ChecksState, GithubError>;
+
+    /// Squash-merge pull request `number`, guarded by `expected_head_sha`.
+    ///
+    /// The guard is the merge endpoint's own `sha` parameter, which GitHub
+    /// refuses with a 409 when the head has moved off it — a compare-and-swap
+    /// on the proposing branch, decided by the server between the caller's read
+    /// and its write rather than by the caller's own earlier look.
+    ///
+    /// Squash because that is what this repository's mainline takes: the
+    /// proposal's title becomes the commit subject, which is why the landing
+    /// assembly authors one at all. No commit title is sent, so the subject is
+    /// the one GitHub composes from the proposal — byte for byte what a person
+    /// pressing the button produces.
+    ///
+    /// # Errors
+    /// A transport fault or an error status other than the 405 / 409 refusals,
+    /// which are [`PullMergeResult::Refused`].
+    fn squash_merge_pull_request(&self, number: u64, expected_head_sha: &str) -> Result<PullMergeResult, GithubError>;
 }
 
 /// A client or transport failure. A clean not-found is `Ok(None)` at the API
@@ -491,6 +533,8 @@ pub enum Method {
     Get,
     /// `POST`.
     Post,
+    /// `PUT`.
+    Put,
     /// `PATCH`.
     Patch,
     /// `DELETE`.
@@ -632,6 +676,7 @@ impl HttpTransport for ReqwestTransport {
         let method = match request.method {
             Method::Get => ReqwestMethod::GET,
             Method::Post => ReqwestMethod::POST,
+            Method::Put => ReqwestMethod::PUT,
             Method::Patch => ReqwestMethod::PATCH,
             Method::Delete => ReqwestMethod::DELETE,
         };
@@ -869,6 +914,8 @@ impl GhRef {
 #[derive(Deserialize)]
 struct GhPullRequestHead {
     sha: String,
+    #[serde(rename = "ref")]
+    ref_name: String,
 }
 
 #[derive(Deserialize)]
@@ -904,6 +951,7 @@ impl GhPullRequest {
         PullRequest {
             number: self.number,
             head_sha: self.head.sha,
+            head_ref: self.head.ref_name,
             base: self.base.ref_name,
             state,
             merged: self.merged,
@@ -932,6 +980,14 @@ impl GhCommit {
     fn into_git_commit(self) -> GitCommit {
         GitCommit { sha: self.sha, tree: self.tree.sha, message: self.message }
     }
+}
+
+/// `PUT /repos/{owner}/{repo}/pulls/{number}/merge` — the accepted reply. Its
+/// `sha` is the commit the base branch became, which under a squash is a commit
+/// neither branch previously carried.
+#[derive(Deserialize)]
+struct GhMerged {
+    sha: String,
 }
 
 /// The merges endpoint's reply. It is a *repository* commit, which nests the
@@ -1418,6 +1474,21 @@ impl<T: HttpTransport> PullRequestApi for ReqwestGithub<T> {
         let response = self.request(Method::Get, url, None)?;
         let listing: GhCheckRunList = decode(&response)?;
         Ok(fold_checks(&listing.check_runs))
+    }
+
+    fn squash_merge_pull_request(&self, number: u64, expected_head_sha: &str) -> Result<PullMergeResult, GithubError> {
+        let payload = serde_json::json!({ "merge_method": "squash", "sha": expected_head_sha }).to_string();
+        // Dispatched rather than `request`ed: the two refusing statuses are
+        // outcomes this maps, so raising them to errors first and unwrapping
+        // them back would put the classification in the error path.
+        let response = self.dispatch(Method::Put, self.pulls_url(&format!("/{number}/merge")), Some(payload))?;
+        match response.status {
+            status if (200..300).contains(&status) => {
+                Ok(PullMergeResult::Merged { merge_commit_sha: decode::<GhMerged>(&response)?.sha })
+            }
+            status @ (405 | 409) => Ok(PullMergeResult::Refused { status, detail: response.body }),
+            status => Err(GithubError::Status { status, body: response.body }),
+        }
     }
 
     fn find_pull_request_for_head(&self, head: &str) -> Result<Option<PullRequest>, GithubError> {
@@ -2063,14 +2134,14 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5), "transport did not bound the stalled request");
     }
 
-    use super::{NewPullRequest, PullRequestApi, PullRequestState};
+    use super::{NewPullRequest, PullMergeResult, PullRequestApi, PullRequestState};
 
     #[test]
     fn create_pull_request_posts_the_repo_pulls_route_with_head_and_base() {
         let github = client(
             201,
             r#"{"number":7,"state":"open","merged":false,"merge_commit_sha":null,
-                "head":{"sha":"deadbeef"},"base":{"ref":"main"}}"#,
+                "head":{"sha":"deadbeef","ref":"bloom/abcd/landing"},"base":{"ref":"main"}}"#,
         );
         let pull = github
             .create_pull_request(&NewPullRequest {
@@ -2104,7 +2175,7 @@ mod tests {
         let open = client(
             200,
             r#"{"number":7,"state":"open","merged":false,"merge_commit_sha":"7e57e57e57",
-                "head":{"sha":"deadbeef"},"base":{"ref":"main"}}"#,
+                "head":{"sha":"deadbeef","ref":"bloom/abcd/landing"},"base":{"ref":"main"}}"#,
         );
         let pull = open.get_pull_request(7).expect("2xx decodes").expect("present");
         assert_eq!(pull.merge_commit_sha, None, "an open pull request's test-merge sha is not a landing");
@@ -2113,7 +2184,7 @@ mod tests {
         let merged = client(
             200,
             r#"{"number":7,"state":"closed","merged":true,"merge_commit_sha":"5quash3d",
-                "head":{"sha":"deadbeef"},"base":{"ref":"main"}}"#,
+                "head":{"sha":"deadbeef","ref":"bloom/abcd/landing"},"base":{"ref":"main"}}"#,
         );
         let pull = merged.get_pull_request(7).expect("2xx decodes").expect("present");
         assert_eq!(pull.state, PullRequestState::Closed);
@@ -2126,12 +2197,56 @@ mod tests {
         let rejected = client(
             200,
             r#"{"number":7,"state":"closed","merged":false,"merge_commit_sha":"7e57e57e57",
-                "head":{"sha":"deadbeef"},"base":{"ref":"main"}}"#,
+                "head":{"sha":"deadbeef","ref":"bloom/abcd/landing"},"base":{"ref":"main"}}"#,
         );
         let pull = rejected.get_pull_request(7).expect("2xx decodes").expect("present");
         assert_eq!(pull.state, PullRequestState::Closed);
         assert!(!pull.merged);
         assert_eq!(pull.merge_commit_sha, None);
+    }
+
+    // Tripwire: the merge request carries `sha`. That parameter is the whole
+    // compare-and-swap the coordinator's own acceptance rests on — GitHub
+    // refuses a merge whose head has moved off it — so a request shaped without
+    // it would merge whatever the branch had become between the caller's checks
+    // and its write, and every test above the transport would still pass.
+    #[test]
+    fn squash_merging_puts_the_merge_route_guarded_by_the_head_sha() {
+        let github = client(200, r#"{"sha":"5quash3d","merged":true,"message":"Pull Request successfully merged"}"#);
+
+        assert_eq!(
+            github.squash_merge_pull_request(7, "deadbeef").expect("2xx decodes"),
+            PullMergeResult::Merged { merge_commit_sha: "5quash3d".to_owned() },
+        );
+
+        let request = github.transport.last.borrow().clone().expect("a request was sent");
+        assert_eq!(request.method, Method::Put);
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/pulls/7/merge");
+        let sent: serde_json::Value = serde_json::from_str(&request.body.unwrap()).unwrap();
+        assert_eq!(sent["sha"], "deadbeef", "the merge is guarded by the head the caller proved");
+        assert_eq!(sent["merge_method"], "squash", "mainline takes squashes; the proposal's title is the subject");
+        assert!(sent.get("commit_title").is_none(), "the subject is GitHub's from the proposal, as by hand");
+    }
+
+    // The two statuses that mean "no" are outcomes, not faults: a caller that
+    // re-drove them would hammer a decision that cannot change. Everything else
+    // stays an error, because everything else might.
+    #[test]
+    fn a_refused_merge_is_an_outcome_and_any_other_status_is_still_an_error() {
+        for status in [405u16, 409] {
+            match client(status, r#"{"message":"Pull Request is not mergeable"}"#).squash_merge_pull_request(7, "d") {
+                Ok(PullMergeResult::Refused { status: got, detail }) => {
+                    assert_eq!(got, status);
+                    assert!(detail.contains("not mergeable"), "the refusal keeps its body: {detail}");
+                }
+                other => panic!("expected a refusal outcome for {status}, got {other:?}"),
+            }
+        }
+
+        match client(500, r#"{"message":"boom"}"#).squash_merge_pull_request(7, "d") {
+            Err(GithubError::Status { status: 500, .. }) => {}
+            other => panic!("expected a 500 to stay an error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2149,7 +2264,7 @@ mod tests {
         let github = client(
             200,
             r#"[{"number":7,"state":"open","merged":false,"merge_commit_sha":null,
-                 "head":{"sha":"deadbeef"},"base":{"ref":"main"}}]"#,
+                 "head":{"sha":"deadbeef","ref":"bloom/abcd/landing"},"base":{"ref":"main"}}]"#,
         );
         let found = github.find_pull_request_for_head("bloomery/land/abcd").expect("2xx decodes").expect("present");
         assert_eq!(found.number, 7);
