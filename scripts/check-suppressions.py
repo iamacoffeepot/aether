@@ -74,8 +74,22 @@ def resolve_diff(root: Path, base_ref: str, head_ref: str) -> tuple[str, str]:
     head = git(root, "rev-parse", "--verify", f"{head_ref}^{{commit}}")
     assert base is not None and head is not None
     head = head.strip()
-    merge_base = git(root, "merge-base", base.strip(), head)
-    assert merge_base is not None
+    # `merge-base` exits 1 with no output when the two commits share no ancestor,
+    # which a bloomery lane produces by construction: it materializes a bare-tree
+    # subject as a parentless wrapper commit (#5025), so a candidate's history is
+    # rooted at the tree it started from and meets the base ref nowhere. That root
+    # is the base the scan wants — the diff from it is exactly what the candidate
+    # changed — so a disjoint history resolves to it rather than leaving by the
+    # exit code that says no verdict was reached at all.
+    merge_base = git(root, "merge-base", base.strip(), head, allow_missing=True)
+    if merge_base is None:
+        roots = (git(root, "rev-list", "--max-parents=0", head) or "").split()
+        if len(roots) != 1:
+            raise OperationalError(
+                f"{base_ref} shares no ancestor with {head_ref}, whose history has "
+                f"{len(roots)} roots — no unambiguous base to scan from"
+            )
+        merge_base = roots[0]
     merge_base = merge_base.strip()
     if not HEX_SHA_RE.fullmatch(merge_base) or not HEX_SHA_RE.fullmatch(head):
         raise OperationalError("git did not resolve the diff endpoints to full commit SHAs")
