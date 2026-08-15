@@ -280,6 +280,26 @@ ignored = ["changed-but-unrelated"]
         self.assertEqual(clean.returncode, 0)
         self.assertEqual(invalid.returncode, 2)
 
+    def test_a_head_sharing_no_ancestor_with_the_base_scans_from_its_own_root(self) -> None:
+        # A bloomery lane roots a bare-tree candidate at a parentless wrapper
+        # commit (#5025), so the base ref shares no ancestor with it. Before the
+        # fallback the scan died on `merge-base`'s silent exit 1 and reported no
+        # verdict at all, which reads as a host fault and costs the member a
+        # refine lap it cannot spend usefully.
+        self.repo.write("src/lib.rs", "fn unrelated() {}\n")
+        base = self.repo.commit("base")
+
+        self.repo.git("checkout", "-q", "--orphan", "candidate")
+        self.repo.write("src/lib.rs", "fn clean() {}\n")
+        self.repo.commit("bloomery: checkout of bare tree")
+        self.repo.write("src/lib.rs", "#[allow(dead_code)]\nfn clean() {}\n")
+        head = self.repo.commit("candidate")
+
+        findings = self.repo.scan(base, head)
+
+        self.assertEqual([item.line for item in findings], [1])
+        self.assertEqual([item.token for item in findings], ["allow(dead_code)"])
+
 
 class SignoffTests(unittest.TestCase):
     base = "1" * 40
