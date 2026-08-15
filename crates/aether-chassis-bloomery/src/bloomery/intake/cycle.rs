@@ -4,13 +4,16 @@
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery::{ExecutionStatus, Nonce, WorkHandle};
+use aether_bloomery::{Admit, ExecutionStatus, Nonce, WorkHandle};
+use aether_data::wire::to_vec;
 
 use super::admit::{Admission, AdmitDecision, IntakeError, UploadedEvidence, admit_uploaded};
 use super::claims::EvidenceClaims;
 use crate::artifacts::ArtifactsCapabilityState;
 use crate::bloomery::executor::{ExecutorPortError, ExecutorShell};
-use crate::bloomery::study::{StudyAdmitDecision, UploadedStudyRecord, admit_study};
+use crate::bloomery::study::{
+    StudyAdmission, StudyAdmitDecision, UploadedStudyRecord, admit_study, study_evidence_event,
+};
 use crate::store::StoreBackend;
 
 /// Where an admitted attempt result goes — #3497's `aether.bloomery.admit`
@@ -118,7 +121,10 @@ pub fn run_intake_cycle(
             // Reversed, every study upload would look up an already-spent nonce
             // and refuse as `UnknownNonce` — the lane would be wired and still
             // record nothing, which is the failure this issue exists to end.
-            report.studied += u32::from(record_cost(store, artifacts.as_deref_mut(), &upload));
+            if let Some(admission) = record_cost(store, artifacts.as_deref_mut(), &upload) {
+                report.studied += 1;
+                admit_study_evidence(sink, &admission, &upload.nonce);
+            }
             match admit_uploaded(store, &upload).map_err(CycleError::Intake)? {
                 AdmitDecision::Admitted(admission) => {
                     report.admitted += 1;
@@ -139,8 +145,8 @@ pub fn run_intake_cycle(
     Ok(report)
 }
 
-/// Record what one attempt cost, returning whether a study row was written
-/// (#4679).
+/// Record what one attempt cost, returning the admission when a study row
+/// was written (#4679).
 ///
 /// Three shapes yield no row and are not failures: an upload carrying no cost
 /// (the harness reported no usage, or the name-only Actions lane produced the
@@ -156,15 +162,15 @@ fn record_cost(
     store: &mut dyn StoreBackend,
     artifacts: Option<&mut ArtifactsCapabilityState>,
     upload: &UploadedEvidence,
-) -> bool {
+) -> Option<StudyAdmission> {
     let (Some(cost), Some(artifacts)) = (upload.cost, artifacts) else {
-        return false;
+        return None;
     };
     let record =
         UploadedStudyRecord { nonce: upload.nonce.clone(), subject: upload.subject, cost, calls: upload.calls.clone() };
 
     match admit_study(store, artifacts, &record) {
-        Ok(StudyAdmitDecision::Admitted(_)) => true,
+        Ok(StudyAdmitDecision::Admitted(admission)) => Some(admission),
         Ok(StudyAdmitDecision::Refused(refusal)) => {
             tracing::warn!(
                 target: "aether_chassis_bloomery::intake",
@@ -172,7 +178,7 @@ fn record_cost(
                 ?refusal,
                 "study record refused; the attempt admits normally but its cost is unrecorded",
             );
-            false
+            None
         }
         Err(error) => {
             tracing::warn!(
@@ -181,7 +187,31 @@ fn record_cost(
                 %error,
                 "study record could not be stored; the attempt admits normally but its cost is unrecorded",
             );
-            false
+            None
         }
+    }
+}
+
+/// Forward the study artifact as journal evidence so a calibration read can
+/// resolve it. A missing hex digest or an encode fault is logged and dropped
+/// — the artifact and index row already landed, and the study lane does not
+/// gate the verdict that follows.
+fn admit_study_evidence(sink: &mut dyn AdmitSink, admission: &StudyAdmission, nonce: &Nonce) {
+    let Some(event) = study_evidence_event(admission, nonce) else {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::intake",
+            nonce = %nonce.0,
+            "study artifact digest is not 32-byte hex; the attempt admits normally but its cost is unjournaled",
+        );
+        return;
+    };
+    match to_vec(&event) {
+        Ok(bytes) => sink.admit(Admission { admit: Admit { event: bytes }, event }),
+        Err(error) => tracing::warn!(
+            target: "aether_chassis_bloomery::intake",
+            nonce = %nonce.0,
+            %error,
+            "study evidence event could not encode; the attempt admits normally but its cost is unjournaled",
+        ),
     }
 }
