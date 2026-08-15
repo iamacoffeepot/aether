@@ -46,8 +46,7 @@ use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AggregateReviewPayload, AggregateVerifyPayload, BloomId, ConfigRegistry, ConfigScopes, Digest,
     DispatchPayload, ExecutionStatus, Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence,
-    StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId,
-    pin_workpiece_description,
+    StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId, pin_workpiece_description,
 };
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, short_hex};
 use aether_data::wire::{from_bytes, to_vec};
