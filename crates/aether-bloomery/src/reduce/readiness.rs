@@ -474,4 +474,81 @@ mod tests {
         );
         assert_eq!(blocking_ancestor(bloom, &WorkpieceId("wp-a".into())), None);
     }
+
+    // The plausible bug: resolving A starts every descendant, so C spends a
+    // lane against a base that does not yet include B's candidate.
+    #[test]
+    fn a_chain_dispatches_one_hop_at_a_time() {
+        let (snapshot, spec) =
+            seal_graph(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)], vec![edge("wp-b", "wp-a"), edge("wp-c", "wp-b")]);
+        assert!(!record(&snapshot, &spec).progress.contains_key(&WorkpieceId("wp-c".into())));
+
+        let integrate_a = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
+        let (after_a, decided_a) = step(&snapshot, &integrate_a);
+        assert_eq!(construct_dispatches(&decided_a), vec![WorkpieceId("wp-b".into())]);
+        assert!(
+            !record(&after_a, &spec).progress.contains_key(&WorkpieceId("wp-c".into())),
+            "C still waits on B, which has only just entered the line",
+        );
+
+        let integrate_b = event("b-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-b", 2, 20) });
+        let (after_b, decided_b) = step(&after_a, &integrate_b);
+        assert_eq!(construct_dispatches(&decided_b), vec![WorkpieceId("wp-c".into())]);
+        assert!(record(&after_b, &spec).progress.contains_key(&WorkpieceId("wp-c".into())));
+        assert!(
+            !decided_b.effects.iter().any(|effect| matches!(effect, Decision::DispatchIntegration { .. })),
+            "the weave still waits for C",
+        );
+    }
+
+    // The plausible bug: readiness treats one satisfied parent as enough, so
+    // B starts the moment A resolves even though C has not.
+    #[test]
+    fn a_member_waits_for_every_parent() {
+        let (snapshot, spec) =
+            seal_graph(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)], vec![edge("wp-b", "wp-a"), edge("wp-b", "wp-c")]);
+        let bloom = record(&snapshot, &spec);
+        assert!(bloom.progress.contains_key(&WorkpieceId("wp-a".into())));
+        assert!(bloom.progress.contains_key(&WorkpieceId("wp-c".into())));
+        assert!(!bloom.progress.contains_key(&WorkpieceId("wp-b".into())));
+
+        let integrate_a = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
+        let (after_a, decided_a) = step(&snapshot, &integrate_a);
+        assert!(construct_dispatches(&decided_a).is_empty(), "A alone does not release B: C is still unresolved");
+        assert!(!record(&after_a, &spec).progress.contains_key(&WorkpieceId("wp-b".into())));
+
+        let integrate_c = event("c-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-c", 3, 30) });
+        let (after_c, decided_c) = step(&after_a, &integrate_c);
+        assert_eq!(construct_dispatches(&decided_c), vec![WorkpieceId("wp-b".into())]);
+        assert!(record(&after_c, &spec).progress.contains_key(&WorkpieceId("wp-b".into())));
+    }
+
+    // The plausible bug: a successor treats inherited claims as unresolved, so
+    // a net-new dependent of an inherited member never enters the line — no
+    // later Integrate arrives for work the predecessor already finished.
+    #[test]
+    fn an_inherited_claim_unblocks_a_successor_dependent() {
+        let predecessor_spec = spec(&[("wp-a", 1)]);
+        let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor_spec.clone(), edges: vec![] });
+        let (after_seal, _) = step(&Snapshot::new(digest(0)), &seal);
+        let integrate = event("a-done", Fact::Integrate { bloom: predecessor_spec.id(), claim: claim("wp-a", 1, 10) });
+        let (after_a, _) = step(&after_seal, &integrate);
+
+        let successor_spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
+        let supersede = event(
+            "sup",
+            Fact::GraphSeal {
+                predecessor: Some(predecessor_spec.id()),
+                spec: successor_spec.clone(),
+                edges: vec![edge("wp-b", "wp-a")],
+            },
+        );
+        let (after, decided) = step(&after_a, &supersede);
+        assert!(matches!(decided.outcome, Outcome::Superseded { .. }), "got {:?}", decided.outcome);
+        assert_eq!(construct_dispatches(&decided), vec![WorkpieceId("wp-b".into())]);
+        let successor = after.blooms.get(&successor_spec.id()).expect("successor bloom");
+        assert!(successor.claims.contains_key(&WorkpieceId("wp-a".into())), "A arrives already resolved");
+        assert!(successor.progress.contains_key(&WorkpieceId("wp-b".into())), "B enters because A is inherited");
+        assert!(!successor.progress.contains_key(&WorkpieceId("wp-a".into())), "an inherited member is not re-run");
+    }
 }
