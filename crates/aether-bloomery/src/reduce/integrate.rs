@@ -40,7 +40,7 @@ pub(super) fn claim_effects(
     effects.extend(provenance);
     // Dependents whose last unresolved edge was this claim now enter Construct.
     // Journaled on this row so replay recovers the schedule (ADR-0190 / ADR-0196).
-    effects.extend(newly_ready_entries(record, bloom, &claim.workpiece));
+    effects.extend(newly_ready_entries(record, bloom, &claim.workpiece, claim.candidate));
 
     let complete = record
         .spec
