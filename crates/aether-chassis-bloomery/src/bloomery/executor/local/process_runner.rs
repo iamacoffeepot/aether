@@ -128,9 +128,18 @@ impl TransformRunner for ProcessTransformRunner {
     fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
         fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
         fetch_subject_if_absent(Path::new("."), spec.checkout_hex)?;
+        // Resolve both order digests before anything downstream reads them:
+        // either may name a bare tree — a spliced dependency claim (ADR-0196)
+        // — and every git consumer past this point refuses one. The checkout
+        // verbs are guarded inside `materialize_checkout`, but `--diff-base`
+        // travels to the lane's verify gates, whose `rev-parse --verify
+        // <base>^{commit}` / `merge-base` fail on a tree and wedge the member
+        // on verify.preflight (#5026).
+        let checkout = commitish_for(Path::new("."), spec.checkout_hex)?;
+        let diff_base = spec.diff_base_hex.map(|hex| commitish_for(Path::new("."), hex)).transpose()?;
         // Bring the slot's checkout to the sealed subject — reset in place when the
         // slot already holds one, created when it does not.
-        materialize_checkout(Path::new("."), spec.worktree_dir, spec.checkout_hex)?;
+        materialize_checkout(Path::new("."), spec.worktree_dir, &checkout)?;
         // The scratch worktree is a full checkout carrying the repo's interactive
         // `.claude/settings.json` hooks, and the construct lane spawns headless
         // `claude` in it — so the SessionStart worktree-rebind hook would fire and
@@ -158,11 +167,11 @@ impl TransformRunner for ProcessTransformRunner {
         // closure (#4890). An order naming none — the whole-bloom aggregate
         // verify, and every stage whose candidate is the working tree — leaves
         // both lanes exactly as they were.
-        if let Some(diff_base) = spec.diff_base_hex {
+        if let Some(diff_base) = diff_base.as_deref() {
             lane.args(["--diff-base", diff_base]);
         }
         if is_model_lane(spec.command) {
-            lane.args(["--subject", spec.checkout_hex]);
+            lane.args(["--subject", checkout.as_str()]);
             if let Some(harness) = spec.harness {
                 lane.args(["--harness", harness]);
             }
