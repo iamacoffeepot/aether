@@ -55,7 +55,7 @@ mod tests {
     use crate::digest::Digest;
     use crate::ids::{IdempotencyKey, WorkpieceId};
     use crate::reduce::{BloomStatus, Decision, Event, Fact, Outcome, Snapshot, reduce};
-    use crate::values::{BloomDraft, ConfigRegistry, Evidence, EvidenceKind, Membership, ResolvedConfigs};
+    use crate::values::{BloomDraft, ConfigRegistry, Evidence, EvidenceKind, Membership, ResolvedConfigs, SpendWindow};
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
@@ -93,8 +93,11 @@ mod tests {
 
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         let mut snapshot = Snapshot::new(base);
-        snapshot =
-            snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()), &ResolvedConfigs::default());
+        snapshot = snapshot.apply(
+            &seal,
+            &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
+            &ResolvedConfigs::default(),
+        );
         snapshot.blooms.get_mut(&bloom).expect("the seal recorded the bloom under its own spec id").status =
             BloomStatus::Resolved;
 

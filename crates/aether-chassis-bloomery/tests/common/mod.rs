@@ -80,6 +80,16 @@ impl Coordinator {
         self.pid
     }
 
+    /// Whether the child is still running.
+    ///
+    /// `free_port` binds `:0` and releases, so a sibling can claim the port
+    /// before this bin binds. The loser exits; `connect_and_handshake` then
+    /// attaches to the thief. A caller that requires this to stay true after
+    /// the handshake is talking to the process it spawned, not a stranger.
+    pub fn is_alive(&mut self) -> bool {
+        self.child.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+    }
+
     /// SIGKILL the coordinator now and reap it (`Child::kill` is SIGKILL on
     /// unix) — the deliberate crash the restart tests simulate, as opposed to
     /// the drop-path safety net. Consumes the guard, so the process cannot be

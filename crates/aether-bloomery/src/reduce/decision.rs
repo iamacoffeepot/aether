@@ -12,8 +12,8 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::values::{
     Adjudication, AgentProfile, CompositionFinding, ConfigRegistry, Evidence, MemberCandidate, OperatorHold,
-    OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, ResolvedBloom, StageCatalog,
-    Transformation, VerifyProof, VerifyReuse, Wedge,
+    OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, ResolvedBloom, SpendQuiesce,
+    StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -579,5 +579,18 @@ pub enum Decision {
         bloom: BloomId,
         /// The workpiece owed a dispatch once the hold lifts.
         workpiece: WorkpieceId,
+    },
+    /// Record (or clear) the snapshot-level spend-quiesce marker (ADR-0192) —
+    /// see [`crate::Snapshot::spend_quiesce`].
+    ///
+    /// `Some` records the crossing that closed the seal door; `None` clears it
+    /// on the first seal that passes the governor again. One variant with an
+    /// `Option` rather than a raised-and-cleared pair, because the clearing
+    /// edge carries no operator, no reason, and nothing else worth journaling
+    /// — the [`Decision::RecordReviewPark`] shape. Appended so the prior
+    /// decisions' wire discriminants are unchanged.
+    RecordSpendQuiesce {
+        /// The crossing that closed the door, or `None` to clear.
+        quiesce: Option<SpendQuiesce>,
     },
 }

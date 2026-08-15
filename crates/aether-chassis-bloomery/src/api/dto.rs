@@ -7,7 +7,9 @@
 //! `Outcome` / projection `ViewDocument` / `BloomView`). The value types
 //! already derive serde, so the API layer serializes them directly; these
 //! structs are the request bodies and the small response envelopes that bundle
-//! a minted draft handle alongside the value.
+//! a minted draft handle alongside the value. `GET /view` and `GET /blooms`
+//! render [`ViewDocument`](aether_bloomery::ViewDocument) as-is, including the
+//! spend-quiesce marker (ADR-0192) when the seal door is closed.
 //!
 //! They carry no `aether_data::Kind` — they are HTTP-JSON bodies, not mailbox
 //! mail, and never cross the wire codec.

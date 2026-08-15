@@ -34,8 +34,8 @@ use std::time::{Duration, Instant};
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, CONTROL_CORE_NAMESPACE, CalibrationDocument, ConfigKind, ConfigRegistry, Decisions,
     Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, ModelOverride, Outcome, Query,
-    QueryResult, ResolvedConfigs, SealError, Snapshot, StageCatalog, StageId, Unproducible, ViewDocument, WorkpieceId,
-    reduce,
+    QueryResult, ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, Unproducible, ViewDocument,
+    WorkpieceId, reduce,
 };
 use aether_chassis_bloomery::store::{JournalWrite, RecordConfig, RecordConfigResult, SqliteStore, StoreBackend};
 use aether_codec::frame::{read_frame, write_frame};
@@ -186,7 +186,7 @@ fn replay_folds_the_recorded_decision_not_the_current_reducer() {
     let db = db.to_str().unwrap();
 
     let resurrectable = seal_event("seal-a", 0, "wp-a");
-    let control_a = reduce(&Snapshot::default(), &resurrectable, &ResolvedConfigs::default());
+    let control_a = reduce(&Snapshot::default(), &resurrectable, &ResolvedConfigs::default(), &SpendWindow::default());
     assert!(
         matches!(control_a.outcome, Outcome::Sealed(_)),
         "fixture control: today's reducer would admit the rejected row (else the resurrection arm tests nothing)"
@@ -194,7 +194,7 @@ fn replay_folds_the_recorded_decision_not_the_current_reducer() {
     let refusal = Decisions { outcome: Outcome::SealRejected(SealError::EmptyMembership), effects: Vec::new() };
 
     let admitted = seal_event("seal-b", 0, "wp-b");
-    let decided_b = reduce(&Snapshot::default(), &admitted, &ResolvedConfigs::default());
+    let decided_b = reduce(&Snapshot::default(), &admitted, &ResolvedConfigs::default(), &SpendWindow::default());
     assert!(matches!(decided_b.outcome, Outcome::Sealed(_)), "fixture control: the admitted row's record seals");
 
     let mut store = SqliteStore::open(db).unwrap();

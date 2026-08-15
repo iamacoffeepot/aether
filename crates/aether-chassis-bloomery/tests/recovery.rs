@@ -18,7 +18,7 @@ mod common;
 
 use std::net::TcpStream;
 
-use aether_bloomery::{BloomId, Digest, Event, Fact, IdempotencyKey, ResolvedConfigs, Snapshot, reduce};
+use aether_bloomery::{BloomId, Digest, Event, Fact, IdempotencyKey, ResolvedConfigs, Snapshot, SpendWindow, reduce};
 use aether_chassis_bloomery::store::{
     AppendEvent, AppendEventResult, ClaimSeal, ClaimSealResult, DrainOutbox, DrainOutboxResult, EnqueueOutbox,
     EnqueueOutboxResult, ReplayJournal, ReplayJournalResult,
@@ -69,7 +69,7 @@ fn kill_and_restart_converges_over_rpc() {
     // The row journals what the reducer decided about it (ADR-0190) — here the
     // clean rejection a land on an orphan bloom reduces to, so the restarted
     // core's fold consumes the key and changes nothing.
-    let decisions = reduce(&Snapshot::default(), &event, &ResolvedConfigs::default());
+    let decisions = reduce(&Snapshot::default(), &event, &ResolvedConfigs::default(), &SpendWindow::default());
     let decision_bytes = to_vec(&decisions).unwrap();
 
     let append: AppendEventResult = call(

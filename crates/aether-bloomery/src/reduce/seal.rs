@@ -6,6 +6,7 @@ use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use aether_data::Kind;
 use serde::de::DeserializeOwned;
 
 use super::attempt::stage_binding;
@@ -16,7 +17,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, WorkpieceId};
 use crate::values::{
     BloomSpec, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, EvidenceKind, MemberCandidate, Membership,
-    ModelOverride, ResolvedConfigs, StageCatalog, Transformation, Unproducible, VerifyFailureSet,
+    ModelOverride, ResolvedConfigs, SpendCeiling, SpendWindow, StageCatalog, Transformation, Unproducible,
+    VerifyFailureSet,
 };
 
 /// Build the seal-time entry-stage dispatch effects for one member: seed its
@@ -68,7 +70,12 @@ fn entry_dispatch_effects(
     ]
 }
 
-pub(super) fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec, configs: &ResolvedConfigs) -> Decisions {
+pub(super) fn reduce_seal(
+    snapshot: &Snapshot,
+    spec: &BloomSpec,
+    configs: &ResolvedConfigs,
+    spend: &SpendWindow,
+) -> Decisions {
     let bloom = spec.id();
     // A known id would resurrect and overwrite the existing record — a sealed
     // spec never amends (ADR-0149 §The bloom).
@@ -114,11 +121,31 @@ pub(super) fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec, configs: &Resol
     if let Some(active) = active_unlanded_bloom(snapshot) {
         return Decisions::rejected(Outcome::SealRejected(SealError::ActiveBloomExists(active)));
     }
+    // Last gate, after every check that names something wrong with the draft:
+    // this one names something true about the fleet (ADR-0192). A member-scoped
+    // ceiling is refused rather than resolved or ignored — a member must not
+    // choose the ceiling that admits its own bloom.
+    if let Err(error) = refuse_member_spend_ceiling(spec) {
+        return Decisions::rejected(Outcome::SealRejected(error));
+    }
+    let ceiling = match sealed_config::<SpendCeiling>(ConfigScopes::bloom_wide(spec.configs()), configs) {
+        Ok(ceiling) => ceiling,
+        Err(error) => return Decisions::rejected(Outcome::SealRejected(error)),
+    };
+    if let Some(quiesce) = ceiling.as_ref().and_then(|ceiling| ceiling.quiesce(spend)) {
+        return Decisions {
+            outcome: Outcome::SealQuiesced(quiesce.clone()),
+            effects: vec![Decision::RecordSpendQuiesce { quiesce: Some(quiesce) }],
+        };
+    }
     // Claim each member, then seed its cursor at the entry stage and dispatch its
     // first attempt — a sealed bloom's members enter the line at `Construct`
     // (ADR-0149 §The line). The claims come first so the dispatch effects attach
     // to a member already in `active`.
-    let mut effects = Vec::with_capacity(spec.members().len() * 3 + 1);
+    let mut effects = Vec::with_capacity(spec.members().len() * 3 + 2);
+    if snapshot.spend_quiesce.is_some() {
+        effects.push(Decision::RecordSpendQuiesce { quiesce: None });
+    }
     for member in spec.members() {
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom });
     }
@@ -148,6 +175,26 @@ pub(super) fn reduce_surface_overlap(members: &[WorkpieceId], intersection: &[St
         outcome: Outcome::SurfaceOverlap { members: members.to_vec(), intersection: intersection.to_vec() },
         effects: Vec::new(),
     }
+}
+
+/// Refuse a `SpendCeiling` sealed on a member rather than resolving or
+/// ignoring it (ADR-0192). A member choosing the ceiling that admits its own
+/// bloom is the self-authorization the bloom-wide-only rule exists to close.
+///
+/// Reported as [`SealError::UnproducibleConfig`] so `SealError` gains no
+/// variant: the address is named, and `MisfiledAs("member")` is why the
+/// bloom-wide door will not produce it.
+fn refuse_member_spend_ceiling(spec: &BloomSpec) -> Result<(), SealError> {
+    for member in spec.members() {
+        if let Some(address) = member.configs.address::<SpendCeiling>() {
+            return Err(SealError::UnproducibleConfig {
+                kind: String::from(SpendCeiling::NAME),
+                address,
+                reason: Unproducible::MisfiledAs(String::from("member")),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The per-member admission checks a bloom's membership must pass before it can
@@ -354,6 +401,13 @@ pub(super) fn reduce_supersede(
     if let Err(error) = validate_configs(successor, configs) {
         return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
     }
+    // A member-scoped ceiling is invalid configuration on either door. The
+    // spend *comparison* does not gate supersession — a successor may admit
+    // while the window is over ceiling so the drain that rolls the window
+    // stays open (ADR-0192).
+    if let Err(error) = refuse_member_spend_ceiling(successor) {
+        return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
+    }
     // And to seal's line admission, so a successor cannot introduce a catalog
     // that cannot run or an override that catalog cannot honour.
     let catalog = match validate_line(successor, configs) {
@@ -482,4 +536,306 @@ pub(super) fn reduce_supersede(
     }
     effects.push(Decision::MarkSuperseded { bloom: *predecessor, by: successor_id });
     Decisions { outcome: Outcome::Superseded { predecessor: *predecessor, successor: successor_id }, effects }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::String;
+
+    use aether_data::Kind;
+    use aether_data::wire::to_vec;
+
+    use super::{reduce_seal, reduce_supersede};
+    use crate::digest::Digest;
+    use crate::ids::{BloomId, IdempotencyKey, WorkpieceId};
+    use crate::reduce::SealError;
+    use crate::reduce::{BloomStatus, Decision, Event, Fact, Outcome, Snapshot};
+    use crate::values::{
+        BloomDraft, ConfigKind, ConfigRegistry, Evidence, EvidenceKind, Membership, ResolvedConfigs, SpendCeiling,
+        SpendQuiesce, SpendWindow, Unproducible,
+    };
+
+    fn digest(seed: u8) -> Digest {
+        Digest::from_bytes([seed; 32])
+    }
+
+    fn membership(name: &str, revision: u8) -> Membership {
+        let mut member = Membership {
+            workpiece: WorkpieceId(name.into()),
+            scope_revision: digest(revision),
+            configs: ConfigRegistry::default(),
+            approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
+        };
+        member.approval.subject = member.subject();
+        member
+    }
+
+    fn draft(revision: u8) -> BloomDraft {
+        BloomDraft { proposals: vec![membership("wp", revision)], base: digest(0), ..BloomDraft::default() }
+    }
+
+    fn ceiling_content(ceiling: &SpendCeiling) -> (ConfigRegistry, ResolvedConfigs) {
+        let mut registry = ConfigRegistry::default();
+        registry.insert::<SpendCeiling>(ceiling.address());
+        let mut configs = ResolvedConfigs::default();
+        configs.insert(ceiling.address(), SpendCeiling::NAME, to_vec(ceiling).expect("ceiling encodes"));
+        (registry, configs)
+    }
+
+    fn draft_with_ceiling(revision: u8, ceiling: &SpendCeiling) -> (BloomDraft, ResolvedConfigs) {
+        let (configs, resolved) = ceiling_content(ceiling);
+        (BloomDraft { configs, ..draft(revision) }, resolved)
+    }
+
+    fn window(total: u64, per_bloom: &[(BloomId, u64)]) -> SpendWindow {
+        SpendWindow {
+            label: String::from("bloomery/daily/2026-08-14"),
+            total_micro_usd: total,
+            per_bloom: per_bloom.iter().copied().collect(),
+            unaccounted_dispatches: 0,
+            unpriced_records: 0,
+        }
+    }
+
+    // The plausible bug: a window at or over its sealed ceiling still claims
+    // members, so the door that should have closed keeps admitting work.
+    #[test]
+    fn a_window_at_ceiling_quiesces_and_claims_nothing() {
+        let ceiling = SpendCeiling { window_micro_usd: Some(10), bloom_micro_usd: None };
+        let (draft, configs) = draft_with_ceiling(1, &ceiling);
+        let spec = draft.seal();
+        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &window(10, &[]));
+
+        assert_eq!(
+            decided.outcome,
+            Outcome::SealQuiesced(SpendQuiesce::Window {
+                window: String::from("bloomery/daily/2026-08-14"),
+                spent_micro_usd: 10,
+                ceiling_micro_usd: 10,
+            }),
+        );
+        assert_eq!(
+            decided.effects,
+            vec![Decision::RecordSpendQuiesce {
+                quiesce: Some(SpendQuiesce::Window {
+                    window: String::from("bloomery/daily/2026-08-14"),
+                    spent_micro_usd: 10,
+                    ceiling_micro_usd: 10,
+                }),
+            }],
+            "a quiesced seal records the crossing and claims no member",
+        );
+    }
+
+    // The plausible bug: the per-bloom axis names the last bloom, or the
+    // over-budget bloom is mutated when the next seal is refused.
+    #[test]
+    fn a_bloom_at_ceiling_quiesces_and_leaves_that_bloom_untouched() {
+        let ceiling = SpendCeiling { window_micro_usd: None, bloom_micro_usd: Some(5) };
+        let (next, configs) = draft_with_ceiling(2, &ceiling);
+        let spec = next.seal();
+
+        let existing = draft(1).seal();
+        let existing_id = existing.id();
+        let event = Event { idempotency_key: IdempotencyKey("prior".into()), fact: Fact::Seal(existing) };
+        let prior = reduce_seal(
+            &Snapshot::new(digest(0)),
+            match &event.fact {
+                Fact::Seal(spec) => spec,
+                _ => unreachable!(),
+            },
+            &ResolvedConfigs::default(),
+            &SpendWindow::default(),
+        );
+        let snapshot = Snapshot::new(digest(0)).apply(&event, &prior, &ResolvedConfigs::default());
+        let before = snapshot.blooms.get(&existing_id).expect("the prior bloom is on the snapshot").clone();
+
+        // Land the prior bloom so the one-active-bloom gate is not what refuses.
+        let mut snapshot = snapshot;
+        snapshot.blooms.get_mut(&existing_id).expect("prior bloom").status = BloomStatus::Landed;
+        snapshot.active.clear();
+
+        let decided = reduce_seal(&snapshot, &spec, &configs, &window(4, &[(existing_id, 5)]));
+        assert_eq!(
+            decided.outcome,
+            Outcome::SealQuiesced(SpendQuiesce::Bloom {
+                window: String::from("bloomery/daily/2026-08-14"),
+                bloom: existing_id,
+                spent_micro_usd: 5,
+                ceiling_micro_usd: 5,
+            }),
+        );
+
+        let after = snapshot.apply(
+            &Event { idempotency_key: IdempotencyKey("quiesce".into()), fact: Fact::Seal(spec) },
+            &decided,
+            &configs,
+        );
+        let still = after.blooms.get(&existing_id).expect("the over-budget bloom stays");
+        assert_eq!(still.progress, before.progress, "a quiesced seal must not move the over-budget bloom's cursor");
+        assert_eq!(still.claims, before.claims, "or revoke its claims");
+        assert_eq!(still.dispatches, before.dispatches, "or touch its in-flight dispatches");
+        assert_eq!(still.status, BloomStatus::Landed);
+    }
+
+    // The plausible bug: a successful seal after a prior crossing leaves the
+    // marker standing, so /view keeps saying the door is closed.
+    #[test]
+    fn a_seal_under_both_axes_clears_a_standing_marker() {
+        let ceiling = SpendCeiling { window_micro_usd: Some(100), bloom_micro_usd: Some(50) };
+        let (draft, configs) = draft_with_ceiling(1, &ceiling);
+        let spec = draft.seal();
+        let mut snapshot = Snapshot::new(digest(0));
+        snapshot.spend_quiesce = Some(SpendQuiesce::Window {
+            window: String::from("bloomery/daily/2026-08-13"),
+            spent_micro_usd: 100,
+            ceiling_micro_usd: 80,
+        });
+
+        let decided = reduce_seal(&snapshot, &spec, &configs, &window(10, &[]));
+        assert!(matches!(decided.outcome, Outcome::Sealed(_)), "under both axes the door opens: {:?}", decided.outcome);
+        assert!(
+            decided.effects.iter().any(|effect| matches!(effect, Decision::RecordSpendQuiesce { quiesce: None })),
+            "a passing seal beside a standing marker emits the clear: {:?}",
+            decided.effects,
+        );
+        assert!(
+            decided.effects.iter().any(|effect| matches!(effect, Decision::ClaimMembership { .. })),
+            "and still claims its members",
+        );
+    }
+
+    // The plausible bug: an absent entry or a None axis still compares against
+    // the measured total, so an uncapped fleet quiesces.
+    #[test]
+    fn an_absent_or_uncapped_ceiling_never_quiesces() {
+        let spec = draft(1).seal();
+        let decided =
+            reduce_seal(&Snapshot::new(digest(0)), &spec, &ResolvedConfigs::default(), &window(u64::MAX, &[]));
+        assert!(matches!(decided.outcome, Outcome::Sealed(_)), "no ceiling is uncapped: {:?}", decided.outcome);
+
+        let ceiling = SpendCeiling { window_micro_usd: None, bloom_micro_usd: None };
+        let (draft, configs) = draft_with_ceiling(2, &ceiling);
+        let spec = draft.seal();
+        let decided = reduce_seal(
+            &Snapshot::new(digest(0)),
+            &spec,
+            &configs,
+            &window(u64::MAX, &[(BloomId(digest(1)), u64::MAX)]),
+        );
+        assert!(
+            matches!(decided.outcome, Outcome::Sealed(_)),
+            "a present None axis is uncapped: {:?}",
+            decided.outcome
+        );
+    }
+
+    // The plausible bug: a member-scoped ceiling is read as the bloom-wide
+    // one, or ignored, so a member chooses the number that admits it.
+    #[test]
+    fn a_member_scoped_ceiling_refuses_rather_than_resolving() {
+        let ceiling = SpendCeiling { window_micro_usd: Some(1), bloom_micro_usd: None };
+        let mut member = membership("wp", 1);
+        member.configs.insert::<SpendCeiling>(ceiling.address());
+        member.approval.subject = member.subject();
+        let spec = BloomDraft { proposals: vec![member], base: digest(0), ..BloomDraft::default() }.seal();
+        let mut configs = ResolvedConfigs::default();
+        configs.insert(ceiling.address(), SpendCeiling::NAME, to_vec(&ceiling).expect("ceiling encodes"));
+
+        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &SpendWindow::default());
+        assert!(
+            matches!(
+                decided.outcome,
+                Outcome::SealRejected(SealError::UnproducibleConfig {
+                    ref kind,
+                    reason: Unproducible::MisfiledAs(ref stored),
+                    ..
+                }) if kind == SpendCeiling::NAME && stored == "member"
+            ),
+            "a member-scoped ceiling refuses: {:?}",
+            decided.outcome,
+        );
+        assert!(decided.effects.is_empty(), "a refused seal claims nothing");
+    }
+
+    // The plausible bug: a missing / misfiled / undecodable ceiling falls
+    // through to uncapped, so a bloom seals under a policy its receipt names
+    // and the door cannot read.
+    #[test]
+    fn an_unproducible_ceiling_refuses_with_the_matching_reason() {
+        let address = digest(9);
+        let mut registry = ConfigRegistry::default();
+        registry.insert::<SpendCeiling>(address);
+
+        let spec = BloomDraft { configs: registry.clone(), ..draft(1) }.seal();
+        let decided =
+            reduce_seal(&Snapshot::new(digest(0)), &spec, &ResolvedConfigs::default(), &SpendWindow::default());
+        assert!(
+            matches!(
+                decided.outcome,
+                Outcome::SealRejected(SealError::UnproducibleConfig {
+                    ref kind,
+                    reason: Unproducible::Absent,
+                    ..
+                }) if kind == SpendCeiling::NAME
+            ),
+            "missing content is Absent: {:?}",
+            decided.outcome,
+        );
+
+        let mut configs = ResolvedConfigs::default();
+        configs.insert(address, String::from("aether.bloomery.price_table"), vec![1, 2, 3]);
+        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &SpendWindow::default());
+        assert!(
+            matches!(
+                decided.outcome,
+                Outcome::SealRejected(SealError::UnproducibleConfig {
+                    ref kind,
+                    reason: Unproducible::MisfiledAs(ref stored),
+                    ..
+                }) if kind == SpendCeiling::NAME && stored == "aether.bloomery.price_table"
+            ),
+            "misfiled content is MisfiledAs: {:?}",
+            decided.outcome,
+        );
+
+        configs = ResolvedConfigs::default();
+        configs.insert(address, SpendCeiling::NAME, vec![0xff, 0xff]);
+        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &SpendWindow::default());
+        assert!(
+            matches!(
+                decided.outcome,
+                Outcome::SealRejected(SealError::UnproducibleConfig {
+                    ref kind,
+                    reason: Unproducible::Undecodable,
+                    ..
+                }) if kind == SpendCeiling::NAME
+            ),
+            "undecodable content is Undecodable: {:?}",
+            decided.outcome,
+        );
+    }
+
+    // The plausible bug: the governor also closes the supersede door, so a
+    // wedged bloom cannot drain and the day cannot roll.
+    #[test]
+    fn supersede_admits_while_the_window_is_over_ceiling() {
+        let ceiling = SpendCeiling { window_micro_usd: Some(1), bloom_micro_usd: None };
+        let (predecessor_draft, configs) = draft_with_ceiling(1, &ceiling);
+        let predecessor_spec = predecessor_draft.seal();
+        let predecessor = predecessor_spec.id();
+        let seal =
+            Event { idempotency_key: IdempotencyKey("prior".into()), fact: Fact::Seal(predecessor_spec.clone()) };
+        let prior = reduce_seal(&Snapshot::new(digest(0)), &predecessor_spec, &configs, &SpendWindow::default());
+        let snapshot = Snapshot::new(digest(0)).apply(&seal, &prior, &configs);
+
+        let (successor_draft, successor_configs) = draft_with_ceiling(2, &ceiling);
+        let successor = successor_draft.seal();
+        let decided = reduce_supersede(&snapshot, &predecessor, &successor, &successor_configs);
+        assert!(
+            matches!(decided.outcome, Outcome::Superseded { .. }),
+            "supersession is not spend-gated: {:?}",
+            decided.outcome,
+        );
+    }
 }

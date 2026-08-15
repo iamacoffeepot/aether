@@ -12,7 +12,7 @@ use aether_data::wire::to_vec;
 use aether_bloomery::{
     BloomDraft, BloomRecord, BloomSpec, BloomStatus, ConfigKind, ConfigRegistry, Decisions, Digest, Event, Evidence,
     EvidenceKind, Fact, IdempotencyKey, Membership, ModelOverride, ResolutionClaim, ResolvedConfigs, Snapshot,
-    StageCatalog, WorkpieceId, reduce,
+    SpendWindow, StageCatalog, WorkpieceId, reduce,
 };
 
 /// A distinct digest named by one seed byte.
@@ -100,7 +100,7 @@ pub fn event(key: &str, fact: Fact) -> Event {
 
 /// Reduce and evolve in one step — the journal-replay unit.
 pub fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
-    let decisions = reduce(snapshot, event, &ResolvedConfigs::default());
+    let decisions = reduce(snapshot, event, &ResolvedConfigs::default(), &SpendWindow::default());
     let next = snapshot.apply(event, &decisions, &ResolvedConfigs::default());
     (next, decisions)
 }
@@ -120,8 +120,11 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
     let bloom = spec.id();
     let mut snapshot = Snapshot::new(digest(mainline));
     let seal = event("seal", Fact::Seal(spec.clone()));
-    snapshot =
-        snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()), &ResolvedConfigs::default());
+    snapshot = snapshot.apply(
+        &seal,
+        &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
+        &ResolvedConfigs::default(),
+    );
     let mut seed = 100u8;
     for member in spec.members() {
         let candidate = digest(seed);
@@ -132,8 +135,11 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
             evidence: Evidence { subject: candidate, kind: EvidenceKind::ResolutionClaim, detail: digest(202) },
         };
         let ev = event(&format!("integrate-{seed}"), Fact::Integrate { bloom, claim: member_claim });
-        snapshot =
-            snapshot.apply(&ev, &reduce(&snapshot, &ev, &ResolvedConfigs::default()), &ResolvedConfigs::default());
+        snapshot = snapshot.apply(
+            &ev,
+            &reduce(&snapshot, &ev, &ResolvedConfigs::default(), &SpendWindow::default()),
+            &ResolvedConfigs::default(),
+        );
         seed = seed.wrapping_add(1);
     }
     // A distinct integrated head digest from the artifact tree (#3615) — this
@@ -144,7 +150,7 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
     );
     snapshot = snapshot.apply(
         &resolve,
-        &reduce(&snapshot, &resolve, &ResolvedConfigs::default()),
+        &reduce(&snapshot, &resolve, &ResolvedConfigs::default(), &SpendWindow::default()),
         &ResolvedConfigs::default(),
     );
     // The fold dispatches the whole-bloom aggregate review (ADR-0153); a
@@ -160,7 +166,7 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
     );
     snapshot = snapshot.apply(
         &verdict,
-        &reduce(&snapshot, &verdict, &ResolvedConfigs::default()),
+        &reduce(&snapshot, &verdict, &ResolvedConfigs::default(), &SpendWindow::default()),
         &ResolvedConfigs::default(),
     );
     (snapshot, spec)
