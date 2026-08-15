@@ -14,7 +14,7 @@ use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, BloomId, ConfigKind, ConfigRegistry, DispatchPayload, EvidenceRef,
     ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce, ReasoningEffort, RedispatchPayload,
     ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride, TimeoutRecord, Topic, Transformation,
-    VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
+    VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -598,9 +598,10 @@ fn drain_threads_the_persisted_description_onto_the_construct_order() {
 
     let orders = backend.orders();
     assert_eq!(orders.len(), 1, "the construct dispatch submitted");
+    let expected = pin_workpiece_description("wp-line", "thread the work order into the prompt");
     assert_eq!(
         orders[0].transformation.description.as_deref(),
-        Some("Workpiece: wp-line\n\nthread the work order into the prompt"),
+        Some(expected.as_str()),
         "the persisted description reached the submitted construct order, pinned to the member",
     );
 }
@@ -631,11 +632,13 @@ fn two_members_of_one_bloom_receive_distinct_workpiece_pinned_descriptions() {
         .collect();
     assert_ne!(descriptions[0], descriptions[1], "sibling members must not share a dispatch description");
     assert_eq!(
-        descriptions[0], "Workpiece: wp-a\n\nthread the work order into the prompt",
+        descriptions[0],
+        pin_workpiece_description("wp-a", "thread the work order into the prompt"),
         "the first line names the member this dispatch owns",
     );
     assert_eq!(
-        descriptions[1], "Workpiece: wp-b\n\nthread the work order into the prompt",
+        descriptions[1],
+        pin_workpiece_description("wp-b", "thread the work order into the prompt"),
         "the sibling's first line names its own workpiece, not its neighbor's",
     );
 }
@@ -1674,7 +1677,7 @@ fn drain_threads_persisted_findings_onto_the_construct_order() {
     let orders = backend.orders();
     let description = orders[0].transformation.description.as_deref().unwrap();
     assert!(
-        description.starts_with("Workpiece: wp-line\n\nthe original order"),
+        description.starts_with(&pin_workpiece_description("wp-line", "the original order")),
         "the member pin leads, then the order text",
     );
     assert!(
@@ -1753,7 +1756,7 @@ fn an_answered_park_replays_the_held_lane_carrying_the_decision() {
     assert_eq!(replay.nonce.0, format!("redispatch-{sequence}"), "the replay is its own attempt, not the spent nonce");
     let description = replay.transformation.description.as_deref().expect("the construct lane carries its prompt");
     assert!(
-        description.starts_with("Workpiece: wp-held\n\nbuild the widget"),
+        description.starts_with(&pin_workpiece_description("wp-held", "build the widget")),
         "the held order's work order survives the replay, still pinned to the member",
     );
     assert!(
