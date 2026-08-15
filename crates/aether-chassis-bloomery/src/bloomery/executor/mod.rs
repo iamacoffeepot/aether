@@ -47,7 +47,7 @@ pub use local::{
     CaptureIdentity, CapturedObjects, DEFAULT_LANE_PROGRAM, LaneProgram, LocalExecutor, LocalExecutorError,
     OrphanedRun, ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, TransformRunner, mock_lane,
 };
-pub use reconcile::{LocalLane, OutstandingDispatch, ReconcileLanes, ReconcileReport};
+pub use reconcile::{LaneOccupancy, LocalLane, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 pub use routing::RoutingExecutor;
 
 /// A backend that always fails with a missing-GitHub-configuration error.
@@ -299,11 +299,12 @@ impl ExecutorShell {
         self.reconciler.as_ref().map(|reconciler| reconciler.reconcile(live)).unwrap_or_default()
     }
 
-    /// Whether a local lane child is in flight. `false` when this shell has no
-    /// reconciliation face (a bare Actions mount has no local children).
+    /// Which lane slots the mounted backend has spoken for right now. Idle when
+    /// this shell has no reconciliation face (a bare Actions mount has no local
+    /// children).
     #[must_use]
-    pub fn any_lane_running(&self) -> bool {
-        self.reconciler.as_ref().is_some_and(|reconciler| reconciler.any_lane_running())
+    pub fn lane_occupancy(&self) -> LaneOccupancy {
+        self.reconciler.as_ref().map_or_else(LaneOccupancy::default, |reconciler| reconciler.lane_occupancy())
     }
 
     /// Submit a fully-resolved work order, returning the nonce-carrying handle.
