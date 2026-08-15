@@ -124,9 +124,10 @@ mod tests {
 
     use super::{resolve, shipped_path};
 
-    /// The three seat bundles: the standing all-Claude posture and the two
+    /// The four seat bundles: the standing all-Claude posture and the three
     /// cross-judge overrides.
-    const SEAT_BUNDLES: [&str; 3] = ["claude-every-seat", "cross-judge-opus-construct", "cross-judge-grok-construct"];
+    const SEAT_BUNDLES: [&str; 4] =
+        ["claude-every-seat", "cross-judge-opus-construct", "cross-judge-grok-construct", "grok-build-sonnet-judge"];
 
     fn write_profiles(stem: &str, text: &str) -> PathBuf {
         let path = env::temp_dir().join(format!("aether-xtask-profiles-{stem}-{}", process::id()));
@@ -213,6 +214,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn grok_build_sonnet_judge_authors_both_configs_and_prices_sonnet() {
+        // The calibrated wave cannot seal by name without this profile, and a
+        // table that still omits claude-sonnet-5 journals the judge unpriced.
+        // A band copied from the grok row would also be wrong: sonnet has none.
+        let resolved =
+            resolve("grok-build-sonnet-judge", &shipped_path()).expect("shipped grok-build-sonnet-judge must resolve");
+
+        assert_eq!(
+            resolved.configs.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(),
+            [ModelOverride::NAME, PriceTable::NAME],
+            "profile authoring order is model override then price table"
+        );
+        let table: PriceTable = serde_json::from_value(resolved.configs[1].1.clone())
+            .unwrap_or_else(|error| panic!("standard table is a price table: {error}"));
+        let sonnet = table.row("claude-sonnet-5").expect("standard table must price the sonnet judge");
+        assert!(sonnet.long_context.is_none(), "sonnet list rates have no long-context band");
+        assert!(table.row("claude-opus-5").is_some(), "adding sonnet must leave the opus row in place");
+        assert!(table.row("grok-4.6").is_some(), "adding sonnet must leave the grok row in place");
+    }
+
     // Tripwire: a seat bundle that leaves a model lane unkeyed dispatches the
     // compiled `StageCatalog::line()` default there, and that default is muse
     // for every one of the five — so an omitted seat (`Reconcile`, dispatched
@@ -254,9 +276,11 @@ mod tests {
         // The construct-side harness each name promises. A wholesale swap of
         // the two bundles' contents leaves both internally consistent and
         // disjoint, so only reading the name back catches it.
-        for (profile, writes) in
-            [("cross-judge-opus-construct", Harness::Claude), ("cross-judge-grok-construct", Harness::Grok)]
-        {
+        for (profile, writes) in [
+            ("cross-judge-opus-construct", Harness::Claude),
+            ("cross-judge-grok-construct", Harness::Grok),
+            ("grok-build-sonnet-judge", Harness::Grok),
+        ] {
             let override_ = shipped_override(profile);
             let contestants = [StageId::Construct, StageId::Refine, StageId::Reconcile]
                 .iter()

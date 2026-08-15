@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "github")]
 use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind};
 use aether_bloomery::{
-    CandidateRef, ConfigRegistry, Digest, Disposition, Event, Forecast, Membership, Outcome, StageId, Statement,
-    Workpiece, WorkpieceId,
+    CandidateRef, ConfigRegistry, Digest, Disposition, Event, Forecast, MemberDependency, Membership, Outcome, StageId,
+    Statement, Workpiece, WorkpieceId,
 };
 
 use crate::bloomery::{AdrTouch, Completeness};
@@ -128,6 +128,12 @@ pub struct SealRequest {
     /// no task (the subject-only prompt), never blocking the seal.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub descriptions: BTreeMap<String, String>,
+    /// Declared member-dependency edges (ADR-0196): `member` depends on
+    /// `depends_on`. The door unions these with derived overlap-ordering
+    /// edges and refuses a cycle or a non-member. Empty (the default) is
+    /// today's edgeless seal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<MemberDependency>,
 }
 
 /// `POST /blooms/{id}/supersede` body — names the open draft to seal as the
