@@ -170,7 +170,9 @@ pub enum Outcome {
         /// The stage that exhausted its retry budget.
         stage: StageId,
         /// The verifier identities in the terminal verdict that had already
-        /// failed for this member. Empty for every non-Verify wedge.
+        /// failed for this member. Empty for every non-Verify wedge, and for a
+        /// `Verify` wedge reached on verdicts that named no verifier at all —
+        /// an empty set here is how a gate that never answered reads.
         repeated_verifiers: VerifyFailureSet,
     },
     /// An attempt completion was refused (unknown bloom, non-member, or a stage

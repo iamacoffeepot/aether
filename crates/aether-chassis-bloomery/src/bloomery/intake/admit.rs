@@ -184,11 +184,18 @@ fn verdict_passed(verdict: StageVerdict) -> bool {
 }
 
 // The ADR-0178 transport invariant, kept outside `admit_uploaded` so the trust
-// boundary's main path stays readable: only a failed member Verify may carry a
-// set, and that one case must carry a nonempty set.
+// boundary's main path stays readable: a failed member Verify is the one result
+// a set belongs to, and every other stage/verdict pair must carry none.
+//
+// A failed member Verify may carry the *empty* set, and that is a meaning rather
+// than a hole: the reducer reads it as a gate that rendered no verdict and
+// re-runs Verify over the untouched candidate. Refusing it here instead left the
+// one producer that has to say it — the fail-closed evidence a lane that exited
+// without writing any leaves behind — with nowhere to go but the order's
+// execution limit, an hour later.
 fn verifier_failure_refusal(stage: StageId, upload: &UploadedEvidence) -> Option<IntakeRefusal> {
     let valid = match (stage, upload.verdict) {
-        (StageId::Verify, StageVerdict::VerificationFailed) => !upload.failed_verifiers.is_empty(),
+        (StageId::Verify, StageVerdict::VerificationFailed) => true,
         _ => upload.failed_verifiers.is_empty(),
     };
     (!valid).then_some(IntakeRefusal::InvalidVerifierFailures {
