@@ -19,9 +19,11 @@ use serde::Serialize;
 use std::fs;
 
 use super::error::LocalExecutorError;
+use super::identity::ProcessIdentity;
 use super::lane_program::LaneProgram;
 use super::orphan::OrphanedRun;
 use super::process_runner::{CaptureIdentity, ProcessTransformRunner};
+use super::quarantine;
 use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::CoordinatorConfig;
@@ -196,22 +198,31 @@ struct Registry {
 }
 
 impl Registry {
-    // How many lane slots are spoken for: the spawned runs, plus the starts that
-    // have not yet become one.
-    fn occupied(&self) -> usize {
-        self.runs.len() + self.starting
+    // How many lane slots are spoken for: the spawned runs, the starts that
+    // have not yet become one, and any quarantined slot no run currently
+    // holds. A quarantined slot whose run is still tracked is already in
+    // `runs` and must not count twice.
+    fn occupied(&self, quarantined: &HashSet<usize>) -> usize {
+        let extra = quarantined.iter().filter(|slot| !self.slots.contains(slot)).count();
+        self.runs.len() + self.starting + extra
     }
 
-    // Claim the lowest unheld slot index.
+    // Claim the lowest unheld, unquarantined slot index.
     //
     // Lowest rather than next-in-sequence, and that is the whole point: a
     // counter would mint a fresh path per dispatch — exactly the arrangement
     // that keeps the compiler cache at a 0% hit rate — while reusing the lowest
     // free index keeps a host's builds inside `0..ceiling` paths forever.
     //
-    // One of `0..=len` is always free, so the search is total.
-    fn claim_lowest_free_slot(&mut self) -> usize {
-        let slot = (0..=self.slots.len()).find(|index| !self.slots.contains(index)).unwrap_or(self.slots.len());
+    // Quarantined indices are skipped the same way held ones are: handing one
+    // out would put a new dispatch in a checkout a surviving child may still
+    // be writing into. The search is still total — there is always a larger
+    // index that is neither held nor quarantined.
+    fn claim_lowest_free_slot(&mut self, quarantined: &HashSet<usize>) -> usize {
+        let mut slot = 0;
+        while self.slots.contains(&slot) || quarantined.contains(&slot) {
+            slot += 1;
+        }
         self.slots.insert(slot);
         slot
     }
@@ -535,12 +546,13 @@ impl LocalExecutor {
     // never overtakes it — the submission order the queue promises holds even in
     // the window between a slot freeing and the pump handing it out.
     fn reserve_slot(&self) -> Option<usize> {
+        let quarantined = quarantine::slots_on_disk(&self.base_dir);
         let mut registry = self.lock();
-        if !registry.waiting.is_empty() || registry.occupied() >= self.max_concurrent_lanes {
+        if !registry.waiting.is_empty() || registry.occupied(&quarantined) >= self.max_concurrent_lanes {
             return None;
         }
         registry.starting += 1;
-        Some(registry.claim_lowest_free_slot())
+        Some(registry.claim_lowest_free_slot(&quarantined))
     }
 
     // Park a dispatch behind the ceiling until a slot frees, saying so in the log.
@@ -700,15 +712,16 @@ impl LocalExecutor {
     // `None` when the ceiling is full or nothing is waiting — either way the pump
     // above has nothing left to do.
     fn take_waiting(&self) -> Option<(PendingRun, usize)> {
+        let quarantined = quarantine::slots_on_disk(&self.base_dir);
         let mut registry = self.lock();
-        if registry.occupied() >= self.max_concurrent_lanes {
+        if registry.occupied(&quarantined) >= self.max_concurrent_lanes {
             return None;
         }
         // Reserved as it is taken: the slot is spent from here, not from whenever
         // the spawn it is handed to returns.
         let pending = registry.waiting.pop_front()?;
         registry.starting += 1;
-        Some((pending, registry.claim_lowest_free_slot()))
+        Some((pending, registry.claim_lowest_free_slot(&quarantined)))
     }
 
     // Re-adopt one live order's run, if the previous process left a local footprint
@@ -1127,13 +1140,41 @@ impl ExecutorBackend for LocalExecutor {
                 );
                 return Ok(());
             };
-            run.process.kill()?;
+            match run.process.kill() {
+                Ok(()) => {}
+                Err(error @ LocalExecutorError::Unterminated(_)) => {
+                    // The child is still out there. Keep the run and its slot
+                    // claim so the next dispatch cannot reset the checkout
+                    // under it, persist a quarantine so a restart without this
+                    // order still withholds the slot by name, and tell the
+                    // caller — `Ok(())` would be a kill that never happened.
+                    if let Some(slot) = run.slot {
+                        quarantine::record(
+                            &self.base_dir,
+                            slot,
+                            &handle.nonce.0,
+                            ProcessIdentity::read(&run.evidence_dir).as_ref(),
+                        );
+                        tracing::warn!(
+                            nonce = %handle.nonce.0,
+                            slot,
+                            "local executor backend: cancel could not terminate the lane child; its slot is quarantined",
+                        );
+                    }
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            }
             // A cancel is terminal — evict the killed run so the registry tracks only
             // in-flight orders rather than parking `cancelled` entries forever, and
             // hand its slot back. The slot's checkout stays where it is: the next
             // dispatch to hold the slot resets it, and removing it here would pull
-            // the tree out from under whoever holds the slot by then.
+            // the tree out from under whoever holds the slot by then. A quarantine
+            // left from an earlier failed attempt is cleared: this kill succeeded.
             let slot = registry.runs.remove(&handle.nonce.0).and_then(|run| run.slot);
+            if let Some(slot) = slot {
+                quarantine::clear(&self.base_dir, slot);
+            }
             registry.release_slot(slot);
         }
         // The eviction above freed a lane slot; hand it to whatever is waiting.
@@ -1321,13 +1362,17 @@ impl ReconcileLanes for LocalExecutor {
     }
 
     fn lane_occupancy(&self) -> LaneOccupancy {
+        let quarantined = quarantine::slots_on_disk(&self.base_dir);
         let registry = self.lock();
         // `slots` is the allocator's own record of what is spoken for, so it
         // already covers a reservation that has not become a run: `reserve_slot`
-        // claims the index before the spawn shells out.
-        let slots = registry.slots.iter().copied().collect();
+        // claims the index before the spawn shells out. Quarantined indices
+        // join it so the janitor names the one slot at risk instead of
+        // treating every slot as possibly-live.
+        let slots = registry.slots.union(&quarantined).copied().collect();
         // A re-adopted run whose evidence recorded no usable slot is building
-        // somewhere this process cannot name.
+        // somewhere this process cannot name. That fail-safe stays: a named
+        // quarantine narrows the blanket, it does not replace it.
         let unattributed = registry.runs.values().any(|run| run.slot.is_none());
         drop(registry);
         LaneOccupancy { slots, unattributed }

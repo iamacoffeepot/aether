@@ -9,6 +9,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+#[cfg(unix)]
+use std::process::{Child, Command};
+
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::subscriber::with_default;
@@ -26,6 +29,11 @@ use tempfile::TempDir;
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::to_hex;
 
+#[cfg(unix)]
+use super::identity::ProcessIdentity;
+#[cfg(unix)]
+use super::orphan::OrphanedRun;
+use super::quarantine;
 use super::runner::CapturedObjects;
 use super::testing::{FixedRunner, canned_capture};
 use super::{LocalExecutor, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner};
@@ -1273,17 +1281,131 @@ fn a_readopted_run_holds_the_slot_it_was_dispatched_in() {
     assert_eq!(log.started(), [slot_path(&base, 1)], "the orphan's slot is not handed to a fresh dispatch");
 
     let handle = WorkHandle::new(Nonce(nonce));
-    exec.cancel(&handle).unwrap();
+    match exec.cancel(&handle) {
+        Err(LocalExecutorError::Unterminated(_)) => {}
+        other => panic!("an unowned orphan must not report a kill it did not perform: {other:?}"),
+    }
     assert_eq!(
         exec.inspect(&handle).unwrap(),
-        ExecutionStatus::Unknown,
-        "the cancelled orphan is evicted like any other terminal run",
+        ExecutionStatus::Running,
+        "an unterminated orphan stays tracked so its slot is not handed out",
     );
+    assert!(
+        exec.lane_occupancy().slots.contains(&0),
+        "the slot it could not free is named as occupied, not hidden behind unattributed",
+    );
+    assert!(!exec.lane_occupancy().unattributed, "a named slot must not flip the sweep's unattributed fail-safe");
     exec.submit(&construct_order(digest(5), &test_nonce("after-cancel"))).unwrap();
     assert_eq!(
         log.started(),
+        [slot_path(&base, 1), slot_path(&base, 2)],
+        "the quarantined slot is not handed to the next dispatch",
+    );
+}
+
+#[test]
+fn a_slotless_unkillable_readopt_stays_unattributed() {
+    // The fail-safe the quarantine must not weaken: a re-adopted run that
+    // recorded no slot still cannot name a directory, so occupancy stays
+    // unattributed and the sweep continues to evict nothing. Narrowing the
+    // blanket to a named slot is the goal; dropping it for a slot-less
+    // orphan is not.
+    let base = TempDir::new().unwrap();
+    let nonce = test_nonce("slotless-orphan");
+    seed_scratch(&base, &nonce, None, None);
+    let (exec, _) = recording_executor(&base, None, RunLifecycle::Running);
+    exec.reconcile(&[outstanding(digest(5), &nonce)]);
+
+    match exec.cancel(&WorkHandle::new(Nonce(nonce))) {
+        Err(LocalExecutorError::Unterminated(_)) => {}
+        other => panic!("an unowned orphan must not report a kill it did not perform: {other:?}"),
+    }
+    let occupancy = exec.lane_occupancy();
+    assert!(occupancy.unattributed, "a run whose slot cannot be named still trips the sweep's fail-safe");
+    assert!(occupancy.slots.is_empty(), "there is no named slot to quarantine");
+}
+
+#[test]
+fn a_disk_quarantine_withholds_the_slot_from_allocation() {
+    // The operator-clearable half: a quarantine file on disk, with no run in
+    // this process, still keeps the slot out of `reserve_slot` and names it
+    // in occupancy. Without this, a restart that does not re-adopt the order
+    // would hand the checkout to a stranger while the surviving child writes.
+    let base = TempDir::new().unwrap();
+    quarantine::record(base.path(), 0, "wo-prior", None);
+    let (exec, log) = recording_executor(&base, None, RunLifecycle::Running);
+
+    assert!(exec.lane_occupancy().slots.contains(&0), "a disk quarantine is occupied by name");
+    exec.submit(&construct_order(digest(5), &test_nonce("fresh"))).unwrap();
+    assert_eq!(log.started(), [slot_path(&base, 1)], "the quarantined slot is skipped");
+
+    quarantine::clear(base.path(), 0);
+    exec.submit(&construct_order(digest(5), &test_nonce("after-clear"))).unwrap();
+    assert_eq!(
+        log.started(),
         [slot_path(&base, 1), slot_path(&base, 0)],
-        "and the slot it held comes back once it is gone",
+        "clearing the file returns the slot to the allocator without a coordinator restart",
+    );
+}
+
+#[cfg(unix)]
+fn spawn_isolated_sleep() -> (Child, ProcessIdentity) {
+    use std::os::unix::process::CommandExt;
+    let child = Command::new("sleep").arg("60").process_group(0).spawn().unwrap();
+    let identity = ProcessIdentity::observe(child.id()).expect("the child is live long enough to observe");
+    (child, identity)
+}
+
+#[cfg(unix)]
+#[test]
+fn reattachment_refuses_a_pid_whose_start_time_does_not_match() {
+    // The recycled-pid kill: a live process at the recorded pid whose start
+    // time does not match is a stranger. Signalling it is strictly worse than
+    // leaving the orphan alive. The refusal must leave that process running.
+    let base = TempDir::new().unwrap();
+    let nonce = test_nonce("mismatch");
+    seed_scratch(&base, &nonce, Some(0), None);
+    let (mut child, mut identity) = spawn_isolated_sleep();
+    identity.starttime = identity.starttime.wrapping_add(1);
+    let evidence_dir = base.path().join(format!("{nonce}-evidence"));
+    identity.write(&evidence_dir).unwrap();
+
+    let mut orphan = OrphanedRun::new(Nonce(nonce), &evidence_dir);
+    match orphan.kill() {
+        Err(LocalExecutorError::Unterminated(detail)) => {
+            assert!(detail.contains("does not match"), "the refusal names the mismatch: {detail}");
+        }
+        other => panic!("a mismatched identity must not be signalled: {other:?}"),
+    }
+    assert!(child.try_wait().unwrap().is_none(), "the stranger at the recycled pid is still running");
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_readopt_cancel_terminates_an_attached_child() {
+    // The happy path this issue exists to restore: a coordinator that restarts
+    // mid-dispatch re-adopts the run, re-attaches by identity, and a cancel
+    // actually kills the process group rather than returning Ok for a kill it
+    // never performed.
+    let base = TempDir::new().unwrap();
+    let nonce = test_nonce("attached");
+    seed_scratch(&base, &nonce, Some(0), None);
+    let (mut child, identity) = spawn_isolated_sleep();
+    identity.write(&base.path().join(format!("{nonce}-evidence"))).unwrap();
+    let (exec, _) = recording_executor(&base, None, RunLifecycle::Running);
+
+    let report = exec.reconcile(&[outstanding(digest(5), &nonce)]);
+    assert_eq!(report.readopted, vec![Nonce(nonce.clone())], "the live order is re-adopted");
+
+    let handle = WorkHandle::new(Nonce(nonce));
+    exec.cancel(&handle).expect("a re-attached kill reports success only after the group is gone");
+    assert!(child.try_wait().unwrap().is_some(), "the re-attached cancel terminated the recorded process group");
+    assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Unknown, "the terminated run is evicted");
+    assert!(
+        !exec.lane_occupancy().slots.contains(&0),
+        "a successful kill releases the slot instead of quarantining it",
     );
 }
 

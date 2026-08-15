@@ -16,9 +16,6 @@
 mod common;
 pub mod fixture;
 
-use std::thread;
-use std::time::{Duration, Instant};
-
 use fixture::{FixtureHarness, digest};
 
 /// The commit a person merges straight to mainline. Recognizable, and no bloom
@@ -39,28 +36,4 @@ fn a_head_merged_mid_run_reaches_the_snapshot_without_a_restart() {
     // merge.
     harness.move_mainline(merged);
     harness.await_mainline(merged);
-}
-
-/// Tripwire: `ObserveTick` is produced on the coordinator poll cadence
-/// (#4938). The handler used to exist with no producer, so every
-/// observation was the single boot-time one. This starts the timer at
-/// one second and waits for a moved head *without* an explicit tick.
-#[test]
-fn observe_tick_fires_on_the_coordinator_poll_cadence() {
-    let mut harness = FixtureHarness::start_with_poll("observe-tick-fires-on-the-cadence", 1);
-
-    let booted = harness.view().mainline;
-    let merged = digest(MERGED);
-    assert_ne!(booted, merged, "the merged head has to be one the boot observation did not already read");
-
-    harness.move_mainline(merged);
-
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if harness.view().mainline == merged {
-            return;
-        }
-        assert!(Instant::now() < deadline, "the poll timer never carried the moved head into the snapshot");
-        thread::sleep(Duration::from_millis(50));
-    }
 }

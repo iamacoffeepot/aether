@@ -72,7 +72,7 @@ use crate::bloomery::intake::{
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 #[cfg(any(test, feature = "testing"))]
-use crate::bloomery::study::{StudyAdmitDecision, UploadedStudyRecord, admit_study};
+use crate::bloomery::study::{StudyAdmitDecision, UploadedStudyRecord, admit_study, study_evidence_event};
 #[cfg(any(test, feature = "testing"))]
 use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload};
 use crate::bloomery::{CoordinatorConfig, ExecutorReactorSetup};
@@ -1732,8 +1732,8 @@ fn pull_and_admit(
 ///
 /// [`on_scripted_evidence`]: ExecutorReactorCapability
 #[cfg(any(test, feature = "testing"))]
-fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (ScriptedEvidenceResult, Option<Admit>) {
-    let failed = |error: String| (ScriptedEvidenceResult::Err { error }, None);
+fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (ScriptedEvidenceResult, Vec<Admit>) {
+    let failed = |error: String| (ScriptedEvidenceResult::Err { error }, Vec::new());
     let Some(store) = state.store.as_mut() else {
         return failed("the executor reactor mounted disabled".to_owned());
     };
@@ -1756,6 +1756,7 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
     // (#4705) this tier exists to catch, with the real cause only in a log the
     // test harness discards. So a scripted study that does not record stops the
     // call and names which of the three it was.
+    let mut admits = Vec::new();
     match (upload.cost, state.artifacts.as_mut()) {
         (Some(cost), Some(artifacts)) => {
             let record = UploadedStudyRecord {
@@ -1765,7 +1766,15 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
                 calls: upload.calls.clone(),
             };
             match admit_study(store, artifacts, &record) {
-                Ok(StudyAdmitDecision::Admitted(_)) => {}
+                Ok(StudyAdmitDecision::Admitted(admission)) => {
+                    let Some(event) = study_evidence_event(&admission, &upload.nonce) else {
+                        return failed("scripted study artifact digest is not 32-byte hex".to_owned());
+                    };
+                    match to_vec(&event) {
+                        Ok(bytes) => admits.push(Admit { event: bytes }),
+                        Err(error) => return failed(format!("scripted study evidence did not encode: {error}")),
+                    }
+                }
                 Ok(StudyAdmitDecision::Refused(refusal)) => {
                     return failed(format!("scripted study record refused: {refusal:?}"));
                 }
@@ -1784,12 +1793,12 @@ fn admit_scripted(state: &mut ExecutorReactorState, encoded: &[u8]) -> (Scripted
     }
 
     match admit_uploaded(store, &upload) {
-        Ok(AdmitDecision::Admitted(admission)) => (
-            ScriptedEvidenceResult::Admitted { idempotency_key: admission.event.idempotency_key.0.clone() },
-            Some(admission.admit.clone()),
-        ),
+        Ok(AdmitDecision::Admitted(admission)) => {
+            admits.push(admission.admit.clone());
+            (ScriptedEvidenceResult::Admitted { idempotency_key: admission.event.idempotency_key.0.clone() }, admits)
+        }
         Ok(AdmitDecision::Refused(refusal)) => {
-            (ScriptedEvidenceResult::Refused { refusal: format!("{refusal:?}") }, None)
+            (ScriptedEvidenceResult::Refused { refusal: format!("{refusal:?}") }, Vec::new())
         }
         Err(error) => failed(error.to_string()),
     }
@@ -2076,9 +2085,9 @@ impl NativeActor for ExecutorReactorCapability {
         // envelope instead of leaving it to be dropped unread.
         let ScriptedEvidence { upload } = mail;
         let control_mailbox = state.control_mailbox;
-        let (result, admit) = admit_scripted(state, &upload);
+        let (result, admits) = admit_scripted(state, &upload);
 
-        if let Some(admit) = admit {
+        for admit in admits {
             let _ = ctx.send_envelope_tracked(control_mailbox, Admit::ID, &admit.encode_into_bytes());
         }
         result

@@ -3,15 +3,18 @@
 
 Only the logic this script owns: the two wire decoders it re-implements against
 the coordinator's storage format, the overdue arithmetic an operator reads a
-sign off, and the digest guard that keeps a malformed repair from reaching the
-API. Nothing here exercises urllib, sqlite3, or argparse -- those are the
-standard library's to get right.
+sign off, the digest guard that keeps a malformed repair from reaching the
+API, and the scratch-root slot listing / quarantine-clearing the operator uses
+to recover a re-adopted lane child. Nothing here exercises urllib, sqlite3, or
+argparse -- those are the standard library's to get right.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import struct
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -262,6 +265,98 @@ class LastMovement(unittest.TestCase):
             {"sequence": 2, "outcome": {"AttemptWedged": {"workpiece": "other", "stage": "Verify"}}},
         ]
         self.assertIsNone(operator.last_movement(records, "wp-a"))
+
+
+class SlotListing(unittest.TestCase):
+    """Projecting scratch-root slot files into the state an operator reads."""
+
+    def test_a_quarantined_slot_names_its_identity_and_stays_distinct_from_occupied(self):
+        # Tripwire: catches listing a quarantined slot as merely occupied (or
+        # free). The operator reaches for this table to find the child a
+        # restart could not kill; collapsing the states hides the one row
+        # they came to clear.
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            (base / "slot-0").mkdir()
+            (base / "slot-1").mkdir()
+            evidence = base / "dispatch-9-evidence"
+            evidence.mkdir()
+            (evidence / "slot").write_text("1\n", encoding="utf-8")
+            (evidence / "identity").write_text(
+                json.dumps({"pid": 11, "pgid": 11, "starttime": 100, "boot_id": "boot-a"}),
+                encoding="utf-8",
+            )
+            (base / "slot-0.quarantine").write_text(
+                json.dumps(
+                    {
+                        "slot": 0,
+                        "nonce": "dispatch-8",
+                        "identity": {"pid": 22, "pgid": 22, "starttime": 200, "boot_id": "boot-a"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            listed = {entry["slot"]: entry for entry in operator.list_slots(str(base))}
+
+            self.assertEqual(listed[0]["state"], "quarantined")
+            self.assertEqual(listed[0]["nonce"], "dispatch-8")
+            self.assertEqual(listed[0]["identity"]["pid"], 22)
+            self.assertEqual(listed[1]["state"], "occupied")
+            self.assertEqual(listed[1]["nonce"], "dispatch-9")
+            self.assertEqual(listed[1]["identity"]["pid"], 11)
+
+    def test_a_checkout_with_no_dispatch_and_no_quarantine_is_free(self):
+        # Tripwire: a slot checkout is reused across dispatches, so an idle
+        # directory is the common case, not an error. Calling it occupied
+        # would send the operator after a child that is not there.
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            (base / "slot-2").mkdir()
+            listed = operator.list_slots(str(base))
+            self.assertEqual(listed, [{"slot": 2, "state": "free", "nonce": None, "identity": None, "quarantine": None}])
+
+
+class QuarantineClearing(unittest.TestCase):
+    """The operator door that releases a withheld slot."""
+
+    def test_clearing_removes_the_file_and_states_what_was_checked(self):
+        # Tripwire: catches a clear that deletes the file without saying what
+        # it compared — the operator is asserting the child is gone, and the
+        # command has to state the check it ran and that the rest is their
+        # word. Also catches a clear that refuses when no matching process is
+        # live, which is the usual case they are confirming.
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            path = operator.slot_quarantine_path(str(base), 3)
+            path.write_text(
+                json.dumps(
+                    {
+                        "slot": 3,
+                        "nonce": "dispatch-12",
+                        "identity": {"pid": 1, "pgid": 1, "starttime": 0, "boot_id": "not-this-boot"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = operator.clear_quarantine(str(base), 3)
+
+            self.assertTrue(result["cleared"])
+            self.assertFalse(result["matching_process_live"])
+            self.assertIn("on your word", result["on_operator_word"])
+            self.assertIn("/proc/1/stat", result["checked"])
+            self.assertFalse(path.exists(), "clearing removes the file the allocator reads")
+
+    def test_clearing_a_slot_that_is_not_quarantined_is_a_named_error(self):
+        # Tripwire: a missing file must not look like success. The operator
+        # would walk away thinking the slot was released when it was never
+        # withheld — or, worse, when they typed the wrong index.
+        with tempfile.TemporaryDirectory() as scratch:
+            with self.assertRaises(operator.OperatorError) as caught:
+                operator.clear_quarantine(scratch, 4)
+            self.assertIn("slot 4", str(caught.exception))
+            self.assertIn("not quarantined", str(caught.exception))
 
 
 if __name__ == "__main__":

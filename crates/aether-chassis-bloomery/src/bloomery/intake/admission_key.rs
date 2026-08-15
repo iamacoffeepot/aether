@@ -37,10 +37,17 @@ pub enum AdmissionKey {
     AggregateReviewExecutorFault,
     /// A whole-bloom aggregate-verify verdict.
     AggregateVerify,
+    /// A study-record evidence admission. Not a dispatch-accounting key: a
+    /// study row landing must not mark the dispatch complete — the verdict
+    /// is what consumes the order. Excluded from [`Self::ALL`].
+    Study,
 }
 
 impl AdmissionKey {
-    /// Every admission shape, for the readers that must consider all of them.
+    /// Every *dispatch-accounting* admission shape. A journal row under one
+    /// of these is the durable statement that the dispatch reached the
+    /// reducer as a verdict. [`Self::Study`] is deliberately absent: it
+    /// rides the same nonce but must not satisfy the strand check.
     pub const ALL: [Self; 7] = [
         Self::Attempt,
         Self::Integrate,
@@ -61,6 +68,7 @@ impl AdmissionKey {
             Self::AggregateReview => "aether.bloomery.aggregate_review",
             Self::AggregateReviewExecutorFault => "aether.bloomery.aggregate_review_executor_fault",
             Self::AggregateVerify => "aether.bloomery.aggregate_verify",
+            Self::Study => "aether.bloomery.study",
         }
     }
 
@@ -75,5 +83,22 @@ impl AdmissionKey {
     #[must_use]
     pub fn every_key_for(nonce: &str) -> Vec<String> {
         Self::ALL.into_iter().map(|key| key.of(nonce).0).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AdmissionKey;
+
+    // The plausible bug: Study is added to ALL, so a study row landing
+    // before the verdict marks the dispatch complete and the strand check
+    // never re-drives a crash that lost the verdict.
+    #[test]
+    fn a_study_key_does_not_account_for_the_dispatch() {
+        let nonce = "n-study";
+        assert!(
+            !AdmissionKey::every_key_for(nonce).contains(&AdmissionKey::Study.of(nonce).0),
+            "a study row must not satisfy the strand check",
+        );
     }
 }
