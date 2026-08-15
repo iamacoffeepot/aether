@@ -210,6 +210,7 @@ pub fn splice_bloom(snapshot: &mut Snapshot, spec: &BloomSpec, status: BloomStat
             operator_hold: None,
             deferred_dispatches: BTreeSet::new(),
             dependencies: Vec::new(),
+            host_faults: BTreeMap::new(),
             superseded_by: None,
         },
     );

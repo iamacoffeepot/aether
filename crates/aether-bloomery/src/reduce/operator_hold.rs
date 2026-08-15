@@ -161,7 +161,7 @@ pub(super) fn reduce_operator_release(snapshot: &Snapshot, bloom: &BloomId, rele
 /// so an impossible entry is dropped rather than dispatched from a position the
 /// reducer invented — an owed dispatch nobody can aim is a stuck workpiece an
 /// operator can see, and a misaimed one is a worker building the wrong tree.
-fn owed_dispatch(record: &BloomRecord, bloom: BloomId, workpiece: &WorkpieceId) -> Option<[Decision; 2]> {
+pub(super) fn owed_dispatch(record: &BloomRecord, bloom: BloomId, workpiece: &WorkpieceId) -> Option<[Decision; 2]> {
     let cursor = record.progress.get(workpiece).copied()?;
     let candidate = cursor.candidate;
     if workpiece.is_composition() {

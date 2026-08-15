@@ -146,6 +146,7 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
             operator_hold: None,
             deferred_dispatches: BTreeSet::new(),
             dependencies: Vec::new(),
+            host_faults: BTreeMap::new(),
             superseded_by: None,
         },
     );
@@ -758,6 +759,41 @@ fn an_unjudged_verify_naming_no_verifier_is_admitted_rather_than_refused() {
     };
     assert_eq!(*failed_verifiers, VerifyFailureSet::EMPTY, "the empty set reaches the reducer intact");
     assert!(store.lookup_order("n-unjudged").unwrap().is_none(), "the admitted order is consumed");
+}
+
+#[test]
+fn a_preflight_only_verify_admits_as_a_host_fault_not_a_candidate_failure() {
+    // The plausible bug: a missing gate tool arrives as VerifyFailed with
+    // `verify.preflight`, so the reducer spends a repair roll and dispatches
+    // Refine against a candidate nobody judged (#5020).
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let workpiece = WorkpieceId("wp-preflight".to_owned());
+    let candidate = Digest::from_bytes([5; 32]);
+    let record = dispatch_record("n-preflight", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
+    record_dispatch(&mut store, &record).unwrap();
+
+    let findings = "Verification did not run.\n\n- `jscpd` — npm install -g jscpd";
+    let upload = UploadedEvidence {
+        nonce: Nonce("n-preflight".to_owned()),
+        subject: candidate,
+        verdict: StageVerdict::VerificationFailed,
+        detail: Digest::from_bytes([7; 32]),
+        candidate: None,
+        findings: Some(findings.to_owned()),
+        failed_verifiers: VerifyFailureSet::one(VerifyFailure::Preflight),
+        cost: None,
+        calls: None,
+    };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
+        panic!("a preflight-only verify is admitted so the reducer can hold it");
+    };
+    let Fact::VerifyHostFault { findings: held, evidence, workpiece: held_wp, .. } = &admission.event.fact else {
+        panic!("a preflight-only set must journal as VerifyHostFault, got {:?}", admission.event.fact);
+    };
+    assert_eq!(held, findings, "the missing tools ride the fact verbatim");
+    assert_eq!(held_wp, &workpiece);
+    assert_eq!(evidence.subject, candidate);
 }
 
 #[test]

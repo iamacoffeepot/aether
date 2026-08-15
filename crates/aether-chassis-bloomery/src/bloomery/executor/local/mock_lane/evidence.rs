@@ -165,6 +165,30 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
     }
 
     // Every remaining command is a mechanical verify lane.
+    // `Environment` is the umbrella preflight miss: status fail, the
+    // synthetic host-fault identity, and the operator-facing findings the
+    // real lane stamps when a gate tool is absent (#5020).
+    if mode == LaneMode::Environment {
+        let findings = "Verification did not run. This host is missing tools or toolchain targets the verify lane \
+             needs, so it cannot compute whether the candidate passes — which is not the same as the \
+             candidate failing, and no change to the candidate can fix it.\n\n\
+             - `jscpd` — npm install -g jscpd\n\n\
+             Install these on the executor host and re-dispatch.";
+        return Outcome {
+            evidence: body(&json!({
+                "command": command,
+                "nonce": evidence_nonce,
+                "status": "fail",
+                "exit_code": 1,
+                "log": format!("{command}.log"),
+                "failed_verifiers": VerifyFailureSet::one(VerifyFailure::Preflight),
+                "findings": findings,
+            })),
+            exit_code: 1,
+            candidate: None,
+        };
+    }
+
     let passed = matches!(
         mode,
         LaneMode::Pass | LaneMode::ConcludesWithoutWriting | LaneMode::MismatchedNonce | LaneMode::NeverExits
@@ -241,6 +265,24 @@ mod tests {
         assert!(
             outcome(CONSTRUCT_IMPLEMENT_COMMAND, "n-1", LaneMode::ConcludesWithoutWriting).candidate.is_none(),
             "the whole mode is a claim with nothing behind it",
+        );
+    }
+
+    #[test]
+    fn a_verify_environment_run_stamps_the_preflight_identity() {
+        // Tripwire: Environment on a mechanical verify has to present what
+        // production preflight presents — `verify.preflight` and the
+        // operator-facing missing-tool prose — or the lane-boundary scenario
+        // exercises a clippy failure and the host-fault path stays dark.
+        let evidence = decoded(VERIFY_CHECK_COMMAND, LaneMode::Environment);
+        assert_eq!(evidence["status"], Value::String("fail".to_owned()));
+        assert_eq!(
+            serde_json::from_value::<VerifyFailureSet>(evidence["failed_verifiers"].clone()).unwrap(),
+            VerifyFailureSet::one(VerifyFailure::Preflight),
+        );
+        assert!(
+            evidence["findings"].as_str().unwrap().contains("`jscpd`"),
+            "the findings must name the missing tool verbatim",
         );
     }
 

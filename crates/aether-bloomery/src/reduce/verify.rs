@@ -6,9 +6,12 @@
 use alloc::vec::Vec;
 
 use super::attempt::{DispatchTargets, SealedLine, move_effects, wedged};
-use super::{BloomRecord, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress, VerifyFailedError};
+use super::operator_hold::owed_dispatch;
+use super::{
+    BloomRecord, BloomStatus, Decision, Decisions, HostFaultError, Outcome, Snapshot, StageProgress, VerifyFailedError,
+};
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{Evidence, Membership, VerifyFailureSet, Wedge};
+use crate::values::{Evidence, Membership, VerifyFailure, VerifyFailureSet, Wedge};
 
 /// Reduce one admitted failing member-Verify verdict.
 ///
@@ -69,6 +72,16 @@ pub(super) fn reduce_verify_failed(
             DispatchTargets { subject, checkout },
             effects,
         );
+    }
+
+    // A preflight-only set is a host that could not run the gates, not a
+    // candidate the gates judged. Holding here — no Refine, no roll, no
+    // attempt increment — is what stops a missing `jscpd` from buying a
+    // paid repair lap (#5020). Findings ride the dedicated fact; this
+    // safety net keeps a `VerifyFailed` that named only preflight from
+    // taking the candidate path either.
+    if failed_verifiers == VerifyFailureSet::one(VerifyFailure::Preflight) {
+        return host_fault_hold(*bloom, workpiece, evidence, String::new(), effects);
     }
 
     let repeated_verifiers = failed_verifiers.intersection(cursor.seen_verify_failures);
@@ -197,4 +210,97 @@ fn unjudged_verify(
         outcome: Outcome::AttemptRetried { bloom, workpiece: workpiece.clone(), stage: StageId::Verify, attempt },
         effects,
     }
+}
+
+/// Reduce a preflight-only Verify: the host could not run the gates (#5020).
+pub(super) fn reduce_verify_host_fault(
+    snapshot: &Snapshot,
+    bloom: &BloomId,
+    workpiece: &WorkpieceId,
+    evidence: &Evidence,
+    findings: &str,
+) -> Decisions {
+    match verify_at(snapshot, bloom, workpiece, Some(evidence)) {
+        Ok(_) => {}
+        Err(error) => return Decisions::rejected(Outcome::HostFaultRejected(error)),
+    }
+    host_fault_hold(
+        *bloom,
+        workpiece,
+        evidence,
+        findings.to_owned(),
+        alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }],
+    )
+}
+
+/// Re-dispatch a member held on a host fault (#5020).
+///
+/// The cursor does not move and no budget is spent: this is the same Verify
+/// the preflight never judged, aimed again now that the host may have the
+/// tools. An operator hold still swallows the dispatch.
+pub(super) fn reduce_resume_host_fault(snapshot: &Snapshot, bloom: &BloomId, workpiece: &WorkpieceId) -> Decisions {
+    let record = match verify_at(snapshot, bloom, workpiece, None) {
+        Ok(record) => record,
+        Err(error) => return Decisions::rejected(Outcome::HostFaultRejected(error)),
+    };
+    if !record.host_faults.contains_key(workpiece) {
+        return Decisions::rejected(Outcome::HostFaultRejected(HostFaultError::NotHeld(workpiece.clone())));
+    }
+
+    let mut effects = alloc::vec![Decision::ClearHostFault { bloom: *bloom, workpiece: workpiece.clone() }];
+    if let Some(owed) = owed_dispatch(record, *bloom, workpiece) {
+        effects.extend(owed);
+    }
+    Decisions { outcome: Outcome::HostFaultResumed { bloom: *bloom, workpiece: workpiece.clone() }, effects }
+}
+
+/// Hold the member at Verify and record the host condition. The cursor, the
+/// attempt count, and the repair ledger stay where they were — a host gap
+/// is not a verdict on the candidate.
+fn host_fault_hold(
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    evidence: &Evidence,
+    findings: String,
+    mut effects: Vec<Decision>,
+) -> Decisions {
+    effects.push(Decision::RecordHostFault {
+        bloom,
+        workpiece: workpiece.clone(),
+        findings,
+        evidence: evidence.detail,
+    });
+    effects.push(Decision::DeferDispatch { bloom, workpiece: workpiece.clone() });
+    Decisions { outcome: Outcome::VerifyHostFaultHeld { bloom, workpiece: workpiece.clone() }, effects }
+}
+
+/// The bloom record for a member sitting at terminal Verify, or why it is not.
+fn verify_at<'a>(
+    snapshot: &'a Snapshot,
+    bloom: &BloomId,
+    workpiece: &WorkpieceId,
+    evidence: Option<&Evidence>,
+) -> Result<&'a BloomRecord, HostFaultError> {
+    let Some(record) = snapshot.blooms.get(bloom) else {
+        return Err(HostFaultError::UnknownOrInactiveBloom);
+    };
+    if record.status != BloomStatus::Sealed {
+        return Err(HostFaultError::UnknownOrInactiveBloom);
+    }
+    let Some(member) = record.spec.members().iter().find(|member| member.workpiece == *workpiece) else {
+        return Err(HostFaultError::NotAMember(workpiece.clone()));
+    };
+    let Some(cursor) = record.progress.get(workpiece).copied() else {
+        return Err(HostFaultError::NotDispatched(workpiece.clone()));
+    };
+    if cursor.stage != StageId::Verify {
+        return Err(HostFaultError::StageMismatch { expected: cursor.stage });
+    }
+    if let Some(evidence) = evidence {
+        let subject = cursor.candidate.map_or(member.scope_revision, |candidate| candidate.tree);
+        if !evidence.validates(&subject) {
+            return Err(HostFaultError::EvidenceNotBound { expected: subject, got: evidence.subject });
+        }
+    }
+    Ok(record)
 }

@@ -500,6 +500,38 @@ pub enum Fact {
         /// The non-empty resolved edge set the door decided.
         edges: Vec<MemberDependency>,
     },
+    /// A dispatched member Verify could not run because the host is missing a
+    /// gate tool (#5020) — the attempt's only failure was `verify.preflight`.
+    ///
+    /// Distinct from [`Fact::VerifyFailed`] so the failure ledger can tell a
+    /// host-provisioning gap from a candidate the gates actually judged. The
+    /// reducer holds the member at `Verify`, spends no repair roll, and never
+    /// dispatches Refine: there is nothing for a model to repair. Appended past
+    /// [`Fact::GraphSeal`] so every prior fact keeps its wire discriminant.
+    VerifyHostFault {
+        /// The bloom whose member could not be verified.
+        bloom: BloomId,
+        /// The member sitting at terminal Verify.
+        workpiece: WorkpieceId,
+        /// The preflight evidence, bound to the member's current subject.
+        evidence: Evidence,
+        /// The preflight findings — the missing tools, listed verbatim.
+        findings: String,
+    },
+    /// The coordinator cadence found a member held on a host fault and is
+    /// re-probing its Verify (#5020).
+    ///
+    /// Clearing the hold and re-dispatching the same stage against the same
+    /// candidate is the resume; a subsequent preflight pass runs the gates,
+    /// and a subsequent preflight miss holds again. Appended past
+    /// [`Fact::VerifyHostFault`] so every prior fact keeps its wire
+    /// discriminant.
+    ResumeHostFault {
+        /// The bloom the held member belongs to.
+        bloom: BloomId,
+        /// The member to re-probe.
+        workpiece: WorkpieceId,
+    },
 }
 
 impl Fact {
