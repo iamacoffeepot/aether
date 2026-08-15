@@ -9,6 +9,7 @@
 //! draft into a canonically-ordered [`BloomSpec`] whose id is the digest of
 //! its own bytes; there is no API to mutate a sealed spec.
 
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::iter::once;
 
@@ -16,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::{BloomId, WorkpieceId};
-use crate::values::{ConfigRegistry, ConfigScopes, Evidence, Forecast};
+use crate::values::{ConfigRegistry, ConfigScopes, Evidence, Forecast, surface_intersection};
 
 /// One workpiece's admission into a bloom: its identity, the exact scope
 /// revision the bloom pins, and the approval evidence bound to that
@@ -71,6 +72,114 @@ impl Membership {
             configs: self.configs.clone(),
         })
     }
+}
+
+/// One directed member-dependency edge (ADR-0196): `member` cannot start until
+/// `depends_on` has resolved. The pair is the wire value the seal's effect
+/// vocabulary journals — `Membership` does not carry it.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+pub struct MemberDependency {
+    /// The dependent workpiece.
+    pub member: WorkpieceId,
+    /// The workpiece it waits for.
+    pub depends_on: WorkpieceId,
+}
+
+/// Why a seal's member-dependency graph was refused (ADR-0196).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DependencyError {
+    /// An edge names a workpiece that is not a member of the bloom being sealed.
+    UnknownWorkpiece(WorkpieceId),
+    /// The resolved graph contains a cycle. The vec names the members on the
+    /// cycle, walking from the back-edge target around to it again.
+    Cycle(Vec<WorkpieceId>),
+}
+
+/// Union `declared` with one ordering edge per pair of `members` whose
+/// declared surfaces intersect, in listed order; refuse a cycle or an edge
+/// that names a non-member.
+///
+/// The later-listed member of an overlapping pair depends on the earlier one,
+/// so the listing is the sequencing the door can see. The returned set is
+/// sorted and de-duplicated so two seals that decide the same graph journal
+/// the same bytes.
+pub fn resolve_member_dependencies(
+    members: &[(WorkpieceId, &[String])],
+    declared: &[MemberDependency],
+) -> Result<Vec<MemberDependency>, DependencyError> {
+    let ids: BTreeSet<&WorkpieceId> = members.iter().map(|(id, _)| id).collect();
+    let mut edges = BTreeSet::new();
+    for edge in declared {
+        if !ids.contains(&edge.member) {
+            return Err(DependencyError::UnknownWorkpiece(edge.member.clone()));
+        }
+        if !ids.contains(&edge.depends_on) {
+            return Err(DependencyError::UnknownWorkpiece(edge.depends_on.clone()));
+        }
+        edges.insert(edge.clone());
+    }
+    for (index, (workpiece, surface)) in members.iter().enumerate() {
+        for (peer, peer_surface) in &members[index + 1..] {
+            if !surface_intersection(surface, peer_surface).is_empty() {
+                edges.insert(MemberDependency { member: (*peer).clone(), depends_on: (*workpiece).clone() });
+            }
+        }
+    }
+    let resolved: Vec<MemberDependency> = edges.into_iter().collect();
+    dependency_cycle(&resolved).map_or(Ok(resolved), |cycle| Err(DependencyError::Cycle(cycle)))
+}
+
+const WHITE: u8 = 0;
+const GRAY: u8 = 1;
+const BLACK: u8 = 2;
+
+/// The members of one directed cycle in `edges`, or `None` when the graph is
+/// acyclic. Iterative: the stack is `(node, next-child index)` plus the path
+/// of gray nodes, so a back edge reconstructs the loop without recursing.
+fn dependency_cycle(edges: &[MemberDependency]) -> Option<Vec<WorkpieceId>> {
+    let mut adj: BTreeMap<&WorkpieceId, Vec<&WorkpieceId>> = BTreeMap::new();
+    let mut nodes = BTreeSet::new();
+    for edge in edges {
+        adj.entry(&edge.member).or_default().push(&edge.depends_on);
+        nodes.insert(&edge.member);
+        nodes.insert(&edge.depends_on);
+    }
+
+    let mut color: BTreeMap<&WorkpieceId, u8> = nodes.iter().copied().map(|id| (id, WHITE)).collect();
+
+    for start in nodes {
+        if color.get(start).copied() != Some(WHITE) {
+            continue;
+        }
+        let mut stack = vec![(start, 0usize)];
+        let mut path = vec![start];
+        color.insert(start, GRAY);
+        while let Some((node, child_idx)) = stack.pop() {
+            let children = adj.get(node).map_or(&[][..], Vec::as_slice);
+            if child_idx < children.len() {
+                stack.push((node, child_idx + 1));
+                let next = children[child_idx];
+                match color.get(next).copied().unwrap_or(WHITE) {
+                    GRAY => {
+                        let start_at = path.iter().position(|id| *id == next).unwrap_or(0);
+                        let mut cycle: Vec<WorkpieceId> = path[start_at..].iter().map(|id| (*id).clone()).collect();
+                        cycle.push(next.clone());
+                        return Some(cycle);
+                    }
+                    WHITE => {
+                        color.insert(next, GRAY);
+                        path.push(next);
+                        stack.push((next, 0));
+                    }
+                    _ => {}
+                }
+            } else {
+                color.insert(node, BLACK);
+                path.pop();
+            }
+        }
+    }
+    None
 }
 
 /// A mutable bloom in shaping: membership proposals, base, and forecast.
@@ -256,4 +365,83 @@ pub struct LandingReceipt {
     pub previous_base: Digest,
     /// The new mainline head after the swap.
     pub new_head: Digest,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DependencyError, MemberDependency, resolve_member_dependencies};
+    use crate::ids::WorkpieceId;
+
+    fn wp(name: &str) -> WorkpieceId {
+        WorkpieceId(name.to_owned())
+    }
+
+    fn edge(member: &str, depends_on: &str) -> MemberDependency {
+        MemberDependency { member: wp(member), depends_on: wp(depends_on) }
+    }
+
+    #[test]
+    fn overlapping_surfaces_derive_an_ordering_edge_in_listed_order() {
+        // The later-listed member of an overlapping pair must wait for the
+        // earlier one. Pairing the other way, or emitting no edge, would leave
+        // the known collision to fold-time Reconcile — the bug this derivation
+        // exists to close.
+        let bloom = ["crates/aether-bloomery/**".to_owned()];
+        let file = ["crates/aether-bloomery/src/values/price.rs".to_owned()];
+        let docs = ["docs/guide/**".to_owned()];
+        let members = [(wp("wp-a"), bloom.as_slice()), (wp("wp-b"), file.as_slice()), (wp("wp-c"), docs.as_slice())];
+
+        let resolved = resolve_member_dependencies(&members, &[]).expect("acyclic");
+
+        assert_eq!(resolved, [edge("wp-b", "wp-a")], "one overlapping pair is one later-depends-on-earlier edge");
+    }
+
+    #[test]
+    fn declared_edges_union_with_derived_and_dedup() {
+        // A declared edge that the surfaces would also derive must appear once.
+        // Emitting it twice would make two seals of the same graph journal
+        // different edge lists, and a silent drop of the declared-only edge
+        // would lose an operator sequencing that no surface overlap predicted.
+        let bloom = ["crates/aether-bloomery/**".to_owned()];
+        let file = ["crates/aether-bloomery/src/lib.rs".to_owned()];
+        let other = ["crates/aether-http/**".to_owned()];
+        let members = [(wp("wp-a"), bloom.as_slice()), (wp("wp-b"), file.as_slice()), (wp("wp-c"), other.as_slice())];
+
+        let resolved =
+            resolve_member_dependencies(&members, &[edge("wp-b", "wp-a"), edge("wp-c", "wp-a")]).expect("acyclic");
+
+        assert_eq!(resolved, [edge("wp-b", "wp-a"), edge("wp-c", "wp-a")]);
+    }
+
+    #[test]
+    fn a_cycle_is_refused_naming_its_members() {
+        // A↔B is the smallest cycle an operator can write. Reporting only one
+        // side, or succeeding, would journal a graph no scheduler can fire.
+        let empty: [String; 0] = [];
+        let members = [(wp("wp-a"), empty.as_slice()), (wp("wp-b"), empty.as_slice())];
+
+        match resolve_member_dependencies(&members, &[edge("wp-a", "wp-b"), edge("wp-b", "wp-a")]) {
+            Err(DependencyError::Cycle(cycle)) => {
+                assert!(
+                    cycle.contains(&wp("wp-a")) && cycle.contains(&wp("wp-b")),
+                    "cycle names both members: {cycle:?}"
+                );
+            }
+            other => panic!("expected a named cycle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_edge_to_a_non_member_is_refused_naming_it() {
+        // An edge pointing outside the bloom cannot be scheduled against this
+        // membership. Swallowing it, or naming the in-bloom end instead, would
+        // hide the workpiece the operator actually misspelled.
+        let empty: [String; 0] = [];
+        let members = [(wp("wp-a"), empty.as_slice())];
+
+        match resolve_member_dependencies(&members, &[edge("wp-a", "wp-z")]) {
+            Err(DependencyError::UnknownWorkpiece(named)) => assert_eq!(named, wp("wp-z")),
+            other => panic!("expected the outsider named, got {other:?}"),
+        }
+    }
 }

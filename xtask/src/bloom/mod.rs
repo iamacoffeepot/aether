@@ -95,6 +95,11 @@ struct SealArgs {
     #[arg(long)]
     workpiece: Vec<String>,
 
+    /// Member dependency (`dependent=dependency`). Repeatable. `issue-B=issue-A`
+    /// means B depends on A.
+    #[arg(long = "edge", value_parser = plan::parse_edge_flag)]
+    edges: Vec<(String, String)>,
+
     #[command(flatten)]
     projection: ProjectionArgs,
 }
@@ -184,7 +189,8 @@ fn run_seal(client: &Client<'_>, args: &SealArgs) -> Result<String> {
     let draft = client.open_draft()?;
     client.patch_draft(&draft.draft_id, &patch)?;
     let members = patch.proposals.unwrap_or_default();
-    let outcome = client.seal(&draft.draft_id, &plan::seal_request(&members, &task, &args.projection.input()?))?;
+    let outcome =
+        client.seal(&draft.draft_id, &plan::seal_request(&members, &task, &args.projection.input()?, &args.edges))?;
     Ok(render_outcome(&outcome.outcome))
 }
 
@@ -525,6 +531,7 @@ mod tests {
                         profile: None,
                         base: BaseChoice::Observed,
                         workpiece: vec!["wp-seal".to_owned()],
+                        edges: Vec::new(),
                         projection: projection_args(),
                     }),
                 )
@@ -541,7 +548,46 @@ mod tests {
         let seal = find(&log, "POST", "/drafts/3/seal").body.as_ref().expect("seal body");
         assert_eq!(seal["descriptions"]["wp-seal"], "build the authoring layer");
         assert_eq!(seal["projections"][0]["declared_surface"][0], "docs/guide/**");
+        assert!(seal.get("edges").is_none(), "an edgeless seal omits the edges field: {seal}");
         assert!(output.contains("Sealed"), "outcome is printed: {output}");
+    }
+
+    #[test]
+    fn seal_sends_declared_edges_on_the_typed_body() {
+        // `--edge issue-B=issue-A` must reach the door as B depends on A. A
+        // swapped pair, or dropping the field, would journal the opposite
+        // graph or none at all.
+        let task = temp_task("seal-edge", "build B on A");
+        let (_, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/view") => {
+                    (200, json!({ "mainline": hex_of(digest(1)), "observed": hex_of(digest(2)), "blooms": [] }))
+                }
+                ("POST", "/drafts") => (201, json!({ "draft_id": "5", "draft": {} })),
+                ("PATCH", "/drafts/5") => (200, json!({ "draft_id": "5", "draft": {} })),
+                ("POST", "/drafts/5/seal") => (200, json!({ "outcome": { "Sealed": hex_of(digest(4)) } })),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &BloomCommand::Seal(SealArgs {
+                        task_file: task.clone(),
+                        configs: Vec::new(),
+                        profile: None,
+                        base: BaseChoice::Observed,
+                        workpiece: vec!["issue-A".to_owned(), "issue-B".to_owned()],
+                        edges: vec![("issue-B".to_owned(), "issue-A".to_owned())],
+                        projection: projection_args(),
+                    }),
+                )
+                .expect("seal --edge against the fake coordinator")
+            },
+        );
+        fs::remove_file(&task).ok();
+        let seal = find(&log, "POST", "/drafts/5/seal").body.as_ref().expect("seal body");
+        assert_eq!(seal["edges"][0]["member"], "issue-B");
+        assert_eq!(seal["edges"][0]["depends_on"], "issue-A");
     }
 
     #[test]
@@ -585,6 +631,7 @@ mod tests {
                         profile: Some("opus-high".to_owned()),
                         base: BaseChoice::Observed,
                         workpiece: vec!["wp-profile".to_owned()],
+                        edges: Vec::new(),
                         projection: projection_args(),
                     }),
                 )

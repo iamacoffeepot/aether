@@ -16,9 +16,9 @@ use super::{
 use crate::digest::Digest;
 use crate::ids::{BloomId, WorkpieceId};
 use crate::values::{
-    BloomSpec, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, EvidenceKind, MemberCandidate, Membership,
-    ModelOverride, ResolvedConfigs, SpendCeiling, SpendWindow, StageCatalog, Transformation, Unproducible,
-    VerifyFailureSet,
+    BloomSpec, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, DependencyError, EvidenceKind,
+    MemberCandidate, MemberDependency, Membership, ModelOverride, ResolvedConfigs, SpendCeiling, SpendWindow,
+    StageCatalog, Transformation, Unproducible, VerifyFailureSet, resolve_member_dependencies,
 };
 
 /// Build the seal-time entry-stage dispatch effects for one member: seed its
@@ -75,6 +75,7 @@ pub(super) fn reduce_seal(
     spec: &BloomSpec,
     configs: &ResolvedConfigs,
     spend: &SpendWindow,
+    edges: &[MemberDependency],
 ) -> Decisions {
     let bloom = spec.id();
     // A known id would resurrect and overwrite the existing record — a sealed
@@ -86,6 +87,9 @@ pub(super) fn reduce_seal(
     // and each approval binds its own scope revision as an Approval (ADR-0149
     // "verify every member's scope and approval lineage").
     if let Err(error) = validate_member_admission(spec.members()) {
+        return Decisions::rejected(Outcome::SealRejected(error));
+    }
+    if let Err(error) = validate_member_graph(spec.members(), edges) {
         return Decisions::rejected(Outcome::SealRejected(error));
     }
     // Every sealed configuration address must be one the reducer was given
@@ -155,6 +159,7 @@ pub(super) fn reduce_seal(
     for member in spec.members() {
         effects.extend(entry_dispatch_effects(bloom, member, spec.base(), spec.configs(), &catalog));
     }
+    effects.push(Decision::RecordMemberDependencies { bloom, edges: edges.to_vec() });
     Decisions { outcome: Outcome::Sealed(bloom), effects }
 }
 
@@ -225,6 +230,26 @@ fn validate_member_admission(members: &[Membership]) -> Result<(), SealError> {
     }
     Ok(())
 }
+
+/// Re-check a door-resolved graph the reducer is about to journal: every
+/// endpoint is a member, and the directed edges are acyclic. Surfaces are
+/// gone by the time the reducer holds the spec, so derivation is the door's;
+/// this is the well-formedness half so a direct `Admit` of a cyclic
+/// [`Fact::GraphSeal`](crate::Fact::GraphSeal) cannot land.
+fn validate_member_graph(members: &[Membership], edges: &[MemberDependency]) -> Result<(), SealError> {
+    if edges.is_empty() {
+        return Ok(());
+    }
+    let listed: Vec<(WorkpieceId, &[String])> =
+        members.iter().map(|member| (member.workpiece.clone(), EMPTY_SURFACE.as_slice())).collect();
+    match resolve_member_dependencies(&listed, edges) {
+        Ok(_) => Ok(()),
+        Err(DependencyError::UnknownWorkpiece(workpiece)) => Err(SealError::UnknownDependency(workpiece)),
+        Err(DependencyError::Cycle(cycle)) => Err(SealError::CyclicDependencies(cycle)),
+    }
+}
+
+const EMPTY_SURFACE: [String; 0] = [];
 
 /// The seal-time line admission (ADR-0174, #4601): whatever catalog the spec
 /// seals must be one the line can run, and every member's model override must be
@@ -368,6 +393,7 @@ pub(super) fn reduce_supersede(
     predecessor: &BloomId,
     successor: &BloomSpec,
     configs: &ResolvedConfigs,
+    edges: &[MemberDependency],
 ) -> Decisions {
     let Some(record) = snapshot.blooms.get(predecessor) else {
         return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::UnknownOrInactivePredecessor));
@@ -394,6 +420,9 @@ pub(super) fn reduce_supersede(
     // anything — an empty, duplicate-workpiece, or unapproved successor is
     // refused here rather than admitted on invalid members (ADR-0149).
     if let Err(error) = validate_member_admission(successor.members()) {
+        return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
+    }
+    if let Err(error) = validate_member_graph(successor.members(), edges) {
         return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
     }
     // A superseding spec is held to seal's catalog admission too — it must
@@ -535,6 +564,7 @@ pub(super) fn reduce_supersede(
         effects.push(Decision::AdvanceMainline { from: snapshot.mainline, to: base });
     }
     effects.push(Decision::MarkSuperseded { bloom: *predecessor, by: successor_id });
+    effects.push(Decision::RecordMemberDependencies { bloom: successor_id, edges: edges.to_vec() });
     Decisions { outcome: Outcome::Superseded { predecessor: *predecessor, successor: successor_id }, effects }
 }
 
@@ -551,8 +581,8 @@ mod tests {
     use crate::reduce::SealError;
     use crate::reduce::{BloomStatus, Decision, Event, Fact, Outcome, Snapshot};
     use crate::values::{
-        BloomDraft, ConfigKind, ConfigRegistry, Evidence, EvidenceKind, Membership, ResolvedConfigs, SpendCeiling,
-        SpendQuiesce, SpendWindow, Unproducible,
+        BloomDraft, ConfigKind, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, ResolvedConfigs,
+        SpendCeiling, SpendQuiesce, SpendWindow, Unproducible,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -604,7 +634,7 @@ mod tests {
         let ceiling = SpendCeiling { window_micro_usd: Some(10), bloom_micro_usd: None };
         let (draft, configs) = draft_with_ceiling(1, &ceiling);
         let spec = draft.seal();
-        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &window(10, &[]));
+        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &window(10, &[]), &[]);
 
         assert_eq!(
             decided.outcome,
@@ -646,6 +676,7 @@ mod tests {
             },
             &ResolvedConfigs::default(),
             &SpendWindow::default(),
+            &[],
         );
         let snapshot = Snapshot::new(digest(0)).apply(&event, &prior, &ResolvedConfigs::default());
         let before = snapshot.blooms.get(&existing_id).expect("the prior bloom is on the snapshot").clone();
@@ -655,7 +686,7 @@ mod tests {
         snapshot.blooms.get_mut(&existing_id).expect("prior bloom").status = BloomStatus::Landed;
         snapshot.active.clear();
 
-        let decided = reduce_seal(&snapshot, &spec, &configs, &window(4, &[(existing_id, 5)]));
+        let decided = reduce_seal(&snapshot, &spec, &configs, &window(4, &[(existing_id, 5)]), &[]);
         assert_eq!(
             decided.outcome,
             Outcome::SealQuiesced(SpendQuiesce::Bloom {
@@ -692,7 +723,7 @@ mod tests {
             ceiling_micro_usd: 80,
         });
 
-        let decided = reduce_seal(&snapshot, &spec, &configs, &window(10, &[]));
+        let decided = reduce_seal(&snapshot, &spec, &configs, &window(10, &[]), &[]);
         assert!(matches!(decided.outcome, Outcome::Sealed(_)), "under both axes the door opens: {:?}", decided.outcome);
         assert!(
             decided.effects.iter().any(|effect| matches!(effect, Decision::RecordSpendQuiesce { quiesce: None })),
@@ -711,7 +742,7 @@ mod tests {
     fn an_absent_or_uncapped_ceiling_never_quiesces() {
         let spec = draft(1).seal();
         let decided =
-            reduce_seal(&Snapshot::new(digest(0)), &spec, &ResolvedConfigs::default(), &window(u64::MAX, &[]));
+            reduce_seal(&Snapshot::new(digest(0)), &spec, &ResolvedConfigs::default(), &window(u64::MAX, &[]), &[]);
         assert!(matches!(decided.outcome, Outcome::Sealed(_)), "no ceiling is uncapped: {:?}", decided.outcome);
 
         let ceiling = SpendCeiling { window_micro_usd: None, bloom_micro_usd: None };
@@ -722,6 +753,7 @@ mod tests {
             &spec,
             &configs,
             &window(u64::MAX, &[(BloomId(digest(1)), u64::MAX)]),
+            &[],
         );
         assert!(
             matches!(decided.outcome, Outcome::Sealed(_)),
@@ -742,7 +774,7 @@ mod tests {
         let mut configs = ResolvedConfigs::default();
         configs.insert(ceiling.address(), SpendCeiling::NAME, to_vec(&ceiling).expect("ceiling encodes"));
 
-        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &SpendWindow::default());
+        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &SpendWindow::default(), &[]);
         assert!(
             matches!(
                 decided.outcome,
@@ -769,7 +801,7 @@ mod tests {
 
         let spec = BloomDraft { configs: registry.clone(), ..draft(1) }.seal();
         let decided =
-            reduce_seal(&Snapshot::new(digest(0)), &spec, &ResolvedConfigs::default(), &SpendWindow::default());
+            reduce_seal(&Snapshot::new(digest(0)), &spec, &ResolvedConfigs::default(), &SpendWindow::default(), &[]);
         assert!(
             matches!(
                 decided.outcome,
@@ -785,7 +817,7 @@ mod tests {
 
         let mut configs = ResolvedConfigs::default();
         configs.insert(address, String::from("aether.bloomery.price_table"), vec![1, 2, 3]);
-        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &SpendWindow::default());
+        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &SpendWindow::default(), &[]);
         assert!(
             matches!(
                 decided.outcome,
@@ -801,7 +833,7 @@ mod tests {
 
         configs = ResolvedConfigs::default();
         configs.insert(address, SpendCeiling::NAME, vec![0xff, 0xff]);
-        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &SpendWindow::default());
+        let decided = reduce_seal(&Snapshot::new(digest(0)), &spec, &configs, &SpendWindow::default(), &[]);
         assert!(
             matches!(
                 decided.outcome,
@@ -826,16 +858,83 @@ mod tests {
         let predecessor = predecessor_spec.id();
         let seal =
             Event { idempotency_key: IdempotencyKey("prior".into()), fact: Fact::Seal(predecessor_spec.clone()) };
-        let prior = reduce_seal(&Snapshot::new(digest(0)), &predecessor_spec, &configs, &SpendWindow::default());
+        let prior = reduce_seal(&Snapshot::new(digest(0)), &predecessor_spec, &configs, &SpendWindow::default(), &[]);
         let snapshot = Snapshot::new(digest(0)).apply(&seal, &prior, &configs);
 
         let (successor_draft, successor_configs) = draft_with_ceiling(2, &ceiling);
         let successor = successor_draft.seal();
-        let decided = reduce_supersede(&snapshot, &predecessor, &successor, &successor_configs);
+        let decided = reduce_supersede(&snapshot, &predecessor, &successor, &successor_configs, &[]);
         assert!(
             matches!(decided.outcome, Outcome::Superseded { .. }),
             "supersession is not spend-gated: {:?}",
             decided.outcome,
         );
+    }
+
+    // The plausible bug: an edgeless seal grows a non-empty graph, or inserts
+    // the new effect in the middle, so every existing journal row's effect
+    // suffix shifts on the next boot replay.
+    #[test]
+    fn an_edgeless_seal_is_today_plus_an_empty_appended_graph() {
+        let spec = draft(1).seal();
+        let bloom = spec.id();
+        let decided =
+            reduce_seal(&Snapshot::new(digest(0)), &spec, &ResolvedConfigs::default(), &SpendWindow::default(), &[]);
+
+        assert!(matches!(decided.outcome, Outcome::Sealed(id) if id == bloom));
+        let Some(Decision::RecordMemberDependencies { bloom: recorded, edges }) = decided.effects.last() else {
+            panic!("edgeless seal must append the graph, got {:?}", decided.effects.last());
+        };
+        assert_eq!(*recorded, bloom);
+        assert!(edges.is_empty(), "an edgeless seal journals an empty edge list, got {edges:?}");
+        assert!(
+            decided.effects.iter().filter(|effect| matches!(effect, Decision::RecordMemberDependencies { .. })).count()
+                == 1,
+            "the graph is appended once: {:?}",
+            decided.effects,
+        );
+        assert!(
+            decided.effects.iter().any(|effect| matches!(effect, Decision::ClaimMembership { .. })),
+            "today's claims still precede the append",
+        );
+    }
+
+    // The plausible bug: the door-resolved graph is decided but not folded, so
+    // a restarted coordinator loses the edges ADR-0190 says replay must keep.
+    #[test]
+    fn a_seal_with_edges_journals_the_graph_and_replay_folds_it() {
+        let spec = BloomDraft {
+            proposals: vec![membership("wp-a", 1), membership("wp-b", 2)],
+            base: digest(0),
+            ..BloomDraft::default()
+        }
+        .seal();
+        let bloom = spec.id();
+        let edges =
+            vec![MemberDependency { member: WorkpieceId("wp-b".into()), depends_on: WorkpieceId("wp-a".into()) }];
+        let decided =
+            reduce_seal(&Snapshot::new(digest(0)), &spec, &ResolvedConfigs::default(), &SpendWindow::default(), &edges);
+        assert!(matches!(decided.outcome, Outcome::Sealed(id) if id == bloom));
+        match decided.effects.last() {
+            Some(Decision::RecordMemberDependencies { bloom: recorded, edges: recorded_edges }) => {
+                assert_eq!(*recorded, bloom);
+                assert_eq!(recorded_edges, &edges);
+            }
+            other => panic!("expected the resolved graph, got {other:?}"),
+        }
+
+        let event = Event {
+            idempotency_key: IdempotencyKey("graph".into()),
+            fact: Fact::GraphSeal { predecessor: None, spec, edges: edges.clone() },
+        };
+        let folded = Snapshot::new(digest(0)).apply(&event, &decided, &ResolvedConfigs::default());
+        let replayed = Snapshot::new(digest(0)).apply(&event, &decided, &ResolvedConfigs::default());
+        assert_eq!(
+            folded.blooms.get(&bloom).map(|record| &record.dependencies),
+            Some(&edges),
+            "apply folds the journaled graph onto the record",
+        );
+        assert_eq!(replayed.blooms.get(&bloom).map(|record| &record.dependencies), Some(&edges));
+        assert_eq!(folded, replayed, "two folds of the same recorded decision agree");
     }
 }

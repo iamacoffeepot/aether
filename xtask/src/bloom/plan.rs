@@ -16,8 +16,8 @@ use sha2::{Digest as _, Sha256};
 
 use super::client::Client;
 use super::dto::{
-    AdrTouch, Approval, BloomSpec, Completeness, ConfigRegistry, DigestHex, DraftPatch, MemberProjection, SealRequest,
-    SupersedeRequest, ViewDocument,
+    AdrTouch, Approval, BloomSpec, Completeness, ConfigRegistry, DependencyEdge, DigestHex, DraftPatch,
+    MemberProjection, SealRequest, SupersedeRequest, ViewDocument,
 };
 use super::dto::{ConfigRegistry as WireRegistry, Membership as WireMembership};
 
@@ -202,10 +202,19 @@ pub fn projections(members: &[WireMembership], input: &ProjectionInput) -> Vec<M
         .collect()
 }
 
-pub fn seal_request(members: &[WireMembership], task: &str, input: &ProjectionInput) -> SealRequest {
+pub fn seal_request(
+    members: &[WireMembership],
+    task: &str,
+    input: &ProjectionInput,
+    edges: &[(String, String)],
+) -> SealRequest {
     SealRequest {
         projections: projections(members, input),
         descriptions: descriptions(task, members.iter().map(|member| member.workpiece.as_str())),
+        edges: edges
+            .iter()
+            .map(|(member, depends_on)| DependencyEdge { member: member.clone(), depends_on: depends_on.clone() })
+            .collect(),
     }
 }
 
@@ -275,6 +284,30 @@ pub fn parse_config_flag(raw: &str) -> Result<(String, PathBuf), String> {
         return Err("expected kind=file.json".to_owned());
     }
     Ok((kind.to_owned(), PathBuf::from(path)))
+}
+
+#[cfg(test)]
+mod edge_flag_tests {
+    #[test]
+    fn parse_edge_flag_reads_dependent_equals_dependency() {
+        // `--edge issue-B=issue-A` is B depends on A. Swapping the sides, or
+        // accepting a missing half, would journal the opposite graph.
+        assert_eq!(
+            super::parse_edge_flag("issue-B=issue-A").expect("well-formed"),
+            ("issue-B".to_owned(), "issue-A".to_owned()),
+        );
+        assert!(super::parse_edge_flag("issue-B").is_err());
+        assert!(super::parse_edge_flag("=issue-A").is_err());
+        assert!(super::parse_edge_flag("issue-B=").is_err());
+    }
+}
+
+pub fn parse_edge_flag(raw: &str) -> Result<(String, String), String> {
+    let (member, depends_on) = raw.split_once('=').ok_or_else(|| "expected dependent=dependency".to_owned())?;
+    if member.is_empty() || depends_on.is_empty() {
+        return Err("expected dependent=dependency".to_owned());
+    }
+    Ok((member.to_owned(), depends_on.to_owned()))
 }
 
 pub fn parse_bloom_id(raw: &str) -> Result<String, String> {
