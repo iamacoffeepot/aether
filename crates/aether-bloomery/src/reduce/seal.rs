@@ -573,13 +573,15 @@ mod tests {
     use alloc::string::String;
 
     use aether_data::Kind;
-    use aether_data::wire::to_vec;
+    use aether_data::wire::{from_bytes, to_vec};
 
     use super::{reduce_seal, reduce_supersede};
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, WorkpieceId};
     use crate::reduce::SealError;
-    use crate::reduce::{BloomStatus, Decision, Event, Fact, Outcome, Snapshot};
+    use crate::reduce::{
+        BloomStatus, Decision, Decisions, Event, Fact, Outcome, Snapshot, decode_recorded_decisions, reduce,
+    };
     use crate::values::{
         BloomDraft, ConfigKind, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, ResolvedConfigs,
         SpendCeiling, SpendQuiesce, SpendWindow, Unproducible,
@@ -901,6 +903,8 @@ mod tests {
 
     // The plausible bug: the door-resolved graph is decided but not folded, so
     // a restarted coordinator loses the edges ADR-0190 says replay must keep.
+    // Replay is apply-only over the journaled row — two applies of one
+    // in-memory Decisions value would agree even if the wire dropped the graph.
     #[test]
     fn a_seal_with_edges_journals_the_graph_and_replay_folds_it() {
         let spec = BloomDraft {
@@ -912,8 +916,12 @@ mod tests {
         let bloom = spec.id();
         let edges =
             vec![MemberDependency { member: WorkpieceId("wp-b".into()), depends_on: WorkpieceId("wp-a".into()) }];
-        let decided =
-            reduce_seal(&Snapshot::new(digest(0)), &spec, &ResolvedConfigs::default(), &SpendWindow::default(), &edges);
+        let event = Event {
+            idempotency_key: IdempotencyKey("graph".into()),
+            fact: Fact::GraphSeal { predecessor: None, spec, edges: edges.clone() },
+        };
+        let base = Snapshot::new(digest(0));
+        let decided = reduce(&base, &event, &ResolvedConfigs::default(), &SpendWindow::default());
         assert!(matches!(decided.outcome, Outcome::Sealed(id) if id == bloom));
         match decided.effects.last() {
             Some(Decision::RecordMemberDependencies { bloom: recorded, edges: recorded_edges }) => {
@@ -923,18 +931,17 @@ mod tests {
             other => panic!("expected the resolved graph, got {other:?}"),
         }
 
-        let event = Event {
-            idempotency_key: IdempotencyKey("graph".into()),
-            fact: Fact::GraphSeal { predecessor: None, spec, edges: edges.clone() },
-        };
-        let folded = Snapshot::new(digest(0)).apply(&event, &decided, &ResolvedConfigs::default());
-        let replayed = Snapshot::new(digest(0)).apply(&event, &decided, &ResolvedConfigs::default());
+        let live = base.apply(&event, &decided, &ResolvedConfigs::default());
+        let journaled: Event = from_bytes(&to_vec(&event).expect("event encodes")).expect("event decodes");
+        let recorded: Decisions = decode_recorded_decisions(&to_vec(&decided).expect("decisions encode"), None)
+            .expect("journaled decisions decode");
+        let replayed = base.apply(&journaled, &recorded, &ResolvedConfigs::default());
+
         assert_eq!(
-            folded.blooms.get(&bloom).map(|record| &record.dependencies),
+            live.blooms.get(&bloom).map(|record| &record.dependencies),
             Some(&edges),
-            "apply folds the journaled graph onto the record",
+            "apply folds the journaled graph onto the record, so equality is not both paths ignoring it",
         );
-        assert_eq!(replayed.blooms.get(&bloom).map(|record| &record.dependencies), Some(&edges));
-        assert_eq!(folded, replayed, "two folds of the same recorded decision agree");
+        assert_eq!(live, replayed, "apply-only replay of the journaled row rebuilds the live snapshot");
     }
 }
