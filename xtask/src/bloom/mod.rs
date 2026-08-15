@@ -13,6 +13,7 @@ mod plan;
 mod profiles;
 mod roll;
 mod status;
+mod upgrade;
 
 use std::env;
 use std::path::PathBuf;
@@ -23,6 +24,7 @@ use clap::{Args, Subcommand};
 use crate::bloom::client::{Client, bloom_in};
 use crate::bloom::plan::{BaseChoice, ProjectionInput};
 use crate::bloom::roll::RollArgs;
+use crate::bloom::upgrade::UpgradeArgs;
 
 /// Coordinator REST bind when `AETHER_HTTP_PORT` is unset — the same default
 /// `aether-chassis-bloomery` uses (`DEFAULT_HTTP_PORT`).
@@ -70,6 +72,8 @@ enum BloomCommand {
     /// Drive the ADR-0186 day roll: quiesce, sync the day back to main,
     /// cut tomorrow from post-sync main, and hand over the repoint.
     Roll(RollArgs),
+    /// Fold-test a candidate coordinator and replace the running binary if it holds.
+    Upgrade(UpgradeArgs),
 }
 
 #[derive(Args, Debug)]
@@ -173,6 +177,7 @@ fn run_on(endpoint: &Endpoint, command: &BloomCommand) -> Result<String> {
         BloomCommand::Seal(args) => run_seal(&client, args),
         BloomCommand::Supersede(args) => run_supersede(&client, args),
         BloomCommand::Roll(args) => roll::run(&client, args),
+        BloomCommand::Upgrade(args) => upgrade::run(&client, args),
     }
 }
 

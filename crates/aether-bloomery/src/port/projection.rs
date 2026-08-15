@@ -135,6 +135,12 @@ pub struct MemberView {
     /// bloom can never resolve — so it has to be readable here, or a stopped
     /// member and a working one render identically.
     pub wedge: Option<Wedge>,
+    /// The ancestor whose unresolved or wedged state is why this member has
+    /// not entered the line (ADR-0196). `None` while the member is working,
+    /// already resolved, or a root that dispatched at seal. `#[serde(default)]`
+    /// so a reader that predates the field still decodes.
+    #[serde(default)]
+    pub blocked_by: Option<WorkpieceId>,
 }
 
 /// A member's pending-decision hold, rendered for the outward mirror: the held

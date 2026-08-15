@@ -548,6 +548,35 @@ def find_member(view: Any, workpiece: str) -> tuple[dict[str, Any], dict[str, An
     )
 
 
+def member_status_state(member: dict[str, Any], *, has_order: bool) -> str:
+    """The one-word state the status table prints for a member.
+
+    A dependent that has not entered the line carries `blocked_by` on the
+    bloom view (ADR-0196). Painting that as `idle` is the mysterious
+    idleness the readiness scheduler exists to name: the member is held,
+    not forgotten.
+    """
+    if member.get("wedge"):
+        return "WEDGED"
+    if member.get("pending_decision"):
+        return "held"
+    if member.get("resolution"):
+        return "integrated"
+    if has_order:
+        return "running"
+    if member.get("blocked_by"):
+        return "blocked"
+    return "idle"
+
+
+def blocked_by_of(member: dict[str, Any]) -> str | None:
+    """The ancestor the bloom view names as holding this member out of the line."""
+    blocked = member.get("blocked_by")
+    if isinstance(blocked, str) and blocked:
+        return blocked
+    return None
+
+
 # The reducer outcomes that move a member along the line, and the field each
 # names its stage with. Read newest-first, the first hit is where the member
 # actually is -- the cursor is reducer state that the view document does not
@@ -613,6 +642,7 @@ def cmd_status(args: argparse.Namespace) -> None:
             wedge = member.get("wedge")
             resolution = member.get("resolution")
             pending = member.get("pending_decision")
+            blocked_by = blocked_by_of(member)
             entry["members"].append(
                 {
                     "workpiece": workpiece,
@@ -624,6 +654,8 @@ def cmd_status(args: argparse.Namespace) -> None:
                     "wedge_evidence": (wedge or {}).get("evidence"),
                     "held_on_question": (pending or {}).get("question"),
                     "outstanding_nonce": order["nonce"] if order else None,
+                    "blocked_by": blocked_by,
+                    "state": member_status_state(member, has_order=order is not None),
                 }
             )
         report["blooms"].append(entry)
@@ -652,19 +684,12 @@ def cmd_status(args: argparse.Namespace) -> None:
             print(f"  executor fault: {fault.get('rolls')}/{fault.get('budget')}{terminal}")
         print(f"  {'MEMBER':<28} {'CURSOR':<17} {'STATE':<12} CANDIDATE")
         for member in bloom["members"]:
-            if member["wedged_at"]:
-                state = "WEDGED"
-            elif member["held_on_question"]:
-                state = "held"
-            elif member["integrated"]:
-                state = "integrated"
-            elif member["outstanding_nonce"]:
-                state = "running"
-            else:
-                state = "idle"
             candidate = member["candidate"] or "-"
             cursor = member["cursor"] or "-"
-            print(f"  {member['workpiece']:<28} {cursor:<17} {state:<12} {candidate}")
+            line = f"  {member['workpiece']:<28} {cursor:<17} {member['state']:<12} {candidate}"
+            if member["blocked_by"]:
+                line += f"  blocked by {member['blocked_by']}"
+            print(line)
 
 
 def cmd_orders(args: argparse.Namespace) -> None:
@@ -702,6 +727,7 @@ def cmd_why(args: argparse.Namespace) -> None:
     wedge = member.get("wedge")
     resolution = member.get("resolution")
     pending = member.get("pending_decision")
+    blocked_by = blocked_by_of(member)
     order = orders[0] if orders else None
 
     lane = None
@@ -727,6 +753,7 @@ def cmd_why(args: argparse.Namespace) -> None:
         "outstanding_order": order,
         "wedge": wedge,
         "held_on_question": pending,
+        "blocked_by": blocked_by,
         "last_lane_result": lane,
     }
 
@@ -760,6 +787,14 @@ def cmd_why(args: argparse.Namespace) -> None:
     if wedge:
         print(f"  WEDGE      at {wedge.get('stage')}, evidence {wedge.get('evidence')}")
         print("             recovery: `grant` for another attempt, or `repair` with a candidate you built.")
+    if blocked_by:
+        ancestor = next((other for other in bloom.get("members", []) if other.get("workpiece") == blocked_by), None)
+        if ancestor and ancestor.get("wedge"):
+            reason = f"which is wedged at {(ancestor.get('wedge') or {}).get('stage')}"
+        else:
+            reason = "which has not resolved yet"
+        print(f"  BLOCKED    by {blocked_by}, {reason}")
+        print("             construct waits for that ancestor; this member has not entered the line.")
     if pending:
         print(f"  HELD       on question {pending.get('question')} at {pending.get('stage')}")
         print(f"             {pending.get('prompt')}")

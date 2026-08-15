@@ -929,7 +929,10 @@ mod tests {
         assert_eq!(decode_object_hex(&"a".repeat(24)).unwrap().as_bytes().len(), 12, "another even length passes too");
     }
 
-    #[cfg(unix)]
+    // Live identity observation reads `/proc/<pid>/stat`. A host without that
+    // filesystem cannot record pgid, so this tripwire is Linux-only — the same
+    // bound as `ProcessIdentity::observe`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn spawn_isolated_makes_the_child_its_own_process_group_leader() {
         // Tripwire: a re-attached kill signals the group. If spawn forgets
