@@ -4,9 +4,7 @@
 
 mod common;
 
-use aether_bloomery::{
-    CandidateRef, Decision, Evidence, EvidenceKind, Fact, FoldConflictError, Outcome, Snapshot, StageId,
-};
+use aether_bloomery::{CandidateRef, Decision, Evidence, EvidenceKind, Fact, Outcome, Snapshot, StageId};
 use common::{claim, digest, draft, event, membership, step, workpiece};
 
 fn conflict_evidence(checkpoint: u8, detail: u8) -> Evidence {
@@ -17,15 +15,35 @@ fn attempt_evidence() -> Evidence {
     Evidence { subject: digest(70), kind: EvidenceKind::VerificationResult, detail: digest(80) }
 }
 
-/// Two members have verified claims. The later one collides on the fold.
+/// Two members have verified claims and a captured candidate on the cursor.
+/// The later one collides on the fold. Construct runs first so Reconcile
+/// can tell a fold-time collision (has a candidate) from base assembly.
 fn two_member_with_claims() -> (Snapshot, aether_bloomery::BloomId) {
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
-    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
-    let (snapshot, _) =
-        step(&snapshot, &event("integrate-alpha", Fact::Integrate { bloom, claim: claim("alpha", 10, 20) }));
-    let (snapshot, _) =
-        step(&snapshot, &event("integrate-beta", Fact::Integrate { bloom, claim: claim("beta", 11, 21) }));
+    let (mut snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    for (name, revision, tree, checkout) in [("alpha", 10, 20, 22), ("beta", 11, 21, 23)] {
+        snapshot = step(
+            &snapshot,
+            &event(
+                &format!("construct-{name}"),
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: workpiece(name),
+                    stage: StageId::Construct,
+                    passed: true,
+                    evidence: attempt_evidence(),
+                    candidate: Some(CandidateRef { tree: digest(tree), checkout: digest(checkout) }),
+                },
+            ),
+        )
+        .0;
+        snapshot = step(
+            &snapshot,
+            &event(&format!("integrate-{name}"), Fact::Integrate { bloom, claim: claim(name, revision, tree) }),
+        )
+        .0;
+    }
     (snapshot, bloom)
 }
 
@@ -240,13 +258,7 @@ fn a_replayed_journal_reproduces_the_fold_conflict_sequence() {
         live = snapshot;
     }
 
-    let mut replayed = {
-        let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
-        let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
-        let (snapshot, _) =
-            step(&snapshot, &event("integrate-alpha", Fact::Integrate { bloom, claim: claim("alpha", 10, 20) }));
-        step(&snapshot, &event("integrate-beta", Fact::Integrate { bloom, claim: claim("beta", 11, 21) })).0
-    };
+    let mut replayed = two_member_with_claims().0;
     for (event, decisions) in &recorded {
         replayed = replayed.apply(event, decisions, &aether_bloomery::ResolvedConfigs::default());
     }
@@ -260,26 +272,126 @@ fn a_replayed_journal_reproduces_the_fold_conflict_sequence() {
     );
 }
 
-// A FoldConflict for a member that never verified is a reactor bug, not a
-// collision to reconcile.
+// ADR-0196 residual splice: a FoldConflict for a member that has not yet
+// constructed is base assembly, not a reactor bug. Reconcile writes the
+// spliced tree; a pass returns the member to Construct on that checkout.
 #[test]
-fn a_fold_conflict_for_a_member_without_a_claim_is_refused() {
-    let spec = draft(1, vec![membership("alpha", 10)]).seal();
+fn a_splice_conflict_on_a_dependent_dispatches_reconcile() {
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
 
-    let (_, decided) = step(
+    let (after, decided) = step(
         &snapshot,
         &event(
-            "fold-conflict-alpha",
+            "splice-conflict-beta",
             Fact::FoldConflict {
                 bloom,
-                workpiece: workpiece("alpha"),
+                workpiece: workpiece("beta"),
                 checkpoint: digest(30),
                 head: digest(31),
                 evidence: conflict_evidence(30, 90),
             },
         ),
     );
-    assert!(matches!(decided.outcome, Outcome::FoldConflictRejected(FoldConflictError::NotIntegrated(_))));
+
+    assert!(
+        matches!(&decided.outcome, Outcome::FoldConflictDispatched { workpiece, .. } if workpiece.0 == "beta"),
+        "the dependent reconciles its base assembly: {:?}",
+        decided.outcome,
+    );
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(effect, Decision::RevokeResolution { .. })),
+        "there is no claim to revoke: the member has not constructed",
+    );
+    let dispatch = decided.effects.iter().find_map(|effect| match effect {
+        Decision::DispatchAttempt { workpiece, stage, transformation, .. } if workpiece.0 == "beta" => {
+            Some((*stage, transformation.checkout))
+        }
+        _ => None,
+    });
+    assert_eq!(dispatch, Some((StageId::Reconcile, digest(31))), "Reconcile checks out the assembled checkpoint");
+
+    let progress = after
+        .blooms
+        .get(&bloom)
+        .expect("the sealed bloom is still in the snapshot")
+        .progress
+        .get(&workpiece("beta"))
+        .expect("beta entered the line at Reconcile");
+    assert_eq!(progress.stage, StageId::Reconcile);
+    assert_eq!(progress.candidate, None);
+    assert_eq!(progress.fold_checkpoint, Some(digest(31)));
+}
+
+// A passing base-assembly Reconcile returns to Construct on the assembled
+// capture, not to Verify — the capture is the spliced base, not the member's
+// work. Catches routing the dependent into Verify against a tree it never
+// authored.
+#[test]
+fn a_passing_base_assembly_reconcile_returns_to_construct() {
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "splice-conflict-beta",
+            Fact::FoldConflict {
+                bloom,
+                workpiece: workpiece("beta"),
+                checkpoint: digest(30),
+                head: digest(31),
+                evidence: conflict_evidence(30, 90),
+            },
+        ),
+    );
+
+    let captured = CandidateRef { tree: digest(41), checkout: digest(42) };
+    let (after, decided) = step(
+        &snapshot,
+        &event(
+            "reconcile-pass",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("beta"),
+                stage: StageId::Reconcile,
+                passed: true,
+                evidence: attempt_evidence(),
+                candidate: Some(captured),
+            },
+        ),
+    );
+
+    match decided.outcome {
+        Outcome::AttemptAdvanced { from, to, .. } => {
+            assert_eq!(from, StageId::Reconcile);
+            assert_eq!(to, StageId::Construct);
+        }
+        other => panic!("expected AttemptAdvanced onto Construct, got {other:?}"),
+    }
+    let dispatch = decided.effects.iter().find_map(|effect| match effect {
+        Decision::DispatchAttempt { stage, transformation, .. } => Some((*stage, transformation.checkout)),
+        _ => None,
+    });
+    assert_eq!(
+        dispatch,
+        Some((StageId::Construct, captured.checkout)),
+        "Construct checks out the assembled capture, not the sealed base",
+    );
+
+    let progress = after
+        .blooms
+        .get(&bloom)
+        .expect("the sealed bloom is still in the snapshot")
+        .progress
+        .get(&workpiece("beta"))
+        .expect("beta still has a progress cursor");
+    assert_eq!(progress.stage, StageId::Construct);
+    assert_eq!(progress.candidate, Some(captured), "Construct checks out the assembled capture");
+    assert_eq!(
+        progress.fold_checkpoint,
+        Some(digest(31)),
+        "the collision head stays so a standing re-collision still wedges",
+    );
 }

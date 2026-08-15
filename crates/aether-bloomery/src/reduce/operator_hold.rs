@@ -182,7 +182,7 @@ fn owed_dispatch(record: &BloomRecord, bloom: BloomId, workpiece: &WorkpieceId) 
     let member = record.spec.members().iter().find(|member| member.workpiece == *workpiece)?;
     let targets = reconcile_or_line_targets(
         member.scope_revision,
-        record.spec.base(),
+        super::splice::member_construct_base(record, workpiece),
         candidate,
         cursor.fold_checkpoint.filter(|_| cursor.stage == StageId::Reconcile),
     );
