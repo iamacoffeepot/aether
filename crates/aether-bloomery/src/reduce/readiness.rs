@@ -158,9 +158,11 @@ pub(super) fn newly_ready_entries(record: &BloomRecord, bloom: BloomId, just_res
 /// entered the line, or `None` when `member` is working, already resolved,
 /// or a root.
 ///
-/// Walks incoming edges iteratively. A wedged ancestor wins over a merely
+/// Walks incoming edges iteratively, skipping claimed parents so a chain
+/// whose root has resolved still names the in-progress parent that is
+/// actually holding the member out. A wedged ancestor wins over a merely
 /// unfinished one — that is the operator-visible reason the subtree is held
-/// — and a tie (two wedged ancestors, or two unfinished roots) breaks in
+/// — and a tie (two wedged ancestors, or two unfinished reasons) breaks in
 /// sealed member order so the view is deterministic.
 pub(super) fn blocking_ancestor(record: &BloomRecord, member: &WorkpieceId) -> Option<WorkpieceId> {
     if record.claims.contains_key(member) || record.progress.contains_key(member) {
@@ -186,7 +188,10 @@ pub(super) fn blocking_ancestor(record: &BloomRecord, member: &WorkpieceId) -> O
         if record.claims.contains_key(dep) {
             continue;
         }
-        let next: Vec<&WorkpieceId> = incoming(record, dep).collect();
+        // Skip claimed parents: a resolved root must not hide the in-progress
+        // parent that is still holding this member out of the line.
+        let next: Vec<&WorkpieceId> =
+            incoming(record, dep).filter(|parent| !record.claims.contains_key(*parent)).collect();
         if next.is_empty() {
             keep_earlier(record, &mut unfinished, dep);
         } else {
@@ -461,6 +466,27 @@ mod tests {
             Some(WorkpieceId("wp-a".into())),
             "a wedge at A is the reason the whole chain is held",
         );
+    }
+
+    // The plausible bug: once A resolves, C's walk goes through in-progress B
+    // to a claimed A and reports no blocker, so `/view` paints C as idle for
+    // a reason the operator cannot name.
+    #[test]
+    fn a_dependent_names_its_in_progress_parent() {
+        let (snapshot, spec) =
+            seal_graph(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)], vec![edge("wp-b", "wp-a"), edge("wp-c", "wp-b")]);
+        let integrate_a = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
+        let (after_a, _) = step(&snapshot, &integrate_a);
+        let bloom = record(&after_a, &spec);
+        assert!(bloom.claims.contains_key(&WorkpieceId("wp-a".into())));
+        assert!(bloom.progress.contains_key(&WorkpieceId("wp-b".into())), "B entered when A resolved");
+        assert!(!bloom.progress.contains_key(&WorkpieceId("wp-c".into())));
+        assert_eq!(
+            blocking_ancestor(bloom, &WorkpieceId("wp-c".into())),
+            Some(WorkpieceId("wp-b".into())),
+            "C is waiting on B, which is the unfinished ancestor now that A has resolved",
+        );
+        assert_eq!(blocking_ancestor(bloom, &WorkpieceId("wp-b".into())), None, "B is in the line");
     }
 
     // The plausible bug: a member already in the line reports a blocker, so
