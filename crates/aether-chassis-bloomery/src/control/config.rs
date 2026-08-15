@@ -10,4 +10,10 @@ pub struct ControlSetup {
     /// seconds — the same backend-neutral coordinator cadence the outbox
     /// reactors poll on (`AETHER_GITHUB_POLL_INTERVAL_SECS`).
     pub poll_interval_secs: u64,
+    /// Shared artifacts-store root the calibration and spend reads resolve
+    /// study records from. `None` uses the same default
+    /// [`resolve_root`](crate::artifacts::resolve_root) the artifacts
+    /// capability does, so a coordinator that never set a root still
+    /// reads the store it writes.
+    pub artifacts_root: Option<String>,
 }
