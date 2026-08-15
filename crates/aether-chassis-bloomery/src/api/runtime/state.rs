@@ -30,8 +30,8 @@ use aether_actor::{HandlesKind, Manual};
 #[cfg(feature = "github")]
 use aether_bloomery::EnumerateClaims;
 use aether_bloomery::{
-    Admit, ApprovalPolicy, BloomDraft, BloomId, Digest, Event, Query, ReplayJournal, ResolvedConfigs, Statement,
-    Workpiece,
+    Admit, ApprovalPolicy, BloomDraft, BloomId, Digest, Event, MemberDependency, Query, ReplayJournal, ResolvedConfigs,
+    Statement, Workpiece,
 };
 use aether_data::wire::to_vec;
 use aether_data::{Kind, MailId, MailboxId};
@@ -174,6 +174,10 @@ pub(super) struct PendingSeal {
     /// The admit idempotency key override, defaulted to the sealed bloom id when
     /// the last verification seals the spec.
     pub(super) idempotency_key: Option<String>,
+    /// The door-resolved member-dependency graph (ADR-0196), carried across
+    /// the verify hop so the eventual admit journals the same edges the
+    /// synchronous path would have.
+    pub(super) edges: Vec<MemberDependency>,
     /// Above-auto members whose signature has not yet verified; the verification
     /// that drops this to zero seals and admits.
     pub(super) remaining: usize,
@@ -205,6 +209,8 @@ pub(super) struct PendingSealSetup {
     pub(super) predecessor: Option<BloomId>,
     pub(super) descriptions: BTreeMap<String, String>,
     pub(super) idempotency_key: Option<String>,
+    /// The door-resolved member-dependency graph, admitted with the sealed spec.
+    pub(super) edges: Vec<MemberDependency>,
     /// One entry per above-auto member — the dispatched `Verify` correlation and
     /// the member it forms.
     pub(super) verifications: Vec<PendingVerify>,
@@ -348,7 +354,7 @@ pub(super) fn finish(
             http::Outcome::Deferred
         }
         Routed::DeferredSeal(setup) => {
-            let PendingSealSetup { gated, predecessor, descriptions, idempotency_key, verifications } = *setup;
+            let PendingSealSetup { gated, predecessor, descriptions, idempotency_key, edges, verifications } = *setup;
             let seal = state.next_seal;
             state.next_seal += 1;
             let remaining = verifications.len();
@@ -359,9 +365,10 @@ pub(super) fn finish(
                     .insert(correlation, SealVerify { seal, member_index, scope_revision, statement });
             }
             let inbound = ctx.take_inbound();
-            state
-                .seals
-                .insert(seal, PendingSeal { inbound, predecessor, gated, descriptions, idempotency_key, remaining });
+            state.seals.insert(
+                seal,
+                PendingSeal { inbound, predecessor, gated, descriptions, idempotency_key, edges, remaining },
+            );
             http::Outcome::Deferred
         }
     }

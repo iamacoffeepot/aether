@@ -102,8 +102,12 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         return Decisions::rejected(Outcome::Duplicate);
     }
     match &event.fact {
-        Fact::Seal(spec) => reduce_seal(snapshot, spec, configs, spend),
-        Fact::Supersede { predecessor, successor } => reduce_supersede(snapshot, predecessor, successor, configs),
+        Fact::Seal(spec) => reduce_seal(snapshot, spec, configs, spend, &[]),
+        Fact::Supersede { predecessor, successor } => reduce_supersede(snapshot, predecessor, successor, configs, &[]),
+        Fact::GraphSeal { predecessor: None, spec, edges } => reduce_seal(snapshot, spec, configs, spend, edges),
+        Fact::GraphSeal { predecessor: Some(predecessor), spec, edges } => {
+            reduce_supersede(snapshot, predecessor, spec, configs, edges)
+        }
         Fact::Integrate { bloom, claim } => reduce_integrate(snapshot, bloom, claim),
         Fact::AdmitEvidence { bloom, evidence } => reduce_admit_evidence(snapshot, bloom, evidence),
         Fact::AdoptAnswer { bloom, answer } => reduce_adopt_answer(snapshot, bloom, answer),
