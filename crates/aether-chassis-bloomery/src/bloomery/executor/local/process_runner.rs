@@ -179,7 +179,12 @@ impl TransformRunner for ProcessTransformRunner {
                 lane.args(["--resume", session]);
             }
         }
-        let child = lane.spawn().map_err(LocalExecutorError::Spawn)?;
+        // Own process group so a re-attached kill after a coordinator restart
+        // can signal the lane *and* the harness it spawned, not just the head
+        // pid this process recorded (issue #4999). `process_group(0)` is the
+        // child's own pid as pgid; no new dependency.
+        let child = spawn_isolated(&mut lane).map_err(LocalExecutorError::Spawn)?;
+        super::identity::record_spawned(spec.evidence_dir, child.id());
         Ok(Box::new(ChildProcess { child }))
     }
 
@@ -503,6 +508,18 @@ fn git_in(dir: &Path, args: &[&str]) -> Result<String, LocalExecutorError> {
         return Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&output.stderr), 1000)));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Spawn `command` in its own process group on Unix, so a later re-attached
+/// kill can signal the whole lane (head + harness grandchildren) rather than
+/// the recorded pid alone.
+fn spawn_isolated(command: &mut Command) -> io::Result<Child> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command.spawn()
 }
 
 /// A live `cargo xtask transform` child.
@@ -910,6 +927,22 @@ mod tests {
         assert_eq!(decode_object_hex(&"a".repeat(40)).unwrap().as_bytes().len(), 20, "a SHA-1 sha is 20 bytes");
         assert_eq!(decode_object_hex(&"a".repeat(64)).unwrap().as_bytes().len(), 32, "a SHA-256 sha is 32 bytes");
         assert_eq!(decode_object_hex(&"a".repeat(24)).unwrap().as_bytes().len(), 12, "another even length passes too");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_isolated_makes_the_child_its_own_process_group_leader() {
+        // Tripwire: a re-attached kill signals the group. If spawn forgets
+        // `process_group(0)`, the child stays in the coordinator's group and
+        // the recorded pgid is not a group this process can isolate —
+        // grandchildren survive the head's death, which is the expensive half
+        // of a leaked lane.
+        let mut child = super::spawn_isolated(Command::new("sleep").arg("30")).unwrap();
+        let identity = super::super::identity::ProcessIdentity::observe(child.id()).expect("the child is live");
+        assert_eq!(identity.pid, child.id());
+        assert_eq!(identity.pgid, child.id(), "process_group(0) makes the child its own group leader");
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]

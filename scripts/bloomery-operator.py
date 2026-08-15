@@ -301,6 +301,13 @@ def order_summary(row: sqlite3.Row, now_millis: int) -> dict[str, Any]:
     }
 
 
+SLOT_PREFIX = "slot-"
+EVIDENCE_SUFFIX = "-evidence"
+QUARANTINE_SUFFIX = ".quarantine"
+IDENTITY_RECORD = "identity"
+SLOT_RECORD = "slot"
+
+
 def evidence_path(worktree_base: str, nonce: str) -> Path:
     """Where a dispatch's lane wrote its evidence.
 
@@ -312,7 +319,175 @@ def evidence_path(worktree_base: str, nonce: str) -> Path:
     base = Path(worktree_base)
     if not nonce.startswith("dispatch-"):
         nonce = f"dispatch-{nonce}"
-    return base / f"{nonce}-evidence" / "evidence.json"
+    return base / f"{nonce}{EVIDENCE_SUFFIX}" / "evidence.json"
+
+
+def slot_quarantine_path(worktree_base: str, slot: int) -> Path:
+    """The sibling of `slot-<n>` that withholds it from allocation."""
+    return Path(worktree_base) / f"{SLOT_PREFIX}{slot}{QUARANTINE_SUFFIX}"
+
+
+def slot_index_from_name(name: str) -> int | None:
+    """`slot-12` or `slot-12.quarantine` as its index, else None."""
+    rest = name.removeprefix(SLOT_PREFIX)
+    rest = rest.removesuffix(QUARANTINE_SUFFIX)
+    if not rest or not rest.isdigit():
+        return None
+    return int(rest)
+
+
+def read_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def observe_process(pid: int) -> dict[str, Any] | None:
+    """Live `/proc` identity for `pid`, or None when the pid is gone."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    closing = stat.rfind(")")
+    if closing < 0:
+        return None
+    fields = stat[closing + 1 :].split()
+    if len(fields) < 20:
+        return None
+    try:
+        pgid = int(fields[2])
+        starttime = int(fields[19])
+    except ValueError:
+        return None
+    return {"pid": pid, "pgid": pgid, "starttime": starttime, "boot_id": boot_id}
+
+
+def identity_matches(recorded: dict[str, Any], live: dict[str, Any]) -> bool:
+    return recorded.get("starttime") == live.get("starttime") and recorded.get("boot_id") == live.get("boot_id")
+
+
+def list_slots(worktree_base: str) -> list[dict[str, Any]]:
+    """Every slot visible under the scratch root, with occupancy and quarantine.
+
+    Occupied means a dispatch's `slot` record still names it. Quarantined
+    means a sibling `slot-<n>.quarantine` file is present — the child could
+    not be terminated and the next dispatch must not build there. A slot can
+    be both: a live re-adopted run whose cancel just failed.
+    """
+    base = Path(worktree_base)
+    if not base.is_dir():
+        die(
+            f"no worktree base at {base}. Pass --worktree-base or set "
+            "AETHER_GITHUB_LOCAL_WORKTREE_BASE to the directory the coordinator "
+            "checks lanes out under."
+        )
+
+    occupants: dict[int, str] = {}
+    identities: dict[int, dict[str, Any]] = {}
+    for entry in base.iterdir():
+        if not entry.is_dir() or not entry.name.endswith(EVIDENCE_SUFFIX):
+            continue
+        nonce = entry.name[: -len(EVIDENCE_SUFFIX)]
+        if not nonce:
+            continue
+        slot_body = (entry / SLOT_RECORD).read_text(encoding="utf-8").strip() if (entry / SLOT_RECORD).is_file() else ""
+        if not slot_body.isdigit():
+            continue
+        slot = int(slot_body)
+        occupants[slot] = nonce
+        identity = read_json_object(entry / IDENTITY_RECORD)
+        if identity is not None:
+            identities[slot] = identity
+
+    quarantines: dict[int, dict[str, Any]] = {}
+    checkout_slots: set[int] = set()
+    for entry in base.iterdir():
+        index = slot_index_from_name(entry.name)
+        if index is None:
+            continue
+        if entry.name.endswith(QUARANTINE_SUFFIX) and entry.is_file():
+            record = read_json_object(entry) or {}
+            quarantines[index] = record
+        elif entry.is_dir():
+            checkout_slots.add(index)
+
+    slots = sorted(checkout_slots | set(occupants) | set(quarantines))
+    listed = []
+    for slot in slots:
+        quarantine = quarantines.get(slot)
+        occupant = occupants.get(slot)
+        if quarantine is not None:
+            state = "quarantined"
+        elif occupant is not None:
+            state = "occupied"
+        else:
+            state = "free"
+        identity = None
+        if quarantine is not None and isinstance(quarantine.get("identity"), dict):
+            identity = quarantine["identity"]
+        elif slot in identities:
+            identity = identities[slot]
+        listed.append(
+            {
+                "slot": slot,
+                "state": state,
+                "nonce": (quarantine or {}).get("nonce") or occupant,
+                "identity": identity,
+                "quarantine": quarantine,
+            }
+        )
+    return listed
+
+
+def clear_quarantine(worktree_base: str, slot: int) -> dict[str, Any]:
+    """Remove a named slot's quarantine after stating what was checked.
+
+    Clearing is an operator assertion, not an inference: a matching process
+    that is still live is reported and the file is still removed. The
+    coordinator reads the file on the next reserve, so the slot returns to
+    the allocator on the operator's word.
+    """
+    if not worktree_base:
+        die(
+            "no worktree base. Pass --worktree-base or set AETHER_GITHUB_LOCAL_WORKTREE_BASE "
+            "to the directory the coordinator checks lanes out under."
+        )
+    path = slot_quarantine_path(worktree_base, slot)
+    if not path.is_file():
+        die(f"slot {slot} is not quarantined (no file at {path})")
+    record = read_json_object(path) or {}
+    identity = record.get("identity") if isinstance(record.get("identity"), dict) else None
+    matching_process_live = False
+    observed = None
+    if identity is not None and isinstance(identity.get("pid"), int):
+        observed = observe_process(identity["pid"])
+        matching_process_live = observed is not None and identity_matches(identity, observed)
+    try:
+        path.unlink()
+    except OSError as error:
+        die(f"could not remove {path}: {error}")
+    return {
+        "slot": slot,
+        "cleared": True,
+        "path": str(path),
+        "nonce": record.get("nonce"),
+        "recorded_identity": identity,
+        "observed_identity": observed,
+        "matching_process_live": matching_process_live,
+        "checked": (
+            f"/proc/{identity['pid']}/stat starttime+boot_id"
+            if identity is not None and "pid" in identity
+            else "no recorded identity to compare"
+        ),
+        "on_operator_word": (
+            "a matching process is still live; the slot is released on your word"
+            if matching_process_live
+            else "no matching process is live; the slot is released on your word"
+        ),
+    }
 
 
 def read_evidence(worktree_base: str, nonce: str) -> dict[str, Any]:
@@ -628,6 +803,45 @@ def cmd_evidence(args: argparse.Namespace) -> None:
             print(f"  {line}")
 
 
+def cmd_slots(args: argparse.Namespace) -> None:
+    if not args.worktree_base:
+        die(
+            "no worktree base. Pass --worktree-base or set AETHER_GITHUB_LOCAL_WORKTREE_BASE "
+            "to the directory the coordinator checks lanes out under."
+        )
+    listed = list_slots(args.worktree_base)
+    if args.json:
+        print_json(listed)
+        return
+    if not listed:
+        print("no lane slots under this scratch root")
+        return
+    print(f"{'SLOT':<8} {'STATE':<12} {'NONCE':<20} IDENTITY")
+    for entry in listed:
+        identity = entry["identity"] or {}
+        if identity:
+            rendered = (
+                f"pid={identity.get('pid')} pgid={identity.get('pgid')} "
+                f"starttime={identity.get('starttime')} boot={identity.get('boot_id')}"
+            )
+        else:
+            rendered = "-"
+        print(f"{entry['slot']:<8} {entry['state']:<12} {str(entry['nonce'] or '-'):<20} {rendered}")
+
+
+def cmd_clear_quarantine(args: argparse.Namespace) -> None:
+    result = clear_quarantine(args.worktree_base, args.slot)
+    if args.json:
+        print_json(result)
+        return
+    print(f"cleared quarantine on slot {result['slot']}")
+    print(f"  path     {result['path']}")
+    print(f"  nonce    {result['nonce'] or '-'}")
+    print(f"  checked  {result['checked']}")
+    print(f"  live     {result['matching_process_live']}")
+    print(f"  {result['on_operator_word']}")
+
+
 def override_body(args: argparse.Namespace, **extra: Any) -> dict[str, Any]:
     """A body for a route that refuses a blank reason or operator."""
     if not args.reason.strip():
@@ -789,6 +1003,16 @@ def build_parser() -> argparse.ArgumentParser:
     evidence = subparsers.add_parser("evidence", help="the lane result summary for one dispatch nonce")
     evidence.add_argument("nonce", help="e.g. dispatch-1746, or just 1746")
     evidence.set_defaults(handler=cmd_evidence)
+
+    slots = subparsers.add_parser("slots", help="lane slots: occupied, free, or quarantined, with the identity that caused it")
+    slots.set_defaults(handler=cmd_slots)
+
+    clear_q = subparsers.add_parser(
+        "clear-quarantine",
+        help="clear a named slot quarantine after you have confirmed its child is gone",
+    )
+    clear_q.add_argument("slot", type=int, help="the slot index, e.g. 0 for slot-0")
+    clear_q.set_defaults(handler=cmd_clear_quarantine)
 
     def with_override(subparser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         subparser.add_argument("--reason", required=True, help="why (the API refuses a blank reason)")
