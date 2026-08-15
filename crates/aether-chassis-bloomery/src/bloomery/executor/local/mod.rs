@@ -70,17 +70,21 @@
 //! contract, its production [`process_runner`] implementation, the [`lane_env`]
 //! policy for what that spawn may hand down, the [`lane_program`] policy for
 //! which program it spawns, the [`mock_lane`] stand-in a lane-boundary scenario
-//! points that policy at, the [`orphan`] stand-in for a child inherited across a
-//! coordinator restart, and the [`backend`] registry +
+//! points that policy at, the [`identity`] a spawn records so a later process
+//! can re-attach, the [`orphan`] stand-in for a child inherited across a
+//! coordinator restart, the [`quarantine`] a slot takes when that child cannot
+//! be killed, and the [`backend`] registry +
 //! [`ExecutorBackend`](aether_bloomery::ExecutorBackend) impl over them.
 
 mod backend;
 mod error;
+mod identity;
 mod lane_env;
 mod lane_program;
 pub mod mock_lane;
 mod orphan;
 mod process_runner;
+mod quarantine;
 mod runner;
 mod session_reuse;
 

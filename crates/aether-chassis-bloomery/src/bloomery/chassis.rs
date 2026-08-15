@@ -384,7 +384,10 @@ impl BootableChassis for BloomeryChassis {
             // live snapshot, drives `reduce`, commits through the store, and gates
             // seals on the source claim refs. Native since the wasm-boundary
             // retirement — the api and reactors address it as a typed peer.
-            .with_actor::<ControlCore>(ControlSetup { poll_interval_secs: coordinator.poll_interval_secs })
+            .with_actor::<ControlCore>(ControlSetup {
+                poll_interval_secs: coordinator.poll_interval_secs,
+                artifacts_root: coordinator.artifacts_root,
+            })
             .with_actor_configured::<ArtifactsCapability>((), artifacts)
             .with_actor::<MirrorReactorCapability>(setups.mirror)
             // The executor dispatch reactor (#3505): drains the reducer's
@@ -460,7 +463,10 @@ impl BootableChassis for BloomeryChassis {
         Ok(builder
             .with_actor::<TraceDispatchCapability>(())
             .with_actor_configured::<StoreCapability>((), store)
-            .with_actor::<ControlCore>(ControlSetup { poll_interval_secs: coordinator.poll_interval_secs })
+            .with_actor::<ControlCore>(ControlSetup {
+                poll_interval_secs: coordinator.poll_interval_secs,
+                artifacts_root: coordinator.artifacts_root,
+            })
             .with_actor_configured::<ArtifactsCapability>((), artifacts)
             .with_actor_configured::<SessionPoolCapability>((), session)
             .with_actor_configured::<SigningCapability>((), signing)

@@ -38,15 +38,17 @@
 //! nothing local to reclaim and keeps the Actions fallback, which is where it
 //! went.
 //!
-//! # The child process is out of reach, deliberately
+//! # Re-attachment is by identity, not by pid
 //!
-//! Re-adopting a run does not re-acquire its child. The coordinator holds no
-//! handle across the restart, records no pid, and [`std::process::Child`] cannot
-//! be reconstructed from one; terminating by pid needs a platform syscall this
-//! workspace does not link on the coordinator's path and is unsound against pid
-//! reuse besides. So the deliberate answer is that a surviving lane child is not
-//! killed by pid — see [`OrphanedRun`](super::local::OrphanedRun) for what a
-//! re-adopted run can observe and what cancelling one actually reclaims.
+//! Re-adopting a run does not reconstruct a [`std::process::Child`]. What a
+//! later coordinator can hold is the process identity the previous one
+//! recorded beside the dispatch's evidence — pid, process-group id, start
+//! time, boot id — and only when that identity still names a live process
+//! does [`OrphanedRun`](super::local::OrphanedRun) own the child's group
+//! well enough to terminate it (issue #4999). A missing, unreadable, or
+//! mismatched record is the unowned run this module started as: cancelling
+//! it reports that the child could not be terminated, and the slot it held
+//! is quarantined rather than handed to the next dispatch.
 
 use std::collections::BTreeSet;
 

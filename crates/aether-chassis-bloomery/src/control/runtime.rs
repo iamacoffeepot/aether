@@ -40,11 +40,12 @@ use aether_bloomery::control::{
 };
 use aether_bloomery::{
     BloomId, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event,
-    Fact, IdempotencyKey, Outcome, ResolvedConfigs, Snapshot, SpendWindow, StudyRecord, Unproducible,
+    EvidenceKind, Fact, IdempotencyKey, Outcome, ResolvedConfigs, Snapshot, SpendWindow, StudyRecord, Unproducible,
     decode_recorded_decisions, grade, measure, reduce, view_of,
 };
 
 use super::{ControlCore, ControlSetup, ObserveTick};
+use crate::artifacts::{ArtifactsCapabilityState, GetResult, resolve_root};
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::source::SourceCapability;
 use crate::store::StoreCapability;
@@ -136,6 +137,11 @@ pub struct ControlCoreState {
     /// bytes, so this is the argument `reduce` reads the way it reads
     /// `configs` (ADR-0192).
     spend: SpendWindow,
+    /// Second handle on the shared artifacts root, so a calibration or spend
+    /// read can resolve study-record bytes without a mail round-trip. `None`
+    /// when the store would not open — those reads then report every study
+    /// as unaccounted rather than guessing a price.
+    artifacts: Option<ArtifactsCapabilityState>,
     pending: BTreeMap<String, VecDeque<Pending>>,
     pending_claims: BTreeMap<u64, PendingClaim>,
     pending_configs: BTreeMap<u64, PendingConfigs>,
@@ -175,6 +181,7 @@ impl NativeActor for ControlCore {
             calibration: CalibrationLedger::default(),
             configs: ResolvedConfigs::default(),
             spend: SpendWindow::default(),
+            artifacts: open_artifacts(config.artifacts_root.as_deref()),
             pending: BTreeMap::new(),
             pending_claims: BTreeMap::new(),
             pending_configs: BTreeMap::new(),
@@ -640,7 +647,7 @@ impl NativeActor for ControlCore {
         // bloom's grade, so it answers before the view document is projected at
         // all — the document would be built and thrown away (ADR-0184).
         if mail.calibration {
-            inbound.reply(&calibration_response(&state.calibration, &state.snapshot));
+            inbound.reply(&calibration_response(&state.calibration, &state.snapshot, state.artifacts.as_mut()));
             return;
         }
         // The live-read path holds no artifact access, so it resolves no question
@@ -740,11 +747,11 @@ impl ControlCoreState {
     ///
     /// Called wherever that evidence can change — a landed commit that
     /// admitted a study record, and the boot replay that rebuilds the same
-    /// log. The resolver this cap can offer is still none (the artifact
-    /// bytes live one capability over), so an unadmitted or unresolvable
-    /// record raises the unaccounted count rather than a guessed price.
+    /// log. An unresolvable artifact raises the unaccounted count rather
+    /// than a guessed price.
     fn refresh_spend(&mut self) {
-        self.spend = measure(&self.snapshot, unresolved_study);
+        let records = load_study_records(self.artifacts.as_mut(), &self.snapshot);
+        self.spend = measure(&self.snapshot, |digest| records.get(digest).copied());
     }
 
     fn inflight_for_key(&self, key: &str) -> usize {
@@ -844,34 +851,81 @@ impl ControlCoreState {
 /// [`grade`]'s report over the same snapshot — the study report's first reader
 /// outside a test.
 ///
-/// Both halves resolve study artifacts through [`unresolved_study`], which is
-/// where this read's honesty boundary sits: a study record is a standalone
-/// artifact in `aether.artifacts`, and nothing admits an
-/// `EvidenceKind::StudyRecord` verdict into the reducer yet — the intake lane
-/// writes the artifact and its index row instead. So the fold holds no study
-/// links, the resolver is never consulted, and the cost columns come back
-/// unfilled with `samples` at zero saying exactly that. The counts the journal
-/// *does* carry — attempts, rolls, the typed verifier failures — are the read's
-/// substance today.
-fn calibration_response(ledger: &CalibrationLedger, snapshot: &Snapshot) -> QueryResult {
-    let document =
-        CalibrationDocument { ledger: ledger.report(unresolved_study), study: grade(snapshot, unresolved_study) };
+/// Both halves resolve study artifacts through [`load_study_records`]: the
+/// fold holds digests, and this read pays the lookup against the shared
+/// artifacts store. An artifact that cannot be read or decoded costs its
+/// cell the cost, time, and sample columns and nothing else — never a
+/// guessed price.
+fn calibration_response(
+    ledger: &CalibrationLedger,
+    snapshot: &Snapshot,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
+) -> QueryResult {
+    let records = load_study_records(artifacts, snapshot);
+    let document = CalibrationDocument {
+        ledger: ledger.report(|digest| records.get(digest).copied()),
+        study: grade(snapshot, |digest| records.get(digest).copied()),
+    };
     match to_vec(&document) {
         Ok(document) => QueryResult::Calibration { document },
         Err(error) => QueryResult::Err { error: format!("calibration document encode failed: {error}") },
     }
 }
 
-/// The study-artifact resolver this cap can offer: none.
+/// Resolve each admitted study evidence's `detail` to its [`StudyRecord`].
 ///
-/// The control core owns the journal-derived snapshot and the ledger folded
-/// beside it; the artifact bytes live one capability over. Both readers take the
-/// miss the same way — [`grade`] spends the record's cost and time columns and
-/// nothing else, the ledger spends the cell's sample — so a calibration read
-/// reports what it measured with the unmeasured columns visibly empty, rather
-/// than reporting numbers nobody took.
-fn unresolved_study(_artifact: &Digest) -> Option<StudyRecord> {
-    None
+/// The fold and the snapshot hold digests, not columns; this is the read-time
+/// lookup `report` / [`grade`] / [`measure`] already take as a closure. A
+/// missing store, a missing digest, or bytes that are not a canonical study
+/// record are all a miss — the honesty boundary, never a zero-cost stand-in.
+fn load_study_records(
+    artifacts: Option<&mut ArtifactsCapabilityState>,
+    snapshot: &Snapshot,
+) -> BTreeMap<Digest, StudyRecord> {
+    let Some(artifacts) = artifacts else {
+        return BTreeMap::new();
+    };
+    let mut records = BTreeMap::new();
+    for bloom in snapshot.blooms.values() {
+        for evidence in &bloom.evidence {
+            if evidence.kind != EvidenceKind::StudyRecord || records.contains_key(&evidence.detail) {
+                continue;
+            }
+            let GetResult::Ok { bytes, .. } = artifacts.get(lowercase_hex(evidence.detail.as_bytes())) else {
+                continue;
+            };
+            let Ok(study) = from_bytes::<StudyRecord>(&bytes) else {
+                continue;
+            };
+            // The untagged wire can coincidentally decode some other artifact;
+            // only a round-trip back to the stored bytes is a study record.
+            if to_vec(&study).ok().as_deref() != Some(bytes.as_slice()) {
+                continue;
+            }
+            records.insert(evidence.detail, study);
+        }
+    }
+    records
+}
+
+/// Open a second handle on the shared artifacts root. A store that will not
+/// open disables study resolution for this process rather than failing
+/// boot — the ledger is a grading surface, and a coordinator that cannot
+/// read costs must still run blooms.
+fn open_artifacts(configured: Option<&str>) -> Option<ArtifactsCapabilityState> {
+    let root = resolve_root(configured);
+    match ArtifactsCapabilityState::open(&root) {
+        Ok(artifacts) => Some(artifacts),
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::control",
+                root = %root.display(),
+                %error,
+                "artifacts store did not open; calibration and spend reads will leave study columns unaccounted",
+            );
+            None
+        }
+    }
 }
 
 /// Answer an orphan-claim release-status read from the snapshot's record map
@@ -1106,9 +1160,54 @@ fn observation_already_admitted(snapshot: &Snapshot, head: &Digest) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery::{Digest, IdempotencyKey, QueryResult, Snapshot};
+    use std::collections::{BTreeMap, BTreeSet};
 
-    use super::{lowercase_hex, observation_already_admitted, observe_mainline_key, release_response};
+    use aether_bloomery::{
+        BloomDraft, BloomId, BloomRecord, BloomStatus, Digest, Evidence, EvidenceKind, IdempotencyKey, QueryResult,
+        Snapshot, StageCatalog, StudyCost, StudyRecord,
+    };
+    use aether_data::wire::to_vec;
+
+    use super::{
+        load_study_records, lowercase_hex, observation_already_admitted, observe_mainline_key, release_response,
+    };
+    use crate::artifacts::{ArtifactsCapabilityState, PutResult};
+
+    fn digest(seed: u8) -> Digest {
+        Digest::from_bytes([seed; 32])
+    }
+
+    fn snapshot_with_study(subject: Digest, detail: Digest) -> Snapshot {
+        let record = BloomRecord {
+            spec: BloomDraft::default().seal(),
+            stage_catalog: StageCatalog::line(),
+            status: BloomStatus::Sealed,
+            claims: BTreeMap::new(),
+            evidence: vec![Evidence { subject, kind: EvidenceKind::StudyRecord, detail }],
+            holds: BTreeSet::new(),
+            progress: BTreeMap::new(),
+            wedged: BTreeMap::new(),
+            dispatches: BTreeMap::new(),
+            integration: None,
+            aggregate_rolls: 0,
+            aggregate_verify_rolls: 0,
+            landing_rolls: 0,
+            resolved_head: None,
+            review_park: None,
+            verify_proofs: BTreeMap::new(),
+            verify_reuses: Vec::new(),
+            aggregate_fault: None,
+            composition_findings: Vec::new(),
+            adjudications: Vec::new(),
+            operator_repairs: Vec::new(),
+            operator_hold: None,
+            deferred_dispatches: BTreeSet::new(),
+            superseded_by: None,
+        };
+        let mut snapshot = Snapshot::default();
+        snapshot.blooms.insert(BloomId(digest(1)), record);
+        snapshot
+    }
 
     #[test]
     fn observe_mainline_key_uses_lowercase_hex() {
@@ -1173,5 +1272,47 @@ mod tests {
 
         assert_eq!(release_response(&snapshot, &[7; 32]), QueryResult::ReleaseNotFound);
         assert_eq!(release_response(&snapshot, b"not a digest"), QueryResult::ReleaseNotFound);
+    }
+
+    // The plausible bug: the resolver answers a missing digest with a
+    // zero-cost record, so an unreadable artifact looks like a free attempt
+    // and a calibration read cannot tell "this seat is free" from "we have
+    // no measurement".
+    #[test]
+    fn an_unresolvable_artifact_is_a_miss_not_a_zero_cost_record() {
+        let dir = tempfile::tempdir().expect("temp artifacts root");
+        let mut artifacts = ArtifactsCapabilityState::open(dir.path()).expect("artifacts store opens");
+        let snapshot = snapshot_with_study(digest(2), digest(3));
+
+        let records = load_study_records(Some(&mut artifacts), &snapshot);
+        assert!(records.is_empty(), "a missing digest must not become a study record");
+        assert_eq!(load_study_records(None, &snapshot).len(), 0, "and neither must a missing store");
+    }
+
+    // The plausible bug: the resolver decodes the artifact but keys it by
+    // StudyRecord::id (domain-tagged) instead of the content-store hash the
+    // evidence detail carries, so report() asks for the store hash and
+    // never finds the record that is sitting in the map.
+    #[test]
+    fn a_stored_study_record_resolves_under_its_content_store_hash() {
+        let dir = tempfile::tempdir().expect("temp artifacts root");
+        let mut artifacts = ArtifactsCapabilityState::open(dir.path()).expect("artifacts store opens");
+        let bloom = BloomId(digest(1));
+        let subject = digest(2);
+        let study = StudyRecord {
+            bloom,
+            subject,
+            cost: StudyCost { cost_micro_usd: 7_000, duration_millis: 4_500, ..StudyCost::default() },
+        };
+        let bytes = to_vec(&study).expect("a study record wire-encodes");
+        let PutResult::Ok { digest: stored } = artifacts.put(&bytes, &[]) else {
+            panic!("the study artifact stores");
+        };
+        let detail = Digest::of_wire_bytes(&bytes);
+        assert_eq!(stored, lowercase_hex(detail.as_bytes()), "the store hash is the untagged sha256");
+
+        let records = load_study_records(Some(&mut artifacts), &snapshot_with_study(subject, detail));
+        assert_eq!(records.get(&detail), Some(&study), "the reported columns are the record's");
+        assert_eq!(records.len(), 1);
     }
 }

@@ -168,6 +168,12 @@ impl AdmitSink for Collector {
     }
 }
 
+fn sink_has_study_evidence(sink: &Collector) -> bool {
+    sink.0.iter().any(|admission| {
+        matches!(&admission.event.fact, Fact::AdmitEvidence { evidence, .. } if evidence.kind == EvidenceKind::StudyRecord)
+    })
+}
+
 struct CapturingSubscriber {
     events: Arc<Mutex<Vec<String>>>,
     next_span: AtomicU64,
@@ -1348,6 +1354,10 @@ fn a_measured_attempt_writes_one_priced_study_row_and_an_unmeasured_one_writes_n
 
     assert_eq!(report.studied, 1, "the measured attempt recorded its cost");
     assert_eq!(report.admitted, 1, "and the verdict admitted on the same pass");
+    assert!(
+        sink_has_study_evidence(&sink),
+        "the cycle journals the study artifact so a calibration read can resolve it"
+    );
 
     // The row is keyed by the digest the order *displayed*, not by anything the
     // upload claimed for itself.

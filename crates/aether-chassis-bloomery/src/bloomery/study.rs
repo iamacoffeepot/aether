@@ -28,31 +28,32 @@
 //!
 //! # The bytes are the truth; the index is a projection
 //!
-//! An accepted study upload does **not** enter the reducer (no new `Fact`, no
-//! new `EvidenceKind` — that reducer-side admission is deferred to #3525). It
-//! normalizes to a [`StudyRecord`] whose canonical bytes are `put` into
-//! `aether.artifacts` with the graded attempt digest as a derivation parent, and
-//! a `(bloom, attempt) → study-artifact` row is written to the `study_index`
-//! projection ([`StoreBackend::record_study`]). That projection is always
-//! rebuildable from the artifact bytes alone ([`rebuild_study_index`]) — it can
-//! be dropped and reconstructed, and it survives the outstanding order being
-//! consumed by the later resolution claim, because the bloom and attempt it
-//! keys on live in the `StudyRecord`'s own bytes.
+//! An accepted study upload normalizes to a [`StudyRecord`] whose canonical
+//! bytes are `put` into `aether.artifacts` with the graded attempt digest as
+//! a derivation parent, a `(bloom, attempt) → study-artifact` row is written
+//! to the `study_index` projection ([`StoreBackend::record_study`]), and the
+//! caller admits [`Fact::AdmitEvidence`] carrying [`EvidenceKind::StudyRecord`]
+//! so the journal names the artifact the calibration and spend reads resolve.
+//! The index is always rebuildable from the artifact bytes alone
+//! ([`rebuild_study_index`]) — it can be dropped and reconstructed, and it
+//! survives the outstanding order being consumed by the later resolution
+//! claim, because the bloom and attempt it keys on live in the
+//! [`StudyRecord`]'s own bytes.
 
 use std::error::Error;
 use std::fmt;
 use std::fmt::Write as _;
 
 use aether_bloomery::{
-    BloomId, ConfigResolveError, ConfigScopes, Digest, Nonce, PriceTable, SealedPriceTable, StudyCall, StudyCost,
-    StudyRecord,
+    BloomId, ConfigResolveError, ConfigScopes, Digest, Event, Evidence, EvidenceKind, Fact, Nonce, PriceTable,
+    SealedPriceTable, StudyCall, StudyCost, StudyRecord,
 };
 use aether_bloomery_github::{InwardError, StudyResult, normalize_study_result};
 use aether_data::Kind;
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
 use crate::artifacts::{ArtifactsCapabilityState, ArtifactsError, PutResult};
-use crate::bloomery::intake::DispatchRecord;
+use crate::bloomery::intake::{AdmissionKey, DispatchRecord};
 use crate::store::{StoreBackend, StoreConfigError};
 
 /// A runner result record a worker uploaded for a `construct.implement` attempt:
@@ -215,6 +216,29 @@ pub fn admit_study(
     Ok(StudyAdmitDecision::Admitted(StudyAdmission { bloom, subject: displayed, study_artifact }))
 }
 
+/// The journal event that names an accepted study artifact so a calibration
+/// or spend read can resolve it.
+///
+/// `detail` is the content-store hash (sha256 of the record's wire bytes),
+/// not the domain-tagged [`StudyRecord::id`](StudyRecord::id): that is the
+/// address `aether.artifacts` stored it under, so the control-core resolver
+/// can `get` it. `None` only when the store returned a digest that is not
+/// 32 bytes of hex — not a path a well-formed put takes.
+#[must_use]
+pub fn study_evidence_event(admission: &StudyAdmission, nonce: &Nonce) -> Option<Event> {
+    Some(Event {
+        idempotency_key: AdmissionKey::Study.of(&nonce.0),
+        fact: Fact::AdmitEvidence {
+            bloom: admission.bloom,
+            evidence: Evidence {
+                subject: admission.subject,
+                kind: EvidenceKind::StudyRecord,
+                detail: digest_from_hex(&admission.study_artifact)?,
+            },
+        },
+    })
+}
+
 /// What the attempt's measured tokens are worth, in micro-USD, under the
 /// [`PriceTable`] its bloom sealed (#4679).
 ///
@@ -341,15 +365,39 @@ fn digest_to_parent(digest: &Digest) -> String {
     out
 }
 
+/// Inverse of [`digest_to_parent`] over a content-store hash: 64 hex
+/// characters, or `None` when the string is not a 32-byte digest.
+fn digest_from_hex(hex: &str) -> Option<Digest> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    let raw = hex.as_bytes();
+    for (i, slot) in bytes.iter_mut().enumerate() {
+        *slot = (hex_nibble(raw[i * 2])? << 4) | hex_nibble(raw[i * 2 + 1])?;
+    }
+    Some(Digest::from_bytes(bytes))
+}
+
+const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::{BloomId, Digest, Nonce, StageCatalog, StageId, StudyCost, StudyRecord, WorkpieceId};
     use aether_bloomery_github::parse_study_cost;
-    use aether_data::wire::from_bytes;
+    use aether_data::wire::{from_bytes, to_vec};
 
     use super::{
         StudyAdmission, StudyAdmitDecision, StudyRefusal, UploadedStudyRecord, admit_study, rebuild_study_index,
+        study_evidence_event,
     };
     use crate::artifacts::{ArtifactsCapabilityState, GetResult};
     use crate::bloomery::{DispatchRecord, record_dispatch};
@@ -490,6 +538,18 @@ mod tests {
         assert!(decoded.grades(&attempt), "the study artifact grades the attempt it names");
         assert_eq!(decoded.bloom, bloom);
         assert_eq!(decoded.cost, cost());
+
+        // The journal event names the content-store hash, not the domain-tagged
+        // record id: that is the address aether.artifacts stored it under, so
+        // the control-core resolver can get it. Using StudyRecord::id here
+        // would make every calibration read miss a record that is on disk.
+        let event = study_evidence_event(&admission, &Nonce("n-1".to_owned())).expect("a put digest is 32-byte hex");
+        let aether_bloomery::Fact::AdmitEvidence { evidence, .. } = event.fact else {
+            panic!("the study event is AdmitEvidence");
+        };
+        assert_eq!(evidence.kind, aether_bloomery::EvidenceKind::StudyRecord);
+        assert_eq!(evidence.subject, attempt);
+        assert_eq!(evidence.detail, Digest::of_wire_bytes(&to_vec(&decoded).unwrap()));
 
         // Match-without-consume: the order stays live for the terminal resolution
         // claim, and a second study admit is idempotent and still leaves it.
