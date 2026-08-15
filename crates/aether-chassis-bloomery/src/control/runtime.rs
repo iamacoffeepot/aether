@@ -719,8 +719,15 @@ impl ControlCoreState {
             (Fact::Seal(spec), Outcome::Sealed(bloom)) => {
                 Some(seal_claim_mail(bloom, spec).map(|mail| (SourceClaim::Seal(mail), ClaimKind::Seal)))
             }
+            (Fact::GraphSeal { spec, predecessor: None, .. }, Outcome::Sealed(bloom)) => {
+                Some(seal_claim_mail(bloom, spec).map(|mail| (SourceClaim::Seal(mail), ClaimKind::Seal)))
+            }
             (Fact::Supersede { predecessor, successor }, Outcome::Superseded { .. }) => Some(
                 transfer_seal_mail(&self.snapshot, predecessor, successor)
+                    .map(|mail| (SourceClaim::Transfer(mail), ClaimKind::Supersede)),
+            ),
+            (Fact::GraphSeal { predecessor: Some(predecessor), spec, .. }, Outcome::Superseded { .. }) => Some(
+                transfer_seal_mail(&self.snapshot, predecessor, spec)
                     .map(|mail| (SourceClaim::Transfer(mail), ClaimKind::Supersede)),
             ),
             _ => None,
@@ -1092,7 +1099,8 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         | Decision::RecordOperatorHold { .. }
         | Decision::RecordOperatorRelease { .. }
         | Decision::DeferDispatch { .. }
-        | Decision::RecordSpendQuiesce { .. } => return Ok(None),
+        | Decision::RecordSpendQuiesce { .. }
+        | Decision::RecordMemberDependencies { .. } => return Ok(None),
     };
     Ok(Some(payload))
 }
@@ -1202,6 +1210,7 @@ mod tests {
             operator_repairs: Vec::new(),
             operator_hold: None,
             deferred_dispatches: BTreeSet::new(),
+            dependencies: Vec::new(),
             superseded_by: None,
         };
         let mut snapshot = Snapshot::default();

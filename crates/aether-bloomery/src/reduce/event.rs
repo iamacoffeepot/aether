@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    Adjudication, BloomSpec, CandidateRef, ConfigRegistry, Evidence, OperatorHold, OperatorRepair, OrphanClaimRelease,
-    OrphanClaimReleaseCompletion, ResolutionClaim, Statement, VerifyFailureSet,
+    Adjudication, BloomSpec, CandidateRef, ConfigRegistry, Evidence, MemberDependency, OperatorHold, OperatorRepair,
+    OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, Statement, VerifyFailureSet,
 };
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
@@ -481,6 +481,25 @@ pub enum Fact {
         /// The globs both declared surfaces permit, sorted and deduplicated.
         intersection: Vec<String>,
     },
+    /// A seal or supersede that carries the door-resolved member-dependency
+    /// graph (ADR-0196).
+    ///
+    /// `Fact::Seal` / `Fact::Supersede` remain the edgeless shapes — an empty
+    /// graph is those facts plus an empty
+    /// [`Decision::RecordMemberDependencies`](crate::Decision::RecordMemberDependencies)
+    /// appended to their effects. This variant is only the non-empty graph, so
+    /// an edgeless seal's event bytes stay today's `Seal`/`Supersede`. Appended
+    /// past [`Fact::SurfaceOverlap`] so every prior fact keeps its wire
+    /// discriminant.
+    GraphSeal {
+        /// The predecessor this seal supersedes, or `None` for a first seal.
+        predecessor: Option<BloomId>,
+        /// The spec being admitted — the same payload [`Fact::Seal`] /
+        /// [`Fact::Supersede`] carry.
+        spec: BloomSpec,
+        /// The non-empty resolved edge set the door decided.
+        edges: Vec<MemberDependency>,
+    },
 }
 
 impl Fact {
@@ -493,7 +512,7 @@ impl Fact {
     /// configuration was produced when it sealed.
     pub fn config_registries(&self) -> impl Iterator<Item = &ConfigRegistry> {
         let spec = match self {
-            Self::Seal(spec) | Self::Supersede { successor: spec, .. } => Some(spec),
+            Self::Seal(spec) | Self::Supersede { successor: spec, .. } | Self::GraphSeal { spec, .. } => Some(spec),
             _ => None,
         };
         spec.into_iter().flat_map(BloomSpec::config_registries)

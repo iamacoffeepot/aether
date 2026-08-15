@@ -28,7 +28,8 @@ mod verify;
 
 pub use approval::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, surface_intersection};
 pub use bloom::{
-    BloomDraft, BloomSpec, LandingReceipt, MemberCandidate, MemberSubject, Membership, ResolutionClaim, ResolvedBloom,
+    BloomDraft, BloomSpec, DependencyError, LandingReceipt, MemberCandidate, MemberDependency, MemberSubject,
+    Membership, ResolutionClaim, ResolvedBloom, resolve_member_dependencies,
 };
 pub use composition::CompositionFinding;
 pub use config::{

@@ -11,9 +11,9 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::values::{
-    Adjudication, AgentProfile, CompositionFinding, ConfigRegistry, Evidence, MemberCandidate, OperatorHold,
-    OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, ResolvedBloom, SpendQuiesce,
-    StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge,
+    Adjudication, AgentProfile, CompositionFinding, ConfigRegistry, Evidence, MemberCandidate, MemberDependency,
+    OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, ResolvedBloom,
+    SpendQuiesce, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -592,5 +592,19 @@ pub enum Decision {
     RecordSpendQuiesce {
         /// The crossing that closed the door, or `None` to clear.
         quiesce: Option<SpendQuiesce>,
+    },
+    /// Record the door-resolved member-dependency graph (ADR-0196) — see
+    /// [`BloomRecord::dependencies`](crate::BloomRecord::dependencies).
+    ///
+    /// The edge set the seal door decided: declared edges unioned with derived
+    /// overlap-ordering edges. Empty is the edgeless degenerate case — today's
+    /// bloom, with this value appended. Snapshot-folding and journal-derived
+    /// like every other `Record*`. Appended so the prior decisions' wire
+    /// discriminants are unchanged.
+    RecordMemberDependencies {
+        /// The bloom the graph was sealed on.
+        bloom: BloomId,
+        /// The resolved `(member, depends_on)` pairs, sorted and de-duplicated.
+        edges: Vec<MemberDependency>,
     },
 }

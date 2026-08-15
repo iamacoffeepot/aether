@@ -162,6 +162,14 @@ pub enum SealError {
     /// move the other's line position. Appended so the prior variants' wire
     /// discriminants are unchanged.
     ReservedWorkpieceId(WorkpieceId),
+    /// A member-dependency edge names a workpiece that is not in this bloom
+    /// (ADR-0196). Appended so the prior variants' wire discriminants are
+    /// unchanged.
+    UnknownDependency(WorkpieceId),
+    /// The resolved member-dependency graph contains a cycle (ADR-0196).
+    /// The vec names the members on the cycle. Appended so the prior
+    /// variants' wire discriminants are unchanged.
+    CyclicDependencies(Vec<WorkpieceId>),
 }
 
 /// Why a supersession was refused.

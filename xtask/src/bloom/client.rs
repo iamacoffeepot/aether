@@ -73,7 +73,10 @@ impl<'a> Client<'a> {
 }
 
 fn spec_in_fact(fact: &Value) -> Option<BloomSpec> {
-    let spec = fact.get("Seal").or_else(|| fact.get("Supersede").and_then(|body| body.get("successor")))?;
+    let spec = fact
+        .get("Seal")
+        .or_else(|| fact.get("Supersede").and_then(|body| body.get("successor")))
+        .or_else(|| fact.get("GraphSeal").and_then(|body| body.get("spec")))?;
     serde_json::from_value(spec.clone()).ok()
 }
 

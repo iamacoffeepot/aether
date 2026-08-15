@@ -15,8 +15,9 @@ use serde::de::DeserializeOwned;
 
 use aether_actor::Manual;
 use aether_bloomery::{
-    Admit, ApprovalPolicy, AuthorityDoor, BloomDraft, BloomId, BloomSpec, ConfigScopes, Digest, Event, Fact,
-    IdempotencyKey, Membership, SpendCeiling, Statement, WorkpieceId, surface_intersection,
+    Admit, ApprovalPolicy, AuthorityDoor, BloomDraft, BloomId, BloomSpec, ConfigScopes, DependencyError, Digest, Event,
+    Fact, IdempotencyKey, MemberDependency, Membership, SpendCeiling, Statement, WorkpieceId,
+    resolve_member_dependencies, surface_intersection,
 };
 use aether_data::wire::to_vec;
 use aether_http::HttpServerResponse;
@@ -38,10 +39,14 @@ use crate::store::{RecordDispatchDescription, StoreCapability};
 /// supersession of `predecessor`. Both carry the identical [`BloomSpec`] — the
 /// gate, the descriptions, and the deferred-verify path are the same for each,
 /// so the door is the only thing that varies.
-fn admission_fact(predecessor: Option<BloomId>, spec: BloomSpec) -> Fact {
-    match predecessor {
-        None => Fact::Seal(spec),
-        Some(predecessor) => Fact::Supersede { predecessor, successor: spec },
+fn admission_fact(predecessor: Option<BloomId>, spec: BloomSpec, edges: Vec<MemberDependency>) -> Fact {
+    if edges.is_empty() {
+        match predecessor {
+            None => Fact::Seal(spec),
+            Some(predecessor) => Fact::Supersede { predecessor, successor: spec },
+        }
+    } else {
+        Fact::GraphSeal { predecessor, spec, edges }
     }
 }
 
@@ -82,7 +87,15 @@ impl ApiCapabilityState {
             Err(response) => return Routed::Reply(response),
         };
 
-        self.gate_and_admit(ctx, draft, None, &request.projections, request.descriptions, request.idempotency_key)
+        self.gate_and_admit(
+            ctx,
+            draft,
+            None,
+            &request.projections,
+            request.descriptions,
+            request.idempotency_key,
+            &request.edges,
+        )
     }
 
     /// The gate-then-admit core both doors share (#4638): resolve every
@@ -112,6 +125,7 @@ impl ApiCapabilityState {
         projections: &[MemberProjection],
         descriptions: BTreeMap<String, String>,
         idempotency_key: Option<String>,
+        declared_edges: &[MemberDependency],
     ) -> Routed {
         // Cap the seal's membership before any gate work or signing dispatch: each
         // above-auto member fans out one `Verify` and one held `SealVerify`
@@ -147,6 +161,10 @@ impl ApiCapabilityState {
                 Ok(resolved) => resolved,
                 Err(response) => return Routed::Reply(response),
             };
+        let edges = match resolve_seal_graph(&sealed_proposals, projections, declared_edges) {
+            Ok(edges) => edges,
+            Err(response) => return Routed::Reply(response),
+        };
         // Every member's projection resolved, so the door now holds every
         // declared surface at once — the one place that ever does. Journal the
         // cross-member overlaps before the seal admits (#4931).
@@ -166,7 +184,10 @@ impl ApiCapabilityState {
             // seal, and a member with none simply dispatches subject-only.
             Self::persist_descriptions(ctx, &spec, &descriptions);
             let key = idempotency_key.unwrap_or_else(|| hex_encode(spec.id().0.as_bytes()));
-            return admit(&Event { idempotency_key: IdempotencyKey(key), fact: admission_fact(predecessor, spec) });
+            return admit(&Event {
+                idempotency_key: IdempotencyKey(key),
+                fact: admission_fact(predecessor, spec, edges),
+            });
         }
         // Deferred path only: cap the outstanding `seals` map before dispatching any
         // `Verify`, so a flood of above-auto seals cannot grow the in-flight seal /
@@ -210,6 +231,7 @@ impl ApiCapabilityState {
             predecessor,
             descriptions,
             idempotency_key,
+            edges,
             verifications,
         }))
     }
@@ -346,12 +368,15 @@ impl ApiCapabilityState {
                 }
                 // Last verification: seal the fully-approved draft and admit,
                 // deferring on the reducer reply exactly as the synchronous path.
-                let PendingSeal { inbound, predecessor, gated, descriptions, idempotency_key, .. } =
+                let PendingSeal { inbound, predecessor, gated, descriptions, idempotency_key, edges, .. } =
                     self.seals.remove(&seal).expect("seal present; just mutated it");
                 let spec = gated.seal();
                 Self::persist_descriptions(ctx, &spec, &descriptions);
                 let key = idempotency_key.unwrap_or_else(|| hex_encode(spec.id().0.as_bytes()));
-                match to_vec(&Event { idempotency_key: IdempotencyKey(key), fact: admission_fact(predecessor, spec) }) {
+                match to_vec(&Event {
+                    idempotency_key: IdempotencyKey(key),
+                    fact: admission_fact(predecessor, spec, edges),
+                }) {
                     Ok(bytes) => {
                         let correlation = self.send_tracked(ctx.actor::<ControlCore>(), &Admit { event: bytes });
                         self.pending.insert(correlation, inbound);
@@ -475,6 +500,39 @@ fn resolve_seal_memberships(
     Ok((sealed_proposals, pending_verifications))
 }
 
+/// Resolve the seal's member-dependency graph (ADR-0196): declared edges
+/// unioned with one ordering edge per overlapping declared-surface pair, in
+/// seal-listed order. A cycle or an edge naming a non-member is a fail-closed
+/// `422` — the graph is decided here, before any admit.
+fn resolve_seal_graph(
+    members: &[Membership],
+    projections: &[MemberProjection],
+    declared: &[MemberDependency],
+) -> Result<Vec<MemberDependency>, HttpServerResponse> {
+    let listed: Vec<(WorkpieceId, &[String])> = members
+        .iter()
+        .filter_map(|member| {
+            projections
+                .iter()
+                .find(|projection| {
+                    projection.workpiece == member.workpiece && projection.scope_revision == member.scope_revision
+                })
+                .map(|projection| (member.workpiece.clone(), projection.declared_surface.as_slice()))
+        })
+        .collect();
+    match resolve_member_dependencies(&listed, declared) {
+        Ok(edges) => Ok(edges),
+        Err(DependencyError::UnknownWorkpiece(workpiece)) => Err(error_response(
+            422,
+            &format!("edge names workpiece {} which is not a member of this bloom", workpiece.0),
+        )),
+        Err(DependencyError::Cycle(cycle)) => {
+            let named = cycle.iter().map(|workpiece| workpiece.0.as_str()).collect::<Vec<_>>().join(" -> ");
+            Err(error_response(422, &format!("cyclic member dependencies: {named}")))
+        }
+    }
+}
+
 /// Every pair of this seal's members whose declared surfaces intersect, as the
 /// facts that record them (#4931).
 ///
@@ -550,10 +608,13 @@ fn parse_optional_body<T: DeserializeOwned + Default>(body: &[u8]) -> Result<T, 
 #[cfg(test)]
 mod tests {
     use aether_bloomery::{
-        BloomDraft, BloomId, ConfigRegistry, Digest, Evidence, EvidenceKind, Fact, Membership, WorkpieceId,
+        BloomDraft, BloomId, ConfigRegistry, Digest, Evidence, EvidenceKind, Fact, MemberDependency, Membership,
+        WorkpieceId,
     };
 
-    use super::{MemberProjection, SealRequest, admission_fact, parse_optional_body, surface_overlaps};
+    use super::{
+        MemberProjection, SealRequest, admission_fact, parse_optional_body, resolve_seal_graph, surface_overlaps,
+    };
     use crate::bloomery::{AdrTouch, Completeness};
 
     /// A sealed member at `revision`. Only its workpiece and scope revision are
@@ -656,7 +717,10 @@ mod tests {
         // for the very active bloom it was meant to replace.
         let spec = BloomDraft::default().seal();
 
-        assert!(matches!(admission_fact(None, spec), Fact::Seal(_)), "an unset predecessor is a first seal");
+        assert!(
+            matches!(admission_fact(None, spec, Vec::new()), Fact::Seal(_)),
+            "an unset predecessor is a first seal"
+        );
     }
 
     #[test]
@@ -664,7 +728,7 @@ mod tests {
         let predecessor = BloomId(Digest::from_bytes([3; 32]));
         let spec = BloomDraft::default().seal();
 
-        match admission_fact(Some(predecessor), spec) {
+        match admission_fact(Some(predecessor), spec, Vec::new()) {
             Fact::Supersede { predecessor: named, .. } => {
                 assert_eq!(named, predecessor, "the supersession must name the predecessor it was given");
             }
@@ -698,5 +762,92 @@ mod tests {
                 .expect("a descriptions map parses");
         assert_eq!(with.descriptions.get("wp-a").map(String::as_str), Some("build the thing"));
         assert_eq!(with.descriptions.get("wp-b").map(String::as_str), Some("and the other"));
+    }
+
+    #[test]
+    fn seal_request_edges_default_empty_and_parse() {
+        // An absent `edges` field must still seal — the `#[serde(default)]`
+        // guard. Dropping it would 400 every edgeless client.
+        let none: SealRequest = parse_optional_body(br#"{"idempotency_key":"k"}"#).expect("no edges still parses");
+        assert!(none.edges.is_empty(), "an absent edges list defaults empty rather than erroring");
+
+        let with: SealRequest = parse_optional_body(br#"{"edges":[{"member":"issue-B","depends_on":"issue-A"}]}"#)
+            .expect("an edges list parses");
+        assert_eq!(
+            with.edges,
+            [MemberDependency {
+                member: WorkpieceId("issue-B".to_owned()),
+                depends_on: WorkpieceId("issue-A".to_owned())
+            }]
+        );
+    }
+
+    #[test]
+    fn a_nonempty_graph_admits_as_graph_seal() {
+        // The edgeless path stays `Fact::Seal` so today's event bytes do not
+        // move. A non-empty graph has to ride a new variant or it cannot reach
+        // the reducer — swapping those two would reshape every historical seal.
+        let spec = BloomDraft::default().seal();
+        let edges = vec![MemberDependency {
+            member: WorkpieceId("issue-B".to_owned()),
+            depends_on: WorkpieceId("issue-A".to_owned()),
+        }];
+        match admission_fact(None, spec, edges.clone()) {
+            Fact::GraphSeal { predecessor: None, edges: named, .. } => assert_eq!(named, edges),
+            other => panic!("a non-empty graph must admit GraphSeal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_door_derives_an_ordering_edge_from_overlapping_surfaces() {
+        // Surfaces ride the request, not the spec. If the door handed the
+        // resolver empty surfaces, overlapping members would seal with no
+        // graph and collide at fold time — the bug derived edges exist to close.
+        let members = [member("wp-a", 1), member("wp-b", 2)];
+        let projections = [
+            projection("wp-a", 1, &["crates/aether-bloomery/**"]),
+            projection("wp-b", 2, &["crates/aether-bloomery/src/lib.rs"]),
+        ];
+
+        let edges = resolve_seal_graph(&members, &projections, &[]).expect("acyclic overlap");
+        assert_eq!(
+            edges,
+            [MemberDependency { member: WorkpieceId("wp-b".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) }]
+        );
+    }
+
+    #[test]
+    fn the_door_refuses_a_cycle_naming_its_members() {
+        // The door is the refuse — a cycle that reached the reducer would
+        // journal a graph no scheduler can fire. The message must name both
+        // members so the operator can see the loop they wrote.
+        let members = [member("wp-a", 1), member("wp-b", 2)];
+        let projections = [projection("wp-a", 1, &["docs/a/**"]), projection("wp-b", 2, &["docs/b/**"])];
+        let declared = [
+            MemberDependency { member: WorkpieceId("wp-a".to_owned()), depends_on: WorkpieceId("wp-b".to_owned()) },
+            MemberDependency { member: WorkpieceId("wp-b".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) },
+        ];
+
+        let error = resolve_seal_graph(&members, &projections, &declared).expect_err("a cycle must refuse");
+        let body = String::from_utf8_lossy(&error.body);
+        assert_eq!(error.status, 422);
+        assert!(body.contains("wp-a"), "cycle names wp-a: {body}");
+        assert!(body.contains("wp-b"), "cycle names wp-b: {body}");
+    }
+
+    #[test]
+    fn the_door_refuses_a_non_member_naming_it() {
+        // An edge pointing outside the bloom cannot be scheduled here.
+        // Naming the in-bloom end instead would hide the workpiece the
+        // operator actually misspelled.
+        let members = [member("wp-a", 1)];
+        let projections = [projection("wp-a", 1, &["docs/**"])];
+        let declared =
+            [MemberDependency { member: WorkpieceId("wp-a".to_owned()), depends_on: WorkpieceId("wp-z".to_owned()) }];
+
+        let error = resolve_seal_graph(&members, &projections, &declared).expect_err("a non-member must refuse");
+        let body = String::from_utf8_lossy(&error.body);
+        assert_eq!(error.status, 422);
+        assert!(body.contains("wp-z"), "refusal names the outsider: {body}");
     }
 }

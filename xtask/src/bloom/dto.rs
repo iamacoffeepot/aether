@@ -218,12 +218,21 @@ pub struct MemberProjection {
     pub pre_approved: bool,
 }
 
+/// One declared member-dependency edge (`member` depends on `depends_on`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DependencyEdge {
+    pub member: String,
+    pub depends_on: String,
+}
+
 /// `POST /drafts/{id}/seal` body.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SealRequest {
     pub projections: Vec<MemberProjection>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub descriptions: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<DependencyEdge>,
 }
 
 /// `POST /blooms/{id}/supersede` body.

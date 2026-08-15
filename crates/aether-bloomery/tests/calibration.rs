@@ -10,10 +10,14 @@ mod common;
 
 use std::collections::BTreeMap;
 
+use aether_data::Kind;
+use aether_data::wire::to_vec;
+
 use aether_bloomery::{
-    AgentSelection, BloomId, CalibrationLedger, CandidateRef, CapabilityCell, CapabilityLedger, Decision, Decisions,
-    Digest, Event, Evidence, EvidenceKind, Fact, Harness, ModelOverride, ReasoningEffort, ResolvedConfigs, Snapshot,
-    SpendWindow, StageId, StageOverride, StudyCost, StudyRecord, VerifyFailure, reduce,
+    AgentSelection, BloomId, CalibrationLedger, CandidateRef, CapabilityCell, CapabilityLedger, ConfigKind, Decision,
+    Decisions, Digest, Event, Evidence, EvidenceKind, Fact, Harness, ModelOverride, Outcome, ReasoningEffort,
+    ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StageOverride, StudyCost, StudyRecord,
+    Unproducible, VerifyFailure, reduce,
 };
 use common::{claim, digest, draft_with_member_override, event, membership, workpiece};
 
@@ -294,4 +298,108 @@ fn a_refused_verify_verdict_charges_nothing() {
 #[test]
 fn a_rendered_ledger_carries_its_caveat() {
     assert_eq!(CalibrationLedger::default().report(|_| None).caveat, aether_bloomery::LEDGER_CAVEAT);
+}
+
+/// One history folded two ways: live (each commit observes against the config
+/// table as of that moment) and boot (the final table is already full, the
+/// way `on_load_configs_result` then `on_replay_result` sequence it).
+struct History {
+    snapshot: Snapshot,
+    live: CalibrationLedger,
+    configs: ResolvedConfigs,
+    rows: Vec<(Event, Decisions)>,
+}
+
+impl History {
+    fn new() -> Self {
+        Self {
+            snapshot: Snapshot::new(digest(1)),
+            live: CalibrationLedger::default(),
+            configs: ResolvedConfigs::default(),
+            rows: Vec::new(),
+        }
+    }
+
+    fn publish(&mut self, override_: &ModelOverride) {
+        self.configs.insert(override_.address(), ModelOverride::NAME, to_vec(override_).expect("override encodes"));
+    }
+
+    fn admit(&mut self, event: Event) -> Decisions {
+        let decisions = reduce(&self.snapshot, &event, &self.configs, &SpendWindow::default());
+        self.live.observe(&event, &decisions, &self.configs);
+        self.snapshot = self.snapshot.apply(&event, &decisions, &self.configs);
+        self.rows.push((event, decisions.clone()));
+        decisions
+    }
+
+    fn replay(&self) -> CalibrationLedger {
+        let mut ledger = CalibrationLedger::default();
+        for (event, decisions) in &self.rows {
+            ledger.observe(event, decisions, &self.configs);
+        }
+        ledger
+    }
+}
+
+fn override_for(harness: Harness, model: &str) -> ModelOverride {
+    ModelOverride { agent: Some(AgentSelection { harness, model: model.into() }), ..ModelOverride::default() }
+}
+
+// Tripwire (ADR-0184): boot replay rebuilds the ledger exactly as the live
+// commits built it, even when config admissions interleave with dispatch-bearing
+// commits. The boot path front-loads the final table; the live path observes
+// against the table as of each commit. Those two views agree because both
+// admission doors (seal and supersede) refuse a registry that names an address
+// the reducer cannot produce — so a recorded `DispatchAttempt` never names a
+// config that was absent when it folded, and a later-admitted entry sitting in
+// the replay table is invisible to earlier rows. A future door that lets a
+// reference to an absent entry through would make the live fold fall back to
+// the catalog profile (`observe` treats `Missing` as unsealed) while replay
+// resolves the now-present override, and this equality would fail.
+#[test]
+fn boot_replay_rebuilds_the_ledger_exactly_as_live_commits_built_it_because_doors_refuse_absent_config_refs() {
+    let first = override_for(Harness::Claude, "claude-opus-5");
+    let second = override_for(Harness::Grok, "grok-build-1");
+    let (draft_a, _) = draft_with_member_override(1, membership(MEMBER, REVISION), &first);
+    let (draft_b, _) = draft_with_member_override(1, membership(MEMBER, REVISION), &second);
+    let spec_a = draft_a.seal();
+    let spec_b = draft_b.seal();
+
+    let mut history = History::new();
+
+    let refused = reduce(
+        &history.snapshot,
+        &event("seal-too-early", Fact::Seal(spec_a.clone())),
+        &history.configs,
+        &SpendWindow::default(),
+    );
+    assert!(
+        matches!(
+            refused.outcome,
+            Outcome::SealRejected(SealError::UnproducibleConfig { ref kind, reason: Unproducible::Absent, .. })
+                if kind == ModelOverride::NAME
+        ),
+        "a seal that names an absent override is refused at the door: {refused:?}",
+    );
+
+    history.publish(&first);
+    let Outcome::Sealed(predecessor) = history.admit(event("seal-a", Fact::Seal(spec_a))).outcome else {
+        panic!("the first override is present, so its seal admits");
+    };
+
+    history.publish(&second);
+    let superseded = history.admit(event("sup-b", Fact::Supersede { predecessor, successor: spec_b }));
+    assert!(
+        matches!(superseded.outcome, Outcome::Superseded { .. }),
+        "the second override is present, so the successor admits: {superseded:?}",
+    );
+
+    let live = history.live.report(|_| None);
+    let replayed = history.replay().report(|_| None);
+    assert_eq!(live, replayed, "front-loading the final table rebuilds the live fold");
+
+    let profile = StageCatalog::profile_of(StageId::Construct);
+    let want = vec![first.resolve(StageId::Construct, &profile), second.resolve(StageId::Construct, &profile)];
+    let got: Vec<_> = live.cells.iter().map(|cell| cell.agent.clone()).collect();
+    assert_eq!(got, want, "each override keyed its own Construct cell, so equality is not both paths ignoring configs");
 }
