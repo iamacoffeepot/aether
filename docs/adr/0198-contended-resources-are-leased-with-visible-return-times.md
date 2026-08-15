@@ -64,10 +64,17 @@ and a return-time forecast, computed from the earlier of each holder's
 `expires_at` and its predicted release — an EWMA of observed hold times per
 resource per stage, the `actor_cost` pattern applied to leases. Waiters
 subscribe rather than poll. The consequence is that waiting becomes
-schedulable: the ADR-0196 readiness fold consumes the forecast and prefers
-dispatching members whose leases are free now, interleaving cheap stages
-into the gaps under expensive ones, instead of blocking wide work behind a
-blind semaphore.
+schedulable, at both levels that plan. The ADR-0196 readiness fold consumes
+the forecast and prefers dispatching members whose leases are free now,
+interleaving cheap stages into the gaps under expensive ones, instead of
+blocking wide work behind a blind semaphore. And the forecast is equally
+addressed to the waiting agent itself: a denial with a return time is a
+planning input, not a rejection. An agent told its build slot frees in four
+minutes sizes work to that window — reads the next work order, runs the
+cheap half of its verification, drafts the report it will need anyway — and
+arrives at its turn already prepared. The difference between a semaphore
+and a library is that the library tells you when your turn begins, and an
+agent that knows its wait can spend it.
 
 ### One librarian, every agent
 
