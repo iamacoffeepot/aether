@@ -18,8 +18,8 @@ use super::{JanitorReactorCapability, JanitorReactorSetup};
 
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::bloomery::{
-    CaptureIdentity, DEFAULT_LANE_PROGRAM, ExecutorShell, LaneProgram, ProcessTransformRunner, SourceShell,
-    TransformRunner,
+    CaptureIdentity, DEFAULT_LANE_PROGRAM, ExecutorShell, LaneOccupancy, LaneProgram, ProcessTransformRunner,
+    SourceShell, TransformRunner,
 };
 use crate::store::SqliteStore;
 
@@ -113,17 +113,23 @@ impl NativeActor for JanitorReactorCapability {
 
     #[handler::single]
     fn on_janitor_tick(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: JanitorTick) {
+        // Cloned rather than borrowed so the probe outlives the `&mut` the
+        // store binding below takes on the same state. An `ExecutorShell` is
+        // two `Arc`s; the clone shares the very registry the lanes claim slots
+        // in, which is the whole point of asking it live.
+        let executor = state.executor.clone();
+        let lanes = || executor.as_ref().map_or_else(LaneOccupancy::default, ExecutorShell::lane_occupancy);
+
         let Some(store) = state.store.as_mut() else {
             return;
         };
-        let lanes_running = state.executor.as_ref().is_some_and(ExecutorShell::any_lane_running);
         match sweep(&mut SweepRequest {
             store,
             runner: state.runner.as_ref(),
             source: state.source.as_ref(),
             worktree_base: &state.worktree_base,
             target_base: &state.target_base,
-            lanes_running,
+            lanes: &lanes,
             policy: &state.policy,
             now: SystemTime::now(),
         }) {

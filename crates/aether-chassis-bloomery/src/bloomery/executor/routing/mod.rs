@@ -26,7 +26,7 @@ use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle,
 use aether_bloomery_github::ExecutorError;
 
 use super::ExecutorPortError;
-use super::reconcile::{LocalLane, OutstandingDispatch, ReconcileLanes, ReconcileReport};
+use super::reconcile::{LaneOccupancy, LocalLane, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 
 /// Which backend an order routed to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -168,8 +168,8 @@ impl ReconcileLanes for RoutingExecutor {
         report
     }
 
-    fn any_lane_running(&self) -> bool {
-        self.local.any_lane_running()
+    fn lane_occupancy(&self) -> LaneOccupancy {
+        self.local.lane_occupancy()
     }
 }
 

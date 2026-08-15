@@ -25,7 +25,7 @@ use super::process_runner::{CaptureIdentity, ProcessTransformRunner};
 use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::CoordinatorConfig;
-use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes, ReconcileReport};
+use crate::bloomery::executor::{LaneOccupancy, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 use crate::bloomery::intake::NameEvidenceClaims;
 use crate::bloomery::triage::MAX_TRIAGED_DIFF_BYTES;
 use crate::session::SessionConfig;
@@ -1311,9 +1311,17 @@ impl ReconcileLanes for LocalExecutor {
         }
     }
 
-    fn any_lane_running(&self) -> bool {
+    fn lane_occupancy(&self) -> LaneOccupancy {
         let registry = self.lock();
-        !registry.runs.is_empty() || registry.starting > 0
+        // `slots` is the allocator's own record of what is spoken for, so it
+        // already covers a reservation that has not become a run: `reserve_slot`
+        // claims the index before the spawn shells out.
+        let slots = registry.slots.iter().copied().collect();
+        // A re-adopted run whose evidence recorded no usable slot is building
+        // somewhere this process cannot name.
+        let unattributed = registry.runs.values().any(|run| run.slot.is_none());
+        drop(registry);
+        LaneOccupancy { slots, unattributed }
     }
 }
 
