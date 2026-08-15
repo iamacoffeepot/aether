@@ -42,6 +42,12 @@ pub enum LocalExecutorError {
     UnresolvedDiffBase(Nonce),
     /// The correspondence store itself faulted while resolving the checkout.
     Correspondence(CorrespondenceError),
+    /// The cancel could not terminate its child. Distinct from a clean
+    /// `Ok(())` so a caller cannot treat an unowned or still-alive child as
+    /// gone (issue #4999). The string names why: no recorded identity, a
+    /// mismatched identity, or a process group that stayed up after the
+    /// signal.
+    Unterminated(String),
 }
 
 impl fmt::Display for LocalExecutorError {
@@ -69,6 +75,9 @@ impl fmt::Display for LocalExecutorError {
                 )
             }
             Self::Correspondence(error) => write!(f, "local executor backend: {error}"),
+            Self::Unterminated(detail) => {
+                write!(f, "local executor backend: could not terminate the lane child: {detail}")
+            }
         }
     }
 }
@@ -82,7 +91,8 @@ impl Error for LocalExecutorError {
             | Self::Evidence(_)
             | Self::NoRunForNonce(_)
             | Self::UnresolvedCheckout(_)
-            | Self::UnresolvedDiffBase(_) => None,
+            | Self::UnresolvedDiffBase(_)
+            | Self::Unterminated(_) => None,
         }
     }
 }

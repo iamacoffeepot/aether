@@ -74,7 +74,10 @@ pub trait RunProcess: Send {
     /// Kill the child (and reap it).
     ///
     /// # Errors
-    /// The underlying kill/reap syscall failed.
+    /// The underlying kill/reap syscall failed, or the child could not be
+    /// terminated at all — [`LocalExecutorError::Unterminated`]. The two are
+    /// distinct from `Ok(())`: a caller that asked for termination and got
+    /// success is entitled to believe the child is gone.
     fn kill(&mut self) -> Result<(), LocalExecutorError>;
 }
 
