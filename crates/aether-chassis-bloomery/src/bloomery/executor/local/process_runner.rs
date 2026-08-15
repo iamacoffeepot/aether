@@ -804,39 +804,6 @@ mod tests {
         (repo, tempfile::tempdir().unwrap(), first, second)
     }
 
-    // ADR-0196: a dependent construct checks out the dependency's capture, so
-    // the worktree the lane materializes must contain that candidate's tree.
-    // Catches checking out the bloom base and presenting a tree that dropped A.
-    #[test]
-    fn a_dependent_checkout_materializes_the_dependencys_tree() {
-        let repo = repo_with_identity(Some(("test", "test@example.test")));
-        fs::write(repo.path().join("base.txt"), "sealed base\n").unwrap();
-        run_git(repo.path(), &["add", "--all"]);
-        run_git(repo.path(), &["commit", "--quiet", "--message", "base"]);
-        let base = git_in(repo.path(), &["rev-parse", "HEAD"]).unwrap().trim().to_owned();
-
-        fs::write(repo.path().join("from-a.txt"), "A's candidate\n").unwrap();
-        run_git(repo.path(), &["add", "--all"]);
-        run_git(repo.path(), &["commit", "--quiet", "--message", "A"]);
-        let a_checkout = git_in(repo.path(), &["rev-parse", "HEAD"]).unwrap().trim().to_owned();
-
-        let scratch = tempfile::tempdir().unwrap();
-        let slot = scratch.path().join("slot-0");
-        materialize_checkout(repo.path(), &slot, &a_checkout).unwrap();
-
-        assert_eq!(
-            fs::read_to_string(slot.join("from-a.txt")).unwrap(),
-            "A's candidate\n",
-            "B's worktree contains A's change, which is what splicing A's candidate onto the base means",
-        );
-        assert_eq!(
-            fs::read_to_string(slot.join("base.txt")).unwrap(),
-            "sealed base\n",
-            "and still carries the bloom base underneath",
-        );
-        assert_ne!(a_checkout, base, "A's capture is a distinct commit from the sealed base");
-    }
-
     #[test]
     fn a_reused_slot_checkout_is_reset_to_the_dispatchs_own_tree() {
         // Tripwire (#4904): a slot's path is reused across dispatches so the

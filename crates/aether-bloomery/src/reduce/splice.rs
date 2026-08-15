@@ -442,9 +442,19 @@ mod tests {
             construct_checkout(&decided, "wp-b").is_none(),
             "B stays out of Construct: A and C are independent tips",
         );
-        assert!(
-            !record(&after, &spec).progress.contains_key(&wp("wp-b")),
-            "B has no cursor until Reconcile assembles its base",
+        let reconcile = decided.effects.iter().find_map(|effect| match effect {
+            Decision::DispatchAttempt { workpiece, stage, transformation, .. } if workpiece.0 == "wp-b" => {
+                Some((*stage, transformation.checkout))
+            }
+            _ => None,
+        });
+        assert_eq!(
+            reconcile,
+            Some((StageId::Reconcile, digest(10))),
+            "B enters at Reconcile on A's tip rather than deadlocking with no cursor",
         );
+        let progress = record(&after, &spec).progress.get(&wp("wp-b")).expect("B has a cursor");
+        assert_eq!(progress.stage, StageId::Reconcile);
+        assert_eq!(progress.fold_checkpoint, Some(digest(10)));
     }
 }

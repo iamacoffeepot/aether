@@ -10,7 +10,10 @@
 //! The decision is made at admission and rides the same
 //! [`Decision::DispatchAttempt`] / [`Decision::AdvanceStage`] pair every other
 //! entry uses. Replay folds those recorded effects (ADR-0190) and does not
-//! recompute who is ready.
+//! recompute who is ready. A ready member whose resolved ancestors have two
+//! or more independent tips cannot name a single construct checkout — that
+//! residual splice collision enters at Reconcile (ADR-0189 / ADR-0196)
+//! rather than waiting forever with no cursor.
 
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
@@ -19,8 +22,10 @@ use super::attempt::{DispatchTargets, SealedLine, move_effects};
 use super::splice::{SplicedBase, checkout_from, spliced_base};
 use super::{BloomRecord, Decision, StageProgress};
 use crate::digest::Digest;
-use crate::ids::{BloomId, WorkpieceId};
-use crate::values::{BloomSpec, ConfigRegistry, MemberDependency, Membership, StageCatalog, VerifyFailureSet};
+use crate::ids::{BloomId, StageId, WorkpieceId};
+use crate::values::{
+    BloomSpec, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, StageCatalog, VerifyFailureSet,
+};
 
 /// Whether every incoming edge of `member` names a workpiece `resolved` accepts.
 ///
@@ -65,6 +70,52 @@ pub(super) fn construct_entry(bloom: BloomId, member: &Membership, sealed: Seale
         DispatchTargets { subject: member.scope_revision, checkout: sealed.base },
         sealed,
     )
+}
+
+/// Reconcile entry for a member whose resolved ancestors have more than one
+/// independent tip — the residual splice collision ADR-0196 hands to
+/// ADR-0189. Journaled on the same Integrate / supersede row that would have
+/// dispatched Construct, so replay recovers it (ADR-0190). The first tip in
+/// sealed order is the checkout: Reconcile assembles the rest onto it rather
+/// than guessing a construct tree.
+fn splice_conflict_entry<F: Fn(&WorkpieceId) -> Option<Digest>>(
+    bloom: BloomId,
+    member: &Membership,
+    sealed: SealedLine<'_>,
+    tips: &[WorkpieceId],
+    checkout_of: &F,
+) -> Vec<Decision> {
+    let head = tips.iter().find_map(checkout_of).unwrap_or(sealed.base);
+    let mut payload = Vec::new();
+    for tip in tips {
+        payload.extend_from_slice(tip.0.as_bytes());
+        payload.push(0);
+        if let Some(checkout) = checkout_of(tip) {
+            payload.extend_from_slice(checkout.as_bytes());
+        }
+        payload.push(0);
+    }
+    let evidence =
+        Evidence { subject: head, kind: EvidenceKind::FoldConflict, detail: Digest::of_wire_bytes(&payload) };
+    let progress = StageProgress {
+        stage: StageId::Reconcile,
+        attempts: 1,
+        candidate: None,
+        repair_rolls: 0,
+        seen_verify_failures: VerifyFailureSet::EMPTY,
+        fold_checkpoint: Some(head),
+        fold_conflict_evidence: Some(evidence.detail),
+    };
+    let mut effects = alloc::vec![Decision::RecordEvidence { bloom, evidence }];
+    effects.extend(move_effects(
+        bloom,
+        &member.workpiece,
+        member.scope_revision,
+        progress,
+        DispatchTargets { subject: member.scope_revision, checkout: head },
+        sealed,
+    ));
+    effects
 }
 
 /// Entry dispatches for every member of a newly sealed bloom whose
@@ -123,17 +174,21 @@ pub(super) fn successor_entries(
             continue;
         }
         let ids: Vec<WorkpieceId> = successor.members().iter().map(|item| item.workpiece.clone()).collect();
-        let checkout = match spliced_base(successor.base(), &ids, edges, &member.workpiece, &|id| {
-            checkout_from(predecessor, id)
-        }) {
-            SplicedBase::Ready(digest) => digest,
-            SplicedBase::Conflict { .. } => continue,
-        };
-        effects.extend(construct_entry(
-            successor_id,
-            member,
-            entry_line(member, successor.configs(), catalog, checkout),
-        ));
+        let checkout_of = |id: &WorkpieceId| checkout_from(predecessor, id);
+        match spliced_base(successor.base(), &ids, edges, &member.workpiece, &checkout_of) {
+            SplicedBase::Ready(digest) => effects.extend(construct_entry(
+                successor_id,
+                member,
+                entry_line(member, successor.configs(), catalog, digest),
+            )),
+            SplicedBase::Conflict { tips } => effects.extend(splice_conflict_entry(
+                successor_id,
+                member,
+                entry_line(member, successor.configs(), catalog, successor.base()),
+                &tips,
+                &checkout_of,
+            )),
+        }
     }
     (every_inherited, effects)
 }
@@ -175,21 +230,20 @@ pub(super) fn newly_ready_entries(
         if !dependencies_resolved(&resolved, &record.dependencies, &member.workpiece) {
             continue;
         }
-        let checkout =
-            match spliced_base(record.spec.base(), &ids, &record.dependencies, &member.workpiece, &checkout_of) {
-                SplicedBase::Ready(digest) => digest,
-                SplicedBase::Conflict { .. } => continue,
-            };
-        effects.extend(construct_entry(
-            bloom,
-            member,
-            SealedLine {
-                configs: member.configs.layered_over(record.spec.configs()),
-                catalog: &record.stage_catalog,
-                base: checkout,
-                held: record.operator_hold.is_some(),
-            },
-        ));
+        let sealed = |base: Digest| SealedLine {
+            configs: member.configs.layered_over(record.spec.configs()),
+            catalog: &record.stage_catalog,
+            base,
+            held: record.operator_hold.is_some(),
+        };
+        match spliced_base(record.spec.base(), &ids, &record.dependencies, &member.workpiece, &checkout_of) {
+            SplicedBase::Ready(digest) => {
+                effects.extend(construct_entry(bloom, member, sealed(digest)));
+            }
+            SplicedBase::Conflict { tips } => {
+                effects.extend(splice_conflict_entry(bloom, member, sealed(record.spec.base()), &tips, &checkout_of));
+            }
+        }
     }
     effects
 }
@@ -327,6 +381,17 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn reconcile_checkout(decisions: &Decisions, name: &str) -> Option<Digest> {
+        decisions.effects.iter().find_map(|effect| match effect {
+            Decision::DispatchAttempt { workpiece, stage, transformation, .. }
+                if workpiece.0 == name && *stage == StageId::Reconcile =>
+            {
+                Some(transformation.checkout)
+            }
+            _ => None,
+        })
     }
 
     fn claim(name: &str, revision: u8, candidate: u8) -> ResolutionClaim {
@@ -587,11 +652,22 @@ mod tests {
         let (after_c, decided_c) = step(&after_a, &integrate_c);
         assert!(
             construct_dispatches(&decided_c).is_empty(),
-            "A and C are independent tips: B waits for Reconcile to assemble its base",
+            "A and C are independent tips: B does not construct on one of them",
         );
+        assert_eq!(
+            reconcile_checkout(&decided_c, "wp-b"),
+            Some(digest(10)),
+            "B enters at Reconcile on A's tip — the first independent parent in sealed order",
+        );
+        let progress = record(&after_c, &spec).progress.get(&WorkpieceId("wp-b".into())).expect("B has a cursor");
+        assert_eq!(progress.stage, StageId::Reconcile);
+        assert_eq!(progress.fold_checkpoint, Some(digest(10)));
         assert!(
-            !record(&after_c, &spec).progress.contains_key(&WorkpieceId("wp-b".into())),
-            "B stays out of the line until base assembly names a checkout",
+            decided_c.effects.iter().any(|effect| matches!(
+                effect,
+                Decision::RecordEvidence { evidence, .. } if evidence.kind == EvidenceKind::FoldConflict
+            )),
+            "the residual collision is journaled as FoldConflict evidence, not dropped",
         );
     }
 
@@ -622,5 +698,45 @@ mod tests {
         assert!(successor.claims.contains_key(&WorkpieceId("wp-a".into())), "A arrives already resolved");
         assert!(successor.progress.contains_key(&WorkpieceId("wp-b".into())), "B enters because A is inherited");
         assert!(!successor.progress.contains_key(&WorkpieceId("wp-a".into())), "an inherited member is not re-run");
+    }
+
+    // The plausible bug: successor_entries drops a net-new join the same way
+    // newly_ready_entries did — two inherited independent parents, no later
+    // Integrate arrives, and B never enters the line.
+    #[test]
+    fn an_inherited_join_dispatches_reconcile_for_the_dependent() {
+        let predecessor_spec = spec(&[("wp-a", 1), ("wp-c", 3)]);
+        let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor_spec.clone(), edges: vec![] });
+        let (snapshot, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (snapshot, _) = step(
+            &snapshot,
+            &event("a-done", Fact::Integrate { bloom: predecessor_spec.id(), claim: claim("wp-a", 1, 10) }),
+        );
+        let (after_parents, _) = step(
+            &snapshot,
+            &event("c-done", Fact::Integrate { bloom: predecessor_spec.id(), claim: claim("wp-c", 3, 30) }),
+        );
+
+        let successor_spec = spec(&[("wp-a", 1), ("wp-c", 3), ("wp-b", 2)]);
+        let supersede = event(
+            "sup",
+            Fact::GraphSeal {
+                predecessor: Some(predecessor_spec.id()),
+                spec: successor_spec.clone(),
+                edges: vec![edge("wp-b", "wp-a"), edge("wp-b", "wp-c")],
+            },
+        );
+        let (after, decided) = step(&after_parents, &supersede);
+        assert!(matches!(decided.outcome, Outcome::Superseded { .. }), "got {:?}", decided.outcome);
+        assert!(construct_dispatches(&decided).is_empty(), "B does not construct on one inherited tip");
+        assert_eq!(
+            reconcile_checkout(&decided, "wp-b"),
+            Some(digest(10)),
+            "B enters at Reconcile on the first inherited tip",
+        );
+        let successor = after.blooms.get(&successor_spec.id()).expect("successor bloom");
+        let progress = successor.progress.get(&WorkpieceId("wp-b".into())).expect("B has a cursor");
+        assert_eq!(progress.stage, StageId::Reconcile);
+        assert_eq!(progress.fold_checkpoint, Some(digest(10)));
     }
 }
