@@ -49,6 +49,7 @@ impl ApiCapabilityState {
             &request.projections,
             request.descriptions,
             request.idempotency_key,
+            &[],
         )
     }
 

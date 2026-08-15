@@ -16,8 +16,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
     Adjudication, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence, EvidenceKind,
-    OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs, SpendQuiesce,
-    StageCatalog, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
+    MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs,
+    SpendQuiesce, StageCatalog, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -306,6 +306,14 @@ pub struct BloomRecord {
     /// replay-rebuilt; defaulted like its sibling.
     #[serde(default)]
     pub deferred_dispatches: BTreeSet<WorkpieceId>,
+    /// The door-resolved member-dependency graph (ADR-0196).
+    ///
+    /// Journal-derived: a seal records it as
+    /// [`Decision::RecordMemberDependencies`] and the fold copies that value.
+    /// Empty is the edgeless degenerate case — today's bloom. Defaulted so a
+    /// journal written before the graph existed still decodes.
+    #[serde(default)]
+    pub dependencies: Vec<MemberDependency>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -421,6 +429,20 @@ pub enum BloomStatus {
     /// Superseded by a successor that inherited its claims.
     Superseded,
 }
+
+/// The spec a successful seal or supersede just admitted, so the fold can
+/// open the bloom record before membership claims land on it.
+fn admitted_spec<'a>(fact: &'a Fact, outcome: &Outcome) -> Option<(&'a BloomSpec, BloomId)> {
+    match (fact, outcome) {
+        (Fact::Seal(spec), Outcome::Sealed(id)) => Some((spec, *id)),
+        (Fact::Supersede { successor, .. }, Outcome::Superseded { successor: id, .. }) => Some((successor, *id)),
+        (Fact::GraphSeal { spec, .. }, Outcome::Sealed(id) | Outcome::Superseded { successor: id, .. }) => {
+            Some((spec, *id))
+        }
+        _ => None,
+    }
+}
+
 impl Snapshot {
     /// A fresh snapshot at a mainline base, with no blooms.
     #[must_use]
@@ -440,19 +462,21 @@ impl Snapshot {
         next.seen.insert(event.idempotency_key.clone());
         // Register the bloom the fact seals, before its membership claims
         // land, so the claim/inherit effects have a record to attach to.
-        match (&event.fact, &decisions.outcome) {
-            (Fact::Seal(spec), Outcome::Sealed(id)) => {
-                next.blooms.insert(*id, BloomRecord::sealed(spec.clone(), configs));
-            }
-            (Fact::Supersede { successor, .. }, Outcome::Superseded { successor: id, .. }) => {
-                next.blooms.insert(*id, BloomRecord::sealed(successor.clone(), configs));
-            }
-            _ => {}
+        if let Some((spec, id)) = admitted_spec(&event.fact, &decisions.outcome) {
+            next.blooms.insert(id, BloomRecord::sealed(spec.clone(), configs));
         }
         for effect in &decisions.effects {
             next.apply_effect(effect);
         }
         next
+    }
+
+    fn apply_graph_effect(&mut self, effect: &Decision) {
+        if let Decision::RecordMemberDependencies { bloom, edges } = effect
+            && let Some(record) = self.blooms.get_mut(bloom)
+        {
+            record.dependencies.clone_from(edges);
+        }
     }
 
     fn apply_effect(&mut self, effect: &Decision) {
@@ -572,6 +596,7 @@ impl Snapshot {
             Decision::RecordSpendQuiesce { quiesce } => {
                 self.spend_quiesce.clone_from(quiesce);
             }
+            Decision::RecordMemberDependencies { .. } => self.apply_graph_effect(effect),
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;
@@ -835,6 +860,7 @@ impl BloomRecord {
             operator_repairs: Vec::new(),
             operator_hold: None,
             deferred_dispatches: BTreeSet::new(),
+            dependencies: Vec::new(),
             superseded_by: None,
         }
     }

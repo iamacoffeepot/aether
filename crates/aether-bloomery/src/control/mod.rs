@@ -295,7 +295,11 @@ impl Topic {
             // Snapshot-only: the spend-quiesce marker is what `/view` reads.
             // The door it closed already refused to enqueue work, so a topic
             // here would enqueue a row nothing drains.
-            | Decision::RecordSpendQuiesce { .. } => None,
+            | Decision::RecordSpendQuiesce { .. }
+            // Snapshot-only: the resolved member graph is what the readiness
+            // scheduler (and splice) read off the record. Nothing is dispatched
+            // from the row itself.
+            | Decision::RecordMemberDependencies { .. } => None,
         }
     }
 }
