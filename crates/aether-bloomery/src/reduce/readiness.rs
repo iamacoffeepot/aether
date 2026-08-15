@@ -16,6 +16,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 use super::attempt::{DispatchTargets, SealedLine, move_effects};
+use super::splice::{SplicedBase, checkout_from, spliced_base};
 use super::{BloomRecord, Decision, StageProgress};
 use crate::digest::Digest;
 use crate::ids::{BloomId, WorkpieceId};
@@ -121,10 +122,17 @@ pub(super) fn successor_entries(
         if !dependencies_resolved(&inherited, edges, &member.workpiece) {
             continue;
         }
+        let ids: Vec<WorkpieceId> = successor.members().iter().map(|item| item.workpiece.clone()).collect();
+        let checkout = match spliced_base(successor.base(), &ids, edges, &member.workpiece, &|id| {
+            checkout_from(predecessor, id)
+        }) {
+            SplicedBase::Ready(digest) => digest,
+            SplicedBase::Conflict { .. } => continue,
+        };
         effects.extend(construct_entry(
             successor_id,
             member,
-            entry_line(member, successor.configs(), catalog, successor.base()),
+            entry_line(member, successor.configs(), catalog, checkout),
         ));
     }
     (every_inherited, effects)
@@ -133,8 +141,26 @@ pub(super) fn successor_entries(
 /// Entry dispatches for members that become ready because `just_resolved` just
 /// gained a claim. Already-started, already-claimed, and wedged members are
 /// left alone — this is the construct *entry*, not a retry.
-pub(super) fn newly_ready_entries(record: &BloomRecord, bloom: BloomId, just_resolved: &WorkpieceId) -> Vec<Decision> {
+///
+/// `just_checkout` is that claim's capture (or its tree, when the test
+/// door jumps to Integrate). The snapshot has not folded the claim yet, so
+/// [`checkout_from`] cannot see it; the splice has to take it as an
+/// argument or B would construct on the bloom base.
+pub(super) fn newly_ready_entries(
+    record: &BloomRecord,
+    bloom: BloomId,
+    just_resolved: &WorkpieceId,
+    just_checkout: Digest,
+) -> Vec<Decision> {
     let resolved = |dep: &WorkpieceId| dep == just_resolved || record.claims.contains_key(dep);
+    let checkout_of = |id: &WorkpieceId| {
+        if id == just_resolved {
+            Some(just_checkout)
+        } else {
+            checkout_from(record, id)
+        }
+    };
+    let ids: Vec<WorkpieceId> = record.spec.members().iter().map(|member| member.workpiece.clone()).collect();
     let mut effects = Vec::new();
     for member in record.spec.members() {
         if member.workpiece == *just_resolved {
@@ -149,7 +175,21 @@ pub(super) fn newly_ready_entries(record: &BloomRecord, bloom: BloomId, just_res
         if !dependencies_resolved(&resolved, &record.dependencies, &member.workpiece) {
             continue;
         }
-        effects.extend(construct_entry(bloom, member, SealedLine::of(record, member)));
+        let checkout =
+            match spliced_base(record.spec.base(), &ids, &record.dependencies, &member.workpiece, &checkout_of) {
+                SplicedBase::Ready(digest) => digest,
+                SplicedBase::Conflict { .. } => continue,
+            };
+        effects.extend(construct_entry(
+            bloom,
+            member,
+            SealedLine {
+                configs: member.configs.layered_over(record.spec.configs()),
+                catalog: &record.stage_catalog,
+                base: checkout,
+                held: record.operator_hold.is_some(),
+            },
+        ));
     }
     effects
 }
@@ -437,7 +477,7 @@ mod tests {
             "the weave still waits for the unfinished members",
         );
         assert!(
-            newly_ready_entries(record(&after, &spec), spec.id(), &WorkpieceId("wp-c".into())).is_empty(),
+            newly_ready_entries(record(&after, &spec), spec.id(), &WorkpieceId("wp-c".into()), digest(30)).is_empty(),
             "resolving C does not start B: B depends on A, not C",
         );
     }
@@ -545,8 +585,14 @@ mod tests {
 
         let integrate_c = event("c-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-c", 3, 30) });
         let (after_c, decided_c) = step(&after_a, &integrate_c);
-        assert_eq!(construct_dispatches(&decided_c), vec![WorkpieceId("wp-b".into())]);
-        assert!(record(&after_c, &spec).progress.contains_key(&WorkpieceId("wp-b".into())));
+        assert!(
+            construct_dispatches(&decided_c).is_empty(),
+            "A and C are independent tips: B waits for Reconcile to assemble its base",
+        );
+        assert!(
+            !record(&after_c, &spec).progress.contains_key(&WorkpieceId("wp-b".into())),
+            "B stays out of the line until base assembly names a checkout",
+        );
     }
 
     // The plausible bug: a successor treats inherited claims as unresolved, so

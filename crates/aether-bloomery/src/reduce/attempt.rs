@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use super::composition::reduce_composition_attempt;
 use super::integrate::claim_effects;
+use super::splice::member_construct_base;
 use super::verify_memo::reuse_of;
 use super::{AttemptCompletedError, BloomRecord, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::digest::Digest;
@@ -114,9 +115,9 @@ pub(super) struct DispatchTargets {
 pub(super) struct SealedLine<'a> {
     /// The member's registry layered over the bloom's.
     pub configs: ConfigRegistry,
-    /// The git commit the bloom was sealed onto — the base every member's
-    /// candidate is built over, and so the range the mechanical `Verify` lane
-    /// reads its candidate's diff against (#4890).
+    /// The git commit this member's candidate is built over — the bloom's
+    /// sealed base for a root, or the spliced dependency tip for a dependent
+    /// (ADR-0196). The mechanical `Verify` lane diffs against this range.
     pub base: Digest,
     /// The catalog the bloom sealed, or the compiled line when it sealed none.
     pub catalog: &'a StageCatalog,
@@ -135,7 +136,7 @@ impl<'a> SealedLine<'a> {
         Self {
             configs: member.configs.layered_over(record.spec.configs()),
             catalog: &record.stage_catalog,
-            base: record.spec.base(),
+            base: member_construct_base(record, &member.workpiece),
             held: record.operator_hold.is_some(),
         }
     }
@@ -220,10 +221,18 @@ pub(super) fn reduce_attempt_completed(
     // failures use the typed VerifyFailed fact. It is caught before the cursor
     // check so it reads as `TerminalStage` rather than a `StageMismatch`. The
     // repair-only `Refine` and the fold-conflict `Reconcile` sit off the
-    // standing line (ADR-0153 / ADR-0189) with an explicit successor: a pass
-    // returns the member to `Verify` for the delta-confirm.
-    let next = if matches!(stage, StageId::Refine | StageId::Reconcile) {
+    // standing line (ADR-0153 / ADR-0189) with an explicit successor. A
+    // Reconcile that assembled a dependent's base (no prior candidate, no
+    // claim) returns to Construct so the member builds on the spliced tree
+    // rather than verifying the assembly as if it were their work. Every
+    // other Reconcile — and Refine — returns to Verify for the delta-confirm.
+    let assembling = stage == StageId::Reconcile
+        && record.progress.get(workpiece).is_some_and(|cursor| cursor.candidate.is_none())
+        && !record.claims.contains_key(workpiece);
+    let next = if stage == StageId::Refine || (stage == StageId::Reconcile && !assembling) {
         Some(StageId::Verify)
+    } else if stage == StageId::Reconcile {
+        Some(StageId::Construct)
     } else {
         StageCatalog::next_member_stage(stage)
     };
@@ -250,6 +259,10 @@ pub(super) fn reduce_attempt_completed(
     // adopts the capture it carried (a mechanical lane carries none — the prior
     // candidate rides forward); a failing attempt adopts nothing, so its capture
     // is discarded and the member stays at the candidate its last pass produced.
+    // A base-assembly Reconcile is the exception: its capture *is* the spliced
+    // base. It rides as the cursor candidate so Construct checks it out, but
+    // `fold_checkpoint` stays the collision head so a standing-head re-collision
+    // still wedges (#4952).
     let prior = cursor.candidate;
     let candidate = if passed {
         captured.or(prior)
@@ -259,12 +272,21 @@ pub(super) fn reduce_attempt_completed(
     // The dispatch targets re-resolve from the cursor (ADR-0152): with a
     // candidate present, the returned evidence binds its tree and the worker
     // checks out its capture commit; without one, the member's frozen scope
-    // revision and the bloom's sealed base (ADR-0149 §Execution, #3572).
-    // Reconcile is the exception: a *retry* checks out the folded checkpoint
-    // the collision named (ADR-0189). A pass leaves that checkout — Verify
-    // retargets from the new candidate like any other advance.
+    // revision and the spliced construct base (ADR-0196). Reconcile is the
+    // exception: a *retry* checks out the folded checkpoint the collision
+    // named (ADR-0189). A pass leaves that checkout — Verify retargets from
+    // the new candidate like any other advance. A passing base-assembly
+    // Reconcile checks out the assembled capture as Construct's base.
     let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile && !passed);
-    let targets = reconcile_or_line_targets(member.scope_revision, record.spec.base(), candidate, fold_checkpoint);
+    let construct_base = member_construct_base(record, workpiece);
+    let targets = if assembling && passed {
+        DispatchTargets {
+            subject: member.scope_revision,
+            checkout: candidate.map_or(construct_base, |current| current.checkout),
+        }
+    } else {
+        reconcile_or_line_targets(member.scope_revision, construct_base, candidate, fold_checkpoint)
+    };
     let ctx = CompletionCtx { bloom: *bloom, workpiece, member, cursor: &cursor, candidate, targets };
     let effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
     if let Some(next) = next.filter(|_| passed) {

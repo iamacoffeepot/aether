@@ -44,9 +44,10 @@ pub(super) fn reduce_verify_failed(
         }));
     }
 
-    let (subject, checkout) = cursor
-        .candidate
-        .map_or_else(|| (member.scope_revision, record.spec.base()), |candidate| (candidate.tree, candidate.checkout));
+    let (subject, checkout) = cursor.candidate.map_or_else(
+        || (member.scope_revision, super::splice::member_construct_base(record, workpiece)),
+        |candidate| (candidate.tree, candidate.checkout),
+    );
     if !evidence.validates(&subject) {
         return Decisions::rejected(Outcome::VerifyFailedRejected(VerifyFailedError::EvidenceNotBound {
             expected: subject,

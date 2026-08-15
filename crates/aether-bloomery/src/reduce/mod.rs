@@ -40,6 +40,7 @@ mod readiness;
 mod review;
 mod seal;
 mod snapshot;
+mod splice;
 mod verify;
 mod verify_memo;
 mod view;
