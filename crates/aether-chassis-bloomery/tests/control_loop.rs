@@ -28,15 +28,17 @@
 mod common;
 
 use std::net::TcpStream;
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, CONTROL_CORE_NAMESPACE, CalibrationDocument, ConfigKind, ConfigRegistry, Decisions,
     Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, ModelOverride, Outcome, Query,
-    QueryResult, ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, Unproducible, ViewDocument,
-    WorkpieceId, reduce,
+    QueryResult, ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StudyCost, StudyRecord,
+    Unproducible, ViewDocument, WorkpieceId, reduce,
 };
+use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, PutResult};
 use aether_chassis_bloomery::store::{JournalWrite, RecordConfig, RecordConfigResult, SqliteStore, StoreBackend};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::{from_bytes, to_vec};
@@ -344,6 +346,135 @@ fn the_capability_ledger_is_measured_live_and_rebuilt_on_replay() {
 
     let replayed = calibration_until_measured(&mut stream, 30, control);
     assert_eq!(replayed.ledger, live.ledger, "boot replay rebuilds the ledger the live fold measured");
+}
+
+/// Fork the coordinator against a unique artifacts root so the study
+/// resolver reads the same store the test writes.
+fn spawn_with_artifacts(port: u16, db: &str, artifacts: &str) -> Coordinator {
+    Coordinator::spawn(port, &[("AETHER_STORE_PATH", db), ("AETHER_ARTIFACTS_ROOT", artifacts)])
+}
+
+// The plausible bug: a journal that names a study artifact still reports
+// zero cost because the resolver is a stub, so every pricing decision
+// reads as "this seat is free".
+#[test]
+fn a_calibration_read_fills_cost_columns_from_a_resolved_study_artifact() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let artifacts_root = dir.path().join("artifacts");
+    let db = db.to_str().unwrap();
+    let artifacts_root = artifacts_root.to_str().unwrap();
+
+    let port = free_port();
+    let _coordinator = spawn_with_artifacts(port, db, artifacts_root);
+    let mut stream = connect_and_handshake(port, "calibration-study");
+    let control = control_mailbox();
+
+    let sealed = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp"));
+    let Outcome::Sealed(bloom) = sealed else {
+        panic!("the seal admits: {sealed:?}");
+    };
+
+    let subject = Digest::from_bytes([1; 32]);
+    let study = StudyRecord {
+        bloom,
+        subject,
+        cost: StudyCost { cost_micro_usd: 7_000, duration_millis: 4_500, ..StudyCost::default() },
+    };
+    let bytes = to_vec(&study).unwrap();
+    let mut artifacts = ArtifactsCapabilityState::open(Path::new(artifacts_root)).unwrap();
+    assert!(matches!(artifacts.put(&bytes, &[]), PutResult::Ok { .. }));
+
+    let admitted = admit(
+        &mut stream,
+        3,
+        control,
+        &Event {
+            idempotency_key: IdempotencyKey("study-1".to_owned()),
+            fact: Fact::AdmitEvidence {
+                bloom,
+                evidence: Evidence { subject, kind: EvidenceKind::StudyRecord, detail: Digest::of_wire_bytes(&bytes) },
+            },
+        },
+    );
+    assert!(matches!(admitted, Outcome::EvidenceAdmitted { .. }), "the study evidence admits: {admitted:?}");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut cid = 10;
+    let document = loop {
+        let document = match call::<_, QueryResult>(
+            &mut stream,
+            cid,
+            control,
+            &Query { bloom: None, release: None, calibration: true },
+        ) {
+            QueryResult::Calibration { document } => {
+                from_bytes::<CalibrationDocument>(&document).expect("calibration document decodes")
+            }
+            other => panic!("expected a calibration reply, got {other:?}"),
+        };
+        if document.ledger.cells.iter().any(|cell| cell.samples > 0) || Instant::now() >= deadline {
+            break document;
+        }
+        cid += 1;
+        thread::sleep(Duration::from_millis(100));
+    };
+
+    let construct = document.ledger.cells.iter().find(|cell| cell.stage == StageId::Construct).expect("Construct ran");
+    assert_eq!(construct.cost_micro_usd, 7_000, "the cost column is the record's priced figure");
+    assert_eq!(construct.worker_secs, 4, "worker time is the record's duration, in whole seconds");
+    assert_eq!(construct.samples, 1, "samples counts the resolved record only");
+    assert_eq!(construct.attempts, 1);
+}
+
+// The plausible bug: an evidence link whose artifact is gone is billed as
+// zero, so a missing file looks like a free attempt and samples still
+// increments as if the measurement landed.
+#[test]
+fn an_unresolvable_study_artifact_stays_unaccounted() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let artifacts_root = dir.path().join("artifacts");
+    let db = db.to_str().unwrap();
+    let artifacts_root = artifacts_root.to_str().unwrap();
+
+    let port = free_port();
+    let _coordinator = spawn_with_artifacts(port, db, artifacts_root);
+    let mut stream = connect_and_handshake(port, "calibration-missing");
+    let control = control_mailbox();
+
+    let sealed = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp"));
+    let Outcome::Sealed(bloom) = sealed else {
+        panic!("the seal admits: {sealed:?}");
+    };
+
+    let admitted = admit(
+        &mut stream,
+        3,
+        control,
+        &Event {
+            idempotency_key: IdempotencyKey("study-missing".to_owned()),
+            fact: Fact::AdmitEvidence {
+                bloom,
+                evidence: Evidence {
+                    subject: Digest::from_bytes([1; 32]),
+                    kind: EvidenceKind::StudyRecord,
+                    detail: Digest::from_bytes([0xEE; 32]),
+                },
+            },
+        },
+    );
+    assert!(
+        matches!(admitted, Outcome::EvidenceAdmitted { .. }),
+        "the dangling study evidence still admits: {admitted:?}"
+    );
+
+    let document = calibration_until_measured(&mut stream, 10, control);
+    let construct = document.ledger.cells.iter().find(|cell| cell.stage == StageId::Construct).expect("Construct ran");
+    assert_eq!(construct.attempts, 1, "the dispatch still counts");
+    assert_eq!(construct.samples, 0, "an unresolvable artifact is not a sample");
+    assert_eq!(construct.cost_micro_usd, 0, "and it must not become a zero-priced measurement");
+    assert_eq!(construct.worker_secs, 0);
 }
 
 #[test]
