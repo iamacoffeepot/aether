@@ -113,6 +113,7 @@
 
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -151,6 +152,11 @@ use crate::common::client::{call, call_frame, connect_and_handshake};
 /// scenario. See the module note — there is no "never", so a day stands in for
 /// one and every step below is an explicit tick.
 const QUIET_POLL_SECS: u64 = 86_400;
+
+/// `GithubConnectionConfig::shared_fixture` is a process-global `OnceLock`.
+/// A second start in this process would share the first scenario's repository
+/// and mainline — the #5000 flake.
+static HARNESS_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// How long the source cap's boot reconcile may take to bind mainline to a real
 /// commit. One in-process round trip, so this is a fault budget rather than a
@@ -227,6 +233,15 @@ impl FixtureHarness {
     /// never bound to a commit inside [`BOOT_BUDGET`].
     #[must_use]
     pub fn start_with_poll(client_name: &str, poll_interval_secs: u64) -> Self {
+        // Tripwire: two scenarios in one binary share `shared_fixture`'s
+        // mainline. Sequential `--test-threads=1` made
+        // `assert_ne!(booted, merged)` fail every time the first test had
+        // already moved `heads/main` (#5000).
+        assert!(
+            !HARNESS_STARTED.swap(true, Ordering::SeqCst),
+            "one FixtureHarness per test binary — shared_fixture is process-global"
+        );
+
         let state = tempfile::tempdir().expect("a temporary root for the journal and the artifacts store");
         let store_path = state.path().join("bloomery.db").to_string_lossy().into_owned();
         let artifacts_root = state.path().join("artifacts").to_string_lossy().into_owned();
