@@ -310,7 +310,9 @@ pub enum VerifyFailedError {
         /// The stage the member is actually waiting at.
         expected: StageId,
     },
-    /// A failed Verify verdict must name at least one closed verifier identity.
+    /// Unused: a failed Verify verdict naming no verifier identity is *unjudged*
+    /// rather than malformed, and re-runs the gate instead of being refused.
+    /// The variant stays so the discriminants after it keep their wire positions.
     EmptyFailures,
     /// The evidence does not bind the member's current Verify subject.
     EvidenceNotBound {

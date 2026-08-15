@@ -992,6 +992,15 @@ fn capture_commit_digest(commit: &BackendObjectId) -> Digest {
 
 /// Fail-closed evidence for an exited run that left no readable file — the
 /// attempt still has to feed retry/wedge rather than loop on a missing path.
+///
+/// `VerificationFailed` with an *empty* verifier set, and both halves are
+/// deliberate. The verdict is failing because nothing here can claim the run
+/// concluded. The set is empty because naming an identity would be a
+/// fabrication: no verifier ran, let alone failed, and the reducer prices a
+/// named identity as a defect in the candidate and dispatches a repair lap to
+/// fix it. Empty is the one shape that says what actually happened — the gate
+/// rendered no verdict — and it is a meaning the reducer acts on, re-running
+/// Verify over the untouched candidate rather than repairing it.
 fn synthesized_missing_evidence(handle: &WorkHandle, subject: &Digest) -> Vec<EvidenceRef> {
     vec![EvidenceRef {
         name: NameEvidenceClaims::attempt_artifact_name(

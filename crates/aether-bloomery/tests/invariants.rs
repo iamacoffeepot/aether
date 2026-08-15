@@ -2308,6 +2308,143 @@ fn verifier_failure_accounting_uses_per_member_union_and_intersection() {
     );
 }
 
+// A failing Verify that names no verifier is a gate that never rendered a
+// verdict, not a candidate that failed one — the lane was killed mid-build, or
+// cancelled on its execution limit, and the candidate it was dispatched against
+// is untouched.
+//
+// Tripwire: an empty verifier set re-dispatches `Verify` against the same
+// targets and spends a Verify attempt, while a set naming even one verifier
+// still re-enters `Refine`. The two branches are asserted together because the
+// bug is a routing choice, and a fix that sends *everything* back to Verify
+// would pass either assertion alone. In production the unjudged branch bought
+// three Refine laps, each asking a model to repair failures nobody observed
+// against a worktree already checked out at the candidate.
+#[test]
+fn an_unjudged_verify_redispatches_verify_while_a_named_failure_still_refines() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let candidate = CandidateRef { tree: digest(30), checkout: digest(31) };
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "construct",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: attempt_evidence(),
+                candidate: Some(candidate),
+            },
+        ),
+    );
+
+    let (unjudged, decided) =
+        step(&snapshot, &verify_failed("unjudged", bloom, "wp", candidate.tree, 81, VerifyFailureSet::EMPTY));
+    assert!(
+        matches!(decided.outcome, Outcome::AttemptRetried { stage: StageId::Verify, attempt: 2, .. }),
+        "an unjudged verdict spends a Verify attempt, got {:?}",
+        decided.outcome,
+    );
+    match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchAttempt { .. })) {
+        Some(Decision::DispatchAttempt { stage, transformation, candidate: dispatched, .. }) => {
+            assert_eq!(*stage, StageId::Verify, "the gate re-runs; the candidate is not sent for repair");
+            assert_eq!(transformation.checkout, candidate.checkout);
+            assert_eq!(*dispatched, Some(candidate.tree));
+        }
+        other => panic!("expected a DispatchAttempt, got {other:?}"),
+    }
+    let progress = unjudged.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
+    assert_eq!(progress.stage, StageId::Verify);
+    assert_eq!(progress.attempts, 2);
+    assert_eq!(progress.candidate, Some(candidate), "the unjudged candidate is untouched");
+    assert_eq!(progress.repair_rolls, 0, "no repair roll is spent on a gate that never ran");
+    assert_eq!(
+        progress.seen_verify_failures,
+        VerifyFailureSet::EMPTY,
+        "an attempt that named no verifier adds none to the seen set",
+    );
+
+    let (refined, named) = step(
+        &unjudged,
+        &verify_failed("named", bloom, "wp", candidate.tree, 82, VerifyFailureSet::one(VerifyFailure::Clippy)),
+    );
+    assert!(
+        matches!(named.outcome, Outcome::RefineReentered { .. }),
+        "a verdict naming a verifier still repairs, got {:?}",
+        named.outcome,
+    );
+    let progress = refined.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
+    assert_eq!(progress.stage, StageId::Refine);
+    assert_eq!(progress.seen_verify_failures, VerifyFailureSet::one(VerifyFailure::Clippy));
+}
+
+// Tripwire: an unjudged candidate that exhausts the Verify budget wedges there
+// instead of falling through to a repair lap. Without this, the terminal
+// unjudged verdict would be the one that finally reached `Refine` — the same
+// wrong routing, arrived at three attempts later — and the operator would read a
+// repair failure rather than "the gate never answered".
+#[test]
+fn an_unjudged_verify_wedges_once_the_verify_budget_is_spent() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let budget = StageCatalog::binding_of(StageId::Verify).retry_budget;
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let candidate = CandidateRef { tree: digest(30), checkout: digest(31) };
+    let (mut snapshot, _) = step(
+        &snapshot,
+        &event(
+            "construct",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: attempt_evidence(),
+                candidate: Some(candidate),
+            },
+        ),
+    );
+
+    for attempt in 1..budget {
+        let (next, decided) = step(
+            &snapshot,
+            &verify_failed(&format!("unjudged-{attempt}"), bloom, "wp", candidate.tree, 81, VerifyFailureSet::EMPTY),
+        );
+        assert!(matches!(decided.outcome, Outcome::AttemptRetried { stage: StageId::Verify, .. }));
+        snapshot = next;
+    }
+
+    let (wedged, decided) =
+        step(&snapshot, &verify_failed("unjudged-last", bloom, "wp", candidate.tree, 82, VerifyFailureSet::EMPTY));
+    assert!(
+        matches!(
+            decided.outcome,
+            Outcome::AttemptWedged { stage: StageId::Verify, repeated_verifiers, .. }
+                if repeated_verifiers == VerifyFailureSet::EMPTY
+        ),
+        "the terminal unjudged verdict wedges at Verify, got {:?}",
+        decided.outcome,
+    );
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
+        "a wedged member is dispatched nothing — least of all a Refine lap",
+    );
+    let record = wedged.blooms.get(&bloom).unwrap();
+    let wedge = record.wedged.get(&workpiece("wp")).expect("the member is recorded as wedged");
+    assert_eq!(wedge.stage, StageId::Verify);
+    assert_eq!(wedge.evidence, digest(82), "the wedge carries the unjudged attempt's own evidence");
+    assert_eq!(
+        wedge.repeated_verifiers,
+        VerifyFailureSet::EMPTY,
+        "an empty set on a Verify wedge is what says the gate never answered",
+    );
+}
+
 #[test]
 fn verify_failed_refuses_invalid_state_set_and_binding_without_effects() {
     let base = Snapshot::new(digest(1));
@@ -2329,13 +2466,20 @@ fn verify_failed_refuses_invalid_state_set_and_binding_without_effects() {
         ),
     );
 
-    let empty = reduce(
+    // Tripwire: an empty verifier set re-dispatches Verify, so the binding check
+    // has to come first — otherwise anyone able to fabricate a `VerifyFailed`
+    // naming no verifier and no real subject could re-dispatch a member's lane at
+    // will. This is the one refusal ordering the unjudged path can break.
+    let unbound_and_empty = reduce(
         &snapshot,
-        &verify_failed("empty", bloom, "wp", digest(10), 81, VerifyFailureSet::EMPTY),
+        &verify_failed("unbound-empty", bloom, "wp", digest(99), 81, VerifyFailureSet::EMPTY),
         &ResolvedConfigs::default(),
     );
-    assert!(matches!(empty.outcome, Outcome::VerifyFailedRejected(VerifyFailedError::EmptyFailures)));
-    assert!(empty.effects.is_empty());
+    assert!(matches!(
+        unbound_and_empty.outcome,
+        Outcome::VerifyFailedRejected(VerifyFailedError::EvidenceNotBound { .. })
+    ));
+    assert!(unbound_and_empty.effects.is_empty());
 
     let unbound = reduce(
         &snapshot,

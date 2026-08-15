@@ -46,7 +46,7 @@ use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AggregateReviewPayload, AggregateVerifyPayload, BloomId, ConfigRegistry, ConfigScopes, Digest,
     DispatchPayload, ExecutionStatus, Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence,
-    StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailure, VerifyFailureSet, WorkHandle, WorkpieceId,
+    StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId,
 };
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, short_hex};
 use aether_data::wire::{from_bytes, to_vec};
@@ -178,13 +178,13 @@ fn now_unix_millis() -> u64 {
 /// a failed run states, so it spends the same sealed attempt or repair budget
 /// and reaches the same wedge — no parallel retry authority.
 ///
-/// A member `Verify` additionally has to name a failing verifier, because the
-/// intake refuses a failed member Verify carrying an empty set. A timeout cannot
-/// know which verifier would have failed, and the umbrella-level
-/// [`VerifyFailure::Preflight`] is the identity that says exactly that: the
-/// verify umbrella produced no per-verifier verdict at all. Repeated timeouts
-/// therefore accumulate as a repeated `Preflight`, wedging the member with a
-/// terminal set that reads as "the umbrella never answered".
+/// A member `Verify` names no verifier at all. A timeout cannot know which one
+/// would have failed, and it must not guess: the reducer prices a named identity
+/// as a defect in the candidate and sends the member to `Refine` to repair it,
+/// which is the wrong answer for a lane that was killed on the clock before it
+/// judged anything. The empty set is the honest report — the gate rendered no
+/// verdict — and the reducer answers it by re-running `Verify` on the member's
+/// own Verify budget, wedging there once that budget is spent.
 ///
 /// `AggregateReview` is deliberately `None`. ADR-0177 routes it to ADR-0176's
 /// `ExecutorFault` — a review lane that never answered produced no judgement of
@@ -203,8 +203,7 @@ fn now_unix_millis() -> u64 {
 /// compile error instead.
 fn timeout_verdict(stage: StageId) -> Option<(StageVerdict, VerifyFailureSet)> {
     match stage {
-        StageId::Verify => Some((StageVerdict::VerificationFailed, VerifyFailureSet::one(VerifyFailure::Preflight))),
-        StageId::Construct | StageId::Refine | StageId::Reconcile | StageId::AggregateVerify => {
+        StageId::Verify | StageId::Construct | StageId::Refine | StageId::Reconcile | StageId::AggregateVerify => {
             Some((StageVerdict::VerificationFailed, VerifyFailureSet::EMPTY))
         }
         // No verdict, for two different reasons. `AggregateReview`'s is deferred,
