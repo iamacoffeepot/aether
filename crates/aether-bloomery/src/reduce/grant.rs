@@ -92,7 +92,12 @@ pub(super) fn reduce_grant_attempts(
     // wedged member had already built rather than starting from the sealed base.
     let candidate = cursor.candidate;
     let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile);
-    let targets = reconcile_or_line_targets(member.scope_revision, record.spec.base(), candidate, fold_checkpoint);
+    let targets = reconcile_or_line_targets(
+        member.scope_revision,
+        super::splice::member_construct_base(record, workpiece),
+        candidate,
+        fold_checkpoint,
+    );
     // Leave exactly `attempts` of headroom under the stage's budget. `Verify`
     // counts repair rolls and resumes at `Refine`; every other stage counts
     // attempts and resumes in place.
