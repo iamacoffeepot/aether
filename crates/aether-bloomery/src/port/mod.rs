@@ -30,8 +30,8 @@ mod source;
 
 pub use executor::{Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
 pub use projection::{
-    BloomView, ExecutorFaultView, LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt, ProjectionBackend,
-    ViewDocument,
+    BloomView, ExecutorFaultView, HostFaultView, LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt,
+    ProjectionBackend, ViewDocument,
 };
 pub use source::{
     Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome, IntegrateOutcome,

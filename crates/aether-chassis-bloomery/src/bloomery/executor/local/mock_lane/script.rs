@@ -48,9 +48,9 @@ pub enum LaneMode {
     /// findings, or a construct run that reports no candidate. Exits non-zero
     /// the way the real verify lane does.
     Fail,
-    /// The review critic's third verdict: a ground step that could not execute
-    /// at all, which is a host fault rather than a finding against the
-    /// candidate and must not drive a repair lap.
+    /// A host that could not judge: the review critic's `environment` status,
+    /// or a mechanical verify's `verify.preflight` miss. Either way the
+    /// candidate was not judged and must not drive a repair lap.
     Environment,
     /// A construct run that concludes and stamps `produced_candidate: true`
     /// while leaving the worktree clean — the empty candidate that reaches

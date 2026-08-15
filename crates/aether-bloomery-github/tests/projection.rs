@@ -45,6 +45,7 @@ fn member(number: u64, revision: u8) -> MemberView {
         pending_decision: None,
         wedge: None,
         blocked_by: None,
+        host_fault: None,
     }
 }
 

@@ -5,7 +5,9 @@ use super::Snapshot;
 use super::readiness::blocking_ancestor;
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
-use crate::port::{BloomView, ExecutorFaultView, LandingBlock, MemberView, PendingDecisionView, ViewDocument};
+use crate::port::{
+    BloomView, ExecutorFaultView, HostFaultView, LandingBlock, MemberView, PendingDecisionView, ViewDocument,
+};
 use crate::values::Question;
 
 /// Assemble a self-contained [`ViewDocument`] from a snapshot — the pure
@@ -76,6 +78,10 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                         .map(|(_, view)| view.clone()),
                     wedge: record.wedged.get(&member.workpiece).copied(),
                     blocked_by: blocking_ancestor(record, &member.workpiece),
+                    host_fault: record
+                        .host_faults
+                        .get(&member.workpiece)
+                        .map(|hold| HostFaultView { findings: hold.findings.clone() }),
                 })
                 .collect();
             // Rendered only once a landing has actually been refused, so an
@@ -118,7 +124,7 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
 mod tests {
     use super::view_of;
     use crate::digest::Digest;
-    use crate::ids::{IdempotencyKey, WorkpieceId};
+    use crate::ids::{IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::{Event, Fact, Snapshot, reduce};
     use crate::values::{
         BloomDraft, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, ResolvedConfigs, SpendWindow,
@@ -178,5 +184,49 @@ mod tests {
             Some(WorkpieceId("wp-a".into())),
             "the held dependent names the ancestor the operator has to wait on",
         );
+    }
+
+    // The plausible bug: a member waiting on a missing host tool renders
+    // identically to one that is still working, so `/view` cannot name the
+    // host condition (#5020).
+    #[test]
+    fn a_host_fault_surfaces_the_preflight_findings() {
+        let spec = BloomDraft { proposals: vec![membership("wp", 1)], base: digest(0), ..BloomDraft::default() }.seal();
+        let bloom = spec.id();
+        let configs = ResolvedConfigs::default();
+        let spend = SpendWindow::default();
+        let mut snapshot = Snapshot::new(digest(0));
+        let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
+        snapshot = snapshot.apply(&seal, &reduce(&snapshot, &seal, &configs, &spend), &configs);
+
+        let construct = Event {
+            idempotency_key: IdempotencyKey("c-pass".into()),
+            fact: Fact::AttemptCompleted {
+                bloom,
+                workpiece: WorkpieceId("wp".into()),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: Evidence { subject: digest(1), kind: EvidenceKind::VerificationResult, detail: digest(70) },
+                candidate: None,
+            },
+        };
+        snapshot = snapshot.apply(&construct, &reduce(&snapshot, &construct, &configs, &spend), &configs);
+
+        let findings = "Verification did not run.\n\n- `jscpd` — npm install -g jscpd";
+        let fault = Event {
+            idempotency_key: IdempotencyKey("preflight".into()),
+            fact: Fact::VerifyHostFault {
+                bloom,
+                workpiece: WorkpieceId("wp".into()),
+                evidence: Evidence { subject: digest(1), kind: EvidenceKind::VerificationResult, detail: digest(71) },
+                findings: findings.to_owned(),
+            },
+        };
+        snapshot = snapshot.apply(&fault, &reduce(&snapshot, &fault, &configs, &spend), &configs);
+
+        let view = view_of(&snapshot, |_| None);
+        let hold = view.blooms[0].members[0].host_fault.as_ref().expect("the member is held on the host");
+        assert_eq!(hold.findings, findings, "the missing tools are what the operator reads");
+        assert!(view.blooms[0].members[0].wedge.is_none(), "a host fault is not a wedge");
     }
 }

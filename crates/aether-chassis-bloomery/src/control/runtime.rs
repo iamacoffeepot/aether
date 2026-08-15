@@ -488,6 +488,11 @@ impl NativeActor for ControlCore {
             return;
         }
         ctx.actor::<SourceCapability>().send_detached(&observe_mail(&state.snapshot.mainline));
+        // Re-probe every member held on a host-provisioning gap (#5020). The
+        // same poll interval that watches mainline is the honest cadence:
+        // a later tick whose preflight passes resumes Verify; one that still
+        // misses holds again. An operator hold still swallows the dispatch.
+        resume_host_faults(state, ctx);
     }
 
     /// Admit the observed mainline head (#4667). The reply to an
@@ -1100,7 +1105,9 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         | Decision::RecordOperatorRelease { .. }
         | Decision::DeferDispatch { .. }
         | Decision::RecordSpendQuiesce { .. }
-        | Decision::RecordMemberDependencies { .. } => return Ok(None),
+        | Decision::RecordMemberDependencies { .. }
+        | Decision::RecordHostFault { .. }
+        | Decision::ClearHostFault { .. } => return Ok(None),
     };
     Ok(Some(payload))
 }
@@ -1142,6 +1149,50 @@ fn lowercase_hex(bytes: &[u8]) -> String {
 /// The source mail that classifies the live head against the snapshot's
 /// current mainline — genesis or an encode failure is the boot-bind path
 /// (any observed head is a fast-forward).
+/// Admit a cadence resume for every member currently held on a host fault.
+///
+/// Fire-and-forget through the ordinary [`Admit`] door so the fact is
+/// journaled and the dispatch is decided by the reducer, not by this tick.
+/// The key names the hold's evidence digest: two ticks against the same
+/// hold collapse to `Duplicate`, and a later miss (new evidence) is a new
+/// key.
+fn resume_host_faults(state: &ControlCoreState, ctx: &mut NativeCtx<'_, Manual>) {
+    for record in state.snapshot.blooms.values() {
+        if record.operator_hold.is_some() {
+            continue;
+        }
+        for (workpiece, hold) in &record.host_faults {
+            let event = Event {
+                idempotency_key: resume_host_fault_key(&record.spec.id(), workpiece, &hold.evidence),
+                fact: Fact::ResumeHostFault { bloom: record.spec.id(), workpiece: workpiece.clone() },
+            };
+            match to_vec(&event) {
+                Ok(bytes) => ctx.actor::<ControlCore>().send_detached(&Admit { event: bytes }),
+                Err(error) => tracing::warn!(
+                    target: "aether_chassis_bloomery::control",
+                    %error,
+                    workpiece = %workpiece.0,
+                    "host-fault resume did not encode"
+                ),
+            }
+        }
+    }
+}
+
+/// The admit key for one cadence resume of a host-fault hold.
+fn resume_host_fault_key(
+    bloom: &BloomId,
+    workpiece: &aether_bloomery::WorkpieceId,
+    evidence: &Digest,
+) -> IdempotencyKey {
+    IdempotencyKey(format!(
+        "resume-host-fault-{}-{}-{}",
+        lowercase_hex(bloom.0.as_bytes()),
+        workpiece.0,
+        lowercase_hex(evidence.as_bytes()),
+    ))
+}
+
 fn observe_mail(mainline: &Digest) -> ObserveMainline {
     ObserveMainline { relative_to: to_vec(mainline).unwrap_or_default() }
 }
@@ -1211,6 +1262,7 @@ mod tests {
             operator_hold: None,
             deferred_dispatches: BTreeSet::new(),
             dependencies: Vec::new(),
+            host_faults: BTreeMap::new(),
             superseded_by: None,
         };
         let mut snapshot = Snapshot::default();

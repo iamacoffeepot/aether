@@ -537,3 +537,28 @@ pub enum LandError {
     /// Mainline moved off the bloom's sealed base — supersession is forced.
     BaseMismatch(BaseMismatch),
 }
+
+/// Why a host-fault hold or cadence resume was refused (#5020).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum HostFaultError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The fact names a workpiece that is not a member of the bloom.
+    NotAMember(WorkpieceId),
+    /// The member holds no dispatched cursor.
+    NotDispatched(WorkpieceId),
+    /// The member is not currently waiting at terminal Verify.
+    StageMismatch {
+        /// The stage the member is actually waiting at.
+        expected: StageId,
+    },
+    /// The evidence does not bind the member's current Verify subject.
+    EvidenceNotBound {
+        /// The candidate tree, or scope revision before a candidate exists.
+        expected: Digest,
+        /// The subject the evidence actually names.
+        got: Digest,
+    },
+    /// The member is not held on a host fault, so there is nothing to resume.
+    NotHeld(WorkpieceId),
+}
