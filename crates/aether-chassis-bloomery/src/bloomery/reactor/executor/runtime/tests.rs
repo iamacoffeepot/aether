@@ -14,7 +14,7 @@ use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, BloomId, ConfigKind, ConfigRegistry, DispatchPayload, EvidenceRef,
     ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce, ReasoningEffort, RedispatchPayload,
     ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride, TimeoutRecord, Topic, Transformation,
-    VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
+    VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -923,14 +923,14 @@ fn a_cancel_that_faults_leaves_the_expired_order_live_to_retry() {
 }
 
 #[test]
-fn a_verify_timeout_terminates_its_order_rather_than_being_refused_for_naming_no_verifier() {
-    // The cross-module hazard no Construct scenario can reach. ADR-0178 makes
-    // the intake refuse a failed member `Verify` that carries an empty verifier
-    // set, and this expiry's whole answer to a refusal is to log and move on — so
-    // a Verify timeout that named no verifier would be refused every tick and its
-    // hung order would sit outstanding forever, which is the bug being fixed,
-    // reappearing one stage over. A timeout cannot know which verifier would have
-    // failed; `Preflight` is the umbrella-level identity that says exactly that.
+fn a_verify_timeout_terminates_its_order_naming_no_verifier_it_cannot_know() {
+    // The cross-module hazard no Construct scenario can reach, in both
+    // directions. This expiry's whole answer to an intake refusal is to log and
+    // move on, so a Verify timeout the broker rejects sits outstanding forever —
+    // and a Verify timeout that *invents* a verifier identity to get admitted
+    // spends a repair roll and sends a model to fix failures no gate observed.
+    // A timeout cannot know which verifier would have failed, so it names none,
+    // and the reducer re-runs the gate instead of repairing the candidate.
     let mut store = SqliteStore::open(":memory:").unwrap();
     let shell = shell(FakeGithub::new());
     let mut tracked = dispatch_one_at(&mut store, &shell, "wp-hung", StageId::Verify);
@@ -943,8 +943,8 @@ fn a_verify_timeout_terminates_its_order_rather_than_being_refused_for_naming_no
             assert_eq!(workpiece, WorkpieceId("wp-hung".to_owned()));
             assert_eq!(
                 failed_verifiers,
-                VerifyFailureSet::one(VerifyFailure::Preflight),
-                "the umbrella that never answered is the failing identity the accounting repeats on",
+                VerifyFailureSet::EMPTY,
+                "an umbrella that never answered names no verifier, and the empty set is what says so",
             );
         }
         other => panic!("expected a Fact::VerifyFailed, got {other:?}"),

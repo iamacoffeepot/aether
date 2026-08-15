@@ -151,7 +151,9 @@ pub struct Wedge {
     pub evidence: Digest,
     /// The verifier identities from the terminal verdict that this member had
     /// already failed before. Nonempty only when repeated Verify failures spent
-    /// the terminal repair roll; every other stage wedges with the empty set.
+    /// the terminal repair roll; every other stage wedges with the empty set —
+    /// as does a `Verify` that exhausted its attempts on verdicts naming no
+    /// verifier at all, the shape a gate that never answered leaves behind.
     pub repeated_verifiers: VerifyFailureSet,
 }
 

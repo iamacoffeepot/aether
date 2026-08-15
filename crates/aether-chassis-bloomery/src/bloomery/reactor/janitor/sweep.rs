@@ -16,6 +16,7 @@ use aether_bloomery::{
 };
 use aether_data::wire::from_bytes;
 
+use crate::bloomery::LaneOccupancy;
 use crate::bloomery::SourceShell;
 use crate::bloomery::TransformRunner;
 use crate::store::StoreBackend;
@@ -29,6 +30,10 @@ const SLOT_PREFIX: &str = "slot-";
 
 /// The suffix a lane slot's cargo target directory carries.
 const TARGET_SUFFIX: &str = "-target";
+
+/// The marker an evicted target directory wears between the rename that takes
+/// it out of the build path and the removal that frees its bytes.
+const EVICTING_SUFFIX: &str = ".evicting-";
 
 /// Seconds in a day — the unit [`JanitorPolicy::evidence_retention_days`] is
 /// stated in.
@@ -52,7 +57,10 @@ pub struct SweepReport {
     pub evidence_dirs: usize,
     /// Candidate / integration / checkpoint refs deleted for terminal blooms.
     pub refs: usize,
-    /// Slot target directories removed because the host was over budget and idle.
+    /// Slot target directories whose bytes this pass actually returned to the
+    /// disk, evicting toward the budget or clearing what an earlier eviction
+    /// left behind. Removals, never attempts: a directory the sweep tried and
+    /// failed to remove is not one of these.
     pub target_dirs: usize,
 }
 
@@ -69,8 +77,17 @@ pub struct SweepRequest<'a> {
     pub worktree_base: &'a Path,
     /// Per-slot cargo target directory root.
     pub target_base: &'a Path,
-    /// Whether a local lane child is in flight — blocks the target-dir sweep.
-    pub lanes_running: bool,
+    /// The live lane-occupancy probe, consulted immediately before each target
+    /// directory is evicted rather than sampled once for the pass.
+    ///
+    /// A sampled `bool` is what let the 2026-08-14 incident through. A pass
+    /// replays the whole journal, prunes a terminal bloom's refs over the
+    /// network, and walks every target tree for its size before it reaches the
+    /// eviction — seconds at least, and the reading it acted on came from
+    /// before all of that. A slot frees and is claimed again inside that
+    /// window, so what the sweep believed was an idle host was one with a
+    /// compiler running in the directory it deleted.
+    pub lanes: &'a dyn Fn() -> LaneOccupancy,
     /// Retention and budget.
     pub policy: &'a JanitorPolicy,
     /// The clock retention is measured against. Production passes
@@ -80,10 +97,10 @@ pub struct SweepRequest<'a> {
 }
 
 /// Rebuild the snapshot from the journal, then reclaim terminal worktrees,
-/// retained-past-window evidence, terminal-bloom working refs, and over-budget
-/// idle target dirs. Best-effort throughout: a dir git refuses or a ref the
-/// source cannot delete is logged and stepped over, never a reason to skip the
-/// rest of the pass.
+/// retained-past-window evidence, terminal-bloom working refs, and enough
+/// over-budget target dirs to get back under the budget. Best-effort
+/// throughout: a dir git refuses or a ref the source cannot delete is logged
+/// and stepped over, never a reason to skip the rest of the pass.
 ///
 /// # Errors
 /// The store could not be read. A journal that does not decode is logged and
@@ -98,11 +115,7 @@ pub fn sweep(request: &mut SweepRequest<'_>) -> rusqlite::Result<SweepReport> {
     let worktrees = reclaim_worktrees(request.runner, request.worktree_base, &live, &owners, &snapshot);
     let evidence_dirs = reclaim_evidence(request, &live, &owners, &snapshot);
     let refs = request.source.map_or(0, |source| prune_terminal_refs(source, &snapshot));
-    let target_dirs = if request.lanes_running {
-        0
-    } else {
-        sweep_targets_if_over_budget(request.target_base, request.policy.lane_target_budget_bytes)
-    };
+    let target_dirs = sweep_targets(request.target_base, request.policy.lane_target_budget_bytes, request.lanes);
     Ok(SweepReport { worktrees, evidence_dirs, refs, target_dirs })
 }
 
@@ -194,8 +207,9 @@ fn reclaim_worktrees(
             worktree = %worktree.display(),
             "janitor: reclaiming a scratch checkout whose owning run is terminal",
         );
-        reclaim_checkout(runner, &worktree);
-        reclaimed += 1;
+        if reclaim_checkout(runner, &worktree) {
+            reclaimed += 1;
+        }
     }
     reclaimed
 }
@@ -238,8 +252,9 @@ fn reclaim_evidence(
             evidence = %path.display(),
             "janitor: reclaiming a consumed evidence directory past the retention window",
         );
-        remove_abandoned(&path);
-        reclaimed += 1;
+        if remove_abandoned(&path) {
+            reclaimed += 1;
+        }
     }
     reclaimed
 }
@@ -284,44 +299,101 @@ fn prune_terminal_refs(source: &SourceShell, snapshot: &Snapshot) -> usize {
     pruned
 }
 
-fn sweep_targets_if_over_budget(target_base: &Path, budget_bytes: u64) -> usize {
-    let dirs = slot_target_dirs(target_base);
-    if dirs.is_empty() {
-        return 0;
-    }
-    let total: u64 = dirs.iter().map(|dir| dir_bytes(dir)).sum();
+/// One slot target directory as the eviction ranks it.
+struct SlotTarget {
+    /// The slot index the directory belongs to — what the occupancy reading is
+    /// keyed by.
+    slot: usize,
+    path: PathBuf,
+    bytes: u64,
+    /// Newest mtime anywhere in the tree: the recency the eviction orders by.
+    used: SystemTime,
+}
+
+/// Bring the slot target directories back under budget, evicting the coldest
+/// first and only as far as the budget requires.
+///
+/// Reclaiming *everything* on an overage — what this did until the 2026-08-14
+/// incident — makes each firing maximally destructive, and a budget set below
+/// the working set makes it fire forever: the host can never get under, so
+/// every tick wants to sweep and races every lane start. Evicting to the line
+/// keeps the warm caches that are still inside it.
+fn sweep_targets(target_base: &Path, budget_bytes: u64, lanes: &dyn Fn() -> LaneOccupancy) -> usize {
+    let mut removed = reclaim_evicting_leftovers(target_base);
+    let mut targets = slot_targets(target_base);
+    let total: u64 = targets.iter().map(|target| target.bytes).sum();
     if total <= budget_bytes {
-        return 0;
+        return removed;
     }
+
+    let occupancy = lanes();
     tracing::info!(
         target: "aether_chassis_bloomery::janitor",
         total_bytes = total,
         budget_bytes,
-        "janitor: lane target dirs over budget and idle; reclaiming",
+        lanes_running = occupancy.any_running(),
+        occupied_slots = occupancy.slots.len(),
+        "janitor: lane target dirs over budget; evicting least recently used back to the line",
     );
-    let mut removed = 0;
-    for dir in dirs {
-        remove_abandoned(&dir);
-        removed += 1;
+
+    // Coldest first: the slot nobody has built in for longest is the one whose
+    // loss costs the least rebuild time.
+    targets.sort_by_key(|target| target.used);
+    let mut held = total;
+    for target in targets {
+        if held <= budget_bytes {
+            break;
+        }
+        // Live, per directory. Everything above this point — the size walk
+        // especially — takes long enough for the answer to have changed.
+        let occupancy = lanes();
+        if occupancy.unattributed {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::janitor",
+                "janitor: a lane child is running in an unidentified slot; leaving every target dir in place",
+            );
+            break;
+        }
+        if occupancy.slots.contains(&target.slot) {
+            tracing::info!(
+                target: "aether_chassis_bloomery::janitor",
+                slot = target.slot,
+                "janitor: slot is occupied; its target dir stays even though the host is over budget",
+            );
+            continue;
+        }
+        if evict_target_dir(&target.path) {
+            held = held.saturating_sub(target.bytes);
+            removed += 1;
+        }
     }
     removed
 }
 
-fn slot_target_dirs(target_base: &Path) -> Vec<PathBuf> {
+fn slot_targets(target_base: &Path) -> Vec<SlotTarget> {
     let Ok(entries) = fs::read_dir(target_base) else {
         return Vec::new();
     };
     entries
         .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir() && path.file_name().and_then(|name| name.to_str()).is_some_and(is_slot_target))
+        .filter_map(|entry| {
+            let path = entry.path();
+            let slot = slot_target_index(path.file_name()?.to_str()?)?;
+            if !path.is_dir() {
+                return None;
+            }
+            let usage = dir_usage(&path);
+            Some(SlotTarget { slot, path, bytes: usage.bytes, used: usage.newest })
+        })
         .collect()
 }
 
-fn is_slot_target(name: &str) -> bool {
-    name.strip_prefix(SLOT_PREFIX)
-        .and_then(|rest| rest.strip_suffix(TARGET_SUFFIX))
-        .is_some_and(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()))
+fn slot_target_index(name: &str) -> Option<usize> {
+    let index = name.strip_prefix(SLOT_PREFIX)?.strip_suffix(TARGET_SUFFIX)?;
+    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    index.parse().ok()
 }
 
 fn is_slot_directory(name: &str) -> bool {
@@ -349,50 +421,162 @@ fn age_days(path: &Path, now: SystemTime) -> Option<u64> {
     now.duration_since(modified).ok().map(|elapsed| elapsed.as_secs() / SECS_PER_DAY)
 }
 
-fn dir_bytes(path: &Path) -> u64 {
-    let mut total: u64 = 0;
+/// What one directory tree costs and when it was last written.
+struct DirUsage {
+    bytes: u64,
+    newest: SystemTime,
+}
+
+/// Total bytes and newest mtime under `path`, in one walk.
+///
+/// Recency comes out of the same walk the size does because the walk is the
+/// expensive part — a slot target tree is tens of gigabytes across millions of
+/// files, and statting it twice to learn two facts about it would double the
+/// window the eviction is racing.
+fn dir_usage(path: &Path) -> DirUsage {
+    let mut bytes: u64 = 0;
+    let mut newest = fs::metadata(path).and_then(|metadata| metadata.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
     let mut stack = vec![path.to_path_buf()];
     while let Some(next) = stack.pop() {
         let Ok(entries) = fs::read_dir(&next) else {
             continue;
         };
         for entry in entries.flatten() {
-            let child = entry.path();
             let Ok(metadata) = entry.metadata() else {
                 continue;
             };
+            if let Ok(modified) = metadata.modified() {
+                newest = newest.max(modified);
+            }
             if metadata.is_dir() {
-                stack.push(child);
+                stack.push(entry.path());
             } else {
-                total = total.saturating_add(metadata.len());
+                bytes = bytes.saturating_add(metadata.len());
             }
         }
     }
-    total
+    DirUsage { bytes, newest }
 }
 
-fn reclaim_checkout(runner: &dyn TransformRunner, dir: &Path) {
-    if let Err(error) = runner.release(dir) {
+/// Take a target directory out of the build path atomically, then delete it.
+///
+/// The rename is the safety, not a tidiness. `remove_dir_all` walks the tree
+/// unlinking as it goes, so a compile racing the sweep is hollowed out
+/// underneath itself — it watches its own object files disappear one at a time
+/// and fails on whichever one it happened to reach for, which is exactly the
+/// 2026-08-14 incident's `unable to copy … No such file or directory`. A
+/// rename is one atomic step: the racing compile finds the whole directory
+/// gone at once and fails immediately with a diagnosable error, or never
+/// notices because it had not opened anything under it yet.
+///
+/// Reports whether the bytes are actually gone, so the caller counts removals
+/// rather than attempts.
+fn evict_target_dir(path: &Path) -> bool {
+    let Some(aside) = eviction_path(path) else {
         tracing::warn!(
             target: "aether_chassis_bloomery::janitor",
-            worktree = %dir.display(),
-            %error,
-            "janitor: git refused an abandoned checkout; removing the directory directly",
+            path = %path.display(),
+            "janitor: target dir has no nameable sibling to move aside into; left in place",
         );
-        remove_abandoned(dir);
-    }
-}
-
-fn remove_abandoned(path: &Path) {
-    match fs::remove_dir_all(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => tracing::warn!(
+        return false;
+    };
+    if let Err(error) = fs::rename(path, &aside) {
+        // Deliberately not falling back to an in-place removal: deleting where
+        // it stands is the hollowing-out this function exists to avoid, and the
+        // next pass retries.
+        tracing::warn!(
             target: "aether_chassis_bloomery::janitor",
             path = %path.display(),
             %error,
-            "janitor: abandoned directory could not be removed",
-        ),
+            "janitor: target dir could not be moved aside; left in place rather than deleted underneath a compile",
+        );
+        return false;
+    }
+    remove_abandoned(&aside)
+}
+
+fn eviction_path(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |since| since.as_nanos());
+    Some(path.parent()?.join(format!("{name}{EVICTING_SUFFIX}{stamp}")))
+}
+
+/// Delete the moved-aside directories a previous pass renamed but could not
+/// remove, returning how many went.
+///
+/// Unswept, they are permanent and invisible: the rename takes a tree out of
+/// the `slot-<index>-target` namespace the budget is measured over, so a failed
+/// removal would hide tens of gigabytes from the accounting while they sit on
+/// the disk. Runs before the budget test rather than inside it, because a host
+/// that has dropped back under budget is exactly the one that would otherwise
+/// keep them forever.
+fn reclaim_evicting_leftovers(target_base: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(target_base) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !is_evicting_leftover(&path) || !path.is_dir() {
+            continue;
+        }
+        tracing::info!(
+            target: "aether_chassis_bloomery::janitor",
+            path = %path.display(),
+            "janitor: retrying a target dir a previous pass moved aside but could not remove",
+        );
+        if remove_abandoned(&path) {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Whether a name is one this janitor minted in [`eviction_path`] — a slot
+/// target name, the marker, and the stamp, all three. Strict, so the retry can
+/// only ever act on its own leavings.
+fn is_evicting_leftover(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()).and_then(|name| name.split_once(EVICTING_SUFFIX)).is_some_and(
+        |(target, stamp)| {
+            slot_target_index(target).is_some() && !stamp.is_empty() && stamp.bytes().all(|byte| byte.is_ascii_digit())
+        },
+    )
+}
+
+/// Release one abandoned checkout, reporting whether it is actually gone.
+fn reclaim_checkout(runner: &dyn TransformRunner, dir: &Path) -> bool {
+    let Err(error) = runner.release(dir) else {
+        return true;
+    };
+    tracing::warn!(
+        target: "aether_chassis_bloomery::janitor",
+        worktree = %dir.display(),
+        %error,
+        "janitor: git refused an abandoned checkout; removing the directory directly",
+    );
+    remove_abandoned(dir)
+}
+
+/// Remove a directory tree, reporting whether it is gone.
+///
+/// The return value is load-bearing: a caller that counts calls rather than
+/// successes reports a reclamation that did not happen, which is how the
+/// 2026-08-14 incident logged `target_dirs=2` in the same breath as
+/// `Directory not empty`.
+fn remove_abandoned(path: &Path) -> bool {
+    match fs::remove_dir_all(path) {
+        Ok(()) => true,
+        // Already absent is the state this asked for.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::janitor",
+                path = %path.display(),
+                %error,
+                "janitor: abandoned directory could not be removed",
+            );
+            false
+        }
     }
 }
 

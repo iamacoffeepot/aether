@@ -48,6 +48,8 @@
 //! killed by pid — see [`OrphanedRun`](super::local::OrphanedRun) for what a
 //! re-adopted run can observe and what cancelling one actually reclaims.
 
+use std::collections::BTreeSet;
+
 use aether_bloomery::{ExecutorBackend, Nonce, Transformation};
 
 use super::local::LocalExecutorError;
@@ -82,6 +84,35 @@ pub struct ReconcileReport {
     pub reclaimed: usize,
 }
 
+/// Which lane slots a backend has spoken for right now.
+///
+/// The janitor's target-directory sweep reads this to decide what it may
+/// delete. Slot-precise rather than a single "is anything running" bool,
+/// because the two answers differ in the case that matters: a host that always
+/// has *some* lane in flight would never enforce its target budget under a
+/// blanket bool, while a slot-keyed reading lets an idle slot's directory go
+/// and leaves the busy one alone.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LaneOccupancy {
+    /// Slot indices held by a tracked run, or by a start that has been given a
+    /// slot and has not yet become one. Each is the slot whose checkout and
+    /// `CARGO_TARGET_DIR` that dispatch is building in.
+    pub slots: BTreeSet<usize>,
+    /// A lane child is in flight whose slot this process cannot name — a boot
+    /// re-adoption that recovered no slot record (see `readopt`). Nothing
+    /// identifies which target directory it is writing into, so while this
+    /// holds, no slot directory can be shown to be free.
+    pub unattributed: bool,
+}
+
+impl LaneOccupancy {
+    /// Whether any lane child is in flight at all, attributable or not.
+    #[must_use]
+    pub fn any_running(&self) -> bool {
+        !self.slots.is_empty() || self.unattributed
+    }
+}
+
 /// The reconciliation face of an executor backend: hand it the orders the store
 /// still holds outstanding, get back what it recovered.
 ///
@@ -100,13 +131,16 @@ pub trait ReconcileLanes: Send + Sync {
     /// to fail a boot that would otherwise run blooms.
     fn reconcile(&self, live: &[OutstandingDispatch]) -> ReconcileReport;
 
-    /// Whether this backend currently has a lane child in flight. The janitor
-    /// will not sweep slot target directories while this is true — a cold
-    /// rebuild is minutes; deleting a live `CARGO_TARGET_DIR` is a wedged
-    /// member. Default is idle: backends with no local children (Actions) never
-    /// block that sweep.
-    fn any_lane_running(&self) -> bool {
-        false
+    /// Which lane slots this backend has spoken for right now.
+    ///
+    /// The janitor will not evict a slot's target directory while that slot is
+    /// listed — a cold rebuild is minutes; deleting a live `CARGO_TARGET_DIR`
+    /// is a wedged member. Read live, immediately before each removal, because
+    /// a slot frees and is re-claimed on the timescale a sweep pass takes.
+    /// Default is idle: backends with no local children (Actions) never block
+    /// that sweep.
+    fn lane_occupancy(&self) -> LaneOccupancy {
+        LaneOccupancy::default()
     }
 }
 

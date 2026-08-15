@@ -25,7 +25,7 @@ use super::process_runner::{CaptureIdentity, ProcessTransformRunner};
 use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::CoordinatorConfig;
-use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes, ReconcileReport};
+use crate::bloomery::executor::{LaneOccupancy, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 use crate::bloomery::intake::NameEvidenceClaims;
 use crate::bloomery::triage::MAX_TRIAGED_DIFF_BYTES;
 use crate::session::SessionConfig;
@@ -992,6 +992,15 @@ fn capture_commit_digest(commit: &BackendObjectId) -> Digest {
 
 /// Fail-closed evidence for an exited run that left no readable file — the
 /// attempt still has to feed retry/wedge rather than loop on a missing path.
+///
+/// `VerificationFailed` with an *empty* verifier set, and both halves are
+/// deliberate. The verdict is failing because nothing here can claim the run
+/// concluded. The set is empty because naming an identity would be a
+/// fabrication: no verifier ran, let alone failed, and the reducer prices a
+/// named identity as a defect in the candidate and dispatches a repair lap to
+/// fix it. Empty is the one shape that says what actually happened — the gate
+/// rendered no verdict — and it is a meaning the reducer acts on, re-running
+/// Verify over the untouched candidate rather than repairing it.
 fn synthesized_missing_evidence(handle: &WorkHandle, subject: &Digest) -> Vec<EvidenceRef> {
     vec![EvidenceRef {
         name: NameEvidenceClaims::attempt_artifact_name(
@@ -1311,9 +1320,17 @@ impl ReconcileLanes for LocalExecutor {
         }
     }
 
-    fn any_lane_running(&self) -> bool {
+    fn lane_occupancy(&self) -> LaneOccupancy {
         let registry = self.lock();
-        !registry.runs.is_empty() || registry.starting > 0
+        // `slots` is the allocator's own record of what is spoken for, so it
+        // already covers a reservation that has not become a run: `reserve_slot`
+        // claims the index before the spawn shells out.
+        let slots = registry.slots.iter().copied().collect();
+        // A re-adopted run whose evidence recorded no usable slot is building
+        // somewhere this process cannot name.
+        let unattributed = registry.runs.values().any(|run| run.slot.is_none());
+        drop(registry);
+        LaneOccupancy { slots, unattributed }
     }
 }
 

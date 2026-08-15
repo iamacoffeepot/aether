@@ -717,6 +717,42 @@ fn a_failing_terminal_verify_admits_typed_verify_failed_not_integrate() {
     ));
 }
 
+// Tripwire: the fail-closed evidence of a run that died before the umbrella
+// judged anything carries an empty verifier set, and the broker has to let it
+// through — the reducer reads it as "unjudged" and re-runs Verify. Refusing it
+// here strands the attempt behind its execution limit, which is what an hour of
+// a production bloom's wall clock went to.
+#[test]
+fn an_unjudged_verify_naming_no_verifier_is_admitted_rather_than_refused() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let workpiece = WorkpieceId("wp-unjudged".to_owned());
+    let candidate = Digest::from_bytes([5; 32]);
+    let record = dispatch_record("n-unjudged", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
+    assert_eq!(record.stage, StageId::Verify);
+    record_dispatch(&mut store, &record).unwrap();
+
+    let upload = UploadedEvidence {
+        nonce: Nonce("n-unjudged".to_owned()),
+        subject: candidate,
+        verdict: StageVerdict::VerificationFailed,
+        detail: Digest::from_bytes([7; 32]),
+        candidate: None,
+        findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
+        cost: None,
+        calls: None,
+    };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
+        panic!("an unjudged failing-verify upload is admitted; the reducer decides what it means");
+    };
+    let Fact::VerifyFailed { failed_verifiers, .. } = &admission.event.fact else {
+        panic!("an unjudged terminal Verify still admits VerifyFailed");
+    };
+    assert_eq!(*failed_verifiers, VerifyFailureSet::EMPTY, "the empty set reaches the reducer intact");
+    assert!(store.lookup_order("n-unjudged").unwrap().is_none(), "the admitted order is consumed");
+}
+
 #[test]
 fn invalid_verifier_sets_are_refused_without_consuming_the_order() {
     let mut store = store();
@@ -725,7 +761,6 @@ fn invalid_verifier_sets_are_refused_without_consuming_the_order() {
     let candidate = Digest::from_bytes([5; 32]);
     let failures = VerifyFailureSet::one(VerifyFailure::Fmt);
     let cases = [
-        ("n-empty-fail", StageId::Verify, StageVerdict::VerificationFailed, VerifyFailureSet::EMPTY),
         ("n-pass-set", StageId::Verify, StageVerdict::VerificationPassed, failures),
         ("n-construct-set", StageId::Construct, StageVerdict::VerificationFailed, failures),
         ("n-park-set", StageId::Verify, StageVerdict::Parked, failures),
