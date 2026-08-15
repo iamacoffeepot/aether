@@ -246,6 +246,8 @@ fn unterminated(detail: impl Into<String>) -> LocalExecutorError {
 
 #[cfg(test)]
 mod tests {
+    use std::iter::repeat_n;
+
     use super::{ProcessIdentity, StatFields};
 
     fn stat_line(comm: &str, pgid: u32, starttime: u64) -> String {
@@ -257,7 +259,7 @@ mod tests {
         // lands at man-page field 22. Values other than pgid/starttime are
         // unused padding.
         let mut fields = vec![state.to_string(), "1".to_owned(), pgid.to_string()];
-        fields.extend(std::iter::repeat_n("0".to_owned(), 16));
+        fields.extend(repeat_n("0".to_owned(), 16));
         fields.push(starttime.to_string());
         format!("42 ({comm}) {}", fields.join(" "))
     }
