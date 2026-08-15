@@ -87,10 +87,7 @@ impl Coordinator {
     /// attaches to the thief. A caller that requires this to stay true after
     /// the handshake is talking to the process it spawned, not a stranger.
     pub fn is_alive(&mut self) -> bool {
-        match self.child.as_mut() {
-            Some(child) => matches!(child.try_wait(), Ok(None)),
-            None => false,
-        }
+        self.child.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)))
     }
 
     /// SIGKILL the coordinator now and reap it (`Child::kill` is SIGKILL on

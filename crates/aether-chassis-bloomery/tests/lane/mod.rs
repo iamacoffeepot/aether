@@ -305,7 +305,7 @@ impl LaneHarness {
 /// `free_port` binds `:0` and releases, so a sibling can claim the port
 /// before the bin binds. The loser exits; a handshake then attaches to the
 /// thief, whose journal already consumed the shared `lane-seal` key — the
-/// NeverExits scenario failed verify in a quarter-second on that Duplicate
+/// `NeverExits` scenario failed verify in a quarter-second on that `Duplicate`
 /// (#4908). Requiring the child to stay alive after the handshake is what
 /// refuses the thief.
 fn spawn_listening_coordinator(
