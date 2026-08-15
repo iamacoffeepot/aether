@@ -11,6 +11,7 @@ mod bloom;
 mod composition;
 mod config;
 mod finding;
+mod lane;
 mod model_override;
 mod operator;
 mod orphan_claim;
@@ -38,6 +39,7 @@ pub use finding::{
     CHECK_KEY, CRITICAL_KEY, ClassifiedFinding, ClassifiedFindings, FindingClass, JUDGMENT_TAG, MECHANICAL_TAG,
     classify_findings,
 };
+pub use lane::{LANE_WORKPIECE_HEADER, pin_workpiece_description, split_lane_identity};
 pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedModel, StageOverride};
 pub use operator::{Adjudication, Disposition, OperatorHold, OperatorRepair};
 pub use orphan_claim::{
