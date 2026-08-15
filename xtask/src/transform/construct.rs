@@ -168,6 +168,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::{env, fs, process};
 
+    use aether_bloomery::{LANE_WORKPIECE_HEADER, pin_workpiece_description};
+
     use super::{
         COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, Measurements,
         porcelain_signals_candidate, stamp_construct_evidence, take_commit_message,
@@ -372,13 +374,13 @@ mod tests {
             CONSTRUCT_INSTRUCTIONS,
             Some(conventions),
             Some("abc123"),
-            Some(&format!("Workpiece: issue-1111\n\n{body}")),
+            Some(&pin_workpiece_description("issue-1111", body)),
         );
         let right = assemble_construct_prompt(
             CONSTRUCT_INSTRUCTIONS,
             Some(conventions),
             Some("abc123"),
-            Some(&format!("Workpiece: issue-2222\n\n{body}")),
+            Some(&pin_workpiece_description("issue-2222", body)),
         );
 
         let prefix_len = left.bytes().zip(right.bytes()).take_while(|(a, b)| a == b).count();
@@ -392,8 +394,11 @@ mod tests {
             left[..prefix_len].contains(body.trim_end()),
             "the shared work order must sit inside the common prefix, not after a per-lane header",
         );
-        assert!(left.contains("Workpiece: issue-1111"), "the left tail still names its member");
-        assert!(right.contains("Workpiece: issue-2222"), "the right tail still names its member");
+        assert!(left.contains(&format!("{LANE_WORKPIECE_HEADER} issue-1111")), "the left tail still names its member");
+        assert!(
+            right.contains(&format!("{LANE_WORKPIECE_HEADER} issue-2222")),
+            "the right tail still names its member",
+        );
         assert!(
             !left[..prefix_len].contains("issue-1111") && !left[..prefix_len].contains("issue-2222"),
             "member identity belongs in the tail after the common prefix",

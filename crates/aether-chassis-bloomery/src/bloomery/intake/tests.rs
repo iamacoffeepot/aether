@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use aether_bloomery::{
     BloomDraft, BloomId, BloomRecord, BloomStatus, ConfigRegistry, Decision, Digest, Event, Evidence, EvidenceKind,
     EvidenceRef, ExecutionLimits, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce,
-    Outcome, ResolvedConfigs, Snapshot, StageCatalog, StageId, StageVerdict, Transformation, VerifyFailure,
-    VerifyFailureSet, WorkHandle, WorkpieceId, reduce,
+    Outcome, ResolvedConfigs, Snapshot, SpendWindow, StageCatalog, StageId, StageVerdict, Transformation,
+    VerifyFailure, VerifyFailureSet, WorkHandle, WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -459,7 +459,7 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
     assert_eq!(sink.0.len(), 1);
 
     // The reducer oracle: the admitted event integrates its member.
-    match reduce(&snapshot, &sink.0[0].event, &ResolvedConfigs::default()).outcome {
+    match reduce(&snapshot, &sink.0[0].event, &ResolvedConfigs::default(), &SpendWindow::default()).outcome {
         Outcome::Integrated { bloom: integrated, workpiece: member } => {
             assert_eq!(integrated, bloom);
             assert_eq!(member, workpiece);
@@ -566,7 +566,7 @@ fn sealed_via_reducer(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snaps
     let bloom = spec.id();
     let snapshot = Snapshot::new(Digest::default());
     let seal = Event { idempotency_key: IdempotencyKey("seal".to_owned()), fact: Fact::Seal(spec) };
-    let decisions = reduce(&snapshot, &seal, &ResolvedConfigs::default());
+    let decisions = reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
     let snapshot = snapshot.apply(&seal, &decisions, &ResolvedConfigs::default());
     (snapshot, bloom)
 }
@@ -616,7 +616,7 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
     assert!(*passed, "a VerificationPassed verdict passes the gate");
 
     // Fold it through the reducer: the member advances to Verify and dispatches it.
-    let decisions = reduce(&snapshot, &admission.event, &ResolvedConfigs::default());
+    let decisions = reduce(&snapshot, &admission.event, &ResolvedConfigs::default(), &SpendWindow::default());
     assert!(matches!(
         decisions.outcome,
         Outcome::AttemptAdvanced { from: StageId::Construct, to: StageId::Verify, .. }
@@ -1559,7 +1559,7 @@ fn a_weave_repair_that_dodges_its_finding_bounces_without_a_re_judge_and_spends_
 
     // The reducer charges the ordinary weave-repair retry and re-weaves — the
     // composite gate run is never dispatched, so no aggregate review behind it.
-    let decisions = reduce(&snapshot, &admission.event, &ResolvedConfigs::default());
+    let decisions = reduce(&snapshot, &admission.event, &ResolvedConfigs::default(), &SpendWindow::default());
     assert!(
         matches!(decisions.outcome, Outcome::CompositionRewoven { refused_at: StageId::Refine, attempt: 2, .. }),
         "the bounce spends a weave-repair retry, got {:?}",
@@ -1621,7 +1621,7 @@ fn a_weave_repair_that_touches_its_finding_passes_to_the_re_judge() {
     assert!(*passed, "a repair that reaches the named symbol keeps its passing verdict");
     assert_eq!(evidence.kind, EvidenceKind::VerificationResult, "an addressed lap is filed as the verdict it is");
 
-    let decisions = reduce(&snapshot, &admission.event, &ResolvedConfigs::default());
+    let decisions = reduce(&snapshot, &admission.event, &ResolvedConfigs::default(), &SpendWindow::default());
     assert!(
         matches!(decisions.outcome, Outcome::CompositionRepaired { .. }),
         "the repair hands the re-woven tree to the composite gate run, got {:?}",
@@ -1682,7 +1682,7 @@ fn repeated_dodges_exhaust_the_repair_budget_and_wedge_the_composition() {
     else {
         panic!("the lap admits");
     };
-    let decisions = reduce(&snapshot, &admission.event, &ResolvedConfigs::default());
+    let decisions = reduce(&snapshot, &admission.event, &ResolvedConfigs::default(), &SpendWindow::default());
     assert!(
         matches!(decisions.outcome, Outcome::CompositionWedged { refused_at: StageId::Refine, .. }),
         "the last dodge exhausts the budget and stops the composition, got {:?}",

@@ -152,38 +152,7 @@ impl LaneHarness {
         // control core over the wire rather than through the REST api.
         let configs = wall_clock_secs.map_or_else(ConfigRegistry::default, |secs| author_catalog(&store_path, secs));
 
-        let rpc_port = free_port();
-        let coordinator = Coordinator::spawn_in(
-            rpc_port,
-            Some(&repo.work_dir()),
-            &[
-                ("AETHER_STORE_PATH", &store_path),
-                ("AETHER_ARTIFACTS_ROOT", &state.path().join("artifacts").to_string_lossy()),
-                // The whole point: the dispatch below the spawn stays real, the
-                // program at the end of the argv does not.
-                ("AETHER_BLOOMERY_LANE_PROGRAM", env!("CARGO_BIN_EXE_bloomery-mock-lane")),
-                ("AETHER_GITHUB_LOCAL_WORKTREE_BASE", &runs.path().to_string_lossy()),
-                // Every lane local, including the mechanical verify one. The
-                // production default routes verify at a shared runner, which
-                // needs a GitHub connection this tier deliberately does not
-                // configure — and the verify lane is where half the catalogue's
-                // failure modes live.
-                ("AETHER_GITHUB_LOCAL_LANE_COMMANDS", "construct.,review.,verify."),
-                ("AETHER_GITHUB_POLL_INTERVAL_SECS", "1"),
-                // In-memory GitHub for the aggregate line (#4732): the member
-                // line alone needs no GitHub, but Integrate→AggregateVerify→
-                // AggregateReview→Land do. `fake` mounts every reactor with an
-                // in-memory double and needs no token/owner/repo.
-                ("AETHER_GITHUB_BACKEND", "fixture"),
-                ("AETHER_GITHUB_FIXTURE_BASE_SHA", repo.head()),
-                // A fixed capture identity, so a candidate commit never depends
-                // on whatever git identity the host running the suite has.
-                ("AETHER_BLOOMERY_OPERATOR_NAME", "lane harness"),
-                ("AETHER_BLOOMERY_OPERATOR_EMAIL", "lane-harness@example.test"),
-            ],
-        );
-
-        let stream = connect_and_handshake(rpc_port, "lane-boundary-harness");
+        let (coordinator, stream) = spawn_listening_coordinator(&repo, &runs, &state, &store_path);
 
         let mut harness = Self { repo, runs, state, store_path, _coordinator: coordinator, stream, cid: 1, base };
         harness.seal(workpiece, configs);
@@ -328,6 +297,63 @@ impl LaneHarness {
         };
         assert!(matches!(outcome, Outcome::Sealed(_)), "the harness seal must seal: {outcome:?}");
     }
+}
+
+/// Fork a coordinator and handshake only once the child we spawned is still
+/// the process on that port.
+///
+/// `free_port` binds `:0` and releases, so a sibling can claim the port
+/// before the bin binds. The loser exits; a handshake then attaches to the
+/// thief, whose journal already consumed the shared `lane-seal` key — the
+/// `NeverExits` scenario failed verify in a quarter-second on that `Duplicate`
+/// (#4908). Requiring the child to stay alive after the handshake is what
+/// refuses the thief.
+fn spawn_listening_coordinator(
+    repo: &ScratchRepo,
+    runs: &TempDir,
+    state: &TempDir,
+    store_path: &str,
+) -> (Coordinator, TcpStream) {
+    for _ in 0..8 {
+        let rpc_port = free_port();
+        let mut coordinator = Coordinator::spawn_in(
+            rpc_port,
+            Some(&repo.work_dir()),
+            &[
+                ("AETHER_STORE_PATH", store_path),
+                ("AETHER_ARTIFACTS_ROOT", &state.path().join("artifacts").to_string_lossy()),
+                // The whole point: the dispatch below the spawn stays real, the
+                // program at the end of the argv does not.
+                ("AETHER_BLOOMERY_LANE_PROGRAM", env!("CARGO_BIN_EXE_bloomery-mock-lane")),
+                ("AETHER_GITHUB_LOCAL_WORKTREE_BASE", &runs.path().to_string_lossy()),
+                // Every lane local, including the mechanical verify one. The
+                // production default routes verify at a shared runner, which
+                // needs a GitHub connection this tier deliberately does not
+                // configure — and the verify lane is where half the catalogue's
+                // failure modes live.
+                ("AETHER_GITHUB_LOCAL_LANE_COMMANDS", "construct.,review.,verify."),
+                ("AETHER_GITHUB_POLL_INTERVAL_SECS", "1"),
+                // In-memory GitHub for the aggregate line (#4732): the member
+                // line alone needs no GitHub, but Integrate→AggregateVerify→
+                // AggregateReview→Land do. `fake` mounts every reactor with an
+                // in-memory double and needs no token/owner/repo.
+                ("AETHER_GITHUB_BACKEND", "fixture"),
+                ("AETHER_GITHUB_FIXTURE_BASE_SHA", repo.head()),
+                // A fixed capture identity, so a candidate commit never depends
+                // on whatever git identity the host running the suite has.
+                ("AETHER_BLOOMERY_OPERATOR_NAME", "lane harness"),
+                ("AETHER_BLOOMERY_OPERATOR_EMAIL", "lane-harness@example.test"),
+            ],
+        );
+        if !coordinator.is_alive() {
+            continue;
+        }
+        let stream = connect_and_handshake(rpc_port, "lane-boundary-harness");
+        if coordinator.is_alive() {
+            return (coordinator, stream);
+        }
+    }
+    panic!("the lane coordinator would not stay up long enough to handshake");
 }
 
 /// The native control core's mailbox, addressed by its lineage path.

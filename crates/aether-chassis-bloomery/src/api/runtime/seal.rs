@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use aether_actor::Manual;
 use aether_bloomery::{
     Admit, ApprovalPolicy, AuthorityDoor, BloomDraft, BloomId, BloomSpec, ConfigScopes, Digest, Event, Fact,
-    IdempotencyKey, Membership, Statement, WorkpieceId, surface_intersection,
+    IdempotencyKey, Membership, SpendCeiling, Statement, WorkpieceId, surface_intersection,
 };
 use aether_data::wire::to_vec;
 use aether_http::HttpServerResponse;
@@ -122,6 +122,15 @@ impl ApiCapabilityState {
             return Routed::Reply(error_response(
                 422,
                 &format!("draft has {} members; a seal is capped at {MAX_SEAL_MEMBERS}", draft.proposals.len()),
+            ));
+        }
+        if let Some(member) = draft.proposals.iter().find(|member| member.configs.address::<SpendCeiling>().is_some()) {
+            return Routed::Reply(error_response(
+                422,
+                &format!(
+                    "member {} seals its own spend ceiling; the ceiling is bloom-wide only, seal fails closed",
+                    member.workpiece.0
+                ),
             ));
         }
         // Which policy this draft is admitted under — the one it seals, or the

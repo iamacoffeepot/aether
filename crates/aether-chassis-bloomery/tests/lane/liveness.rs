@@ -172,6 +172,7 @@ mod tests {
         ViewDocument {
             mainline: Digest::default(),
             observed: Digest::default(),
+            spend_quiesce: None,
             blooms: vec![BloomView {
                 id: BloomId(Digest::from_bytes([7; 32])),
                 status,
@@ -214,6 +215,7 @@ mod tests {
         let faulted = ViewDocument {
             mainline: Digest::default(),
             observed: Digest::default(),
+            spend_quiesce: None,
             blooms: vec![BloomView {
                 id: BloomId(Digest::from_bytes([7; 32])),
                 status: BloomStatus::Sealed,

@@ -16,7 +16,7 @@ mod common;
 
 use aether_bloomery::{
     BloomId, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, OrphanClaimReleaseCompletion, Outcome,
-    ResolvedConfigs, Snapshot, StageId, VerifyFailure, VerifyFailureSet, WorkpieceId, reduce,
+    ResolvedConfigs, Snapshot, SpendWindow, StageId, VerifyFailure, VerifyFailureSet, WorkpieceId, reduce,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use common::{claim, digest, draft, event, membership};
@@ -98,7 +98,7 @@ fn replay(journal: &[Event]) -> (Vec<Decisions>, Snapshot) {
     let mut decisions = Vec::with_capacity(journal.len());
     for ev in journal {
         let decoded: Event = from_bytes(&to_vec(ev).unwrap()).unwrap();
-        let outcome = reduce(&snapshot, &decoded, &ResolvedConfigs::default());
+        let outcome = reduce(&snapshot, &decoded, &ResolvedConfigs::default(), &SpendWindow::default());
         snapshot = snapshot.apply(&decoded, &outcome, &ResolvedConfigs::default());
         decisions.push(outcome);
     }

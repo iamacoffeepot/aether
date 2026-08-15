@@ -47,6 +47,9 @@
 //!   admitted study records into actual cost and time, reads its retries off the
 //!   dispatch ledger, and grades all three against the sealed [`Forecast`]
 //!   (ADR-0151, ADR-0180).
+//! - [`mod@spend`] — the window spend projection: [`measure`] sums
+//!   the priced column on each bloom's admitted study records so the seal-door
+//!   governor and the ledger share one accounting path (ADR-0192).
 //! - [`port`] — the [`SourceBackend`] / [`ProjectionBackend`] /
 //!   [`ExecutorBackend`] trait shapes adapters implement and the host mounts.
 //!   Kept here so adapters depend inward on this crate, cycle-free (ADR-0149
@@ -69,6 +72,7 @@ pub mod manifest;
 pub mod port;
 pub mod reduce;
 pub mod sign;
+pub mod spend;
 pub mod study_report;
 pub mod values;
 
@@ -107,19 +111,21 @@ pub use reduce::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;
 pub use sign::{AuthorityDoor, FakeKeyProvider, KeyProvider, SignatureEnvelope, authorization_message};
+pub use spend::measure;
 pub use study_report::{BloomGrade, StudyReport, grade};
 pub use values::{
     Adjudication, AgentProfile, AgentSelection, ApprovalPolicy, ApprovalRule, Artifact, Attempt, BloomDraft, BloomSpec,
     CHECK_KEY, CONSTRUCT_IMPLEMENT_COMMAND, CRITICAL_KEY, CandidateRef, CatalogError, ClassifiedFinding,
     ClassifiedFindings, CompositionFinding, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, DispatchKey,
     Disposition, Evidence, EvidenceKind, ExecutionLimits, FindingClass, Forecast, Harness, JUDGMENT_TAG,
-    LandingReceipt, LongContextBand, MECHANICAL_TAG, MemberCandidate, MemberSubject, Membership, ModelOverride,
-    NetworkProfile, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OperatorHold, OperatorRepair, OrphanClaimRelease,
-    OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord, OverrideError, PriceRates, PriceTable, Provenance,
-    Question, REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs, ResolvedModel,
-    SealedPriceTable, StageBinding, StageCatalog, StageOverride, StageReceipt, Statement, StudyCall, StudyCost,
-    StudyRecord, SurfacePattern, Tier, TimeoutRecord, ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND,
-    VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VerifiedTree, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof,
-    VerifyReuse, Wedge, Workpiece, classify_findings, config_address, decode_config, is_model_lane,
+    LANE_WORKPIECE_HEADER, LandingReceipt, LongContextBand, MECHANICAL_TAG, MemberCandidate, MemberSubject, Membership,
+    ModelOverride, NetworkProfile, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OperatorHold, OperatorRepair,
+    OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseRecord, OverrideError, PriceRates, PriceTable,
+    Provenance, Question, REVIEW_CRITIC_COMMAND, ReasoningEffort, ResolutionClaim, ResolvedBloom, ResolvedConfigs,
+    ResolvedModel, SealedPriceTable, SpendCeiling, SpendQuiesce, SpendWindow, StageBinding, StageCatalog,
+    StageOverride, StageReceipt, Statement, StudyCall, StudyCost, StudyRecord, SurfacePattern, Tier, TimeoutRecord,
+    ToolPolicy, Transformation, Unproducible, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK,
+    VerifiedTree, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Workpiece,
+    classify_findings, config_address, decode_config, is_model_lane, pin_workpiece_description, split_lane_identity,
     surface_intersection,
 };
