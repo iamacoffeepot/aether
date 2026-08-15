@@ -46,22 +46,22 @@ pub(super) fn move_effects(
 /// when an inherited resolution claim names a candidate tree but the member
 /// has no candidate-bearing cursor.
 ///
-/// **The one place a post-seal [`Decision::DispatchAttempt`] is built** — every
-/// route into the line comes through here or through [`move_effects`], which
-/// delegates to it: an advance, a retry, a Refine re-entry, a reconcile, a
-/// grant, an operator repair, and the composition's weave repair. That is what
-/// makes the operator hold (#4976) one guard rather than a policy scattered over
-/// eight call sites, and what makes the guard hard to forget: the flag rides on
-/// [`SealedLine`], the only way to reach this function, and a [`SealedLine`] can
-/// only be built from a [`BloomRecord`] — so a dispatch path added later carries
-/// the hold whether or not its author thought about it.
+/// **The one place a [`Decision::DispatchAttempt`] is built** — every route
+/// into the line comes through here or through [`move_effects`], which
+/// delegates to it: a seal-time or readiness entry, an advance, a retry, a
+/// Refine re-entry, a reconcile, a grant, an operator repair, and the
+/// composition's weave repair. That is what makes the operator hold (#4976)
+/// one guard rather than a policy scattered over eight call sites, and what
+/// makes the guard hard to forget: the flag rides on [`SealedLine`], the
+/// only way to reach this function.
 ///
 /// Held, the pair becomes the advance plus a [`Decision::DeferDispatch`]: the
 /// cursor still moves (the fact that produced it reduces and journals exactly as
-/// it always did) and the work order is simply not written. The seal door's
-/// entry dispatch is the one dispatch outside this function, and it is
-/// structurally out of reach of a hold — a hold names an existing bloom, and a
-/// seal is what brings one into existence.
+/// it always did) and the work order is simply not written. A first seal
+/// constructs [`SealedLine`] with `held: false` because a hold names an
+/// existing bloom, and a seal is what brings one into existence. A dependent
+/// that becomes ready later reads the live record, so a hold taken in the
+/// meantime swallows that entry the same way it swallows every other move.
 pub(super) fn move_effects_with_candidate(
     bloom: BloomId,
     workpiece: &WorkpieceId,
@@ -108,8 +108,9 @@ pub(super) struct DispatchTargets {
 /// What a dispatch inherits from the bloom that sealed it (ADR-0174): the
 /// flattened configuration registry it resolves through, the stage catalog that
 /// calibrates it, the base its candidate is built over — and whether that bloom
-/// is currently on the operator brake (#4976). All four come off the bloom's
-/// record, so they travel together.
+/// is currently on the operator brake (#4976). All four travel together; a
+/// first seal assembles them from the spec (no record exists yet) and every
+/// later move reads them off the record.
 pub(super) struct SealedLine<'a> {
     /// The member's registry layered over the bloom's.
     pub configs: ConfigRegistry,

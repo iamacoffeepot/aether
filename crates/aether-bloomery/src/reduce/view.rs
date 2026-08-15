@@ -2,6 +2,7 @@
 //! render without querying back into the store (ADR-0149 §The boundary).
 
 use super::Snapshot;
+use super::readiness::blocking_ancestor;
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{BloomView, ExecutorFaultView, LandingBlock, MemberView, PendingDecisionView, ViewDocument};
@@ -20,8 +21,9 @@ use crate::values::Question;
 /// workpiece from the record's accumulated claims — its resolution claim once
 /// integrated (`None` until then), — matched by workpiece from the
 /// [`Question`] each open hold resolves to — its pending-decision hold (`None`
-/// when the member is not held), and its wedge if it has stopped dispatching
-/// for good (`None` while it is still working).
+/// when the member is not held), its wedge if it has stopped dispatching
+/// for good (`None` while it is still working), and — when the sealed graph
+/// is holding it out of the line — the ancestor it is waiting on.
 ///
 /// `resolve_question` resolves an open hold's question digest to its
 /// [`Question`] bytes, the same injected read-only resolver
@@ -73,6 +75,7 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                         .find(|(workpiece, _)| *workpiece == member.workpiece)
                         .map(|(_, view)| view.clone()),
                     wedge: record.wedged.get(&member.workpiece).copied(),
+                    blocked_by: blocking_ancestor(record, &member.workpiece),
                 })
                 .collect();
             // Rendered only once a landing has actually been refused, so an
@@ -108,5 +111,72 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
         observed: snapshot.observed,
         spend_quiesce: snapshot.spend_quiesce.clone(),
         blooms,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::view_of;
+    use crate::digest::Digest;
+    use crate::ids::{IdempotencyKey, WorkpieceId};
+    use crate::reduce::{Event, Fact, Snapshot, reduce};
+    use crate::values::{
+        BloomDraft, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, ResolvedConfigs, SpendWindow,
+    };
+
+    fn digest(seed: u8) -> Digest {
+        Digest::from_bytes([seed; 32])
+    }
+
+    fn membership(name: &str, revision: u8) -> Membership {
+        let mut member = Membership {
+            workpiece: WorkpieceId(name.into()),
+            scope_revision: digest(revision),
+            configs: ConfigRegistry::default(),
+            approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
+        };
+        member.approval.subject = member.subject();
+        member
+    }
+
+    // The plausible bug: a dependent waiting on a still-running ancestor
+    // renders identically to a working member, so `/view` looks idle for a
+    // reason the operator cannot name.
+    #[test]
+    fn a_dependent_surfaces_its_blocking_ancestor() {
+        let spec = BloomDraft {
+            proposals: vec![membership("wp-a", 1), membership("wp-b", 2)],
+            base: digest(0),
+            ..BloomDraft::default()
+        }
+        .seal();
+        let event = Event {
+            idempotency_key: IdempotencyKey("seal".into()),
+            fact: Fact::GraphSeal {
+                predecessor: None,
+                spec,
+                edges: vec![MemberDependency {
+                    member: WorkpieceId("wp-b".into()),
+                    depends_on: WorkpieceId("wp-a".into()),
+                }],
+            },
+        };
+        let snapshot = Snapshot::new(digest(0));
+        let snapshot = snapshot.apply(
+            &event,
+            &reduce(&snapshot, &event, &ResolvedConfigs::default(), &SpendWindow::default()),
+            &ResolvedConfigs::default(),
+        );
+
+        let view = view_of(&snapshot, |_| None);
+        let members = &view.blooms[0].members;
+        let root = members.iter().find(|member| member.workpiece.0 == "wp-a").expect("root member");
+        let dependent = members.iter().find(|member| member.workpiece.0 == "wp-b").expect("dependent member");
+        assert_eq!(root.blocked_by, None, "a dispatched root is not waiting");
+        assert_eq!(
+            dependent.blocked_by,
+            Some(WorkpieceId("wp-a".into())),
+            "the held dependent names the ancestor the operator has to wait on",
+        );
     }
 }

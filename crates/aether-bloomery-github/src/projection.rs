@@ -13,12 +13,13 @@
 //! # What maps to what
 //!
 //! - Each member → one **comment on the issue its workpiece addresses**, keyed
-//!   by workpiece *and* bloom. State, approval, resolution, wedge and any held
-//!   question fold into that one comment rather than taking one apiece: they
-//!   derive from the same [`MemberView`] and change together. The bloom half of
-//!   the key is load-bearing — a successor bloom re-admitting the same
-//!   workpiece shares one issue with its predecessor, and a workpiece-only key
-//!   would have the two overwrite each other.
+//!   by workpiece *and* bloom. State, approval, resolution, wedge, a graph
+//!   hold (`blocked_by`), and any held question fold into that one comment
+//!   rather than taking one apiece: they derive from the same [`MemberView`]
+//!   and change together. The bloom half of the key is load-bearing — a
+//!   successor bloom re-admitting the same workpiece shares one issue with its
+//!   predecessor, and a workpiece-only key would have the two overwrite each
+//!   other.
 //! - A landing receipt → one comment per bloom on every resolvable member
 //!   issue, and on the landing pull request when one exists.
 //! - A bloom has no object of its own. Before it lands there is nothing to
@@ -253,6 +254,10 @@ fn render_member_body(bloom: BloomId, member: &MemberView) -> String {
     );
     let _ = writeln!(body, "- State: {}", member_state(member));
 
+    if let Some(blocker) = &member.blocked_by {
+        let _ = writeln!(body, "- **Blocked** by `{}`: construct waits until that ancestor resolves.", blocker.0);
+    }
+
     if let Some(resolution) = &member.resolution {
         let _ = writeln!(
             body,
@@ -283,10 +288,11 @@ fn render_member_body(bloom: BloomId, member: &MemberView) -> String {
 }
 
 fn member_state(member: &MemberView) -> String {
-    match (&member.resolution, &member.wedge) {
-        (_, Some(wedge)) => format!("**wedged** at {:?}", wedge.stage),
-        (Some(_), None) => "integrated".to_owned(),
-        (None, None) => "in progress".to_owned(),
+    match (&member.resolution, &member.wedge, &member.blocked_by) {
+        (_, Some(wedge), _) => format!("**wedged** at {:?}", wedge.stage),
+        (Some(_), None, _) => "integrated".to_owned(),
+        (None, None, Some(blocker)) => format!("blocked by `{}`", blocker.0),
+        (None, None, None) => "in progress".to_owned(),
     }
 }
 
