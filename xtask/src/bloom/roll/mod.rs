@@ -50,7 +50,7 @@ pub fn run(client: &Client<'_>, args: &RollArgs) -> Result<String> {
 fn roll(view: &ViewDocument, shell: &impl Shell, args: &RollArgs) -> Result<String> {
     let from = sync_from(&args.from)?;
     preconditions::screen(view, shell, &args.date, &args.remote)?;
-    let synced = sync::merge(shell, &from)?;
+    let synced = sync::merge(shell, &args.remote, &from)?;
     cut::create(shell, &args.remote, &args.date)?;
     Ok(handoff(&args.date, &synced))
 }
@@ -133,6 +133,9 @@ mod tests {
         Fake::new(|line| match line {
             line if line.starts_with("gh api") => Run::ok("true"),
             line if line.starts_with("gh pr list") => Run::ok("4990"),
+            line if line.starts_with("gh pr checks") => Run::ok(super::sync::GREEN_GATE_JSON),
+            line if line.contains("rev-parse") => Run::ok("tree-day"),
+            line if line.contains("rev-list") => Run::ok(""),
             _ => Run::ok(""),
         })
     }
