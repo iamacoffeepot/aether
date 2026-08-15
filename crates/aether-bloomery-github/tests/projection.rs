@@ -56,7 +56,7 @@ fn one_bloom(id: BloomId, members: Vec<MemberView>) -> ViewDocument {
         landing_blocked: None,
         executor_fault: None,
     };
-    ViewDocument { mainline: digest(0), observed: digest(0), blooms: vec![bloom] }
+    ViewDocument { mainline: digest(0), observed: digest(0), spend_quiesce: None, blooms: vec![bloom] }
 }
 
 /// A two-member bloom; the second member is integrated (carries a resolution)

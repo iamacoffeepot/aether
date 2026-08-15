@@ -10,8 +10,8 @@
 mod common;
 
 use aether_bloomery::{
-    Evidence, EvidenceKind, Fact, Question, ResolvedConfigs, Snapshot, StageId, VerifyFailure, VerifyFailureSet,
-    WorkpieceId, reduce, view_of,
+    Evidence, EvidenceKind, Fact, Question, ResolvedConfigs, Snapshot, SpendQuiesce, SpendWindow, StageId,
+    VerifyFailure, VerifyFailureSet, WorkpieceId, reduce, view_of,
 };
 use common::{digest, draft, event, membership, observing, sealed_and_resolved};
 use proptest::collection::btree_set;
@@ -32,7 +32,26 @@ fn sealed(members: Vec<aether_bloomery::Membership>) -> Snapshot {
     let spec = draft(0, members).seal();
     let snapshot = Snapshot::new(digest(0));
     let seal = event("seal", Fact::Seal(spec));
-    snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()), &ResolvedConfigs::default())
+    snapshot.apply(
+        &seal,
+        &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
+        &ResolvedConfigs::default(),
+    )
+}
+
+#[test]
+fn view_carries_the_spend_quiesce_marker() {
+    // The plausible bug: view_of drops the snapshot marker, so GET /view
+    // cannot show "quiesced: spend ceiling" and the door looks idle.
+    let mut snapshot = Snapshot::new(digest(0));
+    let marker =
+        SpendQuiesce::Window { window: "bloomery/daily/2026-08-14".into(), spent_micro_usd: 12, ceiling_micro_usd: 10 };
+    snapshot.spend_quiesce = Some(marker.clone());
+    let view = view_of(&snapshot, |_| None);
+    assert_eq!(view.spend_quiesce.as_ref(), Some(&marker));
+
+    let open = view_of(&Snapshot::new(digest(0)), |_| None);
+    assert_eq!(open.spend_quiesce, None, "an open door carries no marker");
 }
 
 #[test]
@@ -70,8 +89,11 @@ fn a_held_member_surfaces_its_pending_decision_only_when_resolvable() {
     let bloom = spec.id();
     let mut snapshot = Snapshot::new(digest(0));
     let seal = event("seal", Fact::Seal(spec));
-    snapshot =
-        snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()), &ResolvedConfigs::default());
+    snapshot = snapshot.apply(
+        &seal,
+        &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
+        &ResolvedConfigs::default(),
+    );
 
     let question = Question {
         stage: StageId::Construct,
@@ -84,8 +106,11 @@ fn a_held_member_surfaces_its_pending_decision_only_when_resolvable() {
     let question_digest = question.id();
     let evidence = Evidence { subject: digest(50), kind: EvidenceKind::Question, detail: question_digest };
     let admit = event("park-1", Fact::AdmitEvidence { bloom, evidence });
-    snapshot =
-        snapshot.apply(&admit, &reduce(&snapshot, &admit, &ResolvedConfigs::default()), &ResolvedConfigs::default());
+    snapshot = snapshot.apply(
+        &admit,
+        &reduce(&snapshot, &admit, &ResolvedConfigs::default(), &SpendWindow::default()),
+        &ResolvedConfigs::default(),
+    );
 
     // With a resolver that returns the question bytes, the held member carries
     // its pending decision, its sibling does not.
@@ -114,8 +139,11 @@ fn a_verify_wedge_projects_only_terminal_repeated_identities() {
     let bloom = spec.id();
     let mut snapshot = Snapshot::new(digest(0));
     let seal = event("seal", Fact::Seal(spec));
-    snapshot =
-        snapshot.apply(&seal, &reduce(&snapshot, &seal, &ResolvedConfigs::default()), &ResolvedConfigs::default());
+    snapshot = snapshot.apply(
+        &seal,
+        &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
+        &ResolvedConfigs::default(),
+    );
 
     let construct = event(
         "construct",
@@ -130,7 +158,7 @@ fn a_verify_wedge_projects_only_terminal_repeated_identities() {
     );
     snapshot = snapshot.apply(
         &construct,
-        &reduce(&snapshot, &construct, &ResolvedConfigs::default()),
+        &reduce(&snapshot, &construct, &ResolvedConfigs::default(), &SpendWindow::default()),
         &ResolvedConfigs::default(),
     );
 
@@ -158,7 +186,7 @@ fn a_verify_wedge_projects_only_terminal_repeated_identities() {
         );
         snapshot = snapshot.apply(
             &failed,
-            &reduce(&snapshot, &failed, &ResolvedConfigs::default()),
+            &reduce(&snapshot, &failed, &ResolvedConfigs::default(), &SpendWindow::default()),
             &ResolvedConfigs::default(),
         );
         if index < 3 {
@@ -179,7 +207,7 @@ fn a_verify_wedge_projects_only_terminal_repeated_identities() {
             );
             snapshot = snapshot.apply(
                 &refine,
-                &reduce(&snapshot, &refine, &ResolvedConfigs::default()),
+                &reduce(&snapshot, &refine, &ResolvedConfigs::default(), &SpendWindow::default()),
                 &ResolvedConfigs::default(),
             );
         }

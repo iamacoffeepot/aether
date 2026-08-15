@@ -445,14 +445,39 @@ pub(super) fn query_response(result: QueryResult) -> HttpServerResponse {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::{
-        AdjudicationError, BloomId, Digest, Event, Fact, OperatorHoldError, OperatorRepairError, Outcome, WorkpieceId,
+        AdjudicationError, BloomId, Digest, Event, Fact, OperatorHoldError, OperatorRepairError, Outcome, QueryResult,
+        SpendQuiesce, ViewDocument, WorkpieceId,
     };
-    use aether_data::wire::from_bytes;
+    use aether_data::wire::{from_bytes, to_vec};
 
-    use super::{ApiCapabilityState, Routed, SupersedeRequest, admitted_response};
+    use super::{ApiCapabilityState, Routed, SupersedeRequest, admitted_response, query_response};
 
     /// A bloom id in the spelling the routes take.
     const BLOOM: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+
+    // The plausible bug: GET /view / GET /blooms drop the snapshot marker, so
+    // an operator cannot see which axis closed the door or by how much.
+    #[test]
+    fn query_response_renders_the_spend_quiesce_marker() {
+        let document = ViewDocument {
+            mainline: Digest::from_bytes([1; 32]),
+            observed: Digest::from_bytes([2; 32]),
+            spend_quiesce: Some(SpendQuiesce::Window {
+                window: "bloomery/daily/2026-08-14".into(),
+                spent_micro_usd: 12,
+                ceiling_micro_usd: 10,
+            }),
+            blooms: Vec::new(),
+        };
+        let result = QueryResult::Document { document: to_vec(&document).unwrap() };
+        let response = query_response(result);
+        assert_eq!(response.status, 200);
+        let body = String::from_utf8(response.body).unwrap();
+        assert!(body.contains("Window"), "the axis is named: {body}");
+        assert!(body.contains("bloomery/daily/2026-08-14"), "the window is named: {body}");
+        assert!(body.contains("12") && body.contains("10"), "spend and ceiling are named: {body}");
+        assert!(body.contains("spent_micro_usd") && body.contains("ceiling_micro_usd"), "the fields are named: {body}");
+    }
     /// A finding digest in the same spelling.
     const FINDING: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use aether_bloomery::{
     AgentSelection, BloomId, CalibrationLedger, CandidateRef, CapabilityCell, CapabilityLedger, Decision, Decisions,
     Digest, Event, Evidence, EvidenceKind, Fact, Harness, ModelOverride, ReasoningEffort, ResolvedConfigs, Snapshot,
-    StageId, StageOverride, StudyCost, StudyRecord, VerifyFailure, reduce,
+    SpendWindow, StageId, StageOverride, StudyCost, StudyRecord, VerifyFailure, reduce,
 };
 use common::{claim, digest, draft_with_member_override, event, membership, workpiece};
 
@@ -50,7 +50,7 @@ impl Journal {
     /// Reduce one event, fold it into both projections, and hand back what was
     /// decided.
     fn admit(&mut self, event: &Event) -> Decisions {
-        let decisions = reduce(&self.snapshot, event, &self.configs);
+        let decisions = reduce(&self.snapshot, event, &self.configs, &SpendWindow::default());
         self.ledger.observe(event, &decisions, &self.configs);
         self.snapshot = self.snapshot.apply(event, &decisions, &self.configs);
         decisions

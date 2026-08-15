@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::SystemTime;
 
-use aether_bloomery::{BloomId, BloomStatus, Digest, Event, ResolvedConfigs, Snapshot, is_active_unlanded, reduce};
+use aether_bloomery::{
+    BloomId, BloomStatus, Digest, Event, ResolvedConfigs, Snapshot, SpendWindow, is_active_unlanded, reduce,
+};
 use aether_data::wire::from_bytes;
 
 use crate::bloomery::LaneOccupancy;
@@ -136,7 +138,7 @@ fn replay_snapshot(store: &mut dyn StoreBackend) -> rusqlite::Result<Snapshot> {
             );
             continue;
         };
-        let decisions = reduce(&snapshot, &event, &configs);
+        let decisions = reduce(&snapshot, &event, &configs, &SpendWindow::default());
         snapshot = snapshot.apply(&event, &decisions, &configs);
     }
     Ok(snapshot)

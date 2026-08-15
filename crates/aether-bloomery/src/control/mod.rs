@@ -291,7 +291,11 @@ impl Topic {
             // effects emitted beside it, on the topic they always had.
             | Decision::RecordOperatorHold { .. }
             | Decision::RecordOperatorRelease { .. }
-            | Decision::DeferDispatch { .. } => None,
+            | Decision::DeferDispatch { .. }
+            // Snapshot-only: the spend-quiesce marker is what `/view` reads.
+            // The door it closed already refused to enqueue work, so a topic
+            // here would enqueue a row nothing drains.
+            | Decision::RecordSpendQuiesce { .. } => None,
         }
     }
 }

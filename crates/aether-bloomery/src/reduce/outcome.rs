@@ -17,7 +17,7 @@ use super::{
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{LandingReceipt, OrphanClaimReleaseCompletion, ResolvedBloom, VerifyFailureSet};
+use crate::values::{LandingReceipt, OrphanClaimReleaseCompletion, ResolvedBloom, SpendQuiesce, VerifyFailureSet};
 
 /// The result of reducing one event: an outcome plus the ordered effects that
 /// enter the transactional outbox.
@@ -544,6 +544,16 @@ pub enum Outcome {
         /// The globs both declared surfaces permit.
         intersection: Vec<String>,
     },
+    /// The seal door closed because the window's measured spend is at or over
+    /// a sealed ceiling (ADR-0192). Appended so every prior outcome keeps its
+    /// wire discriminant.
+    ///
+    /// Not a [`Outcome::SealRejected`]: every other seal refusal names
+    /// something wrong with the draft, and a spend refusal names something
+    /// true about the fleet. The crossing is recorded as
+    /// [`Decision::RecordSpendQuiesce`]
+    /// so `/view` can show the marker rather than a silent refusal to seal.
+    SealQuiesced(SpendQuiesce),
 }
 
 impl Outcome {
