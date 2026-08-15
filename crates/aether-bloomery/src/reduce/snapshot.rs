@@ -116,11 +116,13 @@ pub struct BloomRecord {
     /// The per-member stage cursor (ADR-0149 §The line): for each member
     /// workpiece, the [`StageId`] it currently sits at plus its attempt count
     /// against that stage's `retry_budget`. Rebuilt from the journal like the rest
-    /// of the record — a seal seeds every member at the entry stage
-    /// ([`StageCatalog::entry_stage`](crate::StageCatalog::entry_stage)), a passing attempt advances the cursor, and
-    /// a failing one bumps the attempt count in place — so replay reconstructs
-    /// in-flight line position. A member drops out of the map only implicitly (it
-    /// never does in V1; the record is discarded whole on supersession).
+    /// of the record — a seal seeds each *ready* member at the entry stage
+    /// ([`StageCatalog::entry_stage`](crate::StageCatalog::entry_stage)); dependents stay out until
+    /// every incoming edge has a resolution claim (ADR-0196). A passing
+    /// attempt advances the cursor, and a failing one bumps the attempt
+    /// count in place — so replay reconstructs in-flight line position. A
+    /// member drops out of the map only implicitly (it never does in V1; the
+    /// record is discarded whole on supersession).
     pub progress: BTreeMap<WorkpieceId, StageProgress>,
     /// The members that have wedged, keyed by workpiece (ADR-0149 §The line).
     /// A member lands here when it exhausts a stage's `retry_budget` and stops

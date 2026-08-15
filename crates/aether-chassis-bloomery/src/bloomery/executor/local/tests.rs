@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::process::{Child, Command};
 
 use tracing::field::{Field, Visit};
@@ -29,9 +29,9 @@ use tempfile::TempDir;
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::to_hex;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use super::identity::ProcessIdentity;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use super::orphan::OrphanedRun;
 use super::quarantine;
 use super::runner::CapturedObjects;
@@ -1348,7 +1348,9 @@ fn a_disk_quarantine_withholds_the_slot_from_allocation() {
     );
 }
 
-#[cfg(unix)]
+// These live-process cases observe `/proc/<pid>/stat`. Off Linux that read
+// returns None, the expect panics, and the sleep child leaks into nextest.
+#[cfg(target_os = "linux")]
 fn spawn_isolated_sleep() -> (Child, ProcessIdentity) {
     use std::os::unix::process::CommandExt;
     let child = Command::new("sleep").arg("60").process_group(0).spawn().unwrap();
@@ -1356,7 +1358,7 @@ fn spawn_isolated_sleep() -> (Child, ProcessIdentity) {
     (child, identity)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn reattachment_refuses_a_pid_whose_start_time_does_not_match() {
     // The recycled-pid kill: a live process at the recorded pid whose start
@@ -1382,7 +1384,7 @@ fn reattachment_refuses_a_pid_whose_start_time_does_not_match() {
     let _ = child.wait();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn restart_readopt_cancel_terminates_an_attached_child() {
     // The happy path this issue exists to restore: a coordinator that restarts
