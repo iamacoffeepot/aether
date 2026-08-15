@@ -44,6 +44,7 @@ fn member(number: u64, revision: u8) -> MemberView {
         resolution: None,
         pending_decision: None,
         wedge: None,
+        blocked_by: None,
     }
 }
 
@@ -123,6 +124,21 @@ fn a_changed_member_updates_its_comment_in_place() {
         projection.client().comments_on(MEMBER_B)[0].contains("- State: integrated"),
         "the comment reflects the member's resolution",
     );
+}
+
+#[test]
+fn a_blocked_member_names_the_ancestor_holding_it_out_of_the_line() {
+    // The plausible bug: a dependent waiting on an unresolved ancestor
+    // renders as "in progress", so the issue comment looks idle for a
+    // reason the operator cannot name (ADR-0196).
+    let projection = GithubProjection::new(seeded());
+    let mut document = view(false);
+    document.blooms[0].members[1].blocked_by = Some(WorkpieceId(format!("issue-{MEMBER_A}")));
+
+    projection.reconcile_view(&document).expect("blocked reconcile");
+    let body = &projection.client().comments_on(MEMBER_B)[0];
+    assert!(body.contains(&format!("blocked by `issue-{MEMBER_A}`")), "state names the ancestor: {body}");
+    assert!(body.contains("**Blocked** by"), "the hold is stated, not left as silence: {body}");
 }
 
 #[test]

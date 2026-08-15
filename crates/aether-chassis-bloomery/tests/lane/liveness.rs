@@ -165,6 +165,7 @@ mod tests {
             }),
             pending_decision: None,
             wedge,
+            blocked_by: None,
         }
     }
 

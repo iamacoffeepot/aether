@@ -9,66 +9,14 @@ use alloc::vec::Vec;
 use aether_data::Kind;
 use serde::de::DeserializeOwned;
 
-use super::attempt::stage_binding;
-use super::{
-    BloomStatus, Decision, Decisions, Outcome, SealConflict, SealError, Snapshot, StageProgress, SupersedeError,
-};
-use crate::digest::Digest;
+use super::readiness::{ready_entries, successor_entries};
+use super::{BloomStatus, Decision, Decisions, Outcome, SealConflict, SealError, Snapshot, SupersedeError};
 use crate::ids::{BloomId, WorkpieceId};
 use crate::values::{
-    BloomSpec, ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, DependencyError, EvidenceKind,
-    MemberCandidate, MemberDependency, Membership, ModelOverride, ResolvedConfigs, SpendCeiling, SpendWindow,
-    StageCatalog, Transformation, Unproducible, VerifyFailureSet, resolve_member_dependencies,
+    BloomSpec, ConfigKind, ConfigResolveError, ConfigScopes, DependencyError, EvidenceKind, MemberCandidate,
+    MemberDependency, Membership, ModelOverride, ResolvedConfigs, SpendCeiling, SpendWindow, StageCatalog,
+    Unproducible, resolve_member_dependencies,
 };
-
-/// Build the seal-time entry-stage dispatch effects for one member: seed its
-/// cursor at the entry stage (attempt 1) and dispatch the first attempt against
-/// its frozen scope revision. The cursor advance folds into the snapshot; the
-/// dispatch is a snapshot-inert outbox effect the host submits (ADR-0149 §The
-/// line).
-///
-/// `checkout` is the git commit the attempt's worker checks out — the bloom's
-/// sealed base (`spec.base()`), threaded onto the transformation so the worker
-/// builds the candidate against the exact sealed source (ADR-0149 §Execution,
-/// #3572). It stands in for the diff base too, which at the entry stage is the
-/// same commit: nothing has been captured on top of the base yet. It is distinct from the member's `scope_revision` subject, which is
-/// the aether content digest the returned evidence binds to.
-fn entry_dispatch_effects(
-    bloom: BloomId,
-    member: &Membership,
-    checkout: Digest,
-    bloom_configs: &ConfigRegistry,
-    catalog: &StageCatalog,
-) -> [Decision; 2] {
-    let stage = StageCatalog::entry_stage();
-    let binding = stage_binding(catalog, stage);
-
-    [
-        Decision::AdvanceStage {
-            bloom,
-            workpiece: member.workpiece.clone(),
-            progress: StageProgress {
-                stage,
-                attempts: 1,
-                candidate: None,
-                repair_rolls: 0,
-                seen_verify_failures: VerifyFailureSet::EMPTY,
-                fold_checkpoint: None,
-                fold_conflict_evidence: None,
-            },
-        },
-        Decision::DispatchAttempt {
-            bloom,
-            workpiece: member.workpiece.clone(),
-            stage,
-            transformation: Transformation::for_member_stage(&binding, member.scope_revision, checkout, checkout),
-            scope_revision: member.scope_revision,
-            candidate: None,
-            profile: binding.profile,
-            configs: member.configs.layered_over(bloom_configs),
-        },
-    ]
-}
 
 pub(super) fn reduce_seal(
     snapshot: &Snapshot,
@@ -142,10 +90,11 @@ pub(super) fn reduce_seal(
             effects: vec![Decision::RecordSpendQuiesce { quiesce: Some(quiesce) }],
         };
     }
-    // Claim each member, then seed its cursor at the entry stage and dispatch its
-    // first attempt — a sealed bloom's members enter the line at `Construct`
-    // (ADR-0149 §The line). The claims come first so the dispatch effects attach
-    // to a member already in `active`.
+    // Claim each member, then seed the ready ones at the entry stage and
+    // dispatch their first attempt. Roots (no incoming edges) enter at
+    // `Construct` exactly as today; dependents wait for a resolution claim
+    // (ADR-0196). The claims come first so the dispatch effects attach to a
+    // member already in `active`.
     let mut effects = Vec::with_capacity(spec.members().len() * 3 + 2);
     if snapshot.spend_quiesce.is_some() {
         effects.push(Decision::RecordSpendQuiesce { quiesce: None });
@@ -156,9 +105,7 @@ pub(super) fn reduce_seal(
     // Record the catalog admission resolved so the fold reads the record, not
     // a later binary's compiled line (#4944).
     effects.push(Decision::RecordStageCatalog { bloom, catalog: catalog.clone() });
-    for member in spec.members() {
-        effects.extend(entry_dispatch_effects(bloom, member, spec.base(), spec.configs(), &catalog));
-    }
+    effects.extend(ready_entries(bloom, spec.members(), edges, &|_| false, spec.configs(), &catalog, spec.base()));
     effects.push(Decision::RecordMemberDependencies { bloom, edges: edges.to_vec() });
     Decisions { outcome: Outcome::Sealed(bloom), effects }
 }
@@ -502,28 +449,15 @@ pub(super) fn reduce_supersede(
         }
     }
     // Every successor member that does not arrive already integrated (an
-    // inherited claim above) enters the line fresh: seed its cursor at the
-    // entry stage and dispatch its first attempt against the successor's
-    // sealed base — the same entry dispatch a seal runs (#3663). Net-new
-    // members, scope-changed members, and re-admitted members whose
+    // inherited claim above) is a candidate for the entry line. Roots whose
+    // dependencies are already inherited enter immediately; dependents wait
+    // for those claims the same way a first seal waits (#3663, ADR-0196).
+    // Net-new members, scope-changed members, and re-admitted members whose
     // predecessor never integrated (the wedged-member escape hatch) would
     // otherwise be claimed but never executed, leaving the successor
     // unresolvable.
-    let mut every_member_inherited = true;
-    for member in successor.members() {
-        let inherited =
-            record.claims.get(&member.workpiece).is_some_and(|claim| claim.scope_revision == member.scope_revision);
-        if !inherited {
-            every_member_inherited = false;
-            effects.extend(entry_dispatch_effects(
-                successor_id,
-                member,
-                successor.base(),
-                successor.configs(),
-                &catalog,
-            ));
-        }
-    }
+    let (every_member_inherited, entries) = successor_entries(successor_id, successor, record, edges, &catalog);
+    effects.extend(entries);
     // A successor every one of whose members arrived already integrated has a
     // complete claim set the instant it seals, and no member left to run — so
     // nothing downstream would ever dispatch its fold. `reduce_integrate`

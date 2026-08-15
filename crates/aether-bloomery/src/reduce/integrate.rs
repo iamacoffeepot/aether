@@ -4,6 +4,7 @@
 use alloc::vec::Vec;
 
 use super::aggregate_verify::{aggregate_review_dispatch, aggregate_verify_dispatch};
+use super::readiness::newly_ready_entries;
 use super::verify_memo::{proof_of, reuse_of};
 use super::{
     BloomRecord, BloomStatus, Decision, Decisions, FoldedIntegration, IntegrateError, Outcome, ResolveError, Snapshot,
@@ -37,6 +38,9 @@ pub(super) fn claim_effects(
 ) -> Vec<Decision> {
     let mut effects = alloc::vec![Decision::RecordResolution { bloom, claim: claim.clone() }];
     effects.extend(provenance);
+    // Dependents whose last unresolved edge was this claim now enter Construct.
+    // Journaled on this row so replay recovers the schedule (ADR-0190 / ADR-0196).
+    effects.extend(newly_ready_entries(record, bloom, &claim.workpiece));
 
     let complete = record
         .spec

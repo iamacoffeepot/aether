@@ -4,9 +4,10 @@
 Only the logic this script owns: the two wire decoders it re-implements against
 the coordinator's storage format, the overdue arithmetic an operator reads a
 sign off, the digest guard that keeps a malformed repair from reaching the
-API, and the scratch-root slot listing / quarantine-clearing the operator uses
-to recover a re-adopted lane child. Nothing here exercises urllib, sqlite3, or
-argparse -- those are the standard library's to get right.
+API, the status-table state that names a graph-held dependent, and the
+scratch-root slot listing / quarantine-clearing the operator uses to recover a
+re-adopted lane child. Nothing here exercises urllib, sqlite3, or argparse --
+those are the standard library's to get right.
 """
 
 from __future__ import annotations
@@ -227,6 +228,45 @@ class EvidenceSummary(unittest.TestCase):
         self.assertEqual(summary["output_tokens"], 250)
         self.assertEqual(summary["result_text"], "done")
         self.assertTrue(summary["produced_candidate"])
+
+
+class MemberStatusState(unittest.TestCase):
+    """The status table's one-word state, including a graph-held dependent."""
+
+    def test_a_dependent_waiting_on_an_ancestor_is_blocked_not_idle(self):
+        # The plausible bug: a member that has not entered the line because
+        # its dependency has not resolved is painted `idle`, so an operator
+        # reading `status` / `why` cannot tell a held subtree from a forgotten
+        # dispatch.
+        member = {"workpiece": "wp-b", "blocked_by": "wp-a"}
+        self.assertEqual(operator.member_status_state(member, has_order=False), "blocked")
+        self.assertEqual(operator.blocked_by_of(member), "wp-a")
+
+    def test_a_running_root_is_not_blocked(self):
+        # The plausible bug: `blocked_by` winning over an outstanding order
+        # paints a dispatched root as waiting on itself (or on a stale ancestor).
+        member = {"workpiece": "wp-a", "blocked_by": None}
+        self.assertEqual(operator.member_status_state(member, has_order=True), "running")
+        self.assertIsNone(operator.blocked_by_of(member))
+
+    def test_wedge_and_resolution_outrank_a_stale_blocker(self):
+        # The plausible bug: a resolved or wedged member still carrying a
+        # leftover `blocked_by` from an older view shape is shown as blocked
+        # instead of as finished / terminal.
+        self.assertEqual(
+            operator.member_status_state({"resolution": {"candidate": "aa"}, "blocked_by": "wp-a"}, has_order=False),
+            "integrated",
+        )
+        self.assertEqual(
+            operator.member_status_state({"wedge": {"stage": "Construct"}, "blocked_by": "wp-a"}, has_order=False),
+            "WEDGED",
+        )
+
+    def test_an_empty_blocker_string_is_not_a_hold(self):
+        # The plausible bug: a missing JSON field that arrived as "" is treated
+        # as a named ancestor, so the table prints `blocked by` with no one.
+        self.assertIsNone(operator.blocked_by_of({"blocked_by": ""}))
+        self.assertEqual(operator.member_status_state({"blocked_by": ""}, has_order=False), "idle")
 
 
 class LastMovement(unittest.TestCase):
