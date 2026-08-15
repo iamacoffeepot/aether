@@ -396,9 +396,15 @@ fn fetch_subject_if_absent(repo_dir: &Path, checkout_hex: &str) -> Result<(), Lo
 /// step that fails leaves the path cleared and re-created outright, so a
 /// directory git will not reset cannot wedge every future dispatch that slot
 /// takes.
+///
+/// The subject may name a bare tree rather than a commit — a spliced
+/// dependency claim that resolved without a capture commit (ADR-0196) — so
+/// [`commitish_for`] resolves it first; both the reset and the re-create
+/// paths then stand on a subject git accepts.
 fn materialize_checkout(repo_dir: &Path, worktree_dir: &Path, checkout_hex: &str) -> Result<(), LocalExecutorError> {
+    let commitish = commitish_for(repo_dir, checkout_hex)?;
     if worktree_dir.exists() {
-        match reset_checkout(worktree_dir, checkout_hex) {
+        match reset_checkout(worktree_dir, &commitish) {
             Ok(()) => return Ok(()),
             Err(error) => tracing::warn!(
                 target: "aether_chassis_bloomery::executor",
@@ -409,8 +415,47 @@ fn materialize_checkout(repo_dir: &Path, worktree_dir: &Path, checkout_hex: &str
         }
     }
     reclaim_worktree_path(worktree_dir)?;
-    add_worktree(repo_dir, worktree_dir, checkout_hex)
+    add_worktree(repo_dir, worktree_dir, &commitish)
 }
+
+/// A subject git's checkout verbs accept: the order's own hex when it names a
+/// commit, or a deterministic wrapper commit when it names a bare tree.
+///
+/// A dependent member's spliced construct base is its dependency claim's
+/// candidate digest, and a claim that resolved without a capture commit — the
+/// test door that jumps straight to Integrate — names a *tree* (ADR-0196),
+/// which `git checkout` and `git worktree add` both refuse. The wrapper is
+/// authored under [`WRAPPER_IDENTITY`]'s fixed name and epoch timestamp, so
+/// every materialization of one tree names one commit: the journaled dispatch
+/// replays onto the same wrapper sha instead of minting a fresh parentless
+/// commit per attempt.
+fn commitish_for(repo_dir: &Path, checkout_hex: &str) -> Result<String, LocalExecutorError> {
+    if git_in(repo_dir, &["cat-file", "-t", checkout_hex])?.trim() != "tree" {
+        return Ok(checkout_hex.to_owned());
+    }
+    let wrap = Command::new("git")
+        .current_dir(repo_dir)
+        .args(["commit-tree", checkout_hex, "-m"])
+        .arg(format!("bloomery: checkout of bare tree {checkout_hex}"))
+        .envs(WRAPPER_IDENTITY)
+        .output()
+        .map_err(LocalExecutorError::Spawn)?;
+    if !wrap.status.success() {
+        return Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&wrap.stderr), 1000)));
+    }
+    Ok(String::from_utf8_lossy(&wrap.stdout).trim().to_owned())
+}
+
+/// The fixed author and committer a tree wrapper commit carries, timestamp
+/// included — what keeps every wrap of one tree naming the same commit sha.
+const WRAPPER_IDENTITY: [(&str, &str); 6] = [
+    ("GIT_AUTHOR_NAME", "bloomery"),
+    ("GIT_AUTHOR_EMAIL", "bloomery@localhost"),
+    ("GIT_AUTHOR_DATE", "1970-01-01T00:00:00Z"),
+    ("GIT_COMMITTER_NAME", "bloomery"),
+    ("GIT_COMMITTER_EMAIL", "bloomery@localhost"),
+    ("GIT_COMMITTER_DATE", "1970-01-01T00:00:00Z"),
+];
 
 /// Reset a slot's existing checkout to exactly `checkout_hex`'s tree.
 ///
@@ -839,6 +884,36 @@ mod tests {
             git_in(&slot, &["status", "--porcelain"]).unwrap().trim(),
             "",
             "a reused slot presents exactly as a freshly created checkout, which is what the lane assumes",
+        );
+    }
+
+    #[test]
+    fn a_bare_tree_subject_checks_out_under_one_deterministic_wrapper_commit() {
+        // Tripwire (ADR-0196 splice basing): a dependency claim that resolved
+        // without a capture commit names its candidate by *tree*, and both
+        // checkout verbs refuse a tree — the dispatch wedges and re-drives
+        // forever, stalling the whole ack prefix behind it. The wrapper must
+        // also be deterministic: the failing order is journaled, so every
+        // replay wraps the same tree and has to land on the same commit sha
+        // rather than minting a fresh parentless commit per attempt.
+        let (repo, scratch, first, second) = repo_with_two_commits();
+        let tree = git_in(repo.path(), &["show", "-s", "--format=%T", &second]).unwrap().trim().to_owned();
+        let slot = scratch.path().join("slot-0");
+
+        materialize_checkout(repo.path(), &slot, &tree).unwrap();
+        assert_eq!(
+            git_in(&slot, &["show", "-s", "--format=%T", "HEAD"]).unwrap().trim(),
+            tree,
+            "the slot stands on exactly the ordered tree",
+        );
+
+        let wrapper = git_in(&slot, &["rev-parse", "HEAD"]).unwrap();
+        materialize_checkout(repo.path(), &slot, &first).unwrap();
+        materialize_checkout(repo.path(), &slot, &tree).unwrap();
+        assert_eq!(
+            git_in(&slot, &["rev-parse", "HEAD"]).unwrap(),
+            wrapper,
+            "re-driving the journaled order wraps the same tree into the same commit",
         );
     }
 
