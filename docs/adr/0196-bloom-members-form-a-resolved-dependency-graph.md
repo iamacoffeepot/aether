@@ -137,6 +137,34 @@ An edge is the unit of reuse. When member B depends on member A:
   edge case pays through reduced turns, and the evidence must show it or the
   policy backs off.
 
+### Preventing wasted work
+
+The graph turns waste from an accident to be repaired into a state that is
+either unreachable or checkable. Four commitments:
+
+- **No speculative spend.** Nothing dispatches before its prerequisites
+  hold. A member whose dependency is still constructing costs nothing; a
+  member whose dependency wedges never starts. This is the structural
+  difference from the train, which paid for projection misses — readiness
+  gating spends money only on work whose ground truth already exists.
+- **Resolved work is never redone.** Candidates and their proofs are
+  addressed by tree. A verify whose target tree already carries a proof
+  passes by identity — the #4891 gate generalized from the aggregate stage
+  to every stage. Supersession already adopts resolved candidates at zero
+  re-construction spend; with the graph the transferable unit becomes the
+  resolved subtree, so a successor bloom re-runs only the wedged branch and
+  inherits everything upstream and parallel to it, proofs included.
+- **Partial work survives failure.** A wedge strands its subtree, and only
+  its subtree — every resolved member still lands through the weave. Below
+  the member, lane-death recovery composes with the graph: a retry seeds
+  its worktree from the member's newest checkpoint (#4934, #4994) and
+  re-splices the same dependency candidates, so a died lane forfeits
+  minutes, not the member.
+- **The repair class shrinks at the door.** Derived edges convert the
+  collide-then-Reconcile spend — construct twice, conflict, repair — into
+  an ordering that costs nothing. What Reconcile still handles is the
+  genuinely unforeseeable residue.
+
 ### What does not change
 
 The landing unit. One weave, one landing proposal, one squash onto the day
