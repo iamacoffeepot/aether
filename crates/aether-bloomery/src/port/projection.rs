@@ -22,7 +22,7 @@ use alloc::string::String;
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::BloomStatus;
-use crate::values::{Evidence, LandingReceipt, ResolutionClaim, Wedge};
+use crate::values::{Evidence, LandingReceipt, ResolutionClaim, SpendQuiesce, Wedge};
 
 /// The self-contained render input a reconcile pushes outward: the current
 /// mainline, the last-reported observed head, and every projectable bloom,
@@ -37,6 +37,14 @@ pub struct ViewDocument {
     /// The head the source last reported (#4709) — the other successor base
     /// `reduce_supersede` admits, beside [`Self::mainline`].
     pub observed: Digest,
+    /// The spend-quiesce marker the last crossing recorded (ADR-0192).
+    ///
+    /// `None` when the door is open. Carried on the document so `GET /view`
+    /// and `GET /blooms` render the axis, spend, and ceiling without a
+    /// query-back into the journal. `#[serde(default)]` so a reader that
+    /// predates the field still decodes.
+    #[serde(default)]
+    pub spend_quiesce: Option<SpendQuiesce>,
     /// The blooms to mirror, each self-describing.
     pub blooms: Vec<BloomView>,
 }

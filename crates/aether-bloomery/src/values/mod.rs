@@ -11,6 +11,7 @@ mod bloom;
 mod composition;
 mod config;
 mod finding;
+mod lane;
 mod model_override;
 mod operator;
 mod orphan_claim;
@@ -18,6 +19,7 @@ mod price;
 mod profile;
 mod proof;
 mod question;
+mod spend;
 mod stage;
 mod statement;
 mod study;
@@ -37,6 +39,7 @@ pub use finding::{
     CHECK_KEY, CRITICAL_KEY, ClassifiedFinding, ClassifiedFindings, FindingClass, JUDGMENT_TAG, MECHANICAL_TAG,
     classify_findings,
 };
+pub use lane::{LANE_WORKPIECE_HEADER, pin_workpiece_description, split_lane_identity};
 pub use model_override::{AgentSelection, ModelOverride, OverrideError, ResolvedModel, StageOverride};
 pub use operator::{Adjudication, Disposition, OperatorHold, OperatorRepair};
 pub use orphan_claim::{
@@ -46,6 +49,7 @@ pub use price::{LongContextBand, PriceRates, PriceTable, SealedPriceTable};
 pub use profile::{AgentProfile, Harness, ReasoningEffort, ToolPolicy};
 pub use proof::{VerifiedTree, VerifyGateSet, VerifyProof, VerifyReuse};
 pub use question::Question;
+pub use spend::{SpendCeiling, SpendQuiesce, SpendWindow};
 pub use stage::{
     Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, DispatchKey, ExecutionLimits, NetworkProfile,
     REVIEW_CRITIC_COMMAND, StageBinding, StageCatalog, Transformation, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE,

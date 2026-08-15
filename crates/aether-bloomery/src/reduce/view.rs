@@ -103,5 +103,10 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
             }
         })
         .collect();
-    ViewDocument { mainline: snapshot.mainline, observed: snapshot.observed, blooms }
+    ViewDocument {
+        mainline: snapshot.mainline,
+        observed: snapshot.observed,
+        spend_quiesce: snapshot.spend_quiesce.clone(),
+        blooms,
+    }
 }

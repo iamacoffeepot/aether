@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use aether_bloomery::{
     BloomDraft, ConfigRegistry, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
-    ResolvedConfigs, Snapshot, WorkpieceId, reduce, view_of,
+    ResolvedConfigs, Snapshot, SpendWindow, WorkpieceId, reduce, view_of,
 };
 use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
 use aether_chassis_bloomery::bloomery::ProjectionShell;
@@ -69,7 +69,7 @@ fn synthetic_bloom_snapshot() -> Snapshot {
 
     // Decide once at admission and journal the decision beside the event
     // (ADR-0190) — the shape every production journal row has.
-    let decided = reduce(&Snapshot::new(base), &event, &ResolvedConfigs::default());
+    let decided = reduce(&Snapshot::new(base), &event, &ResolvedConfigs::default(), &SpendWindow::default());
     let mut store = SqliteStore::open(":memory:").unwrap();
     store
         .append_event(&JournalWrite {

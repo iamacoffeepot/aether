@@ -4,7 +4,9 @@
 
 mod common;
 
-use aether_bloomery::{Decision, Decisions, Fact, Outcome, ResolvedConfigs, Snapshot, StageCatalog, StageId, reduce};
+use aether_bloomery::{
+    Decision, Decisions, Fact, Outcome, ResolvedConfigs, Snapshot, SpendWindow, StageCatalog, StageId, reduce,
+};
 use common::{draft, draft_with_catalog, event, membership};
 
 #[test]
@@ -13,8 +15,12 @@ fn a_newly_sealed_bloom_records_the_catalog_admission_resolved() {
     // binary with an edited line would rewrite a bloom that sealed none.
     let spec = draft(1, vec![membership("alpha", 10)]).seal();
     let bloom = spec.id();
-    let decisions =
-        reduce(&Snapshot::new(common::digest(1)), &event("seal", Fact::Seal(spec)), &ResolvedConfigs::default());
+    let decisions = reduce(
+        &Snapshot::new(common::digest(1)),
+        &event("seal", Fact::Seal(spec)),
+        &ResolvedConfigs::default(),
+        &SpendWindow::default(),
+    );
     match decisions.effects.iter().find(|effect| matches!(effect, Decision::RecordStageCatalog { .. })) {
         Some(Decision::RecordStageCatalog { bloom: recorded, catalog }) => {
             assert_eq!(*recorded, bloom);
@@ -66,7 +72,12 @@ fn a_sealed_catalog_is_what_the_effect_carries() {
     let (draft, configs) = draft_with_catalog(1, vec![membership("alpha", 10)], &catalog);
     let spec = draft.seal();
     let bloom = spec.id();
-    let decisions = reduce(&Snapshot::new(common::digest(1)), &event("seal", Fact::Seal(spec.clone())), &configs);
+    let decisions = reduce(
+        &Snapshot::new(common::digest(1)),
+        &event("seal", Fact::Seal(spec.clone())),
+        &configs,
+        &SpendWindow::default(),
+    );
     match decisions.effects.iter().find(|effect| matches!(effect, Decision::RecordStageCatalog { .. })) {
         Some(Decision::RecordStageCatalog { catalog: recorded, .. }) => {
             assert_eq!(*recorded, catalog);
