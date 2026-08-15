@@ -9,11 +9,15 @@ use crate::values::{Evidence, VerifyFailureSet};
 /// Reduce a cross-member fold collision ([`Fact::FoldConflict`](crate::Fact::FoldConflict)).
 ///
 /// The integrate reactor admits the collision instead of refusing it in prose.
-/// This arm revokes the later member's claim — the bloom can no longer resolve
-/// on the conflicted candidate — moves the cursor to `Reconcile`, and dispatches
-/// that stage against the folded checkpoint. A passing Reconcile rejoins the
-/// ordinary line at `Verify`; exhausting the catalog's Reconcile budget wedges
-/// with this fact's evidence attached.
+/// A member that already carries a claim is being folded: this arm revokes it —
+/// the bloom can no longer resolve on the conflicted candidate — moves the
+/// cursor to `Reconcile`, and dispatches that stage against the folded
+/// checkpoint. A member with no claim is a residual splice collision on its
+/// construct base (ADR-0196): there is nothing to revoke, and Reconcile
+/// assembles the base so Construct can follow. A passing fold-time Reconcile
+/// rejoins at `Verify`; a passing base-assembly Reconcile returns to
+/// `Construct`. Exhausting the catalog's Reconcile budget wedges with this
+/// fact's evidence attached.
 ///
 /// What the collision costs the member is decided by its provenance (#4952),
 /// and the marker it is decided on is `fold_checkpoint` rather than `attempts`.
@@ -52,12 +56,6 @@ pub(super) fn reduce_fold_conflict(
     let Some(member) = record.spec.members().iter().find(|member| member.workpiece == *workpiece) else {
         return Decisions::rejected(Outcome::FoldConflictRejected(FoldConflictError::NotAMember(workpiece.clone())));
     };
-    // Only a member that was being folded — one that already carries a
-    // resolution — can collide. A FoldConflict for a member that never
-    // verified is a reactor bug, not a collision to reconcile.
-    if !record.claims.contains_key(workpiece) {
-        return Decisions::rejected(Outcome::FoldConflictRejected(FoldConflictError::NotIntegrated(workpiece.clone())));
-    }
     // Evidence attests to the folded tree it collided with — the same
     // "no evidence validates a digest it does not name" rule every other
     // admission door runs.
@@ -68,12 +66,17 @@ pub(super) fn reduce_fold_conflict(
         }));
     }
 
+    // A member already carrying a claim is being folded: revoke so the bloom
+    // cannot resolve on the conflicted candidate. A member with no claim is
+    // a residual splice collision on its construct base (ADR-0196) — there
+    // is nothing to revoke, and Reconcile assembles the base instead.
+    let claimed = record.claims.contains_key(workpiece);
     let cursor = record.progress.get(workpiece).copied();
     let candidate = cursor.and_then(|progress| progress.candidate);
-    let mut effects = alloc::vec![
-        Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() },
-        Decision::RevokeResolution { bloom: *bloom, workpiece: workpiece.clone() },
-    ];
+    let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
+    if claimed {
+        effects.push(Decision::RevokeResolution { bloom: *bloom, workpiece: workpiece.clone() });
+    }
     // A second collision with a head the member has already reconciled onto
     // stops here with the collision evidence attached (ADR-0189 §5), rather than
     // buying another lane against the very tree the last one was handed. The
