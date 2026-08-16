@@ -48,6 +48,8 @@ use aether_bloomery::{
 use super::{ControlCore, ControlSetup, ObserveTick};
 use crate::artifacts::{ArtifactsCapabilityState, GetResult, resolve_root};
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
+#[cfg(feature = "github")]
+use crate::bloomery::{LandReactorCapability, LandTick};
 use crate::source::SourceCapability;
 use crate::store::StoreCapability;
 
@@ -393,6 +395,15 @@ impl NativeActor for ControlCore {
                 state.calibration.observe(&event, &decisions, &state.configs);
                 state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
                 state.refresh_spend();
+                // A committed land decision is already in the outbox; wake the
+                // reactor now rather than waiting on its next poll. The mail
+                // carries no payload — the row is the authority (ADR-0149).
+                // Periodic and boot ticks remain the recovery path for a missed
+                // nudge or a crash between the durable write and this send.
+                #[cfg(feature = "github")]
+                if decisions.effects.iter().any(|effect| matches!(effect, Decision::DispatchLand { .. })) {
+                    ctx.actor::<LandReactorCapability>().send_detached(&LandTick::default());
+                }
                 // A durably-landed bloom frees its member + admission claim refs
                 // (ADR-0150) — release with the local release, fire-and-forget: the
                 // boot reconcile re-releases any ref an interrupted release stranded.
