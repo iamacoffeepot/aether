@@ -10,14 +10,59 @@
 //! ledger columns [`super::lane::record`] pins for the harnesses that report
 //! less.
 
+/// How much public assistant prose the result record retains. A Refine prompt
+/// has a finite budget, and a transcript can carry tens of turns of narration;
+/// the cap keeps the durable findings channel from becoming the transcript.
+pub(super) const MAX_ASSISTANT_TEXT_BYTES: usize = 16 * 1024;
+
+/// The last `MAX_ASSISTANT_TEXT_BYTES` of `text`, snapped forward to a char
+/// boundary. An over-budget transcript keeps the most recent prose — that is
+/// where the critic's findings and verdict usually sit — rather than the
+/// opening narration.
+pub(super) fn bound_assistant_text(text: &str) -> String {
+    const OMISSION: &str = "…\n";
+    if text.len() <= MAX_ASSISTANT_TEXT_BYTES {
+        return text.to_owned();
+    }
+    let budget = MAX_ASSISTANT_TEXT_BYTES.saturating_sub(OMISSION.len());
+    let mut start = text.len().saturating_sub(budget);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("{OMISSION}{}", &text[start..])
+}
+
+/// Pull public `type: "text"` blocks out of one assistant `message`. Tool-use
+/// payloads, tool results, and non-public reasoning shapes are not text blocks
+/// and do not survive here.
+fn collect_public_text(message: &serde_json::Value, texts: &mut Vec<String>) {
+    let Some(blocks) = message.get("content").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    for block in blocks {
+        if let Some(text) = public_text_block(block) {
+            texts.push(text.to_owned());
+        }
+    }
+}
+
+fn public_text_block(block: &serde_json::Value) -> Option<&str> {
+    if block.get("type").and_then(serde_json::Value::as_str) != Some("text") {
+        return None;
+    }
+    block.get("text").and_then(serde_json::Value::as_str).filter(|text| !text.is_empty())
+}
+
 /// Derive a model lane's result record from an Anthropic-Messages NDJSON
 /// `transcript` — the in-repo, node-free replacement (#3572) for the retired
 /// `scripts/agent-usage-record.mjs` shell-out (#3565 deletes that script). Pure,
 /// and faithful to the ledger derivation: the terminal `result` event carries
 /// cost / turns / duration / usage, and the first non-haiku assistant call's usage
-/// is the warm-resume cache-hit signal. A transcript with no terminal `result` (a
-/// run that died early) yields a `no_result` record rather than an error, so
-/// evidence is never dropped.
+/// is the warm-resume cache-hit signal. Public assistant text blocks from
+/// non-side-model messages ride `assistant_text` so a review can retain findings
+/// that never reached the terminal result (#5056). A transcript with no terminal
+/// `result` (a run that died early) yields a `no_result` record rather than an
+/// error, so evidence is never dropped.
 pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
     use serde_json::{Map, Value, json};
 
@@ -27,6 +72,7 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
     let mut result: Option<Value> = None;
     let mut first_main: Option<Value> = None;
     let mut calls = Vec::new();
+    let mut texts = Vec::new();
     for line in transcript.lines() {
         if line.trim().is_empty() {
             continue;
@@ -42,6 +88,7 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
                 if model.contains("haiku") {
                     continue;
                 }
+                collect_public_text(&message, &mut texts);
                 let Some(usage) = message.get("usage") else {
                     continue;
                 };
@@ -91,6 +138,14 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
             Value::Null
         } else {
             Value::Array(calls)
+        },
+    );
+    record.insert(
+        "assistant_text".to_owned(),
+        if texts.is_empty() {
+            Value::Null
+        } else {
+            json!(bound_assistant_text(&texts.join("\n\n")))
         },
     );
 
@@ -151,6 +206,7 @@ mod tests {
         assert_eq!(record["calls"].as_array().map(Vec::len), Some(1));
         assert_eq!(record["calls"][0]["input"], 100);
         assert_eq!(record["calls"][0]["cache_read"], 40);
+        assert!(record["assistant_text"].is_null(), "content-less assistant events contribute no public text");
 
         // A transcript with no terminal `result` is a legible `no_result` row,
         // never an error — evidence is never dropped.
@@ -159,5 +215,75 @@ mod tests {
         assert_eq!(partial["no_result"], true);
         assert_eq!(partial["first_call_input"], 5);
         assert!(partial.get("cost_usd").is_none(), "a died-early row carries no cost columns");
+        assert!(partial["assistant_text"].is_null());
+    }
+
+    fn transcript(events: &[serde_json::Value]) -> String {
+        events.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
+    }
+
+    fn assistant(model: &str, content: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "assistant",
+            "message": {"model": model, "content": content, "usage": {"input_tokens": 1}},
+        })
+    }
+
+    #[test]
+    fn assistant_text_keeps_ordered_public_blocks_and_drops_everything_else() {
+        // Tripwire (#5056): findings that never reach the terminal result still
+        // have to be derivable, and a tool/reasoning payload that leaked here
+        // would become repair instructions.
+        let record = derive_result_record(&transcript(&[
+            assistant("claude-3-5-haiku", &serde_json::json!([{"type": "text", "text": "SIDE_MODEL_TEXT"}])),
+            assistant(
+                "claude-opus-4-8",
+                &serde_json::json!([
+                    {"type": "thinking", "thinking": "HIDDEN_REASONING"},
+                    {"type": "text", "text": "first finding: empty input panics."},
+                    {"type": "tool_use", "name": "Read", "input": {"path": "TOOL_INPUT_SECRET"}},
+                ]),
+            ),
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "TOOL_RESULT_BODY"},
+                ]},
+            }),
+            assistant(
+                "claude-opus-4-8",
+                &serde_json::json!([{"type": "text", "text": "second finding: the guard is untested."}]),
+            ),
+            serde_json::json!({"type": "system", "subtype": "init", "session_id": "s"}),
+            serde_json::json!({"type": "result", "is_error": false, "result": "VERDICT: finding"}),
+        ]));
+
+        assert_eq!(
+            record["assistant_text"],
+            "first finding: empty input panics.\n\nsecond finding: the guard is untested.",
+        );
+        assert_eq!(record["result"]["result"], "VERDICT: finding", "metering still carries the terminal whole");
+        let text = record["assistant_text"].as_str().expect("public text is retained");
+        assert!(!text.contains("SIDE_MODEL_TEXT"), "haiku is a side model");
+        assert!(!text.contains("HIDDEN_REASONING"), "thinking is not public text");
+        assert!(!text.contains("TOOL_INPUT_SECRET"), "tool-use payloads stay out");
+        assert!(!text.contains("TOOL_RESULT_BODY"), "tool results stay out");
+    }
+
+    #[test]
+    fn assistant_text_is_bounded_to_the_most_recent_prose() {
+        // Tripwire: an unbounded transcript would dump every turn of narration
+        // into the result record and from there into Refine.
+        let prefix = "a".repeat(super::MAX_ASSISTANT_TEXT_BYTES);
+        let tail = "the last finding names the panic.";
+        let record = derive_result_record(&transcript(&[assistant(
+            "claude-opus-4-8",
+            &serde_json::json!([{"type": "text", "text": format!("{prefix}{tail}")}]),
+        )]));
+        let text = record["assistant_text"].as_str().expect("over-budget prose is still retained");
+        assert!(text.len() <= super::MAX_ASSISTANT_TEXT_BYTES, "the field itself is bounded: {}", text.len());
+        assert!(text.ends_with(tail), "the most recent finding survives: {text}");
+        assert!(text.starts_with('…'), "omission of the opening narration is marked");
+        assert!(!text.contains(&prefix), "the opening pad does not survive whole");
     }
 }
