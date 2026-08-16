@@ -69,4 +69,12 @@ pub struct BloomeryCli {
     /// stored binary is.
     #[arg(long = "describe")]
     pub describe: bool,
+
+    /// Inspect the lane-host tool kit against the process PATH and exit
+    /// without booting (#5035). Prints every required tool's resolved path and
+    /// version, or its install line when missing. Exit `0` when the kit is
+    /// complete, `1` when anything is missing — the same inspect boot logs and
+    /// the admission gate refuses against.
+    #[arg(long = "doctor")]
+    pub doctor: bool,
 }

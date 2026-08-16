@@ -10,8 +10,8 @@ an hour disappears while a bloom sits wedged.
 Read commands (status / orders / why / evidence) answer "what is stopping this
 member". Action commands (hold / release / repair / supersede / grant /
 adjudicate) are the coordinator's override routes with their bodies built
-correctly, including the one body whose shape is not guessable: repair takes a
-CandidateRef struct, not a digest string.
+correctly. Repair names a commit (`--from-commit`) and the chassis derives the
+candidate; `--tree` / `--checkout` stay for a pair the coordinator cannot read.
 
 Standard library only -- this runs on the coordinator host, which installs
 nothing.
@@ -282,6 +282,27 @@ class Journal:
 
     def orders_for(self, workpiece: str) -> list[sqlite3.Row]:
         return [row for row in self.outstanding_orders() if row["workpiece"] == workpiece]
+
+    def correspondence_hex(self, digest: str) -> str | None:
+        """The backend object hex `backend_correspondence` records for `digest`.
+
+        The column is opaque bytes: a 20-byte git sha-1 today, a 32-byte sha-256
+        on a future object format. Either way the operator pastes the hex. A
+        missing table, a missing row, or a digest this is not, is None — the
+        ladder names the miss rather than crashing the diagnosis.
+        """
+        if not is_digest_hex(digest):
+            return None
+        try:
+            row = self.conn.execute(
+                "SELECT backend_object FROM backend_correspondence WHERE digest = ?",
+                (bytes.fromhex(digest),),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None or row[0] is None:
+            return None
+        return bytes(row[0]).hex()
 
 
 def order_summary(row: sqlite3.Row, now_millis: int) -> dict[str, Any]:
@@ -609,6 +630,332 @@ def last_movement(journal_records: Sequence[dict[str, Any]], workpiece: str) -> 
     return None
 
 
+OPERATOR_SCRIPT = "bloomery-operator.py"
+SUGGESTED_GRANT_ATTEMPTS = 1
+TREE_PRODUCER = "AttemptCompleted.candidate.tree (construct/refine capture)"
+CHECKOUT_PRODUCER = "AttemptCompleted.candidate.checkout (construct/refine capture)"
+FROM_COMMIT_PRODUCER = "backend_correspondence lookup of CandidateRef.checkout"
+BASE_PRODUCER = "Fact::Seal.base / BloomSpec.base"
+
+
+def digest_hex(value: Any) -> str | None:
+    """A digest as 64 lowercase hex, or None when `value` is not one.
+
+    The API hex-renders digests; a fixture or a raw journal walk may still
+    hand over the 32-byte array serde's default would produce. Both spellings
+    have to resolve, because a ladder that only accepted one would drop a
+    known digest and print the missing-input line over a value it already had.
+    """
+    if isinstance(value, str) and is_digest_hex(value):
+        return value.lower()
+    if isinstance(value, (bytes, bytearray)) and len(value) == DIGEST_BYTES:
+        return bytes(value).hex()
+    if isinstance(value, (list, tuple)) and len(value) == DIGEST_BYTES:
+        try:
+            return bytes(value).hex()
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def fact_of(record: dict[str, Any]) -> dict[str, Any] | None:
+    """The admitted Fact object inside a `GET /journal` record, if present."""
+    event = record.get("event")
+    if not isinstance(event, dict):
+        return None
+    fact = event.get("fact")
+    return fact if isinstance(fact, dict) else event
+
+
+def bloom_sealed_base(records: Sequence[dict[str, Any]], bloom_id: str) -> str | None:
+    """The sealed `base` the journal recorded for `bloom_id`.
+
+    BloomView does not project the spec, so the only place to recover the
+    compare-and-swap base is the Seal / Supersede fact that minted the bloom.
+    Newest match wins: a successor's own seal is the one its mainline is
+    judged against, not the predecessor's.
+    """
+    if not bloom_id:
+        return None
+    for record in reversed(records):
+        fact = fact_of(record)
+        if not isinstance(fact, dict):
+            continue
+        outcome = record.get("outcome")
+        seal = fact.get("Seal")
+        if isinstance(seal, dict) and _outcome_names_sealed(outcome, bloom_id):
+            return digest_hex(seal.get("base"))
+        supersede = fact.get("Supersede")
+        if isinstance(supersede, dict) and _outcome_names_successor(outcome, bloom_id):
+            successor = supersede.get("successor")
+            if isinstance(successor, dict):
+                return digest_hex(successor.get("base"))
+    return None
+
+
+def _outcome_names_sealed(outcome: Any, bloom_id: str) -> bool:
+    return isinstance(outcome, dict) and digest_hex(outcome.get("Sealed")) == bloom_id
+
+
+def _outcome_names_successor(outcome: Any, bloom_id: str) -> bool:
+    if not isinstance(outcome, dict) or not isinstance(outcome.get("Superseded"), dict):
+        return False
+    return digest_hex(outcome["Superseded"].get("successor")) == bloom_id
+
+
+def candidate_pair(value: Any, source: str) -> dict[str, Any] | None:
+    """A CandidateRef's tree/checkout pair, or None when neither field is a digest."""
+    if not isinstance(value, dict):
+        return None
+    tree = digest_hex(value.get("tree"))
+    checkout = digest_hex(value.get("checkout"))
+    if tree is None and checkout is None:
+        return None
+    return {"tree": tree, "checkout": checkout, "source": source}
+
+
+def last_captured_candidate(records: Sequence[dict[str, Any]], workpiece: str) -> dict[str, Any] | None:
+    """The newest journaled CandidateRef for `workpiece`.
+
+    A wedged member has no outstanding order, so the capture lives on the
+    AttemptCompleted (or OperatorRepair) fact that wrote it — not on the view,
+    which only projects a candidate after integrate. Newest wins: a later
+    repair or refine capture is the one an operator would re-offer.
+    """
+    for record in reversed(records):
+        fact = fact_of(record)
+        if not isinstance(fact, dict):
+            continue
+        completed = fact.get("AttemptCompleted")
+        if isinstance(completed, dict) and completed.get("workpiece") == workpiece:
+            pair = candidate_pair(completed.get("candidate"), "AttemptCompleted.candidate")
+            if pair is not None:
+                return pair
+        repair = fact.get("OperatorRepair")
+        if isinstance(repair, dict):
+            body = repair.get("repair") if isinstance(repair.get("repair"), dict) else repair
+            if body.get("workpiece") == workpiece:
+                pair = candidate_pair(body.get("candidate"), "OperatorRepair.candidate")
+                if pair is not None:
+                    return pair
+    return None
+
+
+def last_attempt_count(records: Sequence[dict[str, Any]], workpiece: str) -> int | None:
+    """The newest journaled attempt count for `workpiece`.
+
+    `AttemptWedged` does not carry `attempt`, so a newest-first scan that
+    stopped at the wedge would report none — the exact moment the operator is
+    asking how many attempts were spent. Skip outcomes that have no count.
+    """
+    for record in reversed(records):
+        outcome = record.get("outcome")
+        if not isinstance(outcome, dict):
+            continue
+        for payload in outcome.values():
+            if not isinstance(payload, dict) or payload.get("workpiece") != workpiece:
+                continue
+            attempt = payload.get("attempt")
+            if isinstance(attempt, int):
+                return attempt
+    return None
+
+
+def stranded_members(bloom: dict[str, Any]) -> list[str]:
+    """Workpieces on `bloom` that already hold an integrated candidate."""
+    names = []
+    for member in bloom.get("members") or []:
+        if member.get("resolution") and member.get("workpiece"):
+            names.append(member["workpiece"])
+    return names
+
+
+def _missing_note(flag: str, producer: str) -> str:
+    return f"{flag} unknown to the journal — produced by {producer}"
+
+
+def _filled_note(flag: str, value: str, source: str) -> str:
+    return f"{flag} {value} from {source}"
+
+
+def grant_command(bloom_id: str, workpiece: str, stage: str | None, attempts: int) -> str:
+    parts = [OPERATOR_SCRIPT, "grant", bloom_id, workpiece]
+    if stage:
+        parts.extend(["--stage", stage])
+    parts.extend(["--attempts", str(attempts)])
+    return " ".join(parts)
+
+
+def repair_command(
+    bloom_id: str,
+    workpiece: str,
+    tree: str | None,
+    checkout: str | None,
+    from_commit: str | None,
+) -> str:
+    """The repair invocation with every known input filled.
+
+    `--tree`/`--checkout` is this diagnosis's filled-digest form. `--from-commit`
+    is the chassis-derived alternative when correspondence already names the
+    capture commit. Placeholders for `--reason` / `--operator` stay so the line
+    parses; those two are the operator's words, never the journal's.
+    """
+    parts = [OPERATOR_SCRIPT, "repair", bloom_id, workpiece]
+    if tree and checkout:
+        parts.extend(["--tree", tree, "--checkout", checkout])
+    elif from_commit:
+        parts.extend(["--from-commit", from_commit])
+    else:
+        if tree:
+            parts.extend(["--tree", tree])
+        if checkout:
+            parts.extend(["--checkout", checkout])
+    parts.extend(["--reason", "<reason>", "--operator", "<operator>"])
+    return " ".join(parts)
+
+
+def supersede_command(bloom_id: str) -> str:
+    return f"{OPERATOR_SCRIPT} supersede {bloom_id} --draft <draft>"
+
+
+def recovery_ladder(
+    *,
+    bloom_id: str | None,
+    workpiece: str,
+    wedged_at: str | None,
+    overdue: bool,
+    force: bool,
+    attempt_count: int | None,
+    sealed_base: str | None,
+    mainline: str | None,
+    captured: dict[str, Any] | None,
+    produced_candidate: bool,
+    correspondence: dict[str, str],
+    stranded: Sequence[str],
+) -> list[dict[str, Any]]:
+    """The next recovery rungs, arguments filled from the journal.
+
+    Prints commands and provenance. Never runs them. Grant when the member is
+    wedged or overdue (a retryable lane failure). Repair whenever this is a
+    recovery (or a capture is already on record), with every known digest
+    filled and each miss named. Supersede when the sealed base is behind
+    mainline, naming the integrated candidates a successor would strand.
+    """
+    recovering = bool(wedged_at) or overdue
+    if not recovering and not force:
+        return []
+
+    rungs: list[dict[str, Any]] = []
+    bloom = bloom_id or "<bloom>"
+
+    if recovering:
+        attempts = SUGGESTED_GRANT_ATTEMPTS
+        if wedged_at:
+            because = f"retryable lane failure: wedged at {wedged_at}"
+        else:
+            because = "retryable lane failure: the outstanding order is overdue (grant is refused until the member wedges)"
+        if attempt_count is not None:
+            because += f", {attempt_count} attempt(s) recorded"
+        rungs.append(
+            {
+                "verb": "grant",
+                "command": grant_command(bloom, workpiece, wedged_at, attempts),
+                "because": because,
+                "notes": [f"suggested --attempts {attempts} (one more roll; the sealed catalog ceiling is not served)"],
+            }
+        )
+
+        source = (captured or {}).get("source") or "the journal"
+        tree = (captured or {}).get("tree")
+        checkout = (captured or {}).get("checkout")
+        from_commit = correspondence.get(checkout) if checkout else None
+        notes = []
+        if tree:
+            notes.append(_filled_note("--tree", tree, source))
+        else:
+            notes.append(_missing_note("--tree", TREE_PRODUCER))
+        if checkout:
+            notes.append(_filled_note("--checkout", checkout, source))
+        else:
+            notes.append(_missing_note("--checkout", CHECKOUT_PRODUCER))
+        if from_commit:
+            notes.append(_filled_note("--from-commit", from_commit, FROM_COMMIT_PRODUCER))
+        else:
+            notes.append(_missing_note("--from-commit", FROM_COMMIT_PRODUCER))
+        if produced_candidate and captured is None:
+            notes.append("the last lane reported produced_candidate, but no CandidateRef is in the journal")
+        rungs.append(
+            {
+                "verb": "repair",
+                "command": repair_command(bloom, workpiece, tree, checkout, from_commit),
+                "because": (
+                    "a captured candidate is on record"
+                    if captured or produced_candidate
+                    else "no captured candidate; name the commit you built or wait for a capture"
+                ),
+                "notes": notes,
+            }
+        )
+
+    base_stale = (
+        sealed_base is not None and mainline is not None and sealed_base != mainline
+    )
+    if base_stale or (recovering and sealed_base is None):
+        notes = []
+        if sealed_base is None:
+            notes.append(_missing_note("sealed base", BASE_PRODUCER))
+        else:
+            notes.append(f"sealed base {sealed_base}")
+        if mainline:
+            notes.append(f"mainline    {mainline}")
+        if stranded:
+            notes.append("would strand integrated candidates on: " + ", ".join(stranded))
+        else:
+            notes.append("would strand no integrated candidates")
+        notes.append("--draft is not in the journal: open a successor draft first")
+        rungs.append(
+            {
+                "verb": "supersede",
+                "command": supersede_command(bloom) if bloom_id else None,
+                "because": (
+                    "the sealed base is stale (mainline has moved)"
+                    if base_stale
+                    else "cannot tell whether the base is stale"
+                ),
+                "notes": notes,
+            }
+        )
+
+    if force and not rungs:
+        rungs.append(
+            {
+                "verb": "none",
+                "command": None,
+                "because": (
+                    "no recovery rungs: the member is not wedged or overdue, "
+                    "and the sealed base is not known to be stale"
+                ),
+                "notes": [],
+            }
+        )
+    return rungs
+
+
+def print_ladder(rungs: Sequence[dict[str, Any]]) -> None:
+    print("  ladder")
+    for rung in rungs:
+        verb = rung["verb"]
+        command = rung.get("command")
+        if command:
+            print(f"    {verb:<9} {command}")
+        else:
+            print(f"    {verb:<9} (not assembled — see notes)")
+        if rung.get("because"):
+            print(f"              {rung['because']}")
+        for note in rung.get("notes") or []:
+            print(f"              {note}")
+
+
 def print_json(value: Any) -> None:
     json.dump(value, sys.stdout, indent=2, sort_keys=False)
     sys.stdout.write("\n")
@@ -717,7 +1064,8 @@ def cmd_orders(args: argparse.Namespace) -> None:
 
 def cmd_why(args: argparse.Namespace) -> None:
     api = Api(args.base)
-    bloom, member = find_member(api.view(), args.workpiece)
+    view = api.view()
+    bloom, member = find_member(view, args.workpiece)
     journal = Journal(args.journal)
     now = now_unix_millis()
     orders = [order_summary(row, now) for row in journal.orders_for(args.workpiece)]
@@ -735,6 +1083,39 @@ def cmd_why(args: argparse.Namespace) -> None:
         path = evidence_path(args.worktree_base, order["nonce"])
         if path.exists():
             lane = evidence_summary(read_evidence(args.worktree_base, order["nonce"]))
+
+    captured = last_captured_candidate(records, args.workpiece)
+    if captured is None and order:
+        tree = digest_hex(order.get("candidate"))
+        checkout = digest_hex(order.get("checkout"))
+        if tree or checkout:
+            captured = {"tree": tree, "checkout": checkout, "source": "outstanding_orders"}
+    correspondence: dict[str, str] = {}
+    if captured:
+        for digest in (captured.get("tree"), captured.get("checkout")):
+            if not digest:
+                continue
+            found = journal.correspondence_hex(digest)
+            if found:
+                correspondence[digest] = found
+
+    wedged_at = (wedge or {}).get("stage")
+    overdue = bool(order and order["overdue_secs"] > 0)
+    bloom_id = digest_hex(bloom.get("id"))
+    ladder = recovery_ladder(
+        bloom_id=bloom_id,
+        workpiece=args.workpiece,
+        wedged_at=wedged_at if isinstance(wedged_at, str) else None,
+        overdue=overdue,
+        force=bool(getattr(args, "ladder", False)),
+        attempt_count=last_attempt_count(records, args.workpiece),
+        sealed_base=bloom_sealed_base(records, bloom_id or ""),
+        mainline=digest_hex(view.get("mainline")),
+        captured=captured,
+        produced_candidate=bool(lane and lane.get("produced_candidate")),
+        correspondence=correspondence,
+        stranded=stranded_members(bloom),
+    )
 
     diagnosis = {
         "workpiece": args.workpiece,
@@ -755,6 +1136,7 @@ def cmd_why(args: argparse.Namespace) -> None:
         "held_on_question": pending,
         "blocked_by": blocked_by,
         "last_lane_result": lane,
+        "ladder": ladder,
     }
 
     if args.json:
@@ -786,7 +1168,6 @@ def cmd_why(args: argparse.Namespace) -> None:
 
     if wedge:
         print(f"  WEDGE      at {wedge.get('stage')}, evidence {wedge.get('evidence')}")
-        print("             recovery: `grant` for another attempt, or `repair` with a candidate you built.")
     if blocked_by:
         ancestor = next((other for other in bloom.get("members", []) if other.get("workpiece") == blocked_by), None)
         if ancestor and ancestor.get("wedge"):
@@ -807,6 +1188,9 @@ def cmd_why(args: argparse.Namespace) -> None:
             print(f"             {str(lane['result_text']).strip().splitlines()[0][:160]}")
     elif order:
         print(f"  last lane  no evidence.json yet for {order['nonce']} (still running, or reaped)")
+
+    if ladder:
+        print_ladder(ladder)
 
 
 def cmd_evidence(args: argparse.Namespace) -> None:
@@ -905,16 +1289,73 @@ def cmd_release(args: argparse.Namespace) -> None:
     emit_outcome(Api(args.base).post(f"/blooms/{bloom}/release", override_body(args)))
 
 
+def repair_payload(
+    tree: str | None,
+    checkout: str | None,
+    from_commit: str | None,
+    from_worktree: str | None,
+) -> dict[str, Any]:
+    """The extra fields a repair body carries, or die naming the contract.
+
+    The chassis derives digests from a commit; this script must not re-state
+    that scheme. The low-level pair stays for a candidate the coordinator
+    cannot read.
+    """
+    commit = (from_commit or "").strip() or None
+    worktree = (from_worktree or "").strip() or None
+    has_tree = bool(tree)
+    has_checkout = bool(checkout)
+    named = sum([bool(commit), bool(worktree), has_tree or has_checkout])
+    if named != 1:
+        die(
+            "repair needs exactly one of --from-commit, --from-worktree, or "
+            "both --tree and --checkout"
+        )
+    if has_tree or has_checkout:
+        if not (has_tree and has_checkout):
+            die("the low-level form needs both --tree and --checkout")
+        # The candidate is a CandidateRef STRUCT, never a bare digest string: the
+        # returned evidence binds the tree and the verifying lane checks out the
+        # commit, so a string leaves the gate unable to do half its job and the
+        # route answers `400 invalid repair body: candidate: invalid type: string`.
+        return {
+            "candidate": {
+                "tree": require_digest(tree or "", "--tree"),
+                "checkout": require_digest(checkout or "", "--checkout"),
+            }
+        }
+    if commit:
+        return {"from_commit": commit}
+    return {"from_worktree": worktree or ""}
+
+
 def cmd_repair(args: argparse.Namespace) -> None:
     bloom = require_digest(args.bloom, "the bloom id")
-    tree = require_digest(args.tree, "--tree")
-    checkout = require_digest(args.checkout, "--checkout")
-    # The candidate is a CandidateRef STRUCT, never a bare digest string: the
-    # returned evidence binds the tree and the verifying lane checks out the
-    # commit, so a string leaves the gate unable to do half its job and the
-    # route answers `400 invalid repair body: candidate: invalid type: string`.
-    body = override_body(args, candidate={"tree": tree, "checkout": checkout})
-    emit_outcome(Api(args.base).post(f"/blooms/{bloom}/members/{args.workpiece}/repair", body))
+    extra = repair_payload(args.tree, args.checkout, args.from_commit, args.from_worktree)
+    if "candidate" not in extra:
+        require_repairable(Api(args.base), args.workpiece)
+    emit_outcome(Api(args.base).post(f"/blooms/{bloom}/members/{args.workpiece}/repair", override_body(args, **extra)))
+
+
+COMPOSITION_WORKPIECE = "aether.bloomery.composition"
+
+
+def require_repairable(api: Api, workpiece: str) -> None:
+    """Refuse a from-commit repair of a member that is not wedged.
+
+    The chassis reducer still refuses the same case after host-side work; this
+    check is the one that names the precondition *before* a candidate ref is
+    force-pushed. The composition is not a member in the view, so it is left
+    to the reducer — the only authority that can see its wedge.
+    """
+    if workpiece == COMPOSITION_WORKPIECE:
+        return
+    _, member = find_member(api.view(), workpiece)
+    if not member.get("wedge"):
+        die(
+            f"{workpiece} is not wedged, so it is not repairable. "
+            "A running member already holds a dispatched attempt."
+        )
 
 
 def cmd_supersede(args: argparse.Namespace) -> None:
@@ -971,14 +1412,11 @@ worked example -- recovering a wedged member
   bloomery-operator.py hold <bloom-id> \\
       --reason "taking the construct lap by hand" --operator eve
 
-  # 3. push your work, then hand the coordinator BOTH halves of the candidate.
-  #    --tree is the git tree the evidence binds; --checkout is the commit the
-  #    verifying lane checks out. The body is a CandidateRef struct -- a bare
-  #    digest string is refused with:
-  #      400 invalid repair body: candidate: invalid type: string, expected struct CandidateRef
+  # 3. name the commit that holds the fix. The chassis derives both digests,
+  #    pushes the candidate ref, and records correspondence. --tree/--checkout
+  #    stay for a candidate the coordinator cannot read.
   bloomery-operator.py repair <bloom-id> issue-4931 \\
-      --tree     4f1c...64-hex...9a \\
-      --checkout 8b20...64-hex...c3 \\
+      --from-commit <sha> \\
       --reason "hand-built the fix; model lane could not" --operator eve
 
   # 4. let it run again
@@ -1033,6 +1471,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     why = subparsers.add_parser("why", help="one-shot diagnosis of a member that is not moving")
     why.add_argument("workpiece")
+    why.add_argument(
+        "--ladder",
+        action="store_true",
+        help="print the recovery ladder even when the member is not wedged or overdue "
+        "(otherwise the ladder is printed for those states)",
+    )
     why.set_defaults(handler=cmd_why)
 
     evidence = subparsers.add_parser("evidence", help="the lane result summary for one dispatch nonce")
@@ -1067,15 +1511,21 @@ def build_parser() -> argparse.ArgumentParser:
         subparsers.add_parser(
             "repair",
             help="hand a wedged member a candidate you built yourself",
-            description="The candidate is a CandidateRef struct: BOTH --tree and --checkout are required. "
-            "Sending one digest is refused with `400 invalid repair body: candidate: invalid type: "
-            "string, expected struct CandidateRef`.",
+            description="Name the fix as --from-commit <sha> (or --from-worktree <path>) and the "
+            "chassis derives the candidate, pushes the ref, and records correspondence. "
+            "The low-level form still takes BOTH --tree and --checkout for a candidate "
+            "the coordinator cannot read. Sending one digest is refused with "
+            "`400 invalid repair body`.",
         )
     )
     repair.add_argument("bloom")
     repair.add_argument("workpiece")
-    repair.add_argument("--tree", required=True, help="64-hex git tree digest the evidence binds")
-    repair.add_argument("--checkout", required=True, help="64-hex capture commit the verifying lane checks out")
+    repair.add_argument("--from-commit", default=None, help="commit reachable from the coordinator's repository")
+    repair.add_argument("--from-worktree", default=None, help="worktree whose HEAD is that commit")
+    repair.add_argument("--tree", default=None, help="64-hex git tree digest the evidence binds (low-level form)")
+    repair.add_argument(
+        "--checkout", default=None, help="64-hex capture commit the verifying lane checks out (low-level form)"
+    )
     repair.set_defaults(handler=cmd_repair)
 
     supersede = subparsers.add_parser("supersede", help="seal an open draft as a bloom's successor")

@@ -48,6 +48,13 @@ pub enum LocalExecutorError {
     /// mismatched identity, or a process group that stayed up after the
     /// signal.
     Unterminated(String),
+    /// The lane-host tool kit is incomplete, so this dispatch was refused
+    /// before a child was spawned (#5035). Transient: installing the missing
+    /// tools clears the next re-drain, and the member stays queued rather
+    /// than accruing a failed attempt. The string is [`KitReport::render_refusal`].
+    ///
+    /// [`KitReport::render_refusal`]: crate::bloomery::KitReport::render_refusal
+    MissingKit(String),
 }
 
 impl fmt::Display for LocalExecutorError {
@@ -78,6 +85,7 @@ impl fmt::Display for LocalExecutorError {
             Self::Unterminated(detail) => {
                 write!(f, "local executor backend: could not terminate the lane child: {detail}")
             }
+            Self::MissingKit(detail) => write!(f, "local executor backend: {detail}"),
         }
     }
 }
@@ -92,7 +100,8 @@ impl Error for LocalExecutorError {
             | Self::NoRunForNonce(_)
             | Self::UnresolvedCheckout(_)
             | Self::UnresolvedDiffBase(_)
-            | Self::Unterminated(_) => None,
+            | Self::Unterminated(_)
+            | Self::MissingKit(_) => None,
         }
     }
 }

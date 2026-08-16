@@ -43,6 +43,8 @@ use aether_substrate::{InboundMail, Mailer};
 
 use super::response::error_response;
 use crate::artifacts::{ArtifactsCapability, Get};
+#[cfg(feature = "github")]
+use crate::bloomery::CandidatePush;
 // The control core is a native sibling cap since the wasm-boundary retirement
 // (ADR-0149 §The boundary, amended), addressed as a typed peer
 // (`ctx.defer(&request).to::<ControlCore>()`) rather than a `resolve_embedded`
@@ -102,6 +104,13 @@ pub struct ApiCapabilityState {
     pub(super) configs_ready: bool,
     /// Cached mailer for the multi-hop flows' settlement subscriptions.
     pub(super) mailer: Arc<Mailer>,
+    /// The correspondence a `from_commit` repair records against — the same
+    /// handle the executor uses, so a derived digest resolves for Verify.
+    #[cfg(feature = "github")]
+    pub(super) correspondence: Option<aether_bloomery::SharedCorrespondence>,
+    /// The candidate-ref pusher a `from_commit` repair uses after recording.
+    #[cfg(feature = "github")]
+    pub(super) pusher: Option<Arc<dyn CandidatePush>>,
     /// Staged workpieces, keyed by their workpiece id.
     pub(super) staged: BTreeMap<String, Workpiece>,
     /// Open drafts, keyed by a monotonic per-process handle.

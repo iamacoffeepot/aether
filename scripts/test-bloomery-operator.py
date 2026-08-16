@@ -4,19 +4,26 @@
 Only the logic this script owns: the two wire decoders it re-implements against
 the coordinator's storage format, the overdue arithmetic an operator reads a
 sign off, the digest guard that keeps a malformed repair from reaching the
-API, the status-table state that names a graph-held dependent, and the
+API, the status-table state that names a graph-held dependent, the
 scratch-root slot listing / quarantine-clearing the operator uses to recover a
-re-adopted lane child. Nothing here exercises urllib, sqlite3, or argparse --
-those are the standard library's to get right.
+re-adopted lane child, and the recovery ladder `why` prints for a wedged
+member. Nothing here exercises urllib or argparse's own parsing -- those are
+the standard library's to get right. The ladder tests do feed a printed line
+back through this script's parser, because "runnable verbatim" is the
+contract the printer owns.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
+import shlex
+import sqlite3
 import struct
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 
@@ -173,6 +180,40 @@ class DigestValidation(unittest.TestCase):
             operator.require_digest("nope", "--checkout")
         self.assertIn("--checkout", str(caught.exception))
         self.assertEqual(operator.require_digest("AB" * 32, "--tree"), "ab" * 32)
+
+
+class RepairPayload(unittest.TestCase):
+    """Which source a repair command is allowed to name."""
+
+    def test_from_commit_does_not_restate_the_digest_scheme(self):
+        # Tripwire (#5032): --from-commit must send the sha, never a locally
+        # hashed tree/checkout pair. Re-deriving here is how the last repair
+        # spent six tool calls reconstructing the domain tags.
+        payload = operator.repair_payload(None, None, "deadbeef" * 5, None)
+        self.assertEqual(payload, {"from_commit": "deadbeef" * 5})
+        self.assertNotIn("candidate", payload)
+        self.assertNotIn("tree", payload)
+
+    def test_the_low_level_pair_still_builds_a_candidate_struct(self):
+        tree = "ab" * 32
+        checkout = "cd" * 32
+        payload = operator.repair_payload(tree, checkout, None, None)
+        self.assertEqual(payload, {"candidate": {"tree": tree, "checkout": checkout}})
+
+    def test_two_sources_or_a_half_pair_are_refused_by_name(self):
+        # Tripwire: a mixed invocation must not silently prefer --from-commit
+        # and drop the pair (or the other way around). The operator named two
+        # intents; picking one would push the wrong candidate.
+        with self.assertRaises(operator.OperatorError) as caught:
+            operator.repair_payload("ab" * 32, "cd" * 32, "deadbeef" * 5, None)
+        self.assertIn("--from-commit", str(caught.exception))
+        with self.assertRaises(operator.OperatorError) as caught:
+            operator.repair_payload("ab" * 32, None, None, None)
+        self.assertIn("--tree", str(caught.exception))
+        self.assertIn("--checkout", str(caught.exception))
+        with self.assertRaises(operator.OperatorError) as caught:
+            operator.repair_payload(None, None, None, None)
+        self.assertIn("exactly one", str(caught.exception))
 
 
 class EvidencePathResolution(unittest.TestCase):
@@ -397,6 +438,277 @@ class QuarantineClearing(unittest.TestCase):
                 operator.clear_quarantine(scratch, 4)
             self.assertIn("slot 4", str(caught.exception))
             self.assertIn("not quarantined", str(caught.exception))
+
+
+BLOOM = "4f" * 32
+TREE = "aa" * 32
+CHECKOUT = "bb" * 32
+BASE = "01" * 32
+MAINLINE = "02" * 32
+GIT_SHA = "cd" * 20
+
+
+def parse_printed(command: str) -> object:
+    tokens = shlex.split(command)
+    assert tokens[0] == operator.OPERATOR_SCRIPT
+    return operator.build_parser().parse_args(tokens[1:])
+
+
+def printed_ladder(rungs: list) -> str:
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        operator.print_ladder(rungs)
+    return buf.getvalue()
+
+
+class JournalFactWalk(unittest.TestCase):
+    """Recovering a bloom's base and a member's capture from journal records."""
+
+    def test_digest_hex_accepts_both_api_spellings(self):
+        # The plausible bug: a ladder that only accepted the API's hex form
+        # would treat a 32-byte array (serde's default, a fixture that skipped
+        # the hex adapter) as unknown and print the missing-input line over a
+        # digest it already had.
+        self.assertEqual(operator.digest_hex("AB" * 32), "ab" * 32)
+        self.assertEqual(operator.digest_hex([0xAA] * 32), "aa" * 32)
+        self.assertIsNone(operator.digest_hex("unavailable"))
+        self.assertIsNone(operator.digest_hex([1, 2, 3]))
+
+    def test_the_newest_seal_for_this_bloom_supplies_the_base(self):
+        # The plausible bug: reading the first Seal in the journal, or any
+        # Seal regardless of outcome, reports a predecessor's base as this
+        # bloom's — so a successor whose mainline has not moved looks stale
+        # (or a stale predecessor looks current).
+        records = [
+            {
+                "sequence": 1,
+                "event": {"fact": {"Seal": {"base": BASE}}},
+                "outcome": {"Sealed": "11" * 32},
+            },
+            {
+                "sequence": 2,
+                "event": {"fact": {"Seal": {"base": "03" * 32}}},
+                "outcome": {"Sealed": BLOOM},
+            },
+        ]
+        self.assertEqual(operator.bloom_sealed_base(records, BLOOM), "03" * 32)
+        self.assertIsNone(operator.bloom_sealed_base(records, "99" * 32))
+
+        successor = [
+            {
+                "event": {"fact": {"Supersede": {"predecessor": "11" * 32, "successor": {"base": "04" * 32}}}},
+                "outcome": {"Superseded": {"predecessor": "11" * 32, "successor": BLOOM}},
+            }
+        ]
+        self.assertEqual(operator.bloom_sealed_base(successor, BLOOM), "04" * 32)
+
+    def test_the_newest_capture_for_this_member_wins(self):
+        # The plausible bug: a forward scan reports the first construct
+        # capture, so a later refine or operator repair is ignored and the
+        # repair line pastes a tree the member has already left.
+        records = [
+            {
+                "event": {
+                    "fact": {
+                        "AttemptCompleted": {
+                            "workpiece": "issue-5034",
+                            "candidate": {"tree": "11" * 32, "checkout": "22" * 32},
+                        }
+                    }
+                }
+            },
+            {
+                "event": {
+                    "fact": {
+                        "AttemptCompleted": {
+                            "workpiece": "issue-5034",
+                            "candidate": {"tree": TREE, "checkout": CHECKOUT},
+                        }
+                    }
+                }
+            },
+            {
+                "event": {
+                    "fact": {
+                        "AttemptCompleted": {
+                            "workpiece": "other",
+                            "candidate": {"tree": "33" * 32, "checkout": "44" * 32},
+                        }
+                    }
+                }
+            },
+        ]
+        captured = operator.last_captured_candidate(records, "issue-5034")
+        self.assertEqual(captured["tree"], TREE)
+        self.assertEqual(captured["checkout"], CHECKOUT)
+
+        repaired = operator.last_captured_candidate(
+            [
+                {
+                    "event": {
+                        "fact": {
+                            "OperatorRepair": {
+                                "repair": {
+                                    "workpiece": "issue-5034",
+                                    "candidate": {"tree": TREE, "checkout": CHECKOUT},
+                                }
+                            }
+                        }
+                    }
+                }
+            ],
+            "issue-5034",
+        )
+        self.assertEqual(repaired["source"], "OperatorRepair.candidate")
+        self.assertEqual(repaired["tree"], TREE)
+
+    def test_a_wedge_does_not_erase_the_attempt_count_behind_it(self):
+        # The plausible bug: newest-first stops at AttemptWedged, which has
+        # no `attempt`, and the grant line has to invent a count — or print
+        # none — at the exact moment the operator is asking how many rolls
+        # were spent.
+        records = [
+            {"outcome": {"AttemptRetried": {"workpiece": "issue-5034", "stage": "Verify", "attempt": 3}}},
+            {"outcome": {"AttemptWedged": {"workpiece": "issue-5034", "stage": "Verify"}}},
+        ]
+        self.assertEqual(operator.last_attempt_count(records, "issue-5034"), 3)
+
+
+class RecoveryLadder(unittest.TestCase):
+    """The rungs `why` prints for a wedged or overdue member."""
+
+    def _ladder(self, **overrides):
+        values = {
+            "bloom_id": BLOOM,
+            "workpiece": "issue-5034",
+            "wedged_at": "Verify",
+            "overdue": False,
+            "force": False,
+            "attempt_count": 3,
+            "sealed_base": BASE,
+            "mainline": BASE,
+            "captured": {"tree": TREE, "checkout": CHECKOUT, "source": "AttemptCompleted.candidate"},
+            "produced_candidate": True,
+            "correspondence": {CHECKOUT: GIT_SHA},
+            "stranded": ["issue-4900"],
+        }
+        values.update(overrides)
+        return operator.recovery_ladder(**values)
+
+    def test_a_wedged_member_prints_a_runnable_grant_line(self):
+        # The plausible bug: the grant line is a reminder (`grant for another
+        # attempt`) that still makes the operator look up the bloom id and
+        # invent --attempts. A diagnosis that does not assemble the invocation
+        # is the improvisation this rung exists to retire.
+        rungs = self._ladder()
+        grant = next(rung for rung in rungs if rung["verb"] == "grant")
+        parsed = parse_printed(grant["command"])
+        self.assertEqual(parsed.command, "grant")
+        self.assertEqual(parsed.bloom, BLOOM)
+        self.assertEqual(parsed.workpiece, "issue-5034")
+        self.assertEqual(parsed.attempts, 1)
+        self.assertEqual(parsed.stage, "Verify")
+        self.assertIn(grant["command"], printed_ladder(rungs))
+
+    def test_a_captured_candidate_prints_a_runnable_repair_line(self):
+        # The plausible bug: repair is printed as a verb with no digests, so
+        # the operator still has to walk backend_correspondence by hand — the
+        # exact archaeology the ladder is supposed to have done. The printed
+        # line must parse and satisfy the repair contract (exactly one source).
+        rungs = self._ladder()
+        repair = next(rung for rung in rungs if rung["verb"] == "repair")
+        parsed = parse_printed(repair["command"])
+        self.assertEqual(parsed.command, "repair")
+        payload = operator.repair_payload(parsed.tree, parsed.checkout, parsed.from_commit, parsed.from_worktree)
+        self.assertEqual(payload, {"candidate": {"tree": TREE, "checkout": CHECKOUT}})
+        self.assertIn(GIT_SHA, " ".join(repair["notes"]))
+
+    def test_a_checkout_correspondence_alone_prints_from_commit(self):
+        # The plausible bug: repair waits for both 64-hex halves before
+        # offering any command, so a journal that only kept the capture
+        # commit — the half backend_correspondence can turn into a sha —
+        # prints a template the operator still cannot run. After #5032 the
+        # chassis derives the pair from that sha.
+        rungs = self._ladder(
+            captured={"tree": None, "checkout": CHECKOUT, "source": "AttemptCompleted.candidate"},
+            correspondence={CHECKOUT: GIT_SHA},
+        )
+        repair = next(rung for rung in rungs if rung["verb"] == "repair")
+        parsed = parse_printed(repair["command"])
+        payload = operator.repair_payload(parsed.tree, parsed.checkout, parsed.from_commit, parsed.from_worktree)
+        self.assertEqual(payload, {"from_commit": GIT_SHA})
+
+    def test_an_unknown_digest_names_the_producing_step(self):
+        # The plausible bug: a missing tree or checkout drops the repair rung
+        # (or silently omits the flag), so the operator cannot tell whether
+        # there is no capture or the journal just does not have the digest
+        # yet. The rung stays, and the miss names the step that would have
+        # written it.
+        rungs = self._ladder(captured=None, produced_candidate=True, correspondence={})
+        repair = next(rung for rung in rungs if rung["verb"] == "repair")
+        notes = " ".join(repair["notes"])
+        self.assertIn("unknown to the journal", notes)
+        self.assertIn("AttemptCompleted.candidate.tree", notes)
+        self.assertIn("AttemptCompleted.candidate.checkout", notes)
+        self.assertIn("backend_correspondence", notes)
+
+    def test_a_stale_base_names_the_members_a_supersede_would_strand(self):
+        # The plausible bug: supersede is suggested as a verb with no
+        # accounting of the claims already on the bloom, so the operator
+        # mints a successor and only then discovers which integrated
+        # candidates it stranded.
+        rungs = self._ladder(mainline=MAINLINE)
+        supersede = next(rung for rung in rungs if rung["verb"] == "supersede")
+        parsed = parse_printed(supersede["command"].replace("<draft>", "1"))
+        self.assertEqual(parsed.command, "supersede")
+        self.assertEqual(parsed.bloom, BLOOM)
+        self.assertIn("issue-4900", " ".join(supersede["notes"]))
+        self.assertIn("stale", supersede["because"])
+
+    def test_an_idle_member_does_not_grow_a_ladder(self):
+        # The plausible bug: every `why` ends in grant/repair, so a member
+        # that is waiting on an ancestor or still inside its window is
+        # presented as wedged. The ladder is a recovery surface, not a
+        # decoration on the diagnosis.
+        self.assertEqual(
+            self._ladder(wedged_at=None, overdue=False, force=False, captured=None, produced_candidate=False),
+            [],
+        )
+
+
+class CorrespondenceLookup(unittest.TestCase):
+    """Reading a digest's backend object out of the coordinator's store."""
+
+    def test_a_recorded_row_renders_as_hex_and_a_miss_is_none(self):
+        # The plausible bug: a missing table or a missing row raises, and
+        # `why` dies on the diagnosis the operator opened it for. A miss is
+        # None so the ladder can name the producing step instead.
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "store.db"
+            conn = sqlite3.connect(path)
+            conn.execute(
+                "CREATE TABLE backend_correspondence ("
+                "digest BLOB NOT NULL PRIMARY KEY, backend_object BLOB NOT NULL UNIQUE)"
+            )
+            conn.execute(
+                "INSERT INTO backend_correspondence VALUES (?, ?)",
+                (bytes.fromhex(CHECKOUT), bytes.fromhex(GIT_SHA)),
+            )
+            conn.commit()
+            conn.close()
+
+            journal = operator.Journal(str(path))
+            self.assertEqual(journal.correspondence_hex(CHECKOUT), GIT_SHA)
+            self.assertIsNone(journal.correspondence_hex(TREE), "a digest with no row is a miss, not an error")
+
+    def test_a_journal_without_the_table_is_a_miss(self):
+        # The plausible bug: an older store that never grew
+        # backend_correspondence takes `why` down with an OperationalError
+        # at the exact moment the operator needs the rest of the diagnosis.
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "store.db"
+            sqlite3.connect(path).close()
+            self.assertIsNone(operator.Journal(str(path)).correspondence_hex(CHECKOUT))
 
 
 if __name__ == "__main__":

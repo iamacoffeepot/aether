@@ -24,13 +24,14 @@ use crate::api::{ApiParams, BloomeryApiCapability};
 use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
 use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::cli::BloomeryCli;
+use crate::bloomery::doctor::KitReport;
 use crate::bloomery::driver::BloomeryDriverCapability;
 #[cfg(feature = "github")]
 use crate::bloomery::{
-    ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ExecutorReactorCapability, ExecutorReactorSetup,
-    ExecutorShell, GithubConnectionConfig, IntegrateReactorCapability, IntegrateReactorSetup, JanitorReactorCapability,
-    JanitorReactorSetup, LandReactorCapability, LandReactorSetup, MirrorReactorCapability, MirrorReactorSetup,
-    ProjectionShell, SourceShell, default_candidate_push,
+    CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ExecutorReactorCapability,
+    ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig, IntegrateReactorCapability, IntegrateReactorSetup,
+    JanitorReactorCapability, JanitorReactorSetup, LandReactorCapability, LandReactorSetup, LaneProgram,
+    MirrorReactorCapability, MirrorReactorSetup, ProjectionShell, SourceShell, default_candidate_push,
 };
 use crate::control::{ControlCore, ControlSetup};
 use crate::session::{SessionConfig, SessionPoolCapability};
@@ -104,6 +105,8 @@ struct BloomeryActorSetups {
     claim_release: ClaimReleaseReactorSetup,
     janitor: JanitorReactorSetup,
     source: SourceSetup,
+    correspondence: SharedCorrespondence,
+    pusher: Arc<dyn CandidatePush>,
 }
 
 #[cfg(feature = "github")]
@@ -163,6 +166,7 @@ fn actor_setups(
         .transpose()
         .map_err(|error| BootError::Other(Box::new(error)))?;
     let executor_correspondence = mounted_correspondence(executor.as_ref(), &correspondence);
+    let pusher = default_candidate_push(cfg!(any(test, feature = "testing")) || github.uses_fixture());
 
     Ok(BloomeryActorSetups {
         mirror: MirrorReactorSetup {
@@ -188,7 +192,7 @@ fn actor_setups(
             // the guarantee resting on those scenarios happening not to produce an
             // admitted capture. The `testing` feature is dev-only (no shipping
             // manifest enables it), so this cannot refuse a real deployment's push.
-            pusher: default_candidate_push(cfg!(any(test, feature = "testing")) || github.uses_fixture()),
+            pusher: Arc::clone(&pusher),
         },
         land: LandReactorSetup {
             source: configured.then(|| source.clone()),
@@ -220,6 +224,8 @@ fn actor_setups(
             poll_interval_secs: coordinator.poll_interval_secs,
         },
         source: SourceSetup { shell: source, claims_enabled: configured, mainline: coordinator.mainline() },
+        correspondence,
+        pusher,
     })
 }
 
@@ -356,6 +362,14 @@ impl BootableChassis for BloomeryChassis {
     /// move the same `boot` into the driver afterward.
     #[cfg(feature = "github")]
     fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
+        // The production lane program is the one that inherits the kit. A
+        // mock-lane coordinator must not probe it here: each `--version` is a
+        // process, and a loaded lane-boundary suite boots many coordinators at
+        // once — a parked probe used to leave the RPC port unbound past the
+        // handshake deadline (#5035).
+        if LaneProgram::parse(&env.coordinator.local_lane_program) == LaneProgram::default() {
+            KitReport::inspect().log_at_boot();
+        }
         let BloomeryEnv { rpc_port, http_port, store, artifacts, github, coordinator, session, signing } = env;
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
@@ -447,10 +461,15 @@ impl BootableChassis for BloomeryChassis {
                 (),
                 HttpServerConfig { enabled: true, bind_addr: http_addr.to_string(), ..HttpServerConfig::default() },
             )
-            .with_actor::<BloomeryApiCapability>(ApiParams { approval_policy_file }))
+            .with_actor::<BloomeryApiCapability>(ApiParams {
+                approval_policy_file,
+                correspondence: Some(setups.correspondence),
+                pusher: Some(setups.pusher),
+            }))
     }
     #[cfg(not(feature = "github"))]
     fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
+        KitReport::inspect().log_at_boot();
         let BloomeryEnv { rpc_port, http_port, store, artifacts, coordinator, session, signing } = env;
         let approval_policy_file = coordinator.approval_policy_file.clone();
         let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);
