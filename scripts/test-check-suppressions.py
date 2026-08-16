@@ -271,14 +271,38 @@ ignored = ["changed-but-unrelated"]
             [sys.executable, str(SCRIPT), "--base", "not-a-ref", "--head", head],
             cwd=self.repo.root,
             check=False,
+            text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
 
-        self.assertEqual(finding.returncode, 1)
+        self.assertEqual(finding.returncode, scanner.EXIT_FINDINGS)
         self.assertRegex(finding.stdout, r"src/lib\.rs:1 — allow\(dead_code\)")
         self.assertEqual(clean.returncode, 0)
-        self.assertEqual(invalid.returncode, 2)
+        self.assertEqual(invalid.returncode, scanner.EXIT_UNRESOLVABLE_BASE)
+        self.assertIn("suppression scan refused:", invalid.stderr)
+        self.assertIn("cannot resolve --base not-a-ref", invalid.stderr)
+
+    def test_a_parentless_root_passes_when_that_root_is_the_threaded_base(self) -> None:
+        # The umbrella threads the wrapper commit as --base (#5033). That root
+        # *is* an ancestor of HEAD, so merge-base succeeds and a clean tree
+        # must pass — the case a guessed origin/main never reaches.
+        self.repo.git("checkout", "-q", "--orphan", "candidate")
+        self.repo.write("src/lib.rs", "fn clean() {}\n")
+        root = self.repo.commit("bloomery: checkout of bare tree")
+        self.repo.write("src/lib.rs", "fn still_clean() {}\n")
+        head = self.repo.commit("candidate")
+
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), "--base", root, "--head", head],
+            cwd=self.repo.root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        self.assertEqual(completed.stdout, b"")
 
     def test_a_head_sharing_no_ancestor_with_the_base_scans_from_its_own_root(self) -> None:
         # A bloomery lane roots a bare-tree candidate at a parentless wrapper
