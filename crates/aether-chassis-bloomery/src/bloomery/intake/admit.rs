@@ -7,8 +7,8 @@ use std::fmt;
 
 use aether_bloomery::{
     Admit, BloomId, CandidateRef, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, Nonce, ResolutionClaim,
-    StageCatalog, StageId, StageResult, StageVerdict, StudyCall, StudyCost, VerifyFailureSet, WorkpieceId,
-    classify_findings, normalize_stage_result,
+    StageCatalog, StageId, StageResult, StageVerdict, StudyCall, StudyCost, VerifyFailure, VerifyFailureSet,
+    WorkpieceId, classify_findings, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
@@ -450,6 +450,44 @@ fn thread_triage_note(
 /// and the off-line Refine / Reconcile repairs. Reconcile has no successor in
 /// `MEMBER_LINE`; naming it here is what stops a passing candidate being
 /// refused as [`IntakeRefusal::OutOfLineStage`].
+/// The three terminal-Verify facts: a pass integrates, a preflight-only
+/// miss is a host fault (#5020), and every other failing set is a
+/// candidate `VerifyFailed`.
+fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
+    if verdict_passed(upload.verdict) {
+        let claim = ResolutionClaim {
+            workpiece: record.workpiece.clone(),
+            scope_revision: record.scope_revision,
+            candidate: record.candidate,
+            evidence,
+        };
+        return Event {
+            idempotency_key: AdmissionKey::Integrate.of(&record.nonce.0),
+            fact: Fact::Integrate { bloom: record.bloom, claim },
+        };
+    }
+    // Same admission key as a candidate failure so the dispatch is still
+    // accounted for; the fact is what distinguishes the cause.
+    Event {
+        idempotency_key: AdmissionKey::VerifyFailed.of(&record.nonce.0),
+        fact: if upload.failed_verifiers == VerifyFailureSet::one(VerifyFailure::Preflight) {
+            Fact::VerifyHostFault {
+                bloom: record.bloom,
+                workpiece: record.workpiece.clone(),
+                evidence,
+                findings: upload.findings.clone().unwrap_or_default(),
+            }
+        } else {
+            Fact::VerifyFailed {
+                bloom: record.bloom,
+                workpiece: record.workpiece.clone(),
+                evidence,
+                failed_verifiers: upload.failed_verifiers,
+            }
+        },
+    }
+}
+
 fn admits_as_attempt_completed(stage: StageId) -> bool {
     StageCatalog::next_member_stage(stage).is_some() || matches!(stage, StageId::Refine | StageId::Reconcile)
 }
@@ -530,28 +568,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             fact: Fact::AdmitEvidence { bloom: record.bloom, evidence },
         }
     } else if record.stage == StageId::Verify {
-        if verdict_passed(upload.verdict) {
-            let claim = ResolutionClaim {
-                workpiece: record.workpiece.clone(),
-                scope_revision: record.scope_revision,
-                candidate: record.candidate,
-                evidence,
-            };
-            Event {
-                idempotency_key: AdmissionKey::Integrate.of(&record.nonce.0),
-                fact: Fact::Integrate { bloom: record.bloom, claim },
-            }
-        } else {
-            Event {
-                idempotency_key: AdmissionKey::VerifyFailed.of(&record.nonce.0),
-                fact: Fact::VerifyFailed {
-                    bloom: record.bloom,
-                    workpiece: record.workpiece.clone(),
-                    evidence,
-                    failed_verifiers: upload.failed_verifiers,
-                },
-            }
-        }
+        verify_event(&record, upload, evidence)
     } else if admits_as_attempt_completed(record.stage) {
         Event {
             idempotency_key: AdmissionKey::Attempt.of(&record.nonce.0),
