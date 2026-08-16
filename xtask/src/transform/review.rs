@@ -278,6 +278,7 @@ pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
         conventions::read(Path::new(".")).as_deref(),
         args.subject.as_deref(),
         args.task.as_deref(),
+        None,
     );
     let run = run_model_lane(&prompt, args)?;
     write_evidence_json(

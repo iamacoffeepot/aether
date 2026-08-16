@@ -1140,6 +1140,54 @@ fn a_passing_construct_run_with_nothing_to_capture_fails_closed() {
     assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "a lost capture is a failed attempt");
 }
 
+// A construct lane killed mid-run still captures whatever it wrote, and the
+// fact that produced the capture still reads failed. Catches `passed =
+// concluded || candidate.is_some()` — populating the checkpoint flipping a
+// dead run into a pass.
+#[test]
+fn a_killed_construct_captures_its_partial_worktree_and_still_fails() {
+    let base = TempDir::new().unwrap();
+    let store = correspondence();
+    let evidence = r#"{"command":"construct.implement","nonce":"n-kill","produced_candidate":false,"result_record":{"schema":1,"is_error":true,"result":{}}}"#;
+    let runner = FixedRunner::new(evidence, RunLifecycle::Exited { success: false }, true);
+    let exec = LocalExecutor::new(Arc::new(runner), Arc::clone(&store) as _, base.path());
+
+    let handle = exec.submit(&construct_order(digest(5), "n-kill")).unwrap();
+    let refs = exec.stream_evidence(&handle).unwrap();
+
+    let candidate = refs[0].candidate.expect("a killed construct that wrote something reports its capture");
+    let captured = canned_capture();
+    assert_eq!(store.resolve_backend_object(&candidate.tree).unwrap().as_ref(), Some(&captured.tree));
+    assert_eq!(store.resolve_backend_object(&candidate.checkout).unwrap().as_ref(), Some(&captured.commit));
+    let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
+    assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "a populated candidate cannot flip passed");
+    assert_eq!(upload.candidate, Some(candidate), "the claim carries the checkpoint to the intake");
+}
+
+// A killed lane that died before writing anything captures nothing and does
+// not warn — an empty checkpoint is not a defect. Catches treating a clean
+// death the same as a passed run's empty worktree (the fail-closed warn).
+#[test]
+fn a_killed_construct_with_a_clean_worktree_captures_nothing_and_does_not_warn() {
+    let base = TempDir::new().unwrap();
+    let evidence = r#"{"command":"construct.implement","nonce":"n-clean-die","produced_candidate":false,"result_record":{"schema":1,"no_result":true}}"#;
+    let runner = FixedRunner::new(evidence, RunLifecycle::Exited { success: false }, false);
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path());
+    let events = Arc::new(RecordedEvents::default());
+
+    let handle = exec.submit(&construct_order(digest(5), "n-clean-die")).unwrap();
+    let refs = with_default(EventRecorder(Arc::clone(&events)), || exec.stream_evidence(&handle).unwrap());
+
+    assert!(refs[0].candidate.is_none(), "a clean death is not a checkpoint");
+    let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
+    assert_eq!(upload.verdict, StageVerdict::VerificationFailed);
+    let rendered = events.rendered();
+    assert!(
+        !rendered.contains("passed run left a clean worktree"),
+        "a clean death must not use the passed-run fail-closed warn: {rendered}",
+    );
+}
+
 // A correspondence whose reads work — so the submit resolves its checkout — but
 // whose `record` always faults, standing in for a durable store that goes
 // unwritable between the dispatch and the capture.

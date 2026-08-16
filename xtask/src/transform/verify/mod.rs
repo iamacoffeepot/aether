@@ -67,6 +67,19 @@ struct VerifyInvocation {
     /// contract mis-files every one of its failures in one direction or the
     /// other.
     finding_exit_codes: &'static [i32],
+    /// The exit codes with which this member **refuses an input it could not
+    /// resolve** — a host or work-order fault, never a candidate finding
+    /// (#5033).
+    ///
+    /// Distinct from [`Self::finding_exit_codes`] (the scan ran and found
+    /// something) and from the leftover nonzero bucket (the scan broke). A
+    /// gate that cannot name its `--base` must not invent one and must not
+    /// look like a defect the candidate can edit away.
+    environment_exit_codes: &'static [i32],
+    /// When set, [`Self::args_under`] appends this flag and the work-order's
+    /// resolved diff base. The suppression scanner is the one member that
+    /// reads a git range, and without this it falls back to `origin/main`.
+    diff_base_flag: Option<&'static str>,
     /// How much of the workspace this member looks at when the run computed a
     /// closure to narrow to (#4890).
     breadth: Breadth,
@@ -119,9 +132,15 @@ impl VerifyInvocation {
     /// has to build where the lane that produced the candidate built, in the slot
     /// that lane holds, under the same share of the host. Setting either here
     /// would override the dispatch that knows which slot this is.
-    fn command(&self, scope: &Scope, cache: Option<&CompilerCache>, peak: &PeakMemory) -> Command {
+    fn command(
+        &self,
+        scope: &Scope,
+        diff_base: Option<&str>,
+        cache: Option<&CompilerCache>,
+        peak: &PeakMemory,
+    ) -> Command {
         let mut cmd = peak.command(self.program);
-        cmd.args(self.args_under(scope)).envs(self.env.iter().copied()).envs(CI_BUILD_ENV.iter().copied());
+        cmd.args(self.args_under(scope, diff_base)).envs(self.env.iter().copied()).envs(CI_BUILD_ENV.iter().copied());
         sccache::export(cache, &mut cmd);
         cmd
     }
@@ -137,17 +156,29 @@ impl VerifyInvocation {
     /// `verify.test` states no `--workspace` (nextest's own default is the
     /// workspace), so there the filter is a no-op and the package flags are the
     /// whole change.
-    fn args_under(&self, scope: &Scope) -> Vec<String> {
-        let Some(packages) = scope.packages().filter(|_| self.breadth == Breadth::Closure) else {
-            return self.args.iter().map(|arg| (*arg).to_owned()).collect();
-        };
-
-        self.args
-            .iter()
-            .filter(|arg| **arg != "--workspace")
-            .map(|arg| (*arg).to_owned())
-            .chain(packages.iter().flat_map(|package| ["-p".to_owned(), package.clone()]))
-            .collect()
+    ///
+    /// `diff_base` is the work order's own resolved base — the same value
+    /// [`Scope::resolve`] receives. A member that declares [`Self::diff_base_flag`]
+    /// appends that flag and the base so it scans the candidate's range rather
+    /// than guessing `origin/main` (#5033). Absent, the stated argv is left
+    /// alone: the aggregate verify and a hand-run name no base.
+    fn args_under(&self, scope: &Scope, diff_base: Option<&str>) -> Vec<String> {
+        let mut args: Vec<String> = scope.packages().filter(|_| self.breadth == Breadth::Closure).map_or_else(
+            || self.args.iter().map(|arg| (*arg).to_owned()).collect(),
+            |packages| {
+                self.args
+                    .iter()
+                    .filter(|arg| **arg != "--workspace")
+                    .map(|arg| (*arg).to_owned())
+                    .chain(packages.iter().flat_map(|package| ["-p".to_owned(), package.clone()]))
+                    .collect()
+            },
+        );
+        if let (Some(flag), Some(base)) = (self.diff_base_flag, diff_base) {
+            args.push(flag.to_owned());
+            args.push(base.to_owned());
+        }
+        args
     }
 }
 
@@ -193,6 +224,8 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // forwards it. It has no second code: a manifest it cannot read
             // exits 1 too, so that conflation survives this change unresolved.
             finding_exit_codes: &[1],
+            environment_exit_codes: &[],
+            diff_base_flag: None,
             breadth: Breadth::Workspace,
         }),
         "verify.clippy" => Some(VerifyInvocation {
@@ -205,6 +238,8 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // A lint is a finding this run derives from the JSON stream at exit
             // zero; 101 is cargo's "could not compile", which is a finding too.
             finding_exit_codes: &[101],
+            environment_exit_codes: &[],
+            diff_base_flag: None,
             breadth: Breadth::Closure,
         }),
         "verify.docs" => Some(VerifyInvocation {
@@ -221,6 +256,8 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // documentation findings arrive on the same 101 a compile error
             // does.
             finding_exit_codes: &[101],
+            environment_exit_codes: &[],
+            diff_base_flag: None,
             breadth: Breadth::Closure,
         }),
         "verify.test" => Some(VerifyInvocation {
@@ -254,6 +291,8 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // unusable profile exits 96, an unparsable argv exits 2 — and none
             // of those is a statement about the candidate.
             finding_exit_codes: &[100, 101],
+            environment_exit_codes: &[],
+            diff_base_flag: None,
             breadth: Breadth::Closure,
         }),
         "verify.dup" => Some(VerifyInvocation {
@@ -277,6 +316,8 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // routing every real duplication report to the host. A bad flag is
             // exit 2, which lands on the operational side where it belongs.
             finding_exit_codes: &[1],
+            environment_exit_codes: &[],
+            diff_base_flag: None,
             breadth: Breadth::Workspace,
         }),
         "verify.deps" => Some(VerifyInvocation {
@@ -304,6 +345,8 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // a path it could not walk — the same split the suppression
             // scanner draws, from a different program.
             finding_exit_codes: &[1],
+            environment_exit_codes: &[],
+            diff_base_flag: None,
             breadth: Breadth::Workspace,
         }),
         "verify.suppress" => Some(VerifyInvocation {
@@ -317,7 +360,12 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
             // `OperationalError` it raises — and python3's own 2 for a script
             // it cannot open — leaves by the 2 that says it never reached a
             // verdict. This is the split #4845 was filed for.
+            //
+            // An unresolvable `--base` leaves by 3: the input was refused, no
+            // scan ran, and the umbrella reads that as a host fault (#5033).
             finding_exit_codes: &[1],
+            environment_exit_codes: &[3],
+            diff_base_flag: Some("--base"),
             breadth: Breadth::Workspace,
         }),
         _ => None,
@@ -471,6 +519,8 @@ fn member_outcome(invocation: &VerifyInvocation, derived_pass: bool, code: Optio
 
     if code.is_some_and(|code| invocation.finding_exit_codes.contains(&code)) {
         MemberOutcome::Failed
+    } else if code.is_some_and(|code| invocation.environment_exit_codes.contains(&code)) {
+        MemberOutcome::Environment
     } else {
         MemberOutcome::Operational
     }
@@ -587,7 +637,7 @@ struct Captured {
 /// own cache is a property of *how*: the environment the spawn happens under,
 /// which a rerun repeats unchanged.
 trait MemberRunner {
-    fn run(&mut self, invocation: &VerifyInvocation, scope: &Scope) -> Result<Captured>;
+    fn run(&mut self, invocation: &VerifyInvocation, scope: &Scope, diff_base: Option<&str>) -> Result<Captured>;
 }
 
 /// The runner the lane uses: spawn the member's own command, through the host's
@@ -602,8 +652,8 @@ struct SpawnRunner<'a> {
 }
 
 impl MemberRunner for SpawnRunner<'_> {
-    fn run(&mut self, invocation: &VerifyInvocation, scope: &Scope) -> Result<Captured> {
-        let output = run_captured(invocation.command(scope, self.cache, self.peak))
+    fn run(&mut self, invocation: &VerifyInvocation, scope: &Scope, diff_base: Option<&str>) -> Result<Captured> {
+        let output = run_captured(invocation.command(scope, diff_base, self.cache, self.peak))
             .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
         // The wrapper's report is taken off the stderr the member's log keeps:
         // the reading belongs in the evidence record, and the log belongs to
@@ -618,9 +668,10 @@ fn run_member(
     id: &str,
     invocation: &VerifyInvocation,
     scope: &Scope,
+    diff_base: Option<&str>,
     runner: &mut dyn MemberRunner,
 ) -> Result<(MemberOutcome, Vec<u8>, i32)> {
-    let output = runner.run(invocation, scope)?;
+    let output = runner.run(invocation, scope, diff_base)?;
 
     // A JSON-format member's verdict is ours to derive: its exit status is
     // success even with lints present, because the run was not asked to deny
@@ -673,7 +724,9 @@ impl MemberRun {
     /// A member whose log the distillers read as they always have — everything
     /// but a `verify.test` run whose failures were classified.
     fn plain(id: &str, outcome: MemberOutcome, log: Vec<u8>, exit_code: i32) -> Self {
-        let findings = (!outcome.passed()).then(|| distil_member(id, &String::from_utf8_lossy(&log))).flatten();
+        let findings = matches!(outcome, MemberOutcome::Failed | MemberOutcome::Operational)
+            .then(|| distil_member(id, &String::from_utf8_lossy(&log)))
+            .flatten();
         Self { id: id.to_owned(), outcome, log, exit_code, findings, observation: None }
     }
 }
@@ -746,9 +799,10 @@ fn run_member_discriminated(
     invocation: &VerifyInvocation,
     scope: &Scope,
     closure: Option<&Closure>,
+    diff_base: Option<&str>,
     runner: &mut dyn MemberRunner,
 ) -> Result<MemberRun> {
-    let (outcome, log, exit_code) = run_member(id, invocation, scope, runner)?;
+    let (outcome, log, exit_code) = run_member(id, invocation, scope, diff_base, runner)?;
     let Some(classified) = classify_failures(id, outcome, &log, closure) else {
         return Ok(MemberRun::plain(id, outcome, log, exit_code));
     };
@@ -765,7 +819,7 @@ fn run_member_discriminated(
         });
     }
 
-    let (repeat_outcome, repeat_log, repeat_exit) = run_member(id, invocation, scope, runner)?;
+    let (repeat_outcome, repeat_log, repeat_exit) = run_member(id, invocation, scope, diff_base, runner)?;
     let repeat = classify_failures(id, repeat_outcome, &repeat_log, closure);
 
     // The repeat is the run this member reports: the first one judged nothing
@@ -864,7 +918,7 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     let scope = Scope::resolve(args.diff_base.as_deref());
     let cache = sccache::detect();
     let peak = peak_memory::detect();
-    let output = run_captured(invocation.command(&scope, cache.as_ref(), &peak))
+    let output = run_captured(invocation.command(&scope, args.diff_base.as_deref(), cache.as_ref(), &peak))
         .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
     let stderr = peak.take_report(output.stderr);
 
@@ -1121,7 +1175,14 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         // build.
         let run = match run_prepare(id, &invocation, cache.as_ref(), &peak)? {
             Some((log, code)) => MemberRun::plain(id, MemberOutcome::Failed, log.into_bytes(), code),
-            None => run_member_discriminated(id, &invocation, &scope, closure.as_ref(), &mut runner)?,
+            None => run_member_discriminated(
+                id,
+                &invocation,
+                &scope,
+                closure.as_ref(),
+                args.diff_base.as_deref(),
+                &mut runner,
+            )?,
         };
 
         let log_name = format!("{id}.log");
@@ -1213,7 +1274,12 @@ mod tests {
     }
 
     impl MemberRunner for ScriptedRunner {
-        fn run(&mut self, _invocation: &VerifyInvocation, _scope: &Scope) -> anyhow::Result<Captured> {
+        fn run(
+            &mut self,
+            _invocation: &VerifyInvocation,
+            _scope: &Scope,
+            _diff_base: Option<&str>,
+        ) -> anyhow::Result<Captured> {
             let captured = self.scripted.get(self.runs).expect("the policy ran the member more times than scripted");
             self.runs += 1;
             Ok(Captured { stdout: captured.stdout.clone(), stderr: captured.stderr.clone(), code: captured.code })
@@ -1371,7 +1437,7 @@ mod tests {
         let scope = closure_scope(&["aether-chassis-bloomery", "aether-math"]);
 
         let clippy = verify_command("verify.clippy").expect("verify.clippy mapped");
-        let args = clippy.args_under(&scope);
+        let args = clippy.args_under(&scope, None);
         assert!(
             !args.contains(&String::from("--workspace")),
             "the workspace flag would re-select everything: {args:?}"
@@ -1394,7 +1460,7 @@ mod tests {
         // default — so there the package flags are the entire narrowing.
         let test = verify_command("verify.test").expect("verify.test mapped");
         assert_eq!(
-            test.args_under(&scope),
+            test.args_under(&scope, None),
             [owned(test.args), owned(&["-p", "aether-chassis-bloomery", "-p", "aether-math"])].concat(),
         );
     }
@@ -1410,7 +1476,7 @@ mod tests {
 
         for id in ["verify.fmt", "verify.dup", "verify.deps", "verify.suppress"] {
             let invocation = verify_command(id).expect("member mapped");
-            assert_eq!(invocation.args_under(&scope), owned(invocation.args), "{id} must not narrow");
+            assert_eq!(invocation.args_under(&scope, None), owned(invocation.args), "{id} must not narrow");
             assert_eq!(member_scope_notice(&invocation, &scope), None, "{id} must not claim a closure it ignored");
         }
     }
@@ -1425,7 +1491,11 @@ mod tests {
 
         for &id in verify_check_members() {
             let invocation = verify_command(id).expect("member mapped");
-            assert_eq!(invocation.args_under(&scope), owned(invocation.args), "{id} must dispatch its stated argv");
+            assert_eq!(
+                invocation.args_under(&scope, None),
+                owned(invocation.args),
+                "{id} must dispatch its stated argv"
+            );
         }
     }
 
@@ -1452,10 +1522,22 @@ mod tests {
         // The suppressions job copies the scanner to a runner temp path and
         // invokes it with pull-request shas, so its argv has no lane
         // counterpart at all; what must hold is that the scanner roots the
-        // host running these tests resolves are the ones it declares.
+        // host running these tests resolves are the ones it declares, and
+        // that a work-order base is threaded as `--base` rather than left
+        // for the script to guess `origin/main` (#5033).
         let suppress = verify_command("verify.suppress").expect("verify.suppress mapped");
         assert_eq!(suppress.program, "python3");
         assert_eq!(suppress.args, &["scripts/check-suppressions.py"]);
+        assert_eq!(suppress.diff_base_flag, Some("--base"));
+        assert_eq!(
+            suppress.args_under(&Scope::resolve(None), Some("abc123def")),
+            owned(&["scripts/check-suppressions.py", "--base", "abc123def"]),
+        );
+        assert_eq!(
+            suppress.args_under(&Scope::resolve(None), None),
+            owned(&["scripts/check-suppressions.py"]),
+            "no work-order base leaves the stated argv, so the script keeps its own default",
+        );
         assert_eq!(suppress.requires, &["git", "python3"]);
         let tools = required_tools();
         assert!(tools.contains(&"git"));
@@ -1791,6 +1873,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             &invocation,
             &Scope::resolve(None),
             Some(&closure::Closure::of(&["aether-render"])),
+            None,
             &mut runner,
         )
         .expect("the policy runs");
@@ -1829,6 +1912,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             &invocation,
             &Scope::resolve(None),
             Some(&closure::Closure::of(&["aether-render"])),
+            None,
             &mut runner,
         )
         .expect("the policy runs");
@@ -1861,6 +1945,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             &invocation,
             &Scope::resolve(None),
             Some(&closure::Closure::of(&["aether-render"])),
+            None,
             &mut runner,
         )
         .expect("the policy runs");
@@ -1886,7 +1971,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         let mut runner =
             ScriptedRunner::new(&[(&failing_run(&["aether-actor::fleetharness_binary_store store_round_trips"]), 100)]);
 
-        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, &mut runner)
+        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
             .expect("the policy runs");
 
         assert_eq!(runner.runs, 1, "with no closure there is nothing to classify out, so nothing to rerun for");
@@ -1978,6 +2063,32 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     }
 
     #[test]
+    fn an_unresolvable_base_exit_is_a_host_fault_not_a_finding() {
+        // Tripwire for #5033. The scanner refuses a `--base` it cannot resolve
+        // with a distinct exit, and that exit must not become a candidate
+        // finding or a Refine dispatch: the model cannot invent a git object
+        // the host did not give it.
+        let suppress = verify_command("verify.suppress").expect("verify.suppress mapped");
+        assert_eq!(suppress.environment_exit_codes, &[3]);
+        assert_eq!(
+            member_outcome(&suppress, true, Some(3)),
+            MemberOutcome::Environment,
+            "an unresolvable base is a host-input refusal",
+        );
+        assert!(
+            failed_verifiers([("verify.suppress", MemberOutcome::Environment)]).is_empty(),
+            "a refusal charges no verifier identity, so it cannot spend a repair roll",
+        );
+
+        let log = "suppression scan refused: cannot resolve --base 0000000000000000000000000000000000000000: \
+                   git exited 128";
+        let run = MemberRun::plain("verify.suppress", MemberOutcome::Environment, log.as_bytes().to_vec(), 3);
+        assert!(run.findings.is_none(), "the refusal is not a finding a Refine is handed");
+        assert!(verify_findings(&[run]).is_none(), "so the umbrella dispatches no refine");
+        assert_eq!(umbrella_status(&[MemberOutcome::Environment]), "environment");
+    }
+
+    #[test]
     fn a_members_finding_exits_are_its_own_programs_codes() {
         // Tripwire: these lists decide, per member, which failures blame the
         // candidate. nextest is the one that matters most — its codes are its
@@ -1997,6 +2108,10 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             let invocation = verify_command(id).expect("every umbrella member resolves");
             assert!(!invocation.finding_exit_codes.is_empty(), "{id} states no finding exit, so nothing can blame it");
             assert!(!invocation.finding_exit_codes.contains(&0), "{id} claims a clean exit as a finding");
+            assert!(
+                invocation.environment_exit_codes.iter().all(|code| !invocation.finding_exit_codes.contains(code)),
+                "{id} claims a finding exit as a host-input refusal",
+            );
         }
     }
 

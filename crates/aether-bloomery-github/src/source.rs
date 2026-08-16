@@ -44,6 +44,12 @@
 //!   the queryable, reusable property ADR-0149's successor-reuse clause and
 //!   this slice's first-class-checkpoint mandate require, which a same-call
 //!   guard value could never satisfy.
+//! - `member-checkpoint/<workpiece>` — a dead construct lane's partial
+//!   worktree. Sibling of `checkpoint/`, never nested under it:
+//!   [`SourceBackend::checkpoints`] strips `checkpoint/` and hard-errors
+//!   [`SourceError::Malformed`] on any remainder that is not a hex tree digest,
+//!   so a nested `checkpoint/member/<workpiece>` name would break
+//!   integration-checkpoint enumeration.
 //!
 //! [#3465]: https://github.com/iamacoffeepot/aether/issues/3465
 
@@ -120,7 +126,30 @@ pub fn candidate_ref_name(bloom: &BloomId, workpiece: &str) -> String {
 /// attempt / checkpoint / landing refs use, so one bloom's whole ref namespace
 /// reads as one namespace.
 fn candidate_ref(bloom: &BloomId, workpiece: &str) -> String {
-    let safe: String = workpiece
+    format!("heads/bloom/{}/candidate/{}", short_hex(&bloom.0), sanitize_ref_segment(workpiece))
+}
+
+/// The bloom-namespace ref a dead construct lane's partial worktree is pushed
+/// to — `refs/heads/bloom/<short bloom hex>/member-checkpoint/<workpiece>`.
+///
+/// Public for the same reason [`candidate_ref_name`] is: the executor pushes
+/// the capture and the prune path reclaims it, and one spelling keeps the two
+/// from drifting. The workpiece segment goes through the same sanitizer
+/// [`candidate_ref_name`] uses so a workpiece that is safe on one ref is safe on
+/// the other.
+#[must_use]
+pub fn member_checkpoint_ref_name(bloom: &BloomId, workpiece: &str) -> String {
+    format!("refs/{}", member_checkpoint_ref(bloom, workpiece))
+}
+
+fn member_checkpoint_ref(bloom: &BloomId, workpiece: &str) -> String {
+    format!("heads/bloom/{}/member-checkpoint/{}", short_hex(&bloom.0), sanitize_ref_segment(workpiece))
+}
+
+/// Git-safe ref segment for a machine-authored workpiece id. Shared by the
+/// candidate and member-checkpoint spellings so the two cannot drift.
+fn sanitize_ref_segment(workpiece: &str) -> String {
+    workpiece
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
@@ -129,8 +158,7 @@ fn candidate_ref(bloom: &BloomId, workpiece: &str) -> String {
                 '-'
             }
         })
-        .collect();
-    format!("heads/bloom/{}/candidate/{safe}", short_hex(&bloom.0))
+        .collect()
 }
 
 /// The branch a bloom's landing is proposed from — a sibling of `integration`
@@ -634,20 +662,24 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
         format!("heads/bloom/{}/", short_hex(&bloom.0))
     }
 
-    /// Whether `name` is a candidate, integration, or checkpoint ref under
-    /// `prefix` — the working refs a terminal bloom no longer needs. Landing
-    /// and attempt refs stay: a landing proposal may still be open, and this
-    /// issue does not retire them. Claim refs live in a different namespace
+    /// Whether `name` is a candidate, integration, checkpoint, or member-checkpoint
+    /// ref under `prefix` — the working refs a terminal bloom no longer needs.
+    /// Landing and attempt refs stay: a landing proposal may still be open, and
+    /// this issue does not retire them. Claim refs live in a different namespace
     /// (`bloomery/claims/`, `bloomery/admission/`) and cannot match the prefix.
     fn is_reclaimable_working_ref(name: &str, prefix: &str) -> bool {
         name.strip_prefix(prefix).is_some_and(|rest| {
-            rest == "integration" || rest.starts_with("candidate/") || rest.starts_with("checkpoint/")
+            rest == "integration"
+                || rest.starts_with("candidate/")
+                || rest.starts_with("checkpoint/")
+                || rest.starts_with("member-checkpoint/")
         })
     }
 
-    /// Delete `bloom`'s candidate, integration, and checkpoint refs. Idempotent:
-    /// a name that is already gone is a success. Does not touch claim refs
-    /// (ADR-0150 — those have their own release reactor) or the landing branch.
+    /// Delete `bloom`'s candidate, integration, checkpoint, and member-checkpoint
+    /// refs. Idempotent: a name that is already gone is a success. Does not touch
+    /// claim refs (ADR-0150 — those have their own release reactor) or the landing
+    /// branch.
     ///
     /// # Errors
     /// A transport or backend fault other than an already-absent ref.
@@ -1601,7 +1633,8 @@ mod tests {
 
     use super::{
         ADMISSION_REF, EMPTY_TREE, GitSource, LandAcceptance, LandingRefusal, LandingSource, MainlineRef, SourceError,
-        candidate_ref_name, landing_branch, parse_bloom_line, render_claim_message, render_tombstone_message, to_hex,
+        candidate_ref_name, landing_branch, member_checkpoint_ref_name, parse_bloom_line, render_claim_message,
+        render_tombstone_message, to_hex,
     };
     use crate::client::{GitDataApi, PullRequestApi};
     use crate::short_hex;
@@ -1704,7 +1737,9 @@ mod tests {
         let (fake, bloom, _base) = seeded();
         let source = git_source(&fake, false);
         let candidate = candidate_ref_name(&bloom, "wp-0").trim_start_matches("refs/").to_owned();
+        let member_checkpoint = member_checkpoint_ref_name(&bloom, "wp-0").trim_start_matches("refs/").to_owned();
         fake.seed_ref(&candidate, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        fake.seed_ref(&member_checkpoint, "ffffffffffffffffffffffffffffffffffffffff");
         fake.seed_ref(
             &GitSource::<FakeGithub>::checkpoint_ref(&bloom, &digest(3)),
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1714,14 +1749,70 @@ mod tests {
         fake.seed_ref(&claim_ref(&workpiece("wp-live")), "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
 
         let pruned = source.prune_working_refs(&bloom).unwrap();
-        assert_eq!(pruned, 3, "integration (from create_namespace) + candidate + checkpoint");
+        assert_eq!(pruned, 4, "integration (from create_namespace) + candidate + checkpoint + member-checkpoint");
         assert!(!fake.ref_exists(&GitSource::<FakeGithub>::integration_ref(&bloom)));
         assert!(!fake.ref_exists(&candidate));
+        assert!(!fake.ref_exists(&member_checkpoint));
         assert!(!fake.ref_exists(&GitSource::<FakeGithub>::checkpoint_ref(&bloom, &digest(3))));
         assert!(fake.ref_exists(&GitSource::<FakeGithub>::landing_ref(&bloom)), "the landing branch stays");
         assert!(fake.ref_exists(&GitSource::<FakeGithub>::attempt_ref(&bloom, 1)), "attempt refs stay");
         assert!(fake.ref_exists(ADMISSION_REF), "the admission claim ref stays");
         assert!(fake.ref_exists(&claim_ref(&workpiece("wp-live"))), "a workpiece claim ref stays");
+    }
+
+    #[test]
+    fn is_reclaimable_working_ref_matches_the_member_checkpoint_prefix() {
+        // Tripwire: a member-checkpoint ref has to leave with the rest of a
+        // terminal bloom's namespace. A matcher that only knew candidate /
+        // integration / checkpoint would leak these past the janitor. A live
+        // bloom never calls prune, so its member checkpoints stay by that
+        // policy, not by a special-case exemption here.
+        let prefix = "heads/bloom/aa/";
+        assert!(GitSource::<FakeGithub>::is_reclaimable_working_ref("heads/bloom/aa/member-checkpoint/wp-0", prefix));
+        assert!(GitSource::<FakeGithub>::is_reclaimable_working_ref("heads/bloom/aa/candidate/wp-0", prefix));
+        assert!(GitSource::<FakeGithub>::is_reclaimable_working_ref("heads/bloom/aa/checkpoint/00", prefix));
+        assert!(GitSource::<FakeGithub>::is_reclaimable_working_ref("heads/bloom/aa/integration", prefix));
+        assert!(
+            !GitSource::<FakeGithub>::is_reclaimable_working_ref("heads/bloom/aa/landing", prefix),
+            "the landing branch is not this sweep's",
+        );
+        assert!(
+            !GitSource::<FakeGithub>::is_reclaimable_working_ref("heads/bloom/aa/attempt/1", prefix),
+            "attempt refs stay",
+        );
+    }
+
+    #[test]
+    fn checkpoints_enumerates_only_integration_checkpoints_when_member_checkpoints_exist() {
+        // Tripwire: member-checkpoint refs are a sibling of checkpoint/, never
+        // nested under it. `checkpoints` strips `checkpoint/` and requires the
+        // remainder to be a hex tree digest; a nested name would hard-error
+        // Malformed and break successor reuse.
+        let (fake, bloom, base) = seeded();
+        let source = git_source(&fake, false);
+        let base_tree = source.snapshot(&base).unwrap().tree;
+        source.checkpoint(&bloom, &base_tree).unwrap();
+        fake.seed_ref(
+            member_checkpoint_ref_name(&bloom, "wp-0").trim_start_matches("refs/"),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+
+        let listed = source.checkpoints(&bloom).unwrap();
+        assert_eq!(listed, vec![Checkpoint { bloom, tree: base_tree }]);
+    }
+
+    #[test]
+    fn member_checkpoint_ref_name_shares_the_candidate_sanitizer() {
+        // The two spellings go through one sanitizer so a workpiece that is
+        // ref-safe on the candidate branch is ref-safe on the checkpoint, and
+        // a slash cannot open a nested path under either prefix.
+        let bloom = bloom();
+        let candidate = candidate_ref_name(&bloom, "wp/cand");
+        let checkpoint = member_checkpoint_ref_name(&bloom, "wp/cand");
+        assert!(candidate.ends_with("/candidate/wp-cand"));
+        assert!(checkpoint.ends_with("/member-checkpoint/wp-cand"));
+        assert!(checkpoint.contains("/member-checkpoint/"), "the prefix is a sibling of checkpoint/, not nested");
+        assert!(!checkpoint.contains("/checkpoint/member"), "nesting under checkpoint/ would break enumeration");
     }
 
     #[test]
