@@ -97,6 +97,11 @@ pub struct BloomView {
 /// The digest is always present — it is the finding `adjudicate --finding`
 /// names. Stage, prompt, options, and blocked ride only when the question
 /// artifact resolved; a missing artifact still exposes the digest.
+///
+/// Every field serializes in declaration order even when it is `None` or
+/// empty: `aether_data::wire` encodes structs positionally, so omitting a
+/// slot shifts the next bloom's bytes into it. `#[serde(default)]` is only
+/// for a human-readable reader that predates a field.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ReviewParkView {
     /// The parked [`crate::Question`]'s content-addressed digest — or, for a
@@ -104,16 +109,16 @@ pub struct ReviewParkView {
     /// the exact digest an operator adjudication names.
     pub question: Digest,
     /// The held stage, when the question artifact resolved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub stage: Option<StageId>,
     /// The decision to be made, when the question artifact resolved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub prompt: Option<String>,
     /// The options considered, when the question artifact resolved.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub options: Vec<String>,
     /// What the park blocks, when the question artifact resolved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub blocked: Option<String>,
 }
 

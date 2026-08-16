@@ -76,6 +76,11 @@ pub enum IntegrateOutcome {
         /// member's work.
         #[serde(default)]
         diff: String,
+        /// The candidate checkout/commit the backend offered to the merge —
+        /// the vehicle, not the tree. An ancestry repair can replace this
+        /// while preserving the candidate tree; fold-conflict admission binds
+        /// it so the two attempts do not share an idempotency key.
+        attempted: Digest,
     },
     /// The expected checkpoint was stale — the integration branch has
     /// advanced past it, so the single-writer CAS is refused rather than

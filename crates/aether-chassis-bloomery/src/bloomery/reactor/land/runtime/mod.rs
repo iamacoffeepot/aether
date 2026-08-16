@@ -46,6 +46,13 @@
 //! does not re-drive forever; a transport fault stops the ack prefix so the entry
 //! re-drains next tick.
 //!
+//! A merged proposal is not acked on observation. The journal is the
+//! acknowledgement oracle (ADR-0149): the entry stays in the contiguous prefix
+//! and its idempotent [`Admit`] is resent until [`StoreBackend::journal_holds_any`]
+//! sees the deterministic land key. Only then is the prefix advanced, and
+//! without re-merging or fabricating another receipt. A dispatch miss or restart
+//! therefore cannot forget a landing GitHub has already merged.
+//!
 //! Config-gated exactly like the mirror / executor reactors: unconfigured (empty
 //! token/owner/repo) mounts disabled — no shell, no store, no timer — so a
 //! zero-secret dev boot neither errors nor spins; the land outbox accumulates
@@ -135,6 +142,12 @@ fn land_key(bloom: &Digest) -> IdempotencyKey {
         let _ = write!(key, "{byte:02x}");
     }
     IdempotencyKey(key)
+}
+
+/// Whether the journal already records this bloom's deterministic land admit —
+/// the acknowledgement oracle for a merged proposal.
+fn journal_holds_land(store: &mut dyn StoreBackend, bloom: &Digest) -> rusqlite::Result<bool> {
+    store.journal_holds_any(&[land_key(bloom).0])
 }
 
 /// The idempotency key a landing rejection admits under.
@@ -302,13 +315,16 @@ fn landed(bloom: &BloomId, payload: &LandPayload, new_head: Digest) -> Result<Wa
 }
 
 /// Drain the land topic and issue each entry's compare-and-swap, returning the
-/// [`Admit`]s to forward to the control core (one per landed bloom) and the
-/// highest contiguously-processed outbox sequence to ack (`None` when nothing
-/// processed). A decode failure, an encode failure, or a transport fault stops
-/// the ack prefix at the last success so the failed entry re-drains; a clean
-/// base-moved refusal is a processed entry (acked, no admit). The factored-out
-/// network side, unit-testable against a `SqliteStore` + a fake-GitHub-backed
-/// shell without the mail harness.
+/// [`Admit`]s to forward to the control core (one per landed bloom whose journal
+/// key is not yet present) and the highest contiguously-processed outbox sequence
+/// to ack (`None` when nothing processed). A merged landing is acknowledged only
+/// after the journal holds its deterministic land key — observation produces an
+/// admit and holds the prefix; a later drain that sees the key acknowledges
+/// without re-merging. A decode failure, an encode failure, a journal lookup
+/// fault, or a transport fault stops the ack prefix at the last success so the
+/// failed entry re-drains; a clean base-moved refusal is a processed entry
+/// (acked, no admit). The factored-out network side, unit-testable against a
+/// `SqliteStore` + a fake-GitHub-backed shell without the mail harness.
 fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
     let entries = store.drain_topic(Topic::Land)?;
     let mut admits = Vec::new();
@@ -322,6 +338,24 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
             );
             break;
         };
+        // The journal is the acknowledgement oracle. A committed land key means
+        // this row is done: ack it and do not propose, merge, or admit again.
+        match journal_holds_land(store, &payload.bloom) {
+            Ok(true) => {
+                ack_through = Some(entry.sequence);
+                continue;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::land",
+                    sequence = entry.sequence,
+                    %error,
+                    "land journal lookup failed; leaving the entry durable",
+                );
+                break;
+            }
+        }
         let bloom = BloomId(payload.bloom);
         // Assemble the proposal from what the bloom's own lanes wrote, before the
         // land: the title is the mainline commit's subject forever, so it is
@@ -332,8 +366,11 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
                 match watch_proposal(source, &bloom, &payload, number) {
                     Ok(Watched::Landed(admit)) => {
                         close_member_issues(store, source, &bloom, number);
+                        // External merge is observed; the receipt is not durable
+                        // until the journal holds `land_key`. Hold the prefix and
+                        // return the idempotent Admit so a miss or restart resends.
                         admits.push(admit);
-                        ack_through = Some(entry.sequence);
+                        break;
                     }
                     Ok(Watched::Rejected { admit, cause, findings }) => {
                         // Persist the findings on the bloom row before the ack,
@@ -511,9 +548,10 @@ impl NativeActor for LandReactorCapability {
         }
     }
 
-    /// Poll wake: drain + land the land topic, acking the processed prefix and
-    /// forwarding each landed bloom's `Fact::Land` to the control core. The GitHub
-    /// call runs inline on the dispatcher (the poll cadence spaces them).
+    /// Poll wake: drain + land the land topic, acking the journal-confirmed
+    /// prefix and forwarding each still-uncommitted `Fact::Land` to the control
+    /// core. The GitHub call runs inline on the dispatcher (the poll cadence
+    /// spaces them).
     #[handler::single]
     fn on_land_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: LandTick) {
         let Some(source) = state.source.clone() else {
@@ -532,9 +570,9 @@ impl NativeActor for LandReactorCapability {
                     tracing::warn!(target: "aether_chassis_bloomery::land", %error, "land ack failed; entries re-drive");
                 }
                 for admit in admits {
-                    // Fire-and-forget: the control actor's on_admit is reliable
-                    // local mail, and the reducer's idempotency key dedups a
-                    // resend, so no settlement handle is needed here.
+                    // Fire-and-forget: the outbox stays unacked until the journal
+                    // holds this admit's key, so a dispatch miss redrives, and the
+                    // reducer's idempotency key dedups a resend.
                     let _ = ctx.send_envelope_detached(control_mailbox, Admit::ID, &admit.encode_into_bytes());
                 }
             }
