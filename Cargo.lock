@@ -7780,6 +7780,7 @@ dependencies = [
  "guppy",
  "notify",
  "rmcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

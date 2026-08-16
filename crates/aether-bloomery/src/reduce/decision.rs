@@ -11,9 +11,9 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::values::{
-    Adjudication, AgentProfile, CompositionFinding, ConfigRegistry, Evidence, MemberCandidate, MemberDependency,
-    OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim, ResolvedBloom,
-    SpendQuiesce, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge,
+    Adjudication, AgentProfile, CandidateRef, CompositionFinding, ConfigRegistry, Evidence, MemberCandidate,
+    MemberDependency, OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim,
+    ResolvedBloom, SpendQuiesce, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -638,5 +638,20 @@ pub enum Decision {
         bloom: BloomId,
         /// The member being let off the host-fault hold.
         workpiece: WorkpieceId,
+    },
+    /// Record the capture-commit vehicle known at integration (#5079) — see
+    /// [`BloomRecord::vehicles`](crate::BloomRecord::vehicles).
+    ///
+    /// Tree identity stays on the claim; this row is the host checkout the
+    /// dependent splice must name so a later construct is parented to the
+    /// real capture rather than a parentless wrapper of the claimed tree.
+    /// Appended so the prior decisions' wire discriminants are unchanged.
+    RecordCandidateVehicle {
+        /// The bloom the vehicle is recorded on.
+        bloom: BloomId,
+        /// The member whose capture this is.
+        workpiece: WorkpieceId,
+        /// The tree-plus-checkout pair known at integration.
+        vehicle: CandidateRef,
     },
 }
