@@ -305,7 +305,11 @@ impl Topic {
             // `DispatchAttempt` beside `ClearHostFault`. A topic here would
             // enqueue a row nothing drains.
             | Decision::RecordHostFault { .. }
-            | Decision::ClearHostFault { .. } => None,
+            | Decision::ClearHostFault { .. }
+            // Snapshot-only: the capture vehicle is what splice reads off the
+            // record so a dependent construct checks out the real parent.
+            // Nothing is dispatched from the row itself.
+            | Decision::RecordCandidateVehicle { .. } => None,
         }
     }
 }
