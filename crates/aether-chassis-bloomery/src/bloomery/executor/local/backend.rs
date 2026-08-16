@@ -1411,8 +1411,10 @@ impl ExecutorBackend for LocalExecutor {
         // failing verdict rather than admitting a pass whose work was lost. A run
         // whose checkout this process cannot name (a boot re-adoption that
         // recovered no slot) captures nothing and takes the same downgrade.
+        // A dead construct still captures as a member checkpoint, but only after
+        // the evidence binds to this handle — a stale body cannot trigger it.
         let commit_message = (is_construct && nonce_matches).then(|| parse_commit_message(&bytes)).flatten();
-        let candidate = is_construct
+        let candidate = (is_construct && nonce_matches)
             .then(|| self.construct_capture(worktree_dir, &handle.nonce, concluded, commit_message.as_deref()))
             .flatten();
         // File the message against the member the run's order names, while that
