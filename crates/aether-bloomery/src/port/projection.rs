@@ -30,7 +30,7 @@ use crate::values::{Evidence, LandingReceipt, ResolutionClaim, SpendQuiesce, Wed
 /// idempotent and rebuildable after a deletion (ADR-0149 §The boundary). An
 /// adapter renders entirely from this value and never queries back into the
 /// store.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ViewDocument {
     /// The current mainline head.
     pub mainline: Digest,
@@ -52,7 +52,7 @@ pub struct ViewDocument {
 /// One bloom's outward view: its sealed identity, lifecycle status, optional
 /// successor, the full per-member render data, and — when the aggregate review
 /// has parked the bloom — the bloom-scoped question an operator must settle.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BloomView {
     /// The bloom's identity — the sealed-spec digest ([`crate::BloomSpec::id`]).
     pub id: BloomId,
@@ -102,7 +102,7 @@ pub struct BloomView {
 /// empty: `aether_data::wire` encodes structs positionally, so omitting a
 /// slot shifts the next bloom's bytes into it. `#[serde(default)]` is only
 /// for a human-readable reader that predates a field.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ReviewParkView {
     /// The parked [`crate::Question`]'s content-addressed digest — or, for a
     /// ceiling park, the failing review's record artifact. Either way this is
@@ -124,7 +124,7 @@ pub struct ReviewParkView {
 
 /// A bloom's aggregate-review executor-fault standing, rendered once its review
 /// has reported that it could not judge the fold (ADR-0176).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ExecutorFaultView {
     /// The fold tree the faults are against.
     pub subject: Digest,
@@ -142,7 +142,7 @@ pub struct ExecutorFaultView {
 }
 
 /// A bloom's landing-gate standing, rendered when its landing has been refused.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct LandingBlock {
     /// Landing attempts refused so far.
     pub rolls: u32,
@@ -157,7 +157,7 @@ pub struct LandingBlock {
 /// stage is held on a parked question — its pending-decision. A member is
 /// integrated iff `resolution` is `Some` (the coarse per-member state the
 /// reducer tracks) and held iff `pending_decision` is `Some`.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct MemberView {
     /// The admitted workpiece.
     pub workpiece: WorkpieceId,
@@ -194,7 +194,7 @@ pub struct MemberView {
 
 /// A member's host-fault hold, rendered so an operator can see that Verify
 /// is waiting on the executor host rather than on the candidate (#5020).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct HostFaultView {
     /// The preflight findings — the missing tools, listed verbatim.
     pub findings: String,
@@ -204,7 +204,7 @@ pub struct HostFaultView {
 /// question's digest (the stable idempotency key the projected comment carries)
 /// plus the human-readable decision a person reads where they already look. The
 /// digest is what an adopting answer names; the prose is the question itself.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PendingDecisionView {
     /// The held [`crate::Question`]'s content-addressed digest — the exact
     /// digest an answer adopts, carried in the projection's stable metadata.
