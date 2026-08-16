@@ -622,6 +622,8 @@ struct SeenSpec {
     checkout: Option<String>,
     diff_base: Option<String>,
     resume: Option<String>,
+    worktree: Option<PathBuf>,
+    task: Option<String>,
 }
 
 // A spawn seam that records the `RunSpec` it was handed, so a test can assert what
@@ -641,6 +643,8 @@ impl TransformRunner for CapturingRunner {
             checkout: Some(spec.checkout_hex.to_owned()),
             diff_base: spec.diff_base_hex.map(str::to_owned),
             resume: spec.resume.map(str::to_owned),
+            worktree: Some(spec.worktree_dir.to_owned()),
+            task: spec.task.map(str::to_owned),
         };
         Ok(Box::new(RecordingProcess { lifecycle: RunLifecycle::Running }))
     }
@@ -1712,15 +1716,23 @@ struct ReuseRunner {
     /// T small so the seed still resumes; a large value is what lets a
     /// sealed even-rate table flip lap 2 cold.
     input_tokens: u64,
+    /// A nonce that stays `Running` so its slot stays held — the fixture for
+    /// forcing a predecessor into a non-lowest slot.
+    hold: Option<String>,
 }
 
 impl ReuseRunner {
     fn new(seen: Arc<Mutex<Vec<SeenSpec>>>) -> Self {
-        Self { seen, input_tokens: 1_000 }
+        Self { seen, input_tokens: 1_000, hold: None }
     }
 
     fn with_input_tokens(mut self, input_tokens: u64) -> Self {
         self.input_tokens = input_tokens;
+        self
+    }
+
+    fn holding(mut self, nonce: impl Into<String>) -> Self {
+        self.hold = Some(nonce.into());
         self
     }
 }
@@ -1735,11 +1747,18 @@ impl TransformRunner for ReuseRunner {
             checkout: Some(spec.checkout_hex.to_owned()),
             diff_base: spec.diff_base_hex.map(str::to_owned),
             resume: spec.resume.map(str::to_owned),
+            worktree: Some(spec.worktree_dir.to_owned()),
+            task: spec.task.map(str::to_owned),
         });
         fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
         fs::write(spec.evidence_dir.join("evidence.json"), reuse_evidence(spec.nonce, "sess-1", self.input_tokens))
             .map_err(LocalExecutorError::Io)?;
-        Ok(Box::new(RecordingProcess { lifecycle: RunLifecycle::Exited { success: true } }))
+        let lifecycle = if self.hold.as_deref() == Some(spec.nonce) {
+            RunLifecycle::Running
+        } else {
+            RunLifecycle::Exited { success: true }
+        };
+        Ok(Box::new(RecordingProcess { lifecycle }))
     }
 
     fn release(&self, _worktree_dir: &Path) -> Result<(), LocalExecutorError> {
@@ -1970,4 +1989,215 @@ fn a_sealed_price_table_decides_the_lap_two_arm() {
         "even sealed rates against a large prior T go cold; an empty table would have resumed"
     );
     assert!(seen.lock().unwrap()[1].resume.is_none());
+}
+
+fn stamped_evidence(base: &TempDir, nonce: &str) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(base.path().join(format!("{nonce}-evidence/evidence.json"))).unwrap())
+        .expect("stamped evidence is JSON")
+}
+
+fn order_on(mut order: aether_bloomery::WorkOrder, checkout: Digest) -> aether_bloomery::WorkOrder {
+    order.transformation.checkout = checkout;
+    order
+}
+
+#[test]
+fn a_dependent_construct_prefers_the_predecessors_slot() {
+    // Acceptance: B lands in A's slot when free. Lowest-free would take 0 once
+    // the holder is gone; preferring 1 is the only way B hits the warm target
+    // dir A already compiled.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let holder = test_nonce("hold");
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
+        correspondence(),
+        base.path(),
+    );
+
+    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
+    let refs = exec.stream_evidence(&first).unwrap();
+    let checkout = refs[0].candidate.expect("A captured").checkout;
+    exec.cancel(&holding).unwrap();
+
+    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
+    exec.stream_evidence(&second).unwrap();
+
+    let stamped = stamped_evidence(&base, &test_nonce("B"));
+    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
+    assert_eq!(stamped["slot_affinity"]["assigned"], 1);
+    assert_eq!(stamped["slot_affinity"]["reason"], "preferred");
+    assert_eq!(
+        seen.lock().unwrap().last().and_then(|seen| seen.worktree.clone()),
+        Some(slot_path(&base, 1)),
+        "B built in A's slot, not the newly-freed lowest index"
+    );
+}
+
+#[test]
+fn a_dependent_construct_falls_back_when_the_preferred_slot_is_busy() {
+    // Acceptance: preference is never a wait. A still occupies slot 1; B
+    // takes the lowest free (0) and journals `busy`.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let holder = test_nonce("hold");
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
+        correspondence(),
+        base.path(),
+    );
+
+    let _holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
+    let refs = exec.stream_evidence(&first).unwrap();
+    let checkout = refs[0].candidate.expect("A captured").checkout;
+
+    // Re-occupy A's slot so B cannot have it.
+    let occupier = test_nonce("occupy");
+    let occupying = exec.submit(&construct_order(digest(5), &occupier)).unwrap();
+    // occupier exits immediately (not held), so slot 1 is free again unless we
+    // don't stream it and... it already exited, retire happens on stream, not
+    // on exit. Slot stays held until stream_evidence or cancel.
+    let _ = occupying;
+
+    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
+    exec.stream_evidence(&second).unwrap();
+
+    let stamped = stamped_evidence(&base, &test_nonce("B"));
+    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
+    assert_eq!(stamped["slot_affinity"]["reason"], "busy");
+    assert_ne!(stamped["slot_affinity"]["assigned"], 1, "B must not wait on A's occupied slot");
+}
+
+#[test]
+fn a_cross_seat_dependent_never_resumes_the_predecessors_session() {
+    // Acceptance: grok built A; claude on B, even in A's slot, launches fresh.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let sessions = super::SessionReuse::memory(PriceTable::default());
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
+    let holder = test_nonce("hold");
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone())),
+        correspondence(),
+        base.path(),
+    )
+    .with_session_reuse(sessions);
+
+    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    let first = exec.submit(&grok_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
+    let refs = exec.stream_evidence(&first).unwrap();
+    let checkout = refs[0].candidate.expect("A captured").checkout;
+    exec.cancel(&holding).unwrap();
+
+    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
+    exec.stream_evidence(&second).unwrap();
+
+    let stamped = stamped_evidence(&base, &test_nonce("B"));
+    assert_eq!(stamped["slot_affinity"]["reason"], "preferred", "B still prefers A's slot");
+    assert_eq!(stamped["session_reuse"]["arm"], "fresh");
+    assert_eq!(stamped["session_reuse"]["edge"], false);
+    assert!(seen.lock().unwrap().last().unwrap().resume.is_none());
+}
+
+#[test]
+fn a_judge_dispatch_never_acquires_a_builder_session() {
+    // Acceptance: Review / AggregateReview seats never resume a builder. The
+    // new slot-path handle would leak the constructor's session into the
+    // critic if the judge path consulted it.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let sessions = super::SessionReuse::memory(PriceTable::default());
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+        .with_session_reuse(sessions);
+
+    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
+    exec.stream_evidence(&first).unwrap();
+
+    let mut critic = aether_bloomery::WorkOrder {
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(5),
+            digest(0xC0),
+            digest(0xC0),
+        ),
+        nonce: Nonce(test_nonce("judge")),
+    };
+    critic.transformation.model = Some(ResolvedModel {
+        harness: Harness::Claude,
+        model: "claude-opus-5".to_owned(),
+        effort: ReasoningEffort::High,
+    });
+    critic.transformation.description = Some("issue-A".to_owned());
+    let handle = exec.submit(&critic).unwrap();
+    exec.stream_evidence(&handle).unwrap();
+
+    let stamped = stamped_evidence(&base, &test_nonce("judge"));
+    assert_eq!(stamped["session_reuse"]["arm"], "fresh");
+    assert_eq!(stamped["session_reuse"]["edge"], false);
+    assert!(seen.lock().unwrap()[1].resume.is_none(), "the judge must not inherit the builder's session");
+}
+
+#[test]
+fn dispatch_evidence_carries_fresh_or_resumed_and_token_figures() {
+    // Acceptance: every dispatch journals the arm plus sealed-table token
+    // figures. A missing priced column is the harness's dollar figure sneaking
+    // back in — the study path already refuses that.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let sessions = super::SessionReuse::memory(PriceTable::default());
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+        .with_session_reuse(sessions);
+
+    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
+    exec.stream_evidence(&first).unwrap();
+    let fresh = stamped_evidence(&base, &test_nonce("A"));
+    assert_eq!(fresh["session_reuse"]["arm"], "fresh");
+    assert_eq!(fresh["session_reuse"]["input_tokens"], 1_000);
+    assert_eq!(fresh["session_reuse"]["cache_write_tokens"], 4_000);
+    assert_eq!(fresh["session_reuse"]["output_tokens"], 200);
+    assert_eq!(fresh["session_reuse"]["actual_turns"], 3);
+
+    let second = exec.submit(&claude_order(digest(5), &test_nonce("A2"), "issue-A")).unwrap();
+    exec.stream_evidence(&second).unwrap();
+    let resumed = stamped_evidence(&base, &test_nonce("A2"));
+    assert_eq!(resumed["session_reuse"]["arm"], "resumed");
+    assert_eq!(resumed["session_reuse"]["input_tokens"], 1_000);
+}
+
+#[test]
+fn a_dependent_construct_resumes_the_predecessors_session_and_is_told_about_the_splice() {
+    // Host path for the edge: B's first lap is cold on its own key, so without
+    // the predecessor lookup it would relaunch. The resumed prompt must name
+    // the splice — the reset statement the pool already adds is about files
+    // this session edited, which is the wrong fact along an edge.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let sessions = super::SessionReuse::memory(PriceTable::default());
+    sessions.set_head_hash("head-A");
+    sessions.set_now(1_000);
+    let exec = LocalExecutor::new(Arc::new(ReuseRunner::new(Arc::clone(&seen))), correspondence(), base.path())
+        .with_session_reuse(sessions);
+
+    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
+    let refs = exec.stream_evidence(&first).unwrap();
+    let checkout = refs[0].candidate.expect("A captured").checkout;
+
+    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
+    exec.stream_evidence(&second).unwrap();
+
+    let stamped = stamped_evidence(&base, &test_nonce("B"));
+    assert_eq!(stamped["session_reuse"]["arm"], "resumed");
+    assert_eq!(stamped["session_reuse"]["edge"], true);
+    assert_eq!(seen.lock().unwrap()[1].resume.as_deref(), Some("sess-1"));
+    assert!(
+        seen.lock().unwrap()[1].task.as_deref().is_some_and(|task| task.contains("spliced dependency candidate")),
+        "the resumed prompt must state what was spliced, not only that the tree was reset"
+    );
 }

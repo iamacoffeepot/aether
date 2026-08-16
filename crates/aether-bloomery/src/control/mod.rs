@@ -299,7 +299,13 @@ impl Topic {
             // Snapshot-only: the resolved member graph is what the readiness
             // scheduler (and splice) read off the record. Nothing is dispatched
             // from the row itself.
-            | Decision::RecordMemberDependencies { .. } => None,
+            | Decision::RecordMemberDependencies { .. }
+            // Snapshot-only: the host-fault hold is what `/view` reads, and
+            // the dispatch a cadence resume owes rides as an ordinary
+            // `DispatchAttempt` beside `ClearHostFault`. A topic here would
+            // enqueue a row nothing drains.
+            | Decision::RecordHostFault { .. }
+            | Decision::ClearHostFault { .. } => None,
         }
     }
 }
