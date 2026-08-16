@@ -3,8 +3,10 @@
 //! The running binary is copied beside itself before it is replaced, the
 //! restart is a `systemctl --user restart` (never a raw kill), and the new
 //! process is not trusted until its executable identity matches the installed
-//! path and `/view` is serving again. A timeout while the unit is still up is
-//! "not yet"; a unit that has gone `failed` is a failed restart.
+//! path and `/view` is serving again. A mismatched image is retried until the
+//! observation deadline and then refused, naming both paths. A timeout while
+//! the unit is still up is "not yet"; a unit that has gone `failed` is a
+//! failed restart.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -53,6 +55,7 @@ fn wait_for_observation(
     log: &mut String,
 ) -> Result<ViewDocument> {
     let deadline = Instant::now() + Duration::from_millis(paths.observe_timeout_millis);
+    let mut last_mismatch = None;
     loop {
         let state = active_state(shell, &paths.unit)?;
         if state == "failed" {
@@ -60,16 +63,27 @@ fn wait_for_observation(
         }
 
         let timed_out = Instant::now() >= deadline;
-        match (identity(shell, paths)?, views.live()) {
-            (Some(exe), Ok(view)) if view.observed == prior.observed => {
+        let identity = identity(shell, paths)?;
+        if let Identity::Mismatch { observed, expected } = &identity {
+            last_mismatch = Some((observed.clone(), expected.clone()));
+        }
+
+        match (identity, views.live()) {
+            (Identity::Matching(exe), Ok(view)) if view.observed == prior.observed => {
                 note(log, &format!("process executable is {exe}"));
                 note(log, &format!("observation advanced (observed={} mainline={})", view.observed, view.mainline));
                 return Ok(view);
             }
-            (Some(_), Ok(_)) | (None, _) | (_, Err(_)) if timed_out => {
+            _ if timed_out => {
+                let mismatch = match last_mismatch {
+                    Some((observed, expected)) => {
+                        format!("; last process executable was {observed}, expected {expected}")
+                    }
+                    None => String::new(),
+                };
                 bail!(
                     "timed out after {} millis waiting for /view observation to advance (not yet); \
-                     unit {} is {state}, not failed",
+                     unit {} is {state}, not failed{mismatch}",
                     paths.observe_timeout_millis,
                     paths.unit
                 );
@@ -79,26 +93,35 @@ fn wait_for_observation(
     }
 }
 
-fn identity(shell: &impl Shell, paths: &Paths) -> Result<Option<String>> {
+/// What `/proc/$pid/exe` said, compared to the installed path.
+enum Identity {
+    Absent,
+    Matching(String),
+    Mismatch { observed: String, expected: String },
+}
+
+fn identity(shell: &impl Shell, paths: &Paths) -> Result<Identity> {
     let Ok(pid) = checked(shell, "systemctl", &["--user", "show", "--property=MainPID", "--value", &paths.unit]) else {
-        return Ok(None);
+        return Ok(Identity::Absent);
     };
     if pid.is_empty() || pid == "0" {
-        return Ok(None);
+        return Ok(Identity::Absent);
     }
+
     let exe_path = paths.proc_exe.replace("$pid", &pid);
     let Ok(exe) = checked(shell, "readlink", &["-f", &exe_path]) else {
-        return Ok(None);
+        return Ok(Identity::Absent);
     };
     let observed = exe.trim().trim_end_matches(" (deleted)");
     // `readlink -f` the installed path too: the operator's `--bin` may be
     // relative or carry a `..`, and comparing that spelling to the process
     // image would refuse a restart that did land on the file we installed.
     let expected = checked(shell, "readlink", &["-f", path_arg(&paths.bin)?])?;
-    if observed != expected.trim() {
-        bail!("new process executable is {observed}, expected {expected}");
+    let expected = expected.trim();
+    if observed != expected {
+        return Ok(Identity::Mismatch { observed: observed.to_owned(), expected: expected.to_owned() });
     }
-    Ok(Some(observed.to_owned()))
+    Ok(Identity::Matching(observed.to_owned()))
 }
 
 fn active_state(shell: &impl Shell, unit: &str) -> Result<String> {
@@ -115,6 +138,7 @@ fn path_arg(path: &Path) -> Result<&str> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::PathBuf;
 
     use super::apply;
@@ -228,9 +252,43 @@ mod tests {
         assert!(refusal.contains("not failed"), "the unit is distinguished from failed: {refusal}");
     }
 
-    // Tripwire: a restart that came back as a different binary is the
-    // unit launching BLOOMERY_BIN from a path we did not install. Treating
-    // that as "not yet" would wait out the timeout on the old process.
+    // Tripwire: systemd can report a wrapper as MainPID for a tick after
+    // restart. Aborting on that first sample is how a healthy candidate is
+    // refused after it has already been installed.
+    #[test]
+    fn a_wrapper_process_image_is_retried_until_the_candidate_matches() {
+        let samples = Cell::new(0);
+        let shell = Fake::new(|line| match line {
+            line if line.contains("ActiveState") => Run::ok("active"),
+            line if line.contains("MainPID") => Run::ok("4321"),
+            line if line.starts_with("readlink") && line.contains("/proc/") => {
+                let n = samples.get();
+                samples.set(n + 1);
+                if n == 0 {
+                    Run::ok("/usr/bin/dash")
+                } else {
+                    Run::ok("/opt/bloomery")
+                }
+            }
+            line if line.starts_with("readlink") => Run::ok("/opt/bloomery"),
+            _ => Run::ok(""),
+        });
+        let mut paths = test_paths();
+        paths.observe_timeout_millis = 5_000;
+        let mut log = String::new();
+
+        apply(&live_views(), &shell, &paths, &drained_view(), &mut log)
+            .expect("a transient wrapper image is not a failed upgrade");
+        assert!(samples.get() >= 2, "the wrapper sample is retried: {}", samples.get());
+        assert!(log.contains("process executable is /opt/bloomery"), "identity is the installed path: {log}");
+        assert!(log.contains("observation advanced"), "observation is printed: {log}");
+    }
+
+    // Tripwire: a process image that never becomes the installed binary must
+    // still refuse — at the observation deadline, not on the first sample.
+    // A first-sample abort is how a wrapper occupying MainPID becomes a
+    // false failed upgrade; a deadline that drops the two paths hides what
+    // stayed wrong.
     #[test]
     fn a_mismatched_executable_is_refused() {
         let shell = Fake::new(|line| match line {
@@ -240,12 +298,17 @@ mod tests {
             line if line.starts_with("readlink") => Run::ok("/opt/bloomery"),
             _ => Run::ok(""),
         });
+        let mut paths = test_paths();
+        paths.observe_timeout_millis = 50;
         let mut log = String::new();
 
-        let refusal = apply(&live_views(), &shell, &test_paths(), &drained_view(), &mut log)
-            .expect_err("a wrong exe is refused")
+        let refusal = apply(&live_views(), &shell, &paths, &drained_view(), &mut log)
+            .expect_err("a persistent wrong exe is refused")
             .to_string();
 
+        let pid_samples = shell.calls().iter().filter(|line| line.contains("MainPID")).count();
+        assert!(pid_samples >= 2, "the mismatch is polled until the deadline, got {pid_samples}: {:?}", shell.calls());
+        assert!(refusal.contains("not yet"), "a persistent mismatch uses the observation deadline: {refusal}");
         assert!(refusal.contains("/usr/wrong"), "the observed exe is named: {refusal}");
         assert!(refusal.contains("/opt/bloomery"), "the expected exe is named: {refusal}");
     }
