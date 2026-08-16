@@ -550,6 +550,7 @@ mod tests {
     use super::*;
     use std::f32::consts::{PI, TAU};
     use std::fmt::Write as _;
+    use std::time::{Duration, Instant};
 
     use aether_harness_substrate::{HarnessOp, SubstrateHarness};
     use aether_harness_substrate_capture::test_helpers::{envelope, has_wgpu_adapter};
@@ -859,17 +860,13 @@ f 4 5 8
 
         for _ in 0..6 {
             harness
-                .execute(vec![("timed", HarnessOp::send_and_settle("aether.render", &dispatch(geometry_ids.clone())))])
+                .execute(vec![
+                    ("timed", HarnessOp::send_and_settle("aether.render", &dispatch(geometry_ids.clone()))),
+                    ("timed_frame", HarnessOp::advance(1)),
+                ])
                 .expect("timed candidate dispatch");
         }
-        let timing = harness
-            .execute(vec![(
-                "timings",
-                HarnessOp::send_and_await_reply("aether.render", &ProgramTimings { program_id }),
-            )])
-            .expect("timing query")
-            .reply::<ProgramTimingsResult>("timings")
-            .expect("decode timing reply");
+        let timing = measured_timings(&mut harness, program_id);
         match timing {
             ProgramTimingsResult::Absent { reason } => {
                 assert!(!reason.trim().is_empty(), "an unavailable timing instrument must state why");
@@ -887,6 +884,45 @@ f 4 5 8
 
         assert_visible_silhouette_full_width(&mut harness);
         assert_rear_silhouette_occluded(&mut harness);
+    }
+
+    /// Read the candidate's pass timings once the instrument has actually
+    /// measured them.
+    ///
+    /// The timing instrument resolves a frame's timestamp queries a frame
+    /// or more later, off that frame's critical path, and drops samples
+    /// rather than stalling whenever a readback slot is still in flight
+    /// (`aether_render`'s program timing module states both properties).
+    /// The measurement therefore sits on no mail chain this test can
+    /// settle: reading straight after the dispatches races the readback,
+    /// and under the GPU contention of a full-suite run the last pass's
+    /// row still read `samples: 0` (issue 5021). The harvest that folds a
+    /// finished readback runs at the top of each frame record, so advance
+    /// frames and re-read until every declared pass carries a sample --
+    /// bounded, so a pass that is genuinely never measured still reaches
+    /// the assertions below and fails there rather than hanging here.
+    fn measured_timings(harness: &mut SubstrateHarness, program_id: u32) -> ProgramTimingsResult {
+        let deadline = Instant::now() + Duration::from_secs(10);
+
+        loop {
+            let timing = harness
+                .execute(vec![(
+                    "timings",
+                    HarnessOp::send_and_await_reply("aether.render", &ProgramTimings { program_id }),
+                )])
+                .expect("timing query")
+                .reply::<ProgramTimingsResult>("timings")
+                .expect("decode timing reply");
+            let measured = match &timing {
+                ProgramTimingsResult::Ok { rows, .. } => rows.len() == 6 && rows.iter().all(|row| row.samples > 0),
+                ProgramTimingsResult::Absent { .. } | ProgramTimingsResult::Err { .. } => true,
+            };
+
+            if measured || Instant::now() >= deadline {
+                return timing;
+            }
+            harness.execute(vec![("harvest", HarnessOp::advance(1))]).expect("advance for timing harvest");
+        }
     }
 
     fn assert_visible_silhouette_full_width(harness: &mut SubstrateHarness) {
