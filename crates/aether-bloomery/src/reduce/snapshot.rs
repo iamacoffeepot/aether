@@ -345,6 +345,16 @@ pub struct BloomRecord {
     /// defaulted so a journal written before the hold existed still decodes.
     #[serde(default)]
     pub host_faults: BTreeMap<WorkpieceId, HostFaultHold>,
+    /// The capture-commit vehicle recorded for each resolved member (#5079).
+    ///
+    /// Tree identity stays on [`claims`](Self::claims); this map is the host
+    /// checkout a dependent splice must name so construct is parented to the
+    /// real capture rather than a parentless wrapper of the claimed tree.
+    /// Journal-derived from [`Decision::RecordCandidateVehicle`] and
+    /// replay-rebuilt. `#[serde(default)]` is the `host_faults` precedent
+    /// for a JSON reader that predates the field.
+    #[serde(default)]
+    pub vehicles: BTreeMap<WorkpieceId, CandidateRef>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -561,13 +571,7 @@ impl Snapshot {
                     self.active.remove(workpiece);
                 }
             }
-            Decision::InheritClaim { bloom, claim } | Decision::RecordResolution { bloom, claim } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
-                    // Keyed by workpiece: a re-integration overwrites the stale
-                    // candidate rather than accumulating a second claim.
-                    record.claims.insert(claim.workpiece.clone(), claim.clone());
-                }
-            }
+            Decision::InheritClaim { .. } | Decision::RecordResolution { .. } => self.apply_claim_effect(effect),
             Decision::RecordEvidence { bloom, evidence } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.record_evidence(evidence);
@@ -670,6 +674,7 @@ impl Snapshot {
             }
             Decision::RecordMemberDependencies { .. } => self.apply_graph_effect(effect),
             Decision::RecordHostFault { .. } | Decision::ClearHostFault { .. } => self.apply_host_fault_effect(effect),
+            Decision::RecordCandidateVehicle { .. } => self.apply_vehicle_effect(effect),
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;
@@ -777,6 +782,37 @@ impl Snapshot {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Fold a resolution claim and drop a vehicle whose tree is no longer
+    /// the claim's identity (#5079).
+    fn apply_claim_effect(&mut self, effect: &Decision) {
+        let (Decision::InheritClaim { bloom, claim } | Decision::RecordResolution { bloom, claim }) = effect else {
+            return;
+        };
+        let Some(record) = self.blooms.get_mut(bloom) else {
+            return;
+        };
+        // Keyed by workpiece: a re-integration overwrites the stale
+        // candidate rather than accumulating a second claim.
+        record.claims.insert(claim.workpiece.clone(), claim.clone());
+        // A claim-only re-integrate must not leave a previous capture
+        // sitting over a new tree. The matching vehicle, when there is
+        // one, is written by `RecordCandidateVehicle` later in the same
+        // effect list.
+        if record.vehicles.get(&claim.workpiece).is_some_and(|vehicle| vehicle.tree != claim.candidate) {
+            record.vehicles.remove(&claim.workpiece);
+        }
+    }
+
+    /// Fold the capture-commit vehicle recorded at integration or inherited
+    /// with a valid claim (#5079).
+    fn apply_vehicle_effect(&mut self, effect: &Decision) {
+        if let Decision::RecordCandidateVehicle { bloom, workpiece, vehicle } = effect
+            && let Some(record) = self.blooms.get_mut(bloom)
+        {
+            record.vehicles.insert(workpiece.clone(), *vehicle);
         }
     }
 
@@ -955,6 +991,7 @@ impl BloomRecord {
             deferred_dispatches: BTreeSet::new(),
             dependencies: Vec::new(),
             host_faults: BTreeMap::new(),
+            vehicles: BTreeMap::new(),
             superseded_by: None,
         }
     }
