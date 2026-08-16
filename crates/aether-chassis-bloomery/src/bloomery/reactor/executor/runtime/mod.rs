@@ -44,11 +44,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, AggregateReviewPayload, AggregateVerifyPayload, BloomId, ConfigRegistry, ConfigScopes, Digest,
+    Admit, AggregateReviewPayload, AggregateVerifyPayload, BloomId, CandidateRef, ConfigRegistry, ConfigScopes, Digest,
     DispatchPayload, ExecutionStatus, Fact, ModelOverride, Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence,
     StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet, WorkHandle, WorkpieceId, pin_workpiece_description,
 };
-use aether_bloomery_github::{GitObjectId, candidate_ref_name, short_hex};
+use aether_bloomery_github::{GitObjectId, candidate_ref_name, member_checkpoint_ref_name, short_hex};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
@@ -1422,66 +1422,93 @@ pub fn default_candidate_push(refuse: bool) -> Arc<dyn CandidatePush> {
     }
 }
 
-/// Push each admitted passing capture to its bloom candidate ref (ADR-0152).
-/// Best-effort with loud warns: a failed push leaves the candidate local-only —
-/// a downstream Actions checkout of it will fail visibly and retry through the
-/// stage machinery, never silently run the wrong tree. A failing completion's
-/// capture is not pushed (the reducer discards it).
+/// Push each admitted capture to its bloom ref (ADR-0152). A passing construct
+/// goes to [`candidate_ref_name`]; a failing construct that still captured work
+/// goes to [`member_checkpoint_ref_name`]. Best-effort with loud warns: a failed
+/// push leaves the capture local-only — a downstream checkout of it will fail
+/// visibly and retry through the stage machinery, never silently run the wrong
+/// tree. A failed checkpoint push costs a resume, never correctness.
 fn push_admitted_candidates(
     admissions: &[Admission],
     correspondence: Option<&SharedCorrespondence>,
     pusher: &dyn CandidatePush,
 ) {
     for admission in admissions {
-        let Fact::AttemptCompleted { bloom, workpiece, passed: true, candidate: Some(candidate), .. } =
-            &admission.event.fact
-        else {
+        let (workpiece, candidate, target_ref, kind) = match &admission.event.fact {
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece,
+                stage: StageId::Construct,
+                passed: true,
+                candidate: Some(candidate),
+                ..
+            } => (workpiece, candidate, candidate_ref_name(bloom, &workpiece.0), "candidate"),
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece,
+                stage: StageId::Construct,
+                passed: false,
+                candidate: Some(candidate),
+                ..
+            } => (workpiece, candidate, member_checkpoint_ref_name(bloom, &workpiece.0), "member checkpoint"),
+            _ => continue,
+        };
+        let Some(commit) = resolve_capture_commit(correspondence, workpiece, candidate) else {
             continue;
         };
-        let Some(correspondence) = correspondence else {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::executor",
-                workpiece = %workpiece.0,
-                "admitted capture has no correspondence store to resolve its commit; candidate stays local-only",
-            );
-            continue;
-        };
-        let commit = match correspondence.resolve_backend_object(&candidate.checkout) {
-            Ok(Some(commit)) => match GitObjectId::try_from(commit) {
-                Ok(commit) => commit,
-                Err(error) => {
-                    tracing::warn!(target: "aether_chassis_bloomery::executor", workpiece = %workpiece.0, %error, "capture correspondence is not a valid git object id");
-                    continue;
-                }
-            },
-            Ok(None) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    workpiece = %workpiece.0,
-                    "admitted capture's checkout digest has no recorded git object; candidate stays local-only",
-                );
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!(target: "aether_chassis_bloomery::executor", workpiece = %workpiece.0, %error, "capture correspondence read failed");
-                continue;
-            }
-        };
-        let target_ref = candidate_ref_name(bloom, &workpiece.0);
         match pusher.push(&commit.to_hex(), &target_ref) {
             Ok(()) => tracing::info!(
                 target: "aether_chassis_bloomery::executor",
                 workpiece = %workpiece.0,
                 target_ref = %target_ref,
-                "candidate capture pushed",
+                "{kind} capture pushed",
             ),
             Err(error) => tracing::warn!(
                 target: "aether_chassis_bloomery::executor",
                 workpiece = %workpiece.0,
                 target_ref = %target_ref,
                 %error,
-                "candidate push failed; candidate stays local-only",
+                "{kind} push failed; capture stays local-only",
             ),
+        }
+    }
+}
+
+/// Resolve an admitted capture's checkout digest to the git commit the pusher
+/// names. Shared by the passing-candidate and failing-checkpoint arms so a
+/// correspondence shortfall is handled once.
+fn resolve_capture_commit(
+    correspondence: Option<&SharedCorrespondence>,
+    workpiece: &WorkpieceId,
+    candidate: &CandidateRef,
+) -> Option<GitObjectId> {
+    let Some(correspondence) = correspondence else {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            workpiece = %workpiece.0,
+            "admitted capture has no correspondence store to resolve its commit; capture stays local-only",
+        );
+        return None;
+    };
+    match correspondence.resolve_backend_object(&candidate.checkout) {
+        Ok(Some(commit)) => match GitObjectId::try_from(commit) {
+            Ok(commit) => Some(commit),
+            Err(error) => {
+                tracing::warn!(target: "aether_chassis_bloomery::executor", workpiece = %workpiece.0, %error, "capture correspondence is not a valid git object id");
+                None
+            }
+        },
+        Ok(None) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                workpiece = %workpiece.0,
+                "admitted capture's checkout digest has no recorded git object; capture stays local-only",
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(target: "aether_chassis_bloomery::executor", workpiece = %workpiece.0, %error, "capture correspondence read failed");
+            None
         }
     }
 }
