@@ -639,8 +639,10 @@ pub struct Transformation {
     /// The exact git commit this attempt's worker checks out — the source the
     /// attempt runs on (ADR-0149 §Execution: "the wrapper checks out the exact
     /// digest a resolved work order names"). Resolved per stage by the reducer:
-    /// the bloom's sealed base until the member captures a candidate, then the
-    /// candidate's capture commit (ADR-0152, [`CandidateRef::checkout`]).
+    /// the bloom's sealed base until the member has a captured candidate or a
+    /// construct checkpoint, then that commit. A candidate outranks a
+    /// checkpoint (finished work beats partial work); the newest checkpoint
+    /// wins among checkpoints (ADR-0152, [`CandidateRef::checkout`], #4994).
     ///
     /// Distinct from [`inputs`](Self::inputs): `inputs[0]` is the digest that
     /// *binds the returned evidence* — the member's scope revision, or its
@@ -710,9 +712,10 @@ impl Transformation {
     ///
     /// `checkout` is the git commit the attempt's worker checks out, which the
     /// reducer resolves per stage — the bloom's sealed base until the member has
-    /// a captured candidate, then that candidate's capture commit (ADR-0152). It
-    /// is a separate axis from `subject`: `subject` binds the evidence, `checkout`
-    /// names the tree the work runs on. See [`checkout`](Self::checkout).
+    /// a captured candidate or a construct checkpoint, then that commit. A
+    /// candidate outranks a checkpoint (ADR-0152, #4994). It is a separate axis
+    /// from `subject`: `subject` binds the evidence, `checkout` names the tree
+    /// the work runs on. See [`checkout`](Self::checkout).
     ///
     /// The per-stage lane details (typed command, execution image, network
     /// posture) are the initial calibration — refinable without an ADR, like the

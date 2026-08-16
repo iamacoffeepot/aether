@@ -90,6 +90,8 @@ pub(super) fn reduce_grant_attempts(
     // with a candidate present the returned evidence binds its tree and the worker
     // checks out its capture commit, so the resumed attempt continues the work the
     // wedged member had already built rather than starting from the sealed base.
+    // Without a candidate, a construct checkpoint seeds the checkout the same
+    // way a same-stage retry does (#4994).
     let candidate = cursor.candidate;
     let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile);
     let targets = reconcile_or_line_targets(
@@ -97,6 +99,7 @@ pub(super) fn reduce_grant_attempts(
         super::splice::member_construct_base(record, workpiece),
         candidate,
         fold_checkpoint,
+        snapshot.member_checkpoint(bloom, workpiece),
     );
     // Leave exactly `attempts` of headroom under the stage's budget. `Verify`
     // counts repair rolls and resumes at `Refine`; every other stage counts
