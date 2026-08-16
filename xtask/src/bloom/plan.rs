@@ -188,18 +188,33 @@ pub fn successor_patch(spec: &BloomSpec, base: DigestHex, configs: ConfigRegistr
     }
 }
 
-pub fn projections(members: &[WireMembership], input: &ProjectionInput) -> Vec<MemberProjection> {
-    members
+pub fn projections(
+    members: &[WireMembership],
+    input: &ProjectionInput,
+    surfaces: &[(String, String)],
+) -> Result<Vec<MemberProjection>> {
+    let mut grouped: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for (member, glob) in surfaces {
+        if members.iter().all(|known| known.workpiece != *member) {
+            bail!("--surface names {member}, which is not in the sealed membership");
+        }
+        grouped.entry(member.as_str()).or_default().push(glob.clone());
+    }
+
+    Ok(members
         .iter()
         .map(|member| MemberProjection {
             workpiece: member.workpiece.clone(),
             scope_revision: member.scope_revision,
-            declared_surface: input.declared_surface.clone(),
+            declared_surface: grouped
+                .get(member.workpiece.as_str())
+                .cloned()
+                .unwrap_or_else(|| input.declared_surface.clone()),
             completeness: input.completeness,
             adr_touch: input.adr_touch,
             pre_approved: input.pre_approved,
         })
-        .collect()
+        .collect())
 }
 
 pub fn seal_request(
@@ -207,15 +222,16 @@ pub fn seal_request(
     task: &str,
     input: &ProjectionInput,
     edges: &[(String, String)],
-) -> SealRequest {
-    SealRequest {
-        projections: projections(members, input),
+    surfaces: &[(String, String)],
+) -> Result<SealRequest> {
+    Ok(SealRequest {
+        projections: projections(members, input, surfaces)?,
         descriptions: descriptions(task, members.iter().map(|member| member.workpiece.as_str())),
         edges: edges
             .iter()
             .map(|(member, depends_on)| DependencyEdge { member: member.clone(), depends_on: depends_on.clone() })
             .collect(),
-    }
+    })
 }
 
 pub fn supersede_request(
@@ -223,12 +239,12 @@ pub fn supersede_request(
     members: &[WireMembership],
     task: &str,
     input: &ProjectionInput,
-) -> SupersedeRequest {
-    SupersedeRequest {
+) -> Result<SupersedeRequest> {
+    Ok(SupersedeRequest {
         successor_draft: draft_id.to_owned(),
-        projections: projections(members, input),
+        projections: projections(members, input, &[])?,
         descriptions: descriptions(task, members.iter().map(|member| member.workpiece.as_str())),
-    }
+    })
 }
 
 /// Reconstruct a sealed spec's identity so a journal row can be matched to a
@@ -302,12 +318,36 @@ mod edge_flag_tests {
     }
 }
 
+#[cfg(test)]
+mod surface_flag_tests {
+    #[test]
+    fn parse_surface_flag_reads_member_equals_glob() {
+        // `--surface issue-A=crates/foo/**` is that member's glob. Accepting a
+        // missing half would attach an empty workpiece or drop a surface.
+        assert_eq!(
+            super::parse_surface_flag("issue-A=crates/foo/**").expect("well-formed"),
+            ("issue-A".to_owned(), "crates/foo/**".to_owned()),
+        );
+        assert!(super::parse_surface_flag("issue-A").is_err());
+        assert!(super::parse_surface_flag("=crates/foo/**").is_err());
+        assert!(super::parse_surface_flag("issue-A=").is_err());
+    }
+}
+
 pub fn parse_edge_flag(raw: &str) -> Result<(String, String), String> {
     let (member, depends_on) = raw.split_once('=').ok_or_else(|| "expected dependent=dependency".to_owned())?;
     if member.is_empty() || depends_on.is_empty() {
         return Err("expected dependent=dependency".to_owned());
     }
     Ok((member.to_owned(), depends_on.to_owned()))
+}
+
+pub fn parse_surface_flag(raw: &str) -> Result<(String, String), String> {
+    let (member, glob) = raw.split_once('=').ok_or_else(|| "expected member=glob".to_owned())?;
+    if member.is_empty() || glob.is_empty() {
+        return Err("expected member=glob".to_owned());
+    }
+    Ok((member.to_owned(), glob.to_owned()))
 }
 
 pub fn parse_bloom_id(raw: &str) -> Result<String, String> {
@@ -327,7 +367,7 @@ pub fn require_task(text: &str, path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BaseChoice, ProjectionInput, resolve_base, seal_patch, successor_patch};
+    use super::{BaseChoice, ProjectionInput, projections, resolve_base, seal_patch, successor_patch};
     use crate::bloom::dto::{
         AdrTouch, Approval, BloomSpec, Completeness, ConfigRegistry, DigestHex, Membership, ViewDocument,
     };
@@ -404,5 +444,35 @@ mod tests {
         assert_eq!(input.declared_surface, ["docs/guide/**"]);
         assert_eq!(input.completeness.model_routing_count, Completeness::direct_drive().model_routing_count);
         assert!(!input.completeness.blocked);
+    }
+
+    #[test]
+    fn projections_group_repeated_globs_and_fall_back_per_member() {
+        // A specialized member must not inherit the bloom-wide fallback, and a
+        // member with no `--surface` entries must keep it. Mixing those up
+        // would either invent a derived overlap edge or drop a declared surface.
+        let input = ProjectionInput::resolve(vec!["docs/guide/**".to_owned()], None, AdrTouch::None, false)
+            .expect("fallback surface does not read a completeness file");
+        let members = [member("issue-A", 1), member("issue-B", 2)];
+        let surfaces =
+            [("issue-A".to_owned(), "crates/foo/**".to_owned()), ("issue-A".to_owned(), "crates/bar/**".to_owned())];
+
+        let projections = projections(&members, &input, &surfaces).expect("known members");
+
+        assert_eq!(projections[0].workpiece, "issue-A");
+        assert_eq!(projections[0].declared_surface, ["crates/foo/**", "crates/bar/**"]);
+        assert_eq!(projections[1].workpiece, "issue-B");
+        assert_eq!(projections[1].declared_surface, ["docs/guide/**"]);
+    }
+
+    #[test]
+    fn projections_refuse_a_surface_for_an_unknown_member() {
+        // Silently dropping `--surface issue-Z=…` would let the operator think
+        // they specialized a workpiece the seal never admitted.
+        let input = ProjectionInput::resolve(Vec::new(), None, AdrTouch::None, false)
+            .expect("defaults do not read a completeness file");
+        let err = projections(&[member("issue-A", 1)], &input, &[("issue-Z".to_owned(), "crates/**".to_owned())])
+            .expect_err("unknown member");
+        assert!(err.to_string().contains("issue-Z"), "error names the absent workpiece: {err}");
     }
 }
