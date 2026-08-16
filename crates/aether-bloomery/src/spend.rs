@@ -103,6 +103,7 @@ mod tests {
             deferred_dispatches: BTreeSet::new(),
             dependencies: Vec::new(),
             host_faults: BTreeMap::new(),
+            vehicles: BTreeMap::new(),
             superseded_by: None,
         };
         let mut snapshot = Snapshot::default();

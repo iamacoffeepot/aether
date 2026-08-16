@@ -126,7 +126,8 @@ fn checked(log: &mut String, message: &str) {
 mod tests_support {
     use std::cell::RefCell;
     use std::env;
-    use std::path::PathBuf;
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -141,6 +142,16 @@ mod tests_support {
 
     pub fn unique_temp(prefix: &str) -> PathBuf {
         env::temp_dir().join(format!("{prefix}-{}-{}", process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)))
+    }
+
+    /// Point `proc_exe` at a scratch `/proc/$pid/exe` whose environ carries
+    /// only the named `PATH` plus an unrelated entry the reader must ignore.
+    pub fn install_service_environ(proc_exe: &mut String, pid: &str, path: &str) {
+        let root = unique_temp("aether-xtask-upgrade-proc");
+        *proc_exe = format!("{}/$pid/exe", root.display());
+        let dir = root.join(pid);
+        fs::create_dir_all(&dir).expect("service process dir");
+        fs::write(dir.join("environ"), format!("UNRELATED=secret\0PATH={path}\0")).expect("service process environ");
     }
 
     pub fn drained_view() -> ViewDocument {
@@ -195,6 +206,38 @@ mod tests_support {
         }
     }
 
+    pub fn write_journal(path: &Path, rows: u64) {
+        let connection = rusqlite::Connection::open(path).expect("open journal fixture");
+        connection.execute("CREATE TABLE journal (n INTEGER NOT NULL)", []).expect("create journal table");
+
+        let mut insert = connection.prepare("INSERT INTO journal (n) VALUES (?1)").expect("prepare insert");
+        for n in 0..rows {
+            insert.execute([n]).expect("insert journal row");
+        }
+    }
+
+    pub fn seeded_paths(live_rows: u64, copy_rows: u64) -> Paths {
+        let root = unique_temp("aether-xtask-upgrade-fold");
+        fs::create_dir_all(&root).expect("create fold fixture root");
+        let store = root.join("live.db");
+        write_journal(&store, live_rows);
+        let scratch = root.join("scratch");
+        fs::create_dir_all(&scratch).expect("create fold scratch");
+        write_journal(&scratch.join("fold.db"), copy_rows);
+        let mut paths = test_paths();
+        paths.store = store;
+        paths.scratch = scratch;
+        paths
+    }
+
+    pub fn seeded_args(live_rows: u64, copy_rows: u64) -> super::UpgradeArgs {
+        let paths = seeded_paths(live_rows, copy_rows);
+        let mut args = test_args();
+        args.store = paths.store;
+        args.scratch_dir = Some(paths.scratch);
+        args
+    }
+
     pub struct Scripted {
         live: Result<ViewDocument, String>,
         folded: Result<ViewDocument, String>,
@@ -246,7 +289,7 @@ mod tests {
 
     use super::shell::Run;
     use super::shell::fake::Fake;
-    use super::tests_support::{Scripted, drained_view, test_args};
+    use super::tests_support::{Scripted, drained_view, seeded_args, test_args};
     use super::upgrade;
     use crate::bloom::dto::DigestHex;
     use aether_bloomery::BloomStatus;
@@ -255,6 +298,7 @@ mod tests {
         let path = super::tests_support::unique_temp("aether-xtask-upgrade-candidate");
         fs::write(&path, b"candidate").expect("write a present candidate");
         args.candidate = path;
+        super::tests_support::install_service_environ(&mut args.proc_exe, "4321", "/service/bin");
         args
     }
 
@@ -265,7 +309,6 @@ mod tests {
             line if line.contains("MainPID") => Run::ok("4321"),
             line if line.starts_with("readlink") && line.contains("/proc/") => Run::ok("/opt/bloomery"),
             line if line.starts_with("readlink") => Run::ok("/opt/bloomery"),
-            line if line.starts_with("sqlite3") => Run::ok("12"),
             line if line.starts_with("test -e") => Run::ok(""),
             _ => Run::ok(""),
         })
@@ -277,13 +320,20 @@ mod tests {
 
     #[test]
     fn the_happy_path_prints_each_verification() {
-        let args = present_candidate(test_args());
-        let log = upgrade(&drained_view(), &matching(), &green(), &args).expect("a drained upgrade holds");
+        let args = present_candidate(seeded_args(12, 12));
+        let shell = green();
+        let log = upgrade(&drained_view(), &matching(), &shell, &args).expect("a drained upgrade holds");
 
         assert!(log.contains("checked: no undrained blooms"), "the screen is printed: {log}");
         assert!(log.contains("exists"), "the candidate is printed: {log}");
         assert!(log.contains("reachable"), "the unit is printed: {log}");
+        assert!(log.contains("candidate doctor passed on service PATH"), "the doctor is a named check: {log}");
         assert!(log.contains("journal rows live=12 copy=12"), "row counts are printed: {log}");
+        assert!(
+            !shell.calls().iter().any(|line| line.starts_with("sqlite3")),
+            "the upgrade path does not shell out to sqlite3: {:?}",
+            shell.calls()
+        );
         assert!(log.contains("matches live"), "the fold-test match is printed: {log}");
         assert!(log.contains("lanes disabled"), "lanes-off is printed: {log}");
         assert!(log.contains("backed up"), "the backup is printed: {log}");
@@ -316,13 +366,39 @@ mod tests {
         let _ = fs::remove_file(&args.candidate);
     }
 
+    // Tripwire: a red doctor is a precondition refusal. Copying the store,
+    // replacing the binary, or restarting after that report is how a host
+    // missing jscpd becomes the live coordinator.
+    #[test]
+    fn a_red_doctor_does_not_copy_install_or_restart() {
+        let args = present_candidate(test_args());
+        let shell = Fake::new(|line| match line {
+            line if line.contains("LoadState") => Run::ok("loaded"),
+            line if line.contains("MainPID") => Run::ok("4321"),
+            line if line.contains("--doctor") => Run::failed("jscpd            MISSING  npm install -g jscpd"),
+            _ => Run::ok(""),
+        });
+
+        let refusal =
+            upgrade(&drained_view(), &matching(), &shell, &args).expect_err("a red doctor is refused").to_string();
+
+        assert!(refusal.contains("jscpd"), "the doctor output is surfaced: {refusal}");
+        let calls = shell.calls();
+        assert!(!calls.iter().any(|line| line.contains("restart")), "the live unit is not restarted: {calls:?}");
+        assert!(
+            !calls.iter().any(|line| line.starts_with("sqlite3") || line.starts_with("cp ")),
+            "the store is not copied and the binary is not replaced: {calls:?}"
+        );
+        let _ = fs::remove_file(&args.candidate);
+    }
+
     #[test]
     fn a_reshape_refusal_does_not_restart() {
         let decode = "record 2 decision did not decode: aether wire: invalid bool/presence byte 11";
-        let args = present_candidate(test_args());
+        let args = present_candidate(seeded_args(12, 12));
         let shell = Fake::new(move |line| match line {
             line if line.contains("LoadState") => Run::ok("loaded"),
-            line if line.starts_with("sqlite3") => Run::ok("12"),
+            line if line.contains("MainPID") => Run::ok("4321"),
             line if line.contains("--store-path") => Run::failed(decode),
             line if line.starts_with("test -e") => Run::ok(""),
             _ => Run::ok(""),
@@ -350,7 +426,7 @@ mod tests {
         later.observed = DigestHex::from_bytes([4; 32]);
         let expected = format!("observed={}", later.observed);
         let views = Scripted::new(Ok(later), Ok(drained_view()));
-        let args = present_candidate(test_args());
+        let args = present_candidate(seeded_args(12, 12));
 
         let log = upgrade(&drained_view(), &views, &green(), &args)
             .expect("the later observation is what the restart wait demands");

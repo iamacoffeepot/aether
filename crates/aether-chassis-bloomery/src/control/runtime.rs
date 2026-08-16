@@ -1176,7 +1176,8 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         | Decision::RecordSpendQuiesce { .. }
         | Decision::RecordMemberDependencies { .. }
         | Decision::RecordHostFault { .. }
-        | Decision::ClearHostFault { .. } => return Ok(None),
+        | Decision::ClearHostFault { .. }
+        | Decision::RecordCandidateVehicle { .. } => return Ok(None),
     };
     Ok(Some(payload))
 }
@@ -1332,6 +1333,7 @@ mod tests {
             deferred_dispatches: BTreeSet::new(),
             dependencies: Vec::new(),
             host_faults: BTreeMap::new(),
+            vehicles: BTreeMap::new(),
             superseded_by: None,
         };
         let mut snapshot = Snapshot::default();

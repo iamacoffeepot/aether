@@ -488,11 +488,16 @@ fn adopt_predecessor_work(
             Adoption::WithProof(proof) => {
                 effects.push(Decision::InheritClaim { bloom: successor_id, claim: claim.clone() });
                 effects.push(Decision::RecordVerifyProof { bloom: successor_id, proof });
+                inherit_vehicle(effects, successor_id, record, claim);
             }
             Adoption::ClaimOnly => {
                 effects.push(Decision::InheritClaim { bloom: successor_id, claim: claim.clone() });
+                inherit_vehicle(effects, successor_id, record, claim);
             }
-            Adoption::Reverify(candidate) => reverify.push((member, candidate)),
+            Adoption::Reverify(candidate) => {
+                inherit_vehicle(effects, successor_id, record, claim);
+                reverify.push((member, candidate));
+            }
         }
     }
 
@@ -637,6 +642,37 @@ fn inherited_candidate(predecessor: &BloomRecord, claim: &ResolutionClaim) -> Ca
     CandidateRef {
         tree: claim.candidate,
         checkout: checkout_from(predecessor, &claim.workpiece).unwrap_or(claim.candidate),
+    }
+}
+
+/// Carry the predecessor's matching capture onto the successor beside the
+/// adopted claim (#5079). Tree identity stays on the claim; only a vehicle
+/// whose tree is that identity transfers, so a checkout digest cannot
+/// substitute.
+fn inherit_vehicle(
+    effects: &mut Vec<Decision>,
+    successor: BloomId,
+    predecessor: &BloomRecord,
+    claim: &ResolutionClaim,
+) {
+    let vehicle = predecessor
+        .vehicles
+        .get(&claim.workpiece)
+        .copied()
+        .filter(|candidate| candidate.tree == claim.candidate)
+        .or_else(|| {
+            predecessor
+                .progress
+                .get(&claim.workpiece)
+                .and_then(|progress| progress.candidate)
+                .filter(|candidate| candidate.tree == claim.candidate)
+        });
+    if let Some(vehicle) = vehicle {
+        effects.push(Decision::RecordCandidateVehicle {
+            bloom: successor,
+            workpiece: claim.workpiece.clone(),
+            vehicle,
+        });
     }
 }
 
@@ -1439,5 +1475,180 @@ mod tests {
             decided_sup.effects.iter().any(|effect| matches!(effect, Decision::DispatchIntegration { .. })),
             "every adopted member is already integrated, so the successor folds",
         );
+    }
+
+    fn construct_checkout(decisions: &Decisions, name: &str) -> Option<Digest> {
+        decisions.effects.iter().find_map(|effect| match effect {
+            Decision::DispatchAttempt { workpiece, stage, transformation, .. }
+                if workpiece.0 == name && *stage == StageId::Construct =>
+            {
+                Some(transformation.checkout)
+            }
+            _ => None,
+        })
+    }
+
+    fn inherited_vehicle(decisions: &Decisions, name: &str) -> Option<CandidateRef> {
+        decisions.effects.iter().find_map(|effect| match effect {
+            Decision::RecordCandidateVehicle { workpiece, vehicle, .. } if workpiece.0 == name => Some(*vehicle),
+            _ => None,
+        })
+    }
+
+    // The plausible bug: a successor inherits A's claim but not its capture,
+    // so B constructs on the claimed tree and the local executor wraps a
+    // parentless epoch (#5079).
+    #[test]
+    fn a_dependent_constructs_on_an_inherited_capture() {
+        let predecessor_spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
+        let edges = vec![edge("wp-b", "wp-a")];
+        let (snapshot, _) = step(
+            &Snapshot::new(digest(0)),
+            &event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor_spec.clone(), edges }),
+        );
+        let snapshot = pass_construct(&snapshot, predecessor_spec.id(), "wp-a", 10, 110, "a-build");
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "a-done",
+                Fact::Integrate { bloom: predecessor_spec.id(), claim: verified_claim("wp-a", 1, 10, 60) },
+            ),
+        );
+        let successor_spec = spec_at(&[("wp-a", 1), ("wp-b", 2)], 1);
+        let (after, decided) = step(
+            &snapshot,
+            &event("sup", Fact::Supersede { predecessor: predecessor_spec.id(), successor: successor_spec.clone() }),
+        );
+        assert!(matches!(decided.outcome, Outcome::Superseded { .. }), "got {:?}", decided.outcome);
+        assert_eq!(inherited_workpieces(&decided), vec![wp("wp-a")]);
+        assert_eq!(
+            inherited_vehicle(&decided, "wp-a"),
+            Some(CandidateRef { tree: digest(10), checkout: digest(110) }),
+            "the capture rides with the inherited claim",
+        );
+        assert_eq!(
+            construct_checkout(&decided, "wp-b"),
+            Some(digest(110)),
+            "B constructs on A's capture, not the claimed tree",
+        );
+        assert_eq!(construct_dispatches(&decided), vec![wp("wp-b")]);
+
+        let successor = after.blooms.get(&successor_spec.id()).expect("successor");
+        assert_eq!(
+            successor.vehicles.get(&wp("wp-a")).copied(),
+            Some(CandidateRef { tree: digest(10), checkout: digest(110) }),
+        );
+    }
+
+    fn claim_only(name: &str, revision: u8, candidate: u8) -> ResolutionClaim {
+        ResolutionClaim {
+            workpiece: wp(name),
+            scope_revision: digest(revision),
+            candidate: digest(candidate),
+            evidence: Evidence { subject: digest(candidate), kind: EvidenceKind::ResolutionClaim, detail: digest(201) },
+        }
+    }
+
+    // The plausible bug: a claim with no proof transfers the claim and drops
+    // the capture, so the successor's next dependent wraps a parentless tree.
+    #[test]
+    fn a_claim_only_inherit_carries_the_matching_vehicle() {
+        let predecessor_spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
+        let (snapshot, _) = step(
+            &Snapshot::new(digest(0)),
+            &event(
+                "seal",
+                Fact::GraphSeal {
+                    predecessor: None,
+                    spec: predecessor_spec.clone(),
+                    edges: vec![edge("wp-b", "wp-a")],
+                },
+            ),
+        );
+        let snapshot = pass_construct(&snapshot, predecessor_spec.id(), "wp-a", 10, 110, "a-build");
+        let (snapshot, _) = step(
+            &snapshot,
+            &event("a-done", Fact::Integrate { bloom: predecessor_spec.id(), claim: claim_only("wp-a", 1, 10) }),
+        );
+
+        let successor_spec = spec_at(&[("wp-a", 1), ("wp-b", 2)], 1);
+        let (after, decided) = step(
+            &snapshot,
+            &event("sup", Fact::Supersede { predecessor: predecessor_spec.id(), successor: successor_spec.clone() }),
+        );
+        assert!(matches!(decided.outcome, Outcome::Superseded { .. }), "got {:?}", decided.outcome);
+        assert_eq!(inherited_workpieces(&decided), vec![wp("wp-a")]);
+        assert!(
+            !decided.effects.iter().any(|effect| matches!(effect, Decision::RecordVerifyProof { .. })),
+            "a claim-only inherit has no proof to transfer: {:?}",
+            decided.effects,
+        );
+        assert_eq!(inherited_vehicle(&decided, "wp-a"), Some(CandidateRef { tree: digest(10), checkout: digest(110) }),);
+        assert_eq!(construct_checkout(&decided, "wp-b"), Some(digest(110)));
+        let successor = after.blooms.get(&successor_spec.id()).expect("successor");
+        assert_eq!(
+            successor.vehicles.get(&wp("wp-a")).copied(),
+            Some(CandidateRef { tree: digest(10), checkout: digest(110) }),
+        );
+    }
+
+    // The plausible bug: a splice-mismatch re-verify keeps the candidate on
+    // the cursor but never records the vehicle, so a later inherit of this
+    // successor names the claimed tree.
+    #[test]
+    fn a_reverify_inherit_carries_the_matching_vehicle() {
+        let predecessor_spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
+        let (snapshot, _) = step(
+            &Snapshot::new(digest(0)),
+            &event(
+                "seal",
+                Fact::GraphSeal {
+                    predecessor: None,
+                    spec: predecessor_spec.clone(),
+                    edges: vec![edge("wp-b", "wp-a")],
+                },
+            ),
+        );
+        let snapshot = pass_construct(&snapshot, predecessor_spec.id(), "wp-a", 10, 110, "a-build");
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "a-done",
+                Fact::Integrate { bloom: predecessor_spec.id(), claim: verified_claim("wp-a", 1, 10, 60) },
+            ),
+        );
+        let snapshot = pass_construct(&snapshot, predecessor_spec.id(), "wp-b", 20, 120, "b-build");
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "b-done",
+                Fact::Integrate { bloom: predecessor_spec.id(), claim: verified_claim("wp-b", 2, 20, 61) },
+            ),
+        );
+
+        let successor_spec = spec(&[("wp-b", 2)]);
+        let (after, decided) = step(
+            &snapshot,
+            &event("sup", Fact::Supersede { predecessor: predecessor_spec.id(), successor: successor_spec.clone() }),
+        );
+        assert!(matches!(decided.outcome, Outcome::Superseded { .. }), "got {:?}", decided.outcome);
+        assert!(
+            inherited_workpieces(&decided).is_empty(),
+            "a refused proof must not inherit the claim, got {:?}",
+            inherited_workpieces(&decided),
+        );
+        assert_eq!(verify_dispatches(&decided), vec![wp("wp-b")]);
+        assert_eq!(
+            inherited_vehicle(&decided, "wp-b"),
+            Some(CandidateRef { tree: digest(20), checkout: digest(120) }),
+            "re-verify still records the capture the cursor will check out",
+        );
+        let successor = after.blooms.get(&successor_spec.id()).expect("successor");
+        assert_eq!(
+            successor.vehicles.get(&wp("wp-b")).copied(),
+            Some(CandidateRef { tree: digest(20), checkout: digest(120) }),
+        );
+        let progress = successor.progress.get(&wp("wp-b")).expect("B is on Verify");
+        assert_eq!(progress.candidate, Some(CandidateRef { tree: digest(20), checkout: digest(120) }));
     }
 }

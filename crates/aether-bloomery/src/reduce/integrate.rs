@@ -12,7 +12,7 @@ use super::{
 use crate::digest::Digest;
 use crate::ids::BloomId;
 use crate::ids::StageId;
-use crate::values::{MemberCandidate, ResolutionClaim};
+use crate::values::{CandidateRef, MemberCandidate, ResolutionClaim};
 
 /// The effects one member's resolution claim produces: the claim itself, the
 /// `provenance` note for the verdict it carries, and — when it completes the
@@ -38,9 +38,23 @@ pub(super) fn claim_effects(
 ) -> Vec<Decision> {
     let mut effects = alloc::vec![Decision::RecordResolution { bloom, claim: claim.clone() }];
     effects.extend(provenance);
+    // The capture commit is vehicle state, not claim identity: only a cursor
+    // whose tree is this claim records one. A checkout digest sitting on the
+    // claim must not be treated as a match (#5079).
+    let vehicle = matching_vehicle(record, claim);
+    if let Some(vehicle) = vehicle {
+        effects.push(Decision::RecordCandidateVehicle { bloom, workpiece: claim.workpiece.clone(), vehicle });
+    }
     // Dependents whose last unresolved edge was this claim now enter Construct.
     // Journaled on this row so replay recovers the schedule (ADR-0190 / ADR-0196).
-    effects.extend(newly_ready_entries(record, bloom, &claim.workpiece, claim.candidate));
+    // The snapshot has not folded the vehicle yet, so the splice takes the
+    // capture (or the claimed tree, when none was recorded) as an argument.
+    effects.extend(newly_ready_entries(
+        record,
+        bloom,
+        &claim.workpiece,
+        vehicle.map_or(claim.candidate, |candidate| candidate.checkout),
+    ));
 
     let complete = record
         .spec
@@ -96,6 +110,18 @@ pub(super) fn claim_effects(
 /// refs this bloom lacks and to leave every ref it already carries — including a
 /// successor-produced capture standing beside an inherited one — exactly where
 /// it is.
+/// The cursor's [`CandidateRef`] when its tree is this claim's identity.
+///
+/// Matching on `tree` — never `checkout` — is what keeps a capture commit
+/// from substituting for the claimed tree (ADR-0152 / #5079).
+fn matching_vehicle(record: &BloomRecord, claim: &ResolutionClaim) -> Option<CandidateRef> {
+    record
+        .progress
+        .get(&claim.workpiece)
+        .and_then(|progress| progress.candidate)
+        .filter(|candidate| candidate.tree == claim.candidate)
+}
+
 fn adoption_source(snapshot: &Snapshot, bloom: BloomId, members: &[MemberCandidate]) -> Option<BloomId> {
     let (predecessor, record) = snapshot.blooms.iter().find(|(_, record)| record.superseded_by == Some(bloom))?;
     let inherited = members
