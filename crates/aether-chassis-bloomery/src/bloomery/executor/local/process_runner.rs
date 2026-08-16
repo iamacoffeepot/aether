@@ -127,14 +127,16 @@ impl ProcessTransformRunner {
 impl TransformRunner for ProcessTransformRunner {
     fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
         fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
-        fetch_subject_if_absent(Path::new("."), spec.checkout_hex)?;
-        // Resolve both order digests before anything downstream reads them:
-        // either may name a bare tree — a spliced dependency claim (ADR-0196)
-        // — and every git consumer past this point refuses one. The checkout
-        // verbs are guarded inside `materialize_checkout`, but `--diff-base`
-        // travels to the lane's verify gates, whose `rev-parse --verify
-        // <base>^{commit}` / `merge-base` fail on a tree and wedge the member
-        // on verify.preflight (#5026).
+        // Both sealed identities can exist only on the remote (#5057): the
+        // checkout fetch does not pull an unrelated comparison base, and
+        // `commitish_for` sees the local object database only. Fetch each
+        // one that is absent, then resolve — either may still name a bare
+        // tree (ADR-0196), which every git consumer past this point refuses.
+        // The checkout verbs are guarded inside `materialize_checkout`, but
+        // `--diff-base` travels to the lane's verify gates, whose
+        // `rev-parse --verify <base>^{commit}` / `merge-base` fail on a
+        // tree and wedge the member on verify.preflight (#5026).
+        fetch_order_identities(Path::new("."), spec.checkout_hex, spec.diff_base_hex)?;
         let checkout = commitish_for(Path::new("."), spec.checkout_hex)?;
         let diff_base = spec.diff_base_hex.map(|hex| commitish_for(Path::new("."), hex)).transpose()?;
         // Bring the slot's checkout to the sealed subject — reset in place when the
@@ -355,32 +357,53 @@ const fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-/// Fetch an order's subject when the coordinator does not already hold it (#4643).
+/// Fetch each sealed order identity the coordinator does not already hold.
 ///
-/// `git worktree add` resolves its commit-ish against the **local** object
-/// database only. `Construct` and `Verify` check out the sealed base — a
-/// mainline commit this clone already has — so the resolution succeeds and the
-/// omission is invisible. `AggregateReview` is the first stage whose subject the
+/// Checkout and the comparison base are independent remotes-only commits
+/// (#5057): fetching the subject does not make the base local, and the
+/// resolve that follows ([`commitish_for`]) only sees the local object
+/// database.
+fn fetch_order_identities(
+    repo_dir: &Path,
+    checkout_hex: &str,
+    diff_base_hex: Option<&str>,
+) -> Result<(), LocalExecutorError> {
+    fetch_subject_if_absent(repo_dir, checkout_hex)?;
+    if let Some(hex) = diff_base_hex {
+        fetch_subject_if_absent(repo_dir, hex)?;
+    }
+    Ok(())
+}
+
+/// Fetch an order identity when the coordinator does not already hold it
+/// (#4643, #5057).
+///
+/// `git worktree add` and `git cat-file` resolve against the **local** object
+/// database only. `Construct` and `Verify` check out a sealed identity this
+/// clone already has — so the resolution succeeds and the omission is
+/// invisible. `AggregateReview` is the first stage whose subject the
 /// coordinator neither produced nor already held: the integration commit is
-/// assembled remotely and published as a ref, and without this the checkout
-/// fails on an object that is genuinely absent, wedging the bloom one stage
-/// short of a landing proposal.
+/// assembled remotely and published as a ref. An observed mainline advance
+/// can name the same kind of gap for the comparison base: a valid dispatch
+/// then retries `cat-file` on an object that is genuinely absent.
 ///
-/// The fetch names the exact sha rather than a ref namespace — it is precisely
-/// what the checkout needs, and the bloom ref namespace grows without bound
-/// across runs.
+/// The fetch names the exact sha rather than a ref namespace — ADR-0152
+/// requires the sealed identity, not a branch tip, and the bloom ref
+/// namespace grows without bound across runs.
 ///
-/// Unconditional, because `git fetch <remote> <sha>` is already a no-op when the
-/// object is present: git satisfies the want locally and never opens a
-/// connection. A `cat-file -e` guard in front of it would be unobservable — the
-/// same outcome either way — so the common case costs one git process, not a
-/// round trip.
-fn fetch_subject_if_absent(repo_dir: &Path, checkout_hex: &str) -> Result<(), LocalExecutorError> {
-    git_in(repo_dir, &["fetch", "--no-tags", "--quiet", "origin", checkout_hex]).map_err(|error| match error {
-        // Name the subject in the failure: a bare "couldn't find remote ref" says
+/// Already-local objects skip the fetch: `git fetch origin <sha>` still
+/// needs `origin` to exist even when git would satisfy the want from the
+/// local database, and a dispatch whose identities this clone already holds
+/// must not depend on the remote being reachable.
+fn fetch_subject_if_absent(repo_dir: &Path, hex: &str) -> Result<(), LocalExecutorError> {
+    if git_in(repo_dir, &["cat-file", "-e", hex]).is_ok() {
+        return Ok(());
+    }
+    git_in(repo_dir, &["fetch", "--no-tags", "--quiet", "origin", hex]).map_err(|error| match error {
+        // Name the identity in the failure: a bare "couldn't find remote ref" says
         // nothing about which order could not be materialized.
         LocalExecutorError::Worktree(detail) => {
-            LocalExecutorError::Worktree(format!("fetching order subject {checkout_hex}: {detail}"))
+            LocalExecutorError::Worktree(format!("fetching order subject {hex}: {detail}"))
         }
         other => other,
     })?;
@@ -670,8 +693,9 @@ mod tests {
 
     use super::{
         CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, ProcessTransformRunner, SETTINGS_PATH,
-        TransformRunner, capture_subject, decode_object_hex, fetch_subject_if_absent, git_in, materialize_checkout,
-        neutralize_hooks, reclaim_worktree_path, reset_checkout, strip_hooks,
+        TransformRunner, capture_subject, commitish_for, decode_object_hex, fetch_order_identities,
+        fetch_subject_if_absent, git_in, materialize_checkout, neutralize_hooks, reclaim_worktree_path, reset_checkout,
+        strip_hooks,
     };
 
     #[test]
@@ -806,6 +830,40 @@ mod tests {
         let error = fetch_subject_if_absent(repo.path(), &missing).expect_err("an absent subject cannot be fetched");
 
         assert!(format!("{error:?}").contains(&missing), "the failure names the subject it could not fetch");
+    }
+
+    #[test]
+    fn a_remote_only_diff_base_is_fetched_and_resolved_exactly() {
+        // Tripwire (#5057): start fetched the checkout then resolved the
+        // comparison base with `cat-file` immediately. An observed mainline
+        // that exists only on origin — the base, not the checkout — made
+        // every dispatch retry that cat-file before the lane launched. The
+        // fetch has to name the exact sealed sha: substituting a branch tip
+        // would compare against whatever origin advanced to, not the
+        // identity the order sealed.
+        let (origin, checkout) = repo_with_one_commit();
+        let clone = tempfile::tempdir().unwrap();
+        run_git(clone.path(), &["clone", "--quiet", origin.path().to_str().unwrap(), "."]);
+        run_git(origin.path(), &["commit", "--quiet", "--allow-empty", "--message", "advance"]);
+        let diff_base = git_in(origin.path(), &["rev-parse", "HEAD"]).unwrap().trim().to_owned();
+        assert!(
+            git_in(clone.path(), &["cat-file", "-e", &diff_base]).is_err(),
+            "the comparison base must start remote-only, or the fetch is never exercised",
+        );
+
+        fetch_order_identities(clone.path(), &checkout, Some(&diff_base))
+            .expect("a remote-only base is fetched before resolution");
+
+        assert_eq!(
+            commitish_for(clone.path(), &diff_base).expect("the fetched base must resolve"),
+            diff_base,
+            "the exact sealed identity, not a branch tip origin advanced to",
+        );
+        assert_eq!(
+            commitish_for(clone.path(), &checkout).expect("the local checkout still resolves"),
+            checkout,
+            "fetching the base must not substitute a different checkout",
+        );
     }
 
     #[test]
