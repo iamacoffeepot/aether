@@ -21,6 +21,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
+use std::mem;
 use std::time::Duration;
 
 use aether_actor::{Manual, runtime};
@@ -108,6 +109,15 @@ struct PendingConfigs {
     raw: Vec<u8>,
 }
 
+/// An admit that arrived before boot journal replay finished. The raw bytes and
+/// the inbound reply obligation are kept as they arrived — nothing is decoded
+/// or reduced until [`on_replay_result`](ControlCore::on_replay_result) drains
+/// the queue against the restored snapshot (issue #5066).
+struct HeldAdmission {
+    inbound: InboundMail,
+    raw: Vec<u8>,
+}
+
 /// The control-core state: the live [`Snapshot`] plus the in-flight admits
 /// awaiting their commit replies, queued per idempotency key.
 ///
@@ -145,10 +155,19 @@ pub struct ControlCoreState {
     pending: BTreeMap<String, VecDeque<Pending>>,
     pending_claims: BTreeMap<u64, PendingClaim>,
     pending_configs: BTreeMap<u64, PendingConfigs>,
+    /// Admits that arrived before `replayed` is true. FIFO and process-local:
+    /// each entry holds its inbound reply obligation and raw event bytes, and
+    /// nothing is decoded, reduced, journaled, or replied until
+    /// [`on_replay_result`](ControlCore::on_replay_result) drains them against
+    /// the restored snapshot (issue #5066).
+    held_admissions: VecDeque<HeldAdmission>,
     /// Whether the boot journal replay has finished folding. The mainline
     /// observer polls off a wall-clock timer, which starts the moment this cap
     /// mounts, so it has to hold until the snapshot is the one the journal
     /// describes — see [`on_observe_tick`](ControlCore::on_observe_tick).
+    /// Admission handlers consult the same flag: a re-adopted completion that
+    /// arrives before the fold would otherwise reduce against the empty boot
+    /// snapshot and consume its key as `UnknownOrInactiveBloom`.
     replayed: bool,
     /// The mainline observer's poll-timer sidecar, held for its `Drop` (which
     /// stops and joins the thread on teardown).
@@ -185,6 +204,7 @@ impl NativeActor for ControlCore {
             pending: BTreeMap::new(),
             pending_claims: BTreeMap::new(),
             pending_configs: BTreeMap::new(),
+            held_admissions: VecDeque::new(),
             replayed: false,
             _timer: timer,
         })
@@ -208,10 +228,30 @@ impl NativeActor for ControlCore {
     /// its own commit — the store dedups the second to a [`CommitResult::Duplicate`]
     /// no-op — so its inbound chain stays open (held by its `InboundMail`) until it
     /// is answered.
+    ///
+    /// Before boot replay finishes, the raw bytes and reply obligation are
+    /// enqueued rather than reduced: deciding against the empty boot snapshot
+    /// would consume the key as `UnknownOrInactiveBloom` (issue #5066).
     #[handler::manual]
     fn on_admit(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: Admit) {
         let inbound = ctx.take_inbound();
-        let raw = mail.event;
+        if !state.replayed {
+            state.held_admissions.push_back(HeldAdmission { inbound, raw: mail.event });
+            return;
+        }
+        Self::on_admit_event(state, ctx, inbound, mail.event);
+    }
+
+    /// The ordinary admission path: decode, reduce against the live snapshot,
+    /// and commit. Shared by a live [`on_admit`](Self::on_admit) and by the
+    /// post-replay drain, so a held arrival is decided exactly as one that
+    /// arrived after the snapshot was restored.
+    fn on_admit_event(
+        state: &mut ControlCoreState,
+        ctx: &mut NativeCtx<'_, Manual>,
+        inbound: InboundMail,
+        raw: Vec<u8>,
+    ) {
         let event: Event = match from_bytes(&raw) {
             Ok(event) => event,
             Err(error) => {
@@ -254,7 +294,16 @@ impl NativeActor for ControlCore {
     /// gate: a second deferral would loop the store on an address the re-read
     /// already declined to produce. The back-pressure check is not re-run either
     /// — this admit was already counted when it arrived.
+    ///
+    /// A config reply cannot outrun boot replay — the boot read is the one
+    /// that *starts* replay — but this is still an encoded admit entry, so it
+    /// holds the same way [`on_admit`](Self::on_admit) does if replay is
+    /// somehow still incomplete.
     fn resume_admit(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, inbound: InboundMail, raw: Vec<u8>) {
+        if !state.replayed {
+            state.held_admissions.push_back(HeldAdmission { inbound, raw });
+            return;
+        }
         let event: Event = match from_bytes(&raw) {
             Ok(event) => event,
             Err(error) => {
@@ -454,6 +503,13 @@ impl NativeActor for ControlCore {
         state.refresh_spend();
         state.reconcile_claim_refs(ctx);
         state.replayed = true;
+        // Drain every admit that arrived while the snapshot was still empty,
+        // in arrival order, through the ordinary path. Their reply obligations
+        // stayed open; nothing was decided or committed until now (issue #5066).
+        let held = mem::take(&mut state.held_admissions);
+        for HeldAdmission { inbound, raw } in held {
+            Self::on_admit_event(state, ctx, inbound, raw);
+        }
         // Only now is the snapshot the one the journal describes, so only now can
         // an observation be decided against it (#4677). Asked here rather than
         // from the source cap's own `wire` because that fires the moment the cap
@@ -461,7 +517,9 @@ impl NativeActor for ControlCore {
         // then reads an empty bloom map, finds nothing in flight, and advances
         // mainline out from under the very land the fold above is about to apply
         // — which then refuses as `BaseMismatch` and leaves a landed bloom
-        // reading unlanded for the whole boot.
+        // reading unlanded for the whole boot. Held admissions drain first so
+        // a re-adopted completion is decided against this snapshot before the
+        // observer's own admit is even sent.
         ctx.actor::<SourceCapability>().send_detached(&observe_mail(&state.snapshot.mainline));
     }
 
