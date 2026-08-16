@@ -4,7 +4,10 @@
 //! `AETHER_RPC_PORT` (the engines cap injects it when it forks a bloomery),
 //! `--store-path` shadows `AETHER_STORE_PATH` (the durable database file).
 
-use aether_chassis_bloomery::bloomery::{BloomeryChassis, BloomeryCli, BloomeryEnv, Chassis};
+use std::io::{self, Write as _};
+use std::process;
+
+use aether_chassis_bloomery::bloomery::{BloomeryChassis, BloomeryCli, BloomeryEnv, Chassis, KitReport};
 use aether_substrate::chassis::{PreludeFlags, run_chassis_prelude};
 use clap::Parser as _;
 
@@ -21,6 +24,14 @@ fn main() -> anyhow::Result<()> {
     )?
     .is_handled()
     {
+        return Ok(());
+    }
+    if cli.doctor {
+        let report = KitReport::inspect();
+        io::stdout().write_all(report.render_doctor().as_bytes())?;
+        if !report.is_ready() {
+            process::exit(1);
+        }
         return Ok(());
     }
     let env = BloomeryEnv::resolve(&cli)?;

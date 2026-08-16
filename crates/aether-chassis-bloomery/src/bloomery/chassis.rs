@@ -24,6 +24,7 @@ use crate::api::{ApiParams, BloomeryApiCapability};
 use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
 use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::cli::BloomeryCli;
+use crate::bloomery::doctor::KitReport;
 use crate::bloomery::driver::BloomeryDriverCapability;
 #[cfg(feature = "github")]
 use crate::bloomery::{
@@ -361,6 +362,7 @@ impl BootableChassis for BloomeryChassis {
     /// move the same `boot` into the driver afterward.
     #[cfg(feature = "github")]
     fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
+        KitReport::inspect().log_at_boot();
         let BloomeryEnv { rpc_port, http_port, store, artifacts, github, coordinator, session, signing } = env;
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
@@ -460,6 +462,7 @@ impl BootableChassis for BloomeryChassis {
     }
     #[cfg(not(feature = "github"))]
     fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
+        KitReport::inspect().log_at_boot();
         let BloomeryEnv { rpc_port, http_port, store, artifacts, coordinator, session, signing } = env;
         let approval_policy_file = coordinator.approval_policy_file.clone();
         let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);

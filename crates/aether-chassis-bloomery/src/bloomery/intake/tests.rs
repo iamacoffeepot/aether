@@ -1245,9 +1245,12 @@ fn dispatch_error_is_permanent_is_false_for_every_non_status_fault() {
     let local = DispatchError::Submit(ExecutorPortError::Local(LocalExecutorError::NoRunForNonce(Nonce(
         "dispatch-1".to_owned(),
     ))));
+    let missing_kit = DispatchError::Submit(ExecutorPortError::Local(LocalExecutorError::MissingKit(
+        "lane host is missing kit tools on PATH `(unset)`:\n- `jscpd` — npm install -g jscpd".to_owned(),
+    )));
     let store = DispatchError::Store(rusqlite::Error::QueryReturnedNoRows);
 
-    for error in [transport, decode, pagination, no_run, local, store] {
+    for error in [transport, decode, pagination, no_run, local, missing_kit, store] {
         assert!(!error.is_permanent(), "{error} is a transient fault, not permanent");
     }
 }

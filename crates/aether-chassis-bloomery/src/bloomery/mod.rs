@@ -7,6 +7,7 @@ mod chassis;
 mod cli;
 mod config;
 mod construct;
+mod doctor;
 mod driver;
 #[cfg(feature = "github")]
 mod executor;
@@ -42,6 +43,7 @@ pub use config::{CoordinatorConfig, CoordinatorOverlay};
 #[cfg(feature = "github")]
 pub use config::{GithubConnectionConfig, GithubConnectionOverlay};
 pub use construct::{CONSTRUCT_IMPLEMENT_COMMAND, dispatch_model};
+pub use doctor::{KitReport, KitTool, REQUIRED_KIT, ResolvedTool, ToolStatus};
 pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
 #[cfg(feature = "github")]
 pub use executor::{
