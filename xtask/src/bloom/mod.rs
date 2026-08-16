@@ -104,6 +104,12 @@ struct SealArgs {
     #[arg(long = "edge", value_parser = plan::parse_edge_flag)]
     edges: Vec<(String, String)>,
 
+    /// Per-member declared-surface glob (`member=glob`). Repeatable. A member
+    /// with no `--surface` entry receives `--declared-surface`, including the
+    /// shipped default when neither flag is present.
+    #[arg(long = "surface", value_parser = plan::parse_surface_flag)]
+    surfaces: Vec<(String, String)>,
+
     #[command(flatten)]
     projection: ProjectionArgs,
 }
@@ -194,8 +200,10 @@ fn run_seal(client: &Client<'_>, args: &SealArgs) -> Result<String> {
     let draft = client.open_draft()?;
     client.patch_draft(&draft.draft_id, &patch)?;
     let members = patch.proposals.unwrap_or_default();
-    let outcome =
-        client.seal(&draft.draft_id, &plan::seal_request(&members, &task, &args.projection.input()?, &args.edges))?;
+    let outcome = client.seal(
+        &draft.draft_id,
+        &plan::seal_request(&members, &task, &args.projection.input()?, &args.edges, &args.surfaces)?,
+    )?;
     Ok(render_outcome(&outcome.outcome))
 }
 
@@ -218,7 +226,7 @@ fn run_supersede(client: &Client<'_>, args: &SupersedeArgs) -> Result<String> {
     let members = patch.proposals.unwrap_or_default();
     let outcome = client.supersede(
         &args.bloom_id,
-        &plan::supersede_request(&draft.draft_id, &members, &task, &args.projection.input()?),
+        &plan::supersede_request(&draft.draft_id, &members, &task, &args.projection.input()?)?,
     )?;
     Ok(render_outcome(&outcome.outcome))
 }
@@ -537,6 +545,7 @@ mod tests {
                         base: BaseChoice::Observed,
                         workpiece: vec!["wp-seal".to_owned()],
                         edges: Vec::new(),
+                        surfaces: Vec::new(),
                         projection: projection_args(),
                     }),
                 )
@@ -583,6 +592,7 @@ mod tests {
                         base: BaseChoice::Observed,
                         workpiece: vec!["issue-A".to_owned(), "issue-B".to_owned()],
                         edges: vec![("issue-B".to_owned(), "issue-A".to_owned())],
+                        surfaces: Vec::new(),
                         projection: projection_args(),
                     }),
                 )
@@ -593,6 +603,50 @@ mod tests {
         let seal = find(&log, "POST", "/drafts/5/seal").body.as_ref().expect("seal body");
         assert_eq!(seal["edges"][0]["member"], "issue-B");
         assert_eq!(seal["edges"][0]["depends_on"], "issue-A");
+    }
+
+    #[test]
+    fn seal_sends_per_member_declared_surfaces_on_the_typed_body() {
+        // Two workpieces with distinct `--surface` lists must reach the door
+        // as two projections, not a cloned bloom-wide surface. Cloning would
+        // invent a derived overlap edge and serialize independent work.
+        let task = temp_task("seal-surfaces", "build A and B");
+        let (_, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/view") => {
+                    (200, json!({ "mainline": hex_of(digest(1)), "observed": hex_of(digest(2)), "blooms": [] }))
+                }
+                ("POST", "/drafts") => (201, json!({ "draft_id": "7", "draft": {} })),
+                ("PATCH", "/drafts/7") => (200, json!({ "draft_id": "7", "draft": {} })),
+                ("POST", "/drafts/7/seal") => (200, json!({ "outcome": { "Sealed": hex_of(digest(4)) } })),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &BloomCommand::Seal(SealArgs {
+                        task_file: task.clone(),
+                        configs: Vec::new(),
+                        profile: None,
+                        base: BaseChoice::Observed,
+                        workpiece: vec!["issue-A".to_owned(), "issue-B".to_owned()],
+                        edges: Vec::new(),
+                        surfaces: vec![
+                            ("issue-A".to_owned(), "crates/foo/**".to_owned()),
+                            ("issue-B".to_owned(), "xtask/**".to_owned()),
+                        ],
+                        projection: projection_args(),
+                    }),
+                )
+                .expect("seal --surface against the fake coordinator")
+            },
+        );
+        fs::remove_file(&task).ok();
+        let seal = find(&log, "POST", "/drafts/7/seal").body.as_ref().expect("seal body");
+        assert_eq!(seal["projections"][0]["workpiece"], "issue-A");
+        assert_eq!(seal["projections"][0]["declared_surface"], json!(["crates/foo/**"]));
+        assert_eq!(seal["projections"][1]["workpiece"], "issue-B");
+        assert_eq!(seal["projections"][1]["declared_surface"], json!(["xtask/**"]));
     }
 
     #[test]
@@ -637,6 +691,7 @@ mod tests {
                         base: BaseChoice::Observed,
                         workpiece: vec!["wp-profile".to_owned()],
                         edges: Vec::new(),
+                        surfaces: Vec::new(),
                         projection: projection_args(),
                     }),
                 )
