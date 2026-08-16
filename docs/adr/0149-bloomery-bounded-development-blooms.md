@@ -3,6 +3,7 @@
 - **Status:** Accepted (shipped — bounded Bloomery state transitions in `crates/aether-bloomery/src/reduce/` and the control surface in `crates/aether-bloomery/src/control/`)
 - **Date:** 2026-07-15
 - **Amended:** 2026-08-11 (#4663) — the outward projection targets the objects a repository already holds instead of opening its own. See _[2026-08-11 amendment (#4663): the projection targets existing objects](#2026-08-11-amendment-4663-the-projection-targets-existing-objects)_; §The boundary's projection clause reads under it.
+- **Amended:** 2026-08-16 — the projection may create and fully own the issues it creates, and still never writes an object it did not create. See _[2026-08-16 amendment: the projection owns what it creates](#2026-08-16-amendment-the-projection-owns-what-it-creates)_; the 2026-08-11 §The write surface reads under it.
 
 ## Context
 
@@ -354,7 +355,9 @@ A projection may create and update **only comments carrying its own marker**, an
 create. It may not write an issue or pull-request title or body. It may not open, close, reopen, lock,
 label, assign, or merge. The client contract loses its issue create, overwrite, and find-by-marker verbs, so
 no method reachable from a projection can address a human-authored body — the bound holds by absence rather
-than by discipline.
+than by discipline. *(Amended 2026-08-16: a projection may also create issues and own the title and body of
+issues it created; the prohibition on writing an object it did not create is unchanged. See the 2026-08-16
+amendment section.)*
 
 A comment is the surface, rather than a marker-delimited managed region inside the body, because a managed
 region still writes the whole body back. Every update would round-trip a person's prose through the
@@ -447,3 +450,46 @@ is the same repository-wide walk this amendment removes, so nothing in the proje
   the bloom view carries no previous-base/new-head pair, so the receipt's actual content would be lost, and
   because it would replace a topic with its own at-least-once delivery by whenever a view reconcile next
   happens to run.
+
+## 2026-08-16 amendment: the projection owns what it creates
+
+ADR-0199 makes a fleet-local store the authority for intent and a fleet-local repository the authority for
+source, and settles what is left for the platform: issues become outbound projections only. GitHub stops
+being a place where work is decided and becomes a place where it is visible. That decision is what this
+amendment records; the boundary's direction, the observation-intake rule, and the prohibition on platform
+authentication as an author signature are all unchanged.
+
+The 2026-08-11 amendment narrowed the write surface to marker-keyed comments on objects the repository
+already holds, because the objects a projection wrote to were objects people had authored. Under ADR-0199
+there is a second class of object: the replica issue a projection creates for a commission that has no
+GitHub home and never had one. Nothing is at risk in that object — no human authored it, and its entire
+content is rendered from canonical local state.
+
+### What widens
+
+A projection may **create** issues, and may write the title and body of an issue **it created**.
+
+### What does not widen
+
+A projection may **never** write the title or body of an object it did not create. That prohibition is the
+load-bearing half of the 2026-08-11 amendment and it survives intact; a person's prose is never round-tripped
+through a renderer. Comments on objects the repository already holds keep their existing rule.
+
+The bound holds the same way it held before — by construction rather than by discipline. The create-and-own
+verbs live on a separate client contract from the comment verbs, and a projection may address an issue's
+title or body only through a number it recorded from its own create. An issue that arrived any other way is
+unaddressable by that path, so adopting a human-authored object is not a policy the implementation follows
+but a call it cannot make.
+
+Every created object is marked as adapter-owned and carries a visible notice that it is a replica and is not
+the place to edit. Edits made there are overwritten on the next projection and are never read as input,
+which is the same one-way rule the rest of the boundary already states.
+
+### Why not adopt existing issues instead
+
+Matching a commission to an issue that already exists would avoid duplicate objects during migration, and is
+rejected for the reason the 2026-08-11 amendment gives about numbers: nothing can verify that an issue
+number was authored against this repository, so an adoption rule is a rule about untrusted input. Creating
+the object removes the question — the projection knows the number because it made it. Migration therefore
+creates replicas rather than adopting, and a workpiece whose source issue a person wrote keeps that issue as
+a human object with comments projected onto it, exactly as today.
