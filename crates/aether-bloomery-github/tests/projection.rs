@@ -57,6 +57,7 @@ fn one_bloom(id: BloomId, members: Vec<MemberView>) -> ViewDocument {
         members,
         landing_blocked: None,
         executor_fault: None,
+        review_park: None,
     };
     ViewDocument { mainline: digest(0), observed: digest(0), spend_quiesce: None, blooms: vec![bloom] }
 }
