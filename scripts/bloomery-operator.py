@@ -10,8 +10,8 @@ an hour disappears while a bloom sits wedged.
 Read commands (status / orders / why / evidence) answer "what is stopping this
 member". Action commands (hold / release / repair / supersede / grant /
 adjudicate) are the coordinator's override routes with their bodies built
-correctly, including the one body whose shape is not guessable: repair takes a
-CandidateRef struct, not a digest string.
+correctly. Repair names a commit (`--from-commit`) and the chassis derives the
+candidate; `--tree` / `--checkout` stay for a pair the coordinator cannot read.
 
 Standard library only -- this runs on the coordinator host, which installs
 nothing.
@@ -905,16 +905,73 @@ def cmd_release(args: argparse.Namespace) -> None:
     emit_outcome(Api(args.base).post(f"/blooms/{bloom}/release", override_body(args)))
 
 
+def repair_payload(
+    tree: str | None,
+    checkout: str | None,
+    from_commit: str | None,
+    from_worktree: str | None,
+) -> dict[str, Any]:
+    """The extra fields a repair body carries, or die naming the contract.
+
+    The chassis derives digests from a commit; this script must not re-state
+    that scheme. The low-level pair stays for a candidate the coordinator
+    cannot read.
+    """
+    commit = (from_commit or "").strip() or None
+    worktree = (from_worktree or "").strip() or None
+    has_tree = bool(tree)
+    has_checkout = bool(checkout)
+    named = sum([bool(commit), bool(worktree), has_tree or has_checkout])
+    if named != 1:
+        die(
+            "repair needs exactly one of --from-commit, --from-worktree, or "
+            "both --tree and --checkout"
+        )
+    if has_tree or has_checkout:
+        if not (has_tree and has_checkout):
+            die("the low-level form needs both --tree and --checkout")
+        # The candidate is a CandidateRef STRUCT, never a bare digest string: the
+        # returned evidence binds the tree and the verifying lane checks out the
+        # commit, so a string leaves the gate unable to do half its job and the
+        # route answers `400 invalid repair body: candidate: invalid type: string`.
+        return {
+            "candidate": {
+                "tree": require_digest(tree or "", "--tree"),
+                "checkout": require_digest(checkout or "", "--checkout"),
+            }
+        }
+    if commit:
+        return {"from_commit": commit}
+    return {"from_worktree": worktree or ""}
+
+
 def cmd_repair(args: argparse.Namespace) -> None:
     bloom = require_digest(args.bloom, "the bloom id")
-    tree = require_digest(args.tree, "--tree")
-    checkout = require_digest(args.checkout, "--checkout")
-    # The candidate is a CandidateRef STRUCT, never a bare digest string: the
-    # returned evidence binds the tree and the verifying lane checks out the
-    # commit, so a string leaves the gate unable to do half its job and the
-    # route answers `400 invalid repair body: candidate: invalid type: string`.
-    body = override_body(args, candidate={"tree": tree, "checkout": checkout})
-    emit_outcome(Api(args.base).post(f"/blooms/{bloom}/members/{args.workpiece}/repair", body))
+    extra = repair_payload(args.tree, args.checkout, args.from_commit, args.from_worktree)
+    if "candidate" not in extra:
+        require_repairable(Api(args.base), args.workpiece)
+    emit_outcome(Api(args.base).post(f"/blooms/{bloom}/members/{args.workpiece}/repair", override_body(args, **extra)))
+
+
+COMPOSITION_WORKPIECE = "aether.bloomery.composition"
+
+
+def require_repairable(api: Api, workpiece: str) -> None:
+    """Refuse a from-commit repair of a member that is not wedged.
+
+    The chassis reducer still refuses the same case after host-side work; this
+    check is the one that names the precondition *before* a candidate ref is
+    force-pushed. The composition is not a member in the view, so it is left
+    to the reducer — the only authority that can see its wedge.
+    """
+    if workpiece == COMPOSITION_WORKPIECE:
+        return
+    _, member = find_member(api.view(), workpiece)
+    if not member.get("wedge"):
+        die(
+            f"{workpiece} is not wedged, so it is not repairable. "
+            "A running member already holds a dispatched attempt."
+        )
 
 
 def cmd_supersede(args: argparse.Namespace) -> None:
@@ -971,14 +1028,11 @@ worked example -- recovering a wedged member
   bloomery-operator.py hold <bloom-id> \\
       --reason "taking the construct lap by hand" --operator eve
 
-  # 3. push your work, then hand the coordinator BOTH halves of the candidate.
-  #    --tree is the git tree the evidence binds; --checkout is the commit the
-  #    verifying lane checks out. The body is a CandidateRef struct -- a bare
-  #    digest string is refused with:
-  #      400 invalid repair body: candidate: invalid type: string, expected struct CandidateRef
+  # 3. name the commit that holds the fix. The chassis derives both digests,
+  #    pushes the candidate ref, and records correspondence. --tree/--checkout
+  #    stay for a candidate the coordinator cannot read.
   bloomery-operator.py repair <bloom-id> issue-4931 \\
-      --tree     4f1c...64-hex...9a \\
-      --checkout 8b20...64-hex...c3 \\
+      --from-commit <sha> \\
       --reason "hand-built the fix; model lane could not" --operator eve
 
   # 4. let it run again
@@ -1067,15 +1121,21 @@ def build_parser() -> argparse.ArgumentParser:
         subparsers.add_parser(
             "repair",
             help="hand a wedged member a candidate you built yourself",
-            description="The candidate is a CandidateRef struct: BOTH --tree and --checkout are required. "
-            "Sending one digest is refused with `400 invalid repair body: candidate: invalid type: "
-            "string, expected struct CandidateRef`.",
+            description="Name the fix as --from-commit <sha> (or --from-worktree <path>) and the "
+            "chassis derives the candidate, pushes the ref, and records correspondence. "
+            "The low-level form still takes BOTH --tree and --checkout for a candidate "
+            "the coordinator cannot read. Sending one digest is refused with "
+            "`400 invalid repair body`.",
         )
     )
     repair.add_argument("bloom")
     repair.add_argument("workpiece")
-    repair.add_argument("--tree", required=True, help="64-hex git tree digest the evidence binds")
-    repair.add_argument("--checkout", required=True, help="64-hex capture commit the verifying lane checks out")
+    repair.add_argument("--from-commit", default=None, help="commit reachable from the coordinator's repository")
+    repair.add_argument("--from-worktree", default=None, help="worktree whose HEAD is that commit")
+    repair.add_argument("--tree", default=None, help="64-hex git tree digest the evidence binds (low-level form)")
+    repair.add_argument(
+        "--checkout", default=None, help="64-hex capture commit the verifying lane checks out (low-level form)"
+    )
     repair.set_defaults(handler=cmd_repair)
 
     supersede = subparsers.add_parser("supersede", help="seal an open draft as a bloom's successor")
