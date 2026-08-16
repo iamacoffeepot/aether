@@ -381,6 +381,61 @@ fn a_re_collision_at_the_same_checkpoint_admits_under_the_new_candidates_key() {
     );
 }
 
+// #5083 — an ancestry repair can replace the candidate-ref commit while
+// preserving the exact tree the first collision keyed on. Keyed only on
+// (bloom, workpiece, checkpoint, tree) the repaired merge is a duplicate,
+// the outbox advances, and no Resolve follows.
+#[test]
+fn an_ancestry_corrected_re_collision_admits_under_the_new_checkout_key() {
+    let (first, second) = (digest(0xAB), digest(0xAC));
+    let (fake, base) = seeded(&first);
+    fake.seed_git_object(&second);
+    let bloom = BloomId(digest(1));
+    seed_candidate_branch(&fake, &bloom, "wp-0", "tree-a");
+    let original = seed_candidate_branch(&fake, &bloom, "wp-1", "tree-b");
+    let integration = format!("bloom/{}/integration", short_hex(&bloom.0));
+    let candidate = format!("bloom/{}/candidate/wp-1", short_hex(&bloom.0));
+    fake.seed_merge_conflict_paths(&integration, &candidate, vec!["crates/overlap.rs".into()]);
+    let source = shell(fake.clone());
+    let mut store = SqliteStore::open(":memory:").unwrap();
+
+    enqueue_integration(&mut store, bloom, base, vec![first, second]);
+    let (first_lap, ack) = drain_and_integrate(&mut store, &source, None).unwrap();
+    store.ack_topic(Topic::Integrate, ack.unwrap()).unwrap();
+
+    let parent = fake.create_commit("parent", "tree-parent", &[]).unwrap();
+    let repaired = fake.create_commit("wp-1", "tree-b", &[parent.sha]).unwrap();
+    assert_ne!(repaired.sha, original, "the repaired checkout is a different commit");
+    assert_eq!(repaired.tree, "tree-b", "the tree identity is unchanged");
+    fake.seed_ref(candidate_ref_name(&bloom, "wp-1").trim_start_matches("refs/"), &repaired.sha);
+
+    enqueue_integration(&mut store, bloom, base, vec![first, second]);
+    let (second_lap, ack) = drain_and_integrate(&mut store, &source, None).unwrap();
+    store.ack_topic(Topic::Integrate, ack.unwrap()).unwrap();
+
+    enqueue_integration(&mut store, bloom, base, vec![first, second]);
+    let (replayed, _) = drain_and_integrate(&mut store, &source, None).unwrap();
+
+    assert!(
+        matches!(from_bytes::<Event>(&first_lap[0].event).unwrap().fact, Fact::FoldConflict { .. }),
+        "the first collision journals FoldConflict",
+    );
+    assert!(
+        matches!(from_bytes::<Event>(&second_lap[0].event).unwrap().fact, Fact::FoldConflict { .. }),
+        "the ancestry-corrected checkout is a new collision",
+    );
+    assert_ne!(
+        admitted_key(&second_lap[0]),
+        admitted_key(&first_lap[0]),
+        "the attempted checkout belongs in the key, or the repaired merge is swallowed",
+    );
+    assert_eq!(
+        admitted_key(&replayed[0]),
+        admitted_key(&second_lap[0]),
+        "a replay of the corrected checkout still reduces to that attempt's single key",
+    );
+}
+
 // The overlay bytes are filed under the same sha256 the evidence details, so
 // a wedge later resolves the address against the artifacts store.
 #[test]
