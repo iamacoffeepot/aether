@@ -46,7 +46,10 @@ pub struct SessionPoolCapability;
 #[cfg(feature = "runtime")]
 mod runtime;
 #[cfg(feature = "runtime")]
-pub use runtime::{AcquireMiss, AcquireOutcome, LeasedSession, SessionBackend, SessionPoolState, SqliteSessionStore};
+pub use runtime::{
+    AcquireMiss, AcquireOutcome, CalibrationAggregates, LeasedSession, SessionBackend, SessionPoolState,
+    SqliteSessionStore,
+};
 
 #[cfg(all(test, feature = "runtime"))]
 mod tests;
