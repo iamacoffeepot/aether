@@ -137,6 +137,7 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
         conventions::read(Path::new(".")).as_deref(),
         args.subject.as_deref(),
         args.task.as_deref(),
+        args.seeded.as_deref(),
     );
     let run = run_model_lane(&prompt, args)?;
 
@@ -302,8 +303,13 @@ mod tests {
     // never reads `.claude/skills/implement` (#3572). Pure: no Claude spawn.
     #[test]
     fn construct_prompt_assembles_from_the_in_repo_instructions_and_subject() {
-        let prompt =
-            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("abc123"), Some("thread the work order"));
+        let prompt = assemble_construct_prompt(
+            CONSTRUCT_INSTRUCTIONS,
+            None,
+            Some("abc123"),
+            Some("thread the work order"),
+            None,
+        );
         assert!(prompt.starts_with(CONSTRUCT_INSTRUCTIONS), "without conventions the instruction source leads");
         assert!(prompt.contains("## Subject"), "the checked-out subject is appended as its own section");
         assert!(prompt.contains("abc123"), "the exact checked-out commit is named in the prompt");
@@ -321,14 +327,14 @@ mod tests {
         assert!(!prompt.contains("\n## Lane\n"), "a header-less task grows no lane tail");
 
         // With no subject supplied, the prompt still stands and names no commit.
-        let subjectless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, None, Some("still has a task"));
+        let subjectless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, None, Some("still has a task"), None);
         assert!(subjectless.contains("## Subject"));
         assert!(subjectless.contains("\n## Task\n"));
         assert!(subjectless.starts_with(CONSTRUCT_INSTRUCTIONS));
 
         // With no task, the prompt still stands and appends no `## Task` section —
         // the fail-legible subject-only path for a member with no description.
-        let taskless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("abc123"), None);
+        let taskless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("abc123"), None, None);
         assert!(taskless.contains("## Subject"));
         assert!(!taskless.contains("\n## Task\n"), "no persisted description means no task section");
         assert!(taskless.starts_with(CONSTRUCT_INSTRUCTIONS));
@@ -346,6 +352,7 @@ mod tests {
             Some("Tests must earn their place."),
             Some("abc123"),
             Some("thread the work order"),
+            None,
         );
         assert!(prompt.contains("Tests must earn their place."), "the tree's conventions are carried verbatim");
         assert!(prompt.starts_with("## Conventions\n"), "shared conventions lead so sibling lanes share a prefix");
@@ -357,7 +364,7 @@ mod tests {
 
         // A subject tree carrying no conventions file drops the section rather
         // than failing the dispatch or emitting an empty heading.
-        let bare = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("abc123"), Some("build it"));
+        let bare = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("abc123"), Some("build it"), None);
         assert!(!bare.contains("## Conventions\n"), "no conventions file means no conventions section");
         assert!(bare.contains("\n## Task\n"), "the rest of the prompt is unaffected");
     }
@@ -375,16 +382,19 @@ mod tests {
             Some(conventions),
             Some("abc123"),
             Some(&pin_workpiece_description("issue-1111", body)),
+            None,
         );
         let right = assemble_construct_prompt(
             CONSTRUCT_INSTRUCTIONS,
             Some(conventions),
             Some("abc123"),
             Some(&pin_workpiece_description("issue-2222", body)),
+            None,
         );
 
         let prefix_len = left.bytes().zip(right.bytes()).take_while(|(a, b)| a == b).count();
-        let stable = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some(conventions), Some("abc123"), Some(body));
+        let stable =
+            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some(conventions), Some("abc123"), Some(body), None);
         assert!(
             prefix_len >= stable.len(),
             "common prefix ({prefix_len}) must cover the stable bulk ({})",
@@ -412,13 +422,19 @@ mod tests {
     #[test]
     fn conventions_lead_so_distinct_lane_instructions_still_share_them() {
         let conventions = "Tests must earn their place.";
-        let construct =
-            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some(conventions), Some("abc123"), Some("shared order"));
+        let construct = assemble_construct_prompt(
+            CONSTRUCT_INSTRUCTIONS,
+            Some(conventions),
+            Some("abc123"),
+            Some("shared order"),
+            None,
+        );
         let review = assemble_construct_prompt(
             "REVIEW INSTRUCTIONS ONLY",
             Some(conventions),
             Some("abc123"),
             Some("shared order"),
+            None,
         );
         let prefix_len = construct.bytes().zip(review.bytes()).take_while(|(a, b)| a == b).count();
         assert!(construct.starts_with("## Conventions\n"), "CLAUDE.md leads the prompt");
@@ -429,6 +445,59 @@ mod tests {
         assert!(
             prefix_len > conventions.len(),
             "common prefix ({prefix_len}) must cover more than the raw conventions text",
+        );
+    }
+
+    // Tripwire for #4994 acceptance 4: the checkpoint's trust posture is a
+    // property of *this* dispatch, not of every construct prompt. The plausible
+    // bug is the original one — the paragraph lives in CONSTRUCT_INSTRUCTIONS
+    // and a cold start is told it might be sitting on mid-refactor garbage.
+    #[test]
+    fn construct_prompt_names_the_seeded_state_only_when_seeded() {
+        let cold = assemble_construct_prompt(
+            CONSTRUCT_INSTRUCTIONS,
+            None,
+            Some("abc123"),
+            Some("thread the work order"),
+            None,
+        );
+        assert!(!cold.contains("## Seeded state"), "a cold start grows no seeded-state section");
+        assert!(!cold.contains("mid-refactor garbage"), "the trust posture is not static boilerplate on a cold start");
+        assert!(
+            !CONSTRUCT_INSTRUCTIONS.contains("## Seeded state")
+                && !CONSTRUCT_INSTRUCTIONS.contains("mid-refactor garbage"),
+            "the instruction source must not name a checkpoint the dispatch may not have",
+        );
+
+        let seeded = assemble_construct_prompt(
+            CONSTRUCT_INSTRUCTIONS,
+            None,
+            Some("def456"),
+            Some("thread the work order"),
+            Some("def456"),
+        );
+        let task_at = seeded.find("\n## Task\n").expect("the work order keeps its section");
+        let seeded_at = seeded.find("\n## Seeded state\n").expect("a seeded dispatch names the checkpoint");
+        assert!(task_at < seeded_at, "the seeded-state section sits after the shared work order");
+        assert!(seeded.contains("`def456`"), "the prompt names the checkpoint commit");
+        assert!(seeded.contains("untrusted"), "the prompt names the checkpoint's trust posture");
+        assert!(seeded.contains("mid-refactor garbage"), "the prompt states what a dead attempt's partial tree can be");
+
+        let conventions = "Tests must earn their place.";
+        let body = "shared order";
+        let cold_sibling =
+            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some(conventions), Some("abc123"), Some(body), None);
+        let seeded_sibling = assemble_construct_prompt(
+            CONSTRUCT_INSTRUCTIONS,
+            Some(conventions),
+            Some("abc123"),
+            Some(body),
+            Some("def456"),
+        );
+        let prefix_len = cold_sibling.bytes().zip(seeded_sibling.bytes()).take_while(|(a, b)| a == b).count();
+        assert!(
+            cold_sibling[..prefix_len].contains(body),
+            "a seeded dispatch must not push the work order out of the shared prefix",
         );
     }
 }

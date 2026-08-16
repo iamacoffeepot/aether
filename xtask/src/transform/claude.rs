@@ -63,6 +63,14 @@ fn construct_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str
 /// on; the `## Task` section carries the operator's work-order description
 /// (#3595) so the model is told *what* to build, not just *where*.
 ///
+/// `seeded` names the construct checkpoint this dispatch resumes from (#4994).
+/// Present only when the reducer seeded the checkout from a dead attempt's
+/// partial capture; the prompt then names that commit and its trust-but-verify
+/// posture. `None` is a cold start from the sealed (or spliced) base, and the
+/// prompt says nothing about a checkpoint the worker does not have. The section
+/// sits after the work order so a cold sibling still shares the cached prefix
+/// through the stable bulk (#4985).
+///
 /// Prompt caching is prefix-exact (#4985). The shared bulk leads — conventions
 /// first (the same `CLAUDE.md` every lane of a bloom inlines), then the lane
 /// instructions, subject, and work-order body — and anything that varies per
@@ -76,6 +84,7 @@ pub(super) fn assemble_construct_prompt(
     conventions: Option<&str>,
     subject: Option<&str>,
     task: Option<&str>,
+    seeded: Option<&str>,
 ) -> String {
     let subject_line = subject.map_or_else(
         || "You are working in the checked-out subject tree — the sealed source this work order named.".to_owned(),
@@ -94,8 +103,26 @@ pub(super) fn assemble_construct_prompt(
     } else {
         format!("\n## Task\n\n{task_body}\n")
     };
+    let seeded_section = seeded.map_or_else(String::new, seeded_state_section);
     let lane_section = lane_identity.map_or_else(String::new, |id| format!("\n## Lane\n\n{id}\n"));
-    format!("{conventions_section}{instructions}\n\n## Subject\n\n{subject_line}\n{task_section}{lane_section}")
+    format!(
+        "{conventions_section}{instructions}\n\n## Subject\n\n{subject_line}\n{task_section}{seeded_section}{lane_section}"
+    )
+}
+
+/// The trailing `## Seeded state` section: present only when this dispatch
+/// resumes from a construct checkpoint (#4994). Names the commit and the
+/// trust-but-verify posture a partial tree demands.
+fn seeded_state_section(commit: &str) -> String {
+    format!(
+        "\n## Seeded state\n\n\
+         This dispatch resumes from checkpoint `{commit}`. A prior attempt on this workpiece died \
+         mid-stage and left that partial tree as your starting point rather than the clean sealed \
+         base. The tree is untrusted: it can be mid-refactor garbage that does not compile. Verify \
+         what is there before building on it, and discard it if it is not a foundation. A lane that \
+         silently inherits a broken tree and assumes it is the base produces a worse candidate than \
+         one that started cold.\n"
+    )
 }
 
 /// The last `max` bytes of `s`, snapped forward to a char boundary — for
