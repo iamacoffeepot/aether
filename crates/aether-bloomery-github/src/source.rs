@@ -267,6 +267,19 @@ impl ContentAddressed for LandedHeadAddress<'_> {
     const DOMAIN: &'static str = "aether.bloomery.landed.head";
 }
 
+/// The minted digest of a candidate-ref commit no digest names yet — the
+/// checkout vehicle an `integrate_merge` conflict must report. Same domain as
+/// the capture path's checkout so a commit resolved here is the digest capture
+/// would have recorded for the same object.
+#[derive(Serialize)]
+struct CandidateCommitAddress<'a> {
+    object: &'a [u8],
+}
+
+impl ContentAddressed for CandidateCommitAddress<'_> {
+    const DOMAIN: &'static str = "aether.bloomery.candidate.checkout";
+}
+
 /// The prose a landing proposal is opened with, assembled by the caller that can
 /// see the bloom's membership — the messages its lanes wrote and the objects its
 /// workpieces address. This port sees neither, so the text arrives here already
@@ -618,6 +631,29 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
     fn integration_tree(&self, sha: &str) -> Result<Digest, SourceError> {
         let commit = self.client.get_commit(sha)?;
         self.resolve_object_digest(&commit.tree, "integration branch tree object")
+    }
+
+    // The digest naming the commit `candidate_ref` currently points at — the
+    // vehicle offered to the merge. Resolves a recorded checkout when capture
+    // already named the object; otherwise mints and records one so a conflict
+    // can still identify the attempt. Distinct commits (same tree, different
+    // parents) mint distinct digests; replaying one ref reproduces the same.
+    fn attempted_candidate(&self, candidate_ref: &str) -> Result<Digest, SourceError> {
+        let ref_name = format!("heads/{}", strip_heads(candidate_ref));
+        let sha = self.client.get_ref(&ref_name)?.ok_or(SourceError::MissingRef(ref_name))?.sha;
+        self.candidate_commit_digest(&sha)
+    }
+
+    fn candidate_commit_digest(&self, sha: &str) -> Result<Digest, SourceError> {
+        let object = GitObjectId::from_hex(sha)
+            .ok_or_else(|| SourceError::Malformed(format!("candidate commit sha `{sha}`")))?;
+        if let Some(known) = self.correspondence.resolve_digest(&BackendObjectId::from(&object))? {
+            return Ok(known);
+        }
+
+        let minted = digest_of(&CandidateCommitAddress { object: object.bytes() });
+        self.correspondence.record(&minted, &BackendObjectId::from(object))?;
+        Ok(minted)
     }
 
     // The bloom digest naming real git tree object `sha`, minting and recording
@@ -1117,9 +1153,17 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
             }
             // A cross-member collision: an owner decision, not a fault to
             // retry. The client follows a 409 with a compare so the paths and
-            // the candidate's remaining diff reach the reconcile overlay.
+            // the candidate's remaining diff reach the reconcile overlay. The
+            // attempted vehicle is the commit the ref pointed at — not the
+            // tree — so an ancestry-corrected retry cannot share the previous
+            // collision's admission key.
             MergeResult::Conflict { paths, patch, .. } => {
-                return Ok(IntegrateOutcome::Conflict { at: current_tree, paths, diff: patch });
+                return Ok(IntegrateOutcome::Conflict {
+                    at: current_tree,
+                    paths,
+                    diff: patch,
+                    attempted: self.attempted_candidate(candidate_ref)?,
+                });
             }
         };
 
@@ -1940,6 +1984,54 @@ mod tests {
             panic!("a checkpoint the branch has passed is refused");
         };
         assert_eq!(actual, advanced, "the refusal reports where the branch actually is");
+    }
+
+    #[test]
+    fn a_merge_conflict_names_the_attempted_checkout_not_just_the_tree() {
+        // Wave 5 / #5083: two refs can share a tree and still be different
+        // merge vehicles. The conflict must report the commit actually offered,
+        // so an ancestry-corrected retry cannot reuse the earlier admission key.
+        let (fake, bloom, base) = seeded();
+        let source = git_source(&fake, false);
+        let base_tree = source.snapshot(&base).unwrap().tree;
+        let expected = source.checkpoint(&bloom, &base_tree).unwrap();
+
+        let tree = "tree-same";
+        let first = fake.create_commit("first", tree, &[]).unwrap();
+        let parent = fake.create_commit("parent", "tree-other", &[]).unwrap();
+        let repaired = fake.create_commit("repaired", tree, &[parent.sha]).unwrap();
+        assert_eq!(first.tree, repaired.tree, "the tree identity is unchanged");
+        assert_ne!(first.sha, repaired.sha, "different parentage is a different commit");
+
+        let first_ref = "heads/bloom/cand/wp-first";
+        let repaired_ref = "heads/bloom/cand/wp-repaired";
+        fake.seed_ref(first_ref, &first.sha);
+        fake.seed_ref(repaired_ref, &repaired.sha);
+
+        let first_vehicle = digest(70);
+        let repaired_vehicle = digest(71);
+        fake.seed_correspondence(&first_vehicle, &first.sha);
+        fake.seed_correspondence(&repaired_vehicle, &repaired.sha);
+
+        let integration = format!("bloom/{}/integration", short_hex(&bloom.0));
+        fake.seed_merge_conflict(&integration, "bloom/cand/wp-first");
+        fake.seed_merge_conflict(&integration, "bloom/cand/wp-repaired");
+
+        let first_conflict = source.integrate_merge(&bloom, first_ref, &expected).unwrap();
+        let repaired_conflict = source.integrate_merge(&bloom, repaired_ref, &expected).unwrap();
+        let replayed = source.integrate_merge(&bloom, repaired_ref, &expected).unwrap();
+
+        let attempted = |outcome| match outcome {
+            IntegrateOutcome::Conflict { attempted, .. } => attempted,
+            other => panic!("expected Conflict, got {other:?}"),
+        };
+        assert_eq!(attempted(first_conflict), first_vehicle, "the recorded checkout is the vehicle");
+        assert_eq!(
+            attempted(repaired_conflict),
+            repaired_vehicle,
+            "a same-tree commit with different parentage is a different vehicle",
+        );
+        assert_eq!(attempted(replayed), repaired_vehicle, "replaying the same ref reports the same vehicle");
     }
 
     #[test]

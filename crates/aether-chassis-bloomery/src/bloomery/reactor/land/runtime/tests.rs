@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    Adjudication, BloomId, Correspondence, Digest, Disposition, Event, Fact, IdempotencyKey, LandPayload, Topic,
+    Adjudication, Admit, BloomId, Correspondence, Digest, Disposition, Event, Fact, IdempotencyKey, LandPayload, Topic,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{ChecksState, GitObjectId, GitSource, MainlineRef, PullRequestApi, short_hex, to_hex};
@@ -17,7 +17,7 @@ use aether_data::wire::{from_bytes, to_vec};
 use super::drain_and_land;
 use crate::bloomery::SourceShell;
 use crate::bloomery::outbox::TopicOutbox;
-use crate::store::{JournalWrite, SqliteStore, StoreBackend};
+use crate::store::{AppendOutcome, JournalWrite, SqliteStore, StoreBackend};
 
 fn digest(seed: u8) -> Digest {
     Digest::from_bytes([seed; 32])
@@ -74,7 +74,7 @@ fn an_accepted_proposal_admits_a_fact_land_carrying_the_merge_commit() {
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
     let bloom = BloomId(digest(1));
-    let sequence = enqueue_land(&mut store, bloom, base, new_head);
+    enqueue_land(&mut store, bloom, base, new_head);
 
     // First pass proposes and finds it open.
     assert_eq!(drain_and_land(&mut store, &source).unwrap().1, None, "still open");
@@ -89,10 +89,11 @@ fn an_accepted_proposal_admits_a_fact_land_carrying_the_merge_commit() {
         .number;
     fake.merge_pull_request(number, &squashed);
 
-    // The re-drain observes the acceptance and admits the landing.
+    // The re-drain observes the acceptance and admits the landing. The outbox
+    // stays unacked until the journal holds that admit's key.
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
     assert_eq!(admits.len(), 1, "an accepted proposal admits one fact");
-    assert_eq!(ack_through, Some(sequence), "the completed entry is acked");
+    assert_eq!(ack_through, None, "observation is not acknowledgement; the journal is");
     let event = from_bytes::<Event>(&admits[0].event).unwrap();
     match event.fact {
         Fact::Land { bloom: landed, new_head: head } => {
@@ -320,7 +321,7 @@ fn landing_closes_member_issues_best_effort() {
     seed_member(&mut store, bloom, "issue-11", Some("fix(crate:aether-fs): reject a traversal\n\nThe join escaped."));
     seed_member(&mut store, bloom, "local-spike", Some("docs(guide): describe the atlas\n\nThe recipe was silent."));
     seed_member(&mut store, bloom, "issue-9999", Some("chore(meta): tidy the leftover\n\nNothing to close."));
-    let sequence = enqueue_land(&mut store, bloom, base, new_head);
+    enqueue_land(&mut store, bloom, base, new_head);
 
     drain_and_land(&mut store, &source).unwrap();
     let number = fake
@@ -332,7 +333,7 @@ fn landing_closes_member_issues_best_effort() {
 
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
     assert_eq!(admits.len(), 1, "a failed close does not block the land");
-    assert_eq!(ack_through, Some(sequence), "the landed entry is acked");
+    assert_eq!(ack_through, None, "closure is not the receipt; the journal is");
 
     assert_eq!(fake.issue_is_closed(11), Some(true), "the addressing member's issue is closed");
     let comments = fake.comments_on(11);
@@ -371,7 +372,7 @@ fn the_reactor_merges_its_own_green_proposal_and_admits_the_land() {
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
     let bloom = BloomId(digest(1));
-    let sequence = enqueue_land(&mut store, bloom, base, new_head);
+    enqueue_land(&mut store, bloom, base, new_head);
 
     // The first pass proposes; its gate has reported nothing yet.
     assert_eq!(drain_and_land(&mut store, &source).unwrap().1, None, "an unconcluded gate is not merged on");
@@ -381,7 +382,7 @@ fn the_reactor_merges_its_own_green_proposal_and_admits_the_land() {
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
 
     assert!(fake.pull_request_merged(number).unwrap(), "the reactor merged the proposal it opened");
-    assert_eq!(ack_through, Some(sequence), "the landed entry is acked");
+    assert_eq!(ack_through, None, "the merge is observed; acknowledgement waits on the journal");
     assert_eq!(admits.len(), 1, "the merge and its observation settle in one pass");
     match from_bytes::<Event>(&admits[0].event).unwrap().fact {
         Fact::Land { bloom: landed, new_head: head } => {
@@ -558,4 +559,143 @@ fn an_unadjudicated_bloom_lands_with_no_waiver_section() {
 
     let (_, body) = proposal_of(&fake, bloom);
     assert!(!body.contains("Adjudicated findings"), "no override, no section: {body}");
+}
+
+// The single land admit a drain produced, or panic. The land reactor's view of
+// a completed merge is this event — `Fact::Land` under the deterministic key.
+fn land_admit(admits: &[Admit]) -> Event {
+    assert_eq!(admits.len(), 1, "expected one land admit, got {}", admits.len());
+    from_bytes::<Event>(&admits[0].event).unwrap()
+}
+
+// Persist `event` under its own idempotency key — the control-core commit a
+// successful Admit would have written, without going through the mail harness.
+fn journal_event(store: &mut SqliteStore, event: &Event) -> AppendOutcome {
+    let bytes = to_vec(event).unwrap();
+    store
+        .append_event(&JournalWrite {
+            idempotency_key: &event.idempotency_key.0,
+            event: &bytes,
+            decisions: b"decided",
+            decider: "test",
+        })
+        .unwrap()
+}
+
+// Propose, wait for an external squash-merge, and return the proposal number.
+// The drain that observes the merge is the caller's.
+fn propose_and_merge(fake: &FakeGithub, source: &SourceShell, store: &mut SqliteStore, bloom: BloomId) -> u64 {
+    assert_eq!(drain_and_land(store, source).unwrap().1, None, "still open");
+    let number = proposal_number(fake, bloom);
+    fake.merge_pull_request(number, &"5c".repeat(20));
+    number
+}
+
+#[test]
+fn a_dispatch_miss_before_journal_commit_redrives_the_same_land() {
+    // Tripwire: acking the Land outbox on merge observation deletes the only
+    // durable redrive if the detached Admit then misses. GitHub has moved
+    // mainline; the journal has not. The row must stay, and the next drain must
+    // resend the same deterministic Admit without opening another proposal.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    enqueue_land(&mut store, bloom, base, new_head);
+    let later = BloomId(digest(2));
+    enqueue_land(&mut store, later, base, digest(91));
+    let number = propose_and_merge(&fake, &source, &mut store, bloom);
+
+    let (first, ack) = drain_and_land(&mut store, &source).unwrap();
+    let first = land_admit(&first);
+    assert_eq!(ack, None, "a miss window must not acknowledge the row");
+    assert_eq!(first.idempotency_key, super::land_key(&bloom.0), "the admit is keyed by the bloom");
+    match &first.fact {
+        Fact::Land { bloom: landed, new_head: head } => {
+            assert_eq!(*landed, bloom);
+            assert_ne!(*head, new_head, "the receipt carries the merge commit, not the proposed head");
+        }
+        other => panic!("expected Fact::Land, got {other:?}"),
+    }
+
+    let (again, ack) = drain_and_land(&mut store, &source).unwrap();
+    let again = land_admit(&again);
+    assert_eq!(ack, None, "still no journal row, so still no ack");
+    assert_eq!(again, first, "the redrive is the exact same land admit");
+    assert_eq!(proposal_number(&fake, bloom), number, "a miss must not open a second proposal");
+    assert_eq!(fake.pull_request_merged(number), Some(true), "the original merge stands");
+    assert_eq!(
+        fake.find_pull_request_for_head(&format!("bloom/{}/landing", short_hex(&later.0))).unwrap(),
+        None,
+        "an unconfirmed landing holds later rows; the next bloom is not proposed",
+    );
+    assert_eq!(store.drain_topic(Topic::Land).unwrap().len(), 2, "both rows stay in the unacked prefix");
+}
+
+#[test]
+fn a_restart_after_journal_commit_acks_without_remerging() {
+    // Tripwire: once the journal holds the land key, a coordinator restart is
+    // replay plus outbox republish, not a second merge and not a second receipt.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    let sequence = enqueue_land(&mut store, bloom, base, new_head);
+    let number = propose_and_merge(&fake, &source, &mut store, bloom);
+
+    let (admits, ack) = drain_and_land(&mut store, &source).unwrap();
+    assert_eq!(ack, None);
+    let event = land_admit(&admits);
+    assert_eq!(journal_event(&mut store, &event), AppendOutcome::Applied(1), "one journaled landing transition");
+    assert_eq!(
+        journal_event(&mut store, &event),
+        AppendOutcome::Duplicate,
+        "the deterministic key is the only landing"
+    );
+
+    let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
+    assert!(admits.is_empty(), "a committed land does not fabricate another receipt");
+    assert_eq!(ack_through, Some(sequence), "the restart observes the key and acknowledges");
+    assert_eq!(proposal_number(&fake, bloom), number, "restart must not open a second proposal");
+    assert_eq!(fake.pull_request_merged(number), Some(true), "restart must not merge again");
+}
+
+#[test]
+fn journal_confirmation_acknowledges_the_land_prefix() {
+    // Tripwire: a successful Admit is what earns the ack. After the journal
+    // holds the key, the prefix advances, the outbox goes quiet, and nothing
+    // later is eligible to dispatch more land work for this bloom.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    let sequence = enqueue_land(&mut store, bloom, base, new_head);
+    let number = propose_and_merge(&fake, &source, &mut store, bloom);
+
+    let (admits, ack) = drain_and_land(&mut store, &source).unwrap();
+    assert_eq!(ack, None, "admission has not committed");
+    let event = land_admit(&admits);
+    match event.fact {
+        Fact::Land { bloom: landed, .. } => assert_eq!(landed, bloom, "the Landed view names this bloom"),
+        other => panic!("expected Fact::Land, got {other:?}"),
+    }
+    journal_event(&mut store, &event);
+
+    let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
+    assert!(admits.is_empty(), "confirmation does not re-admit");
+    assert_eq!(ack_through, Some(sequence), "confirmation acknowledges through the landed row");
+    store.ack_topic(Topic::Land, ack_through.unwrap()).unwrap();
+    assert!(store.drain_topic(Topic::Land).unwrap().is_empty(), "no later land work remains eligible");
+
+    let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
+    assert!(admits.is_empty(), "an empty prefix admits nothing");
+    assert_eq!(ack_through, None, "an empty prefix acknowledges nothing");
+    assert_eq!(proposal_number(&fake, bloom), number);
+    assert_eq!(fake.pull_request_merged(number), Some(true));
 }
