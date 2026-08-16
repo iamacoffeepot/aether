@@ -256,7 +256,6 @@ fn version_of(program: &Path) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -271,7 +270,7 @@ mod tests {
     /// A directory whose only runnable program is `git`, answering `--version`
     /// with a known line — the stand-in PATH a missing-tool case inspects.
     fn path_with_only_git() -> (tempfile::TempDir, String) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("a stand-in PATH directory creates");
         write_versioned(dir.path(), "git", "git version 2.0-test");
         let path = dir.path().display().to_string();
         (dir, path)
@@ -279,10 +278,10 @@ mod tests {
 
     fn write_versioned(dir: &Path, name: &str, version_line: &str) {
         let path = dir.join(name);
-        fs::write(&path, format!("#!/bin/sh\necho '{version_line}'\n")).unwrap();
-        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        fs::write(&path, format!("#!/bin/sh\necho '{version_line}'\n")).expect("the stand-in binary writes");
+        let mut permissions = fs::metadata(&path).expect("the stand-in binary is readable").permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(&path, permissions).unwrap();
+        fs::set_permissions(&path, permissions).expect("the stand-in binary is executable");
     }
 
     #[test]
@@ -327,7 +326,7 @@ mod tests {
         // invent a refusal. Building a stand-in for every row (not the process
         // PATH) is what makes the pass independent of whatever this machine
         // happens to have installed.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("a complete-kit PATH directory creates");
         for tool in REQUIRED_KIT {
             write_versioned(dir.path(), tool.program, &format!("{} 1.0-test", tool.program));
         }
@@ -372,9 +371,9 @@ mod tests {
         // missing one: `verify.preflight` would still refuse, and treating the
         // file as present would let admission spend an attempt on a host that
         // cannot spawn the program.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("a stand-in PATH directory creates");
         let path = dir.path().join("jscpd");
-        fs::write(&path, "not executable\n").unwrap();
+        fs::write(&path, "not executable\n").expect("the non-executable fixture writes");
 
         assert!(resolve_on_path("jscpd", dir.path().as_os_str()).is_none());
     }
@@ -383,12 +382,12 @@ mod tests {
     fn a_binary_that_rejects_version_is_not_present() {
         // `--version` is the probe, matching the verify preflight. A file that
         // resolves but exits non-zero is not a tool the lane can run.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("a stand-in PATH directory creates");
         let path = dir.path().join("jscpd");
-        fs::write(&path, "#!/bin/sh\nexit 1\n").unwrap();
-        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        fs::write(&path, "#!/bin/sh\nexit 1\n").expect("the failing --version fixture writes");
+        let mut permissions = fs::metadata(&path).expect("the failing fixture is readable").permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(&path, permissions).unwrap();
+        fs::set_permissions(&path, permissions).expect("the failing fixture is executable");
 
         assert!(version_of(&path).is_none(), "a failing --version is absence, not a present tool with no version");
     }
