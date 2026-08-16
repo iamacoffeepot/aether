@@ -21,6 +21,7 @@ mod outbox;
 pub(crate) mod poll_timer;
 #[cfg(feature = "github")]
 mod reactor;
+mod repair;
 #[cfg(feature = "github")]
 mod source;
 #[cfg(feature = "github")]
@@ -69,6 +70,9 @@ pub use reactor::{
     LandReactorSetup, LandReactorState, LandTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState,
     SweepReport, SweepRequest, sweep,
 };
+#[cfg(feature = "github")]
+pub use repair::{CandidateSource, PrepareError, prepare_candidate};
+pub use repair::{candidate_tree_digest, capture_commit_digest};
 #[cfg(feature = "github")]
 pub use source::SourceShell;
 #[cfg(feature = "github")]

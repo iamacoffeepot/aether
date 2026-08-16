@@ -175,6 +175,40 @@ class DigestValidation(unittest.TestCase):
         self.assertEqual(operator.require_digest("AB" * 32, "--tree"), "ab" * 32)
 
 
+class RepairPayload(unittest.TestCase):
+    """Which source a repair command is allowed to name."""
+
+    def test_from_commit_does_not_restate_the_digest_scheme(self):
+        # Tripwire (#5032): --from-commit must send the sha, never a locally
+        # hashed tree/checkout pair. Re-deriving here is how the last repair
+        # spent six tool calls reconstructing the domain tags.
+        payload = operator.repair_payload(None, None, "deadbeef" * 5, None)
+        self.assertEqual(payload, {"from_commit": "deadbeef" * 5})
+        self.assertNotIn("candidate", payload)
+        self.assertNotIn("tree", payload)
+
+    def test_the_low_level_pair_still_builds_a_candidate_struct(self):
+        tree = "ab" * 32
+        checkout = "cd" * 32
+        payload = operator.repair_payload(tree, checkout, None, None)
+        self.assertEqual(payload, {"candidate": {"tree": tree, "checkout": checkout}})
+
+    def test_two_sources_or_a_half_pair_are_refused_by_name(self):
+        # Tripwire: a mixed invocation must not silently prefer --from-commit
+        # and drop the pair (or the other way around). The operator named two
+        # intents; picking one would push the wrong candidate.
+        with self.assertRaises(operator.OperatorError) as caught:
+            operator.repair_payload("ab" * 32, "cd" * 32, "deadbeef" * 5, None)
+        self.assertIn("--from-commit", str(caught.exception))
+        with self.assertRaises(operator.OperatorError) as caught:
+            operator.repair_payload("ab" * 32, None, None, None)
+        self.assertIn("--tree", str(caught.exception))
+        self.assertIn("--checkout", str(caught.exception))
+        with self.assertRaises(operator.OperatorError) as caught:
+            operator.repair_payload(None, None, None, None)
+        self.assertIn("exactly one", str(caught.exception))
+
+
 class EvidencePathResolution(unittest.TestCase):
     """Where a dispatch's lane evidence sits."""
 

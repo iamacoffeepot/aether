@@ -220,14 +220,25 @@ pub struct AdjudicateRequest {
 /// second move (#4957): the candidate the operator pushed to the workpiece's
 /// candidate ref, offered to the ordinary gates.
 ///
-/// The candidate is the (tree, commit) pair every candidate is in this
-/// vocabulary (ADR-0152): returned evidence binds the tree and the verifying
-/// lane checks out the commit, so naming one would leave the gate unable to do
-/// half its job.
+/// Name exactly one source. `candidate` is the low-level (tree, commit) pair
+/// every candidate is in this vocabulary (ADR-0152). `from_commit` /
+/// `from_worktree` ask the chassis to derive that pair, push the candidate
+/// ref, and record both correspondence rows (#5032) so the operator does not
+/// re-state the digest scheme.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepairRequest {
-    /// The candidate the operator pushed.
-    pub candidate: CandidateRef,
+    /// The candidate the operator already pushed. Required unless `from_commit`
+    /// or `from_worktree` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<CandidateRef>,
+    /// A commit reachable from the coordinator's repository. The chassis
+    /// derives the candidate, pushes the ref, and records correspondence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_commit: Option<String>,
+    /// A worktree whose `HEAD` is a commit the coordinator's repository can
+    /// already see. Resolved, then treated as `from_commit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_worktree: Option<String>,
     /// Why the operator took the lap themselves. Required and non-blank.
     pub reason: String,
     /// Who supplied it. Required and non-blank.

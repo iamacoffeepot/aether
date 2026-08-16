@@ -6,16 +6,14 @@ use std::io;
 use std::path::{Path, PathBuf, absolute};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use aether_bloomery::digest::ContentAddressed;
 use aether_bloomery::{
     BackendObjectId, CandidateRef, Conclusion, ConfigRegistry, ConfigScopes, Digest, EvidenceRef, ExecutionStatus,
     ExecutorBackend, Nonce, PriceTable, ResolvedModel, SharedCorrespondence, StageVerdict, StudyCost, Transformation,
-    VerifyFailureSet, WorkHandle, WorkOrder, digest_of, is_model_lane,
+    VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
 };
 use aether_bloomery_github::parse_study;
 use aether_data::Kind;
 use aether_data::wire::from_bytes;
-use serde::Serialize;
 use std::fs;
 
 use super::affinity::{BuilderSlots, SlotAffinity, SlotChoice, choose_slot, stamp_slot_affinity};
@@ -32,6 +30,7 @@ use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::executor::{LaneOccupancy, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 use crate::bloomery::intake::NameEvidenceClaims;
 use crate::bloomery::triage::MAX_TRIAGED_DIFF_BYTES;
+use crate::bloomery::{candidate_tree_digest, capture_commit_digest};
 use crate::session::SessionConfig;
 use crate::store::{SqliteStore, StoreBackend};
 
@@ -1088,39 +1087,6 @@ impl LocalExecutor {
             ),
         }
     }
-}
-
-/// The content-derived digest of a captured candidate tree: a domain-tagged
-/// address over the backend tree object's raw bytes, so the digest changes
-/// exactly when the captured content does — ADR-0152's supersession property
-/// falls out of the identity choice.
-#[derive(Serialize)]
-struct CandidateTreeAddress<'a> {
-    object: &'a [u8],
-}
-
-impl ContentAddressed for CandidateTreeAddress<'_> {
-    const DOMAIN: &'static str = "aether.bloomery.candidate.tree";
-}
-
-fn candidate_tree_digest(tree: &BackendObjectId) -> Digest {
-    digest_of(&CandidateTreeAddress { object: tree.as_bytes() })
-}
-
-/// The content-derived digest of a capture commit — the [`CandidateRef::checkout`]
-/// axis, distinct from the tree's by domain tag so the two never collide even
-/// over equal object bytes.
-#[derive(Serialize)]
-struct CaptureCommitAddress<'a> {
-    object: &'a [u8],
-}
-
-impl ContentAddressed for CaptureCommitAddress<'_> {
-    const DOMAIN: &'static str = "aether.bloomery.candidate.checkout";
-}
-
-fn capture_commit_digest(commit: &BackendObjectId) -> Digest {
-    digest_of(&CaptureCommitAddress { object: commit.as_bytes() })
 }
 
 /// How a clean worktree reads on this capture: a passed run that produced

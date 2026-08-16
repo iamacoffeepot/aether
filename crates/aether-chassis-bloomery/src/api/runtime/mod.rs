@@ -68,6 +68,8 @@ mod workpieces;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+#[cfg(feature = "github")]
+use std::sync::Arc;
 
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{
@@ -95,6 +97,8 @@ use state::{Routed, SealVerify, VerifyPending, finish};
 use super::BloomeryApiCapability;
 use super::dto::WorkpiecesView;
 use crate::artifacts::{Get, GetResult};
+#[cfg(feature = "github")]
+use crate::bloomery::CandidatePush;
 use crate::bloomery::load_policy;
 use crate::signing::VerifyResult;
 use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult};
@@ -161,6 +165,16 @@ pub struct ApiParams {
     /// Repository-relative path to the Bloomery-owned fallback tier policy
     /// (`approval-policy.toml`).
     pub approval_policy_file: String,
+    /// The same correspondence the executor records captures against. Needed
+    /// so a `from_commit` repair can mint the pair the verifying lane will
+    /// resolve. `None` on a chassis that never mounted a source.
+    #[cfg(feature = "github")]
+    pub correspondence: Option<aether_bloomery::SharedCorrespondence>,
+    /// The same candidate-ref push seam the executor reactor uses after an
+    /// admitted capture. `None` when nothing should push (and `from_commit`
+    /// then refuses).
+    #[cfg(feature = "github")]
+    pub pusher: Option<Arc<dyn CandidatePush>>,
 }
 
 #[http::router]
@@ -202,6 +216,10 @@ impl NativeActor for BloomeryApiCapability {
             configs: ResolvedConfigs::default(),
             configs_ready: false,
             mailer: ctx.mailer(),
+            #[cfg(feature = "github")]
+            correspondence: params.correspondence,
+            #[cfg(feature = "github")]
+            pusher: params.pusher,
             staged: BTreeMap::new(),
             drafts: BTreeMap::new(),
             next_draft: 1,
@@ -376,7 +394,7 @@ impl NativeActor for BloomeryApiCapability {
     ) -> http::Outcome {
         let id = id.0;
         let workpiece = workpiece.0;
-        let routed = ApiCapabilityState::repair(&id, &workpiece, &ctx.request().body);
+        let routed = state.repair(&id, &workpiece, &ctx.request().body);
         finish(state, ctx, routed)
     }
 
