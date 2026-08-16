@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import shlex
 import sqlite3
 import struct
@@ -348,8 +349,27 @@ class LastMovement(unittest.TestCase):
         self.assertIsNone(operator.last_movement(records, "wp-a"))
 
 
+# A pid that cannot be live on this host: Linux PIDs sit well below 2**31-1,
+# so observe_process returns None and the record cannot be an occupant.
+_DEAD_IDENTITY = {"pid": 2147483647, "pgid": 2147483647, "starttime": 1, "boot_id": "retained-dead"}
+_DEAD_IDENTITY_OTHER = {"pid": 2147483646, "pgid": 2147483646, "starttime": 2, "boot_id": "retained-dead"}
+
+
+def _write_evidence(base: Path, nonce: str, slot: int, identity: dict | None) -> None:
+    evidence = base / f"{nonce}-evidence"
+    evidence.mkdir()
+    (evidence / "slot").write_text(f"{slot}\n", encoding="utf-8")
+    if identity is not None:
+        (evidence / "identity").write_text(json.dumps(identity), encoding="utf-8")
+
+
 class SlotListing(unittest.TestCase):
     """Projecting scratch-root slot files into the state an operator reads."""
+
+    def _live_identity(self) -> dict:
+        observed = operator.observe_process(os.getpid())
+        self.assertIsNotNone(observed, "the test process must be observable through /proc")
+        return observed
 
     def test_a_quarantined_slot_names_its_identity_and_stays_distinct_from_occupied(self):
         # Tripwire: catches listing a quarantined slot as merely occupied (or
@@ -360,13 +380,8 @@ class SlotListing(unittest.TestCase):
             base = Path(scratch)
             (base / "slot-0").mkdir()
             (base / "slot-1").mkdir()
-            evidence = base / "dispatch-9-evidence"
-            evidence.mkdir()
-            (evidence / "slot").write_text("1\n", encoding="utf-8")
-            (evidence / "identity").write_text(
-                json.dumps({"pid": 11, "pgid": 11, "starttime": 100, "boot_id": "boot-a"}),
-                encoding="utf-8",
-            )
+            live = self._live_identity()
+            _write_evidence(base, "dispatch-9", 1, live)
             (base / "slot-0.quarantine").write_text(
                 json.dumps(
                     {
@@ -385,7 +400,7 @@ class SlotListing(unittest.TestCase):
             self.assertEqual(listed[0]["identity"]["pid"], 22)
             self.assertEqual(listed[1]["state"], "occupied")
             self.assertEqual(listed[1]["nonce"], "dispatch-9")
-            self.assertEqual(listed[1]["identity"]["pid"], 11)
+            self.assertEqual(listed[1]["identity"]["pid"], live["pid"])
 
     def test_a_checkout_with_no_dispatch_and_no_quarantine_is_free(self):
         # Tripwire: a slot checkout is reused across dispatches, so an idle
@@ -396,6 +411,117 @@ class SlotListing(unittest.TestCase):
             (base / "slot-2").mkdir()
             listed = operator.list_slots(str(base))
             self.assertEqual(listed, [{"slot": 2, "state": "free", "nonce": None, "identity": None, "quarantine": None}])
+
+    def test_a_live_identity_wins_over_historical_evidence_in_any_directory_order(self):
+        # Wave 4/7: list_slots overwrote occupants[slot] in iterdir order, so
+        # a retained dispatch-225/237/272 directory masked the live 436/437/438
+        # process. Filesystem order is not ownership; /proc is.
+        live = self._live_identity()
+        historical = ("dispatch-225", "dispatch-237", "dispatch-272")
+        orders = (
+            historical + ("dispatch-436",),
+            ("dispatch-436",) + historical,
+            ("dispatch-237", "dispatch-436", "dispatch-225", "dispatch-272"),
+        )
+        for names in orders:
+            with self.subTest(names=names):
+                with tempfile.TemporaryDirectory() as scratch:
+                    base = Path(scratch)
+                    (base / "slot-0").mkdir()
+                    for nonce in names:
+                        identity = live if nonce == "dispatch-436" else _DEAD_IDENTITY
+                        _write_evidence(base, nonce, 0, identity)
+
+                    listed = {entry["slot"]: entry for entry in operator.list_slots(str(base))}
+
+                    self.assertEqual(listed[0]["state"], "occupied")
+                    self.assertEqual(listed[0]["nonce"], "dispatch-436")
+                    self.assertEqual(listed[0]["identity"]["pid"], live["pid"])
+                    self.assertEqual(listed[0]["identity"]["starttime"], live["starttime"])
+                    self.assertEqual(listed[0]["identity"]["boot_id"], live["boot_id"])
+
+    def test_dead_retained_evidence_is_not_occupancy(self):
+        # The plausible bug: a checkout whose only evidence is retained and
+        # dead is still reported occupied, so the operator treats an idle
+        # slot as a live blocker.
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            (base / "slot-1").mkdir()
+            _write_evidence(base, "dispatch-225", 1, _DEAD_IDENTITY)
+            _write_evidence(base, "dispatch-237", 1, _DEAD_IDENTITY_OTHER)
+
+            listed = {entry["slot"]: entry for entry in operator.list_slots(str(base))}
+
+            self.assertEqual(listed[1]["state"], "free")
+            self.assertIsNone(listed[1]["nonce"])
+            self.assertIsNone(listed[1]["identity"])
+
+    def test_two_live_identities_for_one_slot_are_unknown(self):
+        # The plausible bug: two live claims, last iterdir write wins — the
+        # operator is told a specific nonce owns the slot when the oracle
+        # cannot choose.
+        self_id = self._live_identity()
+        parent_id = operator.observe_process(os.getppid())
+        self.assertIsNotNone(parent_id, "the parent process must be observable through /proc")
+        self.assertNotEqual(self_id["pid"], parent_id["pid"])
+        for names in (("dispatch-436", "dispatch-437"), ("dispatch-437", "dispatch-436")):
+            with self.subTest(names=names):
+                with tempfile.TemporaryDirectory() as scratch:
+                    base = Path(scratch)
+                    (base / "slot-2").mkdir()
+                    identities = {"dispatch-436": self_id, "dispatch-437": parent_id}
+                    for nonce in names:
+                        _write_evidence(base, nonce, 2, identities[nonce])
+
+                    listed = {entry["slot"]: entry for entry in operator.list_slots(str(base))}
+
+                    self.assertEqual(listed[2]["state"], "unknown")
+                    self.assertIsNone(listed[2]["nonce"])
+                    self.assertIsNone(listed[2]["identity"])
+
+    def test_an_unreadable_identity_is_unknown_not_occupied(self):
+        # The plausible bug: a missing or malformed identity is treated as
+        # occupancy, recreating the false-blocker report with no live process.
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            (base / "slot-3").mkdir()
+            evidence = base / "dispatch-272-evidence"
+            evidence.mkdir()
+            (evidence / "slot").write_text("3\n", encoding="utf-8")
+            (evidence / "identity").write_text("{not-json", encoding="utf-8")
+
+            listed = {entry["slot"]: entry for entry in operator.list_slots(str(base))}
+
+            self.assertEqual(listed[3]["state"], "unknown")
+            self.assertIsNone(listed[3]["nonce"])
+            self.assertIsNone(listed[3]["identity"])
+
+    def test_quarantine_takes_precedence_over_a_live_occupant(self):
+        # The plausible bug: a live re-adopted run whose cancel just failed
+        # is listed occupied, hiding the withheld row the operator came to
+        # clear.
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            (base / "slot-0").mkdir()
+            live = self._live_identity()
+            _write_evidence(base, "dispatch-439", 0, live)
+            (base / "slot-0.quarantine").write_text(
+                json.dumps(
+                    {
+                        "slot": 0,
+                        "nonce": "dispatch-400",
+                        "identity": {"pid": 22, "pgid": 22, "starttime": 200, "boot_id": "boot-a"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            listed = {entry["slot"]: entry for entry in operator.list_slots(str(base))}
+
+            self.assertEqual(listed[0]["state"], "quarantined")
+            self.assertEqual(listed[0]["nonce"], "dispatch-400")
+            self.assertEqual(listed[0]["identity"]["pid"], 22)
+            self.assertEqual(listed[0]["quarantine"]["nonce"], "dispatch-400")
 
 
 class QuarantineClearing(unittest.TestCase):
