@@ -37,6 +37,7 @@ use super::quarantine;
 use super::runner::CapturedObjects;
 use super::testing::{FixedRunner, canned_capture};
 use super::{LocalExecutor, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner};
+use crate::bloomery::REQUIRED_KIT;
 use crate::bloomery::executor::{OutstandingDispatch, ReconcileLanes};
 use crate::bloomery::intake::{EvidenceClaims, NameEvidenceClaims};
 use crate::session::{SessionKey, SessionManifest};
@@ -116,6 +117,74 @@ fn submit_inspect_stream_synthesizes_an_admissible_evidence_ref() {
         "a substantive construct conclusion folds to a passing verdict"
     );
     assert_eq!(upload.detail, Digest::of_wire_bytes(evidence.as_bytes()), "the detail is the evidence content address");
+}
+
+/// A PATH directory whose only runnable program is `git`, so a kit-gated
+/// submit sees `jscpd` (and every other row) as missing.
+fn path_missing_jscpd() -> TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let git = dir.path().join("git");
+    fs::write(&git, "#!/bin/sh\necho 'git version 2.0-test'\n").unwrap();
+    let mut permissions = fs::metadata(&git).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&git, permissions).unwrap();
+    dir
+}
+
+/// A PATH directory with a `--version`-answering stand-in for every kit tool.
+fn path_with_complete_kit() -> TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    for tool in REQUIRED_KIT {
+        let path = dir.path().join(tool.program);
+        fs::write(&path, format!("#!/bin/sh\necho '{} 1.0-test'\n", tool.program)).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+    }
+    dir
+}
+
+#[test]
+fn a_missing_kit_tool_refuses_submit_without_starting_the_lane() {
+    // Tripwire (#5035): a host missing `jscpd` used to dispatch, burn the
+    // attempt on verify.preflight, and wedge. The gate must refuse *before*
+    // prepare/spawn so no outstanding order is recorded and the member stays
+    // queued on the next re-drain.
+    let base = TempDir::new().unwrap();
+    let kit = path_missing_jscpd();
+    let exec = executor(&base, r#"{"command":"construct.implement"}"#, RunLifecycle::Exited { success: true })
+        .with_kit_gate(true)
+        .with_kit_path(kit.path());
+
+    let error = exec.submit(&construct_order(digest(5), "n-kit")).expect_err("a missing kit tool must refuse submit");
+    match error {
+        LocalExecutorError::MissingKit(refusal) => {
+            assert!(refusal.contains("`jscpd`"), "the refusal names the missing tool: {refusal}");
+            assert!(refusal.contains(&kit.path().display().to_string()), "and the PATH it consulted: {refusal}");
+        }
+        other => panic!("expected MissingKit, got {other:?}"),
+    }
+    assert!(
+        exec.inspect(&WorkHandle::new(Nonce("n-kit".to_owned()))).unwrap() == ExecutionStatus::Unknown,
+        "a refused submit must not leave a tracked run",
+    );
+}
+
+#[test]
+fn a_complete_kit_leaves_submit_unchanged() {
+    // Acceptance: on a complete host the gate is a no-op. The stand-in PATH
+    // is complete, so a regression that refuses every submit — an always-on
+    // empty inspect, a list that nothing can satisfy — fails here.
+    let base = TempDir::new().unwrap();
+    let kit = path_with_complete_kit();
+    let exec = executor(&base, r#"{"command":"construct.implement","nonce":"n-ok","produced_candidate":true,"result_record":{"schema":1,"is_error":false,"result":{"num_turns":1}}}"#, RunLifecycle::Exited { success: true })
+        .with_kit_gate(true)
+        .with_kit_path(kit.path());
+
+    let handle = exec.submit(&construct_order(digest(5), "n-ok")).expect("a complete kit must dispatch");
+    assert_eq!(handle, WorkHandle::new(Nonce("n-ok".to_owned())));
 }
 
 #[test]

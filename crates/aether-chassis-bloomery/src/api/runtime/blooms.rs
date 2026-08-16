@@ -5,8 +5,9 @@
 
 use aether_actor::Manual;
 use aether_bloomery::{
-    Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, Disposition, Event, Fact, IdempotencyKey,
-    OperatorHold, OperatorRepair, Outcome, Query, QueryResult, Statement, ViewDocument, WorkpieceId, digest_of,
+    Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, CandidateRef, Disposition, Event, Fact,
+    IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult, Statement, ViewDocument, WorkpieceId,
+    digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerResponse;
@@ -149,7 +150,13 @@ impl ApiCapabilityState {
     /// and the reducer re-enters the workpiece at `Verify`, so the mechanical
     /// suite and the delta-confirm review still run over the operator's tree.
     /// Only the model lap is skipped.
-    pub(super) fn repair(id: &str, workpiece: &str, body: &[u8]) -> Routed {
+    ///
+    /// `from_commit` / `from_worktree` (#5032) run first, on the host: the
+    /// chassis derives the pair, records correspondence, and pushes the
+    /// candidate ref, then admits the same fact the low-level form does. A
+    /// failure there is a `422` that names the precondition, so it never
+    /// becomes a journaled repair of a candidate the verifying lane cannot see.
+    pub(super) fn repair(&self, id: &str, workpiece: &str, body: &[u8]) -> Routed {
         let bloom = match digest_from_hex(id) {
             Some(digest) => BloomId(digest),
             None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
@@ -158,10 +165,14 @@ impl ApiCapabilityState {
             Ok(request) => request,
             Err(error) => return Routed::Reply(error_response(400, &format!("invalid repair body: {error}"))),
         };
-        let RepairRequest { candidate, reason, operator, idempotency_key } = request;
+        let RepairRequest { candidate, from_commit, from_worktree, reason, operator, idempotency_key } = request;
         if let Some(refusal) = unstated(&reason, &operator) {
             return Routed::Reply(refusal);
         }
+        let candidate = match resolve_repair_candidate(self, &bloom, workpiece, candidate, from_commit, from_worktree) {
+            Ok(candidate) => candidate,
+            Err(response) => return Routed::Reply(response),
+        };
 
         let repair = OperatorRepair { workpiece: WorkpieceId(workpiece.to_owned()), candidate, reason, operator };
         let key = idempotency_key.unwrap_or_else(|| {
@@ -358,6 +369,98 @@ impl ApiCapabilityState {
     }
 }
 
+/// The one source a repair body is allowed to name.
+#[derive(Debug)]
+enum RepairSource {
+    Candidate(CandidateRef),
+    FromCommit(String),
+    FromWorktree(String),
+}
+
+/// Pick exactly one candidate source off the request, or a `400` that names
+/// the contract. Isolated so a body with two sources (or none) is refused
+/// before any host-side mutation.
+fn repair_source(
+    candidate: Option<CandidateRef>,
+    from_commit: Option<String>,
+    from_worktree: Option<String>,
+) -> Result<RepairSource, HttpServerResponse> {
+    match (candidate, from_commit, from_worktree) {
+        (Some(candidate), None, None) => Ok(RepairSource::Candidate(candidate)),
+        (None, Some(commit), None) => Ok(RepairSource::FromCommit(commit)),
+        (None, None, Some(path)) => Ok(RepairSource::FromWorktree(path)),
+        _ => Err(error_response(400, "repair needs exactly one of `candidate`, `from_commit`, or `from_worktree`")),
+    }
+}
+
+/// Pick the candidate the repair will admit: the operator-supplied pair, or
+/// one derived from a reachable commit. Exactly one source is accepted.
+fn resolve_repair_candidate(
+    state: &ApiCapabilityState,
+    bloom: &BloomId,
+    workpiece: &str,
+    candidate: Option<CandidateRef>,
+    from_commit: Option<String>,
+    from_worktree: Option<String>,
+) -> Result<CandidateRef, HttpServerResponse> {
+    match repair_source(candidate, from_commit, from_worktree)? {
+        RepairSource::Candidate(candidate) => Ok(candidate),
+        source => derive_repair_candidate(state, bloom, workpiece, &source),
+    }
+}
+
+fn derive_repair_candidate(
+    state: &ApiCapabilityState,
+    bloom: &BloomId,
+    workpiece: &str,
+    source: &RepairSource,
+) -> Result<CandidateRef, HttpServerResponse> {
+    #[cfg(not(feature = "github"))]
+    {
+        let _ = (state, bloom, workpiece, source);
+        Err(error_response(
+            422,
+            "this chassis cannot derive a candidate from a commit: the GitHub source runtime is not mounted",
+        ))
+    }
+
+    #[cfg(feature = "github")]
+    {
+        use std::path::Path;
+
+        use crate::bloomery::{CandidateSource, prepare_candidate};
+
+        let (Some(correspondence), Some(pusher)) = (state.correspondence.as_ref(), state.pusher.as_ref()) else {
+            return Err(error_response(
+                422,
+                "this chassis cannot derive a candidate from a commit: no correspondence store is mounted",
+            ));
+        };
+        let prepared = match source {
+            RepairSource::FromCommit(commit) => prepare_candidate(
+                correspondence.as_ref(),
+                pusher.as_ref(),
+                bloom,
+                workpiece,
+                CandidateSource::Commit(commit),
+                Path::new("."),
+            ),
+            RepairSource::FromWorktree(path) => prepare_candidate(
+                correspondence.as_ref(),
+                pusher.as_ref(),
+                bloom,
+                workpiece,
+                CandidateSource::Worktree(Path::new(path)),
+                Path::new("."),
+            ),
+            RepairSource::Candidate(_) => {
+                return Err(error_response(500, "derive_repair_candidate was handed a pre-built candidate"));
+            }
+        };
+        prepared.map_err(|error| error_response(422, &error.to_string()))
+    }
+}
+
 /// The `422` a manager-override body earns by saying nothing (#4957), or `None`
 /// when it states both.
 ///
@@ -455,7 +558,11 @@ mod tests {
     };
     use aether_data::wire::{from_bytes, to_vec};
 
-    use super::{ApiCapabilityState, Routed, SupersedeRequest, admitted_response, query_response};
+    use super::{
+        ApiCapabilityState, RepairSource, Routed, SupersedeRequest, admitted_response, hex, query_response,
+        repair_source,
+    };
+    use crate::api::dto::RepairRequest;
 
     /// A bloom id in the spelling the routes take.
     const BLOOM: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -651,5 +758,52 @@ mod tests {
         let parsed: SupersedeRequest = serde_json::from_slice(body).unwrap();
 
         assert_eq!(parsed.descriptions.get("wp-a").map(String::as_str), Some("build the thing"));
+    }
+
+    fn candidate_pair() -> aether_bloomery::CandidateRef {
+        aether_bloomery::CandidateRef { tree: Digest::from_bytes([0xaa; 32]), checkout: Digest::from_bytes([0xbb; 32]) }
+    }
+
+    #[test]
+    fn a_repair_body_names_exactly_one_candidate_source() {
+        // Tripwire (#5032): a body that names two sources (or none) must not
+        // silently prefer one. The low-level pair and from-commit derive
+        // different host-side effects; picking the wrong one would skip the
+        // push or overwrite a hand-built pair.
+        let pair = candidate_pair();
+        assert!(matches!(repair_source(Some(pair), None, None), Ok(RepairSource::Candidate(_))));
+        assert!(matches!(repair_source(None, Some("abc".into()), None), Ok(RepairSource::FromCommit(_))));
+        assert!(matches!(repair_source(None, None, Some("/tmp/wt".into())), Ok(RepairSource::FromWorktree(_))));
+
+        for (candidate, commit, worktree, label) in [
+            (None, None, None, "none"),
+            (Some(pair), Some("abc".into()), None, "candidate+commit"),
+            (Some(pair), None, Some("/tmp/wt".into()), "candidate+worktree"),
+            (None, Some("abc".into()), Some("/tmp/wt".into()), "commit+worktree"),
+            (Some(pair), Some("abc".into()), Some("/tmp/wt".into()), "all three"),
+        ] {
+            let refusal = repair_source(candidate, commit, worktree).expect_err(label);
+            assert_eq!(refusal.status, 400, "{label} must be a 400, not a silent pick");
+        }
+    }
+
+    #[test]
+    fn a_legacy_repair_body_still_parses_as_the_candidate_source() {
+        // Tripwire: `candidate` became optional so from_commit can land, but
+        // every existing caller still sends the pair. Making the field vanish
+        // would turn those into `400 invalid repair body`.
+        let body = serde_json::json!({
+            "candidate": {
+                "tree": "aa".repeat(32),
+                "checkout": "bb".repeat(32),
+            },
+            "reason": "hand-built",
+            "operator": "eve",
+        })
+        .to_string();
+        let parsed: RepairRequest = hex::from_slice(body.as_bytes()).expect("a pre-from-commit body still parses");
+        assert!(parsed.from_commit.is_none());
+        assert!(parsed.from_worktree.is_none());
+        assert_eq!(parsed.candidate, Some(candidate_pair()));
     }
 }
