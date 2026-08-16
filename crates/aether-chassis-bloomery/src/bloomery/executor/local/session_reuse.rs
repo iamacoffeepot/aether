@@ -169,6 +169,11 @@ impl SessionReuse {
     /// opened: the operator's `SessionConfig` path and eligibility knobs, not
     /// literals. The acquire inequality still needs the bloom's sealed rates,
     /// which ride each [`AcquireRequest`] rather than this constructor.
+    ///
+    /// Rebuilds the hot routing index from complete durable rows before the
+    /// first acquire. A legacy or malformed row stays in the pool (eligibility
+    /// and lease are unchanged) but is omitted here, so the next lap fails cold
+    /// rather than resuming on invented deposit/slot/builder state.
     pub fn from_config(session: &SessionConfig) -> rusqlite::Result<Self> {
         let pool = SqliteSessionStore::open(
             session.store_path(),
@@ -176,7 +181,22 @@ impl SessionReuse {
             session.lease_ttl_mins.saturating_mul(60),
             session.context_cap_tokens,
         )?;
-        Ok(Self::new(Box::new(pool), PriceTable::default()))
+        let snapshot = pool.routing_snapshot()?;
+        let reuse = Self::new(Box::new(pool), PriceTable::default());
+        reuse.restore_snapshot(snapshot);
+        Ok(reuse)
+    }
+
+    fn restore_snapshot(&self, rows: Vec<(SessionKey, u32, u64, String, bool)>) {
+        let mut state = lock(&self.state);
+        for (key, deposit_count, context_tokens, slot_path, is_builder) in rows {
+            state.deposits.insert(key.clone(), deposit_count);
+            state.last_context.insert(key.clone(), context_tokens);
+            state.slot.insert(key.clone(), slot_path.clone());
+            if is_builder {
+                state.builder_at_slot.insert(slot_path, key);
+            }
+        }
     }
 
     /// Pin the clock the next acquire/deposit stamps — tests only.
@@ -204,14 +224,7 @@ impl SessionReuse {
         slot_path: &str,
         is_builder: bool,
     ) {
-        let _ = lock(&self.pool).release(key, None, session_id, manifest);
-        let mut state = lock(&self.state);
-        *state.deposits.entry(key.clone()).or_insert(0) += 1;
-        state.last_context.insert(key.clone(), manifest.context_tokens);
-        state.slot.insert(key.clone(), slot_path.to_owned());
-        if is_builder {
-            state.builder_at_slot.insert(slot_path.to_owned(), key.clone());
-        }
+        self.persist_and_remember(key, None, session_id, manifest, slot_path, is_builder);
     }
 
     /// Decide whether this lap resumes, acquire from the pool, and return the
@@ -337,13 +350,34 @@ impl SessionReuse {
             read_files: vec![plan.slot_path.clone()],
             deposited_at: now,
         };
-        let _ = lock(&self.pool).release(&plan.key, plan.lease.as_ref(), session_id, &manifest);
+        self.persist_and_remember(
+            &plan.key,
+            plan.lease.as_ref(),
+            session_id,
+            &manifest,
+            &plan.slot_path,
+            plan.is_builder,
+        );
+    }
+
+    fn persist_and_remember(
+        &self,
+        key: &SessionKey,
+        lease: Option<&LeaseToken>,
+        session_id: &str,
+        manifest: &SessionManifest,
+        slot_path: &str,
+        is_builder: bool,
+    ) {
+        let deposit_count = lock(&self.state).deposits.get(key).copied().unwrap_or(0).saturating_add(1);
+        let _ =
+            lock(&self.pool).release_routed(key, lease, session_id, manifest, (deposit_count, slot_path, is_builder));
         let mut state = lock(&self.state);
-        *state.deposits.entry(plan.key.clone()).or_insert(0) += 1;
-        state.last_context.insert(plan.key.clone(), context_tokens);
-        state.slot.insert(plan.key.clone(), plan.slot_path.clone());
-        if plan.is_builder {
-            state.builder_at_slot.insert(plan.slot_path.clone(), plan.key.clone());
+        *state.deposits.entry(key.clone()).or_insert(0) += 1;
+        state.last_context.insert(key.clone(), manifest.context_tokens);
+        state.slot.insert(key.clone(), slot_path.to_owned());
+        if is_builder {
+            state.builder_at_slot.insert(slot_path.to_owned(), key.clone());
         }
     }
 
@@ -636,7 +670,7 @@ mod tests {
     use super::{
         COLD_PREFIX_TOKENS, MissReason, ReuseArm, SEED_NAMED_SITE_TURNS, SessionReuse, resume_is_cheaper, stamp_reuse,
     };
-    use crate::session::{SessionKey, SessionManifest};
+    use crate::session::{SessionBackend, SessionConfig, SessionKey, SessionManifest, SqliteSessionStore};
     use aether_bloomery::{PriceRates, PriceTable};
     use std::path::Path;
 
@@ -898,5 +932,144 @@ mod tests {
             edge: false,
             is_builder: true,
         }
+    }
+
+    fn file_reuse(path: &str) -> SessionReuse {
+        let reuse = SessionReuse::from_config(&SessionConfig { db_path: path.to_owned(), ..SessionConfig::default() })
+            .expect("a file-backed session pool opens");
+        reuse.set_head_hash("head-A");
+        reuse.set_now(1_000);
+        reuse
+    }
+
+    fn temp_pool_path(dir: &tempfile::TempDir) -> String {
+        dir.path().join("sessions.db").to_str().expect("utf-8 temp path").to_owned()
+    }
+
+    fn judge_key() -> SessionKey {
+        SessionKey { task: "review.critic\nissue-4902".to_owned(), ..key() }
+    }
+
+    #[test]
+    fn reopening_the_pool_restores_builder_routing() {
+        // Tripwire: ReuseState used to start empty after a coordinator restart
+        // even though the SQLite pool still held the session. A same-slot
+        // dependent then paid the cold forensics tax ADR-0196 exists to avoid;
+        // a judge seat and a mismatched slot must still stay cold, and a
+        // twice-deposited key must keep the retry-index rule (cold on lap 3).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_pool_path(&dir);
+
+        let reuse = file_reuse(&path);
+        reuse.seed(&key(), "sess-A", &manifest("head-A", 8_000, 1_000), "/slot-0");
+        reuse.seed_builder(&judge_key(), "sess-judge", &manifest("head-A", 4_000, 1_001), "/slot-0", false);
+        drop(reuse);
+
+        let reuse = file_reuse(&path);
+        let mismatch = reuse.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-1"));
+        assert_eq!(mismatch.miss, Some(MissReason::SlotMismatch), "the restored slot must still guard cwd");
+        assert!(mismatch.resume.is_none());
+
+        let edge = reuse.acquire(&construct_request("claude-opus-5", "issue-B", "/slot-0"));
+        assert_eq!(edge.arm, ReuseArm::Resumed, "a same-slot dependent resumes the restored builder");
+        assert_eq!(edge.resume.as_deref(), Some("sess-A"), "the judge deposit must not become the slot handle");
+        assert!(edge.edge);
+
+        let judge = reuse.acquire(&super::AcquireRequest {
+            model: "claude-opus-5",
+            effort: "high",
+            task: "review.critic\nissue-other",
+            worktree: Path::new("/slot-0"),
+            prices: None,
+            command: "review.critic",
+        });
+        assert_eq!(judge.arm, ReuseArm::Fresh, "a judge command never sees the restored builder handle");
+        assert!(judge.resume.is_none());
+        assert!(!judge.edge);
+        drop(reuse);
+
+        let reuse = file_reuse(&path);
+        // The edge acquire above left the row leased at t=1000 (15-min TTL).
+        // A restart that still sees that lease must not look like a lost count.
+        reuse.set_now(2_000);
+        let own = reuse.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-0"));
+        assert_eq!(own.arm, ReuseArm::Resumed, "deposit count 1 must survive so lap 2 still resumes");
+        assert_eq!(own.resume.as_deref(), Some("sess-A"));
+    }
+
+    #[test]
+    fn a_twice_deposited_key_stays_cold_after_reopen() {
+        // Tripwire: inventing deposit_count=1 for every reopened row would
+        // resume a session that already failed twice. The real count must
+        // survive, not a "one builder deposit" default.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_pool_path(&dir);
+
+        let reuse = file_reuse(&path);
+        reuse.seed(&key(), "sess-A", &manifest("head-A", 8_000, 1_000), "/slot-0");
+        reuse.seed(&key(), "sess-A2", &manifest("head-A", 8_000, 1_002), "/slot-0");
+        drop(reuse);
+
+        let reuse = file_reuse(&path);
+        let third = reuse.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-0"));
+        assert_eq!(third.arm, ReuseArm::Fresh, "a twice-deposited key must stay cold after restart");
+        assert_eq!(third.miss, None, "retry-index seed, not a pool miss");
+    }
+
+    #[test]
+    fn reopening_restores_terminal_context_into_the_inequality() {
+        // Tripwire: last_context is what turns a cheap-read row into a resume
+        // and an even-rate row with a large T into a prediction-cold. If
+        // restart restored the count but invented or dropped T, the even-rate
+        // arm would flip to Resumed (None T skips the inequality).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_pool_path(&dir);
+
+        let reuse = file_reuse(&path);
+        reuse.seed(&key(), "sess-A", &manifest("head-A", COLD_PREFIX_TOKENS, 1_000), "/slot-0");
+        drop(reuse);
+
+        let reuse = file_reuse(&path);
+        let even_rates = table("claude-opus-5", row(1_000_000, 1_000_000, 1_000_000));
+        let plan = reuse.acquire(&super::AcquireRequest {
+            model: "claude-opus-5",
+            effort: "high",
+            task: "issue-4902",
+            worktree: Path::new("/slot-0"),
+            prices: Some(&even_rates),
+            command: "construct.implement",
+        });
+        assert_eq!(plan.arm, ReuseArm::Fresh, "restored T must feed the inequality");
+        assert_eq!(plan.miss, None, "a prediction, not a pool miss");
+        assert_eq!(plan.predicted_arm, ReuseArm::Fresh);
+    }
+
+    #[test]
+    fn a_legacy_row_fails_cold_after_reopen() {
+        // Tripwire: treating every reopened row as one builder deposit would
+        // resume a judge (or an incomplete pre-routing row) on a dependency
+        // edge. The pool row stays eligible; the hot index must not see it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_pool_path(&dir);
+
+        let mut store = SqliteSessionStore::open(
+            &path,
+            SessionConfig::default().cache_ttl_cutoff_mins.saturating_mul(60),
+            SessionConfig::default().lease_ttl_mins.saturating_mul(60),
+            SessionConfig::default().context_cap_tokens,
+        )
+        .expect("legacy pool opens");
+        store.release(&key(), None, "sess-legacy", &manifest("head-A", 8_000, 1_000)).expect("unrouted deposit");
+        drop(store);
+
+        let reuse = file_reuse(&path);
+        let edge = reuse.acquire(&construct_request("claude-opus-5", "issue-B", "/slot-0"));
+        assert_eq!(edge.arm, ReuseArm::Fresh, "an unrouted legacy row must not become a builder handle");
+        assert!(edge.resume.is_none());
+        assert!(!edge.edge);
+
+        let own = reuse.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-0"));
+        assert_eq!(own.arm, ReuseArm::Fresh, "an unrouted legacy row must not seed a deposit count");
+        assert!(own.resume.is_none());
     }
 }
