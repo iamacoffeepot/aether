@@ -113,16 +113,25 @@ impl IntegrateReactorState {
 
 /// The idempotency key a bloom's fold-conflict admits under.
 ///
-/// Keyed by the conflicted candidate as well as `(bloom, workpiece, checkpoint)`,
-/// because the checkpoint is the folded tree of the *earlier* members and does
-/// not change between laps. A member that reconciles, verifies, and re-collides
-/// with the same fold produces a new candidate; without that tree in the key
-/// the second collision reduces to `AppendOutcome::Duplicate` and the bloom
-/// stops with the entry acked. The sibling [`resolve_key`] carries the tree
-/// for the same reason (#4722).
-fn fold_conflict_key(bloom: &Digest, workpiece: &str, checkpoint: &Digest, candidate: &Digest) -> IdempotencyKey {
+/// Keyed by the conflicted candidate tree *and* the checkout commit offered
+/// to the merge, as well as `(bloom, workpiece, checkpoint)`. The checkpoint
+/// is the folded tree of the *earlier* members and does not change between
+/// laps. A member that reconciles, verifies, and re-collides with the same
+/// fold produces a new candidate tree; without that tree in the key the
+/// second collision reduces to `AppendOutcome::Duplicate` and the bloom
+/// stops with the entry acked. An ancestry repair can replace the checkout
+/// while preserving the tree; without that vehicle in the key the repaired
+/// merge is discarded as a replay of the earlier collision (#5083). The
+/// sibling [`resolve_key`] carries the tree for the same reason (#4722).
+fn fold_conflict_key(
+    bloom: &Digest,
+    workpiece: &str,
+    checkpoint: &Digest,
+    candidate: &Digest,
+    attempted: &Digest,
+) -> IdempotencyKey {
     use core::fmt::Write;
-    let mut key = String::with_capacity(32 + 64 + 1 + workpiece.len() + 1 + 64 + 1 + 64);
+    let mut key = String::with_capacity(32 + 64 + 1 + workpiece.len() + 1 + 64 + 1 + 64 + 1 + 64);
     key.push_str("aether.bloomery.fold-conflict:");
     for byte in bloom.as_bytes() {
         let _ = write!(key, "{byte:02x}");
@@ -135,6 +144,10 @@ fn fold_conflict_key(bloom: &Digest, workpiece: &str, checkpoint: &Digest, candi
     }
     key.push(':');
     for byte in candidate.as_bytes() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    key.push(':');
+    for byte in attempted.as_bytes() {
         let _ = write!(key, "{byte:02x}");
     }
     IdempotencyKey(key)
@@ -192,18 +205,21 @@ fn resolve_key(bloom: &Digest, tree: &Digest) -> IdempotencyKey {
     IdempotencyKey(key)
 }
 
-/// One member's collision, and the tree the branch stood at when the merge that
-/// produced it was attempted.
+/// One member's collision, the tree the branch stood at when the merge that
+/// produced it was attempted, and the checkout commit that merge offered.
 ///
 /// `at` is what decides whether the evidence still describes the settled
 /// checkpoint: a member folding behind this one moves the branch past `at`, and
 /// a collision measured against a tree the fold has left is evidence about a
-/// checkpoint nothing will reconcile onto.
+/// checkpoint nothing will reconcile onto. `attempted` is the vehicle actually
+/// merged — not the candidate tree — so an ancestry-corrected retry cannot
+/// share the previous collision's admission key.
 struct Collision<'a> {
     member: &'a MemberCandidate,
     at: Digest,
     paths: Vec<String>,
     diff: String,
+    attempted: Digest,
 }
 
 /// One conflicted member's admission: the fact, the overlay bytes its Reconcile
@@ -333,8 +349,8 @@ fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOut
                 // rather than refused in prose: the member reconciles against
                 // the folded checkpoint. Re-driving the same trees cannot
                 // resolve it; the dispatched lane can.
-                Ok(IntegrateOutcome::Conflict { paths, diff, .. }) => {
-                    collisions.push(Collision { member, at: expected.tree, paths, diff });
+                Ok(IntegrateOutcome::Conflict { paths, diff, attempted, .. }) => {
+                    collisions.push(Collision { member, at: expected.tree, paths, diff, attempted });
                     pending.push(member);
                 }
                 Ok(other) => {
@@ -413,7 +429,13 @@ fn conflicted_member(
         detail: Digest::of_wire_bytes(overlay.as_bytes()),
     };
     let event = Event {
-        idempotency_key: fold_conflict_key(&bloom.0, &owner.0, &checkpoint, &collision.member.candidate),
+        idempotency_key: fold_conflict_key(
+            &bloom.0,
+            &owner.0,
+            &checkpoint,
+            &collision.member.candidate,
+            &collision.attempted,
+        ),
         fact: Fact::FoldConflict { bloom: *bloom, workpiece: owner.clone(), checkpoint, head: checkout, evidence },
     };
 
