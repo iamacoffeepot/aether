@@ -2,6 +2,7 @@
 //! over the [`TransformRunner`] spawn seam, and its [`ExecutorBackend`] impl.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf, absolute};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -27,6 +28,7 @@ use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use super::session_reuse::SPLICED_RESET_NOTE;
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::CoordinatorConfig;
+use crate::bloomery::KitReport;
 use crate::bloomery::executor::{LaneOccupancy, OutstandingDispatch, ReconcileLanes, ReconcileReport};
 use crate::bloomery::intake::NameEvidenceClaims;
 use crate::bloomery::triage::MAX_TRIAGED_DIFF_BYTES;
@@ -291,6 +293,18 @@ pub struct LocalExecutor {
     // Checkout-hex → the slot that captured it. B prefers the slot that built A
     // because B's checkout *is* A's candidate commit.
     builders: Mutex<BuilderSlots>,
+    // Whether submit inspects [`REQUIRED_KIT`] before spawning. Production
+    // (`from_config` with the default lane program) turns this on so a missing
+    // tool refuses the dispatch and the member stays queued (#5035). Seam
+    // tests and a mock-lane program leave it off: they do not run the real
+    // kit, and a developer host missing `muse` must not fail every stub submit.
+    //
+    // [`REQUIRED_KIT`]: crate::bloomery::REQUIRED_KIT
+    kit_gate: bool,
+    // PATH the kit inspects when the gate is on. `None` is the process PATH
+    // a dispatched lane inherits; a test names a directory of stand-in
+    // binaries so a missing-tool refusal does not depend on this host.
+    kit_path: Option<OsString>,
 }
 
 impl LocalExecutor {
@@ -321,6 +335,8 @@ impl LocalExecutor {
             messages: None,
             sessions: None,
             builders,
+            kit_gate: false,
+            kit_path: None,
         }
     }
 
@@ -380,6 +396,24 @@ impl LocalExecutor {
         self
     }
 
+    /// Inspect the lane-host kit on every submit and refuse when a required
+    /// tool is missing (#5035). Off by default so seam tests and a mock-lane
+    /// program keep dispatching; [`from_config`](Self::from_config) turns it
+    /// on for the production lane program.
+    #[must_use]
+    pub fn with_kit_gate(mut self, enabled: bool) -> Self {
+        self.kit_gate = enabled;
+        self
+    }
+
+    /// Inspect `path` instead of the process PATH when the kit gate is on.
+    /// Production never sets this; tests use it to name a stand-in directory.
+    #[must_use]
+    pub fn with_kit_path(mut self, path: impl Into<OsString>) -> Self {
+        self.kit_path = Some(path.into());
+        self
+    }
+
     /// Build the production backend from resolved config: the real git + cargo
     /// [`ProcessTransformRunner`], the shared `correspondence` the checkout
     /// resolves through, and the config'd scratch-worktree base dir. The model a
@@ -397,14 +431,16 @@ impl LocalExecutor {
         session: &SessionConfig,
     ) -> Self {
         let identity = CaptureIdentity { name: config.operator_name.clone(), email: config.operator_email.clone() };
+        let lane_program = LaneProgram::parse(&config.local_lane_program);
 
         let backend = Self::new(
-            Arc::new(ProcessTransformRunner::new(identity, LaneProgram::parse(&config.local_lane_program))),
+            Arc::new(ProcessTransformRunner::new(identity, lane_program.clone())),
             correspondence,
             config.local_worktree_base.clone(),
         )
         .with_max_concurrent_lanes(config.max_concurrent_lanes)
-        .with_lane_build(&config.lane_target_base, config.lane_build_jobs);
+        .with_lane_build(&config.lane_target_base, config.lane_build_jobs)
+        .with_kit_gate(lane_program == LaneProgram::default());
         let backend = match super::SessionReuse::from_config(session) {
             Ok(sessions) => backend.with_session_reuse(sessions),
             Err(error) => {
@@ -1153,6 +1189,21 @@ impl ExecutorBackend for LocalExecutor {
     type Error = LocalExecutorError;
 
     fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        if self.kit_gate {
+            let report = self
+                .kit_path
+                .as_ref()
+                .map_or_else(KitReport::inspect, |path| KitReport::inspect_on(Some(path.clone())));
+            if let Some(refusal) = report.render_refusal() {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::doctor",
+                    nonce = %order.nonce.0,
+                    %refusal,
+                    "refusing dispatch; lane host kit is incomplete",
+                );
+                return Err(LocalExecutorError::MissingKit(refusal));
+            }
+        }
         let pending = self.prepare(order)?;
         // Under the ceiling with nothing already waiting, the spawn happens inline,
         // so a spawn fault stays the caller's to re-drive exactly as it was before
