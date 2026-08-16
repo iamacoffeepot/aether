@@ -818,6 +818,59 @@ def supersede_command(bloom_id: str) -> str:
     return f"{OPERATOR_SCRIPT} supersede {bloom_id} --draft <draft>"
 
 
+def review_park_of(bloom: dict[str, Any]) -> dict[str, Any] | None:
+    """The bloom-scoped aggregate-review park, or None when the bloom is not parked.
+
+    Distinct from a member `pending_decision` and from an executor fault: the
+    park is bloom-level, and its digest is the finding `adjudicate --finding`
+    names. A reduced REST rendering (digest only) is still a park.
+    """
+    park = bloom.get("review_park")
+    if not isinstance(park, dict):
+        return None
+    question = digest_hex(park.get("question"))
+    if not question:
+        return None
+    prompt = park.get("prompt")
+    blocked = park.get("blocked")
+    options = park.get("options")
+    return {
+        "question": question,
+        "stage": park.get("stage"),
+        "prompt": prompt if isinstance(prompt, str) and prompt else None,
+        "options": options if isinstance(options, list) else [],
+        "blocked": blocked if isinstance(blocked, str) and blocked else None,
+    }
+
+
+def adjudicate_command(bloom_id: str, finding: str) -> str:
+    """The adjudicate invocation naming the parked question.
+
+    Placeholders for `--reason` / `--operator` stay so the line parses; those
+    two are the operator's words. `--defer` is omitted so the default is
+    Accepted — the operator adds it when the disposition is a filed issue.
+    """
+    return (
+        f"{OPERATOR_SCRIPT} adjudicate {bloom_id} --finding {finding} "
+        "--reason <reason> --operator <operator>"
+    )
+
+
+def print_review_park(park: dict[str, Any], bloom_id: str | None) -> None:
+    """Print the bloom-scoped park and the runnable recovery line."""
+    print(f"  REVIEW PARK question {park['question']}")
+    if park.get("stage"):
+        print(f"             at {park['stage']} (bloom-scoped; not a member hold)")
+    else:
+        print("             bloom-scoped aggregate review; not a member hold")
+    if park.get("prompt"):
+        print(f"             {park['prompt']}")
+    if park.get("blocked"):
+        print(f"             blocks {park['blocked']}")
+    bloom = bloom_id or "<bloom>"
+    print(f"  adjudicate  {adjudicate_command(bloom, park['question'])}")
+
+
 def recovery_ladder(
     *,
     bloom_id: str | None,
@@ -975,12 +1028,16 @@ def cmd_status(args: argparse.Namespace) -> None:
         "blooms": [],
     }
     for bloom in view.get("blooms", []):
+        park = review_park_of(bloom)
+        bloom_id = digest_hex(bloom.get("id"))
         entry = {
             "id": bloom.get("id"),
             "status": bloom.get("status"),
             "superseded_by": bloom.get("superseded_by"),
             "landing_blocked": bloom.get("landing_blocked"),
             "executor_fault": bloom.get("executor_fault"),
+            "review_park": park,
+            "adjudicate": adjudicate_command(bloom_id or "<bloom>", park["question"]) if park else None,
             "members": [],
         }
         for member in bloom.get("members", []):
@@ -1018,25 +1075,34 @@ def cmd_status(args: argparse.Namespace) -> None:
         return
     for bloom in report["blooms"]:
         print()
-        line = f"bloom {bloom['id']}  status={bloom['status']}"
-        if bloom["superseded_by"]:
-            line += f"  superseded_by={bloom['superseded_by']}"
+        print_status_bloom(bloom)
+
+
+def print_status_bloom(bloom: dict[str, Any]) -> None:
+    """One bloom's human status block, including a bloom-scoped review park."""
+    line = f"bloom {bloom['id']}  status={bloom['status']}"
+    if bloom["superseded_by"]:
+        line += f"  superseded_by={bloom['superseded_by']}"
+    if bloom["review_park"]:
+        line += "  REVIEW PARK"
+    print(line)
+    if bloom["landing_blocked"]:
+        block = bloom["landing_blocked"]
+        print(f"  landing blocked: {block.get('rolls')}/{block.get('budget')} refused")
+    if bloom["executor_fault"]:
+        fault = bloom["executor_fault"]
+        terminal = " TERMINAL" if fault.get("terminal") else ""
+        print(f"  executor fault: {fault.get('rolls')}/{fault.get('budget')}{terminal}")
+    if bloom["review_park"]:
+        print_review_park(bloom["review_park"], digest_hex(bloom["id"]))
+    print(f"  {'MEMBER':<28} {'CURSOR':<17} {'STATE':<12} CANDIDATE")
+    for member in bloom["members"]:
+        candidate = member["candidate"] or "-"
+        cursor = member["cursor"] or "-"
+        line = f"  {member['workpiece']:<28} {cursor:<17} {member['state']:<12} {candidate}"
+        if member["blocked_by"]:
+            line += f"  blocked by {member['blocked_by']}"
         print(line)
-        if bloom["landing_blocked"]:
-            block = bloom["landing_blocked"]
-            print(f"  landing blocked: {block.get('rolls')}/{block.get('budget')} refused")
-        if bloom["executor_fault"]:
-            fault = bloom["executor_fault"]
-            terminal = " TERMINAL" if fault.get("terminal") else ""
-            print(f"  executor fault: {fault.get('rolls')}/{fault.get('budget')}{terminal}")
-        print(f"  {'MEMBER':<28} {'CURSOR':<17} {'STATE':<12} CANDIDATE")
-        for member in bloom["members"]:
-            candidate = member["candidate"] or "-"
-            cursor = member["cursor"] or "-"
-            line = f"  {member['workpiece']:<28} {cursor:<17} {member['state']:<12} {candidate}"
-            if member["blocked_by"]:
-                line += f"  blocked by {member['blocked_by']}"
-            print(line)
 
 
 def cmd_orders(args: argparse.Namespace) -> None:
@@ -1117,6 +1183,7 @@ def cmd_why(args: argparse.Namespace) -> None:
         stranded=stranded_members(bloom),
     )
 
+    park = review_park_of(bloom)
     diagnosis = {
         "workpiece": args.workpiece,
         "bloom": bloom.get("id"),
@@ -1135,6 +1202,8 @@ def cmd_why(args: argparse.Namespace) -> None:
         "wedge": wedge,
         "held_on_question": pending,
         "blocked_by": blocked_by,
+        "review_park": park,
+        "adjudicate": adjudicate_command(bloom_id or "<bloom>", park["question"]) if park else None,
         "last_lane_result": lane,
         "ladder": ladder,
     }
@@ -1179,6 +1248,8 @@ def cmd_why(args: argparse.Namespace) -> None:
     if pending:
         print(f"  HELD       on question {pending.get('question')} at {pending.get('stage')}")
         print(f"             {pending.get('prompt')}")
+    if park:
+        print_review_park(park, bloom_id)
     if lane:
         print(
             f"  last lane  {lane['command']} status={lane['status']} turns={lane['turns']} "

@@ -182,6 +182,7 @@ mod tests {
                 members,
                 landing_blocked: None,
                 executor_fault: None,
+                review_park: None,
             }],
         }
     }
@@ -231,6 +232,7 @@ mod tests {
                     evidence: Digest::from_bytes([9; 32]),
                     terminal: true,
                 }),
+                review_park: None,
             }],
         };
 

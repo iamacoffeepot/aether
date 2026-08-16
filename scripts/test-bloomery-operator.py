@@ -574,6 +574,102 @@ class JournalFactWalk(unittest.TestCase):
         self.assertEqual(operator.last_attempt_count(records, "issue-5034"), 3)
 
 
+class ReviewParkPresentation(unittest.TestCase):
+    """An otherwise idle sealed bloom's park in status/why."""
+
+    QUESTION = "ab" * 32
+    BLOOM = "4f" * 32
+
+    def _parked_entry(self, *, resolved: bool = True) -> dict:
+        park = {"question": self.QUESTION}
+        if resolved:
+            park.update(
+                {
+                    "stage": "AggregateReview",
+                    "prompt": "delta-confirm still fails; accept the weave or file a follow-up?",
+                    "options": ["accept — land as-is", "defer — file the finding forward"],
+                    "blocked": "the bloom cannot land until the owner settles the review",
+                }
+            )
+        extracted = operator.review_park_of({"review_park": park})
+        return {
+            "id": self.BLOOM,
+            "status": "Sealed",
+            "superseded_by": None,
+            "landing_blocked": None,
+            "executor_fault": None,
+            "review_park": extracted,
+            "adjudicate": operator.adjudicate_command(self.BLOOM, extracted["question"]),
+            "members": [
+                {
+                    "workpiece": "issue-5055",
+                    "cursor": None,
+                    "state": "integrated",
+                    "candidate": "aa" * 32,
+                    "blocked_by": None,
+                    "held_on_question": None,
+                }
+            ],
+        }
+
+    def test_an_idle_sealed_bloom_names_the_park_and_prints_adjudicate(self):
+        # The plausible bug: status of a Sealed bloom with every member
+        # integrated and no outstanding order still reads as idle, so the
+        # operator never sees the digest the existing adjudicate route needs.
+        entry = self._parked_entry()
+        command = entry["adjudicate"]
+        parsed = parse_printed(command)
+        self.assertEqual(parsed.command, "adjudicate")
+        self.assertEqual(parsed.bloom, self.BLOOM)
+        self.assertEqual(parsed.finding, [self.QUESTION])
+        self.assertEqual(parsed.reason, "<reason>")
+        self.assertEqual(parsed.operator, "<operator>")
+        self.assertIsNone(parsed.defer)
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            operator.print_status_bloom(entry)
+        text = buf.getvalue()
+        self.assertIn("REVIEW PARK", text)
+        self.assertIn(self.QUESTION, text)
+        self.assertIn(command, text)
+        self.assertIn("issue-5055", text)
+        self.assertIn("integrated", text)
+        self.assertNotIn("HELD", text)
+
+    def test_a_digest_only_park_is_still_actionable(self):
+        # The plausible bug: a live REST view that cannot resolve the question
+        # artifact drops the park, so the recovery line is missing exactly
+        # when the operator has only the digest.
+        entry = self._parked_entry(resolved=False)
+        self.assertEqual(entry["review_park"]["question"], self.QUESTION)
+        self.assertIsNone(entry["review_park"]["prompt"])
+        parsed = parse_printed(entry["adjudicate"])
+        self.assertEqual(parsed.finding, [self.QUESTION])
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            operator.print_review_park(entry["review_park"], self.BLOOM)
+        text = buf.getvalue()
+        self.assertIn(self.QUESTION, text)
+        self.assertIn(entry["adjudicate"], text)
+
+    def test_a_member_hold_or_executor_fault_is_not_a_review_park(self):
+        # The plausible bug: any pending_decision or executor_fault is painted
+        # as the bloom-scoped park, so why prints an adjudicate line for a
+        # question the bloom-scope door will refuse.
+        self.assertIsNone(
+            operator.review_park_of(
+                {
+                    "executor_fault": {"rolls": 2, "budget": 2, "terminal": True},
+                    "members": [{"pending_decision": {"question": self.QUESTION, "stage": "Construct"}}],
+                }
+            )
+        )
+        self.assertIsNone(operator.review_park_of({"review_park": {"question": "not-a-digest"}}))
+        self.assertIsNone(operator.review_park_of({}))
+
+
 class RecoveryLadder(unittest.TestCase):
     """The rungs `why` prints for a wedged or overdue member."""
 
