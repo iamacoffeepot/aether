@@ -144,6 +144,16 @@ mod tests_support {
         env::temp_dir().join(format!("{prefix}-{}-{}", process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)))
     }
 
+    /// Point `proc_exe` at a scratch `/proc/$pid/exe` whose environ carries
+    /// only the named `PATH` plus an unrelated entry the reader must ignore.
+    pub fn install_service_environ(proc_exe: &mut String, pid: &str, path: &str) {
+        let root = unique_temp("aether-xtask-upgrade-proc");
+        *proc_exe = format!("{}/$pid/exe", root.display());
+        let dir = root.join(pid);
+        fs::create_dir_all(&dir).expect("service process dir");
+        fs::write(dir.join("environ"), format!("UNRELATED=secret\0PATH={path}\0")).expect("service process environ");
+    }
+
     pub fn drained_view() -> ViewDocument {
         ViewDocument {
             mainline: DigestHex::from_bytes([1; 32]),
@@ -288,6 +298,7 @@ mod tests {
         let path = super::tests_support::unique_temp("aether-xtask-upgrade-candidate");
         fs::write(&path, b"candidate").expect("write a present candidate");
         args.candidate = path;
+        super::tests_support::install_service_environ(&mut args.proc_exe, "4321", "/service/bin");
         args
     }
 
@@ -316,6 +327,7 @@ mod tests {
         assert!(log.contains("checked: no undrained blooms"), "the screen is printed: {log}");
         assert!(log.contains("exists"), "the candidate is printed: {log}");
         assert!(log.contains("reachable"), "the unit is printed: {log}");
+        assert!(log.contains("candidate doctor passed on service PATH"), "the doctor is a named check: {log}");
         assert!(log.contains("journal rows live=12 copy=12"), "row counts are printed: {log}");
         assert!(
             !shell.calls().iter().any(|line| line.starts_with("sqlite3")),
@@ -354,12 +366,39 @@ mod tests {
         let _ = fs::remove_file(&args.candidate);
     }
 
+    // Tripwire: a red doctor is a precondition refusal. Copying the store,
+    // replacing the binary, or restarting after that report is how a host
+    // missing jscpd becomes the live coordinator.
+    #[test]
+    fn a_red_doctor_does_not_copy_install_or_restart() {
+        let args = present_candidate(test_args());
+        let shell = Fake::new(|line| match line {
+            line if line.contains("LoadState") => Run::ok("loaded"),
+            line if line.contains("MainPID") => Run::ok("4321"),
+            line if line.contains("--doctor") => Run::failed("jscpd            MISSING  npm install -g jscpd"),
+            _ => Run::ok(""),
+        });
+
+        let refusal =
+            upgrade(&drained_view(), &matching(), &shell, &args).expect_err("a red doctor is refused").to_string();
+
+        assert!(refusal.contains("jscpd"), "the doctor output is surfaced: {refusal}");
+        let calls = shell.calls();
+        assert!(!calls.iter().any(|line| line.contains("restart")), "the live unit is not restarted: {calls:?}");
+        assert!(
+            !calls.iter().any(|line| line.starts_with("sqlite3") || line.starts_with("cp ")),
+            "the store is not copied and the binary is not replaced: {calls:?}"
+        );
+        let _ = fs::remove_file(&args.candidate);
+    }
+
     #[test]
     fn a_reshape_refusal_does_not_restart() {
         let decode = "record 2 decision did not decode: aether wire: invalid bool/presence byte 11";
         let args = present_candidate(seeded_args(12, 12));
         let shell = Fake::new(move |line| match line {
             line if line.contains("LoadState") => Run::ok("loaded"),
+            line if line.contains("MainPID") => Run::ok("4321"),
             line if line.contains("--store-path") => Run::failed(decode),
             line if line.starts_with("test -e") => Run::ok(""),
             _ => Run::ok(""),

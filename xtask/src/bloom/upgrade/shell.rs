@@ -39,6 +39,14 @@ pub trait Shell {
     /// Run and capture, for anything the upgrade reads back.
     fn capture(&self, program: &str, args: &[&str]) -> Result<Run>;
 
+    /// Run and capture with a narrow environment overlay.
+    ///
+    /// Each pair replaces that variable for the child and clears the rest, so
+    /// the overlay is the only environment the child sees. Callers pass `PATH`
+    /// and nothing else — that is how `--doctor` receives the service path
+    /// without inheriting the operator shell or forwarding unrelated values.
+    fn capture_with_env(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<Run>;
+
     /// Start a process the caller will poll and then stop.
     ///
     /// `stderr_log` receives the child's stderr. Piping it back through this
@@ -63,9 +71,11 @@ pub struct Host;
 
 impl Shell for Host {
     fn capture(&self, program: &str, args: &[&str]) -> Result<Run> {
-        let output =
-            Command::new(program).args(args).output().with_context(|| format!("spawn {}", rendered(program, args)))?;
-        Ok(into_run(output.status, &output.stdout, &output.stderr))
+        run_command(program, args, &[])
+    }
+
+    fn capture_with_env(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<Run> {
+        run_command(program, args, env)
     }
 
     fn launch(
@@ -134,6 +144,19 @@ pub fn rendered(program: &str, args: &[&str]) -> String {
     format!("{program} {}", args.join(" "))
 }
 
+fn run_command(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<Run> {
+    let mut command = Command::new(program);
+    command.args(args);
+    if !env.is_empty() {
+        command.env_clear();
+        for (key, value) in env {
+            command.env(key, value);
+        }
+    }
+    let output = command.output().with_context(|| format!("spawn {}", rendered(program, args)))?;
+    Ok(into_run(output.status, &output.stdout, &output.stderr))
+}
+
 fn into_run(status: ExitStatus, stdout: &[u8], stderr: &[u8]) -> Run {
     Run {
         success: status.success(),
@@ -168,15 +191,21 @@ pub(super) mod fake {
     pub(in crate::bloom::upgrade) struct Fake<'a> {
         reply: Box<dyn Fn(&str) -> Run + 'a>,
         calls: RefCell<Vec<String>>,
+        overlays: RefCell<Vec<Vec<(String, String)>>>,
     }
 
     impl<'a> Fake<'a> {
         pub(in crate::bloom::upgrade) fn new(reply: impl Fn(&str) -> Run + 'a) -> Self {
-            Self { reply: Box::new(reply), calls: RefCell::new(Vec::new()) }
+            Self { reply: Box::new(reply), calls: RefCell::new(Vec::new()), overlays: RefCell::new(Vec::new()) }
         }
 
         pub(in crate::bloom::upgrade) fn calls(&self) -> Vec<String> {
             self.calls.borrow().clone()
+        }
+
+        /// Overlays passed to [`Shell::capture_with_env`], for assertions only.
+        pub(in crate::bloom::upgrade) fn overlays(&self) -> Vec<Vec<(String, String)>> {
+            self.overlays.borrow().clone()
         }
 
         fn answer(&self, program: &str, args: &[&str]) -> Run {
@@ -190,6 +219,13 @@ pub(super) mod fake {
     impl Shell for Fake<'_> {
         fn capture(&self, program: &str, args: &[&str]) -> Result<Run> {
             Ok(self.answer(program, args))
+        }
+
+        fn capture_with_env(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<Run> {
+            self.overlays
+                .borrow_mut()
+                .push(env.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())).collect());
+            self.capture(program, args)
         }
 
         fn launch(
@@ -284,5 +320,39 @@ mod host_tests {
             run.stderr
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Tripwire: `--doctor` must see the service PATH, not the operator
+    // shell's. Overlaying without clearing forwards HOME and the operator
+    // PATH; the doctor then green-lights a host the unit cannot dispatch.
+    #[test]
+    fn capture_with_env_gives_the_child_only_the_overlay() {
+        let run = Host
+            .capture_with_env(
+                "/bin/sh",
+                &["-c", "printf %s \"$PATH\"; printf x%s \"$HOME\""],
+                &[("PATH", "/only/service")],
+            )
+            .expect("overlay capture");
+        assert!(run.success, "the child ran: {}", run.stderr);
+        assert_eq!(run.stdout, "/only/servicex", "PATH is the overlay and unrelated values are not forwarded");
+    }
+}
+
+#[cfg(test)]
+mod fake_tests {
+    use super::Run;
+    use super::Shell;
+    use super::fake::Fake;
+
+    // Tripwire: the rendered call log is what every other test prints on
+    // failure. Putting PATH in that line would dump the service path into
+    // every assertion; overlays() is the only place the value is kept.
+    #[test]
+    fn fake_records_the_overlay_outside_the_call_log() {
+        let fake = Fake::new(|_| Run::ok("ok"));
+        fake.capture_with_env("/opt/candidate", &["--doctor"], &[("PATH", "/service/bin")]).expect("overlay capture");
+        assert_eq!(fake.calls(), vec!["/opt/candidate --doctor".to_owned()]);
+        assert_eq!(fake.overlays(), vec![vec![("PATH".to_owned(), "/service/bin".to_owned())]]);
     }
 }
