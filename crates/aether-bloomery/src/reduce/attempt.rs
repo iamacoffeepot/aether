@@ -257,12 +257,15 @@ pub(super) fn reduce_attempt_completed(
     }
     // The member's candidate after this completion (ADR-0152): a passing attempt
     // adopts the capture it carried (a mechanical lane carries none — the prior
-    // candidate rides forward); a failing attempt adopts nothing, so its capture
-    // is discarded and the member stays at the candidate its last pass produced.
-    // A base-assembly Reconcile is the exception: its capture *is* the spliced
-    // base. It rides as the cursor candidate so Construct checks it out, but
-    // `fold_checkpoint` stays the collision head so a standing-head re-collision
-    // still wedges (#4952).
+    // candidate rides forward); a failing attempt adopts nothing onto the
+    // cursor, so the member stays at the candidate its last pass produced and
+    // the retry still checks out that tree (or the sealed base). A failing
+    // construct's capture is not discarded — `Snapshot::apply` records it as
+    // the member's newest checkpoint, keyed on `passed: false`, without
+    // touching this cursor. A base-assembly Reconcile is the exception: its
+    // capture *is* the spliced base. It rides as the cursor candidate so
+    // Construct checks it out, but `fold_checkpoint` stays the collision head
+    // so a standing-head re-collision still wedges (#4952).
     let prior = cursor.candidate;
     let candidate = if passed {
         captured.or(prior)
@@ -459,5 +462,125 @@ pub(super) fn wedged(
             repeated_verifiers: VerifyFailureSet::EMPTY,
         },
         effects,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::IdempotencyKey;
+    use crate::reduce::{Event, Fact, Outcome, reduce};
+    use crate::values::{BloomDraft, EvidenceKind, Membership, ResolvedConfigs, SpendWindow};
+
+    fn digest(seed: u8) -> Digest {
+        Digest::from_bytes([seed; 32])
+    }
+
+    fn membership(name: &str, revision: u8) -> Membership {
+        let mut member = Membership {
+            workpiece: WorkpieceId(name.into()),
+            scope_revision: digest(revision),
+            configs: ConfigRegistry::default(),
+            approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
+        };
+        member.approval.subject = member.subject();
+        member
+    }
+
+    fn evidence() -> Evidence {
+        Evidence { subject: digest(1), kind: EvidenceKind::VerificationResult, detail: digest(70) }
+    }
+
+    fn event(key: &str, fact: Fact) -> Event {
+        Event { idempotency_key: IdempotencyKey(key.into()), fact }
+    }
+
+    fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
+        let decisions = reduce(snapshot, event, &ResolvedConfigs::default(), &SpendWindow::default());
+        (snapshot.apply(event, &decisions, &ResolvedConfigs::default()), decisions)
+    }
+
+    fn sealed() -> (Snapshot, BloomId) {
+        let spec =
+            BloomDraft { proposals: vec![membership("wp", 10)], base: digest(0), ..BloomDraft::default() }.seal();
+        let bloom = spec.id();
+        let (snapshot, _) = step(&Snapshot::new(digest(0)), &event("seal", Fact::Seal(spec)));
+        (snapshot, bloom)
+    }
+
+    fn fail_construct(bloom: BloomId, key: &str, captured: Option<CandidateRef>) -> Event {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: WorkpieceId("wp".into()),
+                stage: StageId::Construct,
+                passed: false,
+                evidence: evidence(),
+                candidate: captured,
+            },
+        )
+    }
+
+    // The plausible bug: a failing construct's capture is adopted onto the
+    // cursor, so the retry checks out the partial tree and a later pass would
+    // treat the checkpoint as a finished candidate.
+    #[test]
+    fn a_failing_construct_records_its_checkpoint_without_retargeting_the_retry() {
+        let (snapshot, bloom) = sealed();
+        let checkpoint = CandidateRef { tree: digest(21), checkout: digest(22) };
+        let (after, decided) = step(&snapshot, &fail_construct(bloom, "c-die", Some(checkpoint)));
+
+        assert!(matches!(decided.outcome, Outcome::AttemptRetried { stage: StageId::Construct, attempt: 2, .. }));
+        assert_eq!(
+            after.member_checkpoint(&bloom, &WorkpieceId("wp".into())),
+            Some(checkpoint),
+            "the snapshot holds the newest construct checkpoint for #4994",
+        );
+        let Some(progress) = after.blooms.get(&bloom).and_then(|record| record.progress.get(&WorkpieceId("wp".into())))
+        else {
+            panic!("the sealed member has a construct cursor");
+        };
+        assert_eq!(progress.stage, StageId::Construct, "a dead attempt does not advance the cursor");
+        assert_eq!(progress.candidate, None, "the cursor is not the checkpoint's home");
+        match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchAttempt { .. })) {
+            Some(Decision::DispatchAttempt { transformation, candidate, .. }) => {
+                assert_eq!(transformation.checkout, digest(0), "the retry still checks out the sealed base");
+                assert_eq!(*candidate, None, "the retry still binds the scope revision, not the checkpoint");
+            }
+            other => panic!("expected a Construct retry, got {other:?}"),
+        }
+    }
+
+    // The plausible bug: a second death overwrites the cursor but not the
+    // snapshot slot, so #4994 would resume from the first partial tree.
+    #[test]
+    fn a_later_failing_construct_overwrites_the_checkpoint() {
+        let (snapshot, bloom) = sealed();
+        let first = CandidateRef { tree: digest(21), checkout: digest(22) };
+        let (snapshot, _) = step(&snapshot, &fail_construct(bloom, "c-die-1", Some(first)));
+        let second = CandidateRef { tree: digest(31), checkout: digest(32) };
+        let (after, decided) = step(&snapshot, &fail_construct(bloom, "c-die-2", Some(second)));
+
+        assert!(matches!(decided.outcome, Outcome::AttemptWedged { stage: StageId::Construct, .. }));
+        assert_eq!(
+            after.member_checkpoint(&bloom, &WorkpieceId("wp".into())),
+            Some(second),
+            "newest wins, including the death that exhausts the budget",
+        );
+        let Some(progress) = after.blooms.get(&bloom).and_then(|record| record.progress.get(&WorkpieceId("wp".into())))
+        else {
+            panic!("the sealed member has a construct cursor");
+        };
+        assert_eq!(progress.candidate, None);
+    }
+
+    // The plausible bug: a clean death plants an empty checkpoint the retry
+    // would then treat as work.
+    #[test]
+    fn a_failing_construct_without_a_capture_records_no_checkpoint() {
+        let (snapshot, bloom) = sealed();
+        let (after, _) = step(&snapshot, &fail_construct(bloom, "c-empty", None));
+        assert_eq!(after.member_checkpoint(&bloom, &WorkpieceId("wp".into())), None);
     }
 }
