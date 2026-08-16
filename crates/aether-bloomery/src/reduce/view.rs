@@ -141,10 +141,13 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
 
 #[cfg(test)]
 mod tests {
+    use aether_data::wire::{from_bytes, to_vec};
+
     use super::view_of;
     use crate::digest::Digest;
-    use crate::ids::{IdempotencyKey, StageId, WorkpieceId};
-    use crate::reduce::{Event, Fact, Snapshot, reduce};
+    use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
+    use crate::port::{BloomView, ViewDocument};
+    use crate::reduce::{BloomStatus, Event, Fact, Snapshot, reduce};
     use crate::values::{
         BloomDraft, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, Question, ResolvedConfigs,
         SpendWindow,
@@ -272,6 +275,31 @@ mod tests {
         }
     }
 
+    fn following_bloom() -> BloomView {
+        BloomView {
+            id: BloomId(digest(16)),
+            status: BloomStatus::Sealed,
+            superseded_by: None,
+            members: Vec::new(),
+            landing_blocked: None,
+            executor_fault: None,
+            review_park: None,
+        }
+    }
+
+    fn with_following_bloom(mut view: ViewDocument) -> ViewDocument {
+        view.blooms.push(following_bloom());
+        view
+    }
+
+    fn wire_round_trip(view: &ViewDocument) -> ViewDocument {
+        from_bytes(&to_vec(view).expect("the projection wire-encodes")).expect("and decodes back")
+    }
+
+    fn park_json(view: &ViewDocument) -> serde_json::Value {
+        serde_json::to_value(view).expect("the projection has a JSON form")["blooms"][0]["review_park"].clone()
+    }
+
     // The plausible bug: a live-query path (`resolve_question` is `|_| None`)
     // drops the park the way it drops a member hold, so GET /view of an
     // otherwise idle sealed bloom still looks like nothing is waiting.
@@ -362,5 +390,48 @@ mod tests {
         assert!(view.blooms[0].review_park.is_none(), "a member question is not a bloom-scoped park");
         let held = view.blooms[0].members.iter().find(|member| member.workpiece.0 == "wp-held").expect("held member");
         assert!(held.pending_decision.is_some(), "the member hold still projects as itself");
+    }
+
+    // The plausible bug: skip_serializing_if drops None/empty ReviewParkView
+    // fields on the positional wire, so the next bloom's first byte (16) is
+    // read as an Option presence marker and GET /view 500s with
+    // `invalid bool/presence byte 16`.
+    #[test]
+    fn an_unresolved_review_park_round_trips_ahead_of_the_next_bloom() {
+        let question = digest(51);
+        let mut snapshot = sealed("wp");
+        snapshot.blooms.values_mut().next().expect("the sealed bloom").review_park = Some(question);
+
+        let view = with_following_bloom(view_of(&snapshot, |_| None));
+        let decoded = wire_round_trip(&view);
+        assert_eq!(decoded, view, "omitted park slots must not steal the next bloom's bytes");
+
+        let park = park_json(&decoded);
+        assert_eq!(park["question"], serde_json::to_value(question).expect("a digest has a JSON form"));
+        assert!(park["stage"].is_null(), "unresolved details stay empty in the JSON rendering");
+        assert!(park["prompt"].is_null());
+        assert_eq!(park["options"], serde_json::json!([]));
+        assert!(park["blocked"].is_null());
+    }
+
+    // The plausible bug: making the park's wire fields total drops the
+    // resolved prompt/options/blocked from the JSON GET /view still renders.
+    #[test]
+    fn a_resolved_review_park_round_trips_with_its_json_details() {
+        let question = contested_question();
+        let digest = question.id();
+        let mut snapshot = sealed("wp");
+        snapshot.blooms.values_mut().next().expect("the sealed bloom").review_park = Some(digest);
+
+        let view = with_following_bloom(view_of(&snapshot, |asked| (*asked == digest).then(|| question.clone())));
+        let decoded = wire_round_trip(&view);
+        assert_eq!(decoded, view);
+
+        let park = park_json(&decoded);
+        assert_eq!(park["question"], serde_json::to_value(digest).expect("a digest has a JSON form"));
+        assert_eq!(park["stage"], "AggregateReview");
+        assert_eq!(park["prompt"], question.prompt);
+        assert_eq!(park["options"], serde_json::to_value(&question.options).expect("options have a JSON form"));
+        assert_eq!(park["blocked"], question.blocked);
     }
 }
