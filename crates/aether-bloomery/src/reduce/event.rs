@@ -149,7 +149,8 @@ pub enum Fact {
         /// after a model-lane run commits its work; absent on mechanical lanes
         /// and runs that produced nothing. Adopted onto the member's cursor on a
         /// passing completion. A failing construct's capture is recorded as the
-        /// member's newest checkpoint instead, and does not retarget the retry.
+        /// member's newest checkpoint instead of the cursor; the retry checks
+        /// that commit out (#4994) but still binds the scope revision.
         candidate: Option<CandidateRef>,
     },
     /// A dispatched whole-bloom aggregate review completed with evidence

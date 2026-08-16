@@ -259,13 +259,14 @@ pub(super) fn reduce_attempt_completed(
     // adopts the capture it carried (a mechanical lane carries none — the prior
     // candidate rides forward); a failing attempt adopts nothing onto the
     // cursor, so the member stays at the candidate its last pass produced and
-    // the retry still checks out that tree (or the sealed base). A failing
-    // construct's capture is not discarded — `Snapshot::apply` records it as
-    // the member's newest checkpoint, keyed on `passed: false`, without
-    // touching this cursor. A base-assembly Reconcile is the exception: its
-    // capture *is* the spliced base. It rides as the cursor candidate so
-    // Construct checks it out, but `fold_checkpoint` stays the collision head
-    // so a standing-head re-collision still wedges (#4952).
+    // the retry still checks out that tree. A failing construct's capture is
+    // not discarded — `Snapshot::apply` records it as the member's newest
+    // checkpoint, keyed on `passed: false`, without touching this cursor, and
+    // the retry checks that commit out (#4994) while still binding the scope
+    // revision. A base-assembly Reconcile is the exception: its capture *is*
+    // the spliced base. It rides as the cursor candidate so Construct checks
+    // it out, but `fold_checkpoint` stays the collision head so a standing-head
+    // re-collision still wedges (#4952).
     let prior = cursor.candidate;
     let candidate = if passed {
         captured.or(prior)
@@ -274,21 +275,26 @@ pub(super) fn reduce_attempt_completed(
     };
     // The dispatch targets re-resolve from the cursor (ADR-0152): with a
     // candidate present, the returned evidence binds its tree and the worker
-    // checks out its capture commit; without one, the member's frozen scope
-    // revision and the spliced construct base (ADR-0196). Reconcile is the
-    // exception: a *retry* checks out the folded checkpoint the collision
-    // named (ADR-0189). A pass leaves that checkout — Verify retargets from
-    // the new candidate like any other advance. A passing base-assembly
-    // Reconcile checks out the assembled capture as Construct's base.
+    // checks out its capture commit; without one, the newest construct
+    // checkpoint (#4994) or the spliced construct base (ADR-0196). Reconcile
+    // is the exception: a *retry* checks out the folded checkpoint the
+    // collision named (ADR-0189). A pass leaves that checkout — Verify
+    // retargets from the new candidate like any other advance. A passing
+    // base-assembly Reconcile checks out the assembled capture as Construct's
+    // base. This completion's own failing construct capture is newer than
+    // anything already on the snapshot — `apply` has not recorded it yet.
     let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile && !passed);
     let construct_base = member_construct_base(record, workpiece);
+    let member_checkpoint = captured
+        .filter(|_| stage == StageId::Construct && !passed)
+        .or_else(|| snapshot.member_checkpoint(bloom, workpiece));
     let targets = if assembling && passed {
         DispatchTargets {
             subject: member.scope_revision,
             checkout: candidate.map_or(construct_base, |current| current.checkout),
         }
     } else {
-        reconcile_or_line_targets(member.scope_revision, construct_base, candidate, fold_checkpoint)
+        reconcile_or_line_targets(member.scope_revision, construct_base, candidate, fold_checkpoint, member_checkpoint)
     };
     let ctx = CompletionCtx { bloom: *bloom, workpiece, member, cursor: &cursor, candidate, targets };
     let effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
@@ -416,11 +422,18 @@ fn retry_or_wedge(
 
 /// Dispatch targets for a member-line move, or the folded checkpoint when
 /// the member is reconciling a collision (ADR-0189).
+///
+/// Checkout precedence, when the member is not reconciling: a captured
+/// candidate, else the newest construct checkpoint, else the sealed (or
+/// spliced) base. A candidate outranks a checkpoint so finished work beats
+/// partial work; a checkpoint never becomes the evidence-binding subject
+/// (#4994).
 pub(super) fn reconcile_or_line_targets(
     scope_revision: Digest,
     base: Digest,
     candidate: Option<CandidateRef>,
     fold_checkpoint: Option<Digest>,
+    member_checkpoint: Option<CandidateRef>,
 ) -> DispatchTargets {
     if let Some(checkpoint) = fold_checkpoint {
         return DispatchTargets {
@@ -428,10 +441,13 @@ pub(super) fn reconcile_or_line_targets(
             checkout: checkpoint,
         };
     }
-    candidate.map_or(DispatchTargets { subject: scope_revision, checkout: base }, |current| DispatchTargets {
-        subject: current.tree,
-        checkout: current.checkout,
-    })
+    candidate.map_or_else(
+        || DispatchTargets {
+            subject: scope_revision,
+            checkout: member_checkpoint.map_or(base, |checkpoint| checkpoint.checkout),
+        },
+        |current| DispatchTargets { subject: current.tree, checkout: current.checkout },
+    )
 }
 
 /// The terminal answer for a member that has spent `stage`'s retry budget: stop
@@ -522,11 +538,81 @@ mod tests {
         )
     }
 
-    // The plausible bug: a failing construct's capture is adopted onto the
-    // cursor, so the retry checks out the partial tree and a later pass would
-    // treat the checkpoint as a finished candidate.
+    fn pass_construct(bloom: BloomId, key: &str, captured: CandidateRef) -> Event {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: WorkpieceId("wp".into()),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: Evidence {
+                    subject: captured.tree,
+                    kind: EvidenceKind::VerificationResult,
+                    detail: digest(80),
+                },
+                candidate: Some(captured),
+            },
+        )
+    }
+
+    fn construct_dispatch(decisions: &Decisions) -> &Transformation {
+        decisions
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                Decision::DispatchAttempt { transformation, .. } => Some(transformation),
+                _ => None,
+            })
+            .expect("expected a member-stage dispatch")
+    }
+
+    // Tripwire: checkout resolution is candidate over checkpoint over sealed
+    // base. The plausible bug is any transposition — seeding from a checkpoint
+    // when a finished candidate exists, or ignoring a checkpoint and paying
+    // for a cold tree (#4994).
     #[test]
-    fn a_failing_construct_records_its_checkpoint_without_retargeting_the_retry() {
+    fn checkout_prefers_candidate_over_checkpoint_over_sealed_base() {
+        let base = digest(0);
+        let scope = digest(10);
+        let checkpoint = CandidateRef { tree: digest(21), checkout: digest(22) };
+        let candidate = CandidateRef { tree: digest(31), checkout: digest(32) };
+
+        let cold = reconcile_or_line_targets(scope, base, None, None, None);
+        assert_eq!(cold.checkout, base, "neither a candidate nor a checkpoint checks out the sealed base");
+        assert_eq!(cold.subject, scope);
+
+        let seeded = reconcile_or_line_targets(scope, base, None, None, Some(checkpoint));
+        assert_eq!(seeded.checkout, checkpoint.checkout, "a checkpoint without a candidate seeds the checkout");
+        assert_eq!(seeded.subject, scope, "a checkpoint is not a finished candidate: evidence still binds the scope");
+
+        let finished = reconcile_or_line_targets(scope, base, Some(candidate), None, Some(checkpoint));
+        assert_eq!(finished.checkout, candidate.checkout, "a candidate outranks a checkpoint");
+        assert_eq!(finished.subject, candidate.tree);
+    }
+
+    // The plausible bug: a first construct is seeded from an empty checkpoint
+    // slot and leaves the sealed base. Catches treating absence as a digest.
+    #[test]
+    fn a_fresh_construct_checks_out_the_sealed_base() {
+        let spec =
+            BloomDraft { proposals: vec![membership("wp", 10)], base: digest(0), ..BloomDraft::default() }.seal();
+        let bloom = spec.id();
+        let (after, decided) = step(&Snapshot::new(digest(0)), &event("seal", Fact::Seal(spec)));
+        assert_eq!(
+            construct_dispatch(&decided).checkout,
+            digest(0),
+            "a member with neither a candidate nor a checkpoint checks out the sealed base",
+        );
+        assert_eq!(after.member_checkpoint(&bloom, &WorkpieceId("wp".into())), None);
+    }
+
+    // The plausible bug: a failing construct's capture is adopted onto the
+    // cursor, so a later pass would treat the checkpoint as a finished
+    // candidate — or the retry still checks out the sealed base and the
+    // checkpoint is never the tree the next attempt starts from.
+    #[test]
+    fn a_failing_construct_seeds_the_retry_from_its_checkpoint() {
         let (snapshot, bloom) = sealed();
         let checkpoint = CandidateRef { tree: digest(21), checkout: digest(22) };
         let (after, decided) = step(&snapshot, &fail_construct(bloom, "c-die", Some(checkpoint)));
@@ -545,11 +631,75 @@ mod tests {
         assert_eq!(progress.candidate, None, "the cursor is not the checkpoint's home");
         match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchAttempt { .. })) {
             Some(Decision::DispatchAttempt { transformation, candidate, .. }) => {
-                assert_eq!(transformation.checkout, digest(0), "the retry still checks out the sealed base");
+                assert_eq!(transformation.checkout, checkpoint.checkout, "the retry checks out the checkpoint");
                 assert_eq!(*candidate, None, "the retry still binds the scope revision, not the checkpoint");
             }
             other => panic!("expected a Construct retry, got {other:?}"),
         }
+    }
+
+    // The plausible bug: a kill plants a checkpoint, the retry still starts
+    // cold, and a later pass's capture cannot prove the journaled checkout
+    // was the checkpoint the death left (#4994 acceptance 5).
+    #[test]
+    fn a_killed_construct_seeds_the_retry_and_a_pass_then_captures() {
+        let (snapshot, bloom) = sealed();
+        let checkpoint = CandidateRef { tree: digest(21), checkout: digest(22) };
+        let (after_kill, retried) = step(&snapshot, &fail_construct(bloom, "c-die", Some(checkpoint)));
+        assert_eq!(
+            construct_dispatch(&retried).checkout,
+            checkpoint.checkout,
+            "the resume-seeded retry journals the checkpoint as its checkout",
+        );
+
+        let captured = CandidateRef { tree: digest(31), checkout: digest(32) };
+        let (after_pass, advanced) = step(&after_kill, &pass_construct(bloom, "c-pass", captured));
+        assert!(matches!(
+            advanced.outcome,
+            Outcome::AttemptAdvanced { from: StageId::Construct, to: StageId::Verify, .. }
+        ));
+        assert_eq!(
+            construct_dispatch(&advanced).checkout,
+            captured.checkout,
+            "a passing construct outranks the checkpoint it started from",
+        );
+        let Some(progress) =
+            after_pass.blooms.get(&bloom).and_then(|record| record.progress.get(&WorkpieceId("wp".into())))
+        else {
+            panic!("the sealed member has a verify cursor");
+        };
+        assert_eq!(progress.candidate, Some(captured), "the pass adopts the capture, not the checkpoint");
+    }
+
+    // The plausible bug: grant re-aims from the cursor only and forgets the
+    // snapshot checkpoint, so a wedged construct resumes cold.
+    #[test]
+    fn a_grant_after_a_wedged_construct_seeds_from_the_checkpoint() {
+        let (snapshot, bloom) = sealed();
+        let first = CandidateRef { tree: digest(21), checkout: digest(22) };
+        let (snapshot, _) = step(&snapshot, &fail_construct(bloom, "c-die-1", Some(first)));
+        let second = CandidateRef { tree: digest(31), checkout: digest(32) };
+        let (snapshot, wedged) = step(&snapshot, &fail_construct(bloom, "c-die-2", Some(second)));
+        assert!(matches!(wedged.outcome, Outcome::AttemptWedged { stage: StageId::Construct, .. }));
+
+        let (_, granted) = step(
+            &snapshot,
+            &event(
+                "grant",
+                Fact::GrantAttempts {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    stage: StageId::Construct,
+                    attempts: 1,
+                },
+            ),
+        );
+        assert!(matches!(granted.outcome, Outcome::AttemptsGranted { resumes_at: StageId::Construct, .. }));
+        assert_eq!(
+            construct_dispatch(&granted).checkout,
+            second.checkout,
+            "a grant resumes from the newest checkpoint, not the sealed base",
+        );
     }
 
     // The plausible bug: a second death overwrites the cursor but not the
@@ -580,7 +730,12 @@ mod tests {
     #[test]
     fn a_failing_construct_without_a_capture_records_no_checkpoint() {
         let (snapshot, bloom) = sealed();
-        let (after, _) = step(&snapshot, &fail_construct(bloom, "c-empty", None));
+        let (after, decided) = step(&snapshot, &fail_construct(bloom, "c-empty", None));
         assert_eq!(after.member_checkpoint(&bloom, &WorkpieceId("wp".into())), None);
+        assert_eq!(
+            construct_dispatch(&decided).checkout,
+            digest(0),
+            "a clean death does not invent a checkout to seed from",
+        );
     }
 }

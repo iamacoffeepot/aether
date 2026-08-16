@@ -57,8 +57,9 @@ pub struct Snapshot {
     /// A dead construct lane's newest partial capture, keyed by bloom then
     /// workpiece. Folded from a failing [`Fact::AttemptCompleted`] that still
     /// carried a [`CandidateRef`] — the fact already has the field, and the
-    /// cursor is not the home: putting a checkpoint there would retarget the
-    /// retry at the partial tree. #4994 reads this; this issue does not.
+    /// cursor is not the home: putting a checkpoint there would adopt the
+    /// partial tree as a finished candidate. #4994 reads this for checkout
+    /// only — the retry checks out the capture commit, the cursor stays empty.
     ///
     /// Snapshot-level rather than a [`BloomRecord`] field so the fold can see
     /// the fact without a new [`Decision`] (the journal's decisions graph is

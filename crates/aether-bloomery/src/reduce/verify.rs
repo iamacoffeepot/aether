@@ -248,7 +248,7 @@ pub(super) fn reduce_resume_host_fault(snapshot: &Snapshot, bloom: &BloomId, wor
     }
 
     let mut effects = alloc::vec![Decision::ClearHostFault { bloom: *bloom, workpiece: workpiece.clone() }];
-    if let Some(owed) = owed_dispatch(record, *bloom, workpiece) {
+    if let Some(owed) = owed_dispatch(record, *bloom, workpiece, snapshot.member_checkpoint(bloom, workpiece)) {
         effects.extend(owed);
     }
     Decisions { outcome: Outcome::HostFaultResumed { bloom: *bloom, workpiece: workpiece.clone() }, effects }
