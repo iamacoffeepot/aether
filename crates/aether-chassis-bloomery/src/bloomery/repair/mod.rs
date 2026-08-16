@@ -19,5 +19,4 @@ mod prepare;
 pub use prepare::{CandidateSource, PrepareError, prepare_candidate};
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests;

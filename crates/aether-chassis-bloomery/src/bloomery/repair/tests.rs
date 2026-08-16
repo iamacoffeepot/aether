@@ -25,28 +25,28 @@ fn a_canned_capture_pair_mints_and_matches_its_correspondence() {
     // must be the one a repair-from-commit reuses. A tag or hash change that
     // left the executor compiling and this function drifting would make the
     // operator's derived hex miss the row the lane already wrote.
-    let store = SqliteCorrespondence::open(":memory:").unwrap();
+    let store = SqliteCorrespondence::open(":memory:").expect("an in-memory correspondence store opens");
     let tree = canned_tree();
     let commit = canned_commit();
     let tree_digest = candidate_tree_digest(&tree);
     let checkout_digest = capture_commit_digest(&commit);
 
     assert_ne!(tree_digest, checkout_digest, "the two axes are domain-separated even over distinct bytes");
-    store.record(&tree_digest, &tree).unwrap();
-    store.record(&checkout_digest, &commit).unwrap();
+    store.record(&tree_digest, &tree).expect("the canned tree row records");
+    store.record(&checkout_digest, &commit).expect("the canned checkout row records");
 
     assert_eq!(
-        store.resolve_backend_object(&tree_digest).unwrap().as_ref(),
+        store.resolve_backend_object(&tree_digest).expect("the minted tree digest resolves").as_ref(),
         Some(&tree),
         "the minted tree digest must resolve to the tree bytes it was derived from",
     );
     assert_eq!(
-        store.resolve_backend_object(&checkout_digest).unwrap().as_ref(),
+        store.resolve_backend_object(&checkout_digest).expect("the minted checkout digest resolves").as_ref(),
         Some(&commit),
         "the minted checkout digest must resolve to the commit bytes it was derived from",
     );
-    assert_eq!(store.resolve_digest(&tree).unwrap(), Some(tree_digest));
-    assert_eq!(store.resolve_digest(&commit).unwrap(), Some(checkout_digest));
+    assert_eq!(store.resolve_digest(&tree).expect("the canned tree object has a digest"), Some(tree_digest));
+    assert_eq!(store.resolve_digest(&commit).expect("the canned commit object has a digest"), Some(checkout_digest));
 }
 
 #[cfg(feature = "github")]
@@ -71,7 +71,10 @@ mod prepare {
 
     impl CandidatePush for RecordingPush {
         fn push(&self, commit_hex: &str, target_ref: &str) -> Result<(), String> {
-            self.pushed.lock().unwrap().push((commit_hex.to_owned(), target_ref.to_owned()));
+            self.pushed
+                .lock()
+                .expect("the recording pusher is not poisoned")
+                .push((commit_hex.to_owned(), target_ref.to_owned()));
             Ok(())
         }
     }
@@ -89,11 +92,11 @@ mod prepare {
     }
 
     fn repo_with_commit() -> (TempDir, String) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("a temp repo directory creates");
         run_git(dir.path(), &["init", "--quiet"]);
         run_git(dir.path(), &["config", "--local", "user.name", "repair"]);
         run_git(dir.path(), &["config", "--local", "user.email", "repair@example.test"]);
-        fs::write(dir.path().join("fix.rs"), "fn ok() {}\n").unwrap();
+        fs::write(dir.path().join("fix.rs"), "fn ok() {}\n").expect("the fixture file writes");
         run_git(dir.path(), &["add", "fix.rs"]);
         run_git(dir.path(), &["commit", "--quiet", "--message", "the fix"]);
         let sha = git_stdout(dir.path(), &["rev-parse", "HEAD"]);
@@ -101,11 +104,14 @@ mod prepare {
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
-        assert!(Command::new("git").current_dir(dir).args(args).status().unwrap().success(), "git {args:?} failed");
+        assert!(
+            Command::new("git").current_dir(dir).args(args).status().expect("git starts").success(),
+            "git {args:?} failed"
+        );
     }
 
     fn git_stdout(dir: &Path, args: &[&str]) -> String {
-        let output = Command::new("git").current_dir(dir).args(args).output().unwrap();
+        let output = Command::new("git").current_dir(dir).args(args).output().expect("git starts");
         assert!(output.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&output.stderr));
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
@@ -116,7 +122,7 @@ mod prepare {
         // push or either correspondence row would leave Verify unable to check
         // the commit out — the same hole the operator used to fill by hand.
         let (repo, sha) = repo_with_commit();
-        let store = SqliteCorrespondence::open(":memory:").unwrap();
+        let store = SqliteCorrespondence::open(":memory:").expect("an in-memory correspondence store opens");
         let pusher = RecordingPush { pushed: Mutex::new(Vec::new()) };
         let workpiece = "issue-5032";
 
@@ -124,14 +130,24 @@ mod prepare {
             prepare_candidate(&store, &pusher, &bloom(), workpiece, CandidateSource::Commit(&sha), repo.path())
                 .expect("a reachable commit prepares");
 
-        let commit = BackendObjectId::from(aether_bloomery_github::GitObjectId::from_hex(&sha).unwrap());
+        let commit = BackendObjectId::from(
+            aether_bloomery_github::GitObjectId::from_hex(&sha).expect("HEAD peels to a git object id"),
+        );
         let tree_hex = git_stdout(repo.path(), &["rev-parse", &format!("{sha}^{{tree}}")]);
-        let tree = BackendObjectId::from(aether_bloomery_github::GitObjectId::from_hex(&tree_hex).unwrap());
+        let tree = BackendObjectId::from(
+            aether_bloomery_github::GitObjectId::from_hex(&tree_hex).expect("the commit tree peels to a git object id"),
+        );
 
-        assert_eq!(store.resolve_backend_object(&candidate.tree).unwrap().as_ref(), Some(&tree));
-        assert_eq!(store.resolve_backend_object(&candidate.checkout).unwrap().as_ref(), Some(&commit));
         assert_eq!(
-            pusher.pushed.lock().unwrap().as_slice(),
+            store.resolve_backend_object(&candidate.tree).expect("the prepared tree digest resolves").as_ref(),
+            Some(&tree)
+        );
+        assert_eq!(
+            store.resolve_backend_object(&candidate.checkout).expect("the prepared checkout digest resolves").as_ref(),
+            Some(&commit)
+        );
+        assert_eq!(
+            pusher.pushed.lock().expect("the recording pusher is not poisoned").as_slice(),
             &[(sha, candidate_ref_name(&bloom(), workpiece))],
             "the prepare must push the capture commit to the workpiece's candidate ref",
         );
@@ -143,7 +159,7 @@ mod prepare {
         // empty bytes or a last-writer-wins row. The refusal has to name the
         // commit, or the operator cannot tell which input failed.
         let (repo, _) = repo_with_commit();
-        let store = SqliteCorrespondence::open(":memory:").unwrap();
+        let store = SqliteCorrespondence::open(":memory:").expect("an in-memory correspondence store opens");
         let missing = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 
         let error = prepare_candidate(
@@ -171,12 +187,14 @@ mod prepare {
         // `record` blindly would re-point a live digest at the operator's
         // object and silently break every lane still checking the old one out.
         let (repo, sha) = repo_with_commit();
-        let store = SqliteCorrespondence::open(":memory:").unwrap();
+        let store = SqliteCorrespondence::open(":memory:").expect("an in-memory correspondence store opens");
         let tree_hex = git_stdout(repo.path(), &["rev-parse", &format!("{sha}^{{tree}}")]);
-        let tree = BackendObjectId::from(aether_bloomery_github::GitObjectId::from_hex(&tree_hex).unwrap());
+        let tree = BackendObjectId::from(
+            aether_bloomery_github::GitObjectId::from_hex(&tree_hex).expect("the commit tree peels to a git object id"),
+        );
         let stranger = BackendObjectId::new(vec![0xee; 20]);
         let tree_digest = candidate_tree_digest(&tree);
-        store.record(&tree_digest, &stranger).unwrap();
+        store.record(&tree_digest, &stranger).expect("the colliding tree row records");
 
         let error = prepare_candidate(
             &store,
@@ -195,7 +213,7 @@ mod prepare {
         let message = error.to_string();
         assert!(message.contains("already corresponds"), "the refusal must name the collision: {message}");
         assert_eq!(
-            store.resolve_backend_object(&tree_digest).unwrap().as_ref(),
+            store.resolve_backend_object(&tree_digest).expect("the colliding tree digest still resolves").as_ref(),
             Some(&stranger),
             "a refused prepare must leave the existing row in place",
         );
@@ -207,7 +225,7 @@ mod prepare {
         // recapture. Resolving a different commit than `--from-commit HEAD`
         // would hand Verify the wrong checkout.
         let (repo, sha) = repo_with_commit();
-        let store = SqliteCorrespondence::open(":memory:").unwrap();
+        let store = SqliteCorrespondence::open(":memory:").expect("an in-memory correspondence store opens");
         let pusher = RecordingPush { pushed: Mutex::new(Vec::new()) };
 
         let from_worktree = prepare_candidate(
@@ -220,7 +238,7 @@ mod prepare {
         )
         .expect("a worktree of the coordinator repo prepares");
         let from_commit = {
-            let store = SqliteCorrespondence::open(":memory:").unwrap();
+            let store = SqliteCorrespondence::open(":memory:").expect("an in-memory correspondence store opens");
             prepare_candidate(
                 &store,
                 &RecordingPush { pushed: Mutex::new(Vec::new()) },
@@ -229,7 +247,7 @@ mod prepare {
                 CandidateSource::Commit(&sha),
                 repo.path(),
             )
-            .unwrap()
+            .expect("the same commit prepares from its sha")
         };
 
         assert_eq!(from_worktree, from_commit, "HEAD of the worktree is the same commit the operator could have named");
@@ -238,7 +256,7 @@ mod prepare {
     #[test]
     fn a_push_failure_names_the_ref() {
         let (repo, sha) = repo_with_commit();
-        let store = SqliteCorrespondence::open(":memory:").unwrap();
+        let store = SqliteCorrespondence::open(":memory:").expect("an in-memory correspondence store opens");
         let target = candidate_ref_name(&bloom(), "issue-5032");
 
         let error =
