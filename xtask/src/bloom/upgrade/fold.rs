@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, OpenFlags};
 
 use super::paths::Paths;
 use super::shell::{Shell, checked};
@@ -26,7 +27,7 @@ const SIDECARS: [&str; 2] = ["-wal", "-shm"];
 /// Prove the candidate can fold the live journal, then stop it.
 pub fn prove(views: &impl Views, shell: &impl Shell, paths: &Paths, log: &mut String) -> Result<ViewDocument> {
     let copy = copy_store(shell, paths, log)?;
-    compare_row_counts(shell, &paths.store, &copy, log)?;
+    compare_row_counts(&paths.store, &copy, log)?;
     let folded = boot_and_read(views, shell, paths, &copy, log)?;
     note(log, &format!("fold-test mainline={} blooms={} matches live", folded.mainline, folded.blooms.len()));
     Ok(folded)
@@ -54,9 +55,9 @@ fn copy_store(shell: &impl Shell, paths: &Paths, log: &mut String) -> Result<Pat
     Ok(copy)
 }
 
-fn compare_row_counts(shell: &impl Shell, live: &Path, copy: &Path, log: &mut String) -> Result<()> {
-    let live_rows = journal_rows(shell, live)?;
-    let copy_rows = journal_rows(shell, copy)?;
+fn compare_row_counts(live: &Path, copy: &Path, log: &mut String) -> Result<()> {
+    let live_rows = journal_rows(live)?;
+    let copy_rows = journal_rows(copy)?;
     if live_rows != copy_rows {
         bail!(
             "refusing to upgrade: store copy journal row count diverged from live\n  \
@@ -67,9 +68,17 @@ fn compare_row_counts(shell: &impl Shell, live: &Path, copy: &Path, log: &mut St
     Ok(())
 }
 
-fn journal_rows(shell: &impl Shell, store: &Path) -> Result<u64> {
-    let count = checked(shell, "sqlite3", &[path_arg(store)?, "SELECT COUNT(*) FROM journal;"])?;
-    count.parse().with_context(|| format!("journal row count from {} is not a number: {count}", store.display()))
+fn journal_rows(store: &Path) -> Result<u64> {
+    let connection = Connection::open_with_flags(store, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("open journal store {}", store.display()))?;
+    let mut statement = connection
+        .prepare("SELECT COUNT(*) FROM journal")
+        .with_context(|| format!("prepare journal count for {}", store.display()))?;
+
+    let count = statement
+        .query_row([], |row| row.get::<_, i64>(0))
+        .with_context(|| format!("query journal row count from {}", store.display()))?;
+    u64::try_from(count).with_context(|| format!("journal row count from {} is not a number: {count}", store.display()))
 }
 
 fn boot_and_read(
@@ -195,19 +204,25 @@ mod tests {
     use crate::bloom::dto::DigestHex;
     use crate::bloom::upgrade::shell::Run;
     use crate::bloom::upgrade::shell::fake::Fake;
-    use crate::bloom::upgrade::tests_support::{Scripted, drained_view, test_paths};
+    use crate::bloom::upgrade::tests_support::{Scripted, drained_view, seeded_paths};
 
     fn matching() -> Scripted {
         Scripted::matching()
     }
 
-    fn counting<'a>(live_count: &'a str, copy_count: &'a str) -> impl Fn(&str) -> Run + 'a {
-        move |line| match line {
-            line if line.starts_with("sqlite3") && line.contains("fold.db") => Run::ok(copy_count),
-            line if line.starts_with("sqlite3") => Run::ok(live_count),
+    fn folding() -> impl Fn(&str) -> Run {
+        |line| match line {
             line if line.starts_with("test -e") => Run::ok(""),
             _ => Run::ok(""),
         }
+    }
+
+    fn no_sqlite3(shell: &Fake<'_>) {
+        assert!(
+            !shell.calls().iter().any(|line| line.starts_with("sqlite3")),
+            "the upgrade path does not shell out to sqlite3: {:?}",
+            shell.calls()
+        );
     }
 
     // Tripwire: a store file copied without its WAL is the same mainline
@@ -215,11 +230,12 @@ mod tests {
     // upgrade proceeds onto a prefix. Naming both counts is the only signal.
     #[test]
     fn a_store_copy_with_divergent_row_counts_is_refused_naming_both() {
-        let shell = Fake::new(counting("156", "140"));
+        let shell = Fake::new(folding());
         let mut log = String::new();
 
-        let refusal =
-            prove(&matching(), &shell, &test_paths(), &mut log).expect_err("a short copy is refused").to_string();
+        let refusal = prove(&matching(), &shell, &seeded_paths(156, 140), &mut log)
+            .expect_err("a short copy is refused")
+            .to_string();
 
         assert!(refusal.contains("live=156"), "the live count is named: {refusal}");
         assert!(refusal.contains("copy=140"), "the copy count is named: {refusal}");
@@ -228,6 +244,7 @@ mod tests {
             "the candidate is not launched after a short copy: {:?}",
             shell.calls()
         );
+        no_sqlite3(&shell);
     }
 
     // Tripwire: the copy has to take -wal and -shm when they are there. A
@@ -236,19 +253,21 @@ mod tests {
     // not doing it.
     #[test]
     fn the_copy_takes_wal_and_shm_sidecars_when_they_exist() {
-        let shell = Fake::new(counting("12", "12"));
+        let shell = Fake::new(folding());
+        let paths = seeded_paths(12, 12);
         let mut log = String::new();
-        prove(&matching(), &shell, &test_paths(), &mut log).expect("matching counts fold");
+        prove(&matching(), &shell, &paths, &mut log).expect("matching counts fold");
+        assert!(log.contains("journal rows live=12 copy=12"), "equal counts are logged: {log}");
 
         let calls = shell.calls();
-        let store = test_paths().store;
         for suffix in SIDECARS {
-            let from = sidecar_path(&store, suffix);
+            let from = sidecar_path(&paths.store, suffix);
             assert!(
                 calls.iter().any(|line| line.starts_with("cp ") && line.contains(&from.display().to_string())),
                 "the {suffix} sidecar is copied: {calls:?}"
             );
         }
+        no_sqlite3(&shell);
     }
 
     // Tripwire: a checkpointed store has no -wal/-shm. `cp` of a sidecar
@@ -257,26 +276,26 @@ mod tests {
     #[test]
     fn a_checkpointed_store_is_copied_without_missing_sidecars() {
         let shell = Fake::new(|line| match line {
-            line if line.starts_with("sqlite3") => Run::ok("12"),
             line if line.starts_with("test -e") => Run::failed(""),
             _ => Run::ok(""),
         });
+        let paths = seeded_paths(12, 12);
         let mut log = String::new();
-        prove(&matching(), &shell, &test_paths(), &mut log).expect("a checkpointed store folds");
+        prove(&matching(), &shell, &paths, &mut log).expect("a checkpointed store folds");
 
         let calls = shell.calls();
-        let store = test_paths().store;
         for suffix in SIDECARS {
-            let from = sidecar_path(&store, suffix);
+            let from = sidecar_path(&paths.store, suffix);
             assert!(
                 !calls.iter().any(|line| line.starts_with("cp ") && line.contains(&from.display().to_string())),
                 "a missing {suffix} is not copied: {calls:?}"
             );
         }
         assert!(
-            calls.iter().any(|line| line.starts_with("cp ") && line.contains(&store.display().to_string())),
+            calls.iter().any(|line| line.starts_with("cp ") && line.contains(&paths.store.display().to_string())),
             "the main store file is still copied: {calls:?}"
         );
+        no_sqlite3(&shell);
     }
 
     // Tripwire: a candidate whose wire cannot decode the journal must die at
@@ -286,7 +305,6 @@ mod tests {
     fn a_replay_breaking_candidate_surfaces_the_decode_error() {
         let decode = "record 2 decision did not decode: aether wire: invalid bool/presence byte 11";
         let shell = Fake::new(move |line| match line {
-            line if line.starts_with("sqlite3") => Run::ok("12"),
             line if line.contains("--store-path") => Run::failed(decode),
             line if line.starts_with("test -e") => Run::ok(""),
             _ => Run::ok(""),
@@ -294,10 +312,11 @@ mod tests {
         let mut log = String::new();
 
         let refusal =
-            prove(&matching(), &shell, &test_paths(), &mut log).expect_err("a reshape is refused").to_string();
+            prove(&matching(), &shell, &seeded_paths(12, 12), &mut log).expect_err("a reshape is refused").to_string();
 
         assert!(refusal.contains(decode), "the decode error is surfaced: {refusal}");
         assert!(refusal.contains("fold-test aborted"), "the refusal names the fold-test: {refusal}");
+        no_sqlite3(&shell);
     }
 
     #[test]
@@ -305,11 +324,11 @@ mod tests {
         let mut folded = drained_view();
         folded.mainline = DigestHex::from_bytes([9; 32]);
         let views = Scripted::new(Ok(drained_view()), Ok(folded));
-        let shell = Fake::new(counting("12", "12"));
+        let shell = Fake::new(folding());
         let mut log = String::new();
 
         let refusal =
-            prove(&views, &shell, &test_paths(), &mut log).expect_err("a diverged fold is refused").to_string();
+            prove(&views, &shell, &seeded_paths(12, 12), &mut log).expect_err("a diverged fold is refused").to_string();
 
         assert!(refusal.contains("diverged"), "the refusal names the divergence: {refusal}");
         assert!(refusal.contains(&drained_view().mainline.to_string()), "live mainline is named: {refusal}");
@@ -327,8 +346,8 @@ mod tests {
         empty.mainline = DigestHex::from_bytes([0; 32]);
         empty.blooms.clear();
         let views = Scripted::matching().first_folded(empty);
-        let shell = Fake::new(counting("12", "12"));
-        let mut paths = test_paths();
+        let shell = Fake::new(folding());
+        let mut paths = seeded_paths(12, 12);
         paths.fold_timeout_millis = 5_000;
         let mut log = String::new();
 
@@ -342,14 +361,18 @@ mod tests {
     // was supposed to leave untouched.
     #[test]
     fn the_fold_test_boots_the_copy_with_lanes_disabled() {
-        let shell = Fake::new(counting("12", "12"));
+        let shell = Fake::new(folding());
+        let paths = seeded_paths(12, 12);
         let mut log = String::new();
-        prove(&matching(), &shell, &test_paths(), &mut log).expect("matching counts fold");
+        prove(&matching(), &shell, &paths, &mut log).expect("matching counts fold");
 
         let launch =
             shell.calls().into_iter().find(|line| line.contains("--store-path")).expect("the candidate is launched");
         assert!(launch.contains("fold.db"), "the store is the copy: {launch}");
-        assert!(!launch.contains("/var/bloomery.db"), "the live store is not the fold target: {launch}");
+        assert!(
+            !launch.contains(&paths.store.display().to_string()),
+            "the live store is not the fold target: {launch}"
+        );
         assert!(launch.contains("--github-local-lane-enabled=false"), "lanes are off: {launch}");
         assert!(launch.contains("--http-port 18910"), "scratch http port: {launch}");
         assert!(launch.contains("--rpc-port 18909"), "scratch rpc port: {launch}");
@@ -362,10 +385,10 @@ mod tests {
     #[test]
     fn a_live_unreachable_fold_times_out_rather_than_spinning() {
         let views = Scripted::new(Err("connection refused".to_owned()), Ok(drained_view()));
-        let shell = Fake::new(counting("12", "12"));
+        let shell = Fake::new(folding());
         let mut log = String::new();
 
-        let refusal = prove(&views, &shell, &test_paths(), &mut log)
+        let refusal = prove(&views, &shell, &seeded_paths(12, 12), &mut log)
             .expect_err("an unreachable live coordinator is a refusal")
             .to_string();
 
