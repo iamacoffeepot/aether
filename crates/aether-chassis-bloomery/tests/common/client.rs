@@ -21,7 +21,7 @@ use aether_rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_V
 use serde::Serialize;
 
 /// Handshake as a client peer named `client_name`, reporting a refusal instead
-/// of panicking — the fallible half [`connect_and_handshake`] retries on.
+/// of panicking — the fallible half [`try_connect_and_handshake`] returns.
 fn try_handshake(stream: &mut TcpStream, client_name: &str) -> Result<(), String> {
     let hello = WireFrame::Hello(Hello {
         wire_version: WIRE_VERSION,
@@ -32,6 +32,18 @@ fn try_handshake(stream: &mut TcpStream, client_name: &str) -> Result<(), String
         WireFrame::HelloAck(HelloAck { wire_version, .. }) if wire_version == WIRE_VERSION => Ok(()),
         other => Err(format!("expected a matching HelloAck, got {other:?}")),
     }
+}
+
+/// Connect and handshake once, reporting the refusal instead of retrying it.
+///
+/// Connect failures begin with `connecting:`. Handshake failures name the
+/// `Hello` / `HelloAck` step that refused, so a caller can tell a closed port
+/// from a stranger that answered TCP but not the wire.
+pub fn try_connect_and_handshake(port: u16, client_name: &str) -> Result<TcpStream, String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|error| format!("connecting: {error}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    try_handshake(&mut stream, client_name)?;
+    Ok(stream)
 }
 
 /// Connect and handshake as one retried unit.
@@ -48,18 +60,13 @@ fn try_handshake(stream: &mut TcpStream, client_name: &str) -> Result<(), String
 pub fn connect_and_handshake(port: u16, client_name: &str) -> TcpStream {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let refusal = match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(mut stream) => {
-                stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-                match try_handshake(&mut stream, client_name) {
-                    Ok(()) => return stream,
-                    Err(why) => why,
-                }
+        match try_connect_and_handshake(port, client_name) {
+            Ok(stream) => return stream,
+            Err(refusal) => {
+                assert!(Instant::now() < deadline, "no coordinator answered a handshake on port {port}: {refusal}");
+                thread::sleep(Duration::from_millis(100));
             }
-            Err(error) => format!("connecting: {error}"),
-        };
-        assert!(Instant::now() < deadline, "no coordinator answered a handshake on port {port}: {refusal}");
-        thread::sleep(Duration::from_millis(100));
+        }
     }
 }
 

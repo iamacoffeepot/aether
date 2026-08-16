@@ -29,6 +29,7 @@ mod common;
 
 use std::net::TcpStream;
 use std::path::Path;
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -44,7 +45,7 @@ use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 use aether_rpc::WireFrame;
-use common::client::{call, call_frame, connect_and_handshake};
+use common::client::{call, call_frame, connect_and_handshake, try_connect_and_handshake};
 use common::{Coordinator, free_port};
 use serde::Serialize;
 
@@ -348,10 +349,71 @@ fn the_capability_ledger_is_measured_live_and_rebuilt_on_replay() {
     assert_eq!(replayed.ledger, live.ledger, "boot replay rebuilds the ledger the live fold measured");
 }
 
-/// Fork the coordinator against a unique artifacts root so the study
-/// resolver reads the same store the test writes.
-fn spawn_with_artifacts(port: u16, db: &str, artifacts: &str) -> Coordinator {
-    Coordinator::spawn(port, &[("AETHER_STORE_PATH", db), ("AETHER_ARTIFACTS_ROOT", artifacts)])
+/// Fork the coordinator against a unique artifacts root and handshake only
+/// with the child that stayed alive.
+///
+/// Port selection, spawn, and handshake are one bounded retryable
+/// transaction. `free_port` binds `:0` and releases, so a sibling can claim
+/// the port before this bin binds. The loser exits; a deadline handshake
+/// then waits 30s for a process that can never become ready. Retrying the
+/// whole fork after an early exit (or a handshake that landed on a
+/// stranger) is what turns that flake into another attempt.
+fn spawn_with_artifacts(db: &str, artifacts: &str, client_name: &str) -> (Coordinator, TcpStream) {
+    spawn_and_connect(client_name, Duration::from_secs(30), || {
+        let port = free_port();
+        (port, Coordinator::spawn(port, &[("AETHER_STORE_PATH", db), ("AETHER_ARTIFACTS_ROOT", artifacts)]))
+    })
+}
+
+/// Run `spawn` and handshake as one transaction: a fresh child per attempt,
+/// handshake attempts only while that child is alive, the whole fork retried
+/// after an early exit or a bind collision. Returns the live guard beside
+/// the stream so the caller cannot keep a connection to a stranger.
+fn spawn_and_connect(
+    client_name: &str,
+    budget: Duration,
+    mut spawn: impl FnMut() -> (u16, Coordinator),
+) -> (Coordinator, TcpStream) {
+    let deadline = Instant::now() + budget;
+    let mut last = String::from("no attempt");
+    while Instant::now() < deadline {
+        let (port, mut coordinator) = spawn();
+        match handshake_while_alive(&mut coordinator, port, client_name, deadline) {
+            Ok(stream) => return (coordinator, stream),
+            Err(why) => last = why,
+        }
+    }
+    panic!("no artifacts coordinator answered a handshake: {last}");
+}
+
+/// Poll the one-attempt handshake while `coordinator` is still the process
+/// on `port`. An exited child is abandoned immediately — it will never
+/// become ready — so the caller can retry the whole spawn.
+fn handshake_while_alive(
+    coordinator: &mut Coordinator,
+    port: u16,
+    client_name: &str,
+    deadline: Instant,
+) -> Result<TcpStream, String> {
+    let mut last = String::from("child exited before a handshake attempt");
+    while coordinator.is_alive() && Instant::now() < deadline {
+        match try_connect_and_handshake(port, client_name) {
+            Ok(stream) if coordinator.is_alive() => return Ok(stream),
+            Ok(_) => return Err(format!("child on port {port} exited after handshake")),
+            Err(why) => {
+                last = why;
+                if !coordinator.is_alive() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    if coordinator.is_alive() {
+        Err(last)
+    } else {
+        Err(format!("child on port {port} exited: {last}"))
+    }
 }
 
 // The plausible bug: a journal that names a study artifact still reports
@@ -365,9 +427,7 @@ fn a_calibration_read_fills_cost_columns_from_a_resolved_study_artifact() {
     let db = db.to_str().unwrap();
     let artifacts_root = artifacts_root.to_str().unwrap();
 
-    let port = free_port();
-    let _coordinator = spawn_with_artifacts(port, db, artifacts_root);
-    let mut stream = connect_and_handshake(port, "calibration-study");
+    let (_coordinator, mut stream) = spawn_with_artifacts(db, artifacts_root, "calibration-study");
     let control = control_mailbox();
 
     let sealed = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp"));
@@ -438,9 +498,7 @@ fn an_unresolvable_study_artifact_stays_unaccounted() {
     let db = db.to_str().unwrap();
     let artifacts_root = artifacts_root.to_str().unwrap();
 
-    let port = free_port();
-    let _coordinator = spawn_with_artifacts(port, db, artifacts_root);
-    let mut stream = connect_and_handshake(port, "calibration-missing");
+    let (_coordinator, mut stream) = spawn_with_artifacts(db, artifacts_root, "calibration-missing");
     let control = control_mailbox();
 
     let sealed = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp"));
@@ -475,6 +533,49 @@ fn an_unresolvable_study_artifact_stays_unaccounted() {
     assert_eq!(construct.samples, 0, "an unresolvable artifact is not a sample");
     assert_eq!(construct.cost_micro_usd, 0, "and it must not become a zero-priced measurement");
     assert_eq!(construct.worker_secs, 0);
+}
+
+// The plausible bug: the first child loses the bind race and exits, but
+// the fixture keeps calling the 30s handshake helper against that port,
+// so a recoverable startup collision becomes a verifier timeout.
+#[test]
+fn an_early_dead_study_artifact_coordinator_is_retried_without_the_handshake_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let artifacts = dir.path().join("artifacts");
+    let db = db.to_str().unwrap();
+    let artifacts = artifacts.to_str().unwrap();
+
+    let mut attempts = 0;
+    let mut first_returned_at = None;
+    let mut second_started_at = None;
+    let (mut coordinator, _stream) = spawn_and_connect("calibration-retry", Duration::from_secs(30), || {
+        attempts += 1;
+        if attempts == 1 {
+            let port = free_port();
+            let mut coordinator =
+                Coordinator::spawn(port, &[("AETHER_STORE_PATH", db), ("AETHER_ARTIFACTS_ROOT", artifacts)]);
+            let _ = Command::new("kill").args(["-9", &coordinator.pid().to_string()]).status().unwrap();
+            let give_up = Instant::now() + Duration::from_secs(2);
+            while coordinator.is_alive() && Instant::now() < give_up {
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(!coordinator.is_alive(), "the scripted first child must already be dead");
+            first_returned_at = Some(Instant::now());
+            (port, coordinator)
+        } else {
+            if second_started_at.is_none() {
+                second_started_at = Some(Instant::now());
+            }
+            let port = free_port();
+            (port, Coordinator::spawn(port, &[("AETHER_STORE_PATH", db), ("AETHER_ARTIFACTS_ROOT", artifacts)]))
+        }
+    });
+
+    assert!(attempts >= 2, "the dead first child must be retried, attempts={attempts}");
+    let gap = second_started_at.expect("a second spawn ran") - first_returned_at.expect("the first spawn returned");
+    assert!(gap < Duration::from_secs(3), "retrying a dead child must not burn the 30s handshake deadline: {gap:?}");
+    assert!(coordinator.is_alive(), "the retried child stayed up through handshake");
 }
 
 #[test]
