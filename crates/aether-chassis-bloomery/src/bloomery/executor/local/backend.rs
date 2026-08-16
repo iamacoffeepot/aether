@@ -935,13 +935,68 @@ impl LocalExecutor {
     // warn; the caller downgrades the verdict, so a lost capture reads as a
     // failed attempt, never a pass whose work silently evaporated.
     fn capture_candidate(&self, worktree_dir: &Path, nonce: &Nonce, message: Option<&str>) -> Option<CandidateRef> {
+        self.capture_worktree(worktree_dir, nonce, message, EmptyWorktree::FailClosed)
+    }
+
+    // Capture a construct lane that died before concluding. A clean worktree
+    // here means the child wrote nothing, which is an ordinary outcome — debug,
+    // not the fail-closed warn a passed run's empty worktree earns.
+    fn capture_partial(&self, worktree_dir: &Path, nonce: &Nonce, message: Option<&str>) -> Option<CandidateRef> {
+        self.capture_worktree(worktree_dir, nonce, message, EmptyWorktree::Ordinary)
+    }
+
+    // A concluded construct captures as a candidate; a dead one captures as a
+    // member checkpoint. `passed` stays `concluded && (…)`, so populating
+    // `candidate` on the failing path cannot flip the verdict.
+    fn construct_capture(
+        &self,
+        worktree_dir: Option<PathBuf>,
+        nonce: &Nonce,
+        concluded: bool,
+        message: Option<&str>,
+    ) -> Option<CandidateRef> {
+        let worktree_dir = worktree_dir?;
+        if concluded {
+            self.capture_candidate(&worktree_dir, nonce, message)
+        } else {
+            self.capture_partial(&worktree_dir, nonce, message)
+        }
+    }
+
+    fn fail_closed_missing_evidence(
+        &self,
+        handle: &WorkHandle,
+        subject: &Digest,
+        worktree_dir: Option<PathBuf>,
+        is_construct: bool,
+    ) -> Vec<EvidenceRef> {
+        let candidate =
+            is_construct.then(|| self.construct_capture(worktree_dir, &handle.nonce, false, None)).flatten();
+        self.retire(&handle.nonce.0);
+        self.pump();
+        synthesized_missing_evidence(handle, subject, candidate)
+    }
+
+    fn capture_worktree(
+        &self,
+        worktree_dir: &Path,
+        nonce: &Nonce,
+        message: Option<&str>,
+        empty: EmptyWorktree,
+    ) -> Option<CandidateRef> {
         let captured = match self.runner.capture(worktree_dir, message) {
             Ok(Some(captured)) => captured,
             Ok(None) => {
-                tracing::warn!(
-                    nonce = %nonce.0,
-                    "local executor backend: passed run left a clean worktree — nothing to capture, failing closed",
-                );
+                match empty {
+                    EmptyWorktree::FailClosed => tracing::warn!(
+                        nonce = %nonce.0,
+                        "local executor backend: passed run left a clean worktree — nothing to capture, failing closed",
+                    ),
+                    EmptyWorktree::Ordinary => tracing::debug!(
+                        nonce = %nonce.0,
+                        "local executor backend: dead construct left a clean worktree — nothing to checkpoint",
+                    ),
+                }
                 return None;
             }
             Err(error) => {
@@ -1068,6 +1123,14 @@ fn capture_commit_digest(commit: &BackendObjectId) -> Digest {
     digest_of(&CaptureCommitAddress { object: commit.as_bytes() })
 }
 
+/// How a clean worktree reads on this capture: a passed run that produced
+/// nothing is a defect, a dead run that wrote nothing is not.
+#[derive(Clone, Copy)]
+enum EmptyWorktree {
+    FailClosed,
+    Ordinary,
+}
+
 /// Fail-closed evidence for an exited run that left no readable file — the
 /// attempt still has to feed retry/wedge rather than loop on a missing path.
 ///
@@ -1079,7 +1142,11 @@ fn capture_commit_digest(commit: &BackendObjectId) -> Digest {
 /// fix it. Empty is the one shape that says what actually happened — the gate
 /// rendered no verdict — and it is a meaning the reducer acts on, re-running
 /// Verify over the untouched candidate rather than repairing it.
-fn synthesized_missing_evidence(handle: &WorkHandle, subject: &Digest) -> Vec<EvidenceRef> {
+fn synthesized_missing_evidence(
+    handle: &WorkHandle,
+    subject: &Digest,
+    candidate: Option<CandidateRef>,
+) -> Vec<EvidenceRef> {
     vec![EvidenceRef {
         name: NameEvidenceClaims::attempt_artifact_name(
             &handle.nonce,
@@ -1091,7 +1158,7 @@ fn synthesized_missing_evidence(handle: &WorkHandle, subject: &Digest) -> Vec<Ev
         nonce: handle.nonce.clone(),
         artifact_id: 0,
         size_bytes: 0,
-        candidate: None,
+        candidate,
         findings: None,
         failed_verifiers: VerifyFailureSet::EMPTY,
         // Synthesized, not reported: there are no evidence bytes to read a
@@ -1301,13 +1368,7 @@ impl ExecutorBackend for LocalExecutor {
                         error = %read_error,
                         "local executor backend: exited run left no readable evidence — failing closed",
                     );
-                    self.retire(&handle.nonce.0);
-                    // Terminal, so the lane slot is free — a run that failed without
-                    // leaving evidence must release its slot exactly as a run that
-                    // passed does, or a bloom whose lanes all fail this way wedges
-                    // the queue behind them.
-                    self.pump();
-                    return Ok(synthesized_missing_evidence(handle, &subject));
+                    return Ok(self.fail_closed_missing_evidence(handle, &subject, worktree_dir, is_construct));
                 }
                 return Err(LocalExecutorError::Evidence(format!("{}: {read_error}", evidence_path.display())));
             }
@@ -1351,9 +1412,9 @@ impl ExecutorBackend for LocalExecutor {
         // whose checkout this process cannot name (a boot re-adoption that
         // recovered no slot) captures nothing and takes the same downgrade.
         let commit_message = (is_construct && nonce_matches).then(|| parse_commit_message(&bytes)).flatten();
-        let candidate = worktree_dir
-            .filter(|_| is_construct && concluded)
-            .and_then(|worktree_dir| self.capture_candidate(&worktree_dir, &handle.nonce, commit_message.as_deref()));
+        let candidate = is_construct
+            .then(|| self.construct_capture(worktree_dir, &handle.nonce, concluded, commit_message.as_deref()))
+            .flatten();
         // File the message against the member the run's order names, while that
         // order is still outstanding — the intake consumes it a moment later, and
         // the land path has no other way back from a bloom to the lane that wrote
@@ -1363,7 +1424,8 @@ impl ExecutorBackend for LocalExecutor {
         if let (Some(candidate), Some(slot)) = (candidate.as_ref(), slot) {
             self.remember_builder(&candidate.checkout, slot);
         }
-        if candidate.is_some()
+        if concluded
+            && candidate.is_some()
             && let Some(message) = commit_message.as_deref()
         {
             self.file_commit_message(&handle.nonce, message);

@@ -54,6 +54,18 @@ pub struct Snapshot {
     /// reactor's completion folds a terminal result in.
     #[serde(default)]
     pub orphan_releases: BTreeMap<Digest, OrphanClaimReleaseRecord>,
+    /// A dead construct lane's newest partial capture, keyed by bloom then
+    /// workpiece. Folded from a failing [`Fact::AttemptCompleted`] that still
+    /// carried a [`CandidateRef`] — the fact already has the field, and the
+    /// cursor is not the home: putting a checkpoint there would retarget the
+    /// retry at the partial tree. #4994 reads this; this issue does not.
+    ///
+    /// Snapshot-level rather than a [`BloomRecord`] field so the fold can see
+    /// the fact without a new [`Decision`] (the journal's decisions graph is
+    /// wire-frozen) and so every existing `BloomRecord { … }` literal stays
+    /// compiling. `#[serde(default)]` is the `orphan_releases` precedent.
+    #[serde(default)]
+    pub member_checkpoints: BTreeMap<BloomId, BTreeMap<WorkpieceId, CandidateRef>>,
     /// The spend-quiesce marker the last crossing recorded (ADR-0192).
     ///
     /// Snapshot-level rather than per-bloom: the door that closed is the
@@ -75,6 +87,12 @@ impl Snapshot {
     /// (issue #3615). Exposed as a named constant so the reconcile and the
     /// control core address the same genesis base.
     pub const GENESIS_MAINLINE: Digest = Digest::from_bytes([0; 32]);
+
+    /// The newest construct checkpoint recorded for `workpiece` in `bloom`.
+    #[must_use]
+    pub fn member_checkpoint(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<CandidateRef> {
+        self.member_checkpoints.get(bloom)?.get(workpiece).copied()
+    }
 }
 
 /// The per-bloom projection record.
@@ -494,7 +512,34 @@ impl Snapshot {
         for effect in &decisions.effects {
             next.apply_effect(effect);
         }
+        next.record_construct_checkpoint(event, decisions);
         next
+    }
+
+    /// Record a failing construct's capture as the member's newest checkpoint.
+    ///
+    /// Keyed on `passed: false` and `StageId::Construct`: a passing capture is
+    /// a candidate (the cursor adopts it), and a failing Refine still discards
+    /// its capture so a tree that failed its own gate is not a resume seed.
+    /// Gated on a retried or wedged outcome so a refused completion — unknown
+    /// bloom, stage mismatch — cannot plant a checkpoint the reducer rejected.
+    /// Raises no hold and does not write the stage cursor.
+    fn record_construct_checkpoint(&mut self, event: &Event, decisions: &Decisions) {
+        if !matches!(decisions.outcome, Outcome::AttemptRetried { .. } | Outcome::AttemptWedged { .. }) {
+            return;
+        }
+        let Fact::AttemptCompleted {
+            bloom,
+            workpiece,
+            stage: StageId::Construct,
+            passed: false,
+            candidate: Some(checkpoint),
+            ..
+        } = &event.fact
+        else {
+            return;
+        };
+        self.member_checkpoints.entry(*bloom).or_default().insert(workpiece.clone(), *checkpoint);
     }
 
     fn apply_graph_effect(&mut self, effect: &Decision) {
