@@ -55,8 +55,8 @@ pub struct UploadedEvidence {
     /// The exact failed `verify.check` members (ADR-0178), decoded from the
     /// artifact name's mask — the same value the backend projected onto the
     /// port reference, which either composes that mask (local) or reads it
-    /// (Actions). Nonempty only for a failed member Verify — the invariant
-    /// `verifier_failure_refusal` below is what enforces that.
+    /// (Actions). Nonempty only for a failed member Verify or `AggregateVerify` —
+    /// the invariant `verifier_failure_refusal` below is what enforces that.
     pub failed_verifiers: VerifyFailureSet,
     /// What the attempt cost (#4679), authoritative from the port reference like
     /// the candidate. The study lane admits it against the same order — but
@@ -91,7 +91,7 @@ pub enum IntakeRefusal {
     /// so this is a corrupt order. Refused rather than silently integrated.
     OutOfLineStage(StageId),
     /// The typed verifier set disagrees with the stored stage/verdict: only a
-    /// failed member Verify may carry a set, and that case must carry one.
+    /// failed member Verify or `AggregateVerify` may carry a set.
     InvalidVerifierFailures {
         /// The outstanding order's stored stage.
         stage: StageId,
@@ -184,8 +184,9 @@ fn verdict_passed(verdict: StageVerdict) -> bool {
 }
 
 // The ADR-0178 transport invariant, kept outside `admit_uploaded` so the trust
-// boundary's main path stays readable: a failed member Verify is the one result
-// a set belongs to, and every other stage/verdict pair must carry none.
+// boundary's main path stays readable: a failed member Verify or AggregateVerify
+// is the result a set belongs to (they share the `verify.check` producer), and
+// every other stage/verdict pair must carry none.
 //
 // A failed member Verify may carry the *empty* set, and that is a meaning rather
 // than a hole: the reducer reads it as a gate that rendered no verdict and
@@ -195,7 +196,7 @@ fn verdict_passed(verdict: StageVerdict) -> bool {
 // execution limit, an hour later.
 fn verifier_failure_refusal(stage: StageId, upload: &UploadedEvidence) -> Option<IntakeRefusal> {
     let valid = match (stage, upload.verdict) {
-        (StageId::Verify, StageVerdict::VerificationFailed) => true,
+        (StageId::Verify | StageId::AggregateVerify, StageVerdict::VerificationFailed) => true,
         _ => upload.failed_verifiers.is_empty(),
     };
     (!valid).then_some(IntakeRefusal::InvalidVerifierFailures {

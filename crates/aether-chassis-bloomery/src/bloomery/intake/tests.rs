@@ -796,6 +796,10 @@ fn a_preflight_only_verify_admits_as_a_host_fault_not_a_candidate_failure() {
     assert_eq!(evidence.subject, candidate);
 }
 
+// A nonempty typed set is only a failed member Verify or AggregateVerify. A
+// passing verify, a parked verify, a non-verify member, a passing aggregate
+// verify, or a failing aggregate review carrying one is a producer/consumer
+// mismatch: refuse it and leave the order live rather than consume a lie.
 #[test]
 fn invalid_verifier_sets_are_refused_without_consuming_the_order() {
     let mut store = store();
@@ -807,6 +811,8 @@ fn invalid_verifier_sets_are_refused_without_consuming_the_order() {
         ("n-pass-set", StageId::Verify, StageVerdict::VerificationPassed, failures),
         ("n-construct-set", StageId::Construct, StageVerdict::VerificationFailed, failures),
         ("n-park-set", StageId::Verify, StageVerdict::Parked, failures),
+        ("n-agg-pass-set", StageId::AggregateVerify, StageVerdict::VerificationPassed, failures),
+        ("n-agg-review-set", StageId::AggregateReview, StageVerdict::ReviewFinding, failures),
     ];
 
     for (nonce, stage, verdict, failed_verifiers) in cases {
@@ -831,6 +837,42 @@ fn invalid_verifier_sets_are_refused_without_consuming_the_order() {
         ));
         assert!(store.lookup_order(nonce).unwrap().is_some(), "`{nonce}` remains live after refusal");
     }
+}
+
+// The shared `verify.check` producer emits `failed_verifiers` for a failed
+// AggregateVerify the same way it does for a member Verify. Refusing the set
+// here stranded the completed order (dispatch 426) instead of routing the
+// documented aggregate-verification failure transition.
+#[test]
+fn a_failing_aggregate_verify_admits_its_typed_set_as_a_bloom_level_failure() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let tree = Digest::from_bytes([30; 32]);
+    let mut record = dispatch_record("n-agg-ver", bloom, &WorkpieceId(String::new()), tree, tree);
+    record.stage = StageId::AggregateVerify;
+    record_dispatch(&mut store, &record).unwrap();
+
+    let upload = UploadedEvidence {
+        nonce: Nonce("n-agg-ver".to_owned()),
+        subject: tree,
+        verdict: StageVerdict::VerificationFailed,
+        detail: Digest::from_bytes([7; 32]),
+        candidate: None,
+        findings: None,
+        failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+        cost: None,
+        calls: None,
+    };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
+        panic!("a matching failing AggregateVerify upload is admitted");
+    };
+    let Fact::AggregateVerifyCompleted { bloom: verified, passed, evidence } = &admission.event.fact else {
+        panic!("a failing AggregateVerify admits AggregateVerifyCompleted, got {:?}", admission.event.fact);
+    };
+    assert_eq!(*verified, bloom);
+    assert!(!*passed, "a VerificationFailed verdict fails the aggregate gate");
+    assert_eq!(evidence.subject, tree, "the fact retains the intake-validated evidence binding");
+    assert!(store.lookup_order("n-agg-ver").unwrap().is_none(), "the admitted order is consumed");
 }
 
 // ADR-0153 — an AggregateReview order's verdict admits as

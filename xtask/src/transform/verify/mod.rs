@@ -746,42 +746,68 @@ fn classify_failures(
         .flatten()
 }
 
+/// Why a failing `verify.test` member is run a second time.
+#[derive(Clone, Copy)]
+enum RerunKind {
+    /// Every first-run failure sat outside the candidate's reverse-dependency
+    /// closure (#4895).
+    OutOfClosure,
+    /// No closure exists to classify against — an aggregate verify, or a
+    /// candidate whose blast radius could not be bounded (#5064).
+    NoClosure,
+}
+
 /// The line separating a member's first run from its repeat inside the one log
 /// the evidence keeps.
 ///
 /// Both runs stay in that log. The receipt for a rerun is what each of the two
 /// runs said, and a log holding only the second cannot show that the first was
-/// environmental.
-fn rerun_notice(id: &str) -> String {
-    format!(
-        "\n\n{id}: every failure above lies outside the candidate's reverse-dependency closure — a transient \
-         host fault far more often than a candidate defect, so the member is being rerun once. Everything \
-         below is that second run.\n\n"
-    )
+/// environmental — or, with no closure, a flake.
+fn rerun_notice(id: &str, kind: RerunKind) -> String {
+    match kind {
+        RerunKind::OutOfClosure => format!(
+            "\n\n{id}: every failure above lies outside the candidate's reverse-dependency closure — a transient \
+             host fault far more often than a candidate defect, so the member is being rerun once. Everything \
+             below is that second run.\n\n"
+        ),
+        RerunKind::NoClosure => format!(
+            "\n\n{id}: this run has no reverse-dependency closure to classify the failures above against, so the \
+             identical invocation is being rechecked once. Everything below is that second run.\n\n"
+        ),
+    }
 }
 
-/// The environment observation for a member whose first run reported only
-/// out-of-closure failures, framed by what its one repeat then did.
-fn rerun_observation(outcome: MemberOutcome, block: Option<String>) -> Option<String> {
-    let verdict = match outcome {
-        MemberOutcome::Passed => {
+/// The environment observation for a member that earned one repeat, framed by
+/// what that repeat then did.
+///
+/// Out-of-closure blocks stay on this channel whichever way the repeat went.
+/// A no-closure flake is reported only when the recheck came back green: a
+/// persistent second run is ordinary candidate work, not an observation.
+fn rerun_observation(kind: RerunKind, outcome: MemberOutcome, block: Option<String>) -> Option<String> {
+    let verdict = match (kind, outcome) {
+        (RerunKind::OutOfClosure, MemberOutcome::Passed) => {
             "The repeat came back green, so the block did not repeat: it was the host, and the member passes \
              without spending a repair lap."
         }
-        MemberOutcome::Environment => {
+        (RerunKind::OutOfClosure, MemberOutcome::Environment) => {
             "The repeat reported the same out-of-closure block, so this member escalates as an environment \
              fault on the bloom rather than as findings against a candidate that cannot reach it."
         }
-        _ => {
+        (RerunKind::OutOfClosure, _) => {
             "The repeat reported failures inside the closure, so the member is judged on those; the block \
              above is not among them."
         }
+        (RerunKind::NoClosure, MemberOutcome::Passed) => {
+            "The identical recheck came back green, so the first failure did not repeat: it is preserved here \
+             as a flake observation, and the member passes without spending a repair lap."
+        }
+        (RerunKind::NoClosure, _) => return None,
     };
     Some(format!("{}\n\n{verdict}", block?))
 }
 
 /// Run one member, discriminating an environment fault from a candidate defect
-/// (#4895).
+/// (#4895, #5064).
 ///
 /// Only a failing `verify.test` run can be discriminated: a failing test names
 /// the package it lives in, and that package either links something the diff
@@ -794,6 +820,12 @@ fn rerun_observation(outcome: MemberOutcome, block: Option<String>) -> Option<St
 /// repeat is the honest verdict and a red one is a host still broken. A mixed
 /// run is not repeated at all: it found a real defect, and the repair lap it
 /// earns is handed the in-closure half alone.
+///
+/// A failing `verify.test` with no closure at all — `AggregateVerify`, or a
+/// candidate whose blast radius the graph cannot bound — has nothing to
+/// classify out. It is worth exactly one identical recheck: a green second run
+/// is a flake, kept as an observation, and a red one is judged on the second
+/// run alone. The repeat is not itself rechecked.
 fn run_member_discriminated(
     id: &str,
     invocation: &VerifyInvocation,
@@ -808,6 +840,33 @@ fn run_member_discriminated(
     };
 
     if !classified.is_environmental() {
+        if closure.is_none() {
+            let first = classified.findings().or_else(|| distil_diagnostics(&String::from_utf8_lossy(&log)));
+            let (repeat_outcome, repeat_log, repeat_exit) = run_member(id, invocation, scope, diff_base, runner)?;
+            let repeat = classify_failures(id, repeat_outcome, &repeat_log, None);
+            let outcome = if repeat_outcome.passed() {
+                MemberOutcome::Passed
+            } else {
+                repeat_outcome
+            };
+            let findings = matches!(outcome, MemberOutcome::Failed | MemberOutcome::Operational)
+                .then(|| {
+                    repeat
+                        .as_ref()
+                        .and_then(nextest::ClassifiedRun::findings)
+                        .or_else(|| distil_diagnostics(&String::from_utf8_lossy(&repeat_log)))
+                })
+                .flatten();
+            return Ok(MemberRun {
+                id: id.to_owned(),
+                outcome,
+                log: [log, rerun_notice(id, RerunKind::NoClosure).into_bytes(), repeat_log].concat(),
+                exit_code: repeat_exit,
+                findings,
+                observation: rerun_observation(RerunKind::NoClosure, outcome, first),
+            });
+        }
+
         let findings = classified.findings().or_else(|| distil_diagnostics(&String::from_utf8_lossy(&log)));
         return Ok(MemberRun {
             id: id.to_owned(),
@@ -843,10 +902,10 @@ fn run_member_discriminated(
     Ok(MemberRun {
         id: id.to_owned(),
         outcome,
-        log: [log, rerun_notice(id).into_bytes(), repeat_log].concat(),
+        log: [log, rerun_notice(id, RerunKind::OutOfClosure).into_bytes(), repeat_log].concat(),
         exit_code: repeat_exit,
         findings,
-        observation: rerun_observation(outcome, classified.observation()),
+        observation: rerun_observation(RerunKind::OutOfClosure, outcome, classified.observation()),
     })
 }
 
@@ -1961,23 +2020,62 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     }
 
     #[test]
-    fn a_run_with_no_closure_classifies_nothing_out() {
-        // Tripwire: the fail-towards-the-candidate direction. A diff nobody
-        // could resolve, an unreadable package graph, or a change whose blast
-        // radius the graph cannot bound all arrive here as `None` — and a run
-        // that cannot see the candidate must blame the candidate, because the
-        // opposite error excuses a real defect as weather and lands it.
+    fn a_disappearing_aggregate_test_failure_is_an_observation_only_pass() {
+        // Acceptance (#5064): AggregateVerify has no closure, so a transient
+        // workspace test failure used to become repair work. One identical
+        // recheck that comes back green is a flake — the member passes, nothing
+        // is charged to a verifier identity, and the first failure stays on
+        // the observation channel rather than in the findings a Refine is
+        // handed.
         let invocation = verify_command("verify.test").expect("verify.test mapped");
-        let mut runner =
-            ScriptedRunner::new(&[(&failing_run(&["aether-actor::fleetharness_binary_store store_round_trips"]), 100)]);
+        let mut runner = ScriptedRunner::new(&[
+            (&failing_run(&["aether-component::replace_drop_reply_routing"]), 100),
+            (&passing_run(), 0),
+        ]);
 
         let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
             .expect("the policy runs");
 
-        assert_eq!(runner.runs, 1, "with no closure there is nothing to classify out, so nothing to rerun for");
+        assert_eq!(runner.runs, 2, "a failed aggregate verify.test is rechecked exactly once");
+        assert_eq!(run.outcome, MemberOutcome::Passed);
+        assert!(run.findings.is_none(), "a disappeared failure must not become repair work");
+        assert!(run.outcome.failure(&run.id).is_none(), "and no verifier identity is charged for a flake");
+        let observation = run.observation.expect("the first failure is preserved as an observation");
+        assert!(observation.contains("replace_drop_reply_routing"), "naming what disappeared");
+        assert!(observation.contains("flake observation"), "and that it is a flake, not a host-closure block");
+        assert!(
+            !observation.contains("outside the candidate's reverse-dependency closure"),
+            "no closure exists to classify anything out",
+        );
+        assert!(
+            String::from_utf8_lossy(&run.log).contains("being rechecked once"),
+            "both runs stay in the log, separated by the notice that says why there are two",
+        );
+    }
+
+    #[test]
+    fn a_persistent_aggregate_test_failure_stays_repair_directed() {
+        // The fail-closed half of #5064. A first-run failure that is still red
+        // on the identical recheck is the candidate's, judged on the second run
+        // alone — so a flake that vanished between the two runs cannot linger
+        // in the findings, and a real defect cannot be excused as weather.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let mut runner = ScriptedRunner::new(&[
+            (&failing_run(&["aether-component::fleetharness_asset_window"]), 100),
+            (&failing_run(&["aether-kit-sim::client_scenario"]), 100),
+        ]);
+
+        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
+            .expect("the policy runs");
+
+        assert_eq!(runner.runs, 2, "a persistent aggregate failure is not rechecked again");
         assert_eq!(run.outcome, MemberOutcome::Failed);
-        assert!(run.findings.expect("findings").contains("store_round_trips"), "the failure is the candidate's");
-        assert!(run.observation.is_none(), "and there is no observation to make");
+        assert_eq!(run.outcome.failure(&run.id), VerifyFailure::from_name("verify.test"));
+        let findings = run.findings.expect("the second run is handed to the repair lap");
+        assert!(findings.contains("client_scenario"), "findings name the recheck's failure");
+        assert!(!findings.contains("fleetharness_asset_window"), "and not the first run's");
+        assert!(run.observation.is_none(), "a persistent failure is not an observation");
+        assert_eq!(umbrella_status(&[MemberOutcome::Passed, run.outcome]), "fail");
     }
 
     #[test]
