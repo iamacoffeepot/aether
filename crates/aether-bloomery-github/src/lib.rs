@@ -109,5 +109,5 @@ pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, par
 pub use projection::{GithubProjection, canonical_issue_number};
 pub use source::{
     GitSource, LandAcceptance, LandingProposal, LandingRefusal, LandingSource, SourceError, candidate_ref_name,
-    landing_branch, landing_floor_title, to_hex,
+    landing_branch, landing_floor_title, member_checkpoint_ref_name, to_hex,
 };

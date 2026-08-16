@@ -41,7 +41,7 @@ use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate, r
 use super::composition::composition_line;
 use super::{BloomRecord, BloomStatus, Decision, Decisions, OperatorHoldError, Outcome, Snapshot};
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::OperatorHold;
+use crate::values::{CandidateRef, OperatorHold};
 
 /// The bloom both doors act on: known, and still running a line worth freezing.
 ///
@@ -135,7 +135,7 @@ pub(super) fn reduce_operator_release(snapshot: &Snapshot, bloom: &BloomId, rele
     let mut effects = alloc::vec![Decision::RecordOperatorRelease { bloom: *bloom, release: release.clone() }];
     let mut dispatched = Vec::new();
     for workpiece in &record.deferred_dispatches {
-        if let Some(owed) = owed_dispatch(record, *bloom, workpiece) {
+        if let Some(owed) = owed_dispatch(record, *bloom, workpiece, snapshot.member_checkpoint(bloom, workpiece)) {
             effects.extend(owed);
             dispatched.push(workpiece.clone());
         }
@@ -152,8 +152,9 @@ pub(super) fn reduce_operator_release(snapshot: &Snapshot, bloom: &BloomId, rele
 /// none, so the only thing that moves is the work order the hold withheld. The
 /// targets come from the same [`reconcile_or_line_targets`] the grant door uses,
 /// for the same reason — with a candidate present the returned evidence binds
-/// its tree and the worker checks out its capture commit, and a member in a fold
-/// round checks out the checkpoint instead.
+/// its tree and the worker checks out its capture commit, a construct
+/// checkpoint seeds the checkout when there is no candidate (#4994), and a
+/// member in a fold round checks out the collision head instead.
 ///
 /// The `None` arms are unreachable under today's transitions: a deferral is only
 /// ever recorded beside a cursor move, for a workpiece that is a member or the
@@ -161,7 +162,12 @@ pub(super) fn reduce_operator_release(snapshot: &Snapshot, bloom: &BloomId, rele
 /// so an impossible entry is dropped rather than dispatched from a position the
 /// reducer invented — an owed dispatch nobody can aim is a stuck workpiece an
 /// operator can see, and a misaimed one is a worker building the wrong tree.
-pub(super) fn owed_dispatch(record: &BloomRecord, bloom: BloomId, workpiece: &WorkpieceId) -> Option<[Decision; 2]> {
+pub(super) fn owed_dispatch(
+    record: &BloomRecord,
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    member_checkpoint: Option<CandidateRef>,
+) -> Option<[Decision; 2]> {
     let cursor = record.progress.get(workpiece).copied()?;
     let candidate = cursor.candidate;
     if workpiece.is_composition() {
@@ -185,6 +191,7 @@ pub(super) fn owed_dispatch(record: &BloomRecord, bloom: BloomId, workpiece: &Wo
         super::splice::member_construct_base(record, workpiece),
         candidate,
         cursor.fold_checkpoint.filter(|_| cursor.stage == StageId::Reconcile),
+        member_checkpoint,
     );
 
     Some(move_effects_with_candidate(

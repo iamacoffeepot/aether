@@ -35,6 +35,19 @@ class OperationalError(RuntimeError):
     """The scanner could not compute an authoritative verdict."""
 
 
+class UnresolvableBase(RuntimeError):
+    """The stated --base could not be resolved; the scan did not run."""
+
+
+# Printed suppressions. Distinct from both refusal codes below.
+EXIT_FINDINGS = 1
+# An OperationalError — the scan started and could not finish a verdict.
+EXIT_OPERATIONAL = 2
+# The stated --base is not a commit this tree can name. A host-input
+# refusal, never a scan against a guessed substitute (#5033).
+EXIT_UNRESOLVABLE_BASE = 3
+
+
 @dataclass(frozen=True, order=True)
 class Suppression:
     path: str
@@ -69,11 +82,21 @@ def git(root: Path, *args: str, allow_missing: bool = False) -> str | None:
     raise OperationalError(detail)
 
 
+def resolve_commit(root: Path, ref: str) -> str:
+    rendered = git(root, "rev-parse", "--verify", f"{ref}^{{commit}}")
+    assert rendered is not None
+    sha = rendered.strip()
+    if not HEX_SHA_RE.fullmatch(sha):
+        raise OperationalError("git did not resolve the diff endpoints to full commit SHAs")
+    return sha
+
+
 def resolve_diff(root: Path, base_ref: str, head_ref: str) -> tuple[str, str]:
-    base = git(root, "rev-parse", "--verify", f"{base_ref}^{{commit}}")
-    head = git(root, "rev-parse", "--verify", f"{head_ref}^{{commit}}")
-    assert base is not None and head is not None
-    head = head.strip()
+    try:
+        base = resolve_commit(root, base_ref)
+    except OperationalError as error:
+        raise UnresolvableBase(f"cannot resolve --base {base_ref}: {error}") from error
+    head = resolve_commit(root, head_ref)
     # `merge-base` exits 1 with no output when the two commits share no ancestor,
     # which a bloomery lane produces by construction: it materializes a bare-tree
     # subject as a parentless wrapper commit (#5025), so a candidate's history is
@@ -81,7 +104,7 @@ def resolve_diff(root: Path, base_ref: str, head_ref: str) -> tuple[str, str]:
     # is the base the scan wants — the diff from it is exactly what the candidate
     # changed — so a disjoint history resolves to it rather than leaving by the
     # exit code that says no verdict was reached at all.
-    merge_base = git(root, "merge-base", base.strip(), head, allow_missing=True)
+    merge_base = git(root, "merge-base", base, head, allow_missing=True)
     if merge_base is None:
         roots = (git(root, "rev-list", "--max-parents=0", head) or "").split()
         if len(roots) != 1:
@@ -91,7 +114,7 @@ def resolve_diff(root: Path, base_ref: str, head_ref: str) -> tuple[str, str]:
             )
         merge_base = roots[0]
     merge_base = merge_base.strip()
-    if not HEX_SHA_RE.fullmatch(merge_base) or not HEX_SHA_RE.fullmatch(head):
+    if not HEX_SHA_RE.fullmatch(merge_base):
         raise OperationalError("git did not resolve the diff endpoints to full commit SHAs")
     return merge_base, head
 
@@ -648,16 +671,19 @@ def main(argv: list[str] | None = None) -> int:
         if not findings:
             return 0
         if args.pull_request is None:
-            return 1
+            return EXIT_FINDINGS
         if not args.repository:
             raise OperationalError("--repository or GITHUB_REPOSITORY is required with --pull-request")
         token = os.environ.get("GITHUB_TOKEN")
         if not token:
             raise OperationalError("GITHUB_TOKEN is required to verify pull-request body provenance")
-        return 0 if trusted_signoff(args.pull_request, args.repository, base, head, token) else 1
+        return 0 if trusted_signoff(args.pull_request, args.repository, base, head, token) else EXIT_FINDINGS
+    except UnresolvableBase as error:
+        print(f"suppression scan refused: {error}", file=sys.stderr)
+        return EXIT_UNRESOLVABLE_BASE
     except OperationalError as error:
         print(f"suppression scan error: {error}", file=sys.stderr)
-        return 2
+        return EXIT_OPERATIONAL
 
 
 if __name__ == "__main__":

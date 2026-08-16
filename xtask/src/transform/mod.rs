@@ -103,6 +103,12 @@ pub struct TransformArgs {
     /// session through the same flag. Ignored by the verify lane.
     #[arg(long)]
     resume: Option<String>,
+    /// The construct checkpoint this dispatch resumes from (#4994). Named in
+    /// the assembled prompt together with its trust posture; absent on a cold
+    /// start from the sealed (or spliced) base. Ignored by every lane except
+    /// `construct.implement`.
+    #[arg(long)]
+    seeded: Option<String>,
 }
 
 /// `<out>/evidence.json` schema for the verify lane — the untrusted claim a

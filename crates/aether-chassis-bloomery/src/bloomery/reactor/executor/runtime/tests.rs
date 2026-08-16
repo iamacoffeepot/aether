@@ -46,7 +46,7 @@ use crate::bloomery::{
 };
 use crate::session::SessionConfig;
 use crate::store::{JournalWrite, OutstandingOrder, SqliteStore, StoreBackend};
-use aether_bloomery_github::candidate_ref_name;
+use aether_bloomery_github::{candidate_ref_name, member_checkpoint_ref_name};
 
 // A capturing executor backend: it records every submitted `WorkOrder` so a test
 // can assert exactly what `drain_and_dispatch` built — the advisory description it
@@ -1507,10 +1507,11 @@ fn drain_stamps_the_record_axes_from_the_payload() {
 }
 
 // ADR-0152 — an admitted passing capture is pushed to the bloom's candidate ref,
-// resolved through the correspondence to the capture commit; a failing or
-// capture-less admission pushes nothing. Catches a push against the wrong ref
-// namespace (a downstream Actions checkout would 404) and a push of discarded
-// (failing) work.
+// resolved through the correspondence to the capture commit; a failing construct
+// that still captured work pushes to the member-checkpoint sibling; a capture-less
+// admission pushes nothing. Catches a push against the wrong ref namespace (a
+// downstream Actions checkout would 404) and a failing capture landing on the
+// candidate ref as if it had passed.
 #[test]
 fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
     use aether_bloomery::{CandidateRef, Event, IdempotencyKey};
@@ -1548,7 +1549,7 @@ fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
     );
 
     let issued = pusher.pushed.lock().unwrap().clone();
-    assert_eq!(issued.len(), 1, "only the passing capture pushes");
+    assert_eq!(issued.len(), 2, "the passing capture and the failing construct checkpoint both push");
     assert_eq!(issued[0].0, commit_hex, "the pushed sha is the capture commit, resolved via correspondence");
     assert_eq!(
         issued[0].1,
@@ -1557,6 +1558,48 @@ fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
     );
     assert!(issued[0].1.starts_with("refs/heads/bloom/"), "the ref lives in the bloom namespace");
     assert!(issued[0].1.ends_with("/candidate/wp-cand"), "the workpiece segment is sanitized to ref-safe characters");
+    assert_eq!(issued[1].0, commit_hex, "the checkpoint names the same capture commit");
+    assert_eq!(
+        issued[1].1,
+        member_checkpoint_ref_name(&bloom, "wp/cand"),
+        "a failing construct capture pushes to the member-checkpoint sibling, not the candidate ref",
+    );
+    assert!(issued[1].1.ends_with("/member-checkpoint/wp-cand"), "the workpiece segment is sanitized the same way");
+}
+
+// Construct only: a failing Refine that happens to carry a capture must not
+// write a member-checkpoint. Catches the push arm matching on passed:false
+// alone and treating every model's leftover tree as a construct resume seed.
+#[test]
+fn a_failing_refine_capture_is_not_pushed_as_a_member_checkpoint() {
+    use aether_bloomery::{CandidateRef, Event, IdempotencyKey};
+
+    let bloom = BloomId(digest(1));
+    let capture = CandidateRef { tree: digest(0xAB), checkout: digest(0xAC) };
+    let store = FakeGithub::new();
+    store.seed_git_object(&capture.checkout);
+    let fact = Fact::AttemptCompleted {
+        bloom,
+        workpiece: WorkpieceId("wp/cand".to_owned()),
+        stage: StageId::Refine,
+        passed: false,
+        evidence: aether_bloomery::Evidence {
+            subject: digest(9),
+            kind: aether_bloomery::EvidenceKind::VerificationResult,
+            detail: digest(8),
+        },
+        candidate: Some(capture),
+    };
+    let event = Event { idempotency_key: IdempotencyKey("k".to_owned()), fact };
+    let pusher = RecordingPush::default();
+    let correspondence: SharedCorrespondence = Arc::new(store);
+    push_admitted_candidates(
+        &[Admission { admit: Admit { event: to_vec(&event).unwrap() }, event }],
+        Some(&correspondence),
+        &pusher,
+    );
+
+    assert!(pusher.pushed.lock().unwrap().is_empty(), "a refine failure is not a construct checkpoint");
 }
 
 // Tripwire: `default_candidate_push`'s fixture arm declines every push rather
