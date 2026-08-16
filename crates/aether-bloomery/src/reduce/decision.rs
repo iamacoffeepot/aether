@@ -607,4 +607,36 @@ pub enum Decision {
         /// The resolved `(member, depends_on)` pairs, sorted and de-duplicated.
         edges: Vec<MemberDependency>,
     },
+    /// Record that `workpiece` is held at Verify because the host could not
+    /// run the gates (#5020) — see
+    /// [`BloomRecord::host_faults`](crate::BloomRecord::host_faults).
+    ///
+    /// The findings are the preflight prose, journaled so the bloom view and
+    /// the operator CLI can name the missing tools without looking the
+    /// evidence artifact up. Appended so the prior decisions' wire
+    /// discriminants are unchanged.
+    RecordHostFault {
+        /// The bloom the held member belongs to.
+        bloom: BloomId,
+        /// The member sitting at Verify.
+        workpiece: WorkpieceId,
+        /// The preflight findings — the missing tools, listed verbatim.
+        findings: String,
+        /// The preflight evidence digest, the idempotency half of the
+        /// cadence resume so two ticks against the same hold collapse.
+        evidence: Digest,
+    },
+    /// Clear a host-fault hold (#5020), the resume counterpart of
+    /// [`Decision::RecordHostFault`].
+    ///
+    /// The dispatch the hold owed rides as an ordinary
+    /// [`Decision::DispatchAttempt`] beside this one, re-derived from the
+    /// cursor the way an operator release re-derives what a hold swallowed.
+    /// Appended so the prior decisions' wire discriminants are unchanged.
+    ClearHostFault {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The member being let off the host-fault hold.
+        workpiece: WorkpieceId,
+    },
 }

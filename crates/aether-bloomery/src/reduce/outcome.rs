@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
-    AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, IntegrateError,
-    LandError, LandingRejectedError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError,
-    SealError, SupersedeError, VerifyFailedError,
+    AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, HostFaultError,
+    IntegrateError, LandError, LandingRejectedError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError,
+    ResolveError, SealError, SupersedeError, VerifyFailedError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -554,6 +554,24 @@ pub enum Outcome {
     /// [`Decision::RecordSpendQuiesce`]
     /// so `/view` can show the marker rather than a silent refusal to seal.
     SealQuiesced(SpendQuiesce),
+    /// A member Verify could not run because the host is missing a gate tool
+    /// (#5020). The member stays at Verify; nothing is charged to its budget
+    /// and Refine is not dispatched.
+    VerifyHostFaultHeld {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The member held on the host fault.
+        workpiece: WorkpieceId,
+    },
+    /// A host-fault hold was cleared and Verify re-dispatched (#5020).
+    HostFaultResumed {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The member whose Verify is running again.
+        workpiece: WorkpieceId,
+    },
+    /// A host-fault hold or resume was refused.
+    HostFaultRejected(HostFaultError),
 }
 
 impl Outcome {

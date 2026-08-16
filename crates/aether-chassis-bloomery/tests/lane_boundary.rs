@@ -250,6 +250,34 @@ fn a_failing_aggregate_review_drives_a_repair_lap_that_resolves() {
 }
 
 #[test]
+fn a_preflight_failure_holds_on_the_host_and_resumes_without_refine() {
+    // #5020: a missing gate tool is a host fault. The mock's Environment
+    // mode on verify.check stamps the production preflight shape; the
+    // coordinator must hold at Verify, spend no member budget, and — once
+    // the next scripted run can pass — resume on its own cadence without
+    // an operator grant or a Refine lap.
+    let mut harness = LaneHarness::start(
+        &LaneScript::all_passing()
+            .then(VERIFY_CHECK_COMMAND, LaneMode::Environment)
+            .then(VERIFY_CHECK_COMMAND, LaneMode::Pass),
+    );
+
+    let bloom = harness.settle("the member resolves after the host is probed again", |bloom| {
+        bloom.members.first().is_some_and(|member| member.resolution.is_some())
+    });
+
+    assert!(bloom.members[0].wedge.is_none(), "a host fault must not wedge the member");
+    assert!(bloom.members[0].host_fault.is_none(), "a resolved member is no longer held");
+
+    let ledger = harness.ledger();
+    let verifies = ledger.iter().filter(|run| run.command == VERIFY_CHECK_COMMAND).count();
+    let constructs = ledger.iter().filter(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND).count();
+    assert!(verifies >= 2, "the cadence re-probed Verify after the preflight miss: {ledger:?}");
+    assert_eq!(constructs, 1, "no Refine lap for a candidate the gates never judged: {ledger:?}");
+    harness.assert_live();
+}
+
+#[test]
 fn an_aggregate_review_that_cannot_run_retries_the_review_and_never_opens_a_repair_lap() {
     // ADR-0176, end to end below the spawn seam: the critic lane reports that it
     // could not execute at all, and the whole chain — the lane's stamped

@@ -24,6 +24,10 @@ use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
 impl ApiCapabilityState {
     /// `POST /blooms/{id}/supersede` — seal the named successor draft and admit
     /// `Fact::Supersede` against the `{id}` predecessor bloom.
+    ///
+    /// An edgeless body is the drop-a-subtree case (ADR-0196): the reducer
+    /// keeps the predecessor's remaining member graph, so adopted dependents
+    /// stay based on their inherited ancestors rather than becoming roots.
     pub(super) fn supersede(&self, ctx: &NativeCtx<'_, Manual>, id: &str, body: &[u8]) -> Routed {
         let predecessor = match digest_from_hex(id) {
             Some(digest) => BloomId(digest),

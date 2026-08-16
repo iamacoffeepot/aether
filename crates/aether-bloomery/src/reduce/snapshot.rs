@@ -316,8 +316,32 @@ pub struct BloomRecord {
     /// journal written before the graph existed still decodes.
     #[serde(default)]
     pub dependencies: Vec<MemberDependency>,
+    /// Members held at Verify because the host could not run the gates
+    /// (#5020) — keyed by workpiece, carrying the preflight findings.
+    ///
+    /// A `verify.preflight`-only verdict writes one; the coordinator cadence
+    /// clears it when it re-probes. Distinct from
+    /// [`operator_hold`](Self::operator_hold): this is a per-member host
+    /// condition, not a bloom-wide brake. Journal-derived and replay-rebuilt;
+    /// defaulted so a journal written before the hold existed still decodes.
+    #[serde(default)]
+    pub host_faults: BTreeMap<WorkpieceId, HostFaultHold>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
+}
+
+/// A member held at Verify because the host could not run the gates (#5020).
+///
+/// Projection state, not a journal row: the durable write is
+/// [`Decision::RecordHostFault`]. The evidence digest keys the cadence
+/// resume so two ticks against the same hold collapse, and a later miss
+/// (a new evidence artifact) is a new key.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct HostFaultHold {
+    /// The preflight findings — the missing tools, listed verbatim.
+    pub findings: String,
+    /// The preflight evidence digest the hold was recorded against.
+    pub evidence: Digest,
 }
 
 /// A bloom's run of aggregate-review executor faults against one held fold
@@ -599,6 +623,7 @@ impl Snapshot {
                 self.spend_quiesce.clone_from(quiesce);
             }
             Decision::RecordMemberDependencies { .. } => self.apply_graph_effect(effect),
+            Decision::RecordHostFault { .. } | Decision::ClearHostFault { .. } => self.apply_host_fault_effect(effect),
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;
@@ -703,6 +728,26 @@ impl Snapshot {
             Decision::DeferDispatch { bloom, workpiece } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.deferred_dispatches.insert(workpiece.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Fold the two decisions that write a member's host-fault hold (#5020):
+    /// recording the preflight findings, and clearing them on a cadence resume.
+    fn apply_host_fault_effect(&mut self, effect: &Decision) {
+        match effect {
+            Decision::RecordHostFault { bloom, workpiece, findings, evidence } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record
+                        .host_faults
+                        .insert(workpiece.clone(), HostFaultHold { findings: findings.clone(), evidence: *evidence });
+                }
+            }
+            Decision::ClearHostFault { bloom, workpiece } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.host_faults.remove(workpiece);
                 }
             }
             _ => {}
@@ -863,6 +908,7 @@ impl BloomRecord {
             operator_hold: None,
             deferred_dispatches: BTreeSet::new(),
             dependencies: Vec::new(),
+            host_faults: BTreeMap::new(),
             superseded_by: None,
         }
     }

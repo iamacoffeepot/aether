@@ -141,6 +141,21 @@ pub struct MemberView {
     /// so a reader that predates the field still decodes.
     #[serde(default)]
     pub blocked_by: Option<WorkpieceId>,
+    /// Why this member is sitting at Verify without a dispatched attempt
+    /// (#5020): the host could not run the gates. `None` while the member is
+    /// working, wedged, or resolved. The findings name the missing tools
+    /// verbatim. `#[serde(default)]` so a reader that predates the field
+    /// still decodes.
+    #[serde(default)]
+    pub host_fault: Option<HostFaultView>,
+}
+
+/// A member's host-fault hold, rendered so an operator can see that Verify
+/// is waiting on the executor host rather than on the candidate (#5020).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct HostFaultView {
+    /// The preflight findings — the missing tools, listed verbatim.
+    pub findings: String,
 }
 
 /// A member's pending-decision hold, rendered for the outward mirror: the held

@@ -9,13 +9,18 @@ use alloc::vec::Vec;
 use aether_data::Kind;
 use serde::de::DeserializeOwned;
 
-use super::readiness::{ready_entries, successor_entries};
-use super::{BloomStatus, Decision, Decisions, Outcome, SealConflict, SealError, Snapshot, SupersedeError};
-use crate::ids::{BloomId, WorkpieceId};
+use super::attempt::{DispatchTargets, SealedLine, move_effects};
+use super::readiness::{entry_line, ready_entries, successor_entries};
+use super::splice::{SplicedBase, checkout_from, member_construct_base, spliced_base};
+use super::{
+    BloomRecord, BloomStatus, Decision, Decisions, Outcome, SealConflict, SealError, Snapshot, StageProgress,
+    SupersedeError,
+};
+use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
-    BloomSpec, ConfigKind, ConfigResolveError, ConfigScopes, DependencyError, EvidenceKind, MemberCandidate,
-    MemberDependency, Membership, ModelOverride, ResolvedConfigs, SpendCeiling, SpendWindow, StageCatalog,
-    Unproducible, resolve_member_dependencies,
+    BloomSpec, CandidateRef, ConfigKind, ConfigResolveError, ConfigScopes, DependencyError, EvidenceKind,
+    MemberCandidate, MemberDependency, Membership, ModelOverride, ResolutionClaim, ResolvedConfigs, SpendCeiling,
+    SpendWindow, StageCatalog, Unproducible, VerifyFailureSet, VerifyProof, resolve_member_dependencies,
 };
 
 pub(super) fn reduce_seal(
@@ -436,18 +441,61 @@ pub(super) fn reduce_supersede(
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom: successor_id });
     }
     effects.push(Decision::RecordStageCatalog { bloom: successor_id, catalog: catalog.clone() });
+    // An edgeless supersede of a graph bloom keeps the remaining subgraph —
+    // dropping a wedged member must not also drop the edges among the
+    // members that stay. Explicit door-resolved edges still win.
+    let graph = effective_successor_edges(edges, &record.dependencies, successor.members());
+    adopt_predecessor_work(&mut effects, successor, predecessor, record, &graph, &catalog);
+    // Last, so the mainline move is part of the same atomic decision set that
+    // released the predecessor and claimed the successor: the base a land
+    // compare-and-swaps against and the bloom entitled to land on it change
+    // together or not at all.
+    if let Some(base) = rebase {
+        effects.push(Decision::AdvanceMainline { from: snapshot.mainline, to: base });
+    }
+    effects.push(Decision::MarkSuperseded { bloom: *predecessor, by: successor_id });
+    effects.push(Decision::RecordMemberDependencies { bloom: successor_id, edges: graph });
+    Decisions { outcome: Outcome::Superseded { predecessor: *predecessor, successor: successor_id }, effects }
+}
+
+/// Transfer still-valid predecessor claims onto the successor and schedule
+/// whatever did not inherit.
+fn adopt_predecessor_work(
+    effects: &mut Vec<Decision>,
+    successor: &BloomSpec,
+    predecessor: &BloomId,
+    record: &BloomRecord,
+    graph: &[MemberDependency],
+    catalog: &StageCatalog,
+) {
+    let successor_id = successor.id();
     // Inherit only a claim whose workpiece the successor re-admits at the same
     // scope revision — an ejected or scope-changed workpiece drops its stale
-    // claim (ADR-0149 §The bloom).
+    // claim (ADR-0149 §The bloom). A proof rides with the claim only when the
+    // successor's splice reproduces the construct base the proof was collected
+    // against; a different splice re-verifies instead of adopting the proof
+    // (ADR-0196).
+    let mut reverify = Vec::new();
     for claim in record.claims.values() {
-        let still_valid = successor
+        let Some(member) = successor
             .members()
             .iter()
-            .any(|m| m.workpiece == claim.workpiece && m.scope_revision == claim.scope_revision);
-        if still_valid {
-            effects.push(Decision::InheritClaim { bloom: successor_id, claim: claim.clone() });
+            .find(|member| member.workpiece == claim.workpiece && member.scope_revision == claim.scope_revision)
+        else {
+            continue;
+        };
+        match adoption_of(record, successor, graph, claim, member) {
+            Adoption::WithProof(proof) => {
+                effects.push(Decision::InheritClaim { bloom: successor_id, claim: claim.clone() });
+                effects.push(Decision::RecordVerifyProof { bloom: successor_id, proof });
+            }
+            Adoption::ClaimOnly => {
+                effects.push(Decision::InheritClaim { bloom: successor_id, claim: claim.clone() });
+            }
+            Adoption::Reverify(candidate) => reverify.push((member, candidate)),
         }
     }
+
     // Every successor member that does not arrive already integrated (an
     // inherited claim above) is a candidate for the entry line. Roots whose
     // dependencies are already inherited enter immediately; dependents wait
@@ -456,8 +504,21 @@ pub(super) fn reduce_supersede(
     // predecessor never integrated (the wedged-member escape hatch) would
     // otherwise be claimed but never executed, leaving the successor
     // unresolvable.
-    let (every_member_inherited, entries) = successor_entries(successor_id, successor, record, edges, &catalog);
+    let (every_member_inherited, entries) = successor_entries(successor_id, successor, record, graph, catalog);
     effects.extend(entries);
+    for (member, candidate) in &reverify {
+        let base = match successor_construct_base(successor, graph, record, &member.workpiece) {
+            SplicedBase::Ready(digest) => digest,
+            SplicedBase::Conflict { .. } => successor.base(),
+        };
+        effects.extend(verify_reentry(
+            successor_id,
+            member,
+            entry_line(member, successor.configs(), catalog, base),
+            *candidate,
+        ));
+    }
+
     // A successor every one of whose members arrived already integrated has a
     // complete claim set the instant it seals, and no member left to run — so
     // nothing downstream would ever dispatch its fold. `reduce_integrate`
@@ -471,7 +532,10 @@ pub(super) fn reduce_supersede(
     // base, so the successor needs its own fold rather than a reuse of the
     // predecessor's integration — and that fold has to combine rather than
     // state, which is what the merge-based fold is for.
-    if every_member_inherited {
+    //
+    // A splice-mismatch re-verify is not yet integrated: folding now would
+    // weave a candidate whose proof the successor just refused.
+    if every_member_inherited && reverify.is_empty() {
         let members = successor
             .members()
             .iter()
@@ -490,16 +554,117 @@ pub(super) fn reduce_supersede(
             adopt_from: Some(*predecessor),
         });
     }
-    // Last, so the mainline move is part of the same atomic decision set that
-    // released the predecessor and claimed the successor: the base a land
-    // compare-and-swaps against and the bloom entitled to land on it change
-    // together or not at all.
-    if let Some(base) = rebase {
-        effects.push(Decision::AdvanceMainline { from: snapshot.mainline, to: base });
+}
+
+/// The graph a successor actually runs: the door's non-empty edge set, or the
+/// predecessor's remaining subgraph when the supersede is edgeless.
+///
+/// Dropping a wedged member via `Fact::Supersede` (no restated edges) must
+/// keep the edges among the members that stay — otherwise an adopted
+/// dependent becomes a root and reconstructs on the bloom base.
+fn effective_successor_edges(
+    requested: &[MemberDependency],
+    predecessor_edges: &[MemberDependency],
+    members: &[Membership],
+) -> Vec<MemberDependency> {
+    if !requested.is_empty() {
+        return requested.to_vec();
     }
-    effects.push(Decision::MarkSuperseded { bloom: *predecessor, by: successor_id });
-    effects.push(Decision::RecordMemberDependencies { bloom: successor_id, edges: edges.to_vec() });
-    Decisions { outcome: Outcome::Superseded { predecessor: *predecessor, successor: successor_id }, effects }
+    let ids: BTreeSet<&WorkpieceId> = members.iter().map(|member| &member.workpiece).collect();
+    predecessor_edges
+        .iter()
+        .filter(|edge| ids.contains(&edge.member) && ids.contains(&edge.depends_on))
+        .cloned()
+        .collect()
+}
+
+/// Whether an inherited claim also carries its proof, or must re-verify.
+enum Adoption {
+    /// Claim and proof transfer — splice matches the construct base the proof
+    /// was collected against.
+    WithProof(VerifyProof),
+    /// Claim transfers, no proof existed on the predecessor (today's inherit).
+    ClaimOnly,
+    /// Splice differs from the proof's construct base: do not inherit, re-verify
+    /// the existing candidate against the successor's splice.
+    Reverify(CandidateRef),
+}
+
+fn adoption_of(
+    predecessor: &BloomRecord,
+    successor: &BloomSpec,
+    edges: &[MemberDependency],
+    claim: &ResolutionClaim,
+    member: &Membership,
+) -> Adoption {
+    let Some(proof) = predecessor.verify_proof_for(claim.candidate) else {
+        return Adoption::ClaimOnly;
+    };
+    let pred_base = member_construct_base(predecessor, &member.workpiece);
+    match successor_construct_base(successor, edges, predecessor, &member.workpiece) {
+        SplicedBase::Ready(succ_base) if succ_base == pred_base => Adoption::WithProof(proof.clone()),
+        _ => Adoption::Reverify(inherited_candidate(predecessor, claim)),
+    }
+}
+
+fn successor_construct_base(
+    successor: &BloomSpec,
+    edges: &[MemberDependency],
+    predecessor: &BloomRecord,
+    member: &WorkpieceId,
+) -> SplicedBase {
+    let ids: Vec<WorkpieceId> = successor.members().iter().map(|item| item.workpiece.clone()).collect();
+    // Same checkout identity `member_construct_base` uses (capture commit,
+    // falling back to the claimed tree). Comparing the predecessor's
+    // checkout against the successor's tree would refuse every dependent
+    // whose capture commit is not the tree digest — the production case.
+    let checkout_of = |id: &WorkpieceId| {
+        predecessor
+            .claims
+            .get(id)
+            .filter(|claim| {
+                successor
+                    .members()
+                    .iter()
+                    .any(|item| item.workpiece == *id && item.scope_revision == claim.scope_revision)
+            })
+            .and_then(|_| checkout_from(predecessor, id))
+    };
+    spliced_base(successor.base(), &ids, edges, member, &checkout_of)
+}
+
+fn inherited_candidate(predecessor: &BloomRecord, claim: &ResolutionClaim) -> CandidateRef {
+    CandidateRef {
+        tree: claim.candidate,
+        checkout: checkout_from(predecessor, &claim.workpiece).unwrap_or(claim.candidate),
+    }
+}
+
+/// Verify re-entry for an inherited candidate whose proof cannot transfer —
+/// Construct is skipped, the existing candidate is judged against the
+/// successor's splice.
+fn verify_reentry(
+    bloom: BloomId,
+    member: &Membership,
+    sealed: SealedLine<'_>,
+    candidate: CandidateRef,
+) -> [Decision; 2] {
+    move_effects(
+        bloom,
+        &member.workpiece,
+        member.scope_revision,
+        StageProgress {
+            stage: StageId::Verify,
+            attempts: 1,
+            candidate: Some(candidate),
+            repair_rolls: 0,
+            seen_verify_failures: VerifyFailureSet::EMPTY,
+            fold_checkpoint: None,
+            fold_conflict_evidence: None,
+        },
+        DispatchTargets { subject: candidate.tree, checkout: candidate.checkout },
+        sealed,
+    )
 }
 
 #[cfg(test)]
@@ -511,14 +676,15 @@ mod tests {
 
     use super::{reduce_seal, reduce_supersede};
     use crate::digest::Digest;
-    use crate::ids::{BloomId, IdempotencyKey, WorkpieceId};
+    use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::SealError;
     use crate::reduce::{
         BloomStatus, Decision, Decisions, Event, Fact, Outcome, Snapshot, decode_recorded_decisions, reduce,
     };
     use crate::values::{
-        BloomDraft, ConfigKind, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, ResolvedConfigs,
-        SpendCeiling, SpendQuiesce, SpendWindow, Unproducible,
+        BloomDraft, BloomSpec, CandidateRef, ConfigKind, ConfigRegistry, Evidence, EvidenceKind, Forecast,
+        MemberDependency, Membership, ResolutionClaim, ResolvedConfigs, SpendCeiling, SpendQuiesce, SpendWindow,
+        Unproducible,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -877,5 +1043,401 @@ mod tests {
             "apply folds the journaled graph onto the record, so equality is not both paths ignoring it",
         );
         assert_eq!(live, replayed, "apply-only replay of the journaled row rebuilds the live snapshot");
+    }
+
+    fn wp(name: &str) -> WorkpieceId {
+        WorkpieceId(name.into())
+    }
+
+    fn edge(member: &str, depends_on: &str) -> MemberDependency {
+        MemberDependency { member: wp(member), depends_on: wp(depends_on) }
+    }
+
+    fn spec(members: &[(&str, u8)]) -> BloomSpec {
+        spec_at(members, 0)
+    }
+
+    fn spec_at(members: &[(&str, u8)], forecast_tokens: u64) -> BloomSpec {
+        BloomDraft {
+            proposals: members.iter().map(|(name, revision)| membership(name, *revision)).collect(),
+            base: digest(0),
+            forecast: Forecast { predicted_tokens: forecast_tokens, predicted_worker_secs: 0, predicted_retries: 0 },
+            ..BloomDraft::default()
+        }
+        .seal()
+    }
+
+    fn event(key: &str, fact: Fact) -> Event {
+        Event { idempotency_key: IdempotencyKey(key.into()), fact }
+    }
+
+    fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Decisions) {
+        let decisions = reduce(snapshot, event, &ResolvedConfigs::default(), &SpendWindow::default());
+        (snapshot.apply(event, &decisions, &ResolvedConfigs::default()), decisions)
+    }
+
+    fn verified_claim(name: &str, revision: u8, candidate: u8, verdict: u8) -> ResolutionClaim {
+        ResolutionClaim {
+            workpiece: wp(name),
+            scope_revision: digest(revision),
+            candidate: digest(candidate),
+            evidence: Evidence {
+                subject: digest(candidate),
+                kind: EvidenceKind::VerificationResult,
+                detail: digest(verdict),
+            },
+        }
+    }
+
+    fn fail_construct(snapshot: &Snapshot, bloom: BloomId, name: &str, key: &str) -> Snapshot {
+        step(
+            snapshot,
+            &event(
+                key,
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: wp(name),
+                    stage: StageId::Construct,
+                    passed: false,
+                    evidence: Evidence {
+                        subject: digest(1),
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(70),
+                    },
+                    candidate: None,
+                },
+            ),
+        )
+        .0
+    }
+
+    fn pass_construct(snapshot: &Snapshot, bloom: BloomId, name: &str, tree: u8, checkout: u8, key: &str) -> Snapshot {
+        step(
+            snapshot,
+            &event(
+                key,
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: wp(name),
+                    stage: StageId::Construct,
+                    passed: true,
+                    evidence: Evidence {
+                        subject: digest(tree),
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(80),
+                    },
+                    candidate: Some(CandidateRef { tree: digest(tree), checkout: digest(checkout) }),
+                },
+            ),
+        )
+        .0
+    }
+
+    fn construct_dispatches(decisions: &Decisions) -> Vec<WorkpieceId> {
+        decisions
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::DispatchAttempt { workpiece, stage, .. } if *stage == StageId::Construct => {
+                    Some(workpiece.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn verify_dispatches(decisions: &Decisions) -> Vec<WorkpieceId> {
+        decisions
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::DispatchAttempt { workpiece, stage, .. } if *stage == StageId::Verify => {
+                    Some(workpiece.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn inherited_workpieces(decisions: &Decisions) -> Vec<WorkpieceId> {
+        decisions
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::InheritClaim { claim, .. } => Some(claim.workpiece.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // The plausible bug: a wedged descendant freezes its resolved siblings
+    // into a re-run, so A and C spend another construct/verify lap for work
+    // the predecessor already proved.
+    #[test]
+    fn a_wedged_subtree_is_re_dispatched_and_resolved_siblings_are_adopted() {
+        let predecessor_spec = spec(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)]);
+        let edges = vec![edge("wp-b", "wp-a")];
+        let (snapshot, _) = step(
+            &Snapshot::new(digest(0)),
+            &event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor_spec.clone(), edges: edges.clone() }),
+        );
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "a-done",
+                Fact::Integrate { bloom: predecessor_spec.id(), claim: verified_claim("wp-a", 1, 10, 60) },
+            ),
+        );
+        let snapshot = fail_construct(&snapshot, predecessor_spec.id(), "wp-b", "b-fail-1");
+        let snapshot = fail_construct(&snapshot, predecessor_spec.id(), "wp-b", "b-fail-2");
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "c-done",
+                Fact::Integrate { bloom: predecessor_spec.id(), claim: verified_claim("wp-c", 3, 30, 62) },
+            ),
+        );
+        let pred = snapshot.blooms.get(&predecessor_spec.id()).expect("predecessor");
+        assert!(pred.claims.contains_key(&wp("wp-a")));
+        assert!(pred.claims.contains_key(&wp("wp-c")));
+        assert!(pred.wedged.contains_key(&wp("wp-b")));
+        assert!(pred.verify_proof_for(digest(10)).is_some());
+        assert!(pred.verify_proof_for(digest(30)).is_some());
+
+        let successor_spec = spec_at(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)], 1);
+        let (after, decided) = step(
+            &snapshot,
+            &event("sup", Fact::Supersede { predecessor: predecessor_spec.id(), successor: successor_spec.clone() }),
+        );
+        assert!(matches!(decided.outcome, Outcome::Superseded { .. }), "got {:?}", decided.outcome);
+
+        let inherited = inherited_workpieces(&decided);
+        assert_eq!(inherited, vec![wp("wp-a"), wp("wp-c")], "only resolved siblings transfer a claim: {inherited:?}");
+        let proofs: Vec<Digest> = decided
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::RecordVerifyProof { proof, .. } => Some(proof.evidence.subject),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(proofs, vec![digest(10), digest(30)], "each adopted sibling carries its proof");
+        assert_eq!(construct_dispatches(&decided), vec![wp("wp-b")], "only the wedged branch re-enters Construct");
+        assert!(verify_dispatches(&decided).is_empty(), "adopted members must not re-verify: {:?}", decided.effects);
+        assert!(
+            !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchIntegration { .. })),
+            "the weave still waits for the re-run branch",
+        );
+
+        let successor = after.blooms.get(&successor_spec.id()).expect("successor");
+        assert!(successor.verify_proof_for(digest(10)).is_some(), "A's proof is on the successor memo");
+        assert!(successor.verify_proof_for(digest(30)).is_some(), "C's proof is on the successor memo");
+        assert!(successor.claims.contains_key(&wp("wp-a")));
+        assert!(successor.claims.contains_key(&wp("wp-c")));
+        assert!(!successor.claims.contains_key(&wp("wp-b")));
+        assert_eq!(
+            successor.dependencies, edges,
+            "an edgeless supersede keeps the remaining graph so B still depends on A",
+        );
+    }
+
+    // The plausible bug: adoption compares the predecessor's capture checkout
+    // against the successor's claimed tree, so a resolved dependent of an
+    // adopted ancestor re-verifies even though the successor splice is the
+    // same capture — the production case, where checkout ≠ tree.
+    #[test]
+    fn a_resolved_dependent_transfers_its_proof_when_the_splice_matches() {
+        let predecessor_spec = spec(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)]);
+        let edges = vec![edge("wp-b", "wp-a"), edge("wp-c", "wp-a")];
+        let (snapshot, _) = step(
+            &Snapshot::new(digest(0)),
+            &event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor_spec.clone(), edges: edges.clone() }),
+        );
+        let snapshot = pass_construct(&snapshot, predecessor_spec.id(), "wp-a", 10, 110, "a-build");
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "a-done",
+                Fact::Integrate { bloom: predecessor_spec.id(), claim: verified_claim("wp-a", 1, 10, 60) },
+            ),
+        );
+        let snapshot = fail_construct(&snapshot, predecessor_spec.id(), "wp-b", "b-fail-1");
+        let snapshot = fail_construct(&snapshot, predecessor_spec.id(), "wp-b", "b-fail-2");
+        let snapshot = pass_construct(&snapshot, predecessor_spec.id(), "wp-c", 30, 130, "c-build");
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "c-done",
+                Fact::Integrate { bloom: predecessor_spec.id(), claim: verified_claim("wp-c", 3, 30, 62) },
+            ),
+        );
+        let pred = snapshot.blooms.get(&predecessor_spec.id()).expect("predecessor");
+        assert!(pred.claims.contains_key(&wp("wp-a")));
+        assert!(pred.claims.contains_key(&wp("wp-c")));
+        assert!(pred.wedged.contains_key(&wp("wp-b")));
+        assert!(pred.verify_proof_for(digest(10)).is_some());
+        assert!(pred.verify_proof_for(digest(30)).is_some());
+
+        let successor_spec = spec_at(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)], 1);
+        let (after, decided) = step(
+            &snapshot,
+            &event("sup", Fact::Supersede { predecessor: predecessor_spec.id(), successor: successor_spec.clone() }),
+        );
+        assert!(matches!(decided.outcome, Outcome::Superseded { .. }), "got {:?}", decided.outcome);
+
+        let inherited = inherited_workpieces(&decided);
+        assert_eq!(inherited, vec![wp("wp-a"), wp("wp-c")], "the resolved branch transfers: {inherited:?}");
+        let proofs: Vec<Digest> = decided
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::RecordVerifyProof { proof, .. } => Some(proof.evidence.subject),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(proofs, vec![digest(10), digest(30)], "C's proof rides with the matching splice");
+        assert_eq!(construct_dispatches(&decided), vec![wp("wp-b")], "only the wedged branch re-enters Construct");
+        assert!(verify_dispatches(&decided).is_empty(), "a matching splice must not re-verify: {:?}", decided.effects);
+
+        let successor = after.blooms.get(&successor_spec.id()).expect("successor");
+        assert!(successor.verify_proof_for(digest(10)).is_some());
+        assert!(successor.verify_proof_for(digest(30)).is_some());
+        assert!(successor.claims.contains_key(&wp("wp-a")));
+        assert!(successor.claims.contains_key(&wp("wp-c")));
+        assert!(!successor.claims.contains_key(&wp("wp-b")));
+        assert_eq!(successor.dependencies, edges, "the remaining graph still has C depending on A");
+    }
+
+    // The plausible bug: a dependent whose ancestor was dropped still donates
+    // its proof, so the successor treats a tree built on A as proven against
+    // the bare bloom base.
+    #[test]
+    fn a_splice_mismatch_refuses_the_proof_and_re_verifies() {
+        let predecessor_spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
+        let (snapshot, _) = step(
+            &Snapshot::new(digest(0)),
+            &event(
+                "seal",
+                Fact::GraphSeal {
+                    predecessor: None,
+                    spec: predecessor_spec.clone(),
+                    edges: vec![edge("wp-b", "wp-a")],
+                },
+            ),
+        );
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "a-done",
+                Fact::Integrate { bloom: predecessor_spec.id(), claim: verified_claim("wp-a", 1, 10, 60) },
+            ),
+        );
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "b-done",
+                Fact::Integrate { bloom: predecessor_spec.id(), claim: verified_claim("wp-b", 2, 20, 61) },
+            ),
+        );
+
+        let successor_spec = spec(&[("wp-b", 2)]);
+        let (after, decided) = step(
+            &snapshot,
+            &event("sup", Fact::Supersede { predecessor: predecessor_spec.id(), successor: successor_spec.clone() }),
+        );
+        assert!(matches!(decided.outcome, Outcome::Superseded { .. }), "got {:?}", decided.outcome);
+        assert!(
+            inherited_workpieces(&decided).is_empty(),
+            "a refused proof must not inherit the claim, got {:?}",
+            inherited_workpieces(&decided),
+        );
+        assert!(
+            !decided.effects.iter().any(|effect| matches!(effect, Decision::RecordVerifyProof { .. })),
+            "the predecessor's proof must not land on a different splice: {:?}",
+            decided.effects,
+        );
+        assert_eq!(
+            verify_dispatches(&decided),
+            vec![wp("wp-b")],
+            "B re-verifies its candidate against the successor splice",
+        );
+        assert!(
+            construct_dispatches(&decided).is_empty(),
+            "re-verify skips Construct: {:?}",
+            construct_dispatches(&decided),
+        );
+        let successor = after.blooms.get(&successor_spec.id()).expect("successor");
+        assert!(
+            successor.verify_proof_for(digest(20)).is_none(),
+            "the refused proof is absent from the successor memo",
+        );
+        assert!(!successor.claims.contains_key(&wp("wp-b")), "B is not resolved until the re-verify integrates");
+        let progress = successor.progress.get(&wp("wp-b")).expect("B is on Verify");
+        assert_eq!(progress.stage, StageId::Verify);
+        assert_eq!(progress.candidate.map(|current| current.tree), Some(digest(20)));
+    }
+
+    // The plausible bug: adoption effects are decided live but not folded, so
+    // a restart loses the transferred proofs and the remaining graph.
+    #[test]
+    fn a_supersession_with_adoption_replays_to_the_same_state() {
+        let predecessor_spec = spec(&[("wp-a", 1), ("wp-c", 3)]);
+        let edges = vec![edge("wp-c", "wp-a")];
+        let seal =
+            event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor_spec.clone(), edges: edges.clone() });
+        let a_done =
+            event("a-done", Fact::Integrate { bloom: predecessor_spec.id(), claim: verified_claim("wp-a", 1, 10, 60) });
+        let c_done =
+            event("c-done", Fact::Integrate { bloom: predecessor_spec.id(), claim: verified_claim("wp-c", 3, 30, 62) });
+        let successor_spec = spec_at(&[("wp-a", 1), ("wp-c", 3)], 1);
+        let supersede =
+            event("sup", Fact::Supersede { predecessor: predecessor_spec.id(), successor: successor_spec.clone() });
+
+        let base = Snapshot::new(digest(0));
+        let sealed = reduce(&base, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
+        let after_seal = base.apply(&seal, &sealed, &ResolvedConfigs::default());
+        let decided_a = reduce(&after_seal, &a_done, &ResolvedConfigs::default(), &SpendWindow::default());
+        let after_a = after_seal.apply(&a_done, &decided_a, &ResolvedConfigs::default());
+        let decided_c = reduce(&after_a, &c_done, &ResolvedConfigs::default(), &SpendWindow::default());
+        let after_c = after_a.apply(&c_done, &decided_c, &ResolvedConfigs::default());
+        let decided_sup = reduce(&after_c, &supersede, &ResolvedConfigs::default(), &SpendWindow::default());
+        let live = after_c.apply(&supersede, &decided_sup, &ResolvedConfigs::default());
+
+        let replayed = base
+            .apply(
+                &from_bytes(&to_vec(&seal).expect("event encodes")).expect("event decodes"),
+                &decode_recorded_decisions(&to_vec(&sealed).expect("seal encodes"), None).expect("seal decodes"),
+                &ResolvedConfigs::default(),
+            )
+            .apply(
+                &from_bytes(&to_vec(&a_done).expect("event encodes")).expect("event decodes"),
+                &decode_recorded_decisions(&to_vec(&decided_a).expect("a encodes"), None).expect("a decodes"),
+                &ResolvedConfigs::default(),
+            )
+            .apply(
+                &from_bytes(&to_vec(&c_done).expect("event encodes")).expect("event decodes"),
+                &decode_recorded_decisions(&to_vec(&decided_c).expect("c encodes"), None).expect("c decodes"),
+                &ResolvedConfigs::default(),
+            )
+            .apply(
+                &from_bytes(&to_vec(&supersede).expect("event encodes")).expect("event decodes"),
+                &decode_recorded_decisions(&to_vec(&decided_sup).expect("sup encodes"), None).expect("sup decodes"),
+                &ResolvedConfigs::default(),
+            );
+
+        assert_eq!(live, replayed, "apply-only replay of the journaled rows rebuilds the live snapshot");
+        let successor = replayed.blooms.get(&successor_spec.id()).expect("replayed successor");
+        assert!(successor.verify_proof_for(digest(10)).is_some());
+        assert!(successor.verify_proof_for(digest(30)).is_some());
+        assert!(successor.claims.contains_key(&wp("wp-a")));
+        assert!(successor.claims.contains_key(&wp("wp-c")));
+        assert_eq!(
+            successor.dependencies, edges,
+            "replay keeps the remaining graph so C still depends on the adopted A",
+        );
+        assert!(
+            decided_sup.effects.iter().any(|effect| matches!(effect, Decision::DispatchIntegration { .. })),
+            "every adopted member is already integrated, so the successor folds",
+        );
     }
 }
