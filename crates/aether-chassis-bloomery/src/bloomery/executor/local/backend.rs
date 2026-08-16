@@ -18,6 +18,7 @@ use aether_data::wire::from_bytes;
 use serde::Serialize;
 use std::fs;
 
+use super::affinity::{BuilderSlots, SlotAffinity, SlotChoice, choose_slot, stamp_slot_affinity};
 use super::error::LocalExecutorError;
 use super::identity::ProcessIdentity;
 use super::lane_program::LaneProgram;
@@ -25,6 +26,7 @@ use super::orphan::OrphanedRun;
 use super::process_runner::{CaptureIdentity, ProcessTransformRunner};
 use super::quarantine;
 use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
+use super::session_reuse::SPLICED_RESET_NOTE;
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::CoordinatorConfig;
 use crate::bloomery::executor::{LaneOccupancy, OutstandingDispatch, ReconcileLanes, ReconcileReport};
@@ -102,6 +104,9 @@ struct Run {
     // used to deposit the session the attempt produced. `None` when this
     // backend has no pool or the lane is not a Claude model lap.
     reuse: Option<super::ReusePlan>,
+    // Why this run holds the slot it does — journaled even when no pool is
+    // mounted, so slot affinity is auditable on its own.
+    affinity: SlotAffinity,
 }
 
 /// Which lane-specific evidence gates a command's run rides.
@@ -144,6 +149,8 @@ struct PendingRun {
     task: Option<String>,
     subject: Digest,
     gates: LaneGates,
+    // The slot the predecessor that produced this checkout ran in, when known.
+    preferred: Option<usize>,
 }
 
 impl PendingRun {
@@ -207,7 +214,9 @@ impl Registry {
         self.runs.len() + self.starting + extra
     }
 
-    // Claim the lowest unheld, unquarantined slot index.
+    // Claim a preferred predecessor slot when it is free, otherwise the lowest
+    // unheld, unquarantined index. Preference is never a wait: a busy slot
+    // falls back the same way the allocator always did.
     //
     // Lowest rather than next-in-sequence, and that is the whole point: a
     // counter would mint a fresh path per dispatch — exactly the arrangement
@@ -218,13 +227,10 @@ impl Registry {
     // out would put a new dispatch in a checkout a surviving child may still
     // be writing into. The search is still total — there is always a larger
     // index that is neither held nor quarantined.
-    fn claim_lowest_free_slot(&mut self, quarantined: &HashSet<usize>) -> usize {
-        let mut slot = 0;
-        while self.slots.contains(&slot) || quarantined.contains(&slot) {
-            slot += 1;
-        }
+    fn claim_for(&mut self, preferred: Option<usize>, quarantined: &HashSet<usize>) -> (usize, SlotChoice) {
+        let (slot, reason) = choose_slot(preferred, &self.slots, quarantined);
         self.slots.insert(slot);
-        slot
+        (slot, reason)
     }
 
     // Claim one named slot, reporting whether it was free. Boot reconciliation's
@@ -283,6 +289,9 @@ pub struct LocalExecutor {
     // The session-reuse pool this backend consumes. `None` for a backend built
     // without one (most seam tests), which launches every lap cold.
     sessions: Option<super::SessionReuse>,
+    // Checkout-hex → the slot that captured it. B prefers the slot that built A
+    // because B's checkout *is* A's candidate commit.
+    builders: Mutex<BuilderSlots>,
 }
 
 impl LocalExecutor {
@@ -301,6 +310,7 @@ impl LocalExecutor {
         base_dir: impl Into<PathBuf>,
     ) -> Self {
         let base_dir = base_dir.into();
+        let builders = Mutex::new(BuilderSlots::load(&base_dir));
         Self {
             runner,
             correspondence,
@@ -311,6 +321,7 @@ impl LocalExecutor {
             build_jobs: DEFAULT_LANE_BUILD_JOBS,
             messages: None,
             sessions: None,
+            builders,
         }
     }
 
@@ -515,6 +526,7 @@ impl LocalExecutor {
         // the review lane's `status`-stamped evidence must not ride.
         let gates = LaneGates::of(&order.transformation.command);
         let is_model_lane = is_model_lane(&order.transformation.command);
+        let preferred = self.preferred_builder_slot(&checkout_hex);
         // The stage's resolved agent profile, overlaid onto the order by the
         // dispatching host (ADR-0149 §The line) — never a backend-local config
         // knob, which would let a run's model diverge from the profile its bloom
@@ -536,7 +548,19 @@ impl LocalExecutor {
             task: is_model_lane.then_some(order.transformation.description.clone()).flatten(),
             subject: evidence_subject(&order.transformation),
             gates,
+            preferred,
         })
+    }
+
+    fn preferred_builder_slot(&self, checkout_hex: &str) -> Option<usize> {
+        self.builders.lock().unwrap_or_else(PoisonError::into_inner).preferred(checkout_hex)
+    }
+
+    fn remember_builder(&self, checkout: &Digest, slot: usize) {
+        let Ok(Some(object)) = self.correspondence.resolve_backend_object(checkout) else {
+            return;
+        };
+        self.builders.lock().unwrap_or_else(PoisonError::into_inner).record(render_object_hex(&object), slot);
     }
 
     // Claim a lane slot for a dispatch that may start right now, or report that it
@@ -545,14 +569,14 @@ impl LocalExecutor {
     // A dispatch already waiting has the prior claim on a free slot, so a fresh one
     // never overtakes it — the submission order the queue promises holds even in
     // the window between a slot freeing and the pump handing it out.
-    fn reserve_slot(&self) -> Option<usize> {
+    fn reserve_slot(&self, preferred: Option<usize>) -> Option<(usize, SlotChoice)> {
         let quarantined = quarantine::slots_on_disk(&self.base_dir);
         let mut registry = self.lock();
         if !registry.waiting.is_empty() || registry.occupied(&quarantined) >= self.max_concurrent_lanes {
             return None;
         }
         registry.starting += 1;
-        Some(registry.claim_lowest_free_slot(&quarantined))
+        Some(registry.claim_for(preferred, &quarantined))
     }
 
     // Park a dispatch behind the ceiling until a slot frees, saying so in the log.
@@ -580,15 +604,37 @@ impl LocalExecutor {
     // out to git — and the reservation is what keeps the slot it is spending, and
     // the build path that comes with it, from being handed to anyone else
     // meanwhile. A spawn that fails hands the slot straight back.
+    fn stamp_run_evidence(
+        &self,
+        evidence_path: &Path,
+        mut bytes: Vec<u8>,
+        reuse: Option<&super::ReusePlan>,
+        lifecycle: RunLifecycle,
+        nonce: &str,
+        affinity: &SlotAffinity,
+    ) -> Vec<u8> {
+        if let Some(plan) = reuse {
+            bytes = self.record_session_reuse(evidence_path, &bytes, plan, lifecycle, nonce);
+        }
+        if affinity.preferred.is_some() {
+            bytes = stamp_slot_affinity(&bytes, affinity);
+            let _ = fs::write(evidence_path, &bytes);
+        }
+        bytes
+    }
+
     fn record_session_reuse(
         &self,
         evidence_path: &Path,
         bytes: &[u8],
         plan: &super::ReusePlan,
         lifecycle: RunLifecycle,
+        nonce: &str,
     ) -> Vec<u8> {
-        let actual_turns = super::session_reuse::parse_actual_turns(bytes);
-        let bytes = super::session_reuse::stamp_reuse(bytes, plan, actual_turns);
+        let prices = self.sealed_prices(nonce);
+        let mut actuals = super::session_reuse::parse_token_actuals(bytes);
+        actuals.priced_micro_usd = prices.price(&plan.key.model, &actuals.as_cost());
+        let bytes = super::session_reuse::stamp_reuse(bytes, plan, &actuals);
         let _ = fs::write(evidence_path, &bytes);
         if matches!(lifecycle, RunLifecycle::Exited { .. })
             && let Some(session_id) = super::session_reuse::parse_session_id(&bytes)
@@ -614,6 +660,7 @@ impl LocalExecutor {
             task: &task,
             worktree: worktree_dir,
             prices: Some(&prices),
+            command: &pending.command,
         }))
     }
 
@@ -651,12 +698,26 @@ impl LocalExecutor {
         table
     }
 
-    fn start_reserved(&self, pending: PendingRun, slot: usize) -> Result<(), LocalExecutorError> {
+    fn start_reserved(
+        &self,
+        mut pending: PendingRun,
+        slot: usize,
+        reason: SlotChoice,
+    ) -> Result<(), LocalExecutorError> {
         let worktree_dir = self.slot_dir(slot).map_err(LocalExecutorError::Io)?;
         let target_dir = self.slot_target_dir(slot).map_err(LocalExecutorError::Io)?;
         record_slot(&pending.evidence_dir, slot);
         let reuse = self.acquire_reuse(&pending, &worktree_dir);
+        if reuse.as_ref().is_some_and(|plan| plan.edge) {
+            pending.task = Some(
+                pending
+                    .task
+                    .take()
+                    .map_or_else(|| SPLICED_RESET_NOTE.to_owned(), |task| format!("{task}\n\n{SPLICED_RESET_NOTE}")),
+            );
+        }
         let resume = reuse.as_ref().and_then(|plan| plan.resume.as_deref());
+        let affinity = SlotAffinity { preferred: pending.preferred, assigned: slot, reason };
         let started = self.runner.start(&pending.spec(&worktree_dir, &target_dir, self.build_jobs, resume));
 
         let mut registry = self.lock();
@@ -673,6 +734,7 @@ impl LocalExecutor {
                         subject: pending.subject,
                         gates: pending.gates,
                         reuse,
+                        affinity,
                     },
                 );
                 Ok(())
@@ -696,9 +758,9 @@ impl LocalExecutor {
     // through the reactor's deadline sweep, and a head that fails every time can
     // never block the lanes queued behind it.
     fn pump(&self) {
-        while let Some((pending, slot)) = self.take_waiting() {
+        while let Some((pending, slot, reason)) = self.take_waiting() {
             let nonce = pending.nonce.clone();
-            if let Err(error) = self.start_reserved(pending, slot) {
+            if let Err(error) = self.start_reserved(pending, slot, reason) {
                 tracing::error!(
                     %nonce,
                     %error,
@@ -711,7 +773,7 @@ impl LocalExecutor {
     // Take the next waiting dispatch against a free slot, reserving that slot.
     // `None` when the ceiling is full or nothing is waiting — either way the pump
     // above has nothing left to do.
-    fn take_waiting(&self) -> Option<(PendingRun, usize)> {
+    fn take_waiting(&self) -> Option<(PendingRun, usize, SlotChoice)> {
         let quarantined = quarantine::slots_on_disk(&self.base_dir);
         let mut registry = self.lock();
         if registry.occupied(&quarantined) >= self.max_concurrent_lanes {
@@ -721,7 +783,9 @@ impl LocalExecutor {
         // the spawn it is handed to returns.
         let pending = registry.waiting.pop_front()?;
         registry.starting += 1;
-        Some((pending, registry.claim_lowest_free_slot(&quarantined)))
+        let (slot, reason) = registry.claim_for(pending.preferred, &quarantined);
+        drop(registry);
+        Some((pending, slot, reason))
     }
 
     // Re-adopt one live order's run, if the previous process left a local footprint
@@ -779,6 +843,7 @@ impl LocalExecutor {
                 subject: evidence_subject(&dispatch.transformation),
                 gates: LaneGates::of(&dispatch.transformation.command),
                 reuse: None,
+                affinity: SlotAffinity::readopted(slot),
             },
         );
         true
@@ -1061,8 +1126,8 @@ impl ExecutorBackend for LocalExecutor {
         // the ceiling existed. Otherwise the dispatch waits its turn — and is acked
         // as submitted either way, so the reducer's view of it never depends on how
         // busy this host happened to be.
-        if let Some(slot) = self.reserve_slot() {
-            self.start_reserved(pending, slot)?;
+        if let Some((slot, reason)) = self.reserve_slot(pending.preferred) {
+            self.start_reserved(pending, slot, reason)?;
         } else {
             self.enqueue(pending);
         }
@@ -1187,7 +1252,16 @@ impl ExecutorBackend for LocalExecutor {
         // Pull the run's on-disk location, binding digest, and terminal exit out of
         // the guarded region, then drop the lock — the evidence read is blocking IO
         // and must not hold the registry mutex.
-        let (evidence_dir, subject, lifecycle, LaneGates { is_construct, is_verify }, worktree_dir, reuse) = {
+        let (
+            evidence_dir,
+            subject,
+            lifecycle,
+            LaneGates { is_construct, is_verify },
+            worktree_dir,
+            reuse,
+            slot,
+            affinity,
+        ) = {
             let mut registry = self.lock();
             let Some(run) = registry.runs.get_mut(&handle.nonce.0) else {
                 return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
@@ -1199,6 +1273,8 @@ impl ExecutorBackend for LocalExecutor {
                 run.gates,
                 run.worktree_dir.clone(),
                 run.reuse.clone(),
+                run.slot,
+                run.affinity.clone(),
             )
         };
         let exited_success = matches!(lifecycle, RunLifecycle::Exited { success: true });
@@ -1236,9 +1312,7 @@ impl ExecutorBackend for LocalExecutor {
                 return Err(LocalExecutorError::Evidence(format!("{}: {read_error}", evidence_path.display())));
             }
         };
-        if let Some(plan) = reuse.as_ref() {
-            bytes = self.record_session_reuse(&evidence_path, &bytes, plan, lifecycle);
-        }
+        bytes = self.stamp_run_evidence(&evidence_path, bytes, reuse.as_ref(), lifecycle, &handle.nonce.0, &affinity);
         // Evidence must identify the order that produced it before any body claim
         // is trusted. A stale or cross-wired evidence directory is otherwise able
         // to advance a different order merely by carrying a passing verdict.
@@ -1286,6 +1360,9 @@ impl ExecutorBackend for LocalExecutor {
         // this. Only for a candidate that was actually captured, so the row and
         // the candidate arrive together and a lane that produced nothing cannot
         // leave a message behind for the next one.
+        if let (Some(candidate), Some(slot)) = (candidate.as_ref(), slot) {
+            self.remember_builder(&candidate.checkout, slot);
+        }
         if candidate.is_some()
             && let Some(message) = commit_message.as_deref()
         {

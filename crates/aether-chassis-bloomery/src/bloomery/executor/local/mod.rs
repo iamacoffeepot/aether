@@ -76,6 +76,7 @@
 //! be killed, and the [`backend`] registry +
 //! [`ExecutorBackend`](aether_bloomery::ExecutorBackend) impl over them.
 
+mod affinity;
 mod backend;
 mod error;
 mod identity;
