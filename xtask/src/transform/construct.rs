@@ -500,4 +500,59 @@ mod tests {
             "a seeded dispatch must not push the work order out of the shared prefix",
         );
     }
+
+    // Tripwire for #5078: Construct used to restate Verify's full mechanical
+    // matrix, so a successful construct occupied the serial path with work whose
+    // verdict the reducer does not consume. Lightweight authoring checks stay;
+    // the heavy argv must not ride the assembled prompt; fail-closed candidate
+    // language is unchanged.
+    #[test]
+    fn construct_prompt_keeps_authoring_checks_and_leaves_verify_gates_to_verify() {
+        let prompt = assemble_construct_prompt(
+            CONSTRUCT_INSTRUCTIONS,
+            Some("Tests must earn their place."),
+            Some("abc123"),
+            Some("thread the work order"),
+            None,
+        );
+
+        assert!(prompt.contains("cargo fmt"), "formatting stays as cheap authoring feedback");
+        assert!(prompt.contains("focused tests"), "focused behavior tests stay as cheap authoring feedback");
+        assert!(
+            prompt.contains("Dedicated Verify owns"),
+            "the prompt must say Verify owns the mechanical matrix so the model does not volunteer it",
+        );
+        assert!(
+            prompt.contains("Do not run workspace- or package-wide"),
+            "the prompt must forbid volunteering the heavy gates, not merely omit their argv",
+        );
+
+        for needle in [
+            "clippy --workspace --all-targets --keep-going --message-format=json",
+            "doc --workspace --no-deps --document-private-items --all-features --keep-going",
+            "nextest run --all-features --profile ci --no-fail-fast",
+            "scripts/check-suppressions.py",
+            "jscpd@5.0.12",
+            "--no-ignore --skip-target-dir crates",
+            "AETHER_REQUIRE_RUNTIME=1",
+            "AETHER_STORE_PATH=:memory:",
+            "RUSTDOCFLAGS=-D rustdoc::redundant_explicit_links",
+        ] {
+            assert!(!prompt.contains(needle), "heavy Verify argv `{needle}` must not ride the construct prompt");
+        }
+
+        assert!(
+            prompt.contains("say so plainly"),
+            "an unimplementable work order still fails closed instead of inventing a change",
+        );
+        assert!(prompt.contains("cannot proceed"), "the honest no-candidate exit remains named");
+        assert!(
+            prompt.contains("Stop at the candidate"),
+            "the lane still ends on a working-tree candidate, not a merge",
+        );
+        assert!(
+            prompt.contains("Leave the change in the working tree"),
+            "an empty-diff run is still nothing to review",
+        );
+    }
 }
