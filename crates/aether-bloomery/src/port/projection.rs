@@ -50,7 +50,8 @@ pub struct ViewDocument {
 }
 
 /// One bloom's outward view: its sealed identity, lifecycle status, optional
-/// successor, and the full per-member render data.
+/// successor, the full per-member render data, and — when the aggregate review
+/// has parked the bloom — the bloom-scoped question an operator must settle.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BloomView {
     /// The bloom's identity — the sealed-spec digest ([`crate::BloomSpec::id`]).
@@ -78,6 +79,42 @@ pub struct BloomView {
     /// indistinguishable from a bloom sitting quietly between dispatches —
     /// which is the shape an operator has no reason to look at.
     pub executor_fault: Option<ExecutorFaultView>,
+    /// The bloom-scoped aggregate-review park (ADR-0153), once the review has
+    /// raised a question the owner must settle; `None` for an ordinary bloom.
+    ///
+    /// Bloom-level, not a member hold: attaching it to every
+    /// [`MemberView::pending_decision`] would change member semantics. The
+    /// digest is always present so a live-query path that cannot resolve the
+    /// question artifact still names what `adjudicate --finding` must quote.
+    /// `#[serde(default)]` so a reader that predates the field still decodes.
+    #[serde(default)]
+    pub review_park: Option<ReviewParkView>,
+}
+
+/// A bloom's aggregate-review park, rendered so an operator can see that the
+/// bloom is waiting on an owner decision rather than sitting idle (ADR-0153).
+///
+/// The digest is always present — it is the finding `adjudicate --finding`
+/// names. Stage, prompt, options, and blocked ride only when the question
+/// artifact resolved; a missing artifact still exposes the digest.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ReviewParkView {
+    /// The parked [`crate::Question`]'s content-addressed digest — or, for a
+    /// ceiling park, the failing review's record artifact. Either way this is
+    /// the exact digest an operator adjudication names.
+    pub question: Digest,
+    /// The held stage, when the question artifact resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<StageId>,
+    /// The decision to be made, when the question artifact resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// The options considered, when the question artifact resolved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// What the park blocks, when the question artifact resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<String>,
 }
 
 /// A bloom's aggregate-review executor-fault standing, rendered once its review
