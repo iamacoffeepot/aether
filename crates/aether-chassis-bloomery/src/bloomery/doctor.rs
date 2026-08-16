@@ -13,8 +13,18 @@
 
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// How long a kit `--version` probe may take before the child is killed.
+///
+/// Compose used to wait on `Command::output()` with no budget. A kit CLI that
+/// parks on `--version` left the RPC port unbound past the handshake deadline,
+/// so a loaded lane-boundary suite missed its last scenario (#5035).
+const VERSION_PROBE_BUDGET: Duration = Duration::from_secs(1);
 
 /// One program the lane host must resolve on the PATH a dispatch inherits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,19 +250,37 @@ fn is_runnable(path: &Path) -> bool {
 }
 
 fn version_of(program: &Path) -> Option<String> {
-    let output = Command::new(program)
+    version_of_within(program, VERSION_PROBE_BUDGET)
+}
+
+fn version_of_within(program: &Path, budget: Duration) -> Option<String> {
+    let mut child = Command::new(program)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
+        .spawn()
         .ok()?;
-    if !output.status.success() {
-        return None;
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut stdout = Vec::new();
+                child.stdout.take()?.read_to_end(&mut stdout).ok()?;
+                let text = String::from_utf8_lossy(&stdout);
+                return text.lines().next().map(str::trim).filter(|line| !line.is_empty()).map(str::to_owned);
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let version = text.lines().next().map(str::trim).filter(|line| !line.is_empty())?;
-    Some(version.to_owned())
 }
 
 #[cfg(test)]
@@ -260,10 +288,11 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
+    use std::time::{Duration, Instant};
 
     use aether_bloomery::Harness;
 
-    use super::{KitReport, REQUIRED_KIT, ResolvedTool, ToolStatus, resolve_on_path, version_of};
+    use super::{KitReport, REQUIRED_KIT, ResolvedTool, ToolStatus, resolve_on_path, version_of, version_of_within};
 
     const MODEL_HARNESSES: [Harness; 4] = [Harness::Claude, Harness::Codex, Harness::Muse, Harness::Grok];
 
@@ -390,5 +419,30 @@ mod tests {
         fs::set_permissions(&path, permissions).expect("the failing fixture is executable");
 
         assert!(version_of(&path).is_none(), "a failing --version is absence, not a present tool with no version");
+    }
+
+    #[test]
+    fn a_version_probe_that_never_answers_is_absence_not_a_hang() {
+        // Tripwire: compose used to wait on `Command::output()` with no budget.
+        // A kit CLI that parks on `--version` left the RPC port unbound past
+        // the handshake deadline, so a loaded lane-boundary suite failed its
+        // last scenario as "connection refused" rather than judging the
+        // evidence (#5035).
+        let dir = tempfile::tempdir().expect("a stand-in PATH directory creates");
+        let path = dir.path().join("jscpd");
+        fs::write(&path, "#!/bin/sh\nexec sleep 1000\n").expect("the parked --version fixture writes");
+        let mut permissions = fs::metadata(&path).expect("the parked fixture is readable").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).expect("the parked fixture is executable");
+
+        let started = Instant::now();
+        assert!(
+            version_of_within(&path, Duration::from_millis(100)).is_none(),
+            "a parked --version is absence once the budget expires",
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the probe must kill the parked child rather than wait it out",
+        );
     }
 }

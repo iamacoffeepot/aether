@@ -30,8 +30,8 @@ use crate::bloomery::driver::BloomeryDriverCapability;
 use crate::bloomery::{
     CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ExecutorReactorCapability,
     ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig, IntegrateReactorCapability, IntegrateReactorSetup,
-    JanitorReactorCapability, JanitorReactorSetup, LandReactorCapability, LandReactorSetup, MirrorReactorCapability,
-    MirrorReactorSetup, ProjectionShell, SourceShell, default_candidate_push,
+    JanitorReactorCapability, JanitorReactorSetup, LandReactorCapability, LandReactorSetup, LaneProgram,
+    MirrorReactorCapability, MirrorReactorSetup, ProjectionShell, SourceShell, default_candidate_push,
 };
 use crate::control::{ControlCore, ControlSetup};
 use crate::session::{SessionConfig, SessionPoolCapability};
@@ -362,7 +362,14 @@ impl BootableChassis for BloomeryChassis {
     /// move the same `boot` into the driver afterward.
     #[cfg(feature = "github")]
     fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: BloomeryEnv) -> Result<Builder<Self>, BootError> {
-        KitReport::inspect().log_at_boot();
+        // The production lane program is the one that inherits the kit. A
+        // mock-lane coordinator must not probe it here: each `--version` is a
+        // process, and a loaded lane-boundary suite boots many coordinators at
+        // once — a parked probe used to leave the RPC port unbound past the
+        // handshake deadline (#5035).
+        if LaneProgram::parse(&env.coordinator.local_lane_program) == LaneProgram::default() {
+            KitReport::inspect().log_at_boot();
+        }
         let BloomeryEnv { rpc_port, http_port, store, artifacts, github, coordinator, session, signing } = env;
         // Capture the tier-policy path before `github` is moved into the source
         // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
