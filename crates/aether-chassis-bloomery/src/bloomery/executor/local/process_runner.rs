@@ -187,6 +187,9 @@ impl TransformRunner for ProcessTransformRunner {
             if let Some(session) = spec.resume {
                 lane.args(["--resume", session]);
             }
+            if spec.seeded {
+                lane.arg("--seeded");
+            }
         }
         // Own process group so a re-attached kill after a coordinator restart
         // can signal the lane *and* the harness it spawned, not just the head

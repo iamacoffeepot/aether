@@ -56,12 +56,31 @@ fn construct_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str
     argv
 }
 
+/// The trust-posture a seeded construct dispatch names (#4994): a prior attempt
+/// left a checkpoint rather than the clean base. Rides the prompt only when
+/// [`assemble_construct_prompt`] is handed `Some` — a cold dispatch must not
+/// describe a dead-lane scenario that never happened.
+pub(super) const SEEDED_STATE_NOTE: &str = "\
+That commit is the sealed subject until a prior attempt on this workpiece \
+left a candidate or a checkpoint; then it is that commit. A prior attempt \
+that died mid-stage leaves a partial tree that can be mid-refactor garbage \
+that does not compile. When you were handed that tree rather than the clean \
+base, it is your starting point: verify what is there before building on it, \
+and discard it if it is not a foundation. A lane that silently inherits a \
+broken tree and assumes it is the base produces a worse candidate than one \
+that started cold.";
+
 /// Assemble the headless-Claude prompt for the construct lane from the lane-owned
 /// `instructions`, the subject tree's `conventions`, the checked-out `subject`,
 /// and the work-order `task` — pure so the assembly is testable without spawning
 /// Claude (#3572). The subject header names the exact sealed tree the worker is
 /// on; the `## Task` section carries the operator's work-order description
 /// (#3595) so the model is told *what* to build, not just *where*.
+///
+/// `seeded` is the checkpoint trust-posture (#4994): `Some` when this dispatch
+/// checks out a prior attempt's partial tree, `None` on a cold base. The note
+/// sits in the Subject section so the shared instructions stay a cacheable
+/// prefix either way.
 ///
 /// Prompt caching is prefix-exact (#4985). The shared bulk leads — conventions
 /// first (the same `CLAUDE.md` every lane of a bloom inlines), then the lane
@@ -76,16 +95,21 @@ pub(super) fn assemble_construct_prompt(
     conventions: Option<&str>,
     subject: Option<&str>,
     task: Option<&str>,
+    seeded: Option<&str>,
 ) -> String {
-    let subject_line = subject.map_or_else(
-        || "You are working in the checked-out subject tree — the sealed source this work order named.".to_owned(),
-        |subject| {
-            format!(
-                "You are working in the checked-out subject tree at commit `{subject}` — \
-                 the exact sealed source this work order named.",
-            )
-        },
-    );
+    let subject_line = match (subject, seeded) {
+        (Some(subject), None) => format!(
+            "You are working in the checked-out subject tree at commit `{subject}` — \
+             the exact sealed source this work order named.",
+        ),
+        (None, None) => {
+            "You are working in the checked-out subject tree — the sealed source this work order named.".to_owned()
+        }
+        (Some(subject), Some(note)) => {
+            format!("You are working in the checked-out subject tree at commit `{subject}`.\n\n{note}")
+        }
+        (None, Some(note)) => format!("You are working in the checked-out subject tree.\n\n{note}"),
+    };
     let conventions_section =
         conventions.map_or_else(String::new, |text| format!("{}\n\n", conventions::section(text)));
     let (task_body, lane_identity) = task.map_or(("", None), split_lane_identity);

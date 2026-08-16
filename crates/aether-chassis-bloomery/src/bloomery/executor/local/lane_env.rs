@@ -23,7 +23,7 @@
 //! the daemon exports, and enumerating today's damage would leave the next knob
 //! to leak on its own. Everything the lane genuinely needs arrives on its argv
 //! (`--subject`, `--harness`, `--model`, `--effort`, `--task`, `--nonce`,
-//! `--out`) or is set by the gate itself, so nothing scrubbed here is load-
+//! `--out`, `--seeded`) or is set by the gate itself, so nothing scrubbed here is load-
 //! bearing for the run.
 //!
 //! Build caches are deliberately not scrubbed. None of them names durable

@@ -63,6 +63,10 @@ pub struct RunSpec<'a> {
     /// session pool leased one. `None` launches cold. The claude arm of
     /// `cargo xtask transform` threads this to `claude --resume`.
     pub resume: Option<&'a str>,
+    /// The construct dispatch checks out a prior attempt's checkpoint
+    /// (`--seeded`, #4994). `false` is the cold path; the prompt then omits
+    /// the dead-lane trust posture.
+    pub seeded: bool,
 }
 
 /// A running (or finished) transform child — the lifecycle the backend maps onto

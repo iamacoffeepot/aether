@@ -73,11 +73,15 @@ fn executor(base: &TempDir, evidence: &str, lifecycle: RunLifecycle) -> LocalExe
 }
 
 fn construct_order(subject: Digest, nonce: &str) -> aether_bloomery::WorkOrder {
+    construct_order_at(subject, digest(0xC0), nonce)
+}
+
+fn construct_order_at(subject: Digest, checkout: Digest, nonce: &str) -> aether_bloomery::WorkOrder {
     aether_bloomery::WorkOrder {
         transformation: Transformation::for_member_stage(
             &StageCatalog::binding_of(StageId::Construct),
             subject,
-            digest(0xC0),
+            checkout,
             digest(0xB0),
         ),
         nonce: Nonce(nonce.to_owned()),
@@ -624,6 +628,7 @@ struct SeenSpec {
     resume: Option<String>,
     worktree: Option<PathBuf>,
     task: Option<String>,
+    seeded: bool,
 }
 
 // A spawn seam that records the `RunSpec` it was handed, so a test can assert what
@@ -645,6 +650,7 @@ impl TransformRunner for CapturingRunner {
             resume: spec.resume.map(str::to_owned),
             worktree: Some(spec.worktree_dir.to_owned()),
             task: spec.task.map(str::to_owned),
+            seeded: spec.seeded,
         };
         Ok(Box::new(RecordingProcess { lifecycle: RunLifecycle::Running }))
     }
@@ -1186,6 +1192,125 @@ fn a_killed_construct_with_a_clean_worktree_captures_nothing_and_does_not_warn()
         !rendered.contains("passed run left a clean worktree"),
         "a clean death must not use the passed-run fail-closed warn: {rendered}",
     );
+}
+
+// Acceptance 5 of #4994: kill → checkpoint → resume-seeded retry → candidate
+// against the stub runner seam. The reducer already journals the checkpoint as
+// the retry's checkout; this is the host half — LocalExecutor must hand that
+// commit to FixedRunner/the spawn seam rather than the sealed base.
+#[test]
+fn a_killed_construct_seeds_the_retry_from_its_checkpoint_through_the_stub_runner() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let store = correspondence();
+    let exec = LocalExecutor::new(
+        Arc::new(ResumeSeededRunner { seen: Arc::clone(&seen) }),
+        Arc::clone(&store) as _,
+        base.path(),
+    );
+
+    let killed = exec.submit(&construct_order(digest(5), "n-die")).unwrap();
+    let checkpoint = exec.stream_evidence(&killed).unwrap()[0]
+        .candidate
+        .expect("a killed construct that wrote something reports its capture");
+    assert_eq!(
+        store.resolve_backend_object(&checkpoint.checkout).unwrap().as_ref(),
+        Some(&canned_capture().commit),
+        "the checkpoint names the stub capture commit",
+    );
+
+    let retry = exec.submit(&construct_order_at(digest(5), checkpoint.checkout, "n-retry")).unwrap();
+    let passed = exec.stream_evidence(&retry).unwrap();
+    assert!(passed[0].candidate.is_some(), "the resume-seeded retry captures");
+    let upload = NameEvidenceClaims.claim_for(&passed[0]).unwrap();
+    assert_eq!(
+        upload.verdict,
+        StageVerdict::VerificationPassed,
+        "the retry's own pass is not flipped by the earlier death"
+    );
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "kill then resume-seeded retry");
+    assert_eq!(
+        seen[0].checkout.as_deref(),
+        Some(to_hex(&digest(0xC0)).as_str()),
+        "the first dispatch checks out the sealed base",
+    );
+    assert!(!seen[0].seeded, "a cold first dispatch is not seeded");
+    assert_eq!(
+        seen[1].checkout.as_deref(),
+        Some(object_hex(&canned_capture().commit).as_str()),
+        "the resume-seeded retry checks out the checkpoint commit, not the sealed base",
+    );
+    assert!(seen[1].seeded, "the retry that checks out the checkpoint is the seeded dispatch");
+}
+
+fn object_hex(object: &BackendObjectId) -> String {
+    let bytes = object.as_bytes();
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// Two-lap stub: first start dies and still captures; later starts pass and
+/// capture. Records every `RunSpec` so the fixture can assert the retry's
+/// checkout without a real repo.
+struct ResumeSeededRunner {
+    seen: Arc<Mutex<Vec<SeenSpec>>>,
+}
+
+impl TransformRunner for ResumeSeededRunner {
+    fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
+        let lap = {
+            let mut seen = self.seen.lock().unwrap();
+            seen.push(SeenSpec {
+                evidence_dir: Some(spec.evidence_dir.to_owned()),
+                harness: spec.harness.map(str::to_owned),
+                model: spec.model.map(str::to_owned),
+                effort: spec.effort.map(str::to_owned),
+                checkout: Some(spec.checkout_hex.to_owned()),
+                diff_base: spec.diff_base_hex.map(str::to_owned),
+                resume: spec.resume.map(str::to_owned),
+                worktree: Some(spec.worktree_dir.to_owned()),
+                task: spec.task.map(str::to_owned),
+                seeded: spec.seeded,
+            });
+            seen.len()
+        };
+        let passed = lap > 1;
+        let evidence = if passed {
+            format!(
+                r#"{{"command":"construct.implement","nonce":"{}","produced_candidate":true,"result_record":{{"schema":1,"is_error":false,"result":{{"num_turns":3}}}}}}"#,
+                spec.nonce,
+            )
+        } else {
+            format!(
+                r#"{{"command":"construct.implement","nonce":"{}","produced_candidate":false,"result_record":{{"schema":1,"is_error":true,"result":{{}}}}}}"#,
+                spec.nonce,
+            )
+        };
+        fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
+        fs::write(spec.evidence_dir.join("evidence.json"), evidence).map_err(LocalExecutorError::Io)?;
+        Ok(Box::new(RecordingProcess { lifecycle: RunLifecycle::Exited { success: passed } }))
+    }
+
+    fn release(&self, _worktree_dir: &Path) -> Result<(), LocalExecutorError> {
+        Ok(())
+    }
+
+    fn registered_worktrees(&self) -> Result<Vec<PathBuf>, LocalExecutorError> {
+        Ok(Vec::new())
+    }
+
+    fn capture(
+        &self,
+        _worktree_dir: &Path,
+        _message: Option<&str>,
+    ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+        Ok(Some(canned_capture()))
+    }
 }
 
 // A correspondence whose reads work — so the submit resolves its checkout — but
@@ -1797,6 +1922,7 @@ impl TransformRunner for ReuseRunner {
             resume: spec.resume.map(str::to_owned),
             worktree: Some(spec.worktree_dir.to_owned()),
             task: spec.task.map(str::to_owned),
+            seeded: spec.seeded,
         });
         fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
         fs::write(spec.evidence_dir.join("evidence.json"), reuse_evidence(spec.nonce, "sess-1", self.input_tokens))

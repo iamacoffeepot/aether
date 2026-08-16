@@ -151,6 +151,9 @@ struct PendingRun {
     gates: LaneGates,
     // The slot the predecessor that produced this checkout ran in, when known.
     preferred: Option<usize>,
+    // The checkout is a prior construct's checkpoint (#4994), so the lane
+    // prompt names the seeded state. Cold dispatches stay false.
+    seeded: bool,
 }
 
 impl PendingRun {
@@ -179,6 +182,7 @@ impl PendingRun {
             effort: self.profile.as_ref().map(|resolved| resolved.effort.as_str()),
             task: self.task.as_deref(),
             resume,
+            seeded: self.seeded,
         }
     }
 }
@@ -292,6 +296,11 @@ pub struct LocalExecutor {
     // Checkout-hex → the slot that captured it. B prefers the slot that built A
     // because B's checkout *is* A's candidate commit.
     builders: Mutex<BuilderSlots>,
+    // Checkouts captured from a construct that died mid-stage (#4994). A later
+    // submit whose `Transformation.checkout` is one of these is resume-seeded
+    // and must tell the lane so. Passing captures go through `builders` instead:
+    // those are finished candidates, not partial trees.
+    checkpoints: Mutex<HashSet<Digest>>,
 }
 
 impl LocalExecutor {
@@ -322,6 +331,7 @@ impl LocalExecutor {
             messages: None,
             sessions: None,
             builders,
+            checkpoints: Mutex::new(HashSet::new()),
         }
     }
 
@@ -549,6 +559,12 @@ impl LocalExecutor {
             subject: evidence_subject(&order.transformation),
             gates,
             preferred,
+            seeded: gates.is_construct
+                && self
+                    .checkpoints
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .contains(&order.transformation.checkout),
         })
     }
 
@@ -959,7 +975,9 @@ impl LocalExecutor {
         if concluded {
             self.capture_candidate(&worktree_dir, nonce, message)
         } else {
-            self.capture_partial(&worktree_dir, nonce, message)
+            let captured = self.capture_partial(&worktree_dir, nonce, message)?;
+            self.checkpoints.lock().unwrap_or_else(PoisonError::into_inner).insert(captured.checkout);
+            Some(captured)
         }
     }
 

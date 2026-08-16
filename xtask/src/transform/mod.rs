@@ -103,6 +103,12 @@ pub struct TransformArgs {
     /// session through the same flag. Ignored by the verify lane.
     #[arg(long)]
     resume: Option<String>,
+    /// The construct dispatch checks out a prior attempt's checkpoint rather
+    /// than the sealed base (#4994). Names the seeded state and trust posture
+    /// in the assembled prompt; absent (the cold path) omits that note.
+    /// Ignored by every other lane.
+    #[arg(long)]
+    seeded: bool,
 }
 
 /// `<out>/evidence.json` schema for the verify lane — the untrusted claim a
