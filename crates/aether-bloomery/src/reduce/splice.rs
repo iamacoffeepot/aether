@@ -34,14 +34,30 @@ pub(super) enum SplicedBase {
     },
 }
 
-/// The capture commit (or claimed tree, when no cursor remains) of `id`.
+/// The capture commit of `id`, or the claimed tree when no matching vehicle
+/// was recorded.
+///
+/// Prefers the replayed [`BloomRecord::vehicles`] row (ADR-0152 / #5079). A
+/// live cursor is the same-bloom upgrade source — a journal written before
+/// the vehicle effect still carries the capture on `StageProgress`. The
+/// claimed tree is the legacy fallback: a claim-only integrate never had a
+/// capture commit, and `commitish_for` wraps that tree.
 pub(super) fn checkout_from(record: &BloomRecord, id: &WorkpieceId) -> Option<Digest> {
+    let claimed = record.claims.get(id).map(|claim| claim.candidate);
     record
-        .progress
+        .vehicles
         .get(id)
-        .and_then(|progress| progress.candidate)
-        .map(|candidate| candidate.checkout)
-        .or_else(|| record.claims.get(id).map(|claim| claim.candidate))
+        .filter(|vehicle| claimed.is_none_or(|tree| tree == vehicle.tree))
+        .map(|vehicle| vehicle.checkout)
+        .or_else(|| {
+            record
+                .progress
+                .get(id)
+                .and_then(|progress| progress.candidate)
+                .filter(|candidate| claimed.is_none_or(|tree| tree == candidate.tree))
+                .map(|candidate| candidate.checkout)
+        })
+        .or(claimed)
 }
 
 /// The sealed member order, the tie-break every splice walk uses.
@@ -176,13 +192,13 @@ mod tests {
 
     use super::{SplicedBase, member_construct_base, splice_lineage, spliced_base};
     use crate::digest::Digest;
-    use crate::ids::{IdempotencyKey, StageId, WorkpieceId};
+    use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::reduce::{
         BloomRecord, Decision, Decisions, Event, Fact, Outcome, Snapshot, decode_recorded_decisions, reduce,
     };
     use crate::values::{
-        BloomDraft, BloomSpec, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, ResolutionClaim,
-        ResolvedConfigs, SpendWindow, StageCatalog,
+        BloomDraft, BloomSpec, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Forecast, MemberDependency,
+        Membership, ResolutionClaim, ResolvedConfigs, SpendWindow, StageCatalog,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -209,9 +225,14 @@ mod tests {
     }
 
     fn spec(members: &[(&str, u8)]) -> BloomSpec {
+        spec_at(members, 0)
+    }
+
+    fn spec_at(members: &[(&str, u8)], forecast_tokens: u64) -> BloomSpec {
         BloomDraft {
             proposals: members.iter().map(|(name, revision)| membership(name, *revision)).collect(),
             base: digest(0),
+            forecast: Forecast { predicted_tokens: forecast_tokens, predicted_worker_secs: 0, predicted_retries: 0 },
             ..BloomDraft::default()
         }
         .seal()
@@ -456,5 +477,179 @@ mod tests {
         let progress = record(&after, &spec).progress.get(&wp("wp-b")).expect("B has a cursor");
         assert_eq!(progress.stage, StageId::Reconcile);
         assert_eq!(progress.fold_checkpoint, Some(digest(10)));
+    }
+
+    fn construct_pass(bloom: BloomId, name: &str, tree: u8, checkout: u8, key: &str) -> Event {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: wp(name),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: Evidence {
+                    subject: digest(tree),
+                    kind: EvidenceKind::VerificationResult,
+                    detail: digest(80),
+                },
+                candidate: Some(CandidateRef { tree: digest(tree), checkout: digest(checkout) }),
+            },
+        )
+    }
+
+    fn pass_construct(snapshot: &Snapshot, bloom: BloomId, name: &str, tree: u8, checkout: u8, key: &str) -> Snapshot {
+        step(snapshot, &construct_pass(bloom, name, tree, checkout, key)).0
+    }
+
+    fn vehicle_of(decisions: &Decisions, name: &str) -> Option<CandidateRef> {
+        decisions.effects.iter().find_map(|effect| match effect {
+            Decision::RecordCandidateVehicle { workpiece, vehicle, .. } if workpiece.0 == name => Some(*vehicle),
+            _ => None,
+        })
+    }
+
+    // The plausible bug: B's construct still names A's claimed tree, so the
+    // local executor wraps it as a parentless epoch and a clean dependent
+    // patch looks like a fold conflict (#5079).
+    #[test]
+    fn a_dependent_constructs_on_the_recorded_capture_commit() {
+        let spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
+        let seal =
+            event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges: vec![edge("wp-b", "wp-a")] });
+        let (after_seal, _) = step(&Snapshot::new(digest(0)), &seal);
+        let after_build = pass_construct(&after_seal, spec.id(), "wp-a", 10, 110, "a-build");
+        let integrate = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
+        let (after, decided) = step(&after_build, &integrate);
+
+        assert_eq!(
+            vehicle_of(&decided, "wp-a"),
+            Some(CandidateRef { tree: digest(10), checkout: digest(110) }),
+            "integration records the cursor's capture, not the claimed tree alone",
+        );
+        assert_eq!(
+            construct_checkout(&decided, "wp-b"),
+            Some(digest(110)),
+            "B checks out A's capture commit, not the claimed tree",
+        );
+        assert_eq!(
+            member_construct_base(record(&after, &spec), &wp("wp-b")),
+            digest(110),
+            "the record's construct base is the same capture the dispatch named",
+        );
+        assert_eq!(
+            record(&after, &spec).vehicles.get(&wp("wp-a")).copied(),
+            Some(CandidateRef { tree: digest(10), checkout: digest(110) }),
+        );
+    }
+
+    // The plausible bug: a cursor whose checkout equals the claim is treated
+    // as a match, so a checkout digest substitutes for the claim's tree.
+    #[test]
+    fn a_checkout_digest_does_not_record_as_the_claim_vehicle() {
+        let spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
+        let seal =
+            event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges: vec![edge("wp-b", "wp-a")] });
+        let (after_seal, _) = step(&Snapshot::new(digest(0)), &seal);
+        let after_build = pass_construct(&after_seal, spec.id(), "wp-a", 11, 10, "a-build");
+        let integrate = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
+        let (after, decided) = step(&after_build, &integrate);
+
+        assert!(
+            vehicle_of(&decided, "wp-a").is_none(),
+            "a cursor whose tree is not the claim must not become the vehicle: {:?}",
+            decided.effects,
+        );
+        assert_eq!(
+            construct_checkout(&decided, "wp-b"),
+            Some(digest(10)),
+            "B falls back to the claimed tree when no vehicle matched",
+        );
+        assert!(!record(&after, &spec).vehicles.contains_key(&wp("wp-a")));
+    }
+
+    fn replay_row(snapshot: &Snapshot, event: &Event, decided: &Decisions) -> Snapshot {
+        snapshot.apply(
+            &from_bytes(&to_vec(event).expect("event encodes")).expect("event decodes"),
+            &decode_recorded_decisions(&to_vec(decided).expect("decisions encode"), None).expect("decisions decode"),
+            &ResolvedConfigs::default(),
+        )
+    }
+
+    // The plausible bug: apply-only replay loses the vehicle, so a restart
+    // names the claimed tree and the dependent construct is parented to a
+    // parentless wrapper again.
+    #[test]
+    fn replay_resolves_the_unique_maximum_to_the_capture_commit() {
+        let spec = spec(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)]);
+        let edges = vec![edge("wp-b", "wp-a"), edge("wp-c", "wp-b")];
+        let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges });
+        let a_build = construct_pass(spec.id(), "wp-a", 10, 110, "a-build");
+        let a_done = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
+        let b_build = construct_pass(spec.id(), "wp-b", 20, 120, "b-build");
+        let b_done = event("b-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-b", 2, 20) });
+
+        let base = Snapshot::new(digest(0));
+        let (after_seal, sealed) = step(&base, &seal);
+        let (after_built_a, built_a) = step(&after_seal, &a_build);
+        let (after_a, decided_a) = step(&after_built_a, &a_done);
+        let (after_built_b, built_b) = step(&after_a, &b_build);
+        let (live, decided_b) = step(&after_built_b, &b_done);
+
+        let replayed = replay_row(
+            &replay_row(
+                &replay_row(&replay_row(&replay_row(&base, &seal, &sealed), &a_build, &built_a), &a_done, &decided_a),
+                &b_build,
+                &built_b,
+            ),
+            &b_done,
+            &decided_b,
+        );
+
+        assert_eq!(live, replayed, "apply-only replay rebuilds the live snapshot, vehicle included");
+        assert_eq!(
+            member_construct_base(record(&replayed, &spec), &wp("wp-c")),
+            digest(120),
+            "replay names B's capture commit — the unique maximum — not B's claimed tree",
+        );
+        assert_eq!(construct_checkout(&decided_b, "wp-c"), Some(digest(120)));
+    }
+
+    // The plausible bug: the successor inherits A's claim but not its
+    // capture, so C's unique-maximum checkout is the claimed tree.
+    #[test]
+    fn an_inherited_claim_resolves_the_unique_maximum_to_the_capture_commit() {
+        let predecessor = spec(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)]);
+        let edges = vec![edge("wp-b", "wp-a"), edge("wp-c", "wp-b")];
+        let (snapshot, _) = step(
+            &Snapshot::new(digest(0)),
+            &event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor.clone(), edges }),
+        );
+        let snapshot = pass_construct(&snapshot, predecessor.id(), "wp-a", 10, 110, "a-build");
+        let (snapshot, _) =
+            step(&snapshot, &event("a-done", Fact::Integrate { bloom: predecessor.id(), claim: claim("wp-a", 1, 10) }));
+        let snapshot = pass_construct(&snapshot, predecessor.id(), "wp-b", 20, 120, "b-build");
+        let (snapshot, _) =
+            step(&snapshot, &event("b-done", Fact::Integrate { bloom: predecessor.id(), claim: claim("wp-b", 2, 20) }));
+
+        let successor = spec_at(&[("wp-a", 1), ("wp-b", 2), ("wp-c", 3)], 1);
+        let (after, decided) = step(
+            &snapshot,
+            &event("sup", Fact::Supersede { predecessor: predecessor.id(), successor: successor.clone() }),
+        );
+
+        assert_eq!(
+            construct_checkout(&decided, "wp-c"),
+            Some(digest(120)),
+            "C constructs on B's inherited capture, not B's claimed tree",
+        );
+        assert_eq!(
+            member_construct_base(record(&after, &successor), &wp("wp-c")),
+            digest(120),
+            "the successor record's unique maximum is the inherited capture commit",
+        );
+        assert_eq!(
+            after.blooms.get(&successor.id()).expect("successor").vehicles.get(&wp("wp-b")).copied(),
+            Some(CandidateRef { tree: digest(20), checkout: digest(120) }),
+        );
     }
 }

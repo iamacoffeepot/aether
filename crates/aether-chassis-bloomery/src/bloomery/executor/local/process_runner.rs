@@ -955,6 +955,36 @@ mod tests {
     }
 
     #[test]
+    fn a_current_dependency_checkout_stays_on_the_supplied_ancestral_commit() {
+        // The plausible bug (#5079): a dependent construct whose splice named
+        // the dependency's capture commit still ran it through the bare-tree
+        // wrapper, so git saw a parentless epoch instead of the real
+        // ancestry and a clean patch entered Reconcile. A current captured
+        // candidate is already a commit; `commitish_for` must return it
+        // unchanged and materialize it with its parent intact.
+        let (repo, scratch, first, second) = repo_with_two_commits();
+        let slot = scratch.path().join("slot-0");
+
+        assert_eq!(
+            commitish_for(repo.path(), &second).expect("a capture commit resolves as itself"),
+            second,
+            "a current captured candidate must not enter the bare-tree wrapper",
+        );
+
+        materialize_checkout(repo.path(), &slot, &second).unwrap();
+        assert_eq!(
+            git_in(&slot, &["rev-parse", "HEAD"]).unwrap().trim(),
+            second,
+            "the slot stands on the supplied ancestral commit",
+        );
+        assert_eq!(
+            git_in(&slot, &["rev-parse", "HEAD^"]).unwrap().trim(),
+            first,
+            "the capture keeps its real parent; a wrapper would be parentless",
+        );
+    }
+
+    #[test]
     fn a_bare_tree_subject_checks_out_under_one_deterministic_wrapper_commit() {
         // Tripwire (ADR-0196 splice basing): a dependency claim that resolved
         // without a capture commit names its candidate by *tree*, and both
