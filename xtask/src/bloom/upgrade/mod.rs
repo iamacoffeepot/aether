@@ -126,7 +126,8 @@ fn checked(log: &mut String, message: &str) {
 mod tests_support {
     use std::cell::RefCell;
     use std::env;
-    use std::path::PathBuf;
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -195,6 +196,38 @@ mod tests_support {
         }
     }
 
+    pub fn write_journal(path: &Path, rows: u64) {
+        let connection = rusqlite::Connection::open(path).expect("open journal fixture");
+        connection.execute("CREATE TABLE journal (n INTEGER NOT NULL)", []).expect("create journal table");
+
+        let mut insert = connection.prepare("INSERT INTO journal (n) VALUES (?1)").expect("prepare insert");
+        for n in 0..rows {
+            insert.execute([n]).expect("insert journal row");
+        }
+    }
+
+    pub fn seeded_paths(live_rows: u64, copy_rows: u64) -> Paths {
+        let root = unique_temp("aether-xtask-upgrade-fold");
+        fs::create_dir_all(&root).expect("create fold fixture root");
+        let store = root.join("live.db");
+        write_journal(&store, live_rows);
+        let scratch = root.join("scratch");
+        fs::create_dir_all(&scratch).expect("create fold scratch");
+        write_journal(&scratch.join("fold.db"), copy_rows);
+        let mut paths = test_paths();
+        paths.store = store;
+        paths.scratch = scratch;
+        paths
+    }
+
+    pub fn seeded_args(live_rows: u64, copy_rows: u64) -> super::UpgradeArgs {
+        let paths = seeded_paths(live_rows, copy_rows);
+        let mut args = test_args();
+        args.store = paths.store;
+        args.scratch_dir = Some(paths.scratch);
+        args
+    }
+
     pub struct Scripted {
         live: Result<ViewDocument, String>,
         folded: Result<ViewDocument, String>,
@@ -246,7 +279,7 @@ mod tests {
 
     use super::shell::Run;
     use super::shell::fake::Fake;
-    use super::tests_support::{Scripted, drained_view, test_args};
+    use super::tests_support::{Scripted, drained_view, seeded_args, test_args};
     use super::upgrade;
     use crate::bloom::dto::DigestHex;
     use aether_bloomery::BloomStatus;
@@ -265,7 +298,6 @@ mod tests {
             line if line.contains("MainPID") => Run::ok("4321"),
             line if line.starts_with("readlink") && line.contains("/proc/") => Run::ok("/opt/bloomery"),
             line if line.starts_with("readlink") => Run::ok("/opt/bloomery"),
-            line if line.starts_with("sqlite3") => Run::ok("12"),
             line if line.starts_with("test -e") => Run::ok(""),
             _ => Run::ok(""),
         })
@@ -277,13 +309,19 @@ mod tests {
 
     #[test]
     fn the_happy_path_prints_each_verification() {
-        let args = present_candidate(test_args());
-        let log = upgrade(&drained_view(), &matching(), &green(), &args).expect("a drained upgrade holds");
+        let args = present_candidate(seeded_args(12, 12));
+        let shell = green();
+        let log = upgrade(&drained_view(), &matching(), &shell, &args).expect("a drained upgrade holds");
 
         assert!(log.contains("checked: no undrained blooms"), "the screen is printed: {log}");
         assert!(log.contains("exists"), "the candidate is printed: {log}");
         assert!(log.contains("reachable"), "the unit is printed: {log}");
         assert!(log.contains("journal rows live=12 copy=12"), "row counts are printed: {log}");
+        assert!(
+            !shell.calls().iter().any(|line| line.starts_with("sqlite3")),
+            "the upgrade path does not shell out to sqlite3: {:?}",
+            shell.calls()
+        );
         assert!(log.contains("matches live"), "the fold-test match is printed: {log}");
         assert!(log.contains("lanes disabled"), "lanes-off is printed: {log}");
         assert!(log.contains("backed up"), "the backup is printed: {log}");
@@ -319,10 +357,9 @@ mod tests {
     #[test]
     fn a_reshape_refusal_does_not_restart() {
         let decode = "record 2 decision did not decode: aether wire: invalid bool/presence byte 11";
-        let args = present_candidate(test_args());
+        let args = present_candidate(seeded_args(12, 12));
         let shell = Fake::new(move |line| match line {
             line if line.contains("LoadState") => Run::ok("loaded"),
-            line if line.starts_with("sqlite3") => Run::ok("12"),
             line if line.contains("--store-path") => Run::failed(decode),
             line if line.starts_with("test -e") => Run::ok(""),
             _ => Run::ok(""),
@@ -350,7 +387,7 @@ mod tests {
         later.observed = DigestHex::from_bytes([4; 32]);
         let expected = format!("observed={}", later.observed);
         let views = Scripted::new(Ok(later), Ok(drained_view()));
-        let args = present_candidate(test_args());
+        let args = present_candidate(seeded_args(12, 12));
 
         let log = upgrade(&drained_view(), &views, &green(), &args)
             .expect("the later observation is what the restart wait demands");
