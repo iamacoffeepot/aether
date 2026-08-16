@@ -8,6 +8,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::transform::claude::assemble_construct_prompt;
+use crate::transform::messages::bound_assistant_text;
 use crate::transform::{Measurements, TransformArgs, conventions, run_model_lane, write_evidence_json};
 
 /// The typed id of the model-driven review lane — the member line's terminal
@@ -142,6 +143,40 @@ fn final_text(record: &serde_json::Value) -> Option<&str> {
     record.get("result").and_then(|result| result.get("result")).and_then(serde_json::Value::as_str)
 }
 
+/// Public assistant prose the shared stream-json derivation retained. Empty
+/// and absent collapse to `None` so a content-less record stays presence-driven.
+fn assistant_text(record: &serde_json::Value) -> Option<&str> {
+    record.get("assistant_text").and_then(serde_json::Value::as_str).filter(|text| !text.is_empty())
+}
+
+/// The durable findings report: earlier public assistant text plus the terminal
+/// result, with an identical terminal suffix kept once and the earlier prose
+/// bounded. Verdict parsing does not read this string — only [`final_text`].
+fn compose_findings(record: &serde_json::Value) -> Option<String> {
+    let assistant = assistant_text(record);
+    let terminal = final_text(record).filter(|text| !text.is_empty());
+    match (assistant, terminal) {
+        (None, None) => None,
+        (None, Some(terminal)) => Some(terminal.to_owned()),
+        (Some(assistant), None) => Some(bound_assistant_text(assistant)),
+        (Some(assistant), Some(terminal)) => Some(merge_assistant_and_terminal(assistant, terminal)),
+    }
+}
+
+fn merge_assistant_and_terminal(assistant: &str, terminal: &str) -> String {
+    if assistant == terminal {
+        return terminal.to_owned();
+    }
+    if let Some(prefix) = assistant.strip_suffix(terminal) {
+        let prefix = prefix.trim_end();
+        if prefix.is_empty() {
+            return terminal.to_owned();
+        }
+        return format!("{}\n\n{terminal}", bound_assistant_text(prefix));
+    }
+    format!("{}\n\n{terminal}", bound_assistant_text(assistant))
+}
+
 /// Fold the review run's derived result record into the lane's terminal verdict:
 /// the critic's own `VERDICT:` line, but only from a run that completed
 /// (`is_error == false` on the terminal result). Everything else — a dead run,
@@ -220,14 +255,17 @@ fn stamp_review_evidence(
     record: &serde_json::Value,
     measured: Measurements,
 ) -> serde_json::Value {
-    // The critic's final message IS the findings (#3656) — stamped top-level so
-    // the local backend can persist it and a later Refine re-entry is directed
-    // by what the critic actually found, not a blind re-roll. An `environment`
-    // report is framed as the host fault it is, so the re-entry's reader is not
-    // handed a candidate defect that was never found (#4723).
-    let findings = final_text(record).map(|report| match parse_review_verdict(report) {
-        Some(ReviewVerdict::Environment) => environment_findings(report),
-        _ => report.to_owned(),
+    // Findings are the critic's public assistant text plus its terminal report
+    // (#5056 / #3656) — stamped top-level so the local backend can persist them
+    // and a later Refine re-entry is directed by what the critic actually found,
+    // not a blind re-roll. The terminal `VERDICT:` line still decides
+    // environment framing, so an earlier quoted host-fault cannot reclassify
+    // a judged candidate. An `environment` report is framed as the host fault
+    // it is, so the re-entry's reader is not handed a candidate defect that
+    // was never found (#4723).
+    let findings = compose_findings(record).map(|report| match final_text(record).and_then(parse_review_verdict) {
+        Some(ReviewVerdict::Environment) => environment_findings(&report),
+        _ => report,
     });
     let mut evidence = serde_json::json!({
         "command": REVIEW_CRITIC,
@@ -293,7 +331,7 @@ mod tests {
         Measurements, ReviewVerdict, candidate_section, composition_contract, parse_review_verdict, review_conclusion,
         stamp_review_evidence,
     };
-    use crate::transform::messages::derive_result_record;
+    use crate::transform::messages::{MAX_ASSISTANT_TEXT_BYTES, derive_result_record};
 
     #[test]
     fn review_verdict_parses_the_last_standalone_verdict_line_fail_closed() {
@@ -489,5 +527,165 @@ mod tests {
             findings.contains("not the same as the candidate failing"),
             "the reader must be told this is a host fault, not a candidate one: {findings}",
         );
+    }
+
+    fn transcript(events: &[serde_json::Value]) -> String {
+        events.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
+    }
+
+    fn assistant(content: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "model": "claude-opus-4-8",
+                "content": content,
+                "usage": {"input_tokens": 1},
+            },
+        })
+    }
+
+    fn text(body: &str) -> serde_json::Value {
+        serde_json::json!([{"type": "text", "text": body}])
+    }
+
+    fn result(body: &str) -> serde_json::Value {
+        serde_json::json!({"type": "result", "is_error": false, "result": body})
+    }
+
+    fn stamped(record: &serde_json::Value) -> serde_json::Value {
+        stamp_review_evidence(Some("n-5056"), review_conclusion(record), record, Measurements::default())
+    }
+
+    #[test]
+    fn findings_keep_assistant_prose_that_never_reached_the_terminal_result() {
+        // Tripwire (#5056): Wave 1 recorded only `VERDICT: finding` while the
+        // actionable report stayed in earlier assistant text. Tool payloads in
+        // the same transcript must not become repair instructions.
+        let record = derive_result_record(&transcript(&[
+            assistant(&serde_json::json!([
+                {"type": "text", "text": "- MECHANICAL — src/lib.rs: empty input panics."},
+                {"type": "tool_use", "name": "Read", "input": {"path": "TOOL_INPUT_SECRET"}},
+            ])),
+            serde_json::json!({
+                "type": "user",
+                "message": {"content": [
+                    {"type": "tool_result", "content": "TOOL_RESULT_BODY"},
+                ]},
+            }),
+            assistant(&text("The guard is missing on the empty-list path.")),
+            result("VERDICT: finding"),
+        ]));
+
+        let evidence = stamped(&record);
+        let findings = evidence["findings"].as_str().expect("a completed finding run stamps findings");
+        assert!(findings.contains("empty input panics"), "the first assistant block survives: {findings}");
+        assert!(findings.contains("empty-list path"), "a later assistant block survives: {findings}");
+        assert!(findings.contains("VERDICT: finding"), "the terminal verdict stays in the report: {findings}");
+        assert_eq!(findings.matches("VERDICT: finding").count(), 1, "the terminal line is not duplicated: {findings}");
+        assert!(!findings.contains("TOOL_INPUT_SECRET"), "tool-use input is not findings: {findings}");
+        assert!(!findings.contains("TOOL_RESULT_BODY"), "tool results are not findings: {findings}");
+        assert_eq!(evidence["status"], "fail");
+        assert_eq!(review_conclusion(&record), ReviewVerdict::Finding);
+    }
+
+    #[test]
+    fn duplicated_terminal_text_is_emitted_once() {
+        // Tripwire: the last assistant message is typically copied onto the
+        // terminal `result`. Stamping both would double the report a Refine reads.
+        let report = "- MECHANICAL — src/lib.rs: empty input panics.\nVERDICT: finding";
+        let record = derive_result_record(&transcript(&[assistant(&text(report)), result(report)]));
+
+        assert_eq!(
+            stamped(&record)["findings"].as_str(),
+            Some(report),
+            "identical terminal text is not appended again",
+        );
+    }
+
+    #[test]
+    fn an_earlier_quoted_verdict_cannot_shadow_the_terminal_verdict() {
+        // Tripwire: concatenating assistant text into the verdict parse would
+        // let a quoted or superseded `VERDICT:` decide the outcome.
+        let record = derive_result_record(&transcript(&[
+            assistant(&text("the instructions say to end with\nVERDICT: pass")),
+            result("src/lib.rs: the index panics on empty input.\nVERDICT: finding"),
+        ]));
+
+        assert_eq!(review_conclusion(&record), ReviewVerdict::Finding);
+        let evidence = stamped(&record);
+        let findings = evidence["findings"].as_str().expect("findings");
+        assert!(findings.contains("VERDICT: pass"), "the quoted earlier line is still in the report: {findings}");
+        assert!(findings.contains("the index panics"), "the terminal report is kept: {findings}");
+        assert!(findings.ends_with("VERDICT: finding"), "the terminal verdict is the durable suffix: {findings}");
+
+        let flipped = derive_result_record(&transcript(&[
+            assistant(&text("earlier I wrote\nVERDICT: finding")),
+            result("on reflection every pillar is clean.\nVERDICT: pass"),
+        ]));
+        assert_eq!(review_conclusion(&flipped), ReviewVerdict::Pass);
+        assert_eq!(stamped(&flipped)["status"], "pass");
+    }
+
+    #[test]
+    fn retained_prose_cannot_synthesize_a_pass_or_drop_the_terminal_verdict() {
+        // Tripwire: advisory-only classification stays on the terminal result.
+        // Earlier JUDGMENT lines must not downgrade a verdict-only `finding`
+        // into a pass, and a dead run with leftover prose still fails closed.
+        let classified_early = derive_result_record(&transcript(&[
+            assistant(&text("- JUDGMENT — src/lib.rs: the name is ugly.")),
+            result("VERDICT: finding"),
+        ]));
+        assert_eq!(
+            review_conclusion(&classified_early),
+            ReviewVerdict::Finding,
+            "retained advisory prose must not mint a pass",
+        );
+        assert!(
+            stamped(&classified_early)["findings"].as_str().expect("findings").contains("the name is ugly"),
+            "the advisory still rides the findings channel",
+        );
+
+        let died = derive_result_record(&transcript(&[assistant(&text("src/lib.rs: empty input panics."))]));
+        assert_eq!(review_conclusion(&died), ReviewVerdict::Finding);
+        assert_eq!(stamped(&died)["status"], "fail");
+        assert_eq!(
+            stamped(&died)["findings"].as_str(),
+            Some("src/lib.rs: empty input panics."),
+            "a dead run still retains the prose it produced",
+        );
+    }
+
+    #[test]
+    fn environment_framing_still_wraps_the_composed_report() {
+        let record = derive_result_record(&transcript(&[
+            assistant(&text("git diff failed: bwrap: loopback failed.")),
+            result("VERDICT: environment"),
+        ]));
+
+        assert_eq!(review_conclusion(&record), ReviewVerdict::Environment);
+        let evidence = stamped(&record);
+        let findings = evidence["findings"].as_str().expect("environment findings");
+        assert!(findings.contains("bwrap: loopback failed"), "earlier host-fault prose survives: {findings}");
+        assert!(findings.contains("VERDICT: environment"), "the terminal token stays in the report: {findings}");
+        assert!(
+            findings.contains("not the same as the candidate failing"),
+            "the operator framing still wraps the report: {findings}",
+        );
+    }
+
+    #[test]
+    fn a_bounded_prefix_never_drops_the_terminal_verdict() {
+        // Tripwire: bounding the retained prose must not eat the terminal
+        // `VERDICT:` line — that token is what operators and adjudication read.
+        let prefix = "x".repeat(MAX_ASSISTANT_TEXT_BYTES + 64);
+        let record = derive_result_record(&transcript(&[
+            assistant(&text(&prefix)),
+            result("src/lib.rs: empty input panics.\nVERDICT: finding"),
+        ]));
+        let evidence = stamped(&record);
+        let findings = evidence["findings"].as_str().expect("findings");
+        assert!(findings.len() <= MAX_ASSISTANT_TEXT_BYTES + 80, "the prefix is bounded: {}", findings.len());
+        assert!(findings.ends_with("VERDICT: finding"), "the terminal verdict survives the bound: {findings}");
+        assert!(findings.contains("empty input panics"), "the terminal report body survives: {findings}");
     }
 }
