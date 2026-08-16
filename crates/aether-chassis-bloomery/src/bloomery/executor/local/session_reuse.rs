@@ -4,7 +4,9 @@
 //! This module is the missing consumer: it decides whether a lap should try
 //! to resume, acquires from the pool, guards the slot-path cwd gotcha, and
 //! stamps the decision next to the result record's actuals so the reuse rate
-//! is auditable from the evidence the journal already keeps.
+//! is auditable from the evidence the journal already keeps. Completed
+//! actuals fold into a durable (model, effort, family) calibration cell;
+//! acquire reads that cell into n̂ once it clears the sample floor.
 
 use std::collections::HashMap;
 use std::fs;
@@ -35,6 +37,13 @@ const TURN_TOKENS: u64 = 4_500;
 const SEED_NAMED_SITE_TURNS: u64 = 15;
 /// Seed prior: extra turns of going cold versus resume (Δn̂).
 const SEED_EXTRA_COLD_TURNS: u64 = 5;
+/// Learned n̂ is used only once this many usable observations have landed.
+const MIN_CALIBRATION_OBSERVATIONS: u64 = 4;
+/// Per-sample turn cap: a missing/zero count is ignored, anything above this
+/// is recorded as this so one runaway cannot dominate the cell.
+const TURN_OBSERVATION_CAP: u64 = 32;
+/// Per-sample terminal-context cap, matching the pool's default ceiling.
+const CONTEXT_OBSERVATION_CAP: u64 = 150_000;
 
 /// Which way a lap actually went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +92,25 @@ impl MissReason {
     }
 }
 
+/// Whether n̂ came from the compile-time seed or a cell that cleared the floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalibrationSource {
+    /// Fewer than the minimum usable samples, or none.
+    Seed,
+    /// The durable cell's mean, after the floor and the per-sample cap.
+    Learned,
+}
+
+impl CalibrationSource {
+    /// The evidence token that names which prior the inequality used.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Seed => "seed",
+            Self::Learned => "learned",
+        }
+    }
+}
+
 /// The acquire decision remembered on a run so `stream_evidence` can stamp it
 /// beside the result record's actuals and deposit the session that came back.
 #[derive(Debug, Clone)]
@@ -91,6 +119,8 @@ pub struct ReusePlan {
     pub predicted_arm: ReuseArm,
     /// Predicted repair turns (n̂) that went into the inequality.
     pub predicted_turns: u64,
+    /// Whether [`predicted_turns`](Self::predicted_turns) is the seed or learned.
+    pub calibration: CalibrationSource,
     /// The arm the lap actually took.
     pub arm: ReuseArm,
     /// Why a predicted resume launched fresh, when it did.
@@ -169,6 +199,11 @@ impl SessionReuse {
     /// opened: the operator's `SessionConfig` path and eligibility knobs, not
     /// literals. The acquire inequality still needs the bloom's sealed rates,
     /// which ride each [`AcquireRequest`] rather than this constructor.
+    ///
+    /// Rebuilds the hot routing index from complete durable rows before the
+    /// first acquire. A legacy or malformed row stays in the pool (eligibility
+    /// and lease are unchanged) but is omitted here, so the next lap fails cold
+    /// rather than resuming on invented deposit/slot/builder state.
     pub fn from_config(session: &SessionConfig) -> rusqlite::Result<Self> {
         let pool = SqliteSessionStore::open(
             session.store_path(),
@@ -176,7 +211,22 @@ impl SessionReuse {
             session.lease_ttl_mins.saturating_mul(60),
             session.context_cap_tokens,
         )?;
-        Ok(Self::new(Box::new(pool), PriceTable::default()))
+        let snapshot = pool.routing_snapshot()?;
+        let reuse = Self::new(Box::new(pool), PriceTable::default());
+        reuse.restore_snapshot(snapshot);
+        Ok(reuse)
+    }
+
+    fn restore_snapshot(&self, rows: Vec<(SessionKey, u32, u64, String, bool)>) {
+        let mut state = lock(&self.state);
+        for (key, deposit_count, context_tokens, slot_path, is_builder) in rows {
+            state.deposits.insert(key.clone(), deposit_count);
+            state.last_context.insert(key.clone(), context_tokens);
+            state.slot.insert(key.clone(), slot_path.clone());
+            if is_builder {
+                state.builder_at_slot.insert(slot_path, key);
+            }
+        }
     }
 
     /// Pin the clock the next acquire/deposit stamps — tests only.
@@ -204,14 +254,7 @@ impl SessionReuse {
         slot_path: &str,
         is_builder: bool,
     ) {
-        let _ = lock(&self.pool).release(key, None, session_id, manifest);
-        let mut state = lock(&self.state);
-        *state.deposits.entry(key.clone()).or_insert(0) += 1;
-        state.last_context.insert(key.clone(), manifest.context_tokens);
-        state.slot.insert(key.clone(), slot_path.to_owned());
-        if is_builder {
-            state.builder_at_slot.insert(slot_path.to_owned(), key.clone());
-        }
+        self.persist_and_remember(key, None, session_id, manifest, slot_path, is_builder);
     }
 
     /// Decide whether this lap resumes, acquire from the pool, and return the
@@ -232,13 +275,15 @@ impl SessionReuse {
             let state = lock(&self.state);
             (state.deposits.get(&key).copied().unwrap_or(0), state.last_context.get(&key).copied())
         };
-        let predicted_turns = SEED_NAMED_SITE_TURNS;
+        let family = lane_family(request.command);
+        let (predicted_turns, calibration) = self.learned_or_seed(request.model, request.effort, family);
         let predicted_arm = Self::predicted_arm(prices, request.model, deposits, last_context, predicted_turns);
 
         if predicted_arm == ReuseArm::Fresh {
             return ReusePlan {
                 predicted_arm,
                 predicted_turns,
+                calibration,
                 arm: ReuseArm::Fresh,
                 miss: None,
                 resume: None,
@@ -263,6 +308,7 @@ impl SessionReuse {
                     return ReusePlan {
                         predicted_arm,
                         predicted_turns,
+                        calibration,
                         arm: ReuseArm::Fresh,
                         miss: Some(miss),
                         resume: None,
@@ -277,6 +323,7 @@ impl SessionReuse {
                 ReusePlan {
                     predicted_arm,
                     predicted_turns,
+                    calibration,
                     arm: ReuseArm::Resumed,
                     miss: None,
                     resume: Some(leased.session_bytes),
@@ -291,6 +338,7 @@ impl SessionReuse {
             AcquireOutcome::Missed(miss) => ReusePlan {
                 predicted_arm,
                 predicted_turns,
+                calibration,
                 arm: ReuseArm::Fresh,
                 miss: Some(map_pool_miss(miss)),
                 resume: None,
@@ -325,6 +373,25 @@ impl SessionReuse {
         (key, true)
     }
 
+    /// Fold a completed attempt's token actuals into the durable cell for
+    /// this plan's (model, effort, family). Missing or zero turns are ignored;
+    /// a turn or context above the per-sample cap is recorded at the cap.
+    pub fn observe(&self, plan: &ReusePlan, actuals: &ReuseActuals) {
+        let Some(turns) = usable_turns(actuals.turns) else {
+            return;
+        };
+        let family = lane_family(&plan.key.task);
+        if family.is_empty() {
+            return;
+        }
+        let context = actuals
+            .input_tokens
+            .saturating_add(actuals.cache_read_tokens)
+            .saturating_add(actuals.cache_write_tokens)
+            .min(CONTEXT_OBSERVATION_CAP);
+        let _ = lock(&self.pool).update_calibration(&plan.key.model, &plan.key.effort, family, turns, context);
+    }
+
     /// Deposit the session the attempt produced, so the next lap can judge it.
     pub fn deposit(&self, plan: &ReusePlan, session_id: &str, context_tokens: u64) {
         let now = self.now();
@@ -337,14 +404,49 @@ impl SessionReuse {
             read_files: vec![plan.slot_path.clone()],
             deposited_at: now,
         };
-        let _ = lock(&self.pool).release(&plan.key, plan.lease.as_ref(), session_id, &manifest);
+        self.persist_and_remember(
+            &plan.key,
+            plan.lease.as_ref(),
+            session_id,
+            &manifest,
+            &plan.slot_path,
+            plan.is_builder,
+        );
+    }
+
+    fn persist_and_remember(
+        &self,
+        key: &SessionKey,
+        lease: Option<&LeaseToken>,
+        session_id: &str,
+        manifest: &SessionManifest,
+        slot_path: &str,
+        is_builder: bool,
+    ) {
+        let deposit_count = lock(&self.state).deposits.get(key).copied().unwrap_or(0).saturating_add(1);
+        let _ =
+            lock(&self.pool).release_routed(key, lease, session_id, manifest, (deposit_count, slot_path, is_builder));
         let mut state = lock(&self.state);
-        *state.deposits.entry(plan.key.clone()).or_insert(0) += 1;
-        state.last_context.insert(plan.key.clone(), context_tokens);
-        state.slot.insert(plan.key.clone(), plan.slot_path.clone());
-        if plan.is_builder {
-            state.builder_at_slot.insert(plan.slot_path.clone(), plan.key.clone());
+        *state.deposits.entry(key.clone()).or_insert(0) += 1;
+        state.last_context.insert(key.clone(), manifest.context_tokens);
+        state.slot.insert(key.clone(), slot_path.to_owned());
+        if is_builder {
+            state.builder_at_slot.insert(slot_path.to_owned(), key.clone());
         }
+    }
+
+    fn learned_or_seed(&self, model: &str, effort: &str, family: &str) -> (u64, CalibrationSource) {
+        let Ok(Some(cell)) = lock(&self.pool).read_calibration(model, effort, family) else {
+            return (SEED_NAMED_SITE_TURNS, CalibrationSource::Seed);
+        };
+        if cell.observations < MIN_CALIBRATION_OBSERVATIONS || cell.turn_sum == 0 {
+            return (SEED_NAMED_SITE_TURNS, CalibrationSource::Seed);
+        }
+        let mean = cell.turn_sum / cell.observations;
+        if mean == 0 {
+            return (SEED_NAMED_SITE_TURNS, CalibrationSource::Seed);
+        }
+        (mean.min(TURN_OBSERVATION_CAP), CalibrationSource::Learned)
     }
 
     fn predicted_arm(
@@ -453,6 +555,20 @@ pub fn is_builder_command(command: &str) -> bool {
     !is_judge_command(command)
 }
 
+/// The calibration key's family axis: the command's leading segment, so
+/// `construct.implement` and a construct retry share a cell while `review`
+/// stays isolated. A pool `task` (`command` or `command\\ndescription`) is
+/// accepted the same way.
+#[must_use]
+pub fn lane_family(command: &str) -> &str {
+    let command = command.split('\n').next().unwrap_or(command);
+    command.split('.').next().filter(|part| !part.is_empty()).unwrap_or(command)
+}
+
+fn usable_turns(turns: Option<u64>) -> Option<u64> {
+    turns.filter(|turns| *turns > 0).map(|turns| turns.min(TURN_OBSERVATION_CAP))
+}
+
 /// Resume iff `n̂·T < (w/r)·Ŵ + 0.5·n̂·Ŵ + (o/r)·Δn̂·v̂`.
 ///
 /// Evaluated in integers as `2r` times both sides so the rates stay in the
@@ -538,6 +654,7 @@ pub fn stamp_reuse(bytes: &[u8], plan: &ReusePlan, actuals: &ReuseActuals) -> Ve
             "miss": plan.miss.map(MissReason::as_str),
             "predicted_arm": plan.predicted_arm.as_str(),
             "predicted_turns": plan.predicted_turns,
+            "calibration": plan.calibration.as_str(),
             "actual_turns": actuals.turns,
             "input_tokens": actuals.input_tokens,
             "cache_read_tokens": actuals.cache_read_tokens,
@@ -636,7 +753,7 @@ mod tests {
     use super::{
         COLD_PREFIX_TOKENS, MissReason, ReuseArm, SEED_NAMED_SITE_TURNS, SessionReuse, resume_is_cheaper, stamp_reuse,
     };
-    use crate::session::{SessionKey, SessionManifest};
+    use crate::session::{SessionBackend, SessionConfig, SessionKey, SessionManifest, SqliteSessionStore};
     use aether_bloomery::{PriceRates, PriceTable};
     use std::path::Path;
 
@@ -819,6 +936,7 @@ mod tests {
             serde_json::from_slice(&stamped).expect("stamp_reuse emits JSON beside the result record");
         assert_eq!(value["session_reuse"]["arm"], "resumed");
         assert_eq!(value["session_reuse"]["predicted_turns"], 15);
+        assert_eq!(value["session_reuse"]["calibration"], "seed");
         assert_eq!(value["session_reuse"]["actual_turns"], 12);
         assert_eq!(value["session_reuse"]["priced_micro_usd"], 42);
         assert_eq!(value["session_reuse"]["input_tokens"], 1_000);
@@ -888,6 +1006,7 @@ mod tests {
         super::ReusePlan {
             predicted_arm: ReuseArm::Resumed,
             predicted_turns: 15,
+            calibration: super::CalibrationSource::Seed,
             arm: ReuseArm::Resumed,
             miss: None,
             resume: Some("sess-1".to_owned()),
@@ -898,5 +1017,320 @@ mod tests {
             edge: false,
             is_builder: true,
         }
+    }
+
+    fn file_reuse(path: &str) -> SessionReuse {
+        let reuse = SessionReuse::from_config(&SessionConfig { db_path: path.to_owned(), ..SessionConfig::default() })
+            .expect("a file-backed session pool opens");
+        reuse.set_head_hash("head-A");
+        reuse.set_now(1_000);
+        reuse
+    }
+
+    fn temp_pool_path(dir: &tempfile::TempDir) -> String {
+        dir.path().join("sessions.db").to_str().expect("utf-8 temp path").to_owned()
+    }
+
+    fn judge_key() -> SessionKey {
+        SessionKey { task: "review.critic\nissue-4902".to_owned(), ..key() }
+    }
+
+    #[test]
+    fn reopening_the_pool_restores_builder_routing() {
+        // Tripwire: ReuseState used to start empty after a coordinator restart
+        // even though the SQLite pool still held the session. A same-slot
+        // dependent then paid the cold forensics tax ADR-0196 exists to avoid;
+        // a judge seat and a mismatched slot must still stay cold, and a
+        // twice-deposited key must keep the retry-index rule (cold on lap 3).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_pool_path(&dir);
+
+        let reuse = file_reuse(&path);
+        reuse.seed(&key(), "sess-A", &manifest("head-A", 8_000, 1_000), "/slot-0");
+        reuse.seed_builder(&judge_key(), "sess-judge", &manifest("head-A", 4_000, 1_001), "/slot-0", false);
+        drop(reuse);
+
+        let reuse = file_reuse(&path);
+        let mismatch = reuse.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-1"));
+        assert_eq!(mismatch.miss, Some(MissReason::SlotMismatch), "the restored slot must still guard cwd");
+        assert!(mismatch.resume.is_none());
+
+        let edge = reuse.acquire(&construct_request("claude-opus-5", "issue-B", "/slot-0"));
+        assert_eq!(edge.arm, ReuseArm::Resumed, "a same-slot dependent resumes the restored builder");
+        assert_eq!(edge.resume.as_deref(), Some("sess-A"), "the judge deposit must not become the slot handle");
+        assert!(edge.edge);
+
+        let judge = reuse.acquire(&super::AcquireRequest {
+            model: "claude-opus-5",
+            effort: "high",
+            task: "review.critic\nissue-other",
+            worktree: Path::new("/slot-0"),
+            prices: None,
+            command: "review.critic",
+        });
+        assert_eq!(judge.arm, ReuseArm::Fresh, "a judge command never sees the restored builder handle");
+        assert!(judge.resume.is_none());
+        assert!(!judge.edge);
+        drop(reuse);
+
+        let reuse = file_reuse(&path);
+        // The edge acquire above left the row leased at t=1000 (15-min TTL).
+        // A restart that still sees that lease must not look like a lost count.
+        reuse.set_now(2_000);
+        let own = reuse.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-0"));
+        assert_eq!(own.arm, ReuseArm::Resumed, "deposit count 1 must survive so lap 2 still resumes");
+        assert_eq!(own.resume.as_deref(), Some("sess-A"));
+    }
+
+    #[test]
+    fn a_twice_deposited_key_stays_cold_after_reopen() {
+        // Tripwire: inventing deposit_count=1 for every reopened row would
+        // resume a session that already failed twice. The real count must
+        // survive, not a "one builder deposit" default.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_pool_path(&dir);
+
+        let reuse = file_reuse(&path);
+        reuse.seed(&key(), "sess-A", &manifest("head-A", 8_000, 1_000), "/slot-0");
+        reuse.seed(&key(), "sess-A2", &manifest("head-A", 8_000, 1_002), "/slot-0");
+        drop(reuse);
+
+        let reuse = file_reuse(&path);
+        let third = reuse.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-0"));
+        assert_eq!(third.arm, ReuseArm::Fresh, "a twice-deposited key must stay cold after restart");
+        assert_eq!(third.miss, None, "retry-index seed, not a pool miss");
+    }
+
+    #[test]
+    fn reopening_restores_terminal_context_into_the_inequality() {
+        // Tripwire: last_context is what turns a cheap-read row into a resume
+        // and an even-rate row with a large T into a prediction-cold. If
+        // restart restored the count but invented or dropped T, the even-rate
+        // arm would flip to Resumed (None T skips the inequality).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_pool_path(&dir);
+
+        let reuse = file_reuse(&path);
+        reuse.seed(&key(), "sess-A", &manifest("head-A", COLD_PREFIX_TOKENS, 1_000), "/slot-0");
+        drop(reuse);
+
+        let reuse = file_reuse(&path);
+        let even_rates = table("claude-opus-5", row(1_000_000, 1_000_000, 1_000_000));
+        let plan = reuse.acquire(&super::AcquireRequest {
+            model: "claude-opus-5",
+            effort: "high",
+            task: "issue-4902",
+            worktree: Path::new("/slot-0"),
+            prices: Some(&even_rates),
+            command: "construct.implement",
+        });
+        assert_eq!(plan.arm, ReuseArm::Fresh, "restored T must feed the inequality");
+        assert_eq!(plan.miss, None, "a prediction, not a pool miss");
+        assert_eq!(plan.predicted_arm, ReuseArm::Fresh);
+    }
+
+    #[test]
+    fn a_legacy_row_fails_cold_after_reopen() {
+        // Tripwire: treating every reopened row as one builder deposit would
+        // resume a judge (or an incomplete pre-routing row) on a dependency
+        // edge. The pool row stays eligible; the hot index must not see it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_pool_path(&dir);
+
+        let mut store = SqliteSessionStore::open(
+            &path,
+            SessionConfig::default().cache_ttl_cutoff_mins.saturating_mul(60),
+            SessionConfig::default().lease_ttl_mins.saturating_mul(60),
+            SessionConfig::default().context_cap_tokens,
+        )
+        .expect("legacy pool opens");
+        store.release(&key(), None, "sess-legacy", &manifest("head-A", 8_000, 1_000)).expect("unrouted deposit");
+        drop(store);
+
+        let reuse = file_reuse(&path);
+        let edge = reuse.acquire(&construct_request("claude-opus-5", "issue-B", "/slot-0"));
+        assert_eq!(edge.arm, ReuseArm::Fresh, "an unrouted legacy row must not become a builder handle");
+        assert!(edge.resume.is_none());
+        assert!(!edge.edge);
+
+        let own = reuse.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-0"));
+        assert_eq!(own.arm, ReuseArm::Fresh, "an unrouted legacy row must not seed a deposit count");
+        assert!(own.resume.is_none());
+    }
+
+    fn even_rates() -> PriceTable {
+        table("claude-opus-5", row(1_000_000, 1_000_000, 1_000_000))
+    }
+
+    fn even_request(task: &'static str) -> super::AcquireRequest<'static> {
+        super::AcquireRequest {
+            model: "claude-opus-5",
+            effort: "high",
+            task,
+            worktree: Path::new("/slot-0"),
+            prices: None,
+            command: "construct.implement",
+        }
+    }
+
+    fn observe_family(reuse: &SessionReuse, model: &str, effort: &str, family: &str, turns: Option<u64>, context: u64) {
+        reuse.observe(
+            &super::ReusePlan {
+                predicted_arm: ReuseArm::Fresh,
+                predicted_turns: SEED_NAMED_SITE_TURNS,
+                calibration: super::CalibrationSource::Seed,
+                arm: ReuseArm::Fresh,
+                miss: None,
+                resume: None,
+                lease: None,
+                key: SessionKey { model: model.to_owned(), effort: effort.to_owned(), task: family.to_owned() },
+                head_hash: String::new(),
+                slot_path: String::new(),
+                edge: false,
+                is_builder: true,
+            },
+            &super::ReuseActuals { turns, input_tokens: context, ..super::ReuseActuals::default() },
+        );
+    }
+
+    fn warm_even(reuse: &SessionReuse, context: u64) {
+        reuse.set_head_hash("head-A");
+        reuse.set_now(1_000);
+        reuse.seed(&key(), "sess-1", &manifest("head-A", context, 1_000), "/slot-0");
+    }
+
+    #[test]
+    fn sparse_calibration_keeps_the_seed_prior() {
+        // Tripwire: using a cell before the floor would let one noisy lap
+        // flip the inequality. Three usable observations (and any number of
+        // missing/zero ones) must leave n̂ and the arm on the compile-time seed.
+        let reuse = SessionReuse::memory(even_rates());
+        warm_even(&reuse, COLD_PREFIX_TOKENS);
+        observe_family(&reuse, "claude-opus-5", "high", "construct", None, 8_000);
+        observe_family(&reuse, "claude-opus-5", "high", "construct", Some(0), 8_000);
+        for _ in 0..3 {
+            observe_family(&reuse, "claude-opus-5", "high", "construct", Some(1), 8_000);
+        }
+
+        let plan = reuse.acquire(&even_request("issue-4902"));
+        assert_eq!(plan.calibration, super::CalibrationSource::Seed, "below the floor must stay on the seed");
+        assert_eq!(plan.predicted_turns, SEED_NAMED_SITE_TURNS);
+        assert_eq!(plan.predicted_arm, ReuseArm::Fresh, "seed n̂ against even rates and a large T is cold");
+        assert_eq!(plan.arm, ReuseArm::Fresh);
+        assert_eq!(plan.miss, None, "a prediction, not a pool miss");
+    }
+
+    #[test]
+    fn enough_observations_can_flip_the_predicted_arm() {
+        // Tripwire: writing actuals without reading them back is the G3 loop
+        // this issue closes. Four samples of one turn pull n̂ below the
+        // even-rate break-even so lap 2 resumes instead of going cold.
+        let reuse = SessionReuse::memory(even_rates());
+        warm_even(&reuse, COLD_PREFIX_TOKENS);
+        for _ in 0..4 {
+            observe_family(&reuse, "claude-opus-5", "high", "construct", Some(1), 8_000);
+        }
+
+        let plan = reuse.acquire(&even_request("issue-4902"));
+        assert_eq!(plan.calibration, super::CalibrationSource::Learned);
+        assert_eq!(plan.predicted_turns, 1);
+        assert_eq!(plan.predicted_arm, ReuseArm::Resumed, "learned n̂ must feed the inequality");
+        assert_eq!(plan.arm, ReuseArm::Resumed);
+        assert_eq!(plan.resume.as_deref(), Some("sess-1"));
+    }
+
+    #[test]
+    fn unlike_calibration_keys_do_not_change_the_arm() {
+        // Tripwire: a cell keyed only by model (or only by seat) would let
+        // grok / low-effort / review observations steer a high-effort
+        // construct acquire. Each unlike axis must leave the seed in place.
+        let reuse = SessionReuse::memory(even_rates());
+        warm_even(&reuse, COLD_PREFIX_TOKENS);
+        for _ in 0..4 {
+            observe_family(&reuse, "grok-4.6", "high", "construct", Some(1), 8_000);
+            observe_family(&reuse, "claude-opus-5", "low", "construct", Some(1), 8_000);
+            observe_family(&reuse, "claude-opus-5", "high", "review", Some(1), 8_000);
+        }
+
+        let plan = reuse.acquire(&even_request("issue-4902"));
+        assert_eq!(plan.calibration, super::CalibrationSource::Seed);
+        assert_eq!(plan.predicted_turns, SEED_NAMED_SITE_TURNS);
+        assert_eq!(plan.predicted_arm, ReuseArm::Fresh);
+        assert_eq!(plan.arm, ReuseArm::Fresh);
+    }
+
+    #[test]
+    fn an_outlier_observation_is_capped_so_it_cannot_dominate() {
+        // Tripwire: recording a 10_000-turn runaway at face value would pull
+        // the mean past the even-rate break-even at T=50k (n̂ ≥ 11 is cold)
+        // and hide the three cheap samples. The cap must keep n̂ on the
+        // resume side of that row.
+        let reuse = SessionReuse::memory(even_rates());
+        warm_even(&reuse, 50_000);
+        for _ in 0..3 {
+            observe_family(&reuse, "claude-opus-5", "high", "construct", Some(1), 8_000);
+        }
+        observe_family(&reuse, "claude-opus-5", "high", "construct", Some(10_000), 8_000);
+
+        let plan = reuse.acquire(&even_request("issue-4902"));
+        assert_eq!(plan.calibration, super::CalibrationSource::Learned);
+        assert_eq!(plan.predicted_turns, 8, "three ones plus a 32-cap is mean 8, not 2500");
+        assert_eq!(plan.predicted_arm, ReuseArm::Resumed, "a capped outlier must not flip the arm cold");
+        assert_eq!(plan.arm, ReuseArm::Resumed);
+    }
+
+    #[test]
+    fn reopening_the_store_retains_the_learned_decision() {
+        // Tripwire: learning only in the hot process would lose the prior on
+        // coordinator restart and send the next same-profile acquire back to
+        // the seed. The SQLite cell is what has to survive.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_pool_path(&dir);
+
+        let reuse = file_reuse(&path);
+        for _ in 0..4 {
+            observe_family(&reuse, "claude-opus-5", "high", "construct", Some(1), 8_000);
+        }
+        drop(reuse);
+
+        let reuse = SessionReuse::from_config(&SessionConfig { db_path: path, ..SessionConfig::default() })
+            .expect("reopened pool");
+        reuse.set_head_hash("head-A");
+        reuse.set_now(1_000);
+        reuse.seed(&key(), "sess-1", &manifest("head-A", COLD_PREFIX_TOKENS, 1_000), "/slot-0");
+        let plan = reuse.acquire(&super::AcquireRequest {
+            model: "claude-opus-5",
+            effort: "high",
+            task: "issue-4902",
+            worktree: Path::new("/slot-0"),
+            prices: Some(&even_rates()),
+            command: "construct.implement",
+        });
+        assert_eq!(plan.calibration, super::CalibrationSource::Learned);
+        assert_eq!(plan.predicted_turns, 1);
+        assert_eq!(plan.predicted_arm, ReuseArm::Resumed);
+        assert_eq!(plan.arm, ReuseArm::Resumed);
+    }
+
+    #[test]
+    fn learned_calibration_cannot_bypass_an_eligibility_guard() {
+        // Fail-closed: calibration may pick resume vs fresh, never skip a
+        // moved head. The plausible bug is short-circuiting to the predicted
+        // arm without asking the pool.
+        let reuse = SessionReuse::memory(even_rates());
+        reuse.set_head_hash("head-A");
+        reuse.set_now(1_000);
+        reuse.seed(&key(), "sess-1", &manifest("head-A", COLD_PREFIX_TOKENS, 1_000), "/slot-0");
+        for _ in 0..4 {
+            observe_family(&reuse, "claude-opus-5", "high", "construct", Some(1), 8_000);
+        }
+        reuse.set_head_hash("head-MOVED");
+
+        let plan = reuse.acquire(&even_request("issue-4902"));
+        assert_eq!(plan.calibration, super::CalibrationSource::Learned);
+        assert_eq!(plan.predicted_arm, ReuseArm::Resumed, "the prior still wants resume");
+        assert_eq!(plan.arm, ReuseArm::Fresh, "a moved head must still launch fresh");
+        assert_eq!(plan.miss, Some(MissReason::HeadHash));
+        assert!(plan.resume.is_none());
     }
 }

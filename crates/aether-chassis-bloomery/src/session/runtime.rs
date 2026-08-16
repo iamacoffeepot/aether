@@ -14,7 +14,13 @@
 //! in `aether.artifacts`). Eligibility ports `scripts/agent-pool.mjs`'s
 //! `evaluateEligibility` — key match, head-freshness (#3422), age bound (#3264),
 //! context cap, and lazy lease expiry — and deliberately omits the
-//! `workspace_tree_hash` gate #3341 measured and removed.
+//! `workspace_tree_hash` gate #3341 measured and removed. Routing metadata
+//! (`deposit_count`, `canonical_slot`, `builder_eligible`) rides the same row
+//! so a coordinator restart can rebuild the executor's hot index without
+//! inventing state for a legacy or incomplete deposit. A sibling
+//! `reuse_calibration` table holds bounded turn/context aggregates keyed by
+//! model, effort, and lane family — the acquire path reads those priors back
+//! into the sealed-price inequality instead of scanning transcripts.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,8 +46,9 @@ pub struct LeasedSession {
     pub parent_receipt: String,
 }
 
-/// The durable pool the capability drives. One method per transact-mail kind;
-/// each is one atomic `SQLite` transaction.
+/// The durable pool the capability drives. Acquire and release are the
+/// transact-mail kinds; [`SessionBackend::release_routed`] is the executor's
+/// atomic deposit of routing metadata beside the same row.
 pub trait SessionBackend: Send {
     /// Lease the eligible pooled session for `key`, marking it leased until
     /// `now + lease_ttl`, or `None` when no eligible session exists.
@@ -71,6 +78,36 @@ pub trait SessionBackend: Send {
         session_bytes: &str,
         manifest: &SessionManifest,
     ) -> rusqlite::Result<ReleaseOutcome>;
+    /// Deposit like [`release`](Self::release), and write routing metadata in
+    /// the same upsert. `routing` is `(deposit_count, canonical_slot, is_builder)`
+    /// after this deposit — the fields a restart needs that the manifest cannot
+    /// attest (a true count, and whether the seat was a builder).
+    fn release_routed(
+        &mut self,
+        key: &SessionKey,
+        lease: Option<&LeaseToken>,
+        session_bytes: &str,
+        manifest: &SessionManifest,
+        routing: (u32, &str, bool),
+    ) -> rusqlite::Result<ReleaseOutcome>;
+    /// The bounded turn/context aggregates for `(model, effort, family)`, or
+    /// `None` when that cell has never been written.
+    fn read_calibration(
+        &self,
+        model: &str,
+        effort: &str,
+        family: &str,
+    ) -> rusqlite::Result<Option<CalibrationAggregates>>;
+    /// Fold one observation into `(model, effort, family)`. The row stores
+    /// saturating aggregates, never the raw transcript.
+    fn update_calibration(
+        &mut self,
+        model: &str,
+        effort: &str,
+        family: &str,
+        turns: u64,
+        context: u64,
+    ) -> rusqlite::Result<()>;
 }
 
 /// What a [`SessionBackend::release`] did. A refusal is an outcome, not an
@@ -110,6 +147,46 @@ pub enum AcquireOutcome {
     Leased(LeasedSession),
     /// No eligible session — the runner launches cold and records the reason.
     Missed(AcquireMiss),
+}
+
+/// How many observations one calibration cell retains. Past this the fold
+/// drops one mean-share so the row stays bounded and a late sample can still
+/// move the mean.
+const MAX_CALIBRATION_OBSERVATIONS: u64 = 32;
+
+/// Bounded turn/context aggregates for one `(model, effort, family)` cell.
+/// The acquire path reads these; the store never keeps raw transcripts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CalibrationAggregates {
+    /// How many observations have been folded in, capped at the window.
+    pub observations: u64,
+    /// Saturating sum of per-sample (already-capped) turn counts.
+    pub turn_sum: u64,
+    /// Saturating sum of per-sample (already-capped) terminal-context tokens.
+    pub context_sum: u64,
+}
+
+impl CalibrationAggregates {
+    /// Fold one observation. Saturating; a full window replaces one mean-share
+    /// so a single sample cannot occupy the whole cell.
+    #[must_use]
+    pub fn fold(self, turns: u64, context: u64) -> Self {
+        if self.observations >= MAX_CALIBRATION_OBSERVATIONS {
+            let turn_share = self.turn_sum / MAX_CALIBRATION_OBSERVATIONS;
+            let context_share = self.context_sum / MAX_CALIBRATION_OBSERVATIONS;
+            Self {
+                observations: MAX_CALIBRATION_OBSERVATIONS,
+                turn_sum: self.turn_sum.saturating_sub(turn_share).saturating_add(turns),
+                context_sum: self.context_sum.saturating_sub(context_share).saturating_add(context),
+            }
+        } else {
+            Self {
+                observations: self.observations.saturating_add(1),
+                turn_sum: self.turn_sum.saturating_add(turns),
+                context_sum: self.context_sum.saturating_add(context),
+            }
+        }
+    }
 }
 
 /// Is a pooled session eligible to lease? Ports `agent-pool.mjs`'s
@@ -177,9 +254,66 @@ CREATE TABLE IF NOT EXISTS sessions (
     deposited_at        INTEGER NOT NULL,
     leased_until        INTEGER,
     lease_token         TEXT,
+    deposit_count       INTEGER,
+    canonical_slot      TEXT,
+    builder_eligible    INTEGER,
     PRIMARY KEY (model, effort, task)
 );
+CREATE TABLE IF NOT EXISTS reuse_calibration (
+    model           TEXT    NOT NULL,
+    effort          TEXT    NOT NULL,
+    family          TEXT    NOT NULL,
+    observations    INTEGER NOT NULL,
+    turn_sum        INTEGER NOT NULL,
+    context_sum     INTEGER NOT NULL,
+    PRIMARY KEY (model, effort, family)
+);
 ";
+
+/// Additive columns for an existing pool file created before routing metadata
+/// lived on the row. Each `ALTER` is gated on `PRAGMA table_info` so reopening
+/// is idempotent; new files already have the columns from [`MIGRATIONS`].
+/// Existing rows stay `NULL` — the snapshot omits them rather than inventing a
+/// deposit count or builder mark.
+fn migrate_routing_columns(conn: &Connection) -> rusqlite::Result<()> {
+    const COLUMNS: &[(&str, &str)] =
+        &[("deposit_count", "INTEGER"), ("canonical_slot", "TEXT"), ("builder_eligible", "INTEGER")];
+    for &(name, kind) in COLUMNS {
+        if !has_column(conn, "sessions", name)? {
+            conn.execute(&format!("ALTER TABLE sessions ADD COLUMN {name} {kind}"), [])?;
+        }
+    }
+    Ok(())
+}
+
+/// Idempotent on every open so a pool file created before the calibration
+/// projection still grows the table in place. New files already have it from
+/// [`MIGRATIONS`].
+fn migrate_calibration_table(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS reuse_calibration (
+            model           TEXT    NOT NULL,
+            effort          TEXT    NOT NULL,
+            family          TEXT    NOT NULL,
+            observations    INTEGER NOT NULL,
+            turn_sum        INTEGER NOT NULL,
+            context_sum     INTEGER NOT NULL,
+            PRIMARY KEY (model, effort, family)
+        )",
+        [],
+    )?;
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    names.try_fold(false, |found, name| Ok(found || name? == column))
+}
+
+/// One complete routing row: key, deposit count, terminal context T, canonical
+/// slot, builder mark. The snapshot returns only these; transcripts stay on disk.
+type RoutingRow = (SessionKey, u32, u64, String, bool);
 
 /// Distinguishes two acquires that land in the same wall-clock second, so a
 /// lease token is unique to its acquire rather than to its second (#3665). The
@@ -206,8 +340,171 @@ impl SqliteSessionStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(MIGRATIONS)?;
+        migrate_routing_columns(&conn)?;
+        migrate_calibration_table(&conn)?;
         Ok(Self { conn, cutoff_secs, lease_ttl_secs, context_cap })
     }
+
+    /// Complete routing rows only: deposit count, canonical slot, builder mark,
+    /// and the terminal context the inequality uses as T. Incomplete, `NULL`, or
+    /// malformed legacy metadata is omitted so a restart fails cold rather than
+    /// resuming on invented state. Ordered by `deposited_at` so the last builder
+    /// at a slot wins when the caller folds `builder_at_slot`.
+    pub(crate) fn routing_snapshot(&self) -> rusqlite::Result<Vec<RoutingRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT model, effort, task, context_tokens, deposit_count, canonical_slot, builder_eligible
+             FROM sessions
+             ORDER BY deposited_at ASC, model ASC, effort ASC, task ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+            ))
+        })?;
+        let mut snapshot = Vec::new();
+        for row in rows {
+            if let Some(complete) = complete_routing(row?) {
+                snapshot.push(complete);
+            }
+        }
+        Ok(snapshot)
+    }
+
+    fn load_calibration(
+        conn: &Connection,
+        model: &str,
+        effort: &str,
+        family: &str,
+    ) -> rusqlite::Result<Option<CalibrationAggregates>> {
+        conn.query_row(
+            "SELECT observations, turn_sum, context_sum FROM reuse_calibration
+             WHERE model = ?1 AND effort = ?2 AND family = ?3",
+            rusqlite::params![model, effort, family],
+            |row| {
+                Ok(CalibrationAggregates {
+                    observations: u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
+                    turn_sum: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                    context_sum: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                })
+            },
+        )
+        .optional()
+    }
+
+    fn upsert(
+        &mut self,
+        key: &SessionKey,
+        lease: Option<&LeaseToken>,
+        session_bytes: &str,
+        manifest: &SessionManifest,
+        routing: Option<(u32, &str, bool)>,
+    ) -> rusqlite::Result<ReleaseOutcome> {
+        // Prove ownership before depositing (#3665). A release presenting a
+        // lease the row no longer holds is a stale holder returning after its
+        // lease expired and was re-acquired by someone else; depositing anyway
+        // would overwrite the live holder's session bytes with an older
+        // transcript and clear their lease, so a third holder could then acquire
+        // a transcript still being resumed. Refusing is what makes the lease
+        // exclusive rather than advisory.
+        //
+        // A cold deposit (`None`) is held to the same rule: it is legitimate
+        // only against a row nobody holds, or no row at all. Otherwise dropping
+        // the token would be a way to win the race by presenting nothing.
+        let held: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT lease_token FROM sessions WHERE model = ?1 AND effort = ?2 AND task = ?3",
+                rusqlite::params![key.model, key.effort, key.task],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        if let Some(held) = held
+            && held.as_deref() != lease.map(|lease| lease.0.as_str())
+        {
+            return Ok(ReleaseOutcome::NotLeaseHolder);
+        }
+
+        // The read set is audit-only (#3341) — carried as JSON so a caller's
+        // path list round-trips without a delimiter convention.
+        let read_files = serde_json::to_string(&manifest.read_files).unwrap_or_else(|_| "[]".to_owned());
+        let (deposit_count, canonical_slot, builder_eligible) = match routing {
+            Some((count, slot, is_builder)) => {
+                (Some(i64::from(count)), Some(slot), Some(i64::from(u8::from(is_builder))))
+            }
+            None => (None, None, None),
+        };
+        // Upsert on the key, always depositing unleased (`leased_until = NULL`):
+        // a warm release updates the row a resume leased, a cold release inserts.
+        // Routing columns use COALESCE so a mail-path / slot-guard release that
+        // carries no provenance keeps whatever a prior routed deposit wrote.
+        self.conn.execute(
+            "INSERT INTO sessions
+               (model, effort, task, session_bytes, receipt, parent_receipt, head_hash,
+                context_tokens, workspace_tree_hash, read_files, deposited_at, leased_until,
+                deposit_count, canonical_slot, builder_eligible)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13, ?14)
+             ON CONFLICT(model, effort, task) DO UPDATE SET
+               session_bytes = excluded.session_bytes,
+               receipt = excluded.receipt,
+               parent_receipt = excluded.parent_receipt,
+               head_hash = excluded.head_hash,
+               context_tokens = excluded.context_tokens,
+               workspace_tree_hash = excluded.workspace_tree_hash,
+               read_files = excluded.read_files,
+               deposited_at = excluded.deposited_at,
+               leased_until = NULL,
+               lease_token = NULL,
+               deposit_count = COALESCE(excluded.deposit_count, sessions.deposit_count),
+               canonical_slot = COALESCE(excluded.canonical_slot, sessions.canonical_slot),
+               builder_eligible = COALESCE(excluded.builder_eligible, sessions.builder_eligible)",
+            rusqlite::params![
+                key.model,
+                key.effort,
+                key.task,
+                session_bytes,
+                manifest.receipt,
+                manifest.parent_receipt,
+                manifest.head_hash,
+                i64::try_from(manifest.context_tokens).unwrap_or(i64::MAX),
+                manifest.workspace_tree_hash,
+                read_files,
+                i64::try_from(manifest.deposited_at).unwrap_or(i64::MAX),
+                deposit_count,
+                canonical_slot,
+                builder_eligible,
+            ],
+        )?;
+        Ok(ReleaseOutcome::Deposited)
+    }
+}
+
+/// Accept only a complete, well-formed routing triple. `NULL`, a zero count, an
+/// empty slot, or a builder mark that is not `0`/`1` is legacy or corrupt — the
+/// snapshot drops it so the hot index cannot weaken the slot guard.
+fn complete_routing(
+    row: (String, String, String, i64, Option<i64>, Option<String>, Option<i64>),
+) -> Option<RoutingRow> {
+    let (model, effort, task, context_tokens, deposit_count, canonical_slot, builder_eligible) = row;
+    let deposit_count = u32::try_from(deposit_count?).ok().filter(|count| *count > 0)?;
+    let slot_path = canonical_slot.filter(|slot| !slot.is_empty())?;
+    let is_builder = match builder_eligible? {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
+    Some((
+        SessionKey { model, effort, task },
+        deposit_count,
+        u64::try_from(context_tokens).unwrap_or(u64::MAX),
+        slot_path,
+        is_builder,
+    ))
 }
 
 impl SessionBackend for SqliteSessionStore {
@@ -297,67 +594,57 @@ impl SessionBackend for SqliteSessionStore {
         session_bytes: &str,
         manifest: &SessionManifest,
     ) -> rusqlite::Result<ReleaseOutcome> {
-        // Prove ownership before depositing (#3665). A release presenting a
-        // lease the row no longer holds is a stale holder returning after its
-        // lease expired and was re-acquired by someone else; depositing anyway
-        // would overwrite the live holder's session bytes with an older
-        // transcript and clear their lease, so a third holder could then acquire
-        // a transcript still being resumed. Refusing is what makes the lease
-        // exclusive rather than advisory.
-        //
-        // A cold deposit (`None`) is held to the same rule: it is legitimate
-        // only against a row nobody holds, or no row at all. Otherwise dropping
-        // the token would be a way to win the race by presenting nothing.
-        let held: Option<Option<String>> = self
-            .conn
-            .query_row(
-                "SELECT lease_token FROM sessions WHERE model = ?1 AND effort = ?2 AND task = ?3",
-                rusqlite::params![key.model, key.effort, key.task],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?;
-        if let Some(held) = held
-            && held.as_deref() != lease.map(|lease| lease.0.as_str())
-        {
-            return Ok(ReleaseOutcome::NotLeaseHolder);
-        }
+        self.upsert(key, lease, session_bytes, manifest, None)
+    }
 
-        // The read set is audit-only (#3341) — carried as JSON so a caller's
-        // path list round-trips without a delimiter convention.
-        let read_files = serde_json::to_string(&manifest.read_files).unwrap_or_else(|_| "[]".to_owned());
-        // Upsert on the key, always depositing unleased (`leased_until = NULL`):
-        // a warm release updates the row a resume leased, a cold release inserts.
-        self.conn.execute(
-            "INSERT INTO sessions
-               (model, effort, task, session_bytes, receipt, parent_receipt, head_hash,
-                context_tokens, workspace_tree_hash, read_files, deposited_at, leased_until)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)
-             ON CONFLICT(model, effort, task) DO UPDATE SET
-               session_bytes = excluded.session_bytes,
-               receipt = excluded.receipt,
-               parent_receipt = excluded.parent_receipt,
-               head_hash = excluded.head_hash,
-               context_tokens = excluded.context_tokens,
-               workspace_tree_hash = excluded.workspace_tree_hash,
-               read_files = excluded.read_files,
-               deposited_at = excluded.deposited_at,
-               leased_until = NULL,
-               lease_token = NULL",
+    fn release_routed(
+        &mut self,
+        key: &SessionKey,
+        lease: Option<&LeaseToken>,
+        session_bytes: &str,
+        manifest: &SessionManifest,
+        routing: (u32, &str, bool),
+    ) -> rusqlite::Result<ReleaseOutcome> {
+        self.upsert(key, lease, session_bytes, manifest, Some(routing))
+    }
+
+    fn read_calibration(
+        &self,
+        model: &str,
+        effort: &str,
+        family: &str,
+    ) -> rusqlite::Result<Option<CalibrationAggregates>> {
+        Self::load_calibration(&self.conn, model, effort, family)
+    }
+
+    fn update_calibration(
+        &mut self,
+        model: &str,
+        effort: &str,
+        family: &str,
+        turns: u64,
+        context: u64,
+    ) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        let next = Self::load_calibration(&tx, model, effort, family)?.unwrap_or_default().fold(turns, context);
+        tx.execute(
+            "INSERT INTO reuse_calibration (model, effort, family, observations, turn_sum, context_sum)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(model, effort, family) DO UPDATE SET
+               observations = excluded.observations,
+               turn_sum = excluded.turn_sum,
+               context_sum = excluded.context_sum",
             rusqlite::params![
-                key.model,
-                key.effort,
-                key.task,
-                session_bytes,
-                manifest.receipt,
-                manifest.parent_receipt,
-                manifest.head_hash,
-                i64::try_from(manifest.context_tokens).unwrap_or(i64::MAX),
-                manifest.workspace_tree_hash,
-                read_files,
-                i64::try_from(manifest.deposited_at).unwrap_or(i64::MAX),
+                model,
+                effort,
+                family,
+                i64::try_from(next.observations).unwrap_or(i64::MAX),
+                i64::try_from(next.turn_sum).unwrap_or(i64::MAX),
+                i64::try_from(next.context_sum).unwrap_or(i64::MAX),
             ],
         )?;
-        Ok(ReleaseOutcome::Deposited)
+        tx.commit()?;
+        Ok(())
     }
 }
 
@@ -427,5 +714,217 @@ impl NativeActor for SessionPoolCapability {
             Ok(ReleaseOutcome::NotLeaseHolder) => ReleaseResult::NotLeaseHolder,
             Err(error) => ReleaseResult::Err { error: error.to_string() },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionBackend, SqliteSessionStore};
+    use crate::session::kinds::{SessionKey, SessionManifest};
+
+    const HOUR_SECS: u64 = 3600;
+    const LEASE_SECS: u64 = 900;
+    const CAP: u64 = 150_000;
+
+    const LEGACY_SCHEMA: &str = "\
+CREATE TABLE sessions (
+    model               TEXT    NOT NULL,
+    effort              TEXT    NOT NULL,
+    task                TEXT    NOT NULL,
+    session_bytes       TEXT    NOT NULL,
+    receipt             TEXT    NOT NULL,
+    parent_receipt      TEXT,
+    head_hash           TEXT    NOT NULL,
+    context_tokens      INTEGER NOT NULL,
+    workspace_tree_hash TEXT    NOT NULL,
+    read_files          TEXT    NOT NULL,
+    deposited_at        INTEGER NOT NULL,
+    leased_until        INTEGER,
+    lease_token         TEXT,
+    PRIMARY KEY (model, effort, task)
+);
+";
+
+    fn key() -> SessionKey {
+        SessionKey { model: "claude-opus-4-8".to_owned(), effort: "high".to_owned(), task: "implement".to_owned() }
+    }
+
+    fn manifest(head_hash: &str, context_tokens: u64, deposited_at: u64) -> SessionManifest {
+        SessionManifest {
+            parent_receipt: None,
+            receipt: "receipt-1".to_owned(),
+            head_hash: head_hash.to_owned(),
+            context_tokens,
+            workspace_tree_hash: "tree-1".to_owned(),
+            read_files: vec!["/slot-0".to_owned()],
+            deposited_at,
+        }
+    }
+
+    fn column_names(path: &str) -> Vec<String> {
+        let conn = rusqlite::Connection::open(path).expect("pragma connection opens");
+        let mut stmt = conn.prepare("PRAGMA table_info(sessions)").expect("table_info prepares");
+        stmt.query_map([], |row| row.get::<_, String>(1))
+            .expect("table_info maps")
+            .map(|name| name.expect("column name is text"))
+            .collect()
+    }
+
+    #[test]
+    fn a_legacy_pool_file_gains_routing_columns_and_stays_eligible() {
+        // Tripwire: an existing pool predates deposit_count / slot / builder.
+        // Inventing those fields on open would revive a judge row on a
+        // dependency edge. The migration must add the columns in place, leave
+        // the legacy row's routing NULL (snapshot omits it), and keep ordinary
+        // acquire eligibility so the pool itself is not retired.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sessions.db");
+        let path = path.to_str().expect("utf-8 temp path");
+
+        let conn = rusqlite::Connection::open(path).expect("legacy file opens");
+        conn.execute_batch(LEGACY_SCHEMA).expect("legacy schema applies");
+        conn.execute(
+            "INSERT INTO sessions
+               (model, effort, task, session_bytes, receipt, parent_receipt, head_hash,
+                context_tokens, workspace_tree_hash, read_files, deposited_at, leased_until)
+             VALUES ('claude-opus-4-8', 'high', 'implement', 'digest-1', 'receipt-1', NULL, 'head-A',
+                     1000, 'tree-1', '[]', 1000, NULL)",
+            [],
+        )
+        .expect("legacy row inserts");
+        drop(conn);
+
+        let mut store = SqliteSessionStore::open(path, HOUR_SECS, LEASE_SECS, CAP).expect("migrating open");
+        let names = column_names(path);
+        assert!(names.contains(&"deposit_count".to_owned()), "in-place migration must add deposit_count");
+        assert!(names.contains(&"canonical_slot".to_owned()), "in-place migration must add canonical_slot");
+        assert!(names.contains(&"builder_eligible".to_owned()), "in-place migration must add builder_eligible");
+        assert!(
+            store.routing_snapshot().expect("snapshot").is_empty(),
+            "a NULL routing triple must not seed the hot index"
+        );
+        assert!(
+            store.acquire(&key(), "head-A", 1000).expect("acquire").is_some(),
+            "a legacy row stays pool-eligible; only the routing index fails cold"
+        );
+        let tables = {
+            let conn = rusqlite::Connection::open(path).expect("pragma connection opens");
+            let mut stmt =
+                conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").expect("sqlite_master prepares");
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .expect("sqlite_master maps")
+                .map(|name| name.expect("table name is text"))
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            tables.iter().any(|name| name == "reuse_calibration"),
+            "a pre-calibration pool must grow the projection in place so restart can learn"
+        );
+    }
+
+    #[test]
+    fn snapshot_keeps_complete_rows_and_drops_malformed_ones() {
+        // Tripwire: a builder mark that is not 0/1, a zero count, or an empty
+        // slot is not a real deposit. Folding any of them into the hot index
+        // would either weaken the slot guard (resume with no path) or treat a
+        // judge as a builder.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sessions.db");
+        let path = path.to_str().expect("utf-8 temp path");
+
+        let mut store = SqliteSessionStore::open(path, HOUR_SECS, LEASE_SECS, CAP).expect("pool opens");
+        store
+            .release_routed(&key(), None, "digest-1", &manifest("head-A", 8000, 1000), (1, "/slot-0", true))
+            .expect("builder deposit");
+
+        let judge = SessionKey { task: "review.critic".to_owned(), ..key() };
+        store
+            .release_routed(&judge, None, "digest-judge", &manifest("head-A", 4000, 1001), (1, "/slot-0", false))
+            .expect("judge deposit");
+
+        let broken = SessionKey { task: "broken".to_owned(), ..key() };
+        store.release(&broken, None, "digest-legacy", &manifest("head-A", 1000, 1002)).expect("legacy deposit");
+        store
+            .conn
+            .execute(
+                "UPDATE sessions SET deposit_count = 1, canonical_slot = '/slot-0', builder_eligible = 2
+                 WHERE task = 'broken'",
+                [],
+            )
+            .expect("malformed builder mark");
+
+        let snapshot = store.routing_snapshot().expect("snapshot");
+        assert_eq!(
+            snapshot,
+            vec![(key(), 1, 8000, "/slot-0".to_owned(), true), (judge, 1, 4000, "/slot-0".to_owned(), false),],
+            "only complete builder/judge triples survive; a builder_eligible=2 row is omitted"
+        );
+    }
+
+    #[test]
+    fn calibration_aggregates_survive_reopen_and_stay_keyed() {
+        // Tripwire: a restart that dropped the projection would send every
+        // later acquire back to seed priors, and a cell keyed only by model
+        // would mix unlike effort/family populations into one mean.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sessions.db");
+        let path = path.to_str().expect("utf-8 temp path");
+
+        let mut store = SqliteSessionStore::open(path, HOUR_SECS, LEASE_SECS, CAP).expect("pool opens");
+        store.update_calibration("claude-opus-5", "high", "construct", 4, 8_000).expect("first fold");
+        store.update_calibration("claude-opus-5", "high", "construct", 6, 9_000).expect("second fold");
+        store.update_calibration("claude-opus-5", "low", "construct", 20, 1_000).expect("effort isolation");
+        store.update_calibration("grok-4.6", "high", "construct", 20, 1_000).expect("model isolation");
+        store.update_calibration("claude-opus-5", "high", "review", 20, 1_000).expect("family isolation");
+        drop(store);
+
+        let store = SqliteSessionStore::open(path, HOUR_SECS, LEASE_SECS, CAP).expect("reopen");
+        assert_eq!(
+            store.read_calibration("claude-opus-5", "high", "construct").expect("read"),
+            Some(super::CalibrationAggregates { observations: 2, turn_sum: 10, context_sum: 17_000 }),
+            "reopening must keep the folded cell, not a seed-empty row"
+        );
+        assert_eq!(
+            store.read_calibration("claude-opus-5", "low", "construct").expect("read"),
+            Some(super::CalibrationAggregates { observations: 1, turn_sum: 20, context_sum: 1_000 }),
+        );
+        assert_eq!(
+            store.read_calibration("grok-4.6", "high", "construct").expect("read"),
+            Some(super::CalibrationAggregates { observations: 1, turn_sum: 20, context_sum: 1_000 }),
+        );
+        assert_eq!(
+            store.read_calibration("claude-opus-5", "high", "review").expect("read"),
+            Some(super::CalibrationAggregates { observations: 1, turn_sum: 20, context_sum: 1_000 }),
+        );
+        assert!(
+            store.read_calibration("claude-opus-5", "high", "verify").expect("read").is_none(),
+            "an unwritten family must stay absent so acquire falls back to seed"
+        );
+    }
+
+    #[test]
+    fn a_full_calibration_window_stays_bounded() {
+        // Tripwire: an uncapped sum would let one early outlier occupy the
+        // cell forever (and grow the INTEGER without bound). The fold must
+        // cap the count and drop a mean-share so later samples still move it.
+        let empty = super::CalibrationAggregates::default();
+        let filled = (0..super::MAX_CALIBRATION_OBSERVATIONS).fold(empty, |cell, _| cell.fold(10, 1_000));
+        assert_eq!(filled.observations, super::MAX_CALIBRATION_OBSERVATIONS);
+        assert_eq!(filled.turn_sum, 10 * super::MAX_CALIBRATION_OBSERVATIONS);
+
+        let after_outlier = filled.fold(1_000, 1_000);
+        assert_eq!(
+            after_outlier.observations,
+            super::MAX_CALIBRATION_OBSERVATIONS,
+            "the window must not grow past the cap"
+        );
+        assert_eq!(
+            after_outlier.turn_sum,
+            filled.turn_sum - filled.turn_sum / super::MAX_CALIBRATION_OBSERVATIONS + 1_000,
+            "a late sample replaces one mean-share rather than occupying the cell"
+        );
+        let saturated =
+            super::CalibrationAggregates { observations: 1, turn_sum: u64::MAX, context_sum: 0 }.fold(10, 0);
+        assert_eq!(saturated.turn_sum, u64::MAX, "a saturated sum must not wrap");
     }
 }
