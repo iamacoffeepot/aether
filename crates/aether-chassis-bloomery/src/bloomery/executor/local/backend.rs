@@ -672,10 +672,12 @@ impl LocalExecutor {
         let bytes = super::session_reuse::stamp_reuse(bytes, plan, &actuals);
         let _ = fs::write(evidence_path, &bytes);
         if matches!(lifecycle, RunLifecycle::Exited { .. })
-            && let Some(session_id) = super::session_reuse::parse_session_id(&bytes)
             && let Some(sessions) = self.sessions.as_ref()
         {
-            sessions.deposit(plan, &session_id, super::session_reuse::parse_context_tokens(&bytes).unwrap_or(0));
+            sessions.observe(plan, &actuals);
+            if let Some(session_id) = super::session_reuse::parse_session_id(&bytes) {
+                sessions.deposit(plan, &session_id, super::session_reuse::parse_context_tokens(&bytes).unwrap_or(0));
+            }
         }
         bytes
     }

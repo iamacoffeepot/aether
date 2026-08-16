@@ -17,7 +17,10 @@
 //! `workspace_tree_hash` gate #3341 measured and removed. Routing metadata
 //! (`deposit_count`, `canonical_slot`, `builder_eligible`) rides the same row
 //! so a coordinator restart can rebuild the executor's hot index without
-//! inventing state for a legacy or incomplete deposit.
+//! inventing state for a legacy or incomplete deposit. A sibling
+//! `reuse_calibration` table holds bounded turn/context aggregates keyed by
+//! model, effort, and lane family — the acquire path reads those priors back
+//! into the sealed-price inequality instead of scanning transcripts.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -87,6 +90,24 @@ pub trait SessionBackend: Send {
         manifest: &SessionManifest,
         routing: (u32, &str, bool),
     ) -> rusqlite::Result<ReleaseOutcome>;
+    /// The bounded turn/context aggregates for `(model, effort, family)`, or
+    /// `None` when that cell has never been written.
+    fn read_calibration(
+        &self,
+        model: &str,
+        effort: &str,
+        family: &str,
+    ) -> rusqlite::Result<Option<CalibrationAggregates>>;
+    /// Fold one observation into `(model, effort, family)`. The row stores
+    /// saturating aggregates, never the raw transcript.
+    fn update_calibration(
+        &mut self,
+        model: &str,
+        effort: &str,
+        family: &str,
+        turns: u64,
+        context: u64,
+    ) -> rusqlite::Result<()>;
 }
 
 /// What a [`SessionBackend::release`] did. A refusal is an outcome, not an
@@ -126,6 +147,46 @@ pub enum AcquireOutcome {
     Leased(LeasedSession),
     /// No eligible session — the runner launches cold and records the reason.
     Missed(AcquireMiss),
+}
+
+/// How many observations one calibration cell retains. Past this the fold
+/// drops one mean-share so the row stays bounded and a late sample can still
+/// move the mean.
+const MAX_CALIBRATION_OBSERVATIONS: u64 = 32;
+
+/// Bounded turn/context aggregates for one `(model, effort, family)` cell.
+/// The acquire path reads these; the store never keeps raw transcripts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CalibrationAggregates {
+    /// How many observations have been folded in, capped at the window.
+    pub observations: u64,
+    /// Saturating sum of per-sample (already-capped) turn counts.
+    pub turn_sum: u64,
+    /// Saturating sum of per-sample (already-capped) terminal-context tokens.
+    pub context_sum: u64,
+}
+
+impl CalibrationAggregates {
+    /// Fold one observation. Saturating; a full window replaces one mean-share
+    /// so a single sample cannot occupy the whole cell.
+    #[must_use]
+    pub fn fold(self, turns: u64, context: u64) -> Self {
+        if self.observations >= MAX_CALIBRATION_OBSERVATIONS {
+            let turn_share = self.turn_sum / MAX_CALIBRATION_OBSERVATIONS;
+            let context_share = self.context_sum / MAX_CALIBRATION_OBSERVATIONS;
+            Self {
+                observations: MAX_CALIBRATION_OBSERVATIONS,
+                turn_sum: self.turn_sum.saturating_sub(turn_share).saturating_add(turns),
+                context_sum: self.context_sum.saturating_sub(context_share).saturating_add(context),
+            }
+        } else {
+            Self {
+                observations: self.observations.saturating_add(1),
+                turn_sum: self.turn_sum.saturating_add(turns),
+                context_sum: self.context_sum.saturating_add(context),
+            }
+        }
+    }
 }
 
 /// Is a pooled session eligible to lease? Ports `agent-pool.mjs`'s
@@ -198,6 +259,15 @@ CREATE TABLE IF NOT EXISTS sessions (
     builder_eligible    INTEGER,
     PRIMARY KEY (model, effort, task)
 );
+CREATE TABLE IF NOT EXISTS reuse_calibration (
+    model           TEXT    NOT NULL,
+    effort          TEXT    NOT NULL,
+    family          TEXT    NOT NULL,
+    observations    INTEGER NOT NULL,
+    turn_sum        INTEGER NOT NULL,
+    context_sum     INTEGER NOT NULL,
+    PRIMARY KEY (model, effort, family)
+);
 ";
 
 /// Additive columns for an existing pool file created before routing metadata
@@ -213,6 +283,25 @@ fn migrate_routing_columns(conn: &Connection) -> rusqlite::Result<()> {
             conn.execute(&format!("ALTER TABLE sessions ADD COLUMN {name} {kind}"), [])?;
         }
     }
+    Ok(())
+}
+
+/// Idempotent on every open so a pool file created before the calibration
+/// projection still grows the table in place. New files already have it from
+/// [`MIGRATIONS`].
+fn migrate_calibration_table(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS reuse_calibration (
+            model           TEXT    NOT NULL,
+            effort          TEXT    NOT NULL,
+            family          TEXT    NOT NULL,
+            observations    INTEGER NOT NULL,
+            turn_sum        INTEGER NOT NULL,
+            context_sum     INTEGER NOT NULL,
+            PRIMARY KEY (model, effort, family)
+        )",
+        [],
+    )?;
     Ok(())
 }
 
@@ -252,6 +341,7 @@ impl SqliteSessionStore {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(MIGRATIONS)?;
         migrate_routing_columns(&conn)?;
+        migrate_calibration_table(&conn)?;
         Ok(Self { conn, cutoff_secs, lease_ttl_secs, context_cap })
     }
 
@@ -284,6 +374,27 @@ impl SqliteSessionStore {
             }
         }
         Ok(snapshot)
+    }
+
+    fn load_calibration(
+        conn: &Connection,
+        model: &str,
+        effort: &str,
+        family: &str,
+    ) -> rusqlite::Result<Option<CalibrationAggregates>> {
+        conn.query_row(
+            "SELECT observations, turn_sum, context_sum FROM reuse_calibration
+             WHERE model = ?1 AND effort = ?2 AND family = ?3",
+            rusqlite::params![model, effort, family],
+            |row| {
+                Ok(CalibrationAggregates {
+                    observations: u64::try_from(row.get::<_, i64>(0)?).unwrap_or(0),
+                    turn_sum: u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0),
+                    context_sum: u64::try_from(row.get::<_, i64>(2)?).unwrap_or(0),
+                })
+            },
+        )
+        .optional()
     }
 
     fn upsert(
@@ -496,6 +607,45 @@ impl SessionBackend for SqliteSessionStore {
     ) -> rusqlite::Result<ReleaseOutcome> {
         self.upsert(key, lease, session_bytes, manifest, Some(routing))
     }
+
+    fn read_calibration(
+        &self,
+        model: &str,
+        effort: &str,
+        family: &str,
+    ) -> rusqlite::Result<Option<CalibrationAggregates>> {
+        Self::load_calibration(&self.conn, model, effort, family)
+    }
+
+    fn update_calibration(
+        &mut self,
+        model: &str,
+        effort: &str,
+        family: &str,
+        turns: u64,
+        context: u64,
+    ) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        let next = Self::load_calibration(&tx, model, effort, family)?.unwrap_or_default().fold(turns, context);
+        tx.execute(
+            "INSERT INTO reuse_calibration (model, effort, family, observations, turn_sum, context_sum)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(model, effort, family) DO UPDATE SET
+               observations = excluded.observations,
+               turn_sum = excluded.turn_sum,
+               context_sum = excluded.context_sum",
+            rusqlite::params![
+                model,
+                effort,
+                family,
+                i64::try_from(next.observations).unwrap_or(i64::MAX),
+                i64::try_from(next.turn_sum).unwrap_or(i64::MAX),
+                i64::try_from(next.context_sum).unwrap_or(i64::MAX),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 /// Runtime state for [`SessionPoolCapability`]: the one durable pool the
@@ -657,6 +807,19 @@ CREATE TABLE sessions (
             store.acquire(&key(), "head-A", 1000).expect("acquire").is_some(),
             "a legacy row stays pool-eligible; only the routing index fails cold"
         );
+        let tables = {
+            let conn = rusqlite::Connection::open(path).expect("pragma connection opens");
+            let mut stmt =
+                conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").expect("sqlite_master prepares");
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .expect("sqlite_master maps")
+                .map(|name| name.expect("table name is text"))
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            tables.iter().any(|name| name == "reuse_calibration"),
+            "a pre-calibration pool must grow the projection in place so restart can learn"
+        );
     }
 
     #[test]
@@ -696,5 +859,72 @@ CREATE TABLE sessions (
             vec![(key(), 1, 8000, "/slot-0".to_owned(), true), (judge, 1, 4000, "/slot-0".to_owned(), false),],
             "only complete builder/judge triples survive; a builder_eligible=2 row is omitted"
         );
+    }
+
+    #[test]
+    fn calibration_aggregates_survive_reopen_and_stay_keyed() {
+        // Tripwire: a restart that dropped the projection would send every
+        // later acquire back to seed priors, and a cell keyed only by model
+        // would mix unlike effort/family populations into one mean.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sessions.db");
+        let path = path.to_str().expect("utf-8 temp path");
+
+        let mut store = SqliteSessionStore::open(path, HOUR_SECS, LEASE_SECS, CAP).expect("pool opens");
+        store.update_calibration("claude-opus-5", "high", "construct", 4, 8_000).expect("first fold");
+        store.update_calibration("claude-opus-5", "high", "construct", 6, 9_000).expect("second fold");
+        store.update_calibration("claude-opus-5", "low", "construct", 20, 1_000).expect("effort isolation");
+        store.update_calibration("grok-4.6", "high", "construct", 20, 1_000).expect("model isolation");
+        store.update_calibration("claude-opus-5", "high", "review", 20, 1_000).expect("family isolation");
+        drop(store);
+
+        let store = SqliteSessionStore::open(path, HOUR_SECS, LEASE_SECS, CAP).expect("reopen");
+        assert_eq!(
+            store.read_calibration("claude-opus-5", "high", "construct").expect("read"),
+            Some(super::CalibrationAggregates { observations: 2, turn_sum: 10, context_sum: 17_000 }),
+            "reopening must keep the folded cell, not a seed-empty row"
+        );
+        assert_eq!(
+            store.read_calibration("claude-opus-5", "low", "construct").expect("read"),
+            Some(super::CalibrationAggregates { observations: 1, turn_sum: 20, context_sum: 1_000 }),
+        );
+        assert_eq!(
+            store.read_calibration("grok-4.6", "high", "construct").expect("read"),
+            Some(super::CalibrationAggregates { observations: 1, turn_sum: 20, context_sum: 1_000 }),
+        );
+        assert_eq!(
+            store.read_calibration("claude-opus-5", "high", "review").expect("read"),
+            Some(super::CalibrationAggregates { observations: 1, turn_sum: 20, context_sum: 1_000 }),
+        );
+        assert!(
+            store.read_calibration("claude-opus-5", "high", "verify").expect("read").is_none(),
+            "an unwritten family must stay absent so acquire falls back to seed"
+        );
+    }
+
+    #[test]
+    fn a_full_calibration_window_stays_bounded() {
+        // Tripwire: an uncapped sum would let one early outlier occupy the
+        // cell forever (and grow the INTEGER without bound). The fold must
+        // cap the count and drop a mean-share so later samples still move it.
+        let empty = super::CalibrationAggregates::default();
+        let filled = (0..super::MAX_CALIBRATION_OBSERVATIONS).fold(empty, |cell, _| cell.fold(10, 1_000));
+        assert_eq!(filled.observations, super::MAX_CALIBRATION_OBSERVATIONS);
+        assert_eq!(filled.turn_sum, 10 * super::MAX_CALIBRATION_OBSERVATIONS);
+
+        let after_outlier = filled.fold(1_000, 1_000);
+        assert_eq!(
+            after_outlier.observations,
+            super::MAX_CALIBRATION_OBSERVATIONS,
+            "the window must not grow past the cap"
+        );
+        assert_eq!(
+            after_outlier.turn_sum,
+            filled.turn_sum - filled.turn_sum / super::MAX_CALIBRATION_OBSERVATIONS + 1_000,
+            "a late sample replaces one mean-share rather than occupying the cell"
+        );
+        let saturated =
+            super::CalibrationAggregates { observations: 1, turn_sum: u64::MAX, context_sum: 0 }.fold(10, 0);
+        assert_eq!(saturated.turn_sum, u64::MAX, "a saturated sum must not wrap");
     }
 }
