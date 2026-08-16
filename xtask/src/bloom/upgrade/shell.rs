@@ -1,6 +1,6 @@
 //! The external programs the upgrade drives.
 //!
-//! `systemctl`, `sqlite3`, `cp`, and `readlink` sit behind one seam, following
+//! `systemctl`, `cp`, and `readlink` sit behind one seam, following
 //! the roll's `Shell` (and the broader xtask precedent of shelling to `git`
 //! rather than linking an implementation). The seam is what lets the refusal
 //! branches — a reshape that aborts replay, a store copy that dropped its WAL,
