@@ -48,14 +48,16 @@ mod view;
 pub use decision::Decision;
 pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
-    AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, IntegrateError, LandError,
-    LandingRejectedError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError, SealConflict,
-    SealError, SupersedeError, VerifyFailedError,
+    AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, HostFaultError, IntegrateError,
+    LandError, LandingRejectedError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError,
+    SealConflict, SealError, SupersedeError, VerifyFailedError,
 };
 pub use event::{Event, Fact};
 pub use outcome::{DECISIONS_SCHEMA, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions};
 pub use seal::is_active_unlanded;
-pub use snapshot::{AggregateReviewFault, BloomRecord, BloomStatus, FoldedIntegration, Snapshot, StageProgress};
+pub use snapshot::{
+    AggregateReviewFault, BloomRecord, BloomStatus, FoldedIntegration, HostFaultHold, Snapshot, StageProgress,
+};
 pub use view::view_of;
 
 use crate::values::{ResolvedConfigs, SpendWindow};
@@ -74,7 +76,7 @@ use operator_hold::{reduce_operator_hold, reduce_operator_release};
 use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_claim_release};
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
 use seal::{reduce_seal, reduce_supersede, reduce_surface_overlap};
-use verify::reduce_verify_failed;
+use verify::{reduce_resume_host_fault, reduce_verify_failed, reduce_verify_host_fault};
 
 /// Reduce one event against a snapshot into decisions. Pure: reads the
 /// snapshot, returns decisions, mutates nothing (ADR-0149 §The control core).
@@ -152,5 +154,9 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::OperatorHold { bloom, hold } => reduce_operator_hold(snapshot, bloom, hold),
         Fact::OperatorRelease { bloom, release } => reduce_operator_release(snapshot, bloom, release),
         Fact::SurfaceOverlap { members, intersection } => reduce_surface_overlap(members, intersection),
+        Fact::VerifyHostFault { bloom, workpiece, evidence, findings } => {
+            reduce_verify_host_fault(snapshot, bloom, workpiece, evidence, findings)
+        }
+        Fact::ResumeHostFault { bloom, workpiece } => reduce_resume_host_fault(snapshot, bloom, workpiece),
     }
 }

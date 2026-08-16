@@ -18,12 +18,13 @@ use aether_bloomery::Decisions;
 use aether_bloomery::{
     Adjudication, AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
     Artifact, AttemptCompletedError, BloomId, BloomStatus, CandidateRef, CatalogError, ClaimRefKind, ConfigRegistry,
-    Decision, Digest, DispatchKey, Disposition, Event, Evidence, EvidenceKind, Fact, GrantAttemptsError, KeyId,
-    LandError, LandingRejectedError, Membership, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OperatorHold,
-    OperatorHoldError, OperatorRepair, OperatorRepairError, OrphanClaimRelease, OrphanClaimReleaseCompletion,
-    OrphanClaimReleaseError, Outcome, Provenance, Question, ResolutionClaim, ResolveError, ResolvedConfigs, SealError,
-    SignatureEnvelope, Snapshot, SpendWindow, StageCatalog, StageId, StageProgress, Statement, SupersedeError,
-    Unproducible, VerifyFailedError, VerifyFailure, VerifyFailureSet, grade, reduce,
+    Decision, Digest, DispatchKey, Disposition, Event, Evidence, EvidenceKind, Fact, GrantAttemptsError,
+    HostFaultError, KeyId, LandError, LandingRejectedError, Membership, ORPHAN_CLAIM_RELEASE_WORDS, Observation,
+    OperatorHold, OperatorHoldError, OperatorRepair, OperatorRepairError, OrphanClaimRelease,
+    OrphanClaimReleaseCompletion, OrphanClaimReleaseError, Outcome, Provenance, Question, ResolutionClaim,
+    ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, SpendWindow, StageCatalog, StageId,
+    StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure, VerifyFailureSet, grade,
+    reduce,
 };
 use aether_bloomery::{BloomRecord, WorkpieceId};
 use aether_data::Kind;
@@ -2045,6 +2046,126 @@ fn verify_failed(
             failed_verifiers,
         },
     )
+}
+
+fn at_verify(member: &str) -> (Snapshot, BloomId) {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership(member, 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "c-pass",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece(member),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: attempt_evidence(),
+                candidate: None,
+            },
+        ),
+    );
+    (snapshot, bloom)
+}
+
+// The plausible bug: a missing gate tool is a VerifyFailed that re-enters
+// Refine and spends the member's budget — a host-provisioning gap buying a
+// paid model lap (#5020).
+#[test]
+fn a_preflight_only_verify_holds_without_refine_or_budget() {
+    let (snapshot, bloom) = at_verify("wp");
+    let findings = "Verification did not run.\n\n- `jscpd` — npm install -g jscpd";
+    let (after, decided) = step(
+        &snapshot,
+        &event(
+            "preflight",
+            Fact::VerifyHostFault {
+                bloom,
+                workpiece: workpiece("wp"),
+                evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(71) },
+                findings: findings.to_owned(),
+            },
+        ),
+    );
+
+    assert!(
+        matches!(decided.outcome, Outcome::VerifyHostFaultHeld { .. }),
+        "the host fault is its own outcome, not RefineReentered: {:?}",
+        decided.outcome,
+    );
+    assert!(
+        decided
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, Decision::DispatchAttempt { stage: StageId::Refine, .. })),
+        "a missing tool must not dispatch Refine: {:?}",
+        decided.effects,
+    );
+    assert!(
+        decided.effects.iter().any(|effect| matches!(effect, Decision::DeferDispatch { .. })),
+        "the hold uses the operator-hold deferral shape",
+    );
+
+    let record = after.blooms.get(&bloom).unwrap();
+    let cursor = record.progress.get(&workpiece("wp")).unwrap();
+    assert_eq!(cursor.stage, StageId::Verify, "the member stays at Verify");
+    assert_eq!(cursor.repair_rolls, 0, "a host fault spends no repair roll");
+    assert_eq!(cursor.attempts, 1, "and it does not consume a Verify attempt");
+    assert_eq!(
+        record.host_faults.get(&workpiece("wp")).map(|hold| hold.findings.as_str()),
+        Some(findings),
+        "the missing tools are what the operator reads",
+    );
+}
+
+// The plausible bug: fixing the host still needs an operator grant, so a
+// provisioned executor sits idle until someone notices (#5020).
+#[test]
+fn resuming_a_host_fault_re_dispatches_verify_without_a_grant() {
+    let (snapshot, bloom) = at_verify("wp");
+    let (held, _) = step(
+        &snapshot,
+        &event(
+            "preflight",
+            Fact::VerifyHostFault {
+                bloom,
+                workpiece: workpiece("wp"),
+                evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(71) },
+                findings: "missing `jscpd`".into(),
+            },
+        ),
+    );
+    let (after, decided) = step(&held, &event("resume", Fact::ResumeHostFault { bloom, workpiece: workpiece("wp") }));
+
+    assert!(
+        matches!(decided.outcome, Outcome::HostFaultResumed { .. }),
+        "the cadence resume is its own outcome: {:?}",
+        decided.outcome,
+    );
+    match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchAttempt { .. })) {
+        Some(Decision::DispatchAttempt { stage, .. }) => {
+            assert_eq!(*stage, StageId::Verify, "the resume re-probes Verify, not Refine");
+        }
+        other => panic!("expected a Verify dispatch, got {other:?}"),
+    }
+    let record = after.blooms.get(&bloom).unwrap();
+    assert!(record.host_faults.is_empty(), "the hold lifts");
+    let cursor = record.progress.get(&workpiece("wp")).unwrap();
+    assert_eq!(cursor.attempts, 1, "the resume spends no Verify attempt");
+    assert_eq!(cursor.repair_rolls, 0, "and no repair roll");
+}
+
+#[test]
+fn resuming_a_member_that_is_not_held_is_refused() {
+    let (snapshot, bloom) = at_verify("wp");
+    let (_, decided) = step(&snapshot, &event("resume", Fact::ResumeHostFault { bloom, workpiece: workpiece("wp") }));
+    assert!(
+        matches!(decided.outcome, Outcome::HostFaultRejected(HostFaultError::NotHeld(_))),
+        "a resume without a hold is a refusal, not a free extra Verify: {:?}",
+        decided.outcome,
+    );
 }
 
 // ADR-0149 §The line — a seal seeds each member's cursor at the entry stage

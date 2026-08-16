@@ -16,12 +16,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-use aether_bloomery::{Digest, PriceRates, PriceTable};
+use aether_bloomery::{Digest, PriceRates, PriceTable, REVIEW_CRITIC_COMMAND, StudyCost};
 
 use crate::session::{
     AcquireMiss, AcquireOutcome, LeaseToken, LeasedSession, SessionBackend, SessionConfig, SessionKey, SessionManifest,
     SqliteSessionStore,
 };
+
+/// What a resumed dependent construct must be told: the tree is the splice, not
+/// the files the predecessor session last edited on the bloom base.
+pub const SPLICED_RESET_NOTE: &str = "The working tree was reset to the spliced dependency candidate; do not assume files from the predecessor session are still at the bloom base.";
 
 /// Seed prior: tokens of cold static-prefix re-derivation (Ŵ).
 const COLD_PREFIX_TOKENS: u64 = 80_000;
@@ -101,6 +105,12 @@ pub struct ReusePlan {
     pub head_hash: String,
     /// Canonical slot path this lap builds in — the cwd guard.
     pub slot_path: String,
+    /// Whether this lap resumed a predecessor's session along an edge rather
+    /// than its own retry-lap key.
+    pub edge: bool,
+    /// Whether this lap is a builder seat (construct / refine / reconcile).
+    /// Judge seats never update the slot's last-builder handle.
+    pub is_builder: bool,
 }
 
 /// The executor-side consumer of the session pool.
@@ -120,6 +130,8 @@ struct ReuseState {
     last_context: HashMap<SessionKey, u64>,
     /// Slot path the last deposit for this key came from.
     slot: HashMap<SessionKey, String>,
+    /// Last builder key deposited in this slot path — the edge-affinity handle.
+    builder_at_slot: HashMap<String, SessionKey>,
 }
 
 impl SessionReuse {
@@ -179,18 +191,34 @@ impl SessionReuse {
 
     /// Seed a deposited session so a later acquire can hit or miss it.
     pub fn seed(&self, key: &SessionKey, session_id: &str, manifest: &SessionManifest, slot_path: &str) {
+        self.seed_builder(key, session_id, manifest, slot_path, true);
+    }
+
+    /// Seed like [`seed`](Self::seed), choosing whether the row is a builder
+    /// session this slot's next construct may resume.
+    pub fn seed_builder(
+        &self,
+        key: &SessionKey,
+        session_id: &str,
+        manifest: &SessionManifest,
+        slot_path: &str,
+        is_builder: bool,
+    ) {
         let _ = lock(&self.pool).release(key, None, session_id, manifest);
         let mut state = lock(&self.state);
         *state.deposits.entry(key.clone()).or_insert(0) += 1;
         state.last_context.insert(key.clone(), manifest.context_tokens);
         state.slot.insert(key.clone(), slot_path.to_owned());
+        if is_builder {
+            state.builder_at_slot.insert(slot_path.to_owned(), key.clone());
+        }
     }
 
     /// Decide whether this lap resumes, acquire from the pool, and return the
     /// plan the spawn threads and the evidence stamps.
     #[must_use]
     pub fn acquire(&self, request: &AcquireRequest<'_>) -> ReusePlan {
-        let key = SessionKey {
+        let own = SessionKey {
             model: request.model.to_owned(),
             effort: request.effort.to_owned(),
             task: request.task.to_owned(),
@@ -198,6 +226,7 @@ impl SessionReuse {
         let prices = request.prices.unwrap_or(&self.prices);
         let head_hash = self.head_hash_for(request.worktree);
         let slot_path = canonical_slot(request.worktree);
+        let (key, edge) = self.acquire_key(request, &own, &slot_path);
 
         let (deposits, last_context) = {
             let state = lock(&self.state);
@@ -214,9 +243,11 @@ impl SessionReuse {
                 miss: None,
                 resume: None,
                 lease: None,
-                key,
+                key: own,
                 head_hash,
                 slot_path,
+                edge: false,
+                is_builder: is_builder_command(request.command),
             };
         }
 
@@ -236,9 +267,11 @@ impl SessionReuse {
                         miss: Some(miss),
                         resume: None,
                         lease: None,
-                        key,
+                        key: own,
                         head_hash,
                         slot_path,
+                        edge: false,
+                        is_builder: is_builder_command(request.command),
                     };
                 }
                 ReusePlan {
@@ -251,6 +284,8 @@ impl SessionReuse {
                     key,
                     head_hash,
                     slot_path,
+                    edge,
+                    is_builder: is_builder_command(request.command),
                 }
             }
             AcquireOutcome::Missed(miss) => ReusePlan {
@@ -260,11 +295,34 @@ impl SessionReuse {
                 miss: Some(map_pool_miss(miss)),
                 resume: None,
                 lease: None,
-                key,
+                key: own,
                 head_hash,
                 slot_path,
+                edge: false,
+                is_builder: is_builder_command(request.command),
             },
         }
+    }
+
+    /// Own key, or the slot's last builder when this is a cold construct on
+    /// the same seat. A judge command never sees the builder handle.
+    fn acquire_key(&self, request: &AcquireRequest<'_>, own: &SessionKey, slot_path: &str) -> (SessionKey, bool) {
+        if is_judge_command(request.command) {
+            return (own.clone(), false);
+        }
+        let state = lock(&self.state);
+        if state.deposits.get(own).copied().unwrap_or(0) > 0 {
+            return (own.clone(), false);
+        }
+        let Some(predecessor) = state.builder_at_slot.get(slot_path) else {
+            return (own.clone(), false);
+        };
+        if predecessor.model != own.model || predecessor.effort != own.effort || predecessor == own {
+            return (own.clone(), false);
+        }
+        let key = predecessor.clone();
+        drop(state);
+        (key, true)
     }
 
     /// Deposit the session the attempt produced, so the next lap can judge it.
@@ -284,6 +342,9 @@ impl SessionReuse {
         *state.deposits.entry(plan.key.clone()).or_insert(0) += 1;
         state.last_context.insert(plan.key.clone(), context_tokens);
         state.slot.insert(plan.key.clone(), plan.slot_path.clone());
+        if plan.is_builder {
+            state.builder_at_slot.insert(plan.slot_path.clone(), plan.key.clone());
+        }
     }
 
     fn predicted_arm(
@@ -363,6 +424,8 @@ pub struct AcquireRequest<'a> {
     /// The bloom's sealed price table, when the host resolved one. `None`
     /// falls back to the table this [`SessionReuse`] was built with (tests).
     pub prices: Option<&'a PriceTable>,
+    /// The lane command. A judge command never resumes a builder session.
+    pub command: &'a str,
 }
 
 /// The pool `task` axis: the lane command, then the work-order description.
@@ -374,6 +437,20 @@ pub struct AcquireRequest<'a> {
 #[must_use]
 pub fn pool_task(command: &str, description: Option<&str>) -> String {
     description.filter(|task| !task.is_empty()).map_or_else(|| command.to_owned(), |task| format!("{command}\n{task}"))
+}
+
+/// Review and `AggregateReview` both dispatch `review.critic`. Independence
+/// outranks any saving: a judge never resumes a builder session.
+#[must_use]
+pub fn is_judge_command(command: &str) -> bool {
+    command == REVIEW_CRITIC_COMMAND
+}
+
+/// Every model lane that is not a judge is a builder — Construct, Refine, and
+/// Reconcile all dispatch `construct.implement`.
+#[must_use]
+pub fn is_builder_command(command: &str) -> bool {
+    !is_judge_command(command)
 }
 
 /// Resume iff `n̂·T < (w/r)·Ŵ + 0.5·n̂·Ŵ + (o/r)·Δn̂·v̂`.
@@ -440,10 +517,14 @@ fn hex_bytes(bytes: &[u8]) -> String {
     })
 }
 
-/// Stamp the acquire plan (and the result record's actual turns) onto the
+/// Stamp the acquire plan (and the result record's actuals) onto the
 /// evidence envelope so the reuse rate is auditable from the journaled bytes.
+///
+/// Token columns and `priced_micro_usd` are the sealed-table figures, never
+/// the harness's self-reported dollar amount — the same honesty rule the
+/// study path already enforces.
 #[must_use]
-pub fn stamp_reuse(bytes: &[u8], plan: &ReusePlan, actual_turns: Option<u64>) -> Vec<u8> {
+pub fn stamp_reuse(bytes: &[u8], plan: &ReusePlan, actuals: &ReuseActuals) -> Vec<u8> {
     let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return bytes.to_vec();
     };
@@ -457,10 +538,49 @@ pub fn stamp_reuse(bytes: &[u8], plan: &ReusePlan, actual_turns: Option<u64>) ->
             "miss": plan.miss.map(MissReason::as_str),
             "predicted_arm": plan.predicted_arm.as_str(),
             "predicted_turns": plan.predicted_turns,
-            "actual_turns": actual_turns,
+            "actual_turns": actuals.turns,
+            "input_tokens": actuals.input_tokens,
+            "cache_read_tokens": actuals.cache_read_tokens,
+            "cache_write_tokens": actuals.cache_write_tokens,
+            "output_tokens": actuals.output_tokens,
+            "priced_micro_usd": actuals.priced_micro_usd,
+            "edge": plan.edge,
         }),
     );
     serde_json::to_vec_pretty(&value).unwrap_or_else(|_| bytes.to_vec())
+}
+
+/// Per-call token evidence priced from the sealed table, stamped beside the arm.
+#[derive(Debug, Clone, Default)]
+pub struct ReuseActuals {
+    /// `num_turns` from the result record, when present.
+    pub turns: Option<u64>,
+    /// Uncached input tokens.
+    pub input_tokens: u64,
+    /// Cache-read tokens.
+    pub cache_read_tokens: u64,
+    /// Cache-write tokens.
+    pub cache_write_tokens: u64,
+    /// Output tokens.
+    pub output_tokens: u64,
+    /// What those columns are worth under the sealed [`PriceTable`], or `None`
+    /// when the table prices no such model.
+    pub priced_micro_usd: Option<u64>,
+}
+
+impl ReuseActuals {
+    /// The study-cost shape the sealed table prices.
+    #[must_use]
+    pub fn as_cost(&self) -> StudyCost {
+        StudyCost {
+            turns: self.turns.unwrap_or(0),
+            input_tokens: self.input_tokens,
+            cache_read_tokens: self.cache_read_tokens,
+            cache_write_tokens: self.cache_write_tokens,
+            output_tokens: self.output_tokens,
+            ..StudyCost::default()
+        }
+    }
 }
 
 /// The harness session id the result record carried, when it carried one.
@@ -489,11 +609,26 @@ pub fn parse_context_tokens(bytes: &[u8]) -> Option<u64> {
     (total > 0).then_some(total)
 }
 
-/// `num_turns` from the nested result record, when present.
+/// Token columns off the result record (nested or top-level), unpriced.
+///
+/// The envelope the local lane writes nests the record; a bare harness result
+/// record is the object itself. Either way these are the columns the sealed
+/// table prices — never the harness's self-reported dollar figure.
 #[must_use]
-pub fn parse_actual_turns(bytes: &[u8]) -> Option<u64> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    value.get("result_record")?.get("num_turns").and_then(serde_json::Value::as_u64)
+pub fn parse_token_actuals(bytes: &[u8]) -> ReuseActuals {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return ReuseActuals::default();
+    };
+    let record = value.get("result_record").unwrap_or(&value);
+    let number = |key| record.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    ReuseActuals {
+        turns: record.get("num_turns").and_then(serde_json::Value::as_u64),
+        input_tokens: number("input"),
+        cache_read_tokens: number("cache_read"),
+        cache_write_tokens: number("cache_write"),
+        output_tokens: number("output"),
+        priced_micro_usd: None,
+    }
 }
 
 #[cfg(test)]
@@ -538,6 +673,22 @@ mod tests {
             task: "issue-4902",
             worktree: Path::new("/slot-0"),
             prices: None,
+            command: "construct.implement",
+        }
+    }
+
+    fn construct_request(
+        model: &'static str,
+        task: &'static str,
+        worktree: &'static str,
+    ) -> super::AcquireRequest<'static> {
+        super::AcquireRequest {
+            model,
+            effort: "high",
+            task,
+            worktree: Path::new(worktree),
+            prices: None,
+            command: "construct.implement",
         }
     }
 
@@ -606,13 +757,7 @@ mod tests {
         reuse.set_now(1_000);
         reuse.seed(&key(), "sess-1", &manifest("head-A", 8_000, 1_000), "/slot-0");
 
-        let plan = reuse.acquire(&super::AcquireRequest {
-            model: "claude-opus-5",
-            effort: "high",
-            task: "issue-4902",
-            worktree: Path::new("/slot-0"),
-            prices: None,
-        });
+        let plan = reuse.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-0"));
         assert_eq!(plan.arm, ReuseArm::Resumed, "lap 2 resumes the deposited session");
         assert_eq!(plan.resume.as_deref(), Some("sess-1"));
         assert_eq!(plan.predicted_arm, ReuseArm::Resumed);
@@ -625,64 +770,34 @@ mod tests {
         reuse.set_now(1_000);
 
         reuse.set_head_hash("head-A");
-        let cold = reuse.acquire(&super::AcquireRequest {
-            model: "claude-opus-5",
-            effort: "high",
-            task: "missing",
-            worktree: Path::new("/slot-0"),
-            prices: None,
-        });
+        let cold = reuse.acquire(&construct_request("claude-opus-5", "missing", "/slot-0"));
         assert_eq!(cold.miss, None, "lap 1 is a seed-cold, not a pool miss");
         assert_eq!(cold.arm, ReuseArm::Fresh);
 
         reuse.seed(&key(), "sess-1", &manifest("head-A", 8_000, 1_000), "/slot-0");
 
         reuse.set_head_hash("head-MOVED");
-        let head = reuse.acquire(&super::AcquireRequest {
-            model: "claude-opus-5",
-            effort: "high",
-            task: "issue-4902",
-            worktree: Path::new("/slot-0"),
-            prices: None,
-        });
+        let head = reuse.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-0"));
         assert_eq!(head.miss, Some(MissReason::HeadHash));
         assert!(head.resume.is_none());
 
         reuse.set_head_hash("head-A");
         reuse.set_now(1_000 + 55 * 60);
-        let aged = reuse.acquire(&super::AcquireRequest {
-            model: "claude-opus-5",
-            effort: "high",
-            task: "issue-4902",
-            worktree: Path::new("/slot-0"),
-            prices: None,
-        });
+        let aged = reuse.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-0"));
         assert_eq!(aged.miss, Some(MissReason::Age));
 
         let capped = SessionReuse::memory(PriceTable::default());
         capped.set_head_hash("head-A");
         capped.set_now(1_000);
         capped.seed(&key(), "sess-1", &manifest("head-A", 150_001, 1_000), "/slot-0");
-        let over = capped.acquire(&super::AcquireRequest {
-            model: "claude-opus-5",
-            effort: "high",
-            task: "issue-4902",
-            worktree: Path::new("/slot-0"),
-            prices: None,
-        });
+        let over = capped.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-0"));
         assert_eq!(over.miss, Some(MissReason::ContextCap));
 
         let slotted = SessionReuse::memory(PriceTable::default());
         slotted.set_head_hash("head-A");
         slotted.set_now(1_000);
         slotted.seed(&key(), "sess-1", &manifest("head-A", 8_000, 1_000), "/slot-0");
-        let mismatch = slotted.acquire(&super::AcquireRequest {
-            model: "claude-opus-5",
-            effort: "high",
-            task: "issue-4902",
-            worktree: Path::new("/slot-1"),
-            prices: None,
-        });
+        let mismatch = slotted.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-1"));
         assert_eq!(mismatch.miss, Some(MissReason::SlotMismatch));
         assert!(mismatch.resume.is_none());
     }
@@ -690,14 +805,83 @@ mod tests {
     #[test]
     fn stamp_reuse_sits_beside_the_result_record() {
         let plan = reuse_plan_for_stamp();
+        let actuals = super::ReuseActuals {
+            turns: Some(12),
+            input_tokens: 1_000,
+            cache_read_tokens: 8_000,
+            cache_write_tokens: 4_000,
+            output_tokens: 200,
+            priced_micro_usd: Some(42),
+        };
         let stamped =
-            stamp_reuse(br#"{"command":"construct.implement","result_record":{"num_turns":12}}"#, &plan, Some(12));
+            stamp_reuse(br#"{"command":"construct.implement","result_record":{"num_turns":12}}"#, &plan, &actuals);
         let value: serde_json::Value =
             serde_json::from_slice(&stamped).expect("stamp_reuse emits JSON beside the result record");
         assert_eq!(value["session_reuse"]["arm"], "resumed");
         assert_eq!(value["session_reuse"]["predicted_turns"], 15);
         assert_eq!(value["session_reuse"]["actual_turns"], 12);
+        assert_eq!(value["session_reuse"]["priced_micro_usd"], 42);
+        assert_eq!(value["session_reuse"]["input_tokens"], 1_000);
         assert_eq!(value["result_record"]["num_turns"], 12, "the actuals stay on the record");
+    }
+
+    #[test]
+    fn a_dependent_construct_resumes_the_predecessors_session_in_the_same_slot() {
+        // Tripwire: B's own key is cold (different description), so without
+        // edge lookup the first lap of a dependent always launched fresh and
+        // paid the forensics tax ADR-0196 exists to avoid.
+        let reuse = SessionReuse::memory(PriceTable::default());
+        reuse.set_head_hash("head-A");
+        reuse.set_now(1_000);
+        reuse.seed(&key(), "sess-A", &manifest("head-A", 8_000, 1_000), "/slot-0");
+
+        let plan = reuse.acquire(&construct_request("claude-opus-5", "issue-B", "/slot-0"));
+        assert_eq!(plan.arm, ReuseArm::Resumed, "B resumes A's construct session in A's slot");
+        assert_eq!(plan.resume.as_deref(), Some("sess-A"));
+        assert!(plan.edge, "the acquire must name the edge so evidence can justify it");
+    }
+
+    #[test]
+    fn a_cross_seat_edge_never_resumes() {
+        // Acceptance: grok built A; a different seat on B must not resume, even
+        // in A's slot. The plausible bug is matching on slot path alone and
+        // dropping the model/effort seat check.
+        let reuse = SessionReuse::memory(PriceTable::default());
+        reuse.set_head_hash("head-A");
+        reuse.set_now(1_000);
+        reuse.seed(&grok_key(), "sess-grok", &manifest("head-A", 8_000, 1_000), "/slot-0");
+
+        let plan = reuse.acquire(&construct_request("claude-opus-5", "issue-B", "/slot-0"));
+        assert_eq!(plan.arm, ReuseArm::Fresh, "a claude B does not resume a grok A");
+        assert!(plan.resume.is_none());
+        assert!(!plan.edge);
+    }
+
+    #[test]
+    fn a_judge_never_acquires_a_builder_session() {
+        // Acceptance / ADR-0196: Review and AggregateReview seats always start
+        // fresh. The plausible bug is the new slot-path builder handle leaking
+        // into review.critic because the judge shares the predecessor's model,
+        // effort, and slot.
+        let reuse = SessionReuse::memory(PriceTable::default());
+        reuse.set_head_hash("head-A");
+        reuse.set_now(1_000);
+        reuse.seed(&key(), "sess-A", &manifest("head-A", 8_000, 1_000), "/slot-0");
+
+        let judge = reuse.acquire(&super::AcquireRequest {
+            model: "claude-opus-5",
+            effort: "high",
+            task: "review.critic\nissue-4902",
+            worktree: Path::new("/slot-0"),
+            prices: None,
+            command: "review.critic",
+        });
+        assert_eq!(judge.arm, ReuseArm::Fresh, "a judge must not resume the builder");
+        assert!(judge.resume.is_none());
+        assert!(!judge.edge);
+
+        let still = reuse.acquire(&construct_request("claude-opus-5", "issue-4902", "/slot-0"));
+        assert_eq!(still.resume.as_deref(), Some("sess-A"), "the judge acquire must not have leased the builder row");
     }
 
     fn reuse_plan_for_stamp() -> super::ReusePlan {
@@ -711,6 +895,8 @@ mod tests {
             key: key(),
             head_hash: "head-A".to_owned(),
             slot_path: "/slot-0".to_owned(),
+            edge: false,
+            is_builder: true,
         }
     }
 }
