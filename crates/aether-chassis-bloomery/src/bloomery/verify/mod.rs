@@ -31,5 +31,4 @@ impl HostClass {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "a fixture that cannot be built is a broken test, not a recoverable path")]
 mod tests;

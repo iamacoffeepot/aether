@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -47,7 +48,7 @@ impl ClosureKey {
 #[derive(Debug)]
 pub enum ClosureKeyError {
     /// The checkout path could not be canonicalized.
-    Checkout(std::io::Error),
+    Checkout(io::Error),
     /// `cargo metadata` did not produce a usable workspace graph.
     Metadata { status: Option<i32>, stderr: String },
     /// The metadata JSON did not decode.
