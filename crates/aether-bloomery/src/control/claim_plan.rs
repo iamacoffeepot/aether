@@ -121,7 +121,7 @@ pub fn plan_heals(snapshot: &Snapshot, states: &[ClaimRefState]) -> Vec<Result<H
                     } else {
                         ops.push(release_heal_mail(holder, &state.ref_kind).map(HealOp::Release));
                     }
-                } else if snapshot.blooms.get(holder).is_none()
+                } else if !snapshot.blooms.contains_key(holder)
                     && let Some(owner) = journal_owner(snapshot, &state.ref_kind)
                 {
                     ops.push(transfer_heal_mail(holder, &owner, &state.ref_kind).map(HealOp::Transfer));
