@@ -189,6 +189,7 @@ mod tests {
         porcelain_signals_candidate, stamp_construct_evidence, take_commit_message,
     };
     use crate::transform::claude::assemble_construct_prompt;
+    use crate::transform::conventions::LANE_CONTEXT;
 
     #[test]
     fn construct_evidence_binds_the_nonce_carries_the_record_and_the_candidate_signal() {
@@ -411,10 +412,7 @@ mod tests {
         let prompt =
             assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("thread the work order"), None);
 
-        assert!(
-            prompt.contains(crate::transform::conventions::LANE_CONTEXT),
-            "the curated lane context rides the prompt"
-        );
+        assert!(prompt.contains(LANE_CONTEXT), "the curated lane context rides the prompt");
         assert!(prompt.contains("Tests must earn their place"), "testing doctrine stays");
         assert!(prompt.contains("spell units out in identifiers"), "code conventions stay");
 
