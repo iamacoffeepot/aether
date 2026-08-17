@@ -10,6 +10,7 @@ use std::process::Command;
 use anyhow::Result;
 
 use crate::transform::claude::assemble_construct_prompt;
+use crate::transform::fixers::{self, Report as FixerReport};
 use crate::transform::{Measurements, TransformArgs, conventions, run_model_lane, write_evidence_json};
 
 /// The typed id of the model-driven construct lane (#3511). Recognized here so
@@ -41,13 +42,17 @@ pub(super) const CONSTRUCT_INSTRUCTIONS: &str = include_str!("construct_instruct
 /// conclusion, not mere non-error. Pure so the binding is testable without
 /// running Claude or git (#3572). `measured` carries what the host observed of
 /// the run — what sccache served its builds and what it peaked at — each stamped
-/// presence-driven by [`Measurements::stamp`].
+/// presence-driven by [`Measurements::stamp`]. `fixers` is whether the
+/// mechanical fmt / clippy --fix pass ran and whether it moved the tree,
+/// always present so a later reader can tell a model-authored line from a
+/// fixer-authored one at the run level.
 fn stamp_construct_evidence(
     nonce: Option<&str>,
     produced_candidate: bool,
     commit_message: Option<&str>,
     record: &serde_json::Value,
     measured: Measurements,
+    fixers: FixerReport,
 ) -> serde_json::Value {
     let mut evidence = serde_json::json!({
         "command": CONSTRUCT_IMPLEMENT,
@@ -55,6 +60,7 @@ fn stamp_construct_evidence(
         "produced_candidate": produced_candidate,
         "result_record": record,
     });
+    fixers.stamp(&mut evidence);
     measured.stamp(&mut evidence);
     // Presence-driven, like the review lane's `findings`: a run that wrote no
     // deliverable stamps no key at all, so the host reads absence as "this run
@@ -146,6 +152,13 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
     // the worktree, and a run whose only change *was* the deliverable does not
     // read as having produced a candidate.
     let commit_message = take_commit_message(Path::new("."));
+    // The chassis stages with `git add --all` only after this process exits, so
+    // this is the last moment the lane owns the tree. Fmt then a scoped
+    // MachineApplicable clippy --fix apply the class of findings that otherwise
+    // spend a Refine lap; they are best-effort and cannot fail the lane. The
+    // candidate signal is read *after* so a fixer-authored edit is part of this
+    // candidate rather than a second authorship.
+    let fixers = fixers::apply(Path::new("."), &args.out);
     // Inspect the worktree (cwd) for the candidate change the run's whole job is
     // to leave (#3596): the gate demands a substantive conclusion, and an empty
     // diff is nothing to review. Captured after the child is reaped so it reflects
@@ -160,6 +173,7 @@ pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
             commit_message.as_deref(),
             &run.record,
             run.measured,
+            fixers,
         ),
     )
 }
@@ -172,7 +186,7 @@ mod tests {
     use aether_bloomery::{LANE_WORKPIECE_HEADER, pin_workpiece_description};
 
     use super::{
-        COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, Measurements,
+        COMMIT_MESSAGE_DELIVERABLE, CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, FixerReport, Measurements,
         porcelain_signals_candidate, stamp_construct_evidence, take_commit_message,
     };
     use crate::transform::claude::assemble_construct_prompt;
@@ -180,7 +194,14 @@ mod tests {
     #[test]
     fn construct_evidence_binds_the_nonce_carries_the_record_and_the_candidate_signal() {
         let record = serde_json::json!({ "cost_usd": 0.42, "num_turns": 3, "input": 1000 });
-        let evidence = stamp_construct_evidence(Some("nonce-7"), true, None, &record, Measurements::default());
+        let evidence = stamp_construct_evidence(
+            Some("nonce-7"),
+            true,
+            None,
+            &record,
+            Measurements::default(),
+            FixerReport::default(),
+        );
         assert_eq!(evidence["command"], CONSTRUCT_IMPLEMENT);
         assert_eq!(evidence["nonce"], "nonce-7", "the broker-matched nonce binds the evidence");
         assert_eq!(
@@ -189,6 +210,8 @@ mod tests {
         );
         assert_eq!(evidence["result_record"]["cost_usd"], 0.42, "the derived cost/turns record is carried");
         assert_eq!(evidence["result_record"]["num_turns"], 3);
+        assert_eq!(evidence["fixers"]["ran"], false, "the fixer receipt is always present, even when they did not run");
+        assert_eq!(evidence["fixers"]["changed"], false);
 
         assert!(
             evidence.get("commit_message").is_none(),
@@ -203,6 +226,7 @@ mod tests {
             None,
             &serde_json::json!({ "no_result": true }),
             Measurements::default(),
+            FixerReport::default(),
         );
         assert!(no_nonce["nonce"].is_null());
         assert_eq!(no_nonce["produced_candidate"], false, "an empty-candidate run stamps false");
@@ -216,9 +240,33 @@ mod tests {
     #[test]
     fn a_written_deliverable_rides_the_evidence_envelope_whole() {
         let message = "feat(crate:aether-render): draw the overlay pass\n\nThe world pass owns depth.";
-        let evidence =
-            stamp_construct_evidence(Some("n-1"), true, Some(message), &serde_json::json!({}), Measurements::default());
+        let evidence = stamp_construct_evidence(
+            Some("n-1"),
+            true,
+            Some(message),
+            &serde_json::json!({}),
+            Measurements::default(),
+            FixerReport::default(),
+        );
         assert_eq!(evidence["commit_message"], message, "the message is carried verbatim, body included");
+    }
+
+    // Tripwire: a reader that has to infer whether fmt / clippy --fix ran
+    // cannot tell a model-authored line from a fixer-authored one. The
+    // receipt is therefore always present, including the ran-but-unchanged
+    // case that would otherwise collapse into "never ran".
+    #[test]
+    fn fixer_receipt_rides_the_evidence_envelope() {
+        let evidence = stamp_construct_evidence(
+            Some("n-1"),
+            true,
+            None,
+            &serde_json::json!({}),
+            Measurements::default(),
+            FixerReport { ran: true, changed: true },
+        );
+        assert_eq!(evidence["fixers"]["ran"], true);
+        assert_eq!(evidence["fixers"]["changed"], true);
     }
 
     // The deliverable is read back *and removed*: the host stages the whole

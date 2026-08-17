@@ -11,7 +11,7 @@
 //! the wedged member had already built. This door expresses it directly.
 
 use super::attempt::{SealedLine, move_effects_with_candidate, reconcile_or_line_targets};
-use super::{BloomStatus, Decisions, GrantAttemptsError, Outcome, Snapshot, StageProgress};
+use super::{BloomStatus, Decision, Decisions, GrantAttemptsError, Outcome, Snapshot, StageProgress};
 use crate::ids::{BloomId, StageId, WorkpieceId};
 
 /// Grant a wedged member `attempts` more attempts and re-dispatch it
@@ -19,25 +19,27 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 ///
 /// The grant moves the member's cursor, and a cursor that moves is a member that
 /// is dispatching again — so it needs no clear-the-wedge concept of its own:
-/// [`Decision::AdvanceStage`](crate::Decision::AdvanceStage) is already the only
-/// route out of the wedged set, and this emits the same advance-and-dispatch
-/// pair every other cursor move emits.
+/// [`Decision::AdvanceStage`] is already the only route out of the wedged set,
+/// and this emits the same advance-and-dispatch pair every other cursor move
+/// emits.
 ///
-/// **Which counter it hands back depends on the stage.** A wedge at `Verify` is
-/// not spent `attempts` — repeated verifier failures spend cursor-carried
-/// `repair_rolls`, which the per-stage `attempts` reset cannot clear — so a
-/// Verify grant lowers `repair_rolls` and resumes at `Refine`, the re-entry the
-/// wedge denied. Resuming at `Verify` instead would re-run the mechanical gate
-/// on an unchanged candidate, which is the thing ADR-0153 routes away from: the
-/// verdict cannot change until a findings-directed fix changes the candidate.
-/// Every other stage wedges on `attempts` against its own budget, so a grant
-/// there lowers `attempts` and resumes in place.
+/// **Which counter it hands back depends on the wedge cause (#5091), not only
+/// the stage.** A `MACHINERY` wedge exhausted the independent host-fault series
+/// — no judgment was rendered — so the grant resets only that series, leaves
+/// `attempts` / `repair_rolls` / the candidate alone, and resumes at the wedged
+/// stage itself. Re-entering `Refine` would spend a model lap against an
+/// unchanged candidate, which is the thing ADR-0195 routes away from. A `WORK`
+/// wedge keeps today's axis: a wedge at `Verify` spent cursor-carried
+/// `repair_rolls`, so the grant lowers those and resumes at `Refine`; every
+/// other work wedge lowers `attempts` and resumes in place.
 ///
 /// Either way `attempts` means the same thing to the operator asking for it:
-/// **how many more dispatched attempts the member may spend before it wedges
-/// again**. The counters are set to leave exactly that much headroom under the
-/// stage's own budget, which is also the ceiling — a member cannot be handed
-/// back more than its stage was ever calibrated to spend.
+/// **how many more dispatched attempts the member may spend on that axis before
+/// it wedges again**. The counters are set to leave exactly that much headroom
+/// under the stage's own budget, which is also the ceiling — a member cannot be
+/// handed back more than its stage was ever calibrated to spend. One grant is
+/// one sealed-budget-sized batch; another batch is another grant with a fresh
+/// idempotency key after the next wedge.
 pub(super) fn reduce_grant_attempts(
     snapshot: &Snapshot,
     bloom: &BloomId,
@@ -101,10 +103,18 @@ pub(super) fn reduce_grant_attempts(
         fold_checkpoint,
         snapshot.member_checkpoint(bloom, workpiece),
     );
-    // Leave exactly `attempts` of headroom under the stage's budget. `Verify`
-    // counts repair rolls and resumes at `Refine`; every other stage counts
-    // attempts and resumes in place.
-    let progress = if stage == StageId::Verify {
+    // A machinery series at the sealed ceiling is the #5091 cause: the host
+    // never judged the candidate. Anything else is the work/repair axis.
+    let machinery = snapshot
+        .member_machinery(bloom, workpiece)
+        .is_some_and(|fault| fault.stage == wedge.stage && fault.rolls >= budget);
+    let progress = if machinery {
+        // Same stage, same candidate, same work/repair counters. Headroom
+        // lives on the machinery series, written after the cursor move so
+        // the grant's AdvanceStage (which retires a spent series) does not
+        // wipe the leftover rolls.
+        cursor
+    } else if stage == StageId::Verify {
         StageProgress {
             stage: StageId::Refine,
             attempts: 1,
@@ -125,7 +135,7 @@ pub(super) fn reduce_grant_attempts(
             fold_conflict_evidence: cursor.fold_conflict_evidence,
         }
     };
-    let effects = move_effects_with_candidate(
+    let mut effects = move_effects_with_candidate(
         *bloom,
         workpiece,
         member.scope_revision,
@@ -133,7 +143,20 @@ pub(super) fn reduce_grant_attempts(
         targets,
         candidate.map(|current| current.tree),
         SealedLine::of(record, member),
-    );
+    )
+    .to_vec();
+    if machinery {
+        let spent = budget - attempts;
+        if spent > 0 {
+            effects.push(Decision::RecordMemberMachinery {
+                bloom: *bloom,
+                workpiece: workpiece.clone(),
+                stage,
+                rolls: spent,
+                evidence: wedge.evidence,
+            });
+        }
+    }
     Decisions {
         outcome: Outcome::AttemptsGranted {
             bloom: *bloom,
@@ -141,6 +164,6 @@ pub(super) fn reduce_grant_attempts(
             resumes_at: progress.stage,
             attempts,
         },
-        effects: effects.to_vec(),
+        effects,
     }
 }
