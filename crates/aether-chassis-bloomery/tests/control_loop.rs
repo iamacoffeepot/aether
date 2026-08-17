@@ -46,7 +46,7 @@ use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 use aether_rpc::WireFrame;
-use common::client::{call, call_frame, try_connect_and_handshake};
+use common::client::{call, call_frame, handshake_while_alive, spawn_and_connect};
 use common::{Coordinator, free_port};
 use serde::Serialize;
 
@@ -365,57 +365,6 @@ fn spawn_with_artifacts(db: &str, artifacts: &str, client_name: &str) -> (Coordi
     })
 }
 
-/// Run `spawn` and handshake as one transaction: a fresh child per attempt,
-/// handshake attempts only while that child is alive, the whole fork retried
-/// after an early exit or a bind collision. Returns the live guard beside
-/// the stream so the caller cannot keep a connection to a stranger.
-fn spawn_and_connect(
-    client_name: &str,
-    budget: Duration,
-    mut spawn: impl FnMut() -> (u16, Coordinator),
-) -> (Coordinator, TcpStream) {
-    let deadline = Instant::now() + budget;
-    let mut last = String::from("no attempt");
-    while Instant::now() < deadline {
-        let (port, mut coordinator) = spawn();
-        match handshake_while_alive(&mut coordinator, port, client_name, deadline) {
-            Ok(stream) => return (coordinator, stream),
-            Err(why) => last = why,
-        }
-    }
-    panic!("no artifacts coordinator answered a handshake: {last}");
-}
-
-/// Poll the one-attempt handshake while `coordinator` is still the process
-/// on `port`. An exited child is abandoned immediately — it will never
-/// become ready — so the caller can retry the whole spawn.
-fn handshake_while_alive(
-    coordinator: &mut Coordinator,
-    port: u16,
-    client_name: &str,
-    deadline: Instant,
-) -> Result<TcpStream, String> {
-    let mut last = String::from("child exited before a handshake attempt");
-    while coordinator.is_alive() && Instant::now() < deadline {
-        match try_connect_and_handshake(port, client_name) {
-            Ok(stream) if coordinator.is_alive() => return Ok(stream),
-            Ok(_) => return Err(format!("child on port {port} exited after handshake")),
-            Err(why) => {
-                last = why;
-                if !coordinator.is_alive() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-        }
-    }
-    if coordinator.is_alive() {
-        Err(last)
-    } else {
-        Err(format!("child on port {port} exited: {last}"))
-    }
-}
-
 // The plausible bug: a journal that names a study artifact still reports
 // zero cost because the resolver is a stub, so every pricing decision
 // reads as "this seat is free".
@@ -533,6 +482,29 @@ fn an_unresolvable_study_artifact_stays_unaccounted() {
     assert_eq!(construct.samples, 0, "an unresolvable artifact is not a sample");
     assert_eq!(construct.cost_micro_usd, 0, "and it must not become a zero-priced measurement");
     assert_eq!(construct.worker_secs, 0);
+}
+
+// The plausible bug: the common handshake retry ignores child death and
+// burns its 30s deadline against a port that will never accept — the
+// failure that reads as "no coordinator answered a handshake on port N:
+// Connection refused" under full-suite load (#5116).
+#[test]
+fn handshake_while_alive_abandons_a_dead_child_without_the_deadline() {
+    let port = free_port();
+    let start = Instant::now();
+    let mut remaining = 2;
+    let error = handshake_while_alive(port, "dead-child", start + Duration::from_secs(30), || {
+        let live = remaining > 0;
+        remaining -= 1;
+        live
+    })
+    .expect_err("a closed port with a dying child must not handshake");
+    assert!(error.contains("exited"), "the refusal names the dead child rather than a deadline connect: {error}");
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "abandoning a dead child must not burn the 30s handshake deadline: {:?}",
+        start.elapsed()
+    );
 }
 
 // The plausible bug: the first child loses the bind race and exits, but

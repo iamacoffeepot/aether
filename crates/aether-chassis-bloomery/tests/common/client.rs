@@ -6,7 +6,10 @@
 //! it drift — the reply-collection loop in particular, whose "keep the last
 //! envelope of the expected kind, return it at `ReplyEnd`" shape is subtle
 //! enough that a copy which got it slightly wrong would fail intermittently and
-//! look like a coordinator bug.
+//! look like a coordinator bug. The spawn-and-handshake transaction lives here
+//! for the same reason: a bind-race retry that only one suite owns leaves every
+//! other caller burning the handshake deadline against a child that already
+//! lost the port.
 
 #![allow(dead_code, reason = "each test binary compiles the whole module and uses only the fixtures it needs")]
 #![allow(clippy::unwrap_used, reason = "a fixture that cannot reach its process reports it by panicking")]
@@ -19,6 +22,8 @@ use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{Kind, MailboxId};
 use aether_rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
 use serde::Serialize;
+
+use super::Coordinator;
 
 /// Handshake as a client peer named `client_name`, reporting a refusal instead
 /// of panicking — the fallible half [`try_connect_and_handshake`] returns.
@@ -46,7 +51,7 @@ pub fn try_connect_and_handshake(port: u16, client_name: &str) -> Result<TcpStre
     Ok(stream)
 }
 
-/// Connect and handshake as one retried unit.
+/// Connect and handshake as one retried unit against an already-chosen port.
 ///
 /// Retrying the pair rather than the connect alone is what makes this safe under
 /// a suite that forks many coordinators at once. A port is reserved by binding
@@ -55,18 +60,71 @@ pub fn try_connect_and_handshake(port: u16, client_name: &str) -> Result<TcpStre
 /// stranger and fails at the handshake, which a connect-only retry cannot
 /// recover from.
 ///
+/// This helper cannot see the child. If the process that was supposed to bind
+/// `port` has already exited, the loop burns its deadline against a socket that
+/// will never accept — the full-suite flake at this panic. Callers that own the
+/// fork should use [`spawn_and_connect`] so a dead child is another attempt
+/// instead of a 30s hang.
+///
 /// # Panics
 /// No coordinator answered a handshake on `port` inside the deadline.
 pub fn connect_and_handshake(port: u16, client_name: &str) -> TcpStream {
     let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
+    match handshake_while_alive(port, client_name, deadline, || true) {
+        Ok(stream) => stream,
+        Err(refusal) => panic!("no coordinator answered a handshake on port {port}: {refusal}"),
+    }
+}
+
+/// Run `spawn` and handshake as one transaction: a fresh child per attempt,
+/// handshake attempts only while that child is alive, the whole fork retried
+/// after an early exit or a bind collision. Returns the live guard beside
+/// the stream so the caller cannot keep a connection to a stranger.
+pub fn spawn_and_connect(
+    client_name: &str,
+    budget: Duration,
+    mut spawn: impl FnMut() -> (u16, Coordinator),
+) -> (Coordinator, TcpStream) {
+    let deadline = Instant::now() + budget;
+    let mut last = String::from("no attempt");
+    while Instant::now() < deadline {
+        let (port, mut coordinator) = spawn();
+        match handshake_while_alive(port, client_name, deadline, || coordinator.is_alive()) {
+            Ok(stream) => return (coordinator, stream),
+            Err(why) => last = why,
+        }
+    }
+    panic!("no coordinator answered a handshake: {last}");
+}
+
+/// Poll the one-attempt handshake while `alive` stays true. An exited child
+/// is abandoned immediately — it will never become ready — so the caller can
+/// retry the whole spawn instead of burning the handshake deadline against a
+/// port that lost the bind race (#5116).
+pub fn handshake_while_alive(
+    port: u16,
+    client_name: &str,
+    deadline: Instant,
+    mut alive: impl FnMut() -> bool,
+) -> Result<TcpStream, String> {
+    let mut last = String::from("child exited before a handshake attempt");
+    while alive() && Instant::now() < deadline {
         match try_connect_and_handshake(port, client_name) {
-            Ok(stream) => return stream,
-            Err(refusal) => {
-                assert!(Instant::now() < deadline, "no coordinator answered a handshake on port {port}: {refusal}");
+            Ok(stream) if alive() => return Ok(stream),
+            Ok(_) => return Err(format!("child on port {port} exited after handshake")),
+            Err(why) => {
+                last = why;
+                if !alive() {
+                    break;
+                }
                 thread::sleep(Duration::from_millis(100));
             }
         }
+    }
+    if alive() {
+        Err(last)
+    } else {
+        Err(format!("child on port {port} exited: {last}"))
     }
 }
 
