@@ -2,8 +2,8 @@
 //! fake-GitHub-backed `SourceShell` — the network side the running capability
 //! drives, without the mail harness. `init` / the timer / the ctx send are the
 //! thin glue the chassis-boot test and compilation cover; this pins the loop that
-//! turns a land decision into a landing proposal, merges that proposal once its
-//! gate is green, and admits the `Fact::Land` it then observes.
+//! turns a land decision into a landing proposal, merges that proposal once
+//! the structural gates hold, and admits the `Fact::Land` it then observes.
 
 use std::sync::Arc;
 
@@ -11,7 +11,7 @@ use aether_bloomery::{
     Adjudication, Admit, BloomId, Correspondence, Digest, Disposition, Event, Fact, IdempotencyKey, LandPayload, Topic,
 };
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{ChecksState, GitObjectId, GitSource, MainlineRef, PullRequestApi, short_hex, to_hex};
+use aether_bloomery_github::{GitObjectId, GitSource, MainlineRef, PullRequestApi, short_hex, to_hex};
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::drain_and_land;
@@ -46,25 +46,6 @@ fn enqueue_land(store: &mut SqliteStore, bloom: BloomId, expected_base: Digest, 
 }
 
 #[test]
-fn an_open_proposal_admits_nothing_and_leaves_the_entry_to_re_drain() {
-    // Tripwire: the outbox *is* the watch. A proposal that has not been accepted
-    // yet must leave its entry unacked, or the bloom's landing is forgotten the
-    // moment it is proposed and `Fact::Land` is never admitted at all.
-    let (fake, base) = seeded();
-    let new_head = digest(90);
-    fake.seed_git_object(&new_head);
-    let source = shell(fake, true);
-    let mut store = SqliteStore::open(":memory:").unwrap();
-    let sequence = enqueue_land(&mut store, BloomId(digest(1)), base, new_head);
-
-    let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
-
-    assert!(admits.is_empty(), "an open proposal admits no land");
-    assert_eq!(ack_through, None, "the entry stays unacked so the watch re-drains");
-    let _ = sequence;
-}
-
-#[test]
 fn an_accepted_proposal_admits_a_fact_land_carrying_the_merge_commit() {
     let (fake, base) = seeded();
     let new_head = digest(90);
@@ -76,21 +57,15 @@ fn an_accepted_proposal_admits_a_fact_land_carrying_the_merge_commit() {
     let bloom = BloomId(digest(1));
     enqueue_land(&mut store, bloom, base, new_head);
 
-    // First pass proposes and finds it open.
-    assert_eq!(drain_and_land(&mut store, &source).unwrap().1, None, "still open");
-
-    // The operator squash-merges it. Mainline becomes a commit that is neither
-    // the proposed head nor anything Bloomery created.
+    // An operator squash-merges the proposal the reactor opened, before the
+    // reactor's own accept fires. Opening first, then merging by hand, is
+    // what keeps this the observation path rather than the reactor's merge.
+    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+        panic!("expected Proposed");
+    };
     let squashed = "5c".repeat(20);
-    let number = fake
-        .find_pull_request_for_head(&format!("bloom/{}/landing", short_hex(&bloom.0)))
-        .unwrap()
-        .expect("the first pass proposed one")
-        .number;
     fake.merge_pull_request(number, &squashed);
 
-    // The re-drain observes the acceptance and admits the landing. The outbox
-    // stays unacked until the journal holds that admit's key.
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
     assert_eq!(admits.len(), 1, "an accepted proposal admits one fact");
     assert_eq!(ack_through, None, "observation is not acknowledgement; the journal is");
@@ -127,12 +102,9 @@ fn a_declined_proposal_admits_nothing_and_acks_the_definitive_refusal() {
     let bloom = BloomId(digest(1));
     let sequence = enqueue_land(&mut store, bloom, base, new_head);
 
-    drain_and_land(&mut store, &source).unwrap();
-    let number = fake
-        .find_pull_request_for_head(&format!("bloom/{}/landing", short_hex(&bloom.0)))
-        .unwrap()
-        .expect("proposed")
-        .number;
+    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+        panic!("expected Proposed");
+    };
     fake.close_pull_request(number);
 
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
@@ -298,7 +270,12 @@ fn an_open_proposal_does_not_close_member_issues() {
     seed_member(&mut store, bloom, "issue-11", Some("fix(crate:aether-fs): reject a traversal"));
     enqueue_land(&mut store, bloom, base, new_head);
 
-    drain_and_land(&mut store, &source).unwrap();
+    // Propose without accepting — closing belongs to the merge, not the
+    // open. A drain would accept immediately (#5110), so this calls `land`
+    // itself.
+    let aether_bloomery::LandOutcome::Proposed { .. } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+        panic!("expected Proposed");
+    };
 
     assert_eq!(fake.issue_is_closed(11), Some(false), "an unaccepted land must not close the source issue");
     assert!(fake.comments_on(11).is_empty(), "an unaccepted land leaves no close comment");
@@ -323,15 +300,8 @@ fn landing_closes_member_issues_best_effort() {
     seed_member(&mut store, bloom, "issue-9999", Some("chore(meta): tidy the leftover\n\nNothing to close."));
     enqueue_land(&mut store, bloom, base, new_head);
 
-    drain_and_land(&mut store, &source).unwrap();
-    let number = fake
-        .find_pull_request_for_head(&format!("bloom/{}/landing", short_hex(&bloom.0)))
-        .unwrap()
-        .expect("proposed")
-        .number;
-    fake.merge_pull_request(number, &"5c".repeat(20));
-
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
+    let number = proposal_number(&fake, bloom);
     assert_eq!(admits.len(), 1, "a failed close does not block the land");
     assert_eq!(ack_through, None, "closure is not the receipt; the journal is");
 
@@ -354,18 +324,12 @@ fn proposal_number(fake: &FakeGithub, bloom: BloomId) -> u64 {
         .number
 }
 
-// Report every check on the proposal's head as passed — the landing gate going
-// green, which is the only thing the reactor merges on.
-fn pass_checks(fake: &FakeGithub, number: u64) {
-    fake.seed_checks(&fake.pull_request_head_sha(number).expect("the proposal has a head"), ChecksState::Passed);
-}
-
 #[test]
-fn the_reactor_merges_its_own_green_proposal_and_admits_the_land() {
-    // Acceptance 1 (#4953). The middle step used to be a person: the reactor
-    // proposed and then sat until somebody merged, which is minutes to hours of
-    // latency per bloom in a loop that is otherwise unattended. Nothing in this
-    // scenario presses the button, and the bloom still lands.
+fn the_reactor_merges_its_own_proposal_and_admits_the_land() {
+    // Acceptance 1 (#4953, #5110). The middle step used to wait on a green
+    // GitHub gate. The reactor now proposes and accepts in one pass: bloomery's
+    // own gates already proved the head. Nothing in this scenario presses the
+    // button, and the bloom still lands.
     let (fake, base) = seeded();
     let new_head = digest(90);
     fake.seed_git_object(&new_head);
@@ -374,12 +338,8 @@ fn the_reactor_merges_its_own_green_proposal_and_admits_the_land() {
     let bloom = BloomId(digest(1));
     enqueue_land(&mut store, bloom, base, new_head);
 
-    // The first pass proposes; its gate has reported nothing yet.
-    assert_eq!(drain_and_land(&mut store, &source).unwrap().1, None, "an unconcluded gate is not merged on");
-    let number = proposal_number(&fake, bloom);
-    pass_checks(&fake, number);
-
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
+    let number = proposal_number(&fake, bloom);
 
     assert!(fake.pull_request_merged(number).unwrap(), "the reactor merged the proposal it opened");
     assert_eq!(ack_through, None, "the merge is observed; acknowledgement waits on the journal");
@@ -413,11 +373,11 @@ fn a_landing_whose_proposal_drifted_is_refused_and_journaled_rather_than_merged(
     let bloom = BloomId(digest(1));
     let sequence = enqueue_land(&mut store, bloom, base, new_head);
 
-    drain_and_land(&mut store, &source).unwrap();
-    let number = proposal_number(&fake, bloom);
+    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+        panic!("expected Proposed");
+    };
     let pushed = "ee".repeat(20);
     fake.push_to_pull_request(number, &pushed);
-    fake.seed_checks(&pushed, ChecksState::Passed);
 
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
 
@@ -438,15 +398,6 @@ fn a_landing_whose_proposal_drifted_is_refused_and_journaled_rather_than_merged(
     assert!(findings.contains(&pushed), "the findings name the head that was found: {findings}");
 }
 
-// Report the proposal's checks as the named failures — the landing gate going
-// red, which is what admits `Fact::LandingRejected` instead of merging.
-fn fail_checks(fake: &FakeGithub, number: u64, failing: &[&str]) {
-    fake.seed_checks(
-        &fake.pull_request_head_sha(number).expect("the proposal has a head"),
-        ChecksState::Failed { failing: failing.iter().map(|name| (*name).to_owned()).collect() },
-    );
-}
-
 // The single landing-rejection admit a drain produced, or panic.
 fn rejection_admit(admits: &[Admit]) -> Event {
     assert_eq!(admits.len(), 1, "expected one rejection admit, got {}", admits.len());
@@ -456,11 +407,14 @@ fn rejection_admit(admits: &[Admit]) -> Event {
 #[test]
 fn two_landings_refused_for_the_same_cause_admit_under_distinct_keys() {
     // #5106: keyed only by bloom and cause, a second landing of the same bloom
-    // that fails the same checks reduces to a duplicate. The land entry is
-    // acked and the reducer never learns the second refusal happened — a
-    // Resolved bloom whose landing is silently gone. The two halves are one
-    // invariant (the sibling of #4722): the key separates attempts, without
-    // weakening the crash-replay dedup it exists for.
+    // that fails the same way reduces to a duplicate. The land entry is acked
+    // and the reducer never learns the second refusal happened — a Resolved
+    // bloom whose landing is silently gone. The two halves are one invariant
+    // (the sibling of #4722): the key separates attempts, without weakening
+    // the crash-replay dedup it exists for.
+    //
+    // Check-failure is no longer a landing refusal (#5110). Drift is: a
+    // commit nobody proved arriving on the proposal the reactor opened.
     let (fake, base) = seeded();
     let (first_head, second_head) = (digest(90), digest(91));
     fake.seed_git_object(&first_head);
@@ -468,17 +422,20 @@ fn two_landings_refused_for_the_same_cause_admit_under_distinct_keys() {
     let source = shell(fake.clone(), true);
     let mut store = SqliteStore::open(":memory:").unwrap();
     let bloom = BloomId(digest(1));
-    let failing = ["CI pass", "Clippy"];
 
     enqueue_land(&mut store, bloom, base, first_head);
-    assert_eq!(drain_and_land(&mut store, &source).unwrap().1, None, "the first propose is still open");
-    fail_checks(&fake, proposal_number(&fake, bloom), &failing);
+    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &first_head, None).unwrap()
+    else {
+        panic!("expected Proposed");
+    };
+    fake.push_to_pull_request(number, &"ee".repeat(20));
     let (first_lap, ack) = drain_and_land(&mut store, &source).unwrap();
     let first = rejection_admit(&first_lap);
     store.ack_topic(Topic::Land, ack.expect("the first refusal is acked")).unwrap();
 
-    // A new outbox entry for the re-resolved bloom — the same landing branch
-    // is adopted, so the checks (and the cause string) are unchanged.
+    // A new outbox entry for the re-resolved bloom. The open proposal is
+    // adopted; its recorded head is still the drifted sha, so the second
+    // accept refuses the same way against the newer proven head.
     enqueue_land(&mut store, bloom, base, second_head);
     let (second_lap, _) = drain_and_land(&mut store, &source).unwrap();
     let second = rejection_admit(&second_lap);
@@ -522,10 +479,10 @@ fn a_base_that_moved_under_an_open_proposal_leaves_the_bloom_supersedable() {
     let bloom = BloomId(digest(1));
     let sequence = enqueue_land(&mut store, bloom, base, new_head);
 
-    drain_and_land(&mut store, &source).unwrap();
-    let number = proposal_number(&fake, bloom);
-    pass_checks(&fake, number);
-    // Mainline moves between the proposal opening and its gate going green.
+    let aether_bloomery::LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head, None).unwrap() else {
+        panic!("expected Proposed");
+    };
+    // Mainline moves between the proposal opening and the accept.
     fake.seed_ref_at("heads/main", &digest(77));
     fake.seed_git_object(&digest(77));
 
@@ -650,15 +607,6 @@ fn journal_event(store: &mut SqliteStore, event: &Event) -> AppendOutcome {
         .unwrap()
 }
 
-// Propose, wait for an external squash-merge, and return the proposal number.
-// The drain that observes the merge is the caller's.
-fn propose_and_merge(fake: &FakeGithub, source: &SourceShell, store: &mut SqliteStore, bloom: BloomId) -> u64 {
-    assert_eq!(drain_and_land(store, source).unwrap().1, None, "still open");
-    let number = proposal_number(fake, bloom);
-    fake.merge_pull_request(number, &"5c".repeat(20));
-    number
-}
-
 #[test]
 fn a_dispatch_miss_before_journal_commit_redrives_the_same_land() {
     // Tripwire: acking the Land outbox on merge observation deletes the only
@@ -674,9 +622,9 @@ fn a_dispatch_miss_before_journal_commit_redrives_the_same_land() {
     enqueue_land(&mut store, bloom, base, new_head);
     let later = BloomId(digest(2));
     enqueue_land(&mut store, later, base, digest(91));
-    let number = propose_and_merge(&fake, &source, &mut store, bloom);
 
     let (first, ack) = drain_and_land(&mut store, &source).unwrap();
+    let number = proposal_number(&fake, bloom);
     let first = land_admit(&first);
     assert_eq!(ack, None, "a miss window must not acknowledge the row");
     assert_eq!(first.idempotency_key, super::land_key(&bloom.0), "the admit is keyed by the bloom");
@@ -713,9 +661,9 @@ fn a_restart_after_journal_commit_acks_without_remerging() {
     let mut store = SqliteStore::open(":memory:").unwrap();
     let bloom = BloomId(digest(1));
     let sequence = enqueue_land(&mut store, bloom, base, new_head);
-    let number = propose_and_merge(&fake, &source, &mut store, bloom);
 
     let (admits, ack) = drain_and_land(&mut store, &source).unwrap();
+    let number = proposal_number(&fake, bloom);
     assert_eq!(ack, None);
     let event = land_admit(&admits);
     assert_eq!(journal_event(&mut store, &event), AppendOutcome::Applied(1), "one journaled landing transition");
@@ -744,9 +692,9 @@ fn journal_confirmation_acknowledges_the_land_prefix() {
     let mut store = SqliteStore::open(":memory:").unwrap();
     let bloom = BloomId(digest(1));
     let sequence = enqueue_land(&mut store, bloom, base, new_head);
-    let number = propose_and_merge(&fake, &source, &mut store, bloom);
 
     let (admits, ack) = drain_and_land(&mut store, &source).unwrap();
+    let number = proposal_number(&fake, bloom);
     assert_eq!(ack, None, "admission has not committed");
     let event = land_admit(&admits);
     match event.fact {

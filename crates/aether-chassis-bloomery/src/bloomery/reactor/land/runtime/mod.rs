@@ -7,8 +7,8 @@
 //! Landing is a proposal and then an acceptance rather than one write, because
 //! the pull request is where a landing becomes correspondence a person can read.
 //! Both halves are the reactor's (issue #4953): it proposes the resolved head,
-//! merges its own proposal once the gate is green, and admits the landing it
-//! then observes.
+//! merges its own proposal once the structural gates hold, and admits the
+//! landing it then observes.
 //!
 //! 1. **Drain.** Each tick drains the store's `aether.bloomery.land` outbox topic
 //!    (its own connection, mirroring the executor reactor's store ownership) and
@@ -23,13 +23,15 @@
 //!    and the ADR's successor-seal is a caller act, not a reactor one.
 //! 3. **Accept.** On [`LandOutcome::Proposed`] it polls the proposal in the same
 //!    pass, and while that proposal is open it asks
-//!    [`SourceShell::accept_land`] to merge it. That merge happens only on a
-//!    green gate and only while the proposal still offers the exact head the
-//!    bloom proved onto the exact base it sealed against; anything moved refuses
-//!    and surfaces instead. A refusal that says mainline moved leaves the bloom
-//!    where a moved base always leaves it — `Resolved` and supersedable; every
-//!    other refusal admits a [`Fact::LandingRejected`], which is what renders as
-//!    a blocked landing in the outward view rather than a bloom sitting quietly.
+//!    [`SourceShell::accept_land`] to merge it. That merge happens once the
+//!    structural gates hold — the proposal is this bloom's landing branch
+//!    aimed at mainline, still offering the exact head the bloom proved onto
+//!    the exact base it sealed against — without consulting check state
+//!    (ADR-0186, #5110). Anything moved refuses and surfaces instead. A
+//!    refusal that says mainline moved leaves the bloom where a moved base
+//!    always leaves it — `Resolved` and supersedable; every other refusal
+//!    admits a [`Fact::LandingRejected`], which is what renders as a blocked
+//!    landing in the outward view rather than a bloom sitting quietly.
 //! 4. **Observe.** Once the proposal reads merged it admits a [`Fact::Land`]
 //!    back to the control core — where [`reduce_land`](aether_bloomery) advances
 //!    the mainline and emits the
@@ -201,25 +203,9 @@ fn rejected(bloom: &BloomId, payload: &LandPayload, cause: String, findings: Str
         .map_err(|error| SourceError::Malformed(format!("landing rejection did not encode: {error}")))
 }
 
-/// The findings text a landing rejection leaves for the repair dispatch — the
-/// same bloom-row channel a failing aggregate review writes, so the Refine
-/// re-entry prompt picks it up through the path that already exists rather than
-/// a second one.
-fn landing_findings(failing: &[String]) -> String {
-    use core::fmt::Write;
-    let mut findings = String::from(
-        "The landing branch's CI refused this bloom's integrated head. These checks did not pass; \
-         repair them against current mainline, which has moved since the bloom sealed.\n",
-    );
-    for check in failing {
-        let _ = write!(findings, "\n- {check}");
-    }
-    findings
-}
-
 /// The findings text a refused *acceptance* leaves for the repair dispatch —
-/// the same bloom-row channel a red gate writes, so one re-entry prompt reads
-/// both.
+/// the same bloom-row channel a failing aggregate review writes, so one
+/// re-entry prompt reads both.
 ///
 /// The refusal states itself and the prompt does not restate it: each variant
 /// names a different thing that stopped the merge, and spelling one of them out
@@ -242,10 +228,11 @@ enum Watched {
     Declined(String),
     /// Terminal — mainline moved; admit this and ack the entry.
     Landed(Admit),
-    /// The landing was refused: its checks failed (#4689), or its proposal
-    /// drifted off the head the bloom proved (#4953). Terminal *for this entry*
-    /// — the admit routes the bloom back into repair or parks it — so the entry
-    /// is acked rather than left polling a proposal nothing will accept.
+    /// The landing was refused: its proposal drifted off the head the bloom
+    /// proved (#4953), or the source refused the merge. Terminal *for this
+    /// entry* — the admit routes the bloom back into repair or parks it — so
+    /// the entry is acked rather than left polling a proposal nothing will
+    /// accept.
     Rejected {
         /// The `Fact::LandingRejected` to forward.
         admit: Admit,
@@ -257,7 +244,7 @@ enum Watched {
     },
 }
 
-/// Poll an issued land proposal, accept it when its gate has gone green, and
+/// Poll an issued land proposal, accept it when the structural gates hold, and
 /// fold what happened into the drain loop's outcomes.
 fn watch_proposal(
     source: &SourceShell,
@@ -266,17 +253,17 @@ fn watch_proposal(
     number: u64,
 ) -> Result<Watched, SourceError> {
     match source.poll_land(bloom, &payload.expected_base, number)? {
-        LandProposal::Open => accept_proposal(source, bloom, payload, number),
+        // Production no longer emits `ChecksFailed` (#5110). Treat a residual
+        // encoding the same as `Open` rather than routing it to
+        // [`Watched::Rejected`]: a check conclusion is not a landing verdict.
+        LandProposal::Open | LandProposal::ChecksFailed { .. } => accept_proposal(source, bloom, payload, number),
         LandProposal::Declined => Ok(Watched::Declined("the landing proposal was declined".to_owned())),
-        LandProposal::ChecksFailed { failing } => {
-            rejected(bloom, payload, failing.join(","), landing_findings(&failing))
-        }
         LandProposal::Landed(receipt) => landed(bloom, payload, receipt.new_head),
     }
 }
 
-/// Accept the still-open proposal: merge it, once its gate is green and it
-/// still offers the head this bloom proved (issue #4953).
+/// Accept the still-open proposal: merge it once the structural gates hold and
+/// it still offers the head this bloom proved (issue #4953).
 ///
 /// The merge used to be an operator's — the one human action left in an
 /// otherwise unattended loop, invisible while it was owed. It is the same trust
@@ -290,9 +277,8 @@ fn accept_proposal(
     number: u64,
 ) -> Result<Watched, SourceError> {
     match source.accept_land(bloom, &payload.expected_base, &payload.new_head, number)? {
-        // Nothing green to press yet. The entry stays unacked and the poll
-        // cadence — not this function — decides when to look again, which is
-        // what keeps a waiting gate from becoming a spin.
+        // Nothing to press yet. The entry stays unacked and the poll cadence
+        // — not this function — decides when to look again.
         LandAcceptance::Pending => Ok(Watched::Open),
         LandAcceptance::Accepted => match source.poll_land(bloom, &payload.expected_base, number)? {
             LandProposal::Landed(receipt) => landed(bloom, payload, receipt.new_head),

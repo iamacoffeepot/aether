@@ -6,11 +6,10 @@
 //! hours per bloom depending on who was looking, and it was invisible — nothing
 //! said "waiting on a merge", so a resolved bloom just sat.
 //!
-//! Every other landing scenario has [`FixtureHarness::land_the_fold`] merge the
-//! proposal by hand, because their gates report nothing and the coordinator will
-//! not merge on an absence. This one drives the gate green instead and merges
-//! nothing itself, so the only thing that can move the bloom off `Resolved` is
-//! the land reactor accepting the proposal it opened.
+//! Every other landing scenario has [`FixtureHarness::land_the_fold`] take the
+//! bloom through its aggregate gates and the land tick. This one asserts that
+//! the land reactor itself merges the proposal it opened — nobody presses the
+//! button, and check state is not consulted (#5110).
 
 mod common;
 pub mod fixture;
@@ -35,12 +34,12 @@ fn a_resolved_bloom_lands_on_the_coordinators_own_merge() {
     harness.upload_admitted(&passed(&verify));
 
     let (_, proposal) = harness.resolve_and_propose(bloom);
-    assert!(!harness.landing_merged(proposal), "a proposal whose gate has not reported is not merged on");
-    assert_eq!(harness.bloom(bloom).status, BloomStatus::Resolved, "the bloom is proposed, not landed");
+    assert!(harness.landing_merged(proposal), "the coordinator merged on the structural gates");
 
-    // The gate concludes green. Nothing below merges anything — the ticks
-    // `await_landing` drives are the land reactor's own poll wake.
-    harness.pass_landing_checks(proposal);
+    // Nothing below merges anything — the ticks `await_landing` drives are
+    // the land reactor's own poll wake, which observes the merge it already
+    // performed. The Admit is detached, so status may still read Resolved
+    // until that wake lands.
     harness.await_landing(bloom, BloomStatus::Landed);
 
     assert!(harness.landing_merged(proposal), "the coordinator merged the landing it opened");

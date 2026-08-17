@@ -2,6 +2,12 @@ name: CI
 
 on:
   pull_request:
+    # Landing proposals onto the day's bloomery ref are correspondence
+    # (ADR-0186): bloomery's own gates already proved the tree, and the
+    # pull-request jobs are not consumed. Skip them so paid runners are
+    # not spent on a wait nothing reads. PRs onto `main` still run.
+    branches-ignore:
+      - 'bloomery/daily/**'
   push:
     branches: [ main ]
   # The full-suite lane runs only on a push to `main`, so without a
