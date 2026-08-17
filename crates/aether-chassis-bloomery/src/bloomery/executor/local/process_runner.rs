@@ -702,9 +702,14 @@ fn neutralize_hooks(worktree_dir: &Path) -> Result<(), LocalExecutorError> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::fs;
+    use std::io;
     use std::path::Path;
     use std::process::Command;
     use std::slice;
+    #[cfg(unix)]
+    use std::thread;
+    #[cfg(unix)]
+    use std::time::Duration;
 
     use tempfile::TempDir;
 
@@ -721,7 +726,7 @@ mod tests {
         // Tripwire (ADR-0195 §2): collapsing `try_wait` Err into
         // `Exited { success: false }` made a runner fault indistinguishable
         // from a lane that judged the subject and exited 1.
-        let lifecycle = RunLifecycle::from_try_wait(Err(std::io::Error::other("waitid failed")));
+        let lifecycle = RunLifecycle::from_try_wait(Err(io::Error::other("waitid failed")));
         assert_eq!(lifecycle, RunLifecycle::ObservationFault);
         assert!(lifecycle.is_terminal());
         assert!(!lifecycle.clean_success());
@@ -737,7 +742,7 @@ mod tests {
         let mut clean = Command::new("true").spawn().unwrap();
         let clean_lifecycle = loop {
             match RunLifecycle::from_try_wait(clean.try_wait()) {
-                RunLifecycle::Running => std::thread::sleep(std::time::Duration::from_millis(5)),
+                RunLifecycle::Running => thread::sleep(Duration::from_millis(5)),
                 other => break other,
             }
         };
@@ -747,7 +752,7 @@ mod tests {
         child.kill().unwrap();
         let signaled = loop {
             match RunLifecycle::from_try_wait(child.try_wait()) {
-                RunLifecycle::Running => std::thread::sleep(std::time::Duration::from_millis(5)),
+                RunLifecycle::Running => thread::sleep(Duration::from_millis(5)),
                 other => break other,
             }
         };

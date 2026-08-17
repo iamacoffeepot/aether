@@ -946,7 +946,7 @@ fn a_cancel_that_faults_leaves_the_expired_order_live_to_retry() {
     let working_backend = Arc::new(CapturingBackend::default());
     let working_shell = ExecutorShell::new(Arc::clone(&working_backend));
     let _ = tick(&mut store, &working_shell, &mut tracked, AT_THE_DEADLINE);
-    assert_eq!(working_backend.cancelled().len(), 1, "the next tick retries the cancel once the transport recovers",);
+    assert_eq!(working_backend.cancelled().len(), 1, "the next tick retries the cancel once the transport recovers");
 }
 
 #[test]

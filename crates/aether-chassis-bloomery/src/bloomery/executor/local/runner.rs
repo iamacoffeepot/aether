@@ -112,11 +112,7 @@ impl RunLifecycle {
     /// Fold a non-blocking `try_wait` into the typed lifecycle.
     #[must_use]
     pub fn from_try_wait(result: io::Result<Option<ExitStatus>>) -> Self {
-        match result {
-            Ok(None) => Self::Running,
-            Ok(Some(status)) => Self::from_exit_status(status),
-            Err(_) => Self::ObservationFault,
-        }
+        result.map_or(Self::ObservationFault, |status| status.map_or(Self::Running, Self::from_exit_status))
     }
 
     /// Classify a reaped [`ExitStatus`] without collapsing a signal into a

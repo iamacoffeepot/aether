@@ -110,6 +110,19 @@ struct Run {
     affinity: SlotAffinity,
 }
 
+/// Snapshot of a tracked run taken under the registry lock so evidence
+/// streaming can drop the mutex before blocking IO.
+struct StreamedRun {
+    evidence_dir: PathBuf,
+    subject: Digest,
+    lifecycle: RunLifecycle,
+    gates: LaneGates,
+    worktree_dir: Option<PathBuf>,
+    reuse: Option<super::ReusePlan>,
+    slot: Option<usize>,
+    affinity: SlotAffinity,
+}
+
 /// Which lane-specific evidence gates a command's run rides.
 ///
 /// Derived in one place because two paths stamp it onto a run — `submit` for a
@@ -1178,6 +1191,175 @@ impl LocalExecutor {
             ),
         }
     }
+
+    fn unread_evidence(
+        &self,
+        handle: &WorkHandle,
+        run: &StreamedRun,
+        host_fault: Option<HostFaultCause>,
+        evidence_path: &Path,
+        read_error: &io::Error,
+    ) -> Result<Vec<EvidenceRef>, LocalExecutorError> {
+        if !run.lifecycle.is_terminal() {
+            return Err(LocalExecutorError::Evidence(format!("{}: {read_error}", evidence_path.display())));
+        }
+        // The run's own lifecycle is the terminal-vs-transient discriminator. A
+        // terminal run that left no readable evidence never will — re-driving
+        // the read against it loops forever (the live 2026-07-18 bug), so this is
+        // terminal: evict, free the slot, and synthesize an executor fault
+        // (ADR-0195 §§1–2) rather than an error the intake re-drives. A Running
+        // run's missing file is transient — keep the entry and its slot.
+        let cause = host_fault.unwrap_or_else(|| HostFaultCause::from_read_error(read_error));
+        tracing::warn!(
+            nonce = %handle.nonce.0,
+            evidence = %evidence_path.display(),
+            error = %read_error,
+            cause = cause.token(),
+            "local executor backend: terminal run left no readable evidence — host fault",
+        );
+        Ok(self.fail_closed_host_fault(handle, &run.subject, run.worktree_dir.clone(), run.gates.is_construct, cause))
+    }
+
+    fn unbound_body_fault(
+        &self,
+        handle: &WorkHandle,
+        run: StreamedRun,
+        host_fault: Option<HostFaultCause>,
+        parseable: bool,
+    ) -> Vec<EvidenceRef> {
+        let cause = host_fault.unwrap_or(if parseable {
+            HostFaultCause::NonceMismatch
+        } else {
+            HostFaultCause::Unparseable
+        });
+        tracing::warn!(
+            nonce = %handle.nonce.0,
+            cause = cause.token(),
+            "local executor backend: child body is not a bound judgment — host fault",
+        );
+        self.fail_closed_host_fault(handle, &run.subject, run.worktree_dir, run.gates.is_construct, cause)
+    }
+
+    fn bound_stream_evidence(
+        &self,
+        handle: &WorkHandle,
+        run: StreamedRun,
+        host_fault: Option<HostFaultCause>,
+        bytes: &[u8],
+    ) -> Vec<EvidenceRef> {
+        let StreamedRun {
+            subject, lifecycle, gates: LaneGates { is_construct, is_verify }, worktree_dir, slot, ..
+        } = run;
+        let failed_verifiers = if is_verify {
+            parse_failed_verifiers(bytes)
+        } else {
+            Some(VerifyFailureSet::EMPTY)
+        };
+        // Verdict from the run's own evidence, lane-specific. The construct lane's
+        // gate demands a substantive conclusion (#3596) — a terminal `result` with
+        // `is_error == false` AND a produced candidate — and is fail-closed on any
+        // shortfall (dead run, errored run, empty candidate), so it never falls
+        // back to the child's terminal exit (an empty run exits zero). The verify
+        // lane stamps a `status` ("pass"/"fail"); the raw clean-success fallback
+        // survives only for a non-construct evidence shape that stamps no status.
+        let status = parse_status(bytes);
+        // An authored `environment` stamp is the lane reporting it could not
+        // judge, on every dispatched stage — not only AggregateReview.
+        if status == Some(LaneStatus::Environment) {
+            return self.authored_executor_fault(handle, &subject, worktree_dir, is_construct, slot, bytes);
+        }
+        // A verify body whose typed set does not decode is incomplete: nothing
+        // here can name a verifier, and inventing one would dispatch a repair.
+        if is_verify && failed_verifiers.is_none() {
+            return self.fail_closed_host_fault(
+                handle,
+                &subject,
+                worktree_dir,
+                is_construct,
+                host_fault.unwrap_or(HostFaultCause::Unparseable),
+            );
+        }
+        let status_passed = status.map_or_else(|| lifecycle.clean_success(), |status| status == LaneStatus::Pass);
+        let concluded = if is_construct {
+            construct_conclusion(bytes)
+        } else if is_verify {
+            failed_verifiers.is_some() && status_passed
+        } else {
+            status_passed
+        };
+        // A passed construct-lane run's work is captured out of the slot checkout
+        // it built in (ADR-0152) — commit + tree recorded as correspondence rows,
+        // the digest pair riding the evidence reference — while that checkout
+        // still holds it, which is until the next dispatch takes the slot.
+        // Fail-closed: a passed run whose capture falls short downgrades to a
+        // failing verdict rather than admitting a pass whose work was lost. A run
+        // whose checkout this process cannot name (a boot re-adoption that
+        // recovered no slot) captures nothing and takes the same downgrade.
+        // A dead construct still captures as a member checkpoint, but only after
+        // the evidence binds to this handle — a stale body cannot trigger it.
+        let commit_message = is_construct.then(|| parse_commit_message(bytes)).flatten();
+        let candidate = is_construct
+            .then(|| self.construct_capture(worktree_dir.clone(), &handle.nonce, concluded, commit_message.as_deref()))
+            .flatten();
+        // File the message against the member the run's order names, while that
+        // order is still outstanding — the intake consumes it a moment later, and
+        // the land path has no other way back from a bloom to the lane that wrote
+        // this. Only for a candidate that was actually captured, so the row and
+        // the candidate arrive together and a lane that produced nothing cannot
+        // leave a message behind for the next one.
+        if let (Some(candidate), Some(slot)) = (candidate.as_ref(), slot) {
+            self.remember_builder(&candidate.checkout, slot);
+        }
+        if concluded
+            && candidate.is_some()
+            && let Some(message) = commit_message.as_deref()
+        {
+            self.file_commit_message(&handle.nonce, message);
+        }
+        let passed = concluded && (!is_construct || candidate.is_some());
+        // A bound authored pass or failure keeps that verdict even when the
+        // child later exited nonzero or was signalled: the evidence judged the
+        // subject. A host observation only wins when the body is not a judgment.
+        let authored = status == Some(LaneStatus::Pass) || status == Some(LaneStatus::Fail) || is_construct;
+        if !passed
+            && !authored
+            && let Some(cause) = host_fault
+        {
+            return self.fail_closed_host_fault(handle, &subject, worktree_dir, is_construct, cause);
+        }
+        // The evidence has been consumed and any candidate captured — evict the
+        // run so the registry tracks only in-flight orders rather than growing for
+        // the process's lifetime, and hand its lane slot back. (The failed-read
+        // path above returns early, keeping both the registry entry and the slot
+        // claim for a later retry, so nothing resets the checkout the retry reads.)
+        self.retire(&handle.nonce.0);
+        self.pump();
+        let verdict = if passed {
+            StageVerdict::VerificationPassed
+        } else {
+            StageVerdict::VerificationFailed
+        };
+        // The detail digest is the content address of the evidence bytes — the
+        // supporting artifact the verdict points at.
+        let detail = Digest::of_wire_bytes(bytes);
+        let failed_verifiers = failed_verifiers.unwrap_or_default();
+        let name =
+            NameEvidenceClaims::attempt_artifact_name(&handle.nonce, &subject, verdict, failed_verifiers, &detail);
+        vec![EvidenceRef {
+            name,
+            nonce: handle.nonce.clone(),
+            // The local lane holds evidence on disk, not in a numbered artifact
+            // store, so there is no backend artifact id; the name carries the whole
+            // claim and the size is the file's length.
+            artifact_id: 0,
+            size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            candidate,
+            findings: parse_findings(bytes),
+            failed_verifiers,
+            cost: parse_cost(bytes),
+            calls: parse_calls(bytes),
+        }]
+    }
 }
 
 /// How a clean worktree reads on this capture: a passed run that produced
@@ -1207,6 +1389,14 @@ impl HostFaultCause {
             RunLifecycle::Signaled { signal } => Some(Self::Signaled(signal)),
             RunLifecycle::ObservationFault => Some(Self::ObservationFault),
             RunLifecycle::Running | RunLifecycle::Exited { .. } => None,
+        }
+    }
+
+    fn from_read_error(error: &io::Error) -> Self {
+        if error.kind() == io::ErrorKind::NotFound {
+            Self::MissingEvidence
+        } else {
+            Self::Unreadable
         }
     }
 
@@ -1462,188 +1652,45 @@ impl ExecutorBackend for LocalExecutor {
         // Pull the run's on-disk location, binding digest, and terminal exit out of
         // the guarded region, then drop the lock — the evidence read is blocking IO
         // and must not hold the registry mutex.
-        let (
-            evidence_dir,
-            subject,
-            lifecycle,
-            LaneGates { is_construct, is_verify },
-            worktree_dir,
-            reuse,
-            slot,
-            affinity,
-        ) = {
+        let run = {
             let mut registry = self.lock();
             let Some(run) = registry.runs.get_mut(&handle.nonce.0) else {
                 return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
             };
-            (
-                run.evidence_dir.clone(),
-                run.subject,
-                run.process.poll(),
-                run.gates,
-                run.worktree_dir.clone(),
-                run.reuse.clone(),
-                run.slot,
-                run.affinity.clone(),
-            )
-        };
-        let host_fault = HostFaultCause::from_lifecycle(lifecycle);
-        let evidence_path = evidence_dir.join("evidence.json");
-        let mut bytes = match fs::read(&evidence_path) {
-            Ok(bytes) => bytes,
-            // The run's own lifecycle is the terminal-vs-transient discriminator. A
-            // terminal run that left no readable evidence never will — re-driving
-            // the read against it loops forever (the live 2026-07-18 bug), so this is
-            // terminal: evict, free the slot, and synthesize an executor fault
-            // (ADR-0195 §§1–2) rather than an error the intake re-drives. A Running
-            // run's missing file is transient — keep the entry and its slot.
-            Err(read_error) => {
-                if lifecycle.is_terminal() {
-                    let cause = host_fault.unwrap_or(if read_error.kind() == io::ErrorKind::NotFound {
-                        HostFaultCause::MissingEvidence
-                    } else {
-                        HostFaultCause::Unreadable
-                    });
-                    tracing::warn!(
-                        nonce = %handle.nonce.0,
-                        evidence = %evidence_path.display(),
-                        error = %read_error,
-                        cause = cause.token(),
-                        "local executor backend: terminal run left no readable evidence — host fault",
-                    );
-                    return Ok(self.fail_closed_host_fault(handle, &subject, worktree_dir, is_construct, cause));
-                }
-                return Err(LocalExecutorError::Evidence(format!("{}: {read_error}", evidence_path.display())));
+            StreamedRun {
+                evidence_dir: run.evidence_dir.clone(),
+                subject: run.subject,
+                lifecycle: run.process.poll(),
+                gates: run.gates,
+                worktree_dir: run.worktree_dir.clone(),
+                reuse: run.reuse.clone(),
+                slot: run.slot,
+                affinity: run.affinity.clone(),
             }
         };
-        bytes = self.stamp_run_evidence(&evidence_path, bytes, reuse.as_ref(), lifecycle, &handle.nonce.0, &affinity);
+        let host_fault = HostFaultCause::from_lifecycle(run.lifecycle);
+        let evidence_path = run.evidence_dir.join("evidence.json");
+        let mut bytes = match fs::read(&evidence_path) {
+            Ok(bytes) => bytes,
+            Err(read_error) => return self.unread_evidence(handle, &run, host_fault, &evidence_path, &read_error),
+        };
+        bytes = self.stamp_run_evidence(
+            &evidence_path,
+            bytes,
+            run.reuse.as_ref(),
+            run.lifecycle,
+            &handle.nonce.0,
+            &run.affinity,
+        );
         // Evidence must identify the order that produced it before any body claim
         // is trusted. A stale or cross-wired evidence directory is otherwise able
         // to advance a different order merely by carrying a passing verdict.
         let parseable = serde_json::from_slice::<serde_json::Value>(&bytes).is_ok();
         let nonce_matches = parseable && evidence_nonce_matches(&bytes, &handle.nonce);
         if !parseable || !nonce_matches {
-            let cause = host_fault.unwrap_or(if parseable {
-                HostFaultCause::NonceMismatch
-            } else {
-                HostFaultCause::Unparseable
-            });
-            tracing::warn!(
-                nonce = %handle.nonce.0,
-                cause = cause.token(),
-                "local executor backend: child body is not a bound judgment — host fault",
-            );
-            return Ok(self.fail_closed_host_fault(handle, &subject, worktree_dir, is_construct, cause));
+            return Ok(self.unbound_body_fault(handle, run, host_fault, parseable));
         }
-        let failed_verifiers = if is_verify {
-            parse_failed_verifiers(&bytes)
-        } else {
-            Some(VerifyFailureSet::EMPTY)
-        };
-        // Verdict from the run's own evidence, lane-specific. The construct lane's
-        // gate demands a substantive conclusion (#3596) — a terminal `result` with
-        // `is_error == false` AND a produced candidate — and is fail-closed on any
-        // shortfall (dead run, errored run, empty candidate), so it never falls
-        // back to the child's terminal exit (an empty run exits zero). The verify
-        // lane stamps a `status` ("pass"/"fail"); the raw clean-success fallback
-        // survives only for a non-construct evidence shape that stamps no status.
-        let status = parse_status(&bytes);
-        // An authored `environment` stamp is the lane reporting it could not
-        // judge, on every dispatched stage — not only AggregateReview.
-        if status == Some(LaneStatus::Environment) {
-            return Ok(self.authored_executor_fault(handle, &subject, worktree_dir, is_construct, slot, &bytes));
-        }
-        // A verify body whose typed set does not decode is incomplete: nothing
-        // here can name a verifier, and inventing one would dispatch a repair.
-        if is_verify && failed_verifiers.is_none() {
-            return Ok(self.fail_closed_host_fault(
-                handle,
-                &subject,
-                worktree_dir,
-                is_construct,
-                host_fault.unwrap_or(HostFaultCause::Unparseable),
-            ));
-        }
-        let status_passed = status.map_or(lifecycle.clean_success(), |status| status == LaneStatus::Pass);
-        let concluded = if is_construct {
-            construct_conclusion(&bytes)
-        } else if is_verify {
-            failed_verifiers.is_some() && status_passed
-        } else {
-            status_passed
-        };
-        // A passed construct-lane run's work is captured out of the slot checkout
-        // it built in (ADR-0152) — commit + tree recorded as correspondence rows,
-        // the digest pair riding the evidence reference — while that checkout
-        // still holds it, which is until the next dispatch takes the slot.
-        // Fail-closed: a passed run whose capture falls short downgrades to a
-        // failing verdict rather than admitting a pass whose work was lost. A run
-        // whose checkout this process cannot name (a boot re-adoption that
-        // recovered no slot) captures nothing and takes the same downgrade.
-        // A dead construct still captures as a member checkpoint, but only after
-        // the evidence binds to this handle — a stale body cannot trigger it.
-        let commit_message = is_construct.then(|| parse_commit_message(&bytes)).flatten();
-        let candidate = is_construct
-            .then(|| self.construct_capture(worktree_dir.clone(), &handle.nonce, concluded, commit_message.as_deref()))
-            .flatten();
-        // File the message against the member the run's order names, while that
-        // order is still outstanding — the intake consumes it a moment later, and
-        // the land path has no other way back from a bloom to the lane that wrote
-        // this. Only for a candidate that was actually captured, so the row and
-        // the candidate arrive together and a lane that produced nothing cannot
-        // leave a message behind for the next one.
-        if let (Some(candidate), Some(slot)) = (candidate.as_ref(), slot) {
-            self.remember_builder(&candidate.checkout, slot);
-        }
-        if concluded
-            && candidate.is_some()
-            && let Some(message) = commit_message.as_deref()
-        {
-            self.file_commit_message(&handle.nonce, message);
-        }
-        let passed = concluded && (!is_construct || candidate.is_some());
-        // A bound authored pass or failure keeps that verdict even when the
-        // child later exited nonzero or was signalled: the evidence judged the
-        // subject. A host observation only wins when the body is not a judgment.
-        let authored = status == Some(LaneStatus::Pass) || status == Some(LaneStatus::Fail) || is_construct;
-        if !passed
-            && !authored
-            && let Some(cause) = host_fault
-        {
-            return Ok(self.fail_closed_host_fault(handle, &subject, worktree_dir, is_construct, cause));
-        }
-        // The evidence has been consumed and any candidate captured — evict the
-        // run so the registry tracks only in-flight orders rather than growing for
-        // the process's lifetime, and hand its lane slot back. (The failed-read
-        // path above returns early, keeping both the registry entry and the slot
-        // claim for a later retry, so nothing resets the checkout the retry reads.)
-        self.retire(&handle.nonce.0);
-        self.pump();
-        let verdict = if passed {
-            StageVerdict::VerificationPassed
-        } else {
-            StageVerdict::VerificationFailed
-        };
-        // The detail digest is the content address of the evidence bytes — the
-        // supporting artifact the verdict points at.
-        let detail = Digest::of_wire_bytes(&bytes);
-        let failed_verifiers = failed_verifiers.unwrap_or_default();
-        let name =
-            NameEvidenceClaims::attempt_artifact_name(&handle.nonce, &subject, verdict, failed_verifiers, &detail);
-        Ok(vec![EvidenceRef {
-            name,
-            nonce: handle.nonce.clone(),
-            // The local lane holds evidence on disk, not in a numbered artifact
-            // store, so there is no backend artifact id; the name carries the whole
-            // claim and the size is the file's length.
-            artifact_id: 0,
-            size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-            candidate,
-            findings: nonce_matches.then(|| parse_findings(&bytes)).flatten(),
-            failed_verifiers,
-            cost: nonce_matches.then(|| parse_cost(&bytes)).flatten(),
-            calls: nonce_matches.then(|| parse_calls(&bytes)).flatten(),
-        }])
+        Ok(self.bound_stream_evidence(handle, run, host_fault, &bytes))
     }
 }
 

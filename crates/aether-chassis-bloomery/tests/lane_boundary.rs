@@ -199,7 +199,7 @@ fn wrong_nonce_evidence_never_advances_a_member() {
     // this order. It must fail closed before construct capture.
     let mut harness = ran_under(LaneMode::MismatchedNonce);
     let bloom = harness.view();
-    assert!(bloom.blooms[0].members[0].resolution.is_none(), "a wrong-nonce pass never resolves the member",);
+    assert!(bloom.blooms[0].members[0].resolution.is_none(), "a wrong-nonce pass never resolves the member");
     assert!(
         harness.ledger().iter().all(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND),
         "stale construct evidence never captures a candidate or advances to verification",
@@ -356,7 +356,7 @@ fn a_lane_that_never_exits_is_cancelled_as_a_host_fault() {
     harness.wait_for_runs(1);
     thread::sleep(Duration::from_secs(7));
     let bloom = harness.view();
-    assert!(bloom.blooms[0].members[0].resolution.is_none(), "a lane that never answered resolves nothing",);
+    assert!(bloom.blooms[0].members[0].resolution.is_none(), "a lane that never answered resolves nothing");
     assert_scratch_checkouts_are_lane_slots(&harness, "a cancelled run leaves no checkout of its own behind");
 }
 
