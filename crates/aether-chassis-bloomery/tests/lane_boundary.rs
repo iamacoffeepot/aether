@@ -382,10 +382,9 @@ fn a_lane_that_never_exits_is_cancelled_as_a_host_fault() {
 fn a_lane_that_goes_silent_is_cancelled_before_its_wall_clock() {
     // ADR-0195 §8: a local model lane that streamed progress and then stopped
     // must not occupy the slot until the sealed hour. The host silence
-    // threshold cancels it. Intake on this tree still refuses a member-stage
-    // ExecutorFault (#5091 owns the machinery fact), so the order stays
-    // outstanding after the cancel — the load-bearing property here is early
-    // cancellation and slot release, not the retry #5091 will own.
+    // threshold cancels it. Intake admits that ExecutorFault as a member
+    // machinery fault and redispatches — the load-bearing property here is
+    // early cancellation and slot release, not the retry.
     let mut harness =
         LaneHarness::start_with_heartbeat(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 60, 2);
 
