@@ -1,0 +1,21 @@
+[package]
+name = "aether-bloomery-console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bloomery-console"
+path = "src/bin/bloomery_console.rs"
+
+[dependencies]
+aether-bloomery = { path = "../aether-bloomery", default-features = false }
+anyhow = { workspace = true }
+clap = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
