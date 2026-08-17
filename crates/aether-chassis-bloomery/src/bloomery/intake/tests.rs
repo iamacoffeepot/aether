@@ -145,6 +145,7 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
             operator_repairs: Vec::new(),
             operator_hold: None,
             deferred_dispatches: BTreeSet::new(),
+            deferred_aggregates: BTreeSet::new(),
             dependencies: Vec::new(),
             host_faults: BTreeMap::new(),
             vehicles: BTreeMap::new(),

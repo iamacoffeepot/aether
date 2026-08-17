@@ -121,9 +121,10 @@ impl ContentAddressed for OperatorRepair {
 ///
 /// The same shape serves both edges because both say exactly the same two
 /// things, and neither says anything else — a hold carries no scope, no
-/// priority, and no expiry. It is bloom-level and flat: freeze new dispatch,
-/// decide, release. What varies between raising it and dropping it is the fact
-/// that carries it, not the value.
+/// priority, and no expiry. It is bloom-level and flat: freeze new dispatch
+/// (member laps and the two aggregate gates), decide, release. What varies
+/// between raising it and dropping it is the fact that carries it, not the
+/// value.
 ///
 /// [`reason`](Self::reason) and [`operator`](Self::operator) are fields rather
 /// than optional context for the reason they are on [`Adjudication`]: a brake

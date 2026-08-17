@@ -298,10 +298,12 @@ pub struct BloomRecord {
     /// dispatches normally.
     ///
     /// The brake for a bloom that looks wrong but has not stopped: while it is
-    /// set the reducer emits no [`Decision::DispatchAttempt`] for this bloom, and
-    /// every other fact — lane completions, verify results, fold outcomes —
-    /// reduces exactly as it always did, so the work already running lands in the
-    /// journal instead of being stranded by a killed coordinator.
+    /// set the reducer emits no [`Decision::DispatchAttempt`],
+    /// [`Decision::DispatchAggregateVerify`], or
+    /// [`Decision::DispatchAggregateReview`] for this bloom, and every other
+    /// fact — lane completions, verify results, fold outcomes — reduces exactly
+    /// as it always did, so the work already running lands in the journal
+    /// instead of being stranded by a killed coordinator.
     ///
     /// Bloom-level and flat: one hold, no per-member scope, no priority, no
     /// timed resume. It composes with the review park (`review_park`) rather than
@@ -327,6 +329,19 @@ pub struct BloomRecord {
     /// replay-rebuilt; defaulted like its sibling.
     #[serde(default)]
     pub deferred_dispatches: BTreeSet<WorkpieceId>,
+    /// The aggregate stages this bloom owes a dispatch, because the hold
+    /// swallowed the verify or review their fold just earned (#5100).
+    ///
+    /// The same argument as [`deferred_dispatches`](Self::deferred_dispatches)
+    /// at bloom scope: a fold whose aggregate is still in flight and one whose
+    /// dispatch was withheld sit at the same integration. A release that read
+    /// only the held fold would either strand the swallowed gate or put a
+    /// second worker on a running one. The dispatch is re-derived from the
+    /// fold, catalog, and roll as they stand then; the *set* is recorded as it
+    /// happens. A stage leaves it when the dispatch it names actually goes
+    /// out. Journal-derived and replay-rebuilt; defaulted like its sibling.
+    #[serde(default)]
+    pub deferred_aggregates: BTreeSet<StageId>,
     /// The door-resolved member-dependency graph (ADR-0196).
     ///
     /// Journal-derived: a seal records it as
@@ -668,7 +683,8 @@ impl Snapshot {
             | Decision::RecordOperatorRepair { .. } => self.apply_composition_effect(effect),
             Decision::RecordOperatorHold { .. }
             | Decision::RecordOperatorRelease { .. }
-            | Decision::DeferDispatch { .. } => self.apply_operator_hold_effect(effect),
+            | Decision::DeferDispatch { .. }
+            | Decision::DeferAggregate { .. } => self.apply_operator_hold_effect(effect),
             Decision::RecordSpendQuiesce { quiesce } => {
                 self.spend_quiesce.clone_from(quiesce);
             }
@@ -749,9 +765,9 @@ impl Snapshot {
         }
     }
 
-    /// Fold the three decisions that write the operator brake (#4976): raising
-    /// it, dropping it, and the deferral one raised hold records each time it
-    /// swallows a dispatch.
+    /// Fold the decisions that write the operator brake (#4976 / #5100): raising
+    /// it, dropping it, and the deferrals a raised hold records each time it
+    /// swallows a member or aggregate dispatch.
     ///
     /// Split out of [`apply_effect`](Self::apply_effect) for the reason its
     /// siblings are: they are one mechanism — a flag, its clear, and the ledger
@@ -779,6 +795,11 @@ impl Snapshot {
             Decision::DeferDispatch { bloom, workpiece } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.deferred_dispatches.insert(workpiece.clone());
+                }
+            }
+            Decision::DeferAggregate { bloom, stage } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.deferred_aggregates.insert(*stage);
                 }
             }
             _ => {}
@@ -871,6 +892,18 @@ impl Snapshot {
             && let Some(record) = self.blooms.get_mut(bloom)
         {
             record.deferred_dispatches.remove(workpiece);
+        }
+        // An aggregate work order that actually goes out settles whatever the
+        // hold owed that gate, the same implicit clear a member dispatch uses.
+        if let Decision::DispatchAggregateVerify { bloom, .. } = effect
+            && let Some(record) = self.blooms.get_mut(bloom)
+        {
+            record.deferred_aggregates.remove(&StageId::AggregateVerify);
+        }
+        if let Decision::DispatchAggregateReview { bloom, .. } = effect
+            && let Some(record) = self.blooms.get_mut(bloom)
+        {
+            record.deferred_aggregates.remove(&StageId::AggregateReview);
         }
         let (bloom, key) = match effect {
             Decision::DispatchAttempt { bloom, workpiece, stage, .. } => {
@@ -989,6 +1022,7 @@ impl BloomRecord {
             operator_repairs: Vec::new(),
             operator_hold: None,
             deferred_dispatches: BTreeSet::new(),
+            deferred_aggregates: BTreeSet::new(),
             dependencies: Vec::new(),
             host_faults: BTreeMap::new(),
             vehicles: BTreeMap::new(),
