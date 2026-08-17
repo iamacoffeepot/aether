@@ -137,7 +137,7 @@ pub struct GitCommit {
 }
 
 /// The GitHub client contract the projection depends on. Both the real
-/// [`ReqwestGithub`] and the test `FakeGithub` implement it,
+/// `ReqwestGithub` HTTP adapter and the test `FakeGithub` implement it,
 /// so the projection logic is exercised without a token or network.
 ///
 /// **Comments only on the write side.** There is deliberately no verb here that
@@ -205,7 +205,7 @@ pub trait IssueStateApi {
 /// sibling of [`GithubApi`] rather than an extension of it: the projection has
 /// no use for refs and the source port has no use for issues, so segregating
 /// the two keeps each backend generic over only the surface it touches. Both
-/// [`ReqwestGithub`] and the test `FakeGithub` implement it, so the source
+/// `ReqwestGithub` and the test `FakeGithub` implement it, so the source
 /// backend is exercised with no token or network.
 ///
 /// Ref names are the short `heads/…` form (no leading `refs/`); the client
@@ -353,7 +353,7 @@ pub enum PullMergeResult {
 /// A third sibling of [`GithubApi`] and [`GitDataApi`] for the reason those two
 /// are separate: the projection has no use for pull requests and the land path
 /// has no use for issues, so each backend stays generic over only the surface
-/// it touches. Both [`ReqwestGithub`] and the test `FakeGithub` implement it,
+/// it touches. Both `ReqwestGithub` and the test `FakeGithub` implement it,
 /// so the land path is exercised with no token and no network.
 pub trait PullRequestApi {
     /// Open a pull request.
@@ -514,7 +514,7 @@ pub struct Artifact {
 /// The GitHub Actions REST surface the executor port drives — `workflow_dispatch`
 /// plus the run + artifacts API. A sibling of [`GithubApi`] / [`GitDataApi`]
 /// (each backend is generic over only the surface it touches), implemented by
-/// both [`ReqwestGithub`] and the test `FakeGithub` so the executor is
+/// both `ReqwestGithub` and the test `FakeGithub` so the executor is
 /// exercised with no token or network.
 ///
 /// `workflow_dispatch` answers `204 No Content` with no run id, so there is no
@@ -569,6 +569,7 @@ pub trait ActionsApi {
 /// prefix left on does not fail loudly, it addresses a branch that does not
 /// exist. A name carrying neither (a raw commit sha, which the merge endpoint
 /// also accepts as a head) passes through.
+#[must_use]
 pub fn strip_heads(name: &str) -> &str {
     name.strip_prefix("refs/heads/").or_else(|| name.strip_prefix("heads/")).unwrap_or(name)
 }

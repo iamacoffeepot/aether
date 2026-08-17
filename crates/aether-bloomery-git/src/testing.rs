@@ -162,7 +162,7 @@ struct State {
 /// An in-memory GitHub double implementing [`GithubApi`].
 ///
 /// Cloning shares one backing store (an `Arc<Mutex<…>>`), so a demo can hand a
-/// clone to a [`GithubProjection`](crate::GithubProjection) and keep another to
+/// clone to a `GithubProjection` and keep another to
 /// introspect what the projection wrote.
 #[derive(Default, Clone)]
 pub struct FakeGithub {
