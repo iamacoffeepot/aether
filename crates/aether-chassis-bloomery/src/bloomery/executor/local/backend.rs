@@ -703,16 +703,29 @@ impl LocalExecutor {
         nonce: &str,
     ) -> Vec<u8> {
         let prices = self.sealed_prices(nonce);
-        let mut actuals = super::session_reuse::parse_token_actuals(bytes);
-        actuals.priced_micro_usd = prices.price(&plan.key.model, &actuals.as_cost());
-        let bytes = super::session_reuse::stamp_reuse(bytes, plan, &actuals);
+        let actuals = super::session_reuse::parse_token_actuals(bytes);
+        let calls = parse_calls(bytes);
+        let bytes = super::session_reuse::stamp_reuse(bytes, plan, &actuals, &prices, calls.as_deref());
         let _ = fs::write(evidence_path, &bytes);
         if lifecycle.is_terminal()
             && let Some(sessions) = self.sessions.as_ref()
         {
             sessions.observe(plan, &actuals);
             if let Some(session_id) = super::session_reuse::parse_session_id(&bytes) {
-                sessions.deposit(plan, &session_id, super::session_reuse::parse_context_tokens(&bytes).unwrap_or(0));
+                match super::session_reuse::parse_context_tokens(&bytes) {
+                    Some(context) => {
+                        let concluded = if plan.is_builder {
+                            construct_conclusion(&bytes)
+                        } else {
+                            parse_status(&bytes) == Some(LaneStatus::Pass)
+                        };
+                        sessions.deposit(plan, &session_id, context, concluded);
+                    }
+                    None => tracing::warn!(
+                        nonce,
+                        "local executor backend: result record has no per-call usage; skipping session deposit so an unmeasured lap cannot look empty"
+                    ),
+                }
             }
         }
         bytes
@@ -721,26 +734,24 @@ impl LocalExecutor {
     fn acquire_reuse(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
         let sessions = self.sessions.as_ref()?;
         // Every harness keys into the pool the same way — the arm comes from
-        // the sealed row for the resolved model, never from the harness name.
+        // the two static rules and the pool, never from the harness name.
         let profile = pending.profile.as_ref()?;
         // Command + description: a critic that shares the construct lap's
         // model, effort, and work-order text must not resume the constructor.
         let task = super::session_reuse::pool_task(&pending.command, pending.task.as_deref());
-        let prices = self.sealed_prices(&pending.nonce);
         Some(sessions.acquire(&super::AcquireRequest {
             model: &profile.model,
             effort: profile.effort.as_str(),
             task: &task,
             worktree: worktree_dir,
-            prices: Some(&prices),
             command: &pending.command,
         }))
     }
 
     // The bloom's sealed price table, looked up from the outstanding order
-    // the reactor recorded. An empty table (no store, no sealed rates, a
-    // decode miss) leaves the seed to decide — resume on lap 2 — rather
-    // than inventing rates.
+    // the reactor recorded. Used to stamp the observed and counterfactual
+    // prices; an empty table leaves those columns unpriced rather than
+    // inventing rates.
     fn sealed_prices(&self, nonce: &str) -> PriceTable {
         let Some(messages) = self.messages.as_ref() else {
             return PriceTable::default();
