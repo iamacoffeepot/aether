@@ -11,7 +11,7 @@ path = "src/bin/bloomery_console.rs"
 [dependencies]
 aether-bloomery = { path = "../aether-bloomery", default-features = false }
 anyhow = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["env"] }
 crossterm = { workspace = true }
 ratatui = { workspace = true }
 serde = { workspace = true, features = ["derive", "std"] }

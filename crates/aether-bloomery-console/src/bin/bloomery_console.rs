@@ -1,6 +1,5 @@
 //! `bloomery-console` — arg parsing, terminal setup/restore, the event loop.
 
-use std::env;
 use std::io::{self, stdout};
 use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +21,7 @@ use ratatui::backend::CrosstermBackend;
 /// `aether-chassis-bloomery` uses.
 const DEFAULT_HTTP_PORT: u16 = 8910;
 const DEFAULT_POLL_MILLIS: u64 = 1000;
-const REQUEST_TIMEOUT: Duration = Duration::from_millis(1000);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 const INPUT_SLICE: Duration = Duration::from_millis(100);
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -36,8 +35,8 @@ struct Args {
     host: String,
 
     /// Coordinator REST port. Defaults to `AETHER_HTTP_PORT`, then 8910.
-    #[arg(long)]
-    port: Option<u16>,
+    #[arg(long, env = "AETHER_HTTP_PORT", default_value_t = DEFAULT_HTTP_PORT)]
+    port: u16,
 
     /// How often to poll `GET /view`, in milliseconds.
     #[arg(long, default_value_t = DEFAULT_POLL_MILLIS)]
@@ -46,19 +45,12 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let endpoint = Endpoint { host: args.host, port: args.port.unwrap_or_else(coordinator_port) };
+    let endpoint = Endpoint { host: args.host, port: args.port };
     let poll = Duration::from_millis(args.poll_millis);
-    run(endpoint, poll)
+    run(&endpoint, poll)
 }
 
-/// `AETHER_HTTP_PORT`, then the coordinator's compiled default.
-fn coordinator_port() -> u16 {
-    // Operator tooling reading the coordinator's REST bind — not cap config.
-    #[allow(clippy::disallowed_methods)]
-    env::var("AETHER_HTTP_PORT").ok().and_then(|value| value.parse().ok()).unwrap_or(DEFAULT_HTTP_PORT)
-}
-
-fn run(endpoint: Endpoint, poll: Duration) -> Result<()> {
+fn run(endpoint: &Endpoint, poll: Duration) -> Result<()> {
     install_panic_hook();
     install_shutdown_signals();
     enable_raw_mode().context("enter raw mode")?;
@@ -73,7 +65,11 @@ fn run(endpoint: Endpoint, poll: Duration) -> Result<()> {
     result
 }
 
-fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, endpoint: Endpoint, poll: Duration) -> Result<()> {
+fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    endpoint: &Endpoint,
+    poll: Duration,
+) -> Result<()> {
     let mut state = BoardState::new(endpoint.label());
     let mut last_poll = Instant::now();
     let mut force = true;
@@ -84,8 +80,8 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, endpoint: E
         }
 
         if force || last_poll.elapsed() >= poll {
-            match http::get_json::<ViewDocument>(&endpoint, "/view", REQUEST_TIMEOUT) {
-                Ok(view) => state.apply_view(view),
+            match http::get_json::<ViewDocument>(endpoint, "/view", REQUEST_TIMEOUT) {
+                Ok(view) => state.apply_view(&view),
                 Err(error) => state.apply_error(error),
             }
             last_poll = Instant::now();

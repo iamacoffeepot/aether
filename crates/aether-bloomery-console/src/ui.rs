@@ -10,7 +10,7 @@ use crate::state::{BoardRow, BoardState, format_age};
 
 /// Paint one frame of the board.
 pub fn render(frame: &mut Frame<'_>, state: &BoardState) {
-    let stale = state.is_stale();
+    let dimmed = state.is_stale();
     let alert_height = if state.alerts.is_empty() {
         0
     } else {
@@ -26,21 +26,21 @@ pub fn render(frame: &mut Frame<'_>, state: &BoardState) {
         ])
         .split(frame.area());
 
-    frame.render_widget(header(state, stale), chunks[0]);
+    frame.render_widget(header(state, dimmed), chunks[0]);
     if alert_height > 0 {
         frame.render_widget(alert_band(state), chunks[1]);
     }
-    render_table(frame, chunks[2], state, stale);
+    render_table(frame, chunks[2], state, dimmed);
     frame.render_widget(footer(), chunks[3]);
 }
 
-fn header(state: &BoardState, stale: bool) -> Paragraph<'static> {
+fn header(state: &BoardState, dimmed: bool) -> Paragraph<'static> {
     let age = format_age(state.sample_age());
     let mut spans = vec![
         Span::styled("bloomery-console", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(format!("  {}  sample {age}", state.endpoint_label)),
     ];
-    if stale {
+    if dimmed {
         spans.push(Span::styled("  STALE", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
         if let Some(error) = &state.last_error {
             spans.push(Span::raw(format!("  {error}")));
@@ -74,14 +74,14 @@ fn alert_color(token: &str) -> Color {
     }
 }
 
-fn render_table(frame: &mut Frame<'_>, area: Rect, state: &BoardState, stale: bool) {
-    let dim = if stale {
+fn render_table(frame: &mut Frame<'_>, area: Rect, state: &BoardState, dimmed: bool) {
+    let muted = if dimmed {
         Style::default().add_modifier(Modifier::DIM)
     } else {
         Style::default()
     };
     let header = Row::new(["BLOOM / MEMBER", "STATE", "MACH", "BLOCKED BY", "WEDGE"])
-        .style(Style::default().add_modifier(Modifier::BOLD).patch(dim));
+        .style(Style::default().add_modifier(Modifier::BOLD).patch(muted));
     let rows = state.rows.iter().map(|row| match row {
         BoardRow::Bloom(bloom) => Row::new([
             Cell::from(bloom.id_prefix.clone()),
@@ -90,7 +90,7 @@ fn render_table(frame: &mut Frame<'_>, area: Rect, state: &BoardState, stale: bo
             Cell::from(""),
             Cell::from(""),
         ])
-        .style(Style::default().add_modifier(Modifier::BOLD).patch(dim)),
+        .style(Style::default().add_modifier(Modifier::BOLD).patch(muted)),
         BoardRow::Member(member) => Row::new([
             Cell::from(format!("  {}", member.workpiece)),
             Cell::from(member.state.clone()),
@@ -98,7 +98,7 @@ fn render_table(frame: &mut Frame<'_>, area: Rect, state: &BoardState, stale: bo
             Cell::from(member.blocked_by.clone()),
             Cell::from(member.wedge_cause.clone()),
         ])
-        .style(dim),
+        .style(muted),
     });
     let table = Table::new(
         rows,
@@ -165,7 +165,7 @@ mod tests {
             }],
         };
         let mut state = BoardState::new("127.0.0.1:8910".to_owned());
-        state.apply_view(view);
+        state.apply_view(&view);
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test backend");
         terminal.draw(|frame| render(frame, &state)).expect("draw");
         let text = buffer_text(&terminal);
@@ -188,7 +188,7 @@ mod tests {
             }],
         };
         let mut state = BoardState::new("127.0.0.1:8910".to_owned());
-        state.apply_view(view);
+        state.apply_view(&view);
         state.apply_error("connection refused");
         let mut terminal = Terminal::new(TestBackend::new(100, 12)).expect("test backend");
         terminal.draw(|frame| render(frame, &state)).expect("draw");

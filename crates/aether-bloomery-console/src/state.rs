@@ -76,9 +76,9 @@ impl BoardState {
         Self { rows: Vec::new(), alerts: Vec::new(), selected: None, last_ok: None, last_error: None, endpoint_label }
     }
 
-    pub fn apply_view(&mut self, view: ViewDocument) {
-        self.rows = rows_of(&view);
-        self.alerts = alerts_of(&view);
+    pub fn apply_view(&mut self, view: &ViewDocument) {
+        self.rows = rows_of(view);
+        self.alerts = alerts_of(view);
         self.last_ok = Some(Instant::now());
         self.last_error = None;
         self.reseat_selection();
@@ -338,7 +338,7 @@ mod tests {
             ],
         };
         let mut state = BoardState::new("127.0.0.1:8910".to_owned());
-        state.apply_view(first);
+        state.apply_view(&first);
         state.selected = Some(RowId::Member { bloom: digest(1), workpiece: "wp-b".to_owned() });
         assert_eq!(state.selected_index(), Some(2));
 
@@ -348,7 +348,7 @@ mod tests {
                 BloomView { id: digest(1), members: vec![member("wp-b"), member("wp-a")], ..BloomView::default() },
             ],
         };
-        state.apply_view(reordered);
+        state.apply_view(&reordered);
         assert_eq!(state.selected, Some(RowId::Member { bloom: digest(1), workpiece: "wp-b".to_owned() }));
         assert_eq!(state.selected_index(), Some(3));
     }
@@ -361,7 +361,7 @@ mod tests {
             blooms: vec![BloomView { id: digest(1), members: vec![member("wp-a")], ..BloomView::default() }],
         };
         let mut state = BoardState::new("127.0.0.1:8910".to_owned());
-        state.apply_view(view);
+        state.apply_view(&view);
         assert_eq!(state.rows.len(), 2);
         assert!(!state.is_stale());
         state.apply_error("connection refused");
@@ -407,7 +407,7 @@ mod tests {
         assert_eq!(format_age(None), "never");
         assert_eq!(format_age(Some(Duration::from_secs(0))), "0s");
         assert_eq!(format_age(Some(Duration::from_secs(59))), "59s");
-        assert_eq!(format_age(Some(Duration::from_secs(60))), "1m");
-        assert_eq!(format_age(Some(Duration::from_secs(3600))), "1h");
+        assert_eq!(format_age(Some(Duration::from_mins(1))), "1m");
+        assert_eq!(format_age(Some(Duration::from_hours(1))), "1h");
     }
 }
