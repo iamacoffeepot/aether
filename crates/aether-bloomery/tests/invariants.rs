@@ -4839,7 +4839,7 @@ fn an_adjudication_does_not_land_a_head_whose_aggregate_verify_is_red() {
     );
     match decided_green.effects.iter().find(|effect| matches!(effect, Decision::DispatchLand { .. })) {
         Some(Decision::DispatchLand { new_head, .. }) => {
-            assert_eq!(*new_head, digest(45), "landing the weave the refine captured, now proven")
+            assert_eq!(*new_head, digest(45), "landing the weave the refine captured, now proven");
         }
         other => panic!("expected the land dispatch, got {other:?}"),
     }
