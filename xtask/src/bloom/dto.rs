@@ -242,6 +242,8 @@ pub struct SupersedeRequest {
     pub projections: Vec<MemberProjection>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub descriptions: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<DependencyEdge>,
 }
 
 /// `GET /journal`.

@@ -66,7 +66,7 @@ pub(super) fn owed_aggregate_verify(record: &BloomRecord, bloom: BloomId, tree: 
 
     Decision::DispatchAggregateVerify {
         bloom,
-        transformation: Transformation::for_aggregate_verify(&binding, tree, head),
+        transformation: Transformation::for_aggregate_verify(&binding, tree, head, record.spec.base()),
         roll: record.aggregate_verify_rolls + 1,
         profile: binding.profile,
     }

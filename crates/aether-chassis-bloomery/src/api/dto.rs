@@ -164,6 +164,13 @@ pub struct SupersedeRequest {
     /// its quality collapses.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub descriptions: BTreeMap<String, String>,
+    /// Declared member-dependency edges — the same optional list [`SealRequest::edges`]
+    /// carries. The door unions these with derived overlap-ordering edges and
+    /// refuses a cycle or a non-member. Empty (the default) is the edgeless
+    /// drop-a-subtree supersede: the reducer keeps the predecessor's remaining
+    /// member graph.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<MemberDependency>,
 }
 
 /// `POST /blooms/{id}/grant` body — hand a wedged member more attempts on the
