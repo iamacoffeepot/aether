@@ -952,7 +952,7 @@ def verify_failed_fact(workpiece, verifiers, bloom=BLOOM_A, detail=DETAIL_A, kin
 
 def machinery_fact(workpiece, stage="Verify", bloom=BLOOM_A, detail=DETAIL_B):
     return {
-        "MemberMachineryFault": {
+        "MemberExecutorFault": {
             "bloom": bloom,
             "workpiece": workpiece,
             "stage": stage,
@@ -977,6 +977,23 @@ def wire_verify_failed_event(key, bloom, workpiece, verifiers, subject=SUBJECT, 
     for name in verifiers:
         body += wire_string(name)
     return wire_string(key) + struct.pack("<I", 13) + body
+
+
+def wire_member_executor_fault_event(
+    key, bloom, workpiece, stage=4, subject=SUBJECT, detail=DETAIL_B, kind=6
+) -> bytes:
+    body = bytes.fromhex(bloom) + wire_string(workpiece) + struct.pack("<I", stage)
+    body += bytes.fromhex(subject) + struct.pack("<I", kind) + bytes.fromhex(detail)
+    return wire_string(key) + struct.pack("<I", 28) + body
+
+
+def wire_machinery_retried(bloom, workpiece, stage=4, rolls=1, budget=3) -> bytes:
+    return (
+        struct.pack("<I", 65)
+        + bytes.fromhex(bloom)
+        + wire_string(workpiece)
+        + struct.pack("<III", stage, rolls, budget)
+    )
 
 
 def open_operator_store(path: Path) -> sqlite3.Connection:
@@ -1088,7 +1105,7 @@ class FlakeSignatures(unittest.TestCase):
         self.assertEqual(signatures[0]["verifiers"], ["verify.clippy", "verify.test"])
 
     def test_machinery_stays_distinct_from_verifier_failures(self):
-        # The plausible bug: a MemberMachineryFault at Verify is folded into
+        # The plausible bug: a MemberExecutorFault at Verify is folded into
         # the verifier row for that stage, so a sick host is reported as a
         # candidate defect (or the reverse).
         records = [
@@ -1096,7 +1113,7 @@ class FlakeSignatures(unittest.TestCase):
             journal_record(
                 2,
                 machinery_fact("issue-1"),
-                {"MemberMachineryRetried": {"bloom": BLOOM_A, "workpiece": "issue-1", "stage": "Verify", "rolls": 1}},
+                {"MachineryRetried": {"bloom": BLOOM_A, "workpiece": "issue-1", "stage": "Verify", "rolls": 1}},
             ),
         ]
         signatures = operator.group_flake_signatures(records)
@@ -1114,17 +1131,17 @@ class FlakeSignatures(unittest.TestCase):
             journal_record(
                 1,
                 machinery_fact("issue-1"),
-                {"MemberMachineryRetried": {"workpiece": "issue-1", "stage": "Verify", "rolls": 1}},
+                {"MachineryRetried": {"workpiece": "issue-1", "stage": "Verify", "rolls": 1}},
             ),
             journal_record(
                 2,
                 machinery_fact("issue-1"),
-                {"MemberMachineryRetried": {"workpiece": "issue-1", "stage": "Verify", "rolls": 2}},
+                {"MachineryRetried": {"workpiece": "issue-1", "stage": "Verify", "rolls": 2}},
             ),
             journal_record(
                 3,
                 machinery_fact("issue-1"),
-                {"MemberMachineryWedged": {"workpiece": "issue-1", "stage": "Verify", "rolls": 2}},
+                {"MachineryWedged": {"workpiece": "issue-1", "stage": "Verify", "rolls": 2}},
             ),
         ]
         signatures = operator.group_flake_signatures(records)
@@ -1169,8 +1186,12 @@ class FlakeJournalDecoding(unittest.TestCase):
         # the wrong index would group an unrelated fact as a verifier flake.
         self.assertEqual(operator.FACT_NAMES[13], "VerifyFailed")
         self.assertEqual(operator.FACT_NAMES[16], "AggregateReviewExecutorFault")
+        self.assertEqual(operator.FACT_NAMES[27], "SpliceAssembled")
+        self.assertEqual(operator.FACT_NAMES[28], "MemberExecutorFault")
         self.assertEqual(operator.OUTCOME_NAMES[41], "AggregateReviewExecutorFaulted")
         self.assertEqual(operator.OUTCOME_NAMES[42], "AggregateReviewExecutorWedged")
+        self.assertEqual(operator.OUTCOME_NAMES[65], "MachineryRetried")
+        self.assertEqual(operator.OUTCOME_NAMES[66], "MachineryWedged")
 
     def test_journal_sequences_survive_a_reopen(self):
         # The plausible bug: grouping by Python insertion order or by rowid
@@ -1220,6 +1241,38 @@ class FlakeJournalDecoding(unittest.TestCase):
             signatures = operator.group_flake_signatures(operator.Journal(str(path)).records())
             self.assertEqual(signatures[0]["cause"], "verify.clippy,verify.test")
             self.assertEqual(signatures[0]["workpieces"], ["issue-7"])
+
+    def test_a_wire_encoded_member_executor_fault_groups_as_machinery(self):
+        # The plausible bug: flakes still names #5091's anticipated
+        # MemberMachinery* variants, so a live coordinator journal (canonical
+        # wire bytes for Fact::MemberExecutorFault / Outcome::MachineryRetried)
+        # reports no machinery signature.
+        event = wire_member_executor_fault_event("k", BLOOM_A, "issue-7")
+        decoded = operator.decode_event_blob(event)
+        fact = decoded["fact"]["MemberExecutorFault"]
+        self.assertEqual(fact["workpiece"], "issue-7")
+        self.assertEqual(fact["stage"], "Verify")
+        self.assertEqual(fact["evidence"]["kind"], "ExecutorFault")
+
+        outcome = operator.decode_decisions_blob(wire_machinery_retried(BLOOM_A, "issue-7", rolls=2, budget=3))
+        self.assertEqual(outcome["MachineryRetried"]["rolls"], 2)
+        self.assertEqual(outcome["MachineryRetried"]["budget"], 3)
+
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "store.db"
+            conn = open_operator_store(path)
+            conn.execute(
+                "INSERT INTO journal (idempotency_key, event, decisions) VALUES (?, ?, ?)",
+                ("wire-machinery", event, wire_machinery_retried(BLOOM_A, "issue-7", rolls=2, budget=3)),
+            )
+            conn.commit()
+            conn.close()
+            signatures = operator.group_flake_signatures(operator.Journal(str(path)).records())
+            self.assertEqual(len(signatures), 1)
+            self.assertEqual(signatures[0]["kind"], "machinery")
+            self.assertEqual(signatures[0]["cause"], "executor_fault")
+            self.assertEqual(signatures[0]["workpieces"], ["issue-7"])
+            self.assertEqual(signatures[0]["machinery_retries"], 2)
 
 
 class FlakePressure(unittest.TestCase):
@@ -1351,7 +1404,7 @@ class FlakePressure(unittest.TestCase):
                 conn,
                 "k3",
                 machinery_fact("issue-1"),
-                {"MemberMachineryWedged": {"workpiece": "issue-1", "stage": "Verify", "rolls": 2}},
+                {"MachineryWedged": {"workpiece": "issue-1", "stage": "Verify", "rolls": 2}},
             )
             insert_order(conn, nonce="dispatch-1", workpiece="issue-1", stage_index=4, deadline=500)
             conn.commit()

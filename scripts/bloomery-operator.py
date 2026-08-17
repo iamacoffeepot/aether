@@ -90,6 +90,8 @@ FACT_NAMES = (
     "GraphSeal",
     "VerifyHostFault",
     "ResumeHostFault",
+    "SpliceAssembled",
+    "MemberExecutorFault",
 )
 
 OUTCOME_NAMES = (
@@ -156,6 +158,11 @@ OUTCOME_NAMES = (
     "VerifyHostFaultHeld",
     "HostFaultResumed",
     "HostFaultRejected",
+    "SpliceAssembled",
+    "SpliceRejected",
+    "MachineryRetried",
+    "MachineryWedged",
+    "MemberExecutorFaultRejected",
 )
 
 # Canonical verifier identities, in the bit order VerifyFailure::ALL uses. A
@@ -174,24 +181,25 @@ VERIFY_FAILURE_NAMES = (
 )
 
 # Typed machinery facts/outcomes. The aggregate-review pair already exists in
-# this tree; the MemberMachinery* names are the #5091 member-stage lifecycle
-# (tail-appended on the journal, JSON-shaped in fixtures and in GET /journal).
+# this tree; MemberExecutorFault / MachineryRetried / MachineryWedged are the
+# #5091 member-stage lifecycle (tail-appended on the journal, JSON-shaped in
+# fixtures and in GET /journal).
 MACHINERY_FACT_NAMES = frozenset(
     {
         "AggregateReviewExecutorFault",
-        "MemberMachineryFault",
+        "MemberExecutorFault",
     }
 )
 MACHINERY_RETRY_OUTCOMES = frozenset(
     {
         "AggregateReviewExecutorFaulted",
-        "MemberMachineryRetried",
+        "MachineryRetried",
     }
 )
 MACHINERY_WEDGE_OUTCOMES = frozenset(
     {
         "AggregateReviewExecutorWedged",
-        "MemberMachineryWedged",
+        "MachineryWedged",
     }
 )
 
@@ -1107,7 +1115,7 @@ def _decode_known_fact(name: str, cursor: _WireCursor) -> dict[str, Any] | None:
         if bloom is None or evidence is None:
             return None
         return {"bloom": bloom, "evidence": evidence, "stage": "AggregateReview"}
-    if name == "MemberMachineryFault":
+    if name == "MemberExecutorFault":
         bloom = cursor.digest()
         workpiece = cursor.string()
         stage = _variant_name(cursor.u32(), STAGES)
@@ -1150,14 +1158,15 @@ def _decode_known_outcome(name: str, cursor: _WireCursor) -> dict[str, Any] | No
             "budget": budget,
             "evidence": {"detail": evidence, "kind": "ExecutorFault", "subject": subject},
         }
-    if name in {"MemberMachineryRetried", "MemberMachineryWedged"}:
+    if name in {"MachineryRetried", "MachineryWedged"}:
         bloom = cursor.digest()
         workpiece = cursor.string()
         stage = _variant_name(cursor.u32(), STAGES)
         rolls = cursor.u32()
-        if bloom is None or workpiece is None or stage is None or rolls is None:
+        budget = cursor.u32()
+        if bloom is None or workpiece is None or stage is None or rolls is None or budget is None:
             return None
-        return {"bloom": bloom, "workpiece": workpiece, "stage": stage, "rolls": rolls}
+        return {"bloom": bloom, "workpiece": workpiece, "stage": stage, "rolls": rolls, "budget": budget}
     return {}
 
 
