@@ -11,7 +11,7 @@ use anyhow::Result;
 
 use crate::transform::claude::assemble_construct_prompt;
 use crate::transform::fixers::{self, Report as FixerReport};
-use crate::transform::{Measurements, TransformArgs, conventions, run_model_lane, write_evidence_json};
+use crate::transform::{Measurements, TransformArgs, run_model_lane, write_evidence_json};
 
 /// The typed id of the model-driven construct lane (#3511). Recognized here so
 /// an unknown id stays unmapped exactly as in the verify lane.
@@ -134,13 +134,12 @@ fn capture_produced_candidate(out_dir: &Path) -> bool {
 pub(super) fn run_construct(args: &TransformArgs) -> Result<()> {
     // The lane owns its process: the prompt is assembled from the in-repo
     // instruction source and the checked-out subject, never from a skill in the
-    // worker's checkout. It is piped on the child's stdin. The subject tree's own
-    // conventions ride along (#4647) — read from the cwd the lane runs in, which
-    // is that checkout — so they reach the agent whichever harness is forked,
-    // rather than depending on the CLI to go and find them.
+    // worker's checkout. It is piped on the child's stdin. The curated lane
+    // context rides along (#4647, #5141) so the conventions reach the agent
+    // whichever harness is forked, rather than depending on the CLI to go and
+    // find them — and rather than inlining the whole subject-tree CLAUDE.md.
     let prompt = assemble_construct_prompt(
         CONSTRUCT_INSTRUCTIONS,
-        conventions::read(Path::new(".")).as_deref(),
         args.subject.as_deref(),
         args.task.as_deref(),
         args.seeded.as_deref(),
@@ -351,14 +350,9 @@ mod tests {
     // never reads `.claude/skills/implement` (#3572). Pure: no Claude spawn.
     #[test]
     fn construct_prompt_assembles_from_the_in_repo_instructions_and_subject() {
-        let prompt = assemble_construct_prompt(
-            CONSTRUCT_INSTRUCTIONS,
-            None,
-            Some("abc123"),
-            Some("thread the work order"),
-            None,
-        );
-        assert!(prompt.starts_with(CONSTRUCT_INSTRUCTIONS), "without conventions the instruction source leads");
+        let prompt =
+            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("thread the work order"), None);
+        assert!(prompt.contains(CONSTRUCT_INSTRUCTIONS), "the instruction source rides the prompt");
         assert!(prompt.contains("## Subject"), "the checked-out subject is appended as its own section");
         assert!(prompt.contains("abc123"), "the exact checked-out commit is named in the prompt");
         assert!(
@@ -375,46 +369,63 @@ mod tests {
         assert!(!prompt.contains("\n## Lane\n"), "a header-less task grows no lane tail");
 
         // With no subject supplied, the prompt still stands and names no commit.
-        let subjectless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, None, Some("still has a task"), None);
+        let subjectless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("still has a task"), None);
         assert!(subjectless.contains("## Subject"));
         assert!(subjectless.contains("\n## Task\n"));
-        assert!(subjectless.starts_with(CONSTRUCT_INSTRUCTIONS));
+        assert!(subjectless.contains(CONSTRUCT_INSTRUCTIONS));
 
         // With no task, the prompt still stands and appends no `## Task` section —
         // the fail-legible subject-only path for a member with no description.
-        let taskless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("abc123"), None, None);
+        let taskless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), None, None);
         assert!(taskless.contains("## Subject"));
         assert!(!taskless.contains("\n## Task\n"), "no persisted description means no task section");
-        assert!(taskless.starts_with(CONSTRUCT_INSTRUCTIONS));
+        assert!(taskless.contains(CONSTRUCT_INSTRUCTIONS));
     }
 
-    // The conventions the subject tree carries ride the prompt itself (#4647)
-    // rather than being pointed at, because only one of the three harnesses the
-    // lane can fork reads a conventions file on its own. They lead (#4985) so
-    // construct and review share the CLAUDE.md prefix; the work order follows
+    // The curated lane context rides the prompt itself (#4647, #5141) rather
+    // than being pointed at, because only one of the three harnesses the lane
+    // can fork reads a conventions file on its own. They lead (#4985) so
+    // construct and review share the lane-context prefix; the work order follows
     // the long general rules, and a per-lane tail may follow it.
     #[test]
     fn conventions_ride_the_prompt_ahead_of_the_work_order() {
-        let prompt = assemble_construct_prompt(
-            CONSTRUCT_INSTRUCTIONS,
-            Some("Tests must earn their place."),
-            Some("abc123"),
-            Some("thread the work order"),
-            None,
+        let prompt =
+            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("thread the work order"), None);
+        assert!(
+            prompt.contains("Tests must earn their place"),
+            "the curated lane context carries the testing doctrine",
         );
-        assert!(prompt.contains("Tests must earn their place."), "the tree's conventions are carried verbatim");
         assert!(prompt.starts_with("## Conventions\n"), "shared conventions lead so sibling lanes share a prefix");
         let conventions_at = prompt.find("## Conventions\n").expect("the conventions get their own section");
         let instructions_at = prompt.find(CONSTRUCT_INSTRUCTIONS).expect("the lane instructions still ride");
         let task_at = prompt.find("\n## Task\n").expect("the work order keeps its section");
-        assert!(conventions_at < instructions_at, "CLAUDE.md leads the lane-specific instructions");
+        assert!(conventions_at < instructions_at, "lane context leads the lane-specific instructions");
         assert!(instructions_at < task_at, "the work order stays after the long general rules");
+    }
 
-        // A subject tree carrying no conventions file drops the section rather
-        // than failing the dispatch or emitting an empty heading.
-        let bare = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("abc123"), Some("build it"), None);
-        assert!(!bare.contains("## Conventions\n"), "no conventions file means no conventions section");
-        assert!(bare.contains("\n## Task\n"), "the rest of the prompt is unaffected");
+    // Tripwire (#5141): the assembler used to inline the whole subject-tree
+    // CLAUDE.md, so every turn re-read MCP / runtime / wasm authoring the lane
+    // cannot act on. A wholesale embed returning is this test going red.
+    #[test]
+    fn assembled_construct_prompt_carries_lane_context_not_the_whole_claude_md() {
+        let prompt =
+            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("thread the work order"), None);
+
+        assert!(
+            prompt.contains(crate::transform::conventions::LANE_CONTEXT),
+            "the curated lane context rides the prompt"
+        );
+        assert!(prompt.contains("Tests must earn their place"), "testing doctrine stays");
+        assert!(prompt.contains("spell units out in identifiers"), "code conventions stay");
+
+        for heading in [
+            "## MCP harness",
+            "## Runtime & subsystems",
+            "## Writing components",
+            "## Harness self-modification guardrail",
+        ] {
+            assert!(!prompt.contains(heading), "dropped CLAUDE.md section `{heading}` must not ride the prompt");
+        }
     }
 
     // Tripwire: prompt caching is prefix-exact. A per-member `Workpiece:` header
@@ -423,26 +434,22 @@ mod tests {
     // byte-identical prefix through the stable bulk.
     #[test]
     fn sibling_lane_prompts_share_a_byte_identical_prefix_through_the_work_order() {
-        let conventions = "Tests must earn their place.";
         let body = "# Wave-3 member work order\n\nImplement the sealed plan.\n";
         let left = assemble_construct_prompt(
             CONSTRUCT_INSTRUCTIONS,
-            Some(conventions),
             Some("abc123"),
             Some(&pin_workpiece_description("issue-1111", body)),
             None,
         );
         let right = assemble_construct_prompt(
             CONSTRUCT_INSTRUCTIONS,
-            Some(conventions),
             Some("abc123"),
             Some(&pin_workpiece_description("issue-2222", body)),
             None,
         );
 
         let prefix_len = left.bytes().zip(right.bytes()).take_while(|(a, b)| a == b).count();
-        let stable =
-            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some(conventions), Some("abc123"), Some(body), None);
+        let stable = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some(body), None);
         assert!(
             prefix_len >= stable.len(),
             "common prefix ({prefix_len}) must cover the stable bulk ({})",
@@ -466,33 +473,20 @@ mod tests {
 
     // Tripwire: construct vs review used to open with different instruction
     // files, so 99.8% overlapping ~59k-token prompts shared no cache (#4985).
-    // Conventions lead, so distinct instruction texts still share CLAUDE.md.
+    // Conventions lead, so distinct instruction texts still share lane context.
     #[test]
     fn conventions_lead_so_distinct_lane_instructions_still_share_them() {
-        let conventions = "Tests must earn their place.";
-        let construct = assemble_construct_prompt(
-            CONSTRUCT_INSTRUCTIONS,
-            Some(conventions),
-            Some("abc123"),
-            Some("shared order"),
-            None,
-        );
-        let review = assemble_construct_prompt(
-            "REVIEW INSTRUCTIONS ONLY",
-            Some(conventions),
-            Some("abc123"),
-            Some("shared order"),
-            None,
-        );
+        let construct = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("shared order"), None);
+        let review = assemble_construct_prompt("REVIEW INSTRUCTIONS ONLY", Some("abc123"), Some("shared order"), None);
         let prefix_len = construct.bytes().zip(review.bytes()).take_while(|(a, b)| a == b).count();
-        assert!(construct.starts_with("## Conventions\n"), "CLAUDE.md leads the prompt");
+        assert!(construct.starts_with("## Conventions\n"), "lane context leads the prompt");
         assert!(
-            construct[..prefix_len].contains(conventions),
+            construct[..prefix_len].contains("Tests must earn their place"),
             "the shared conventions must sit inside the common prefix",
         );
         assert!(
-            prefix_len > conventions.len(),
-            "common prefix ({prefix_len}) must cover more than the raw conventions text",
+            prefix_len > "Tests must earn their place".len(),
+            "common prefix ({prefix_len}) must cover more than a single conventions phrase",
         );
     }
 
@@ -502,13 +496,8 @@ mod tests {
     // and a cold start is told it might be sitting on mid-refactor garbage.
     #[test]
     fn construct_prompt_names_the_seeded_state_only_when_seeded() {
-        let cold = assemble_construct_prompt(
-            CONSTRUCT_INSTRUCTIONS,
-            None,
-            Some("abc123"),
-            Some("thread the work order"),
-            None,
-        );
+        let cold =
+            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("thread the work order"), None);
         assert!(!cold.contains("## Seeded state"), "a cold start grows no seeded-state section");
         assert!(!cold.contains("mid-refactor garbage"), "the trust posture is not static boilerplate on a cold start");
         assert!(
@@ -519,7 +508,6 @@ mod tests {
 
         let seeded = assemble_construct_prompt(
             CONSTRUCT_INSTRUCTIONS,
-            None,
             Some("def456"),
             Some("thread the work order"),
             Some("def456"),
@@ -531,17 +519,10 @@ mod tests {
         assert!(seeded.contains("untrusted"), "the prompt names the checkpoint's trust posture");
         assert!(seeded.contains("mid-refactor garbage"), "the prompt states what a dead attempt's partial tree can be");
 
-        let conventions = "Tests must earn their place.";
         let body = "shared order";
-        let cold_sibling =
-            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some(conventions), Some("abc123"), Some(body), None);
-        let seeded_sibling = assemble_construct_prompt(
-            CONSTRUCT_INSTRUCTIONS,
-            Some(conventions),
-            Some("abc123"),
-            Some(body),
-            Some("def456"),
-        );
+        let cold_sibling = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some(body), None);
+        let seeded_sibling =
+            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some(body), Some("def456"));
         let prefix_len = cold_sibling.bytes().zip(seeded_sibling.bytes()).take_while(|(a, b)| a == b).count();
         assert!(
             cold_sibling[..prefix_len].contains(body),
@@ -556,13 +537,8 @@ mod tests {
     // language is unchanged.
     #[test]
     fn construct_prompt_keeps_authoring_checks_and_leaves_verify_gates_to_verify() {
-        let prompt = assemble_construct_prompt(
-            CONSTRUCT_INSTRUCTIONS,
-            Some("Tests must earn their place."),
-            Some("abc123"),
-            Some("thread the work order"),
-            None,
-        );
+        let prompt =
+            assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("thread the work order"), None);
 
         assert!(prompt.contains("cargo fmt"), "formatting stays as cheap authoring feedback");
         assert!(prompt.contains("focused tests"), "focused behavior tests stay as cheap authoring feedback");
