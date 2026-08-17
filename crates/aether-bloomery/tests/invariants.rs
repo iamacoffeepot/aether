@@ -3365,20 +3365,25 @@ fn grant_refuses_a_running_member_a_stale_stage_and_an_unspendable_request() {
     );
 }
 
-// #5090 — an operator-selected machinery grant is a bounded same-stage batch
-// on the host-fault axis. The plausible bugs: treating a machinery Verify
-// wedge as a work wedge (resume at Refine, spend repair rolls), charging
-// ordinary attempts, moving the candidate, admitting a second worker while
-// the first is outstanding, or letting a repeated identical grant through
-// under the same idempotency key.
-#[test]
-fn a_machinery_grant_reruns_the_wedged_stage_for_exactly_n_dispatches() {
-    let base = Snapshot::new(digest(1));
+fn verify_executor_fault(bloom: BloomId, key: &str, detail: u8) -> Event {
+    event(
+        key,
+        Fact::MemberExecutorFault {
+            bloom,
+            workpiece: workpiece("wp"),
+            stage: StageId::Verify,
+            evidence: Evidence { subject: digest(21), kind: EvidenceKind::ExecutorFault, detail: digest(detail) },
+        },
+    )
+}
+
+/// Seal a two-member bloom, capture a Construct candidate on `wp`, then spend
+/// the Verify machinery ceiling so that member is wedged on the host-fault axis.
+fn machinery_wedged_at_verify() -> (Snapshot, BloomId, CandidateRef) {
     let spec = draft(1, vec![membership("wp", 10), membership("other", 11)]).seal();
     let bloom = spec.id();
-    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
-
     let captured = CandidateRef { tree: digest(21), checkout: digest(22) };
+    let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
     let (snapshot, _) = step(
         &snapshot,
         &event(
@@ -3393,28 +3398,27 @@ fn a_machinery_grant_reruns_the_wedged_stage_for_exactly_n_dispatches() {
             },
         ),
     );
-    let other_before = snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("other")).copied();
-    let claims_before = snapshot.blooms.get(&bloom).unwrap().claims.clone();
+    let (snapshot, _) = step(&snapshot, &verify_executor_fault(bloom, "fault-1", 60));
+    let (snapshot, _) = step(&snapshot, &verify_executor_fault(bloom, "fault-2", 61));
+    let (wedged, _) = step(&snapshot, &verify_executor_fault(bloom, "fault-3", 62));
+    (wedged, bloom, captured)
+}
 
-    let fault = |key: &str, detail: u8| {
-        event(
-            key,
-            Fact::MemberExecutorFault {
-                bloom,
-                workpiece: workpiece("wp"),
-                stage: StageId::Verify,
-                evidence: Evidence { subject: digest(21), kind: EvidenceKind::ExecutorFault, detail: digest(detail) },
-            },
-        )
-    };
-    let (snapshot, _) = step(&snapshot, &fault("fault-1", 60));
-    let (snapshot, _) = step(&snapshot, &fault("fault-2", 61));
-    let (wedged, _) = step(&snapshot, &fault("fault-3", 62));
+// #5090 — an operator-selected machinery grant is a bounded same-stage batch
+// on the host-fault axis. The plausible bugs: treating a machinery Verify
+// wedge as a work wedge (resume at Refine, spend repair rolls), charging
+// ordinary attempts, moving the candidate, or dispatching more than N times.
+#[test]
+fn a_machinery_grant_reruns_the_wedged_stage_for_exactly_n_dispatches() {
+    let (wedged, bloom, captured) = machinery_wedged_at_verify();
     assert!(matches!(
         wedged.blooms.get(&bloom).unwrap().wedged.get(&workpiece("wp")),
         Some(wedge) if wedge.stage == StageId::Verify
     ));
-    let before = wedged.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).copied().unwrap();
+    let record = wedged.blooms.get(&bloom).unwrap();
+    let other_before = record.progress.get(&workpiece("other")).copied();
+    let claims_before = record.claims.clone();
+    let before = record.progress.get(&workpiece("wp")).copied().unwrap();
     assert_eq!(before.attempts, 1);
     assert_eq!(before.repair_rolls, 0);
     assert_eq!(before.candidate, Some(captured));
@@ -3444,10 +3448,10 @@ fn a_machinery_grant_reruns_the_wedged_stage_for_exactly_n_dispatches() {
     assert_eq!(cursor.candidate, Some(captured), "the candidate does not move");
     assert_eq!(cursor.seen_verify_failures, before.seen_verify_failures);
     assert_eq!(record.claims, claims_before, "resolved work does not move");
-    assert_eq!(record.progress.get(&workpiece("other")).copied(), other_before, "a sibling's cursor does not move",);
+    assert_eq!(record.progress.get(&workpiece("other")).copied(), other_before, "a sibling's cursor does not move");
     assert_eq!(granted.member_machinery(&bloom, &workpiece("wp")).unwrap().rolls, 1);
 
-    let (after1, d1) = step(&granted, &fault("fault-g1", 63));
+    let (after1, d1) = step(&granted, &verify_executor_fault(bloom, "fault-g1", 63));
     assert!(
         matches!(d1.outcome, Outcome::MachineryRetried { stage: StageId::Verify, rolls: 2, budget: 3, .. }),
         "got {:?}",
@@ -3463,7 +3467,7 @@ fn a_machinery_grant_reruns_the_wedged_stage_for_exactly_n_dispatches() {
     assert_eq!(cursor.repair_rolls, 0);
     assert_eq!(cursor.candidate, Some(captured));
 
-    let (rewedged, d2) = step(&after1, &fault("fault-g2", 64));
+    let (rewedged, d2) = step(&after1, &verify_executor_fault(bloom, "fault-g2", 64));
     assert!(
         matches!(d2.outcome, Outcome::MachineryWedged { stage: StageId::Verify, rolls: 3, budget: 3, .. }),
         "got {:?}",
@@ -3474,6 +3478,19 @@ fn a_machinery_grant_reruns_the_wedged_stage_for_exactly_n_dispatches() {
         "the Nth fault of an N-batch wedges instead of dispatching",
     );
     assert!(rewedged.blooms.get(&bloom).unwrap().wedged.contains_key(&workpiece("wp")));
+}
+
+// #5090 — a repeated identical grant is a no-op unless the operator mints a
+// fresh idempotency key, and a grant never admits a second worker on a
+// running member or a resolved bloom.
+#[test]
+fn a_repeated_machinery_grant_needs_a_fresh_key_and_refuses_live_work() {
+    let (wedged, bloom, _) = machinery_wedged_at_verify();
+    let grant =
+        event("grant", Fact::GrantAttempts { bloom, workpiece: workpiece("wp"), stage: StageId::Verify, attempts: 2 });
+    let (granted, _) = step(&wedged, &grant);
+    let (after1, _) = step(&granted, &verify_executor_fault(bloom, "fault-g1", 63));
+    let (rewedged, _) = step(&after1, &verify_executor_fault(bloom, "fault-g2", 64));
 
     let (dup, d_dup) = step(&rewedged, &grant);
     assert!(matches!(d_dup.outcome, Outcome::Duplicate), "the same key cannot buy a second batch");
@@ -3489,7 +3506,7 @@ fn a_machinery_grant_reruns_the_wedged_stage_for_exactly_n_dispatches() {
         "a fresh key authorizes another batch, got {:?}",
         d_again.outcome,
     );
-    assert_eq!(d_again.effects.iter().filter(|effect| matches!(effect, Decision::DispatchAttempt { .. })).count(), 1,);
+    assert_eq!(d_again.effects.iter().filter(|effect| matches!(effect, Decision::DispatchAttempt { .. })).count(), 1);
 
     let (_, d_running) = step(
         &granted_again,

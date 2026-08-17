@@ -19,9 +19,9 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 ///
 /// The grant moves the member's cursor, and a cursor that moves is a member that
 /// is dispatching again — so it needs no clear-the-wedge concept of its own:
-/// [`Decision::AdvanceStage`](crate::Decision::AdvanceStage) is already the only
-/// route out of the wedged set, and this emits the same advance-and-dispatch
-/// pair every other cursor move emits.
+/// [`Decision::AdvanceStage`] is already the only route out of the wedged set,
+/// and this emits the same advance-and-dispatch pair every other cursor move
+/// emits.
 ///
 /// **Which counter it hands back depends on the wedge cause (#5091), not only
 /// the stage.** A `MACHINERY` wedge exhausted the independent host-fault series
