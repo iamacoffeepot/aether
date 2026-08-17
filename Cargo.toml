@@ -19,6 +19,7 @@ members = [
     "crates/aether-behavior",
     "crates/aether-behavior-derive",
     "crates/aether-bloomery",
+    "crates/aether-bloomery-console",
     "crates/aether-bloomery-github",
     "crates/aether-chassis-bloomery",
     "crates/aether-http-derive",
@@ -125,6 +126,11 @@ proc-macro2 = "1"
 quote = "1"
 serde = { version = "1", default-features = false }
 serde_json = "1"
+# Live operator TUI for the Bloomery coordinator (issue 5120). The
+# console is a standalone read-only board; these two are its only new
+# workspace deps.
+crossterm = "0.28"
+ratatui = "0.29"
 # ADR-0149 Bloomery journal store (issue 3458): SQLite in WAL mode is the
 # durable single-writer home for the journal / inbox / outbox / active-
 # membership tables. Host crate (`aether-chassis-bloomery`) only — the guest
