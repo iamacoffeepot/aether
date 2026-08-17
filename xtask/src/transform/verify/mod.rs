@@ -1445,34 +1445,35 @@ mod tests {
     }
 
     #[test]
-    fn the_construct_instructions_state_the_gate_argv_a_lane_has_to_run() {
-        // Tripwire: the construct lane's pre-exit checklist is a second
-        // spelling of these invocations, and a near-miss one predicts nothing —
-        // rustdoc without `--document-private-items` passes over the private
-        // items the gate fails on, so the lane goes green and bounces anyway
-        // (#4951). Flags move here often (#4836, #4863) and prose nobody
-        // compiles goes stale silently, so the instructions are asserted
-        // against the arms rather than proofread against them.
-        for id in ["verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.suppress"] {
-            let invocation = verify_command(id).expect("member mapped");
+    fn verify_owns_the_heavy_matrix_construct_prose_does_not_restate_it() {
+        // Tripwire: Construct used to mirror every Verify argv (#4951), which
+        // duplicated the mechanical matrix on the serial path and went stale
+        // the moment a flag moved (#5078). Verify's typed map is the authority:
+        // every umbrella member must still resolve, and none of the heavy argv
+        // may appear in construct prose.
+        for &id in verify_check_members() {
+            assert!(verify_command(id).is_some(), "{id} must resolve via verify_command");
+        }
 
+        for id in ["verify.clippy", "verify.docs", "verify.test", "verify.suppress", "verify.dup", "verify.deps"] {
+            let invocation = verify_command(id).expect("member mapped");
             let stated = argv(&invocation).join(" ");
             assert!(
-                CONSTRUCT_INSTRUCTIONS.contains(&stated),
-                "{id} runs `{stated}`, which construct_instructions.md has to state for a lane to run it",
+                !CONSTRUCT_INSTRUCTIONS.contains(&stated),
+                "{id} runs `{stated}`, which construct_instructions.md must not restate — Verify owns that argv",
             );
             for &(key, value) in invocation.env {
                 let setting = format!("{key}={value}");
                 assert!(
-                    CONSTRUCT_INSTRUCTIONS.contains(&setting),
-                    "{id} runs under {setting}, and a lane that omits it runs a different check",
+                    !CONSTRUCT_INSTRUCTIONS.contains(&setting),
+                    "{id} runs under {setting}, which is Verify's environment, not construct prose",
                 );
             }
             if let Some(prepare) = invocation.prepare {
                 let prepare = format!("cargo {}", prepare.join(" "));
                 assert!(
-                    CONSTRUCT_INSTRUCTIONS.contains(&prepare),
-                    "{id} is preceded by `{prepare}`, without which the lane's run is missing its inputs",
+                    !CONSTRUCT_INSTRUCTIONS.contains(&prepare),
+                    "{id} is preceded by `{prepare}`, which is Verify's prepare, not a construct step",
                 );
             }
         }
