@@ -113,6 +113,22 @@ fn orphan_claim_release(workpiece: WorkpieceId, holder: BloomId) -> OrphanClaimR
     OrphanClaimRelease { ref_kind: ClaimRefKind::Workpiece(workpiece), expected_holder: holder }
 }
 
+fn advance_stage(bloom: BloomId, workpiece: WorkpieceId) -> Decision {
+    Decision::AdvanceStage {
+        bloom,
+        workpiece,
+        progress: StageProgress {
+            stage: StageId::Construct,
+            attempts: 1,
+            candidate: Some(CandidateRef { tree: digest(2), checkout: digest(3) }),
+            repair_rolls: 0,
+            seen_verify_failures: VerifyFailureSet::one(VerifyFailure::Clippy),
+            fold_checkpoint: Some(digest(4)),
+            fold_conflict_evidence: Some(digest(5)),
+        },
+    }
+}
+
 fn dispatch_attempt(bloom: BloomId, workpiece: WorkpieceId) -> Decision {
     Decision::DispatchAttempt {
         bloom,
@@ -138,6 +154,16 @@ fn dispatch_aggregate_review(bloom: BloomId) -> Decision {
 
 fn dispatch_aggregate_verify(bloom: BloomId) -> Decision {
     Decision::DispatchAggregateVerify { bloom, transformation: transformation(), roll: 3, profile: profile() }
+}
+
+fn dispatch_splice(bloom: BloomId, workpiece: WorkpieceId, successor: BloomId) -> Decision {
+    Decision::DispatchSplice {
+        bloom,
+        workpiece,
+        base: digest(41),
+        members: vec![MemberCandidate { workpiece: WorkpieceId("beta".into()), candidate: digest(42) }],
+        adopt_from: Some(successor),
+    }
 }
 
 fn set_resolved(bloom: BloomId, workpiece: WorkpieceId) -> Decision {
@@ -273,19 +299,7 @@ fn representative() -> Decisions {
             Decision::InheritClaim { bloom: successor, claim: resolution_claim(workpiece.clone()) },
             Decision::RecordResolution { bloom, claim: resolution_claim(workpiece.clone()) },
             Decision::RevokeResolution { bloom, workpiece: workpiece.clone() },
-            Decision::AdvanceStage {
-                bloom,
-                workpiece: workpiece.clone(),
-                progress: StageProgress {
-                    stage: StageId::Construct,
-                    attempts: 1,
-                    candidate: Some(CandidateRef { tree: digest(2), checkout: digest(3) }),
-                    repair_rolls: 0,
-                    seen_verify_failures: VerifyFailureSet::one(VerifyFailure::Clippy),
-                    fold_checkpoint: Some(digest(4)),
-                    fold_conflict_evidence: Some(digest(5)),
-                },
-            },
+            advance_stage(bloom, workpiece.clone()),
             Decision::RecordStageCatalog { bloom, catalog: stage_catalog() },
             Decision::RecordEvidence {
                 bloom,
@@ -359,13 +373,7 @@ fn representative() -> Decisions {
         .chain(host_fault_records(bloom, workpiece.clone()))
         .chain([record_candidate_vehicle(bloom, workpiece.clone())])
         .chain(brake_aggregates(bloom))
-        .chain([Decision::DispatchSplice {
-            bloom,
-            workpiece,
-            base: digest(41),
-            members: vec![MemberCandidate { workpiece: WorkpieceId("beta".into()), candidate: digest(42) }],
-            adopt_from: Some(successor),
-        }])
+        .chain([dispatch_splice(bloom, workpiece, successor)])
         .collect(),
     }
 }

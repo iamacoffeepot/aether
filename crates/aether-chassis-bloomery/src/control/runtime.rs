@@ -1080,28 +1080,7 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
             Topic::Redispatch,
             to_vec(&RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer, words: words.clone() })?,
         )),
-        Decision::DispatchAttempt {
-            bloom,
-            workpiece,
-            stage,
-            transformation,
-            scope_revision,
-            candidate,
-            profile,
-            configs,
-        } => {
-            let payload = DispatchPayload {
-                bloom: bloom.0,
-                workpiece: workpiece.clone(),
-                stage: *stage,
-                transformation: transformation.clone(),
-                scope_revision: *scope_revision,
-                candidate: *candidate,
-                profile: profile.clone(),
-                configs: configs.clone(),
-            };
-            Some(OutboxPayload::new(Topic::Dispatch, to_vec(&payload)?))
-        }
+        Decision::DispatchAttempt { .. } => dispatch_attempt_outbox(effect)?,
         Decision::DispatchLand { bloom, expected_base, new_head } => {
             let payload = LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head };
             Some(OutboxPayload::new(Topic::Land, to_vec(&payload)?))
@@ -1115,16 +1094,7 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
             };
             Some(OutboxPayload::new(Topic::Integrate, to_vec(&payload)?))
         }
-        Decision::DispatchSplice { bloom, workpiece, base, members, adopt_from } => {
-            let payload = SplicePayload {
-                bloom: bloom.0,
-                workpiece: workpiece.clone(),
-                base: *base,
-                members: members.clone(),
-                adopt_from: adopt_from.map(|predecessor| predecessor.0),
-            };
-            Some(OutboxPayload::new(Topic::Splice, to_vec(&payload)?))
-        }
+        Decision::DispatchSplice { .. } => splice_outbox(effect)?,
         Decision::DispatchAggregateReview { bloom, transformation, roll, profile, configs } => {
             let payload = AggregateReviewPayload {
                 profile: profile.clone(),
@@ -1183,6 +1153,47 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         | Decision::ClearHostFault { .. }
         | Decision::RecordCandidateVehicle { .. } => None,
     })
+}
+
+fn dispatch_attempt_outbox(effect: &Decision) -> Result<Option<OutboxPayload>, WireError> {
+    let Decision::DispatchAttempt {
+        bloom,
+        workpiece,
+        stage,
+        transformation,
+        scope_revision,
+        candidate,
+        profile,
+        configs,
+    } = effect
+    else {
+        return Ok(None);
+    };
+    let payload = DispatchPayload {
+        bloom: bloom.0,
+        workpiece: workpiece.clone(),
+        stage: *stage,
+        transformation: transformation.clone(),
+        scope_revision: *scope_revision,
+        candidate: *candidate,
+        profile: profile.clone(),
+        configs: configs.clone(),
+    };
+    Ok(Some(OutboxPayload::new(Topic::Dispatch, to_vec(&payload)?)))
+}
+
+fn splice_outbox(effect: &Decision) -> Result<Option<OutboxPayload>, WireError> {
+    let Decision::DispatchSplice { bloom, workpiece, base, members, adopt_from } = effect else {
+        return Ok(None);
+    };
+    let payload = SplicePayload {
+        bloom: bloom.0,
+        workpiece: workpiece.clone(),
+        base: *base,
+        members: members.clone(),
+        adopt_from: adopt_from.map(|predecessor| predecessor.0),
+    };
+    Ok(Some(OutboxPayload::new(Topic::Splice, to_vec(&payload)?)))
 }
 
 /// Commit a just-reduced admit, or reply immediately when it needs no new row.

@@ -81,7 +81,7 @@ pub(super) fn construct_entry(bloom: BloomId, member: &Membership, sealed: Seale
 fn splice_join_entry<F: Fn(&WorkpieceId) -> Option<Digest>>(
     bloom: BloomId,
     member: &Membership,
-    sealed: SealedLine<'_>,
+    sealed: &SealedLine<'_>,
     tips: &[WorkpieceId],
     checkout_of: &F,
     adopt_from: Option<BloomId>,
@@ -225,7 +225,7 @@ pub(super) fn successor_entries(
                 effects.extend(splice_join_entry(
                     successor_id,
                     member,
-                    entry_line(member, successor.configs(), catalog, successor.base()),
+                    &entry_line(member, successor.configs(), catalog, successor.base()),
                     &tips,
                     &checkout_of,
                     adopt_from,
@@ -284,7 +284,14 @@ pub(super) fn newly_ready_entries(
                 effects.extend(construct_entry(bloom, member, sealed(digest)));
             }
             SplicedBase::Join { tips } => {
-                effects.extend(splice_join_entry(bloom, member, sealed(record.spec.base()), &tips, &checkout_of, None));
+                effects.extend(splice_join_entry(
+                    bloom,
+                    member,
+                    &sealed(record.spec.base()),
+                    &tips,
+                    &checkout_of,
+                    None,
+                ));
             }
         }
     }
@@ -697,7 +704,7 @@ mod tests {
             construct_dispatches(&decided_c).is_empty(),
             "A and C are independent tips: B does not construct on one of them",
         );
-        assert!(reconcile_checkout(&decided_c, "wp-b").is_none(), "a structural join is not a residual collision",);
+        assert!(reconcile_checkout(&decided_c, "wp-b").is_none(), "a structural join is not a residual collision");
         let splice = decided_c.effects.iter().find_map(|effect| match effect {
             Decision::DispatchSplice { workpiece, base, members, .. } if workpiece.0 == "wp-b" => {
                 Some((*base, members.iter().map(|member| member.workpiece.clone()).collect::<Vec<_>>()))
