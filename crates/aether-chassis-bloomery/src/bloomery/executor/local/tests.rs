@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 #[cfg(target_os = "linux")]
 use std::process::{Child, Command};
 
@@ -444,7 +446,7 @@ fn an_absent_or_unreadable_or_future_transcript_is_not_fabricated_progress() {
 
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink("/no-such-transcript", dir.join("transcript.jsonl")).unwrap();
+        symlink("/no-such-transcript", dir.join("transcript.jsonl")).unwrap();
         assert_eq!(
             exec.inspect(&handle).unwrap(),
             ExecutionStatus::Running { last_progress_unix_millis: None },
@@ -456,7 +458,7 @@ fn an_absent_or_unreadable_or_future_transcript_is_not_fabricated_progress() {
     let transcript = dir.join("transcript.jsonl");
     fs::write(&transcript, b"{}\n").unwrap();
     let file = fs::File::open(&transcript).unwrap();
-    file.set_modified(SystemTime::now() + Duration::from_secs(3600)).unwrap();
+    file.set_modified(SystemTime::now() + Duration::from_hours(1)).unwrap();
     drop(file);
     assert_eq!(
         exec.inspect(&handle).unwrap(),

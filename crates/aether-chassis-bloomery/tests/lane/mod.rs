@@ -52,6 +52,7 @@ pub mod repo;
 use std::fs;
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -352,6 +353,30 @@ impl LaneHarness {
         };
         assert!(matches!(outcome, Outcome::Sealed(_)), "the harness seal must seal: {outcome:?}");
     }
+}
+
+/// Drive `body` while a scoped worker keeps calling `tick`. The worker
+/// stops when `body` returns or panics, so this is `thread::scope` rather
+/// than a detached spawn the settlement umbrella would refuse.
+pub fn while_pumping<T>(mut tick: impl FnMut() + Send, body: impl FnOnce() -> T) -> T {
+    struct StopOnDrop<'a>(&'a AtomicBool);
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let stop = AtomicBool::new(false);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            while !stop.load(Ordering::Relaxed) {
+                tick();
+                thread::sleep(Duration::from_millis(200));
+            }
+        });
+        let _stop = StopOnDrop(&stop);
+        body()
+    })
 }
 
 /// Fork a coordinator and handshake only once the child we spawned is still

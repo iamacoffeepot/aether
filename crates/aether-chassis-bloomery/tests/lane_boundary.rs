@@ -21,17 +21,13 @@ mod lane;
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
 
 use aether_bloomery::{
     BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure,
     VerifyFailureSet,
 };
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneScript};
-use lane::LaneHarness;
+use lane::{LaneHarness, while_pumping};
 
 /// Whether the bloom's single member has come to rest either way — resolved, or
 /// wedged. The predicate most scenarios wait on, because what separates them is
@@ -384,34 +380,26 @@ fn a_lane_that_goes_silent_is_cancelled_before_its_wall_clock_and_retries_the_sa
     // harness's quiescence budget treats as a stall. Priming each new
     // evidence dir once is what makes every lap silent rather than only the
     // first.
-    let stop = Arc::new(AtomicBool::new(false));
     let runs = harness.runs_dir();
-    let pumping = {
-        let stop = Arc::clone(&stop);
-        thread::spawn(move || {
-            let mut primed = HashSet::new();
-            while !stop.load(Ordering::Relaxed) {
-                if let Ok(entries) = fs::read_dir(&runs) {
-                    for entry in entries.filter_map(Result::ok) {
-                        let name = entry.file_name();
-                        let Some(nonce) = name.to_str().and_then(|name| name.strip_suffix("-evidence")) else {
-                            continue;
-                        };
-                        if !primed.insert(nonce.to_owned()) {
-                            continue;
-                        }
-                        let path = entry.path().join("transcript.jsonl");
-                        let _ = fs::write(&path, b"{}\n");
+    let mut primed = HashSet::new();
+    let bloom = while_pumping(
+        || {
+            if let Ok(entries) = fs::read_dir(&runs) {
+                for entry in entries.filter_map(Result::ok) {
+                    let name = entry.file_name();
+                    let Some(nonce) = name.to_str().and_then(|name| name.strip_suffix("-evidence")) else {
+                        continue;
+                    };
+                    if !primed.insert(nonce.to_owned()) {
+                        continue;
                     }
+                    let path = entry.path().join("transcript.jsonl");
+                    let _ = fs::write(&path, b"{}\n");
                 }
-                thread::sleep(Duration::from_millis(200));
             }
-        })
-    };
-
-    let bloom = harness.settle("the silent member comes to rest", at_rest);
-    stop.store(true, Ordering::Relaxed);
-    let _ = pumping.join();
+        },
+        || harness.settle("the silent member comes to rest", at_rest),
+    );
 
     assert!(bloom.members[0].resolution.is_none(), "a silent lane resolves nothing");
     assert!(bloom.members[0].wedge.is_some(), "silence must reach the same wedge a timeout does");
@@ -430,35 +418,27 @@ fn a_continuously_noisy_lane_still_dies_at_its_absolute_deadline() {
     // Progress only extends the silence window. A lane that keeps writing
     // its transcript must still hit the sealed wall clock — otherwise a
     // noisy but unproductive process would run forever.
-    let stop = Arc::new(AtomicBool::new(false));
     let mut harness =
         LaneHarness::start_with_heartbeat(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 5, 30);
     let runs = harness.runs_dir();
-    let pumping = {
-        let stop = Arc::clone(&stop);
-        thread::spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
-                if let Ok(entries) = fs::read_dir(&runs) {
-                    for entry in entries.filter_map(Result::ok) {
-                        let name = entry.file_name();
-                        let Some(nonce) = name.to_str().and_then(|name| name.strip_suffix("-evidence")) else {
-                            continue;
-                        };
-                        let path = entry.path().join("transcript.jsonl");
-                        let _ = fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| {
-                            use std::io::Write as _;
-                            file.write_all(nonce.as_bytes())
-                        });
-                    }
+    let bloom = while_pumping(
+        || {
+            if let Ok(entries) = fs::read_dir(&runs) {
+                for entry in entries.filter_map(Result::ok) {
+                    let name = entry.file_name();
+                    let Some(nonce) = name.to_str().and_then(|name| name.strip_suffix("-evidence")) else {
+                        continue;
+                    };
+                    let path = entry.path().join("transcript.jsonl");
+                    let _ = fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| {
+                        use std::io::Write as _;
+                        file.write_all(nonce.as_bytes())
+                    });
                 }
-                thread::sleep(Duration::from_millis(200));
             }
-        })
-    };
-
-    let bloom = harness.settle("the noisy hung member comes to rest", at_rest);
-    stop.store(true, Ordering::Relaxed);
-    let _ = pumping.join();
+        },
+        || harness.settle("the noisy hung member comes to rest", at_rest),
+    );
 
     assert!(bloom.members[0].resolution.is_none(), "a noisy hung lane resolves nothing");
     assert!(bloom.members[0].wedge.is_some(), "the sealed deadline still terminates a continuously noisy lane");

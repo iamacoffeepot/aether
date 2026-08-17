@@ -349,6 +349,7 @@ fn is_silent(start: u64, now_unix_millis: u64, threshold_millis: u64) -> bool {
 /// Why a synthesised failed attempt is being admitted for a still-pending
 /// order. Both causes reuse the same cancel → timeout-record → intake path;
 /// the distinction is the log line, not a new journal variant.
+#[derive(Clone, Copy)]
 enum TerminationCause {
     Deadline,
     HeartbeatSilence,
@@ -467,9 +468,7 @@ fn terminate_live_order(
         subject: record.displayed_digest,
         deadline_unix_millis: deadline,
     };
-    let Some(detail) = store_timeout_record(artifacts, &timeout) else {
-        return None;
-    };
+    let detail = store_timeout_record(artifacts, &timeout)?;
 
     let upload = UploadedEvidence {
         nonce: record.nonce.clone(),

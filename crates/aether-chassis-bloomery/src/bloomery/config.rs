@@ -1,5 +1,6 @@
 //! Bloomery coordinator and GitHub adapter configuration boundaries.
 
+use std::error::Error;
 use std::fmt;
 
 #[cfg(feature = "github")]
@@ -436,7 +437,7 @@ impl fmt::Display for HeartbeatSilenceZero {
     }
 }
 
-impl std::error::Error for HeartbeatSilenceZero {}
+impl Error for HeartbeatSilenceZero {}
 
 #[cfg(feature = "github")]
 impl GithubConnectionConfig {
