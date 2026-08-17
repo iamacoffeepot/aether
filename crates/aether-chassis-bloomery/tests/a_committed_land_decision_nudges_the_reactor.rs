@@ -14,7 +14,7 @@ pub mod fixture;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_bloomery::{BloomId, BloomStatus};
+use aether_bloomery::BloomId;
 use fixture::{FixtureHarness, captured, digest, passed};
 
 /// The workpiece the single sealed member covers.
@@ -54,7 +54,7 @@ fn a_committed_land_decision_nudges_the_reactor() {
 
     let proposal = await_landing_proposal(&mut harness, bloom);
     assert!(proposal > 0, "the land reactor opened a numbered proposal");
-    assert_eq!(harness.bloom(bloom).status, BloomStatus::Resolved, "a proposed bloom has not landed yet");
+    assert!(harness.landing_merged(proposal), "the nudge also accepts the proposal it opened");
 }
 
 /// Wait until the boot-constructed land reactor opens a proposal for `bloom`.

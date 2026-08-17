@@ -64,7 +64,7 @@ use aether_bloomery::{
 use serde::Serialize;
 
 use crate::client::{
-    ChecksState, GitDataApi, GitRef, GithubApi, GithubError, IssueStateApi, MergeResult, NewComment, NewPullRequest,
+    GitDataApi, GitRef, GithubApi, GithubError, IssueStateApi, MergeResult, NewComment, NewPullRequest,
     PullMergeResult, PullRequestApi, PullRequestState, strip_heads,
 };
 use crate::correspondence::GitObjectId;
@@ -302,24 +302,21 @@ pub struct LandingProposal {
 /// What asking the port to accept a bloom's own landing proposal did
 /// (issue #4953).
 ///
-/// The coordinator opens the proposal and, once its gate is green, merges it —
-/// the same trust decision the pipeline already made, since ADR-0186 gives the
-/// daily ref no required checks precisely because bloomery's own verify and
-/// aggregate gates prove each landing. What is automated is the button press,
-/// not the judgement, so this vocabulary is about whether the thing being
-/// merged is still the thing that was proven.
+/// The coordinator opens the proposal and merges it once the structural gates
+/// hold — the proposal is this bloom's landing branch aimed at mainline, its
+/// head is still the proven head, and the base compare-and-swap still passes.
+/// ADR-0186 gives the daily ref no required checks because bloomery's own
+/// verify and aggregate gates prove each landing; the proposal is
+/// correspondence, not a review surface, so this vocabulary does not consult
+/// check state.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LandAcceptance {
     /// The proposal merged, or had already merged. Either way the watch's next
     /// poll reads the commit mainline actually became; this reports only that
     /// there is nothing left to press.
     Accepted,
-    /// Nothing to accept yet: the proposal's gate has not reported green.
-    ///
-    /// A gate that has concluded *red* also lands here. Classifying a red gate
-    /// is [`SourceBackend::poll_land`]'s job — the watch consults it first, and
-    /// a second classification here would be a second place to keep in step.
-    /// What this answers is only whether the green a merge requires is in hand.
+    /// Nothing to accept yet. The watch leaves the proposal open and looks
+    /// again on the next pass.
     Pending,
     /// Refused, and why. The landing does not proceed under this proposal.
     Refused(LandingRefusal),
@@ -1229,16 +1226,12 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
             if pull.state != PullRequestState::Open {
                 return Ok(LandProposal::Declined);
             }
-            // An open proposal that has not merged is only *waiting* while its
-            // gate might still pass. Once a check has concluded red the
-            // proposal cannot merge, and reporting that as `Open` is what left
-            // a bloom polling something nothing would ever accept. Anything
-            // pending — or no check reported yet — stays open: a partial gate
-            // is not a verdict.
-            return Ok(match self.client.checks_for_ref(&pull.head_sha)? {
-                ChecksState::Failed { failing } => LandProposal::ChecksFailed { failing },
-                ChecksState::Absent | ChecksState::Pending | ChecksState::Passed => LandProposal::Open,
-            });
+            // An open proposal is open until it merges, is closed, or drifts.
+            // Check conclusions are not a landing verdict: bloomery's own
+            // gates already proved this head (ADR-0186), and mapping a red
+            // check to `ChecksFailed` is what rejected a fully proven tree
+            // on a runner-side flake (#5110).
+            return Ok(LandProposal::Open);
         };
 
         // Mainline became the *merge* commit, which under a squash accept is a
@@ -1452,16 +1445,17 @@ pub trait LandingSource: SourceBackend<Error = SourceError> {
     ) -> Result<LandOutcome, SourceError>;
 
     /// Accept the landing proposal numbered `number` — merge the pull request
-    /// the port itself opened for `bloom`, once its gate is green and it still
-    /// proposes exactly what the bloom proved (issue #4953).
+    /// the port itself opened for `bloom`, once the structural gates hold and
+    /// it still proposes exactly what the bloom proved (issue #4953).
     ///
     /// Gated by the same `cas_land_enabled` kill switch
     /// [`land_proposal`](Self::land_proposal) is, and guarded by the same
     /// compare-and-swap the proposal was opened under: `expected_base` has to
     /// still be mainline, `new_head` has to still be the proposal's head, and
     /// the merge itself is issued against that head sha so the source refuses
-    /// it if the branch moves in between. Refuse-and-surface is the answer to
-    /// every one of those moving — never merge-anyway.
+    /// it if the branch moves in between. Check state is not consulted
+    /// (ADR-0186, #5110). Refuse-and-surface is the answer to every one of
+    /// those moving — never merge-anyway.
     ///
     /// # Errors
     /// [`SourceError::LandingDisabled`] while the land gate is off, or a
@@ -1522,10 +1516,9 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> LandingSource f
         //
         // A redrive of the same head is still a no-write (`point_landing_branch`
         // no-ops). A later land with a new proven head — a refine after the
-        // first proposal's checks refused — must move the branch onto that head
-        // before returning, or checks keep running against the refused commit
-        // and the #4953 head-match then refuses the new landing as drift, one
-        // gate too late.
+        // first proposal was refused — must move the branch onto that head
+        // before returning, or the #4953 head-match then refuses the new
+        // landing as drift, one gate too late.
         //
         // Ahead of the base check, deliberately. The base check decides whether to
         // *open* a landing; once one is open its fate belongs to the proposal, and
@@ -1636,18 +1629,12 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> LandingSource f
         // The same compare-and-swap `land_proposal` opened under, re-asked at
         // the moment of the write. `land_proposal` deliberately does not
         // re-decide a base once a proposal is open — an open proposal's fate
-        // belongs to the proposal — but a merge *is* the write that base guards,
-        // and mainline can have moved in the ticks between opening and green.
+        // belongs to the proposal — but a merge *is* the write that base
+        // guards, and mainline can have moved in the ticks between opening
+        // and this accept.
         let actual = self.mainline_digest(&self.mainline_head()?.sha)?;
         if actual != *expected_base {
             return Ok(LandAcceptance::Refused(LandingRefusal::BaseMoved { expected: *expected_base, actual }));
-        }
-
-        // Green, and only green. `Absent` reads as not-yet — a gate that has not
-        // reported is not a gate that passed — so a proposal nothing ever checks
-        // is left for a person rather than merged on an absence.
-        if self.client.checks_for_ref(&pull.head_sha)? != ChecksState::Passed {
-            return Ok(LandAcceptance::Pending);
         }
 
         match self.client.squash_merge_pull_request(number, &pull.head_sha)? {
@@ -2329,10 +2316,10 @@ mod tests {
 
     // Tripwire: a refine produces a new proven head while the landing pull
     // request from the refused first land is still open on the old one. Adopt
-    // without re-pointing leaves checks running against the refused commit,
-    // and the later head-match gate (#4953) then refuses the new landing as
-    // drift — one gate too late. The adopt path is the one that knows both
-    // heads and must move the branch before returning Proposed.
+    // without re-pointing leaves the proposal on the old commit, and the
+    // later head-match gate (#4953) then refuses the new landing as drift —
+    // one gate too late. The adopt path is the one that knows both heads and
+    // must move the branch before returning Proposed.
     #[test]
     fn land_after_a_refine_repoints_an_open_proposal_onto_the_new_proven_head() {
         let fake = FakeGithub::new();
@@ -2464,15 +2451,11 @@ mod tests {
     // head from the proposal would attest a commit that is on no branch — and
     // leaving it unrecorded would break the next bloom's base check, which
     // reverse-resolves mainline through exactly this correspondence.
-    // #4689 — an open proposal is only *waiting* while its gate might still
-    // pass. A concluded-red gate means it can never merge, and reporting that as
-    // `Open` is what left a bloom polling something nothing would accept.
-    //
-    // Tripwire on the pending side above all: reading a partial gate as failed
-    // would tear a bloom's line open every time a slow check had not reported
-    // yet, which is worse than the bug being fixed.
+    // #5110 — an open proposal stays open until it merges, is closed, or
+    // drifts. Mapping a concluded-red check to `ChecksFailed` is what
+    // rejected a fully proven tree after a runner-side flake.
     #[test]
-    fn an_open_proposal_is_only_open_while_its_checks_might_still_pass() {
+    fn an_open_proposal_stays_open_regardless_of_check_state() {
         let fake = FakeGithub::new();
         let bloom = bloom();
         let base = digest(10);
@@ -2487,26 +2470,19 @@ mod tests {
         };
         let head_sha = fake.pull_request_head_sha(number).expect("the proposal has a head");
 
-        // No check has reported: nothing to judge, so the watch keeps waiting.
-        assert_eq!(source.poll_land(&bloom, &base, number).unwrap(), LandProposal::Open);
-
-        // A check still running is not a verdict — a later one can still fail.
-        fake.seed_checks(&head_sha, ChecksState::Pending);
-        assert_eq!(source.poll_land(&bloom, &base, number).unwrap(), LandProposal::Open);
-
-        fake.seed_checks(&head_sha, ChecksState::Passed);
-        assert_eq!(source.poll_land(&bloom, &base, number).unwrap(), LandProposal::Open);
-
-        // Red: terminal for the watch, carrying the names a repair is directed by.
-        fake.seed_checks(&head_sha, ChecksState::Failed { failing: alloc_vec(&["Clippy", "Rustdoc"]) });
-        assert_eq!(
-            source.poll_land(&bloom, &base, number).unwrap(),
-            LandProposal::ChecksFailed { failing: alloc_vec(&["Clippy", "Rustdoc"]) },
-        );
-    }
-
-    fn alloc_vec(names: &[&str]) -> Vec<String> {
-        names.iter().map(|name| (*name).to_owned()).collect()
+        for state in [
+            ChecksState::Absent,
+            ChecksState::Pending,
+            ChecksState::Passed,
+            ChecksState::Failed { failing: vec!["Clippy".into(), "Rustdoc".into()] },
+        ] {
+            fake.seed_checks(&head_sha, state.clone());
+            assert_eq!(
+                source.poll_land(&bloom, &base, number).unwrap(),
+                LandProposal::Open,
+                "a {state:?} check is not a landing verdict",
+            );
+        }
     }
 
     #[test]
@@ -2578,16 +2554,15 @@ mod tests {
         (source, number, head_sha)
     }
 
-    // Acceptance 1: a green landing merges with nobody pressing anything. The
-    // merge commit is what mainline became — the port never reports a landing
-    // under the head it proposed, because a squash produces neither branch's
-    // commit.
+    // Acceptance 1: a structurally valid landing merges with nobody pressing
+    // anything. The merge commit is what mainline became — the port never
+    // reports a landing under the head it proposed, because a squash produces
+    // neither branch's commit.
     #[test]
-    fn a_green_proposal_is_accepted_and_mainline_becomes_the_squash_commit() {
+    fn a_structurally_valid_proposal_is_accepted_and_mainline_becomes_the_squash_commit() {
         let fake = FakeGithub::new();
         let (base, new_head) = (digest(10), digest(90));
-        let (source, number, head_sha) = proposed(&fake, &base, &new_head);
-        fake.seed_checks(&head_sha, ChecksState::Passed);
+        let (source, number, _) = proposed(&fake, &base, &new_head);
 
         assert_eq!(source.accept_land(&bloom(), &base, &new_head, number).unwrap(), LandAcceptance::Accepted);
         assert_eq!(fake.pull_request_merged(number), Some(true), "the port merged the proposal it opened");
@@ -2606,8 +2581,7 @@ mod tests {
     fn accepting_a_landing_refuses_while_the_land_gate_is_off() {
         let fake = FakeGithub::new();
         let (base, new_head) = (digest(10), digest(90));
-        let (_, number, head_sha) = proposed(&fake, &base, &new_head);
-        fake.seed_checks(&head_sha, ChecksState::Passed);
+        let (_, number, _) = proposed(&fake, &base, &new_head);
 
         match git_source(&fake, false).accept_land(&bloom(), &base, &new_head, number) {
             Err(SourceError::LandingDisabled) => {}
@@ -2616,24 +2590,30 @@ mod tests {
         assert_eq!(fake.pull_request_merged(number), Some(false), "a gated-off port merges nothing");
     }
 
-    // A gate that has not concluded green is not a gate that passed. `Absent`
-    // above all: a proposal nothing has checked yet reads exactly like one
-    // everything has passed if the port asks only "did anything fail".
+    // Tripwire: consulting check state is what parked a proven landing for
+    // ten to twenty minutes, and what rejected one when a runner flake
+    // concluded red after aggregate verify had already passed the same
+    // suite (#5110).
     #[test]
-    fn a_proposal_whose_gate_has_not_gone_green_is_not_accepted() {
-        let fake = FakeGithub::new();
-        let (base, new_head) = (digest(10), digest(90));
-        let (source, number, head_sha) = proposed(&fake, &base, &new_head);
-
-        for state in [ChecksState::Absent, ChecksState::Pending] {
+    fn a_proposal_is_accepted_without_consulting_check_state() {
+        for state in [
+            ChecksState::Absent,
+            ChecksState::Pending,
+            ChecksState::Passed,
+            ChecksState::Failed { failing: vec!["CI pass".into()] },
+        ] {
+            let fake = FakeGithub::new();
+            let (base, new_head) = (digest(10), digest(90));
+            let (source, number, head_sha) = proposed(&fake, &base, &new_head);
             fake.seed_checks(&head_sha, state.clone());
+
             assert_eq!(
                 source.accept_land(&bloom(), &base, &new_head, number).unwrap(),
-                LandAcceptance::Pending,
-                "a {state:?} gate leaves the proposal for a later pass",
+                LandAcceptance::Accepted,
+                "a {state:?} check does not block acceptance",
             );
+            assert_eq!(fake.pull_request_merged(number), Some(true), "a {state:?} check still merged");
         }
-        assert_eq!(fake.pull_request_merged(number), Some(false), "nothing merged on an unconcluded gate");
     }
 
     // Acceptance 2: a proposal that gained a commit nobody proved is refused,
@@ -2648,7 +2628,6 @@ mod tests {
 
         let pushed = "ee".repeat(20);
         fake.push_to_pull_request(number, &pushed);
-        fake.seed_checks(&pushed, ChecksState::Passed);
 
         match source.accept_land(&bloom(), &base, &new_head, number).unwrap() {
             LandAcceptance::Refused(LandingRefusal::Drifted { detail }) => {
@@ -2662,13 +2641,12 @@ mod tests {
     // Acceptance 2, the other axis. `land` deliberately stops re-deciding the
     // base once a proposal is open, so without this check the acceptance would
     // be the one write in the landing that no base guard covers — and the
-    // window is real: a proposal sits open for as many ticks as its gate takes.
+    // window is real: a proposal can sit open across ticks before the accept.
     #[test]
     fn a_base_that_moved_after_the_proposal_opened_refuses_the_merge() {
         let fake = FakeGithub::new();
         let (base, new_head) = (digest(10), digest(90));
-        let (source, number, head_sha) = proposed(&fake, &base, &new_head);
-        fake.seed_checks(&head_sha, ChecksState::Passed);
+        let (source, number, _) = proposed(&fake, &base, &new_head);
 
         let moved = digest(77);
         fake.seed_ref("heads/main", &"d4".repeat(20));
