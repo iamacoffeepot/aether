@@ -98,16 +98,16 @@ pub use port::{
     BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ClaimReleaseOutcome, Conclusion,
     EvidenceRef, ExecutionStatus, ExecutorBackend, ExecutorFaultView, HostFaultView, IntegrateOutcome,
     IntegrationPosition, LandOutcome, LandProposal, LandingBlock, MemberView, PendingDecisionView, ProjectedReceipt,
-    ProjectionBackend, ReviewParkView, SourceBackend, SourceSnapshot, ViewDocument, WorkHandle, WorkOrder,
+    ProjectionBackend, ReviewParkView, SourceBackend, SourceSnapshot, ViewDocument, WedgeCause, WorkHandle, WorkOrder,
 };
 pub use reduce::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
     AggregateVerifyError, AttemptCompletedError, BaseMismatch, BloomRecord, BloomStatus, DECISIONS_SCHEMA, Decision,
     Decisions, DecisionsSchemaError, Event, Fact, FoldConflictError, FoldedIntegration, GrantAttemptsError,
-    HostFaultError, HostFaultHold, IntegrateError, LandError, LandingRejectedError, OperatorHoldError,
-    OperatorRepairError, OrphanClaimReleaseError, Outcome, ResolveError, SealConflict, SealError, Snapshot,
-    SpliceError, StageProgress, SupersedeError, VerifyFailedError, decode_recorded_decisions, is_active_unlanded,
-    reduce, view_of,
+    HostFaultError, HostFaultHold, IntegrateError, LandError, LandingRejectedError, MemberExecutorFaultError,
+    MemberMachineryFault, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, Outcome, ResolveError,
+    SealConflict, SealError, Snapshot, SpliceError, StageProgress, SupersedeError, VerifyFailedError,
+    decode_recorded_decisions, is_active_unlanded, reduce, view_of,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;

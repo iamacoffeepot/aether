@@ -1152,21 +1152,28 @@ fn a_cycle_that_faulted_partway_does_not_expire_the_handles_it_never_inspected()
     assert_eq!(store.list_outstanding_nonces().unwrap().len(), 2, "both orders survive the blip");
 
     // The transport recovers on the next tick: the finished lane admits its own
-    // passing verdict, and only the genuinely silent one times out.
+    // passing verdict, and only the genuinely silent one times out — as the
+    // member machinery fault #5091 admits, not a failing attempt that would
+    // spend the work budget.
     let admits = tick(&mut store, &working, &mut tracked, AT_THE_DEADLINE);
 
-    let passed: Vec<bool> = admits
-        .iter()
-        .map(|admit| match from_bytes::<aether_bloomery::Event>(&admit.event).unwrap().fact {
-            Fact::AttemptCompleted { passed, .. } => passed,
-            other => panic!("expected a Fact::AttemptCompleted, got {other:?}"),
-        })
-        .collect();
-    assert_eq!(
-        passed,
-        vec![true],
-        "the finished lane keeps its own verdict; the silent timeout is a host fault, not a second attempt",
-    );
+    let mut passed = false;
+    let mut silent_fault = false;
+    for admit in &admits {
+        match from_bytes::<aether_bloomery::Event>(&admit.event).unwrap().fact {
+            Fact::AttemptCompleted { passed: true, .. } => passed = true,
+            Fact::MemberExecutorFault { workpiece, stage, evidence, .. } => {
+                assert_eq!(workpiece.0, "wp-silent");
+                assert_eq!(stage, StageId::Construct);
+                assert_eq!(evidence.kind, aether_bloomery::EvidenceKind::ExecutorFault);
+                silent_fault = true;
+            }
+            other => panic!("expected a passing attempt or a silent-order machinery fault, got {other:?}"),
+        }
+    }
+    assert!(passed, "the finished lane keeps its own verdict");
+    assert!(silent_fault, "the silent timeout is a host fault, not a second attempt");
+    assert_eq!(admits.len(), 2);
 }
 
 /// A backend that faults one named nonce's `inspect` and delegates everything
