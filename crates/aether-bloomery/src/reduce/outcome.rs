@@ -492,9 +492,12 @@ pub enum Outcome {
         /// The findings this adjudication closed, in the order it named them.
         closed: Vec<Digest>,
         /// Whether closing them let the composition proceed to its landing —
-        /// `false` when the bloom holds no weave to land, which is the state a
-        /// landing-refused composition wedges in and where the operator's next
-        /// move is a repair rather than a waiver.
+        /// `false` when the bloom holds no weave to land, or when the weave it
+        /// holds has no green aggregate-verify proof yet (#5104). The first is
+        /// the state a landing-refused composition wedges in, where the
+        /// operator's next move is a repair rather than a waiver. The second
+        /// leaves the ordinary refine cycle to finish proving the current head;
+        /// landing dispatches once that proof is green.
         proceeds_to_landing: bool,
     },
     /// An operator adjudication was refused.

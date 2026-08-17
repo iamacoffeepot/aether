@@ -95,10 +95,13 @@ fn adjudicable(record: &BloomRecord, finding: &Digest) -> bool {
 
 /// Reduce an operator adjudication ([`Fact::OperatorAdjudication`](crate::Fact::OperatorAdjudication)).
 ///
-/// The named findings are closed, any park they raised is released, and the
-/// composition proceeds to its landing from the weave it already holds — the
-/// same destination a passing review sends it to, reached on the operator's
-/// authority instead of a verdict's.
+/// The named findings are closed and any park they raised is released. Landing
+/// is a separate question: the composition proceeds from the weave it already
+/// holds only when that weave's aggregate verify is already green — the same
+/// destination a passing review sends it to, reached on the operator's
+/// authority instead of a verdict's. A red or still-pending proof closes the
+/// findings and leaves the ordinary refine cycle to finish proving the head;
+/// landing dispatches once that proof is green, not from this override.
 ///
 /// What it never emits is a member dispatch or a
 /// [`Decision::RevokeResolution`]. An
@@ -161,7 +164,7 @@ pub(super) fn reduce_operator_adjudication(
     }
 }
 
-/// Send the adjudicated composition to its landing, if it has a weave to land.
+/// Send the adjudicated composition to its landing, if it has a proven weave.
 ///
 /// Three states, one destination. A bloom already `Resolved` was parked by its
 /// landing gate, so it re-proposes the head it still holds. A `Sealed` bloom
@@ -171,6 +174,13 @@ pub(super) fn reduce_operator_adjudication(
 /// the fold and whose repair then wedged — there is no tree to land, so the
 /// findings close and nothing dispatches; the operator's next move there is a
 /// repair, not a waiver.
+///
+/// A fourth refusal sits in front of every destination: the head about to be
+/// proposed must already carry a green aggregate-verify proof (#5104). A refine
+/// lap can replace the held fold while a park still names an earlier, proven
+/// weave, and landing that newer head before its gates return — or after they
+/// return red — is how a waived finding became a red landing proposal. Closing
+/// the findings does not wait on that proof; only this dispatch does.
 ///
 /// Either landing path first advances the composition's cursor to `Land`, which
 /// is what clears a composition wedge (`AdvanceStage` is the only route out of
@@ -182,6 +192,9 @@ fn proceed_to_landing(record: &BloomRecord, bloom: &BloomId, effects: &mut Vec<D
         let Some(head) = record.resolved_head else {
             return false;
         };
+        if !resolved_head_is_proven(record, head) {
+            return false;
+        }
         effects.push(Decision::AdvanceStage {
             bloom: *bloom,
             workpiece: composition,
@@ -196,6 +209,9 @@ fn proceed_to_landing(record: &BloomRecord, bloom: &BloomId, effects: &mut Vec<D
     let Some(integration) = record.integration.as_ref() else {
         return false;
     };
+    if !weave_is_proven(record, integration.tree) {
+        return false;
+    }
     let weave = CandidateRef { tree: integration.tree, checkout: integration.head };
     effects.push(Decision::AdvanceStage {
         bloom: *bloom,
@@ -221,6 +237,26 @@ fn proceed_to_landing(record: &BloomRecord, bloom: &BloomId, effects: &mut Vec<D
         new_head: integration.head,
     });
     true
+}
+
+/// Whether `tree` has a green mechanical proof on this bloom — the memo every
+/// other verify position consults (#4891). A missing proof is the failed-or-pending
+/// case: either the gates have not returned or they returned red, and neither is
+/// a head landing may propose.
+fn weave_is_proven(record: &BloomRecord, tree: Digest) -> bool {
+    record.verify_proof_for(tree).is_some()
+}
+
+/// Whether a `Resolved` bloom's landing head is a weave this bloom has already
+/// proven. The fold is cleared on resolve, so the composition cursor's candidate
+/// is what still names the tree that produced `head`. A resolved bloom with no
+/// matching cursor was reviewed onto this head and refine cannot replace
+/// `resolved_head` while the bloom stays `Resolved`, so that case stays landable.
+fn resolved_head_is_proven(record: &BloomRecord, head: Digest) -> bool {
+    match record.progress.get(&WorkpieceId::composition()).and_then(|progress| progress.candidate) {
+        Some(candidate) if candidate.checkout == head => weave_is_proven(record, candidate.tree),
+        _ => true,
+    }
 }
 
 /// Reduce an operator-supplied repair ([`Fact::OperatorRepair`](crate::Fact::OperatorRepair)).
