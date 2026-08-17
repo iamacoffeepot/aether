@@ -8,6 +8,9 @@ use std::collections::BTreeMap;
 
 use super::ClosureKey;
 
+#[cfg(feature = "runtime")]
+use crate::store::{ProofFactWrite, StoreBackend};
+
 /// The result a proof fact records. Append-only: a new spelling goes on the
 /// end, never a rename or reorder of these two.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -70,7 +73,6 @@ pub struct DiscriminatedFacts {
 
 impl DiscriminatedFacts {
     /// The facts in test-id order.
-    #[must_use]
     pub fn iter(&self) -> impl Iterator<Item = &DiscriminatedFact> {
         self.facts.iter()
     }
@@ -128,17 +130,17 @@ pub fn discriminate(first: &RunnerReport, second: &RunnerReport) -> Discriminate
 /// The store write failed.
 #[cfg(feature = "runtime")]
 pub fn record_proof_facts(
-    store: &mut dyn crate::store::StoreBackend,
-    source: ProofSource<'_>,
+    store: &mut dyn StoreBackend,
+    source: &ProofSource<'_>,
     facts: &DiscriminatedFacts,
     host_class: &super::HostClass,
     producing_dispatch: &str,
     producing_bloom: &[u8],
 ) -> rusqlite::Result<usize> {
-    use crate::store::ProofFactWrite;
+    use std::slice::from_ref;
 
-    let closures: &[ClosureKey] = match &source {
-        ProofSource::Member { closure } => std::slice::from_ref(closure),
+    let closures: &[ClosureKey] = match source {
+        ProofSource::Member { closure } => from_ref(closure),
         ProofSource::Aggregate { closures } => closures,
     };
     let writes: Vec<ProofFactWrite<'_>> = closures
@@ -185,7 +187,7 @@ mod tests {
         second.insert("crate::flaky", ProofResult::Red);
         let written = record_proof_facts(
             &mut store,
-            ProofSource::Member { closure },
+            &ProofSource::Member { closure },
             &discriminate(&first, &second),
             &host,
             "nonce-flake",
@@ -204,7 +206,7 @@ mod tests {
         green_second.insert("crate::stable", ProofResult::Green);
         let written = record_proof_facts(
             &mut store,
-            ProofSource::Member { closure },
+            &ProofSource::Member { closure },
             &discriminate(&green_first, &green_second),
             &host,
             "nonce-green",
@@ -240,7 +242,7 @@ mod tests {
 
         let written = record_proof_facts(
             &mut store,
-            ProofSource::Aggregate { closures: &keys },
+            &ProofSource::Aggregate { closures: &keys },
             &discriminate(&first, &second),
             &HostClass::new("fleet"),
             "nonce-agg",
