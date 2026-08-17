@@ -158,14 +158,14 @@ pub(super) fn run_headless_claude(
     // construct lane costs in RAM is the builds its agent drives, and the
     // wrapper's reading covers the whole reaped tree rather than this process.
     let mut claude = peak.command("claude");
-    let mut argv = construct_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref());
+    let mut flags = construct_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref());
     // Tool injection is Claude-only. Codex / muse / grok review paths have no
     // MCP hook and keep the terminal `VERDICT:` parse.
     if args.command == REVIEW_CRITIC {
         let config = review_mcp::prepare(&args.out)?;
-        argv.extend(review_mcp::mcp_argv(&config));
+        flags.extend(review_mcp::mcp_argv(&config));
     }
-    claude.args(argv);
+    claude.args(flags);
     scratch.export(&mut claude);
     sccache::export(cache, &mut claude);
     // Piped stdin + streamed stdout share the lane primitive: the child is
