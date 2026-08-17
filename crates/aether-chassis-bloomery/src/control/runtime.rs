@@ -41,8 +41,8 @@ use aether_bloomery::control::{
 };
 use aether_bloomery::{
     BloomId, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event,
-    EvidenceKind, Fact, IdempotencyKey, Outcome, ResolvedConfigs, Snapshot, SpendWindow, StudyRecord, Unproducible,
-    decode_recorded_decisions, grade, measure, reduce, view_of,
+    EvidenceKind, Fact, IdempotencyKey, OperatorRepairError, Outcome, ResolvedConfigs, Snapshot, SpendWindow,
+    StudyRecord, Unproducible, decode_recorded_decisions, grade, measure, reduce, view_of,
 };
 
 use super::{ControlCore, ControlSetup, ObserveTick};
@@ -281,13 +281,7 @@ impl NativeActor for ControlCore {
             return;
         }
         let decisions = reduce(&state.snapshot, &event, &state.configs, &state.spend);
-        // A duplicate key is already applied (in this process's life or rebuilt by
-        // replay), so it needs no durable commit — reply immediately.
-        if matches!(decisions.outcome, Outcome::Duplicate) {
-            inbound.reply(&admit_duplicate(&event.idempotency_key.0));
-            return;
-        }
-        state.gate_or_commit(ctx, inbound, raw, event, decisions);
+        finish_admit(state, ctx, inbound, raw, event, decisions);
     }
 
     /// Re-run a held admit now that the configuration set is refilled.
@@ -314,11 +308,7 @@ impl NativeActor for ControlCore {
             }
         };
         let decisions = reduce(&state.snapshot, &event, &state.configs, &state.spend);
-        if matches!(decisions.outcome, Outcome::Duplicate) {
-            inbound.reply(&admit_duplicate(&event.idempotency_key.0));
-            return;
-        }
-        state.gate_or_commit(ctx, inbound, raw, event, decisions);
+        finish_admit(state, ctx, inbound, raw, event, decisions);
     }
 
     /// The `aether.source` claim/transfer/release reply. Correlate on the echoed
@@ -780,7 +770,9 @@ impl ControlCoreState {
     /// locally-rejected seal (or any non-seal fact) carries no successful outcome,
     /// so it needs no ref op and commits straight through — a rejected event still
     /// journals (bare append) so its key is durably consumed and a replay stays a
-    /// no-op.
+    /// no-op. A rejected operator repair is the exception: it journals under a
+    /// key that includes the outcome so the content-derived key stays free for a
+    /// later accepted retry of the same repair (#5107).
     fn gate_or_commit(
         &mut self,
         ctx: &mut NativeCtx<'_, Manual>,
@@ -882,6 +874,8 @@ impl ControlCoreState {
         // Every non-duplicate admitted event is journaled — even a rejected one, so
         // a replay stays a no-op and the key is durably consumed. A rejection
         // carries empty membership/outbox effects, so the commit is a bare append.
+        // Operator-repair refusals arrive here already retagged (#5107) so the
+        // content-derived key they were submitted under is not the one consumed.
         let commit = Commit {
             idempotency_key: key.clone(),
             event: raw,
@@ -1181,6 +1175,81 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
     })
 }
 
+/// Commit a just-reduced admit, or reply immediately when it needs no new row.
+///
+/// A duplicate is already applied. A rejected operator repair whose tagged
+/// key is already journaled (or in flight) answers the current refusal
+/// without occupying the content-derived key a later accepted retry needs
+/// (#5107). Every other decision goes through the ordinary claim-or-commit
+/// path, with a rejected repair retagged first so the journal row cannot
+/// shadow that retry.
+fn finish_admit(
+    state: &mut ControlCoreState,
+    ctx: &mut NativeCtx<'_, Manual>,
+    inbound: InboundMail,
+    raw: Vec<u8>,
+    event: Event,
+    decisions: Decisions,
+) {
+    if matches!(decisions.outcome, Outcome::Duplicate) {
+        inbound.reply(&admit_duplicate(&event.idempotency_key.0));
+        return;
+    }
+    match retag_rejected_repair(&state.snapshot, |key| state.inflight_for_key(key), raw, event, &decisions) {
+        Ok(Some((raw, event))) => state.gate_or_commit(ctx, inbound, raw, event, decisions),
+        Ok(None) => {
+            inbound.reply(&admit_ok(&decisions.outcome));
+        }
+        Err(error) => {
+            inbound.reply(&AdmitResult::Err { error: format!("admit encode failed: {error}") });
+        }
+    }
+}
+
+/// Retag a rejected operator repair so the content-derived key stays free.
+///
+/// `None` means this refusal is already journaled (or a same-tag commit is
+/// in flight) and the caller should answer the current outcome without a
+/// new row. Any other fact, and any accepted repair, is returned unchanged.
+fn retag_rejected_repair(
+    snapshot: &Snapshot,
+    inflight: impl Fn(&str) -> usize,
+    raw: Vec<u8>,
+    mut event: Event,
+    decisions: &Decisions,
+) -> Result<Option<(Vec<u8>, Event)>, WireError> {
+    let Outcome::OperatorRepairRejected(error) = &decisions.outcome else {
+        return Ok(Some((raw, event)));
+    };
+    let tagged = rejected_repair_key(&event.idempotency_key, error);
+    if snapshot.seen.contains(&tagged) || inflight(&tagged.0) > 0 {
+        return Ok(None);
+    }
+    event.idempotency_key = tagged;
+    Ok(Some((to_vec(&event)?, event)))
+}
+
+/// Journal key for a refused operator repair: the submitted key plus the
+/// refusal class, so a `Held` row cannot occupy the key a later accepted
+/// submit of the same content needs, and two different refusal classes of
+/// the same repair stay distinct rows.
+fn rejected_repair_key(original: &IdempotencyKey, error: &OperatorRepairError) -> IdempotencyKey {
+    IdempotencyKey(format!("{}:rejected:{}", original.0, rejected_repair_tag(error)))
+}
+
+fn rejected_repair_tag(error: &OperatorRepairError) -> &'static str {
+    match error {
+        OperatorRepairError::UnknownOrInactiveBloom => "UnknownOrInactiveBloom",
+        OperatorRepairError::BlankReason => "BlankReason",
+        OperatorRepairError::BlankOperator => "BlankOperator",
+        OperatorRepairError::NotAMember(_) => "NotAMember",
+        OperatorRepairError::AlreadyResolved(_) => "AlreadyResolved",
+        OperatorRepairError::NotWedged(_) => "NotWedged",
+        OperatorRepairError::UnapprovedMember(_) => "UnapprovedMember",
+        OperatorRepairError::Held => "Held",
+    }
+}
+
 /// Answer a duplicate admission, naming the key it discarded.
 ///
 /// A duplicate is a *dropped fact*: the event reduces to nothing and none of the
@@ -1291,13 +1360,15 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use aether_bloomery::{
-        BloomDraft, BloomId, BloomRecord, BloomStatus, Digest, Evidence, EvidenceKind, IdempotencyKey, QueryResult,
-        Snapshot, StageCatalog, StudyCost, StudyRecord,
+        BloomDraft, BloomId, BloomRecord, BloomStatus, CandidateRef, Decisions, Digest, Event, Evidence, EvidenceKind,
+        Fact, IdempotencyKey, OperatorRepair, OperatorRepairError, Outcome, QueryResult, Snapshot, StageCatalog,
+        StudyCost, StudyRecord, WorkpieceId,
     };
     use aether_data::wire::to_vec;
 
     use super::{
-        load_study_records, lowercase_hex, observation_already_admitted, observe_mainline_key, release_response,
+        load_study_records, lowercase_hex, observation_already_admitted, observe_mainline_key, rejected_repair_key,
+        release_response, retag_rejected_repair,
     };
     use crate::artifacts::{ArtifactsCapabilityState, PutResult};
 
@@ -1404,6 +1475,101 @@ mod tests {
 
         assert_eq!(release_response(&snapshot, &[7; 32]), QueryResult::ReleaseNotFound);
         assert_eq!(release_response(&snapshot, b"not a digest"), QueryResult::ReleaseNotFound);
+    }
+
+    // Tripwire (#5107): a refused repair journals under the submitted key plus
+    // the refusal class, not under the content key the operator will resubmit.
+    // Collapsing every refusal onto one `:rejected` suffix would make a `Held`
+    // row look like a prior `NotWedged` of the same content; omitting the
+    // suffix is the incident — the refused row occupies the retry.
+    #[test]
+    fn a_rejected_repair_key_includes_the_refusal_class() {
+        let original = IdempotencyKey("aether.bloomery.repair:bloom:digest".into());
+        let held = rejected_repair_key(&original, &OperatorRepairError::Held);
+        let not_wedged = rejected_repair_key(&original, &OperatorRepairError::NotWedged(WorkpieceId("wp".into())));
+
+        assert_eq!(held.0, "aether.bloomery.repair:bloom:digest:rejected:Held");
+        assert_eq!(not_wedged.0, "aether.bloomery.repair:bloom:digest:rejected:NotWedged");
+        assert_ne!(held, not_wedged, "two refusal classes of the same repair are two rows");
+        assert_ne!(held, original, "the content key itself is not the journal key");
+    }
+
+    fn repair_event(key: &str) -> Event {
+        Event {
+            idempotency_key: IdempotencyKey(key.into()),
+            fact: Fact::OperatorRepair {
+                bloom: BloomId(digest(1)),
+                repair: OperatorRepair {
+                    workpiece: WorkpieceId("wp".into()),
+                    candidate: CandidateRef { tree: digest(2), checkout: digest(3) },
+                    reason: "one-line fix".into(),
+                    operator: "eve".into(),
+                },
+            },
+        }
+    }
+
+    // The plausible bug: a `Held` refusal is journaled under the content key
+    // the operator will resubmit, so the retry after release reduces to
+    // Duplicate. Retag must rewrite both the event and the encoded bytes —
+    // replay folds `seen` from the bytes, not the store column.
+    #[test]
+    fn a_rejected_repair_is_retagged_in_the_event_bytes() {
+        let event = repair_event("aether.bloomery.repair:same");
+        let raw = to_vec(&event).expect("a reducer event encodes");
+        let decisions =
+            Decisions { outcome: Outcome::OperatorRepairRejected(OperatorRepairError::Held), effects: Vec::new() };
+
+        let (rewritten, tagged) =
+            retag_rejected_repair(&Snapshot::default(), |_| 0, raw.clone(), event.clone(), &decisions)
+                .expect("retag encodes the tagged event")
+                .expect("an unseen refusal is journaled under a new key");
+
+        assert_eq!(tagged.idempotency_key.0, "aether.bloomery.repair:same:rejected:Held");
+        assert_ne!(rewritten, raw, "replay reads the event bytes, so they must carry the tagged key");
+        assert_eq!(
+            retag_rejected_repair(
+                &Snapshot::default(),
+                |_| 0,
+                raw.clone(),
+                event.clone(),
+                &Decisions {
+                    outcome: Outcome::OperatorRepairAccepted {
+                        bloom: BloomId(digest(1)),
+                        workpiece: WorkpieceId("wp".into()),
+                        candidate: digest(2),
+                    },
+                    effects: Vec::new(),
+                }
+            )
+            .expect("retag of an accepted repair cannot fail")
+            .expect("an accepted repair is unchanged")
+            .1
+            .idempotency_key,
+            event.idempotency_key,
+            "only a refused repair is retagged",
+        );
+
+        let mut seen = Snapshot::default();
+        seen.seen.insert(tagged.idempotency_key);
+        assert!(
+            retag_rejected_repair(&seen, |_| 0, raw.clone(), event.clone(), &decisions)
+                .expect("retag of an already-journaled refusal cannot fail")
+                .is_none(),
+            "a refusal already journaled under its tagged key is not committed again",
+        );
+        assert!(
+            retag_rejected_repair(
+                &Snapshot::default(),
+                |key| usize::from(key.ends_with(":rejected:Held")),
+                raw,
+                event,
+                &decisions
+            )
+            .expect("retag of an in-flight tagged commit cannot fail")
+            .is_none(),
+            "an in-flight tagged commit is treated as already journaled",
+        );
     }
 
     // The plausible bug: the resolver answers a missing digest with a

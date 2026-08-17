@@ -152,14 +152,21 @@ fn journal_holds_land(store: &mut dyn StoreBackend, bloom: &Digest) -> rusqlite:
 
 /// The idempotency key a landing rejection admits under.
 ///
-/// Keyed by `cause` as well as the bloom, so the *same* refusal re-observed on
-/// the next tick reduces to a duplicate, while a repaired bloom whose landing
-/// fails a different way still admits. Without the cause a second, genuinely
-/// new rejection would be swallowed as a replay.
-fn rejected_key(bloom: &Digest, cause: &str) -> IdempotencyKey {
+/// Keyed by the proposed head and the cause as well as the bloom. The same
+/// refusal re-observed on the next tick (same head, same cause) reduces to a
+/// duplicate, while a later landing of the same bloom — a new head after a
+/// repair, even when CI names the same failing checks — admits a second,
+/// distinct fact. Keyed by bloom and cause alone, that second refusal was
+/// discarded as a replay and the bloom sat `Resolved` with its land entry
+/// acked (#5106).
+fn rejected_key(bloom: &Digest, head: &Digest, cause: &str) -> IdempotencyKey {
     use core::fmt::Write;
     let mut key = String::from("aether.bloomery.landing_rejected:");
     for byte in bloom.as_bytes() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    key.push(':');
+    for byte in head.as_bytes() {
         let _ = write!(key, "{byte:02x}");
     }
     let _ = write!(key, ":{cause}");
@@ -167,16 +174,19 @@ fn rejected_key(bloom: &Digest, cause: &str) -> IdempotencyKey {
 }
 
 /// The [`Watched::Rejected`] a refused landing folds to: a `Fact::LandingRejected`
-/// keyed by `cause`, carrying `findings` for the repair the admit dispatches.
+/// keyed by the proposed head and `cause`, carrying `findings` for the repair
+/// the admit dispatches.
 ///
 /// The rejection binds the head that was proposed — the reducer refuses one
 /// naming any other head, so a rejection left over from a superseded landing
 /// cannot re-open members under a newer one. The detail artifact is the same
 /// head: the findings are persisted beside the bloom rather than
-/// content-addressed here.
+/// content-addressed here. The head also belongs in the idempotency key, or a
+/// later landing of this bloom that fails the same way is discarded as a
+/// replay of this one (#5106).
 fn rejected(bloom: &BloomId, payload: &LandPayload, cause: String, findings: String) -> Result<Watched, SourceError> {
     let event = Event {
-        idempotency_key: rejected_key(&payload.bloom, &cause),
+        idempotency_key: rejected_key(&payload.bloom, &payload.new_head, &cause),
         fact: Fact::LandingRejected {
             bloom: *bloom,
             evidence: Evidence {
