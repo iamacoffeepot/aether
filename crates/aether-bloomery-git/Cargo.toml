@@ -1,0 +1,33 @@
+[package]
+name = "aether-bloomery-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The port traits (`SourceBackend`) and the value vocabulary (`Digest`,
+# `Correspondence`, `IntegrateOutcome`, …) this adapter implements. The
+# adapter depends *inward* on the control core, never the reverse (ADR-0149
+# §The boundary) — that is what keeps the static-link DAG cycle-free.
+# The pure reducer + value vocabulary. `default-features = false` links only
+# the rlib core, never the guest-SDK `runtime` feature (issue #3497).
+aether-bloomery = { path = "../aether-bloomery", default-features = false }
+serde = { workspace = true, features = ["derive", "std"] }
+# The in-process fake mints deterministic commit shas as sha256 over message /
+# tree / parents; marker tests hash a spec so the roundtrip is computed.
+sha2 = { workspace = true }
+
+[features]
+# Exposes the in-process `FakeGithub` double so a downstream crate (the GitHub
+# adapter, the host demo) can drive the source port without a live token or
+# network. The name is historical: the double models git objects plus the
+# landing surfaces `GitSource` is still generic over.
+testing = []
+
+[dev-dependencies]
+# The object-repo mode mints real git objects, so the tests that pin it need a
+# real repository to mint them in.
+tempfile = "3"
+
+[lints]
+workspace = true
