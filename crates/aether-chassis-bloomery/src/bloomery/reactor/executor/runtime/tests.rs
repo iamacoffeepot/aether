@@ -2926,7 +2926,7 @@ fn progress_extends_only_the_silence_window() {
 
     backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS + SILENCE_MILLIS - 1_000));
     let _ = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + 2 * SILENCE_MILLIS);
-    assert_eq!(backend.cancelled(), vec![nonce.clone()], "the same stamp left to go quiet reaches the threshold",);
+    assert_eq!(backend.cancelled(), vec![nonce], "the same stamp left to go quiet reaches the threshold");
     assert_eq!(
         timeout_verdict(StageId::Construct),
         Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
@@ -2954,7 +2954,7 @@ fn a_restart_does_not_reset_the_silence_window() {
         .collect();
     backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS));
     let _ = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS);
-    assert_eq!(backend.cancelled(), vec![nonce], "a re-tracked handle still expires from the original heartbeat",);
+    assert_eq!(backend.cancelled(), vec![nonce], "a re-tracked handle still expires from the original heartbeat");
 }
 
 #[test]
