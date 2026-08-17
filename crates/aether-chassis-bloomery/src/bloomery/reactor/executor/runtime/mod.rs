@@ -1508,11 +1508,15 @@ pub fn default_candidate_push(refuse: bool) -> Arc<dyn CandidatePush> {
 }
 
 /// Push each admitted capture to its bloom ref (ADR-0152). A passing construct
-/// goes to [`candidate_ref_name`]; a failing construct that still captured work
-/// goes to [`member_checkpoint_ref_name`]. Best-effort with loud warns: a failed
-/// push leaves the capture local-only — a downstream checkout of it will fail
-/// visibly and retry through the stage machinery, never silently run the wrong
-/// tree. A failed checkpoint push costs a resume, never correctness.
+/// or refine goes to [`candidate_ref_name`]; a failing construct that still
+/// captured work goes to [`member_checkpoint_ref_name`]. Refine is in the
+/// passing arm because a composition weave-repair capture is the head landing
+/// will create its branch from — skipping it leaves that commit local-only and
+/// the land loop 422s on an object the source repository has never seen. Best-effort
+/// with loud warns: a failed push leaves the capture local-only — a downstream
+/// checkout of it will fail visibly and retry through the stage machinery, never
+/// silently run the wrong tree. A failed checkpoint push costs a resume, never
+/// correctness.
 fn push_admitted_candidates(
     admissions: &[Admission],
     correspondence: Option<&SharedCorrespondence>,
@@ -1523,7 +1527,7 @@ fn push_admitted_candidates(
             Fact::AttemptCompleted {
                 bloom,
                 workpiece,
-                stage: StageId::Construct,
+                stage: StageId::Construct | StageId::Refine,
                 passed: true,
                 candidate: Some(candidate),
                 ..
