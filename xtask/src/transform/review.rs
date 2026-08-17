@@ -1,15 +1,25 @@
 //! The `review.critic` lane: assemble the critic prompt from the lane's
 //! in-repo five-pillar instruction source plus the subject and the work
-//! order, run the critic headless, and fold its `VERDICT:` line into the
-//! pass/fail status the local backend reads. Fail-closed at every shortfall.
+//! order, run the critic headless, and fold its reports into the pass/fail
+//! status the local backend reads. Fail-closed at every shortfall.
+//!
+//! The Claude harness injects append-only report tools and the status is
+//! derived from the findings file. Harnesses without tool injection
+//! (codex / muse / grok) keep the terminal `VERDICT:` parse.
 
 use std::path::Path;
 
+use aether_bloomery::Harness;
 use anyhow::Result;
 
 use crate::transform::claude::assemble_construct_prompt;
 use crate::transform::messages::bound_assistant_text;
-use crate::transform::{Measurements, TransformArgs, conventions, run_model_lane, write_evidence_json};
+use crate::transform::review_reports::{
+    FindingClass, Reports, findings_path, load_notes, load_reports, notes_path, render_reports,
+};
+use crate::transform::{
+    Measurements, TransformArgs, conventions, resolve_harness, run_model_lane, write_evidence_json,
+};
 
 /// The typed id of the model-driven review lane — the member line's terminal
 /// critic (`Transformation::for_member_stage` dispatches it for the Review
@@ -36,8 +46,9 @@ enum ReviewVerdict {
 /// form `VERDICT: pass` / `VERDICT: finding` / `VERDICT: environment` wins (the
 /// instructions demand it stand alone at the end, but a stray earlier occurrence
 /// must not shadow the real one). `None` for a message with no well-formed
-/// verdict line — the caller fails closed. Pure so the parse is testable without
-/// spawning Claude.
+/// verdict line — the caller fails closed. Used only on harnesses that cannot
+/// inject the report tools (codex / muse / grok). Pure so the parse is testable
+/// without spawning the critic.
 fn parse_review_verdict(final_text: &str) -> Option<ReviewVerdict> {
     final_text.lines().rev().find_map(verdict_line)
 }
@@ -119,8 +130,7 @@ fn composition_contract(diff_base: Option<&str>) -> String {
          tell you what each member set out to do, so you can tell whether the weave preserved it. A defect in a \
          member's own code that the weave faithfully carried through is *not* a finding of this review: it belongs \
          to a member that is already done, and it is filed as new work rather than reopening finished work. If you \
-         see one and it is serious, name it in your justification prose as an observation and say plainly that it \
-         is member-scope; do not let it decide your verdict.\n\n\
+         see one and it is serious, `report_note` it as member-scope; do not `report_finding` it.\n\n\
          Findings freeze per subject, exactly as member review findings do: on a re-review of a repaired weave, \
          discharge the frozen findings you were given and judge only what changed. Do not open a fresh full pass \
          over work you already judged.\n"
@@ -290,12 +300,12 @@ fn merge_assistant_and_terminal(assistant: &str, terminal: &str) -> String {
     format!("{}\n\n{terminal}", bound_assistant_text(assistant))
 }
 
-/// Fold the review run's derived result record into the lane's terminal verdict:
-/// the critic's own `VERDICT:` line, but only from a run that completed
-/// (`is_error == false` on the terminal result). Everything else — a dead run,
-/// an errored run, a missing or malformed verdict line — folds to `Finding`,
-/// fail-closed (a wrongly passed defect integrates; a wrong finding just
-/// retries).
+/// Fold the review run's derived result record into the lane's terminal verdict
+/// on harnesses without report tools: the critic's own `VERDICT:` line, but only
+/// from a run that completed (`is_error == false` on the terminal result).
+/// Everything else — a dead run, an errored run, a missing or malformed verdict
+/// line — folds to `Finding`, fail-closed (a wrongly passed defect integrates; a
+/// wrong finding just retries).
 ///
 /// A `finding` verdict is then read by class (#4961): the critic states what
 /// each finding is, and a report whose findings are all non-blocking advisories
@@ -309,11 +319,7 @@ fn merge_assistant_and_terminal(assistant: &str, terminal: &str) -> String {
 /// cannot be trusted to have reported why. Pure so the gate is testable without
 /// spawning Claude.
 fn review_conclusion(record: &serde_json::Value) -> ReviewVerdict {
-    let completed_clean = record
-        .get("result")
-        .is_some_and(|result| result.get("is_error").and_then(serde_json::Value::as_bool) == Some(false));
-
-    if !completed_clean {
+    if !completed_clean(record) {
         return ReviewVerdict::Finding;
     }
     match final_text(record).and_then(parse_review_verdict) {
@@ -356,6 +362,70 @@ fn advisory_only(record: &serde_json::Value) -> ReviewVerdict {
     }
 
     ReviewVerdict::Pass
+}
+
+/// Whether the terminal result claims the run completed without a harness error.
+fn completed_clean(record: &serde_json::Value) -> bool {
+    record
+        .get("result")
+        .is_some_and(|result| result.get("is_error").and_then(serde_json::Value::as_bool) == Some(false))
+}
+
+/// Derive the Claude-path verdict from the findings file. A cleanly finished
+/// run that reported nothing is a pass; a defect charges the candidate; only
+/// environment reports mean the critic could not judge; a malformed file is a
+/// lane shortfall (`environment`), never a candidate pass or fail. An errored
+/// or dead run does not become a pass from an empty file — that path keeps the
+/// existing lane-failure handling.
+fn conclude_from_reports(record: &serde_json::Value, reports: &Reports) -> ReviewVerdict {
+    match reports {
+        Reports::Malformed { .. } => ReviewVerdict::Environment,
+        Reports::Clean { findings } => {
+            if findings.iter().any(|finding| finding.class == FindingClass::Defect) {
+                return ReviewVerdict::Finding;
+            }
+            if !completed_clean(record) {
+                return ReviewVerdict::Finding;
+            }
+            if findings.iter().any(|finding| finding.class == FindingClass::Environment) {
+                return ReviewVerdict::Environment;
+            }
+            ReviewVerdict::Pass
+        }
+    }
+}
+
+/// Stamp evidence from the Claude findings file: the accumulated reports are
+/// the findings text, never the terminal prose. Notes ride a separate key and
+/// do not affect `status`.
+fn stamp_reports_evidence(
+    nonce: Option<&str>,
+    record: &serde_json::Value,
+    measured: Measurements,
+    reports: &Reports,
+    notes: Option<String>,
+) -> serde_json::Value {
+    let verdict = conclude_from_reports(record, reports);
+    let findings = match reports {
+        Reports::Malformed { reason } => Some(environment_findings(reason)),
+        Reports::Clean { findings } => match verdict {
+            ReviewVerdict::Pass => None,
+            ReviewVerdict::Finding => Some(render_reports(findings)),
+            ReviewVerdict::Environment => Some(environment_findings(&render_reports(findings))),
+        },
+    };
+    let mut evidence = serde_json::json!({
+        "command": REVIEW_CRITIC,
+        "nonce": nonce,
+        "status": status_token(verdict),
+        "findings": findings,
+        "result_record": record,
+    });
+    if let Some(notes) = notes {
+        evidence["notes"] = serde_json::Value::String(notes);
+    }
+    measured.stamp(&mut evidence);
+    evidence
 }
 
 /// Stamp the broker-matched `nonce` and the lane's terminal `verdict` onto the
@@ -411,10 +481,10 @@ fn status_token(verdict: ReviewVerdict) -> &'static str {
 
 /// The `review.critic` lane: assemble the critic prompt from the lane's in-repo
 /// five-pillar instruction source plus the subject and the work order, run the
-/// critic headless, and fold its `VERDICT:` line into the pass/fail `status`
-/// the local backend's verdict derivation reads. Fail-closed at every shortfall
-/// (see [`review_conclusion`]). Like the construct lane it needs a Claude
-/// credential, so it runs worker-side — never on the zero-secret path.
+/// critic headless, and fold its reports into the pass/fail `status` the local
+/// backend's verdict derivation reads. Fail-closed at every shortfall. Like the
+/// construct lane it needs a credential, so it runs worker-side — never on the
+/// zero-secret path.
 pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
     // Pillars 3 and 5 judge the candidate against the repository's stated
     // conventions, so the critic is given them rather than told to go and read
@@ -439,19 +509,30 @@ pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
         None,
     );
     let run = run_model_lane(&prompt, args)?;
-    write_evidence_json(
-        &args.out,
-        &stamp_review_evidence(args.nonce.as_deref(), review_conclusion(&run.record), &run.record, run.measured),
-    )
+    // Claude injects the report tools and the findings file is the verdict
+    // channel. Codex / muse / grok have no injection and keep the text parse.
+    let evidence = if matches!(resolve_harness(args.harness.as_deref())?, Harness::Claude) {
+        stamp_reports_evidence(
+            args.nonce.as_deref(),
+            &run.record,
+            run.measured,
+            &load_reports(&findings_path(&args.out)),
+            load_notes(&notes_path(&args.out)),
+        )
+    } else {
+        stamp_review_evidence(args.nonce.as_deref(), review_conclusion(&run.record), &run.record, run.measured)
+    };
+    write_evidence_json(&args.out, &evidence)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Measurements, ReviewVerdict, candidate_section, composition_contract, parse_review_verdict, review_conclusion,
-        stamp_review_evidence,
+        Measurements, ReviewVerdict, candidate_section, composition_contract, conclude_from_reports,
+        parse_review_verdict, review_conclusion, stamp_reports_evidence, stamp_review_evidence,
     };
     use crate::transform::messages::{MAX_ASSISTANT_TEXT_BYTES, derive_result_record};
+    use crate::transform::review_reports::{FindingClass, FindingReport, Reports};
 
     #[test]
     fn review_verdict_parses_the_last_standalone_verdict_line_fail_closed() {
@@ -976,5 +1057,81 @@ mod tests {
         let findings = unmatched_evidence["findings"].as_str().expect("findings");
         assert_eq!(findings, "see finding below.\n\nVERDICT: finding");
         assert!(!findings.contains("never accepted"), "an unmatched call is not accepted: {findings}");
+    }
+
+    fn clean_record(text: &str) -> serde_json::Value {
+        derive_result_record(&format!("{}\n", serde_json::json!({"type": "result", "is_error": false, "result": text})))
+    }
+
+    fn errored_record(text: &str) -> serde_json::Value {
+        derive_result_record(&format!("{}\n", serde_json::json!({"type": "result", "is_error": true, "result": text})))
+    }
+
+    fn defect(summary: &str, detail: &str) -> FindingReport {
+        FindingReport { summary: summary.to_owned(), detail: detail.to_owned(), class: FindingClass::Defect }
+    }
+
+    fn environment(summary: &str, detail: &str) -> FindingReport {
+        FindingReport { summary: summary.to_owned(), detail: detail.to_owned(), class: FindingClass::Environment }
+    }
+
+    // Pre-fix a clean Claude run with no VERDICT: line stamped fail and handed
+    // its pass prose to Refine as findings. An empty reports file is a pass.
+    #[test]
+    fn a_clean_claude_run_with_no_reports_passes_without_a_verdict_line() {
+        let record = clean_record("all five pillars hold; no defect I can name.");
+        let reports = Reports::Clean { findings: Vec::new() };
+        assert_eq!(conclude_from_reports(&record, &reports), ReviewVerdict::Pass);
+        let evidence = stamp_reports_evidence(Some("n-pass"), &record, Measurements::default(), &reports, None);
+        assert_eq!(evidence["status"], "pass");
+        assert!(evidence["findings"].is_null(), "a clean pass does not stamp terminal prose as findings");
+    }
+
+    // Pre-fix the fail path persisted the terminal prose. The stamped findings
+    // must be the accumulated reports, in order.
+    #[test]
+    fn a_defect_report_fails_and_stamps_the_reports_not_the_terminal_prose() {
+        let record = clean_record("looks fine to me, shipping it.");
+        let reports = Reports::Clean {
+            findings: vec![defect("empty input panics", "src/lib.rs: unguarded index on an empty list")],
+        };
+        assert_eq!(conclude_from_reports(&record, &reports), ReviewVerdict::Finding);
+        let evidence = stamp_reports_evidence(None, &record, Measurements::default(), &reports, None);
+        assert_eq!(evidence["status"], "fail");
+        let findings = evidence["findings"].as_str().expect("findings");
+        assert!(findings.contains("empty input panics"), "{findings}");
+        assert!(findings.contains("unguarded index"), "{findings}");
+        assert!(!findings.contains("looks fine to me"), "terminal prose is not the findings channel: {findings}");
+    }
+
+    #[test]
+    fn only_environment_reports_stamp_environment() {
+        let record = clean_record("could not run git diff");
+        let reports = Reports::Clean { findings: vec![environment("git diff failed", "bwrap: loopback failed")] };
+        assert_eq!(conclude_from_reports(&record, &reports), ReviewVerdict::Environment);
+        let evidence = stamp_reports_evidence(None, &record, Measurements::default(), &reports, None);
+        assert_eq!(evidence["status"], "environment");
+        let findings = evidence["findings"].as_str().expect("findings");
+        assert!(findings.contains("bwrap: loopback failed"), "{findings}");
+        assert!(findings.contains("not the same as the candidate failing"), "{findings}");
+    }
+
+    #[test]
+    fn an_errored_run_with_an_empty_findings_file_does_not_pass() {
+        let record = errored_record("");
+        let reports = Reports::Clean { findings: Vec::new() };
+        assert_ne!(conclude_from_reports(&record, &reports), ReviewVerdict::Pass);
+        assert_eq!(stamp_reports_evidence(None, &record, Measurements::default(), &reports, None)["status"], "fail",);
+    }
+
+    #[test]
+    fn a_malformed_findings_file_is_environment_never_pass_or_fail() {
+        let record = clean_record("VERDICT: pass");
+        let reports = Reports::Malformed { reason: "line 1: truncated line".to_owned() };
+        assert_eq!(conclude_from_reports(&record, &reports), ReviewVerdict::Environment);
+        let evidence = stamp_reports_evidence(None, &record, Measurements::default(), &reports, None);
+        assert_eq!(evidence["status"], "environment");
+        assert_ne!(evidence["status"], "pass");
+        assert_ne!(evidence["status"], "fail");
     }
 }
