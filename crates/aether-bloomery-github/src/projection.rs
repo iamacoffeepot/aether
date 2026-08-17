@@ -49,9 +49,7 @@ use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::client::{GithubApi, GithubError, NewComment, PullRequestApi};
-use crate::marker::{Marker, render_marker};
-use crate::short_hex;
-use crate::source::landing_branch;
+use crate::{Marker, landing_branch, render_marker, short_hex};
 
 /// The prefix a [`WorkpieceId`] carries to address an object in the configured
 /// repository. Adapter-local by construction: the core gains no issue

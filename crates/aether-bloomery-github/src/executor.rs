@@ -46,33 +46,10 @@ use aether_bloomery::{
     SharedCorrespondence, VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
 };
 
+use crate::GitObjectId;
 use crate::client::{ActionsApi, GithubError, RunConclusion, RunStatus, WorkflowRun, name_carries_nonce};
-use crate::correspondence::GitObjectId;
 
-/// The `workflow_dispatch` input key carrying the typed lane command — the
-/// correlation contract with the external wrapper workflow, whose `inputs:`
-/// block names these exact strings (#3668). One constant per key (its siblings
-/// below), shared with the fake and the tests, so a drifted key cannot
-/// silently dispatch a run the wrapper reads as blank.
-pub const INPUT_COMMAND: &str = "command";
-
-/// The input key carrying the evidence-binding subject — see [`INPUT_COMMAND`].
-pub const INPUT_SUBJECT: &str = "subject";
-
-/// The input key carrying the correlation nonce — see [`INPUT_COMMAND`].
-pub const INPUT_NONCE: &str = "nonce";
-
-/// The input key carrying the displayed digest — see [`INPUT_COMMAND`].
-pub const INPUT_DISPLAYED: &str = "displayed";
-
-/// The input key carrying the coordinator-resolved model. Only the model
-/// wrapper declares it, so only a model-lane dispatch sends it — see
-/// [`INPUT_COMMAND`].
-pub const INPUT_MODEL: &str = "model";
-
-/// The input key carrying the resolved reasoning-effort tier — the model
-/// wrapper's sibling of [`INPUT_MODEL`].
-pub const INPUT_EFFORT: &str = "effort";
+pub use aether_bloomery_git::{INPUT_COMMAND, INPUT_DISPLAYED, INPUT_EFFORT, INPUT_MODEL, INPUT_NONCE, INPUT_SUBJECT};
 
 /// An executor-port fault. Its own type because the port needs an arm the value
 /// vocabulary does not carry — a message asked to act on a run that does not
@@ -449,8 +426,8 @@ mod tests {
 
     use super::{ActionsExecutor, ExecutorError, LaneWorkflows};
     use crate::client::{Artifact, RunConclusion, RunStatus};
-    use crate::source::to_hex;
     use crate::testing::FakeGithub;
+    use crate::to_hex;
 
     const WORKFLOW: &str = "bloomery-transform.yml";
     // The credential-bearing sibling — distinct from WORKFLOW so a dispatch that

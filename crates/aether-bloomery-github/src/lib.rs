@@ -1,11 +1,14 @@
 //! aether-bloomery-github: the outward projection mirror (ADR-0149 slice 4,
 //! [#3459], as amended by [#3460]).
 //!
-//! The only crate in the workspace permitted to name a GitHub type. It is a
-//! plain adapter rlib (no cdylib, no wasm actors, no `aether-data` kinds),
-//! statically linked into `aether-chassis-bloomery` per ADR-0149 §Packaging, and
-//! it depends *inward* on the control core ([`aether_bloomery`]) so the
-//! static-link DAG stays cycle-free.
+//! The GitHub REST / projection adapter. It is a plain adapter rlib (no cdylib,
+//! no wasm actors, no `aether-data` kinds), statically linked into
+//! `aether-chassis-bloomery` per ADR-0149 §Packaging, and it depends *inward*
+//! on the control core ([`aether_bloomery`]) and the adapter-neutral git
+//! vocabulary ([`aether_bloomery_git`]) so the static-link DAG stays
+//! cycle-free. The git source port, object-id types, and in-process fake live
+//! in that sibling crate; this crate is the one that speaks GitHub's HTTP
+//! protocol.
 //!
 //! # Direction is outward
 //!
@@ -53,61 +56,34 @@
 //! [#3460]: https://github.com/iamacoffeepot/aether/issues/3460
 //! [#4663]: https://github.com/iamacoffeepot/aether/issues/4663
 
-use aether_bloomery::Digest;
-
-/// A digest's first six bytes as hex — the short form every human-facing
-/// surface names a bloom by: projected comment bodies, the branch namespace,
-/// and a landing proposal's subject.
-///
-/// Twelve hex characters is git's own short-sha convention and reads at a
-/// glance where sixty-four does not. It is a *name*, never an identity: the
-/// authoritative full digest rides the projection body and the sealed spec, so
-/// a reader who needs to verify has it. Collision would need on the order of
-/// 2^24 blooms against one mainline before it were likelier than not, and the
-/// namespace is addressed by construction rather than parsed back.
-#[must_use]
-pub fn short_hex(digest: &Digest) -> String {
-    let bytes = digest.as_bytes();
-    let mut out = String::with_capacity(12);
-    for byte in &bytes[..6] {
-        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-    }
-    out
-}
+pub use aether_bloomery_git::{
+    ActionsApi, Artifact, CheckConclusion, CheckRun, ChecksState, Comment, GitCommit, GitDataApi, GitObjectFormat,
+    GitObjectId, GitRef, GitSource, GithubApi, GithubError, IssueStateApi, LandAcceptance, LandingProposal,
+    LandingRefusal, LandingSource, MainlineRef, Marker, MergeResult, NewCheckRun, NewComment, NewPullRequest,
+    PullMergeResult, PullRequest, PullRequestApi, PullRequestState, RunConclusion, RunStatus, SourceError, WorkflowRun,
+    candidate_ref_name, check_run_external_id, landing_branch, landing_floor_title, member_checkpoint_ref_name,
+    parse_check_run_external_id, parse_marker, render_marker, short_hex, to_hex,
+};
 
 mod app_auth;
 mod client;
 mod config;
-mod correspondence;
 mod executor;
 mod inward;
-mod mainline;
-mod marker;
 mod projection;
-mod source;
 
 #[cfg(any(test, feature = "testing"))]
-pub mod testing;
+pub use aether_bloomery_git::testing;
 
 pub use app_auth::{AppTokenSource, InstallationTokenExchange};
 pub use client::{
-    ActionsApi, Artifact, CheckConclusion, CheckRun, ChecksState, Comment, GitCommit, GitDataApi, GitRef, GithubApi,
-    GithubError, HttpRequest, HttpResponse, HttpTransport, InstallationToken, IssueStateApi, MergeResult, Method,
-    NewCheckRun, NewComment, NewPullRequest, PullMergeResult, PullRequest, PullRequestApi, PullRequestState,
-    ReqwestGithub, ReqwestTransport, RunConclusion, RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
+    HttpRequest, HttpResponse, HttpTransport, InstallationToken, Method, ReqwestGithub, ReqwestTransport,
+    StaticTokenSource, TokenSource,
 };
 pub use config::GithubConfig;
-pub use correspondence::{GitObjectFormat, GitObjectId};
 pub use executor::{ActionsExecutor, ExecutorError, LaneWorkflows};
 pub use inward::{
     InwardError, StageResult, StageVerdict, StudyRecordError, StudyResult, normalize_stage_result,
     normalize_study_result, parse_study, parse_study_cost,
 };
-pub use mainline::MainlineRef;
-pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
 pub use projection::{GithubProjection, canonical_issue_number};
-pub use source::{
-    GitSource, LandAcceptance, LandingProposal, LandingRefusal, LandingSource, SourceError, candidate_ref_name,
-    landing_branch, landing_floor_title, member_checkpoint_ref_name, to_hex,
-};

@@ -151,17 +151,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-bloomery-git"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-bloomery",
+ "aether-bloomery-git",
+ "serde",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "aether-bloomery-github"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-bloomery",
+ "aether-bloomery-git",
  "aether-bloomery-github",
  "jsonwebtoken",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
- "tempfile",
  "tracing",
 ]
 

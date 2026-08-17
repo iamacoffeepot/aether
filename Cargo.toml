@@ -19,6 +19,7 @@ members = [
     "crates/aether-behavior",
     "crates/aether-behavior-derive",
     "crates/aether-bloomery",
+    "crates/aether-bloomery-git",
     "crates/aether-bloomery-github",
     "crates/aether-chassis-bloomery",
     "crates/aether-http-derive",

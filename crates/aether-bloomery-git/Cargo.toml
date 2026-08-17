@@ -1,0 +1,37 @@
+[package]
+name = "aether-bloomery-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The port traits (`SourceBackend`) and the value vocabulary (`Digest`,
+# `Correspondence`, claim/land outcomes) this adapter implements. The adapter
+# depends *inward* on the control core, never the reverse (ADR-0149 §The
+# boundary). `default-features = false` links only the rlib core, never the
+# guest-SDK `runtime` feature (issue #3497).
+aether-bloomery = { path = "../aether-bloomery", default-features = false }
+serde = { workspace = true, features = ["derive", "std"] }
+# The in-process fake hashes synthetic commit identities; the marker tests
+# hash fixture bytes into a digest. Optional so a production link of the
+# source port does not carry a hasher it never calls.
+sha2 = { workspace = true, optional = true }
+
+[features]
+# Exposes the in-process `FakeGithub` double so a downstream crate can drive
+# the source port against it without a live token or network.
+testing = ["dep:sha2"]
+
+[dev-dependencies]
+# Self-dependency with `testing` on, so this crate's own unit tests see the
+# `FakeGithub` double the feature exposes — an integration-style cfg(test)
+# module in `source.rs` links the lib without the feature unless we turn it
+# on here.
+aether-bloomery-git = { path = ".", features = ["testing"] }
+# The object-repo mode mints real git objects, so the tests that pin it need a
+# real repository to mint them in.
+tempfile = "3"
+sha2 = { workspace = true }
+
+[lints]
+workspace = true
