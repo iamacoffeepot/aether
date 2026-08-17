@@ -332,6 +332,13 @@ pub enum VerifyFailedError {
 }
 
 /// Why an attempt grant was refused (#4708).
+///
+/// The same refusals apply to both grant axes (#5090): a `MACHINERY` grant
+/// and a `WORK` grant are one fact, so a running member, a stale stage, a
+/// non-member, a resolved bloom, and a zero or over-cap batch are refused
+/// here rather than predicted client-side. The granted axis and resume stage
+/// ride the admitted [`Outcome::AttemptsGranted`](crate::Outcome::AttemptsGranted),
+/// not a second error vocabulary.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum GrantAttemptsError {
     /// The bloom is not known or not active — only a `Sealed` bloom runs a line,
@@ -352,7 +359,9 @@ pub enum GrantAttemptsError {
         /// The stage the grant named.
         got: StageId,
     },
-    /// The grant asks for no attempts, or for more than the member could spend.
+    /// The grant asks for no attempts, or for more than the member could spend
+    /// on the wedged axis (ordinary attempts, Verify repair rolls, or the
+    /// independent machinery series).
     ///
     /// The counters a grant writes are read against the stage's own
     /// [`retry_budget`](crate::StageBinding::retry_budget), so a larger request

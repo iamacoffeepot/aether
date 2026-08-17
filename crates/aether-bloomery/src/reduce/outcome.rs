@@ -325,12 +325,16 @@ pub enum Outcome {
         bloom: BloomId,
         /// The resumed member.
         workpiece: WorkpieceId,
-        /// The stage the member resumes at: the wedged stage itself, or `Refine`
-        /// when the wedge was a spent repair ceiling at `Verify` — re-running the
+        /// The stage the member resumes at, which names the granted axis with
+        /// the count below: the wedged stage itself on a `MACHINERY` grant
+        /// (and on a non-`Verify` `WORK` grant), or `Refine` when a `WORK`
+        /// wedge at `Verify` spent the repair ceiling — re-running the
         /// mechanical gate on an unchanged candidate cannot change its verdict.
         resumes_at: StageId,
-        /// How many dispatched attempts the member may now spend before it
-        /// wedges again.
+        /// How many dispatched attempts the member may now spend on that axis
+        /// before it wedges again. A `MACHINERY` grant spends this against the
+        /// independent host-fault series; a `WORK` grant spends it against
+        /// ordinary attempts or Verify repair rolls.
         attempts: u32,
     },
     /// An attempt grant was refused.

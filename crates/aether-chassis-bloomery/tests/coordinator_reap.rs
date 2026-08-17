@@ -14,34 +14,26 @@
 
 mod common;
 
-use std::net::TcpStream;
 use std::panic::{self, AssertUnwindSafe};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use aether_substrate::pid_lock::is_pid_alive;
-use common::{Coordinator, free_port};
-
-/// Block until the bin has bound its RPC port, so the panic below unwinds past a
-/// *booted* coordinator — the shape that leaked, and the one that holds a lock.
-fn wait_until_serving(port: u16) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(Instant::now() < deadline, "the bloomery bin never bound port {port}");
-        thread::sleep(Duration::from_millis(100));
-    }
-}
+use common::Coordinator;
+use common::client::spawn_and_connect;
 
 #[test]
 fn a_panic_between_the_fork_and_the_teardown_reaps_the_coordinator() {
-    let rpc_port = free_port();
     // `AETHER_STORE_PATH` is pinned rather than left to its `":memory:"` default:
     // the default only holds when nothing in the ambient environment names a
     // store, and a run under a coordinator's environment inherits one — the live
-    // journal (#4714).
-    let coordinator = Coordinator::spawn(rpc_port, &[("AETHER_STORE_PATH", ":memory:")]);
+    // journal (#4714). Handshake is the boot gate so the panic below unwinds
+    // past a *booted* coordinator — the shape that leaked, and the one that
+    // holds a lock. Port 0 lets the child bind atomically; the helper
+    // discovers that listen instead of racing a reserved port (#5116).
+    let (coordinator, _stream) = spawn_and_connect("reap-test", Duration::from_mins(1), || {
+        (0, Coordinator::spawn(0, &[("AETHER_STORE_PATH", ":memory:")]))
+    });
     let pid = i32::try_from(coordinator.pid()).unwrap();
-    wait_until_serving(rpc_port);
     assert!(is_pid_alive(pid), "the forked coordinator is live before the panic");
 
     // The failing test: it unwinds out of the scope owning the guard, exactly as

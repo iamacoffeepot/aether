@@ -896,6 +896,62 @@ class RecoveryLadder(unittest.TestCase):
             [],
         )
 
+    def test_a_machinery_wedge_names_the_axis_and_a_fresh_key(self):
+        # The plausible bug: a machinery wedge prints the same "retryable
+        # lane failure" grant as a work wedge, so the operator grants a
+        # Refine lap (or thinks they already did) instead of one bounded
+        # same-stage batch that needs a new key to repeat.
+        rungs = self._ladder(wedge_cause="Machinery")
+        grant = next(rung for rung in rungs if rung["verb"] == "grant")
+        self.assertIn("machinery wedge at Verify", grant["because"])
+        notes = " ".join(grant["notes"])
+        self.assertIn("bounded batch", notes)
+        self.assertIn("--idempotency-key", notes)
+        self.assertIn("machinery axis", notes)
+        parsed = parse_printed(grant["command"])
+        self.assertEqual(parsed.attempts, 1)
+        self.assertEqual(parsed.stage, "Verify")
+
+
+class GrantOutcomeRendering(unittest.TestCase):
+    """The grant command names resume stage and axis from the server reply."""
+
+    def test_a_granted_batch_names_the_resume_stage_and_axis(self):
+        # The plausible bug: grant dumps the raw JSON and the operator has
+        # to reconstruct whether they bought a machinery rerun or a Refine
+        # repair from fields that do not say so.
+        lines = operator.grant_outcome_lines(
+            {"outcome": {"AttemptsGranted": {"resumes_at": "Verify", "attempts": 2}}},
+            "Machinery",
+        )
+        self.assertEqual(lines, ["granted 2 machinery attempt(s); resumes at Verify"])
+        work = operator.grant_outcome_lines(
+            {"outcome": {"AttemptsGranted": {"resumes_at": "Refine", "attempts": 1}}},
+            "Work",
+        )
+        self.assertEqual(work, ["granted 1 work attempt(s); resumes at Refine"])
+
+    def test_a_duplicate_grant_names_the_fresh_key(self):
+        # The plausible bug: a content-derived key replay prints only
+        # `Duplicate`, so the operator retries the same invocation forever.
+        self.assertEqual(
+            operator.grant_outcome_lines("Duplicate", "Machinery"),
+            ["duplicate grant; pass --idempotency-key to authorize another identical batch"],
+        )
+
+    def test_grant_help_names_a_bounded_batch_and_a_fresh_key(self):
+        # The plausible bug: --attempts is documented as "how many more
+        # attempts" with no ceiling or repeat-key, so the operator thinks
+        # one grant is unbounded.
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit):
+            with redirect_stdout(buf):
+                operator.build_parser().parse_args(["grant", "--help"])
+        text = buf.getvalue()
+        self.assertIn("bounded batch", text)
+        self.assertIn("--idempotency-key", text)
+        self.assertIn("machinery", text)
+
 
 class CorrespondenceLookup(unittest.TestCase):
     """Reading a digest's backend object out of the coordinator's store."""

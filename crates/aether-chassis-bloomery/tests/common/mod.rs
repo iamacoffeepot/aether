@@ -12,6 +12,8 @@
 #![allow(dead_code, reason = "each test binary compiles the whole module and uses only the fixtures it needs")]
 #![allow(clippy::unwrap_used, reason = "a fixture that cannot set up its process reports it by panicking")]
 
+use std::collections::HashSet;
+use std::fs;
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -62,7 +64,10 @@ impl Coordinator {
         let mut command = Command::new(env!("CARGO_BIN_EXE_bloomery"));
         command
             .env("AETHER_RPC_PORT", rpc_port.to_string())
-            .env("AETHER_HTTP_PORT", free_port().to_string())
+            // OS-assigned: a reserved-then-released HTTP port is the same
+            // bind race as RPC, and a collision here kills the child before
+            // the RPC ingress exists.
+            .env("AETHER_HTTP_PORT", "0")
             .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -83,11 +88,41 @@ impl Coordinator {
     /// Whether the child is still running.
     ///
     /// `free_port` binds `:0` and releases, so a sibling can claim the port
-    /// before this bin binds. The loser exits; `connect_and_handshake` then
-    /// attaches to the thief. A caller that requires this to stay true after
-    /// the handshake is talking to the process it spawned, not a stranger.
+    /// before this bin binds. The loser exits; a deadline handshake then
+    /// attaches to the thief or burns 30s against a closed port. A caller
+    /// that requires this to stay true after the handshake is talking to the
+    /// process it spawned, not a stranger — [`client::spawn_and_connect`]
+    /// retries the whole fork when this goes false.
     pub fn is_alive(&mut self) -> bool {
         self.child.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+    }
+
+    /// Local ports this process currently has in `LISTEN`, from `/proc`.
+    ///
+    /// Used by the handshake helper so a connect only targets a socket the
+    /// child we forked actually owns — a reserved port another suite process
+    /// claimed in the `free_port` window is skipped rather than Hello'd.
+    pub fn listening_ports_for(pid: u32) -> Vec<u16> {
+        let ours = socket_inodes(pid);
+        if ours.is_empty() {
+            return Vec::new();
+        }
+        let mut ports = Vec::new();
+        collect_our_listen_ports("/proc/net/tcp", &ours, &mut ports);
+        collect_our_listen_ports("/proc/net/tcp6", &ours, &mut ports);
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
+
+    /// [`listening_ports_for`](Self::listening_ports_for) for this child.
+    pub fn listening_ports(&self) -> Vec<u16> {
+        Self::listening_ports_for(self.pid)
+    }
+
+    /// Whether this child owns a `LISTEN` socket on `port`.
+    pub fn listens_on(&self, port: u16) -> bool {
+        self.listening_ports().contains(&port)
     }
 
     /// SIGKILL the coordinator now and reap it (`Child::kill` is SIGKILL on
@@ -114,4 +149,40 @@ impl Drop for Coordinator {
     fn drop(&mut self) {
         self.reap();
     }
+}
+
+fn socket_inodes(pid: u32) -> HashSet<u64> {
+    let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return HashSet::new();
+    };
+    entries.flatten().filter_map(|entry| parse_socket_inode(&fs::read_link(entry.path()).ok()?)).collect()
+}
+
+fn parse_socket_inode(target: &Path) -> Option<u64> {
+    target.to_str()?.strip_prefix("socket:[")?.strip_suffix(']')?.parse().ok()
+}
+
+fn collect_our_listen_ports(table: &str, ours: &HashSet<u64>, ports: &mut Vec<u16>) {
+    let Ok(text) = fs::read_to_string(table) else {
+        return;
+    };
+    for line in text.lines().skip(1) {
+        let columns: Vec<&str> = line.split_whitespace().collect();
+        // sl local rem st tx:rx tr:when retr uid timeout inode
+        if columns.len() < 10 || columns[3] != "0A" {
+            continue;
+        }
+        let Ok(inode) = columns[9].parse() else {
+            continue;
+        };
+        if ours.contains(&inode)
+            && let Some(port) = parse_hex_port(columns[1])
+        {
+            ports.push(port);
+        }
+    }
+}
+
+fn parse_hex_port(local_address: &str) -> Option<u16> {
+    u16::from_str_radix(local_address.rsplit_once(':')?.1, 16).ok()
 }
