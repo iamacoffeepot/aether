@@ -724,11 +724,12 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> GitSource<C> {
     }
 
     // Point the bloom's landing branch at `sha`, creating it or moving it. The
-    // force is deliberate and safe: this ref is per-bloom and Bloomery-owned,
-    // and the only way to reach it with the branch already elsewhere is a prior
-    // attempt that failed after the ref write and before the proposal (an open
-    // proposal is adopted before this runs). Fast-forward-only would wedge that
-    // bloom's landing forever on a ref nobody else reads.
+    // force is deliberate and safe: this ref is per-bloom and Bloomery-owned.
+    // The fresh-open path reaches here with the branch elsewhere after a prior
+    // attempt that failed after the ref write and before the proposal; the adopt
+    // path reaches here when a still-open proposal sits on a stale head after a
+    // refine. Fast-forward-only would wedge that bloom's landing forever on a
+    // ref nobody else reads.
     fn point_landing_branch(&self, bloom: &BloomId, sha: &str) -> Result<(), SourceError> {
         let name = Self::landing_ref(bloom);
         match self.client.get_ref(&name)? {
@@ -1517,8 +1518,14 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> LandingSource f
         }
         // Adopt before anything else: a re-drained land entry (or a crash-and-
         // replay) must find the proposal it already opened rather than opening a
-        // second one. This is what makes issuing a land idempotent, and it runs
-        // before any write so a redrive touches nothing.
+        // second one. This is what makes issuing a land idempotent.
+        //
+        // A redrive of the same head is still a no-write (`point_landing_branch`
+        // no-ops). A later land with a new proven head — a refine after the
+        // first proposal's checks refused — must move the branch onto that head
+        // before returning, or checks keep running against the refused commit
+        // and the #4953 head-match then refuses the new landing as drift, one
+        // gate too late.
         //
         // Ahead of the base check, deliberately. The base check decides whether to
         // *open* a landing; once one is open its fate belongs to the proposal, and
@@ -1527,6 +1534,12 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> LandingSource f
         // the one outcome the watch exists to observe.
         let branch = landing_branch(bloom);
         if let Some(existing) = self.client.find_pull_request_for_head(&branch)? {
+            if existing.state == PullRequestState::Open {
+                let proven = self.resolve_git_sha(new_head, "land new head digest")?;
+                if existing.head_sha != proven {
+                    self.point_landing_branch(bloom, &proven)?;
+                }
+            }
             return Ok(LandOutcome::Proposed { number: existing.number });
         }
 
@@ -2312,6 +2325,46 @@ mod tests {
         let first = source.land(&bloom, &base, &new_head).unwrap();
         let second = source.land(&bloom, &base, &new_head).unwrap();
         assert_eq!(first, second, "a re-issued land adopts the same proposal");
+    }
+
+    // Tripwire: a refine produces a new proven head while the landing pull
+    // request from the refused first land is still open on the old one. Adopt
+    // without re-pointing leaves checks running against the refused commit,
+    // and the later head-match gate (#4953) then refuses the new landing as
+    // drift — one gate too late. The adopt path is the one that knows both
+    // heads and must move the branch before returning Proposed.
+    #[test]
+    fn land_after_a_refine_repoints_an_open_proposal_onto_the_new_proven_head() {
+        let fake = FakeGithub::new();
+        let bloom = bloom();
+        let base = digest(10);
+        fake.seed_ref("heads/main", &"a1".repeat(20));
+        fake.seed_correspondence(&base, &"a1".repeat(20));
+        let refused = digest(90);
+        let refined = digest(91);
+        fake.seed_git_object(&refused);
+        fake.seed_git_object(&refined);
+        let source = git_source(&fake, true);
+
+        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &refused).unwrap() else {
+            panic!("the first land opens the proposal");
+        };
+        assert_eq!(
+            fake.ref_target(&format!("heads/{}", landing_branch(&bloom))),
+            Some(to_hex(&refused)),
+            "the first land points the branch at the refused head",
+        );
+
+        assert_eq!(
+            source.land(&bloom, &base, &refined).unwrap(),
+            LandOutcome::Proposed { number },
+            "the second land adopts the same proposal",
+        );
+        assert_eq!(
+            fake.ref_target(&format!("heads/{}", landing_branch(&bloom))),
+            Some(to_hex(&refined)),
+            "the adopted proposal's branch now points at the refined head",
+        );
     }
 
     #[test]
