@@ -34,10 +34,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    Admit, AdmitResult, BloomDraft, CONTROL_CORE_NAMESPACE, CalibrationDocument, ConfigKind, ConfigRegistry, Decisions,
-    Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, ModelOverride, Outcome, Query,
-    QueryResult, ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StudyCost, StudyRecord,
-    Unproducible, ViewDocument, WorkpieceId, reduce,
+    Admit, AdmitResult, BloomDraft, BloomId, CONTROL_CORE_NAMESPACE, CalibrationDocument, CandidateRef, ConfigKind,
+    ConfigRegistry, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, ModelOverride,
+    OperatorHold, OperatorRepair, OperatorRepairError, Outcome, Query, QueryResult, ResolvedConfigs, SealError,
+    Snapshot, SpendWindow, StageCatalog, StageId, StudyCost, StudyRecord, Unproducible, ViewDocument, WorkpieceId,
+    digest_of, reduce,
 };
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, PutResult};
 use aether_chassis_bloomery::store::{JournalWrite, RecordConfig, RecordConfigResult, SqliteStore, StoreBackend};
@@ -685,4 +686,126 @@ fn a_seal_naming_a_configuration_authored_after_boot_still_admits() {
         ),
         "an address nothing authored is refused, naming its kind: {refused:?}",
     );
+}
+
+/// The same content-derived key the repair route mints: bloom id plus the
+/// repair's own digest. A resent body without `--idempotency-key` is this
+/// string twice.
+fn repair_event(bloom: BloomId) -> Event {
+    let repair = OperatorRepair {
+        workpiece: WorkpieceId("wp".into()),
+        candidate: CandidateRef { tree: Digest::from_bytes([0x60; 32]), checkout: Digest::from_bytes([0x61; 32]) },
+        reason: "one-line fix, cheaper than a lap".into(),
+        operator: "eve".into(),
+    };
+    let key = format!(
+        "aether.bloomery.repair:{}:{}",
+        hex_bytes(bloom.0.as_bytes()),
+        hex_bytes(digest_of(&repair).as_bytes()),
+    );
+    Event { idempotency_key: IdempotencyKey(key), fact: Fact::OperatorRepair { bloom, repair } }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut text, byte| {
+        use std::fmt::Write;
+        write!(&mut text, "{byte:02x}").expect("writing to String cannot fail");
+        text
+    })
+}
+
+fn fail_construct(key: &str, bloom: BloomId) -> Event {
+    Event {
+        idempotency_key: IdempotencyKey(key.into()),
+        fact: Fact::AttemptCompleted {
+            bloom,
+            workpiece: WorkpieceId("wp".into()),
+            stage: StageId::Construct,
+            passed: false,
+            evidence: Evidence {
+                subject: Digest::from_bytes([70; 32]),
+                kind: EvidenceKind::VerificationResult,
+                detail: Digest::from_bytes([80; 32]),
+            },
+            candidate: None,
+        },
+    }
+}
+
+fn brake(key: &str, bloom: BloomId, fact: impl FnOnce(BloomId, OperatorHold) -> Fact) -> Event {
+    Event {
+        idempotency_key: IdempotencyKey(key.into()),
+        fact: fact(bloom, OperatorHold { reason: "the run looks wrong".into(), operator: "eve".into() }),
+    }
+}
+
+// Tripwire (#5107): a repair refused while the bloom is held must not occupy
+// the content-derived key. The incident was a `Held` row answering the
+// identical resubmit after release as `Duplicate`, so the operator had to
+// guess at `--idempotency-key`. Replay is in the loop because `seen` is
+// rebuilt from the event bytes: retagging only the store column would look
+// correct until the next boot.
+#[test]
+fn a_rejected_repair_does_not_shadow_the_same_content_after_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let db = db.to_str().unwrap();
+
+    let port = free_port();
+    let coordinator = spawn(port, db);
+    let mut stream = connect_and_handshake(port, "control-loop-test");
+    let control = control_mailbox();
+
+    let Outcome::Sealed(bloom) = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp")) else {
+        panic!("the seal admits");
+    };
+    let retried = admit(&mut stream, 3, control, &fail_construct("fail-1", bloom));
+    assert!(matches!(retried, Outcome::AttemptRetried { .. }), "first construct failure retries: {retried:?}");
+    let wedged = admit(&mut stream, 4, control, &fail_construct("fail-2", bloom));
+    assert!(matches!(wedged, Outcome::AttemptWedged { .. }), "the construct budget wedges: {wedged:?}");
+    let held =
+        admit(&mut stream, 5, control, &brake("hold-1", bloom, |bloom, hold| Fact::OperatorHold { bloom, hold }));
+    assert!(matches!(held, Outcome::BloomHeld { .. }), "the bloom is on the brake: {held:?}");
+
+    let repair = repair_event(bloom);
+    let refused = admit(&mut stream, 6, control, &repair);
+    assert!(
+        matches!(refused, Outcome::OperatorRepairRejected(OperatorRepairError::Held)),
+        "a repair while held is refused: {refused:?}",
+    );
+    let still_held = admit(&mut stream, 7, control, &repair);
+    assert!(
+        matches!(still_held, Outcome::OperatorRepairRejected(OperatorRepairError::Held)),
+        "resubmitting while still held is still Held, not Duplicate: {still_held:?}",
+    );
+
+    drop(stream);
+    coordinator.kill9();
+
+    let port = free_port();
+    let _coordinator = spawn(port, db);
+    let mut stream = connect_and_handshake(port, "control-loop-test");
+    let control = control_mailbox();
+
+    let after_replay = admit(&mut stream, 8, control, &repair);
+    assert!(
+        matches!(after_replay, Outcome::OperatorRepairRejected(OperatorRepairError::Held)),
+        "replay must not put the content key in `seen`: {after_replay:?}",
+    );
+
+    let let_go = admit(
+        &mut stream,
+        9,
+        control,
+        &brake("release-1", bloom, |bloom, release| Fact::OperatorRelease { bloom, release }),
+    );
+    assert!(matches!(let_go, Outcome::BloomReleased { .. }), "the bloom comes off the brake: {let_go:?}");
+
+    let accepted = admit(&mut stream, 10, control, &repair);
+    assert!(
+        matches!(accepted, Outcome::OperatorRepairAccepted { .. }),
+        "the identical repair is accepted without a key override: {accepted:?}",
+    );
+    let replayed = admit(&mut stream, 11, control, &repair);
+    assert!(matches!(replayed, Outcome::Duplicate), "an accepted repair still consumes the content key: {replayed:?}");
 }
