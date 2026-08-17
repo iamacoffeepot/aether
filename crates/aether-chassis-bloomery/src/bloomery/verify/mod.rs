@@ -1,14 +1,23 @@
-//! Proof-fact addressing and recording for the verification ledger
-//! (ADR-0200 §The fact).
+//! Proof-fact addressing, recording, and attribution for the verification
+//! ledger (ADR-0200 §The fact, §"Attribution through the ledger").
 //!
 //! A proof fact is addressed by `(closure_key, test, result, host_class)`.
 //! [`closure_key`] hashes a package's git-addressed dependency closure;
 //! [`HostClass`] is the opaque host the coordinator supplies; [`discriminate`]
-//! is the only constructor of facts the ledger will store.
+//! is the only constructor of facts the ledger will store;
+//! [`attribute_gate_failure`] is the failure-attribution path member verify
+//! and the aggregate gate share.
 
+#[cfg(feature = "runtime")]
+mod attribution;
 mod closure;
 mod facts;
 
+#[cfg(feature = "runtime")]
+pub use attribution::{
+    Attribution, AttributionError, AttributionRequest, BaseProbe, BaseRepairWorkpiece, RepairBoard,
+    attribute_gate_failure, consult_proof_fact,
+};
 pub use closure::{ClosureKey, ClosureKeyError, closure_key};
 #[cfg(feature = "runtime")]
 pub use facts::record_proof_facts;
