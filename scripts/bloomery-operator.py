@@ -1672,6 +1672,7 @@ def recovery_ladder(
     produced_candidate: bool,
     correspondence: dict[str, str],
     stranded: Sequence[str],
+    wedge_cause: str | None = None,
 ) -> list[dict[str, Any]]:
     """The next recovery rungs, arguments filled from the journal.
 
@@ -1690,18 +1691,30 @@ def recovery_ladder(
 
     if recovering:
         attempts = SUGGESTED_GRANT_ATTEMPTS
-        if wedged_at:
+        machinery = wedge_cause == "Machinery"
+        if machinery and wedged_at:
+            because = (
+                f"machinery wedge at {wedged_at}: grant resets only the machinery "
+                "axis and re-runs that stage on the same candidate"
+            )
+        elif wedged_at:
             because = f"retryable lane failure: wedged at {wedged_at}"
         else:
             because = "retryable lane failure: the outstanding order is overdue (grant is refused until the member wedges)"
         if attempt_count is not None:
             because += f", {attempt_count} attempt(s) recorded"
+        notes = [
+            f"suggested --attempts {attempts} (one bounded batch; the sealed stage budget is the ceiling)",
+            "a later identical batch needs --idempotency-key; the default key is content-derived",
+        ]
+        if machinery:
+            notes.append("eligible now: the member is wedged on the machinery axis, not on work or repair")
         rungs.append(
             {
                 "verb": "grant",
                 "command": grant_command(bloom, workpiece, wedged_at, attempts),
                 "because": because,
-                "notes": [f"suggested --attempts {attempts} (one more roll; the sealed catalog ceiling is not served)"],
+                "notes": notes,
             }
         )
 
@@ -1968,6 +1981,7 @@ def cmd_why(args: argparse.Namespace) -> None:
         produced_candidate=bool(lane and lane.get("produced_candidate")),
         correspondence=correspondence,
         stranded=stranded_members(bloom),
+        wedge_cause=member.get("wedge_cause") if isinstance(member.get("wedge_cause"), str) else None,
     )
 
     park = review_park_of(bloom)
@@ -1987,6 +2001,7 @@ def cmd_why(args: argparse.Namespace) -> None:
         "has_candidate": resolution is not None,
         "outstanding_order": order,
         "wedge": wedge,
+        "wedge_cause": member.get("wedge_cause"),
         "held_on_question": pending,
         "blocked_by": blocked_by,
         "review_park": park,
@@ -2023,7 +2038,9 @@ def cmd_why(args: argparse.Namespace) -> None:
         print("  order      none outstanding -- nothing is dispatched for this member right now")
 
     if wedge:
-        print(f"  WEDGE      at {wedge.get('stage')}, evidence {wedge.get('evidence')}")
+        cause = diagnosis.get("wedge_cause") or member.get("wedge_cause")
+        cause_bit = f", cause {cause}" if cause else ""
+        print(f"  WEDGE      at {wedge.get('stage')}{cause_bit}, evidence {wedge.get('evidence')}")
     if blocked_by:
         ancestor = next((other for other in bloom.get("members", []) if other.get("workpiece") == blocked_by), None)
         if ancestor and ancestor.get("wedge"):
@@ -2223,6 +2240,47 @@ def emit_outcome(result: Any) -> None:
     print_json(result)
 
 
+def grant_axis_name(wedge_cause: str | None) -> str:
+    """The operator-facing name of the axis a grant spends."""
+    if wedge_cause == "Machinery":
+        return "machinery"
+    if wedge_cause == "Work":
+        return "work"
+    return "attempts"
+
+
+def grant_outcome_lines(result: Any, wedge_cause: str | None) -> list[str]:
+    """Render the resumed stage and granted axis from a grant response.
+
+    `AttemptsGranted` already names `resumes_at` and `attempts`; the axis is
+    the wedge cause the operator saw (the response does not grow a new
+    discriminant). A duplicate tells them a fresh key is required for another
+    identical batch.
+    """
+    outcome = result.get("outcome", result) if isinstance(result, dict) else result
+    if outcome == "Duplicate":
+        return ["duplicate grant; pass --idempotency-key to authorize another identical batch"]
+    if not isinstance(outcome, dict):
+        return []
+    granted = outcome.get("AttemptsGranted")
+    if isinstance(granted, dict):
+        resumes = granted.get("resumes_at") or "unknown"
+        attempts = granted.get("attempts")
+        axis = grant_axis_name(wedge_cause)
+        return [f"granted {attempts} {axis} attempt(s); resumes at {resumes}"]
+    refused = outcome.get("GrantAttemptsRejected")
+    if refused is not None:
+        return [f"grant refused: {json.dumps(refused, sort_keys=True)}"]
+    return []
+
+
+def emit_grant_outcome(result: Any, wedge_cause: str | None) -> None:
+    """Print the grant's resume stage/axis, then the raw outcome."""
+    for line in grant_outcome_lines(result, wedge_cause):
+        print(line)
+    print_json(result)
+
+
 def cmd_hold(args: argparse.Namespace) -> None:
     bloom = require_digest(args.bloom, "the bloom id")
     emit_outcome(Api(args.base).post(f"/blooms/{bloom}/hold", override_body(args)))
@@ -2312,13 +2370,19 @@ def cmd_supersede(args: argparse.Namespace) -> None:
 
 def cmd_grant(args: argparse.Namespace) -> None:
     bloom = require_digest(args.bloom, "the bloom id")
+    api = Api(args.base)
+    member: dict[str, Any] | None = None
+    try:
+        _, member = find_member(api.view(), args.workpiece)
+    except OperatorError:
+        if args.stage is None:
+            raise
     stage = args.stage
     if stage is None:
         # The reducer refuses a grant naming any stage but the one the member is
         # wedged at, so resolving it from the wedge beats making the operator
         # retype what the view already knows.
-        _, member = find_member(Api(args.base).view(), args.workpiece)
-        wedge = member.get("wedge")
+        wedge = (member or {}).get("wedge")
         if not wedge:
             die(
                 f"{args.workpiece} is not wedged, so there is no stage to grant against. "
@@ -2330,7 +2394,7 @@ def cmd_grant(args: argparse.Namespace) -> None:
     body: dict[str, Any] = {"workpiece": args.workpiece, "stage": stage, "attempts": args.attempts}
     if args.idempotency_key:
         body["idempotency_key"] = args.idempotency_key
-    emit_outcome(Api(args.base).post(f"/blooms/{bloom}/grant", body))
+    emit_grant_outcome(api.post(f"/blooms/{bloom}/grant", body), (member or {}).get("wedge_cause"))
 
 
 def cmd_adjudicate(args: argparse.Namespace) -> None:
@@ -2492,11 +2556,25 @@ def build_parser() -> argparse.ArgumentParser:
     supersede.add_argument("--idempotency-key", default=None)
     supersede.set_defaults(handler=cmd_supersede)
 
-    grant = subparsers.add_parser("grant", help="hand a wedged member more attempts and resume it")
+    grant = subparsers.add_parser(
+        "grant",
+        help="hand a wedged member one bounded batch of attempts and resume it",
+        description=(
+            "Grant --attempts N as one sealed-budget-sized batch on the axis the "
+            "wedge names: a machinery wedge re-runs the same stage on the same "
+            "candidate; a work wedge at Verify still resumes at Refine. A repeat "
+            "of the same bloom/workpiece/stage/count needs --idempotency-key."
+        ),
+    )
     grant.add_argument("bloom")
     grant.add_argument("workpiece")
     grant.add_argument("--stage", default=None, help="defaults to the stage the member is wedged at")
-    grant.add_argument("--attempts", type=int, default=1, help="how many more attempts to allow [1]")
+    grant.add_argument(
+        "--attempts",
+        type=int,
+        default=1,
+        help="one bounded batch of N retries on the wedged axis; the stage budget is the ceiling [1]",
+    )
     grant.add_argument(
         "--idempotency-key",
         default=None,
