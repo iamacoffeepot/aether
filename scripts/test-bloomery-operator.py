@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import shlex
 import sqlite3
 import struct
@@ -348,6 +349,25 @@ class LastMovement(unittest.TestCase):
         self.assertIsNone(operator.last_movement(records, "wp-a"))
 
 
+def write_slot_evidence(base: Path, nonce: str, slot: int, identity: dict[str, object] | str | None = None) -> None:
+    evidence = base / f"{nonce}-evidence"
+    evidence.mkdir()
+    (evidence / "slot").write_text(f"{slot}\n", encoding="utf-8")
+    if isinstance(identity, str):
+        (evidence / "identity").write_text(identity, encoding="utf-8")
+    elif identity is not None:
+        (evidence / "identity").write_text(json.dumps(identity), encoding="utf-8")
+
+
+def this_process_identity() -> dict[str, object]:
+    identity = operator.observe_process(os.getpid())
+    assert identity is not None
+    return identity
+
+
+DEAD_IDENTITY = {"pid": 999999, "pgid": 999999, "starttime": 1, "boot_id": "historical"}
+
+
 class SlotListing(unittest.TestCase):
     """Projecting scratch-root slot files into the state an operator reads."""
 
@@ -360,13 +380,8 @@ class SlotListing(unittest.TestCase):
             base = Path(scratch)
             (base / "slot-0").mkdir()
             (base / "slot-1").mkdir()
-            evidence = base / "dispatch-9-evidence"
-            evidence.mkdir()
-            (evidence / "slot").write_text("1\n", encoding="utf-8")
-            (evidence / "identity").write_text(
-                json.dumps({"pid": 11, "pgid": 11, "starttime": 100, "boot_id": "boot-a"}),
-                encoding="utf-8",
-            )
+            live = this_process_identity()
+            write_slot_evidence(base, "dispatch-9", 1, live)
             (base / "slot-0.quarantine").write_text(
                 json.dumps(
                     {
@@ -385,7 +400,34 @@ class SlotListing(unittest.TestCase):
             self.assertEqual(listed[0]["identity"]["pid"], 22)
             self.assertEqual(listed[1]["state"], "occupied")
             self.assertEqual(listed[1]["nonce"], "dispatch-9")
-            self.assertEqual(listed[1]["identity"]["pid"], 11)
+            self.assertEqual(listed[1]["identity"]["pid"], live["pid"])
+
+    def test_quarantine_outranks_a_live_occupant_on_the_same_slot(self):
+        # Tripwire: a cancel that failed leaves both a quarantine file and a
+        # still-live identity. The operator came to see the withheld slot;
+        # collapsing it to occupied hides the file they need to clear.
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            (base / "slot-0").mkdir()
+            write_slot_evidence(base, "dispatch-9", 0, this_process_identity())
+            (base / "slot-0.quarantine").write_text(
+                json.dumps(
+                    {
+                        "slot": 0,
+                        "nonce": "dispatch-8",
+                        "identity": {"pid": 22, "pgid": 22, "starttime": 200, "boot_id": "boot-a"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            listed = operator.list_slots(str(base))
+
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["state"], "quarantined")
+            self.assertEqual(listed[0]["nonce"], "dispatch-8")
+            self.assertEqual(listed[0]["identity"]["pid"], 22)
+            self.assertIsNotNone(listed[0]["quarantine"])
 
     def test_a_checkout_with_no_dispatch_and_no_quarantine_is_free(self):
         # Tripwire: a slot checkout is reused across dispatches, so an idle
@@ -396,6 +438,87 @@ class SlotListing(unittest.TestCase):
             (base / "slot-2").mkdir()
             listed = operator.list_slots(str(base))
             self.assertEqual(listed, [{"slot": 2, "state": "free", "nonce": None, "identity": None, "quarantine": None}])
+
+    def test_the_live_identity_is_the_occupant_regardless_of_retained_history(self):
+        # Tripwire: Wave 4/7. list_slots used to assign occupants[slot] in
+        # iterdir order, so a retained dispatch-225-evidence could overwrite
+        # the live dispatch-436 that /proc still shows in the slot. Occupancy
+        # is a live identity match, not a leftover directory or a newer nonce.
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            (base / "slot-0").mkdir()
+            (base / "slot-1").mkdir()
+            live = this_process_identity()
+            recycled = {**live, "starttime": live["starttime"] + 1}
+
+            write_slot_evidence(base, "dispatch-436", 0, live)
+            write_slot_evidence(base, "dispatch-225", 0, DEAD_IDENTITY)
+            write_slot_evidence(base, "dispatch-237", 0, DEAD_IDENTITY)
+            write_slot_evidence(base, "dispatch-272", 0, DEAD_IDENTITY)
+            write_slot_evidence(base, "dispatch-100", 0, recycled)
+            write_slot_evidence(base, "dispatch-200", 0, "not-json")
+
+            write_slot_evidence(base, "dispatch-999", 1, DEAD_IDENTITY)
+            write_slot_evidence(base, "dispatch-1000", 1, DEAD_IDENTITY)
+            write_slot_evidence(base, "dispatch-1", 1, live)
+
+            listed = {entry["slot"]: entry for entry in operator.list_slots(str(base))}
+
+            self.assertEqual(listed[0]["state"], "occupied")
+            self.assertEqual(listed[0]["nonce"], "dispatch-436")
+            self.assertEqual(listed[0]["identity"]["pid"], live["pid"])
+            self.assertEqual(listed[1]["state"], "occupied")
+            self.assertEqual(listed[1]["nonce"], "dispatch-1")
+            self.assertEqual(listed[1]["identity"]["pid"], live["pid"])
+
+    def test_retained_dead_evidence_does_not_occupy_a_checkout(self):
+        # Tripwire: evidence outlives the process. Treating a dead record as
+        # occupied is how Wave 7 reported stale blockers on free slots.
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            (base / "slot-0").mkdir()
+            write_slot_evidence(base, "dispatch-225", 0, DEAD_IDENTITY)
+            write_slot_evidence(base, "dispatch-272", 0, DEAD_IDENTITY)
+
+            listed = operator.list_slots(str(base))
+
+            self.assertEqual(
+                listed, [{"slot": 0, "state": "free", "nonce": None, "identity": None, "quarantine": None}]
+            )
+
+    def test_two_live_identities_for_one_slot_are_unknown(self):
+        # Tripwire: two matching /proc identities cannot both be "the" occupant.
+        # Picking either nonce (by name, age, or iterdir) is the same lie as
+        # the historical overwrite — report unknown instead of guessing.
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            (base / "slot-0").mkdir()
+            self_live = this_process_identity()
+            init_live = operator.observe_process(1)
+            self.assertIsNotNone(init_live, "pid 1 must be observable so the two live claims are distinct")
+            write_slot_evidence(base, "dispatch-436", 0, self_live)
+            write_slot_evidence(base, "dispatch-437", 0, init_live)
+
+            listed = operator.list_slots(str(base))
+
+            self.assertEqual(
+                listed, [{"slot": 0, "state": "unknown", "nonce": None, "identity": None, "quarantine": None}]
+            )
+
+    def test_an_unreadable_identity_is_unknown_not_an_occupant(self):
+        # Tripwire: a slot claim with no readable identity used to be occupied
+        # on the directory name alone. That is a nonce with no process proof.
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            (base / "slot-0").mkdir()
+            write_slot_evidence(base, "dispatch-225", 0, "not-json")
+            write_slot_evidence(base, "dispatch-226", 0, None)
+
+            listed = operator.list_slots(str(base))
+
+            self.assertEqual(
+                listed, [{"slot": 0, "state": "unknown", "nonce": None, "identity": None, "quarantine": None}]
+            )
 
 
 class QuarantineClearing(unittest.TestCase):
