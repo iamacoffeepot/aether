@@ -795,6 +795,66 @@ class ReviewParkPresentation(unittest.TestCase):
         self.assertIsNone(operator.review_park_of({}))
 
 
+class CompositionWedgePresentation(unittest.TestCase):
+    """A Sealed bloom whose composition is wedged is not a healthy bloom."""
+
+    BLOOM = "4f" * 32
+    FINDING = "ab" * 32
+    EVIDENCE = "cd" * 32
+
+    def _view_bloom(self) -> dict:
+        return {
+            "id": self.BLOOM,
+            "status": "Sealed",
+            "superseded_by": None,
+            "landing_blocked": None,
+            "executor_fault": None,
+            "review_park": None,
+            "composition": {
+                "cursor": {"stage": "Refine", "attempts": 3, "candidate": {"tree": TREE, "checkout": CHECKOUT}},
+                "wedge": {"stage": "Refine", "evidence": self.EVIDENCE},
+                "findings": [{"subject": TREE, "detail": self.FINDING, "implicated": []}],
+            },
+            "members": [
+                {
+                    "workpiece": "issue-5119",
+                    "resolution": {"candidate": TREE},
+                    "wedge": None,
+                    "pending_decision": None,
+                }
+            ],
+        }
+
+    def test_a_wedged_composition_renders_a_stopped_row_and_the_adjudicate_hint(self):
+        # The plausible bug (issue 5138): status of a Sealed bloom with every
+        # member integrated and no review park still reads as healthy, so the
+        # operator never sees the composition wedge or the finding digest
+        # adjudicate needs.
+        view_bloom = self._view_bloom()
+        entry = operator.bloom_status_entry(view_bloom, {})
+        composition_row = next(row for row in entry["members"] if row["workpiece"] == operator.COMPOSITION_WORKPIECE)
+        self.assertEqual(composition_row["state"], "WEDGED")
+        self.assertEqual(composition_row["wedged_at"], "Refine")
+        parsed = parse_printed(entry["adjudicate"])
+        self.assertEqual(parsed.command, "adjudicate")
+        self.assertEqual(parsed.bloom, self.BLOOM)
+        self.assertEqual(parsed.finding, [self.FINDING])
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            operator.print_status_bloom(entry)
+        text = buf.getvalue()
+        self.assertIn("COMPOSITION WEDGE", text)
+        self.assertIn(operator.COMPOSITION_WORKPIECE, text)
+        self.assertIn("WEDGED", text)
+        self.assertIn(entry["adjudicate"], text)
+        self.assertIn("issue-5119", text)
+
+        found, member = operator.find_member({"blooms": [view_bloom]}, operator.COMPOSITION_WORKPIECE)
+        self.assertEqual(found["id"], self.BLOOM)
+        self.assertEqual((member.get("wedge") or {}).get("stage"), "Refine")
+
+
 class RecoveryLadder(unittest.TestCase):
     """The rungs `why` prints for a wedged or overdue member."""
 

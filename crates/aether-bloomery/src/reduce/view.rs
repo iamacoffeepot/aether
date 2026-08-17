@@ -6,8 +6,8 @@ use super::readiness::blocking_ancestor;
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{
-    BloomView, ExecutorFaultView, HostFaultView, LandingBlock, MemberView, PendingDecisionView, ReviewParkView,
-    ViewDocument, WedgeCause,
+    BloomView, CompositionCursorView, CompositionView, ExecutorFaultView, HostFaultView, LandingBlock, MemberView,
+    PendingDecisionView, ReviewParkView, ViewDocument, WedgeCause,
 };
 use crate::values::Question;
 
@@ -26,7 +26,10 @@ use crate::values::Question;
 /// [`Question`] each open hold resolves to — its pending-decision hold (`None`
 /// when the member is not held), its wedge if it has stopped dispatching
 /// for good (`None` while it is still working), and — when the sealed graph
-/// is holding it out of the line — the ancestor it is waiting on.
+/// is holding it out of the line — the ancestor it is waiting on. The
+/// composition workpiece is not a sealed member: its cursor, wedge, and open
+/// findings ride on [`BloomView::composition`] so a refine-budget stop is
+/// visible without attaching it to every member.
 ///
 /// `resolve_question` resolves an open hold's question digest to its
 /// [`Question`] bytes, the same injected read-only resolver
@@ -136,6 +139,24 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                 None => ReviewParkView { question, stage: None, prompt: None, options: Vec::new(), blocked: None },
             });
 
+            // Rendered only once the composition has a cursor, a wedge, or an
+            // open finding, so an ordinary bloom's view is unchanged here too.
+            let composition_cursor =
+                record.progress.get(&WorkpieceId::composition()).map(|progress| CompositionCursorView {
+                    stage: progress.stage,
+                    attempts: progress.attempts,
+                    candidate: progress.candidate,
+                });
+            let composition_wedge = record.wedged.get(&WorkpieceId::composition()).copied();
+            let composition_findings = record.open_composition_findings().cloned().collect::<Vec<_>>();
+            let composition =
+                (composition_cursor.is_some() || composition_wedge.is_some() || !composition_findings.is_empty())
+                    .then_some(CompositionView {
+                        cursor: composition_cursor,
+                        wedge: composition_wedge,
+                        findings: composition_findings,
+                    });
+
             BloomView {
                 id: record.spec.id(),
                 status: record.status,
@@ -144,6 +165,7 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                 landing_blocked,
                 executor_fault,
                 review_park,
+                composition,
             }
         })
         .collect();
@@ -163,10 +185,10 @@ mod tests {
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::port::{BloomView, ViewDocument, WedgeCause};
-    use crate::reduce::{BloomStatus, Event, Fact, Snapshot, reduce};
+    use crate::reduce::{BloomStatus, Event, Fact, Outcome, Snapshot, reduce};
     use crate::values::{
         BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, Question,
-        ResolvedConfigs, SpendWindow,
+        ResolutionClaim, ResolvedConfigs, SpendWindow, VerifyFailureSet, Wedge,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -352,6 +374,7 @@ mod tests {
             landing_blocked: None,
             executor_fault: None,
             review_park: None,
+            composition: None,
         }
     }
 
@@ -508,5 +531,112 @@ mod tests {
         assert_eq!(park["prompt"], question.prompt);
         assert_eq!(park["options"], serde_json::to_value(&question.options).expect("options have a JSON form"));
         assert_eq!(park["blocked"], question.blocked);
+    }
+
+    fn step(snapshot: Snapshot, event: Event) -> (Snapshot, Outcome) {
+        let configs = ResolvedConfigs::default();
+        let spend = SpendWindow::default();
+        let decisions = reduce(&snapshot, &event, &configs, &spend);
+        (snapshot.apply(&event, &decisions, &configs), decisions.outcome)
+    }
+
+    fn claim(name: &str, revision: u8, candidate: u8) -> ResolutionClaim {
+        ResolutionClaim {
+            workpiece: WorkpieceId(name.into()),
+            scope_revision: digest(revision),
+            candidate: digest(candidate),
+            evidence: Evidence { subject: digest(candidate), kind: EvidenceKind::ResolutionClaim, detail: digest(200) },
+        }
+    }
+
+    fn event(key: &str, fact: Fact) -> Event {
+        Event { idempotency_key: IdempotencyKey(key.into()), fact }
+    }
+
+    // The plausible bug (issue 5138): a composition that exhausted its Refine
+    // budget records CompositionWedged + a RecordWedge + an open finding, but
+    // /view still renders status Sealed with every member integrated and no
+    // park, so the operator cannot see the stop or the digest adjudicate needs.
+    #[test]
+    fn a_composition_wedge_surfaces_its_wedge_and_open_finding() {
+        let spec = BloomDraft { proposals: vec![membership("wp", 1)], base: digest(0), ..BloomDraft::default() }.seal();
+        let bloom = spec.id();
+        let mut snapshot = Snapshot::new(digest(0));
+        snapshot = step(snapshot, event("seal", Fact::Seal(spec))).0;
+        snapshot = step(snapshot, event("integrate", Fact::Integrate { bloom, claim: claim("wp", 1, 10) })).0;
+        snapshot = step(
+            snapshot,
+            event("resolve", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: Vec::new() }),
+        )
+        .0;
+
+        let failed_verify = event(
+            "verify-fail",
+            Fact::AggregateVerifyCompleted {
+                bloom,
+                passed: false,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::VerificationResult, detail: digest(52) },
+            },
+        );
+        snapshot = step(snapshot, failed_verify).0;
+
+        let fail_refine = |key: &str, detail: u8| {
+            event(
+                key,
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: WorkpieceId::composition(),
+                    stage: StageId::Refine,
+                    passed: false,
+                    evidence: Evidence {
+                        subject: digest(40),
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(detail),
+                    },
+                    candidate: None,
+                },
+            )
+        };
+        let mut outcome = None;
+        let mut last_detail = 70;
+        for (index, detail) in [(1_u8, 70_u8), (2, 71), (3, 72), (4, 73)] {
+            last_detail = detail;
+            let (next, next_outcome) = step(snapshot, fail_refine(&format!("refine-{index}"), detail));
+            snapshot = next;
+            if matches!(next_outcome, Outcome::CompositionWedged { .. }) {
+                outcome = Some(next_outcome);
+                break;
+            }
+        }
+        assert!(
+            matches!(outcome, Some(Outcome::CompositionWedged { refused_at: StageId::Refine, .. })),
+            "failed refine completions spend the budget: {outcome:?}"
+        );
+
+        let view = with_following_bloom(view_of(&snapshot, |_| None));
+        let decoded = wire_round_trip(&view);
+        assert_eq!(decoded, view, "composition slots must not steal the next bloom's bytes");
+
+        let composition = view.blooms[0].composition.as_ref().expect("the composition line is on the bloom");
+        assert_eq!(
+            composition.wedge,
+            Some(Wedge {
+                stage: StageId::Refine,
+                evidence: digest(last_detail),
+                repeated_verifiers: VerifyFailureSet::EMPTY,
+            }),
+            "the wedge is the same shape a member wedge renders",
+        );
+        assert!(
+            composition.findings.iter().any(|finding| finding.detail == digest(52)),
+            "the open finding digest is what adjudicate --finding quotes",
+        );
+        let cursor = composition.cursor.as_ref().expect("the composition still names the stage it stopped at");
+        assert_eq!(cursor.stage, StageId::Refine);
+        assert!(view.blooms[0].review_park.is_none(), "a refine-budget wedge is not a review park");
+        assert!(
+            view.blooms[0].members.iter().all(|member| member.wedge.is_none()),
+            "the stop is the composition's, not a member's",
+        );
     }
 }
