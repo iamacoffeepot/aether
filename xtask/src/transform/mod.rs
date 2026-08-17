@@ -22,6 +22,7 @@ mod claude;
 mod codex;
 mod construct;
 mod conventions;
+mod fixers;
 mod grok;
 mod lane;
 mod messages;
