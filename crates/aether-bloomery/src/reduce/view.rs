@@ -18,7 +18,7 @@ use crate::values::Question;
 /// into the store. Pure: reads the snapshot, allocates a document, mutates
 /// nothing.
 ///
-/// Each [`BloomRecord`](crate::BloomRecord) becomes a [`BloomView`] (its sealed-spec id, status,
+/// Each [`BloomRecord`] becomes a [`BloomView`] (its sealed-spec id, status,
 /// and successor), and each sealed [`crate::Membership`] a [`MemberView`]
 /// carrying the member's scope revision, approval evidence, — matched by
 /// workpiece from the record's accumulated claims — its resolution claim once
@@ -39,7 +39,7 @@ use crate::values::Question;
 /// A hold whose bytes the resolver cannot read (a caller with no artifact
 /// access, e.g. the live-query path) surfaces no `pending_decision` on its
 /// member, exactly as an unresolvable study record contributes no cost to a
-/// grade. A bloom-scoped [`BloomRecord::review_park`](crate::BloomRecord::review_park)
+/// grade. A bloom-scoped [`BloomRecord::review_park`]
 /// is different: the digest is always projected, and resolved details ride
 /// only when the same resolver can read them. The park is never copied onto
 /// a member hold.
