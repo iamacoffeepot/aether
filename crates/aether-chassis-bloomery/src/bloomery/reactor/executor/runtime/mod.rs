@@ -719,7 +719,7 @@ fn seed_composition_refine_order(
         record.transformation.description = Some(pin_workpiece_description(workpiece, &description));
         return Ok(());
     }
-    if !findings.is_some_and(|findings| !findings.trim().is_empty()) {
+    if findings.is_none_or(|findings| findings.trim().is_empty()) {
         return Ok(());
     }
     store.record_dispatch_description(bloom, workpiece, COMPOSITION_REFINE_ORDER)?;
