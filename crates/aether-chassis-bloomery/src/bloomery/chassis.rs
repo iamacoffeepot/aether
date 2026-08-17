@@ -182,6 +182,7 @@ fn actor_setups(
             artifacts_root: coordinator.artifacts_root.clone(),
             poll_interval_secs: coordinator.poll_interval_secs,
             stale_warn_after_secs: coordinator.stale_warn_after_secs,
+            heartbeat_silence_secs: coordinator.heartbeat_silence_secs()?,
             repository: repository.clone(),
             disabled_missing: github.missing_connection_knobs(),
             // Build shape first, configuration second (#4842). A `testing`-featured

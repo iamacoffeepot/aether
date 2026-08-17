@@ -40,7 +40,10 @@ pub struct CycleReport {
     /// Handles inspected this cycle that were not yet `Completed`, paired with
     /// their observed status (#3635) — feeds the executor reactor's staleness
     /// sweep so a wedged dispatch's last status is visible in its warn without a
-    /// second `inspect` call.
+    /// second `inspect` call, and carries a running lane's host-observed
+    /// progress timestamp so the heartbeat reaper sees the backend observation
+    /// without another `inspect`. Completed-evidence-first ordering is unchanged:
+    /// a `Completed` handle is streamed here and never appears in `pending`.
     pub pending: Vec<(Nonce, ExecutionStatus)>,
 }
 

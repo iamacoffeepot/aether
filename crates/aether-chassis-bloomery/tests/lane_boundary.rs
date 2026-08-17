@@ -28,7 +28,7 @@ use aether_bloomery::{
     VerifyFailureSet,
 };
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneScript};
-use lane::LaneHarness;
+use lane::{LaneHarness, while_pumping};
 
 /// Whether the bloom's single member has come to rest either way — resolved, or
 /// wedged. The predicate most scenarios wait on, because what separates them is
@@ -358,6 +358,63 @@ fn a_lane_that_never_exits_is_cancelled_as_a_host_fault() {
     let bloom = harness.view();
     assert!(bloom.blooms[0].members[0].resolution.is_none(), "a lane that never answered resolves nothing");
     assert_scratch_checkouts_are_lane_slots(&harness, "a cancelled run leaves no checkout of its own behind");
+}
+
+#[test]
+fn a_lane_that_goes_silent_is_cancelled_before_its_wall_clock() {
+    // ADR-0195 §8: a local model lane that streamed progress and then stopped
+    // must not occupy the slot until the sealed hour. The host silence
+    // threshold cancels it. Intake on this tree still refuses a member-stage
+    // ExecutorFault (#5091 owns the machinery fact), so the order stays
+    // outstanding after the cancel — the load-bearing property here is early
+    // cancellation and slot release, not the retry #5091 will own.
+    let mut harness =
+        LaneHarness::start_with_heartbeat(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 60, 2);
+
+    harness.wait_for_runs(1);
+    for nonce in harness.evidence_nonces() {
+        harness.write_transcript(&nonce, "{}\n");
+    }
+    thread::sleep(Duration::from_secs(5));
+
+    let bloom = harness.view();
+    assert!(bloom.blooms[0].members[0].resolution.is_none(), "a silent lane resolves nothing");
+    assert_scratch_checkouts_are_lane_slots(&harness, "a silenced run leaves no checkout of its own behind");
+}
+
+#[test]
+fn a_continuously_noisy_lane_still_dies_at_its_absolute_deadline() {
+    // Progress only extends the silence window. A lane that keeps writing
+    // its transcript must still hit the sealed wall clock — otherwise a
+    // noisy but unproductive process would run forever.
+    let mut harness =
+        LaneHarness::start_with_heartbeat(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 5, 30);
+    let runs = harness.runs_dir();
+    while_pumping(
+        || {
+            if let Ok(entries) = fs::read_dir(&runs) {
+                for entry in entries.filter_map(Result::ok) {
+                    let name = entry.file_name();
+                    let Some(nonce) = name.to_str().and_then(|name| name.strip_suffix("-evidence")) else {
+                        continue;
+                    };
+                    let path = entry.path().join("transcript.jsonl");
+                    let _ = fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| {
+                        use std::io::Write as _;
+                        file.write_all(nonce.as_bytes())
+                    });
+                }
+            }
+        },
+        || {
+            harness.wait_for_runs(1);
+            thread::sleep(Duration::from_secs(7));
+        },
+    );
+
+    let bloom = harness.view();
+    assert!(bloom.blooms[0].members[0].resolution.is_none(), "a noisy hung lane resolves nothing");
+    assert_scratch_checkouts_are_lane_slots(&harness, "a deadline-killed noisy run leaves no checkout of its own");
 }
 
 // Every checkout git has registered under the harness's run directories.

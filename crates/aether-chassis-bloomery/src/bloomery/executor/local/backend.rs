@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf, absolute};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
     BackendObjectId, CandidateRef, Conclusion, ConfigRegistry, ConfigScopes, Digest, EvidenceRef, ExecutionStatus,
@@ -75,6 +76,11 @@ const TARGET_SUFFIX: &str = "-target";
 /// configures it — the seam default, mirroring
 /// [`CoordinatorConfig::lane_build_jobs`]'s, which is what production resolves.
 const DEFAULT_LANE_BUILD_JOBS: usize = 8;
+
+/// The streamed provider transcript a running model lane writes under its
+/// evidence directory. Its modification time is the local backend's live
+/// progress signal (ADR-0195 §8); coordinator polling must never touch it.
+const TRANSCRIPT_FILE: &str = "transcript.jsonl";
 
 /// The file a dispatch records its lane slot in, inside its own evidence
 /// directory — the durable half of the slot assignment, read back by boot
@@ -1538,8 +1544,10 @@ impl ExecutorBackend for LocalExecutor {
     #[allow(clippy::significant_drop_tightening, reason = "run is a &mut reborrow; the guard must outlive it")]
     fn inspect(&self, handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
         // Read the lifecycle out of the guarded region and drop the lock before
-        // returning — the guard need only be held for the poll.
-        let lifecycle = {
+        // returning — the guard need only be held for the poll. The evidence
+        // path is cloned so the transcript metadata read below does not hold
+        // the registry, and so polling itself never opens that file for write.
+        let (lifecycle, evidence_dir) = {
             let mut registry = self.lock();
             let Some(run) = registry.runs.get_mut(&handle.nonce.0) else {
                 // A dispatch still waiting for a lane slot is dispatched but not
@@ -1555,10 +1563,12 @@ impl ExecutorBackend for LocalExecutor {
                 // rather than reading the killed child's exit as a plain completion.
                 return Ok(ExecutionStatus::Unknown);
             };
-            run.process.poll()
+            (run.process.poll(), run.evidence_dir.clone())
         };
         Ok(match lifecycle {
-            RunLifecycle::Running => ExecutionStatus::Running,
+            RunLifecycle::Running => {
+                ExecutionStatus::Running { last_progress_unix_millis: transcript_progress_unix_millis(&evidence_dir) }
+            }
             // Every terminal observation is a completed run so `stream_evidence`
             // can classify it. A signal or a wait fault is not a clean success.
             _ if lifecycle.clean_success() => ExecutionStatus::Completed { conclusion: Conclusion::Success },
@@ -1764,6 +1774,21 @@ fn record_slot(evidence_dir: &Path, slot: usize) {
 /// could not be written) or recorded text that is not a slot index.
 fn recorded_slot(evidence_dir: &Path) -> Option<usize> {
     fs::read_to_string(evidence_dir.join(SLOT_RECORD)).ok()?.trim().parse().ok()
+}
+
+/// The streamed transcript's modification time, or `None` when the file is
+/// absent, unreadable, or stamped in the future.
+///
+/// Future metadata is refused rather than reported: a clock-skewed mtime would
+/// otherwise look like progress that has not happened yet and extend the
+/// silence window past the sealed deadline. Metadata is read only — opening the
+/// file for write here would make coordinator polling itself the heartbeat.
+fn transcript_progress_unix_millis(evidence_dir: &Path) -> Option<u64> {
+    let modified = fs::metadata(evidence_dir.join(TRANSCRIPT_FILE)).ok()?.modified().ok()?;
+    let millis = modified.duration_since(UNIX_EPOCH).ok().and_then(|since| u64::try_from(since.as_millis()).ok())?;
+    let now =
+        SystemTime::now().duration_since(UNIX_EPOCH).ok().and_then(|since| u64::try_from(since.as_millis()).ok())?;
+    (millis <= now).then_some(millis)
 }
 
 /// Whether a scratch-root directory name is a lane slot's canonical checkout.
