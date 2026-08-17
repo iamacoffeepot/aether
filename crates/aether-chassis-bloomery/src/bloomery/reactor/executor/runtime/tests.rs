@@ -12,14 +12,14 @@ use std::collections::BTreeMap;
 
 use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, BloomId, CandidateRef, ConfigKind, ConfigRegistry, DispatchPayload,
-    EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce, ReasoningEffort,
+    EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, LandOutcome, ModelOverride, Nonce, ReasoningEffort,
     RedispatchPayload, ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride, TimeoutRecord, Topic,
     Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
-    ActionsExecutor, Artifact, ExecutorError, GithubError, LaneWorkflows, RunConclusion, RunStatus, StageVerdict,
-    to_hex,
+    ActionsExecutor, Artifact, ExecutorError, GitSource, GithubError, LaneWorkflows, MainlineRef, RunConclusion,
+    RunStatus, StageVerdict, landing_branch, to_hex,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
@@ -42,7 +42,8 @@ use crate::bloomery::intake::{
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::{CoordinatorConfig, GithubConnectionConfig};
 use crate::bloomery::{
-    ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
+    ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, SourceShell,
+    UnconfiguredActionsBackend,
 };
 use crate::session::SessionConfig;
 use crate::store::{JournalWrite, OutstandingOrder, SqliteStore, StoreBackend};
@@ -1509,9 +1510,10 @@ fn drain_stamps_the_record_axes_from_the_payload() {
 // ADR-0152 — an admitted passing capture is pushed to the bloom's candidate ref,
 // resolved through the correspondence to the capture commit; a failing construct
 // that still captured work pushes to the member-checkpoint sibling; a capture-less
-// admission pushes nothing. Catches a push against the wrong ref namespace (a
-// downstream Actions checkout would 404) and a failing capture landing on the
-// candidate ref as if it had passed.
+// admission pushes nothing. A passing Refine is the same candidate publish as a
+// passing Construct (refinement supersedes). Catches a push against the wrong
+// ref namespace (a downstream Actions checkout would 404) and a failing capture
+// landing on the candidate ref as if it had passed.
 #[test]
 fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
     use aether_bloomery::{CandidateRef, Event, IdempotencyKey};
@@ -1600,6 +1602,49 @@ fn a_failing_refine_capture_is_not_pushed_as_a_member_checkpoint() {
     );
 
     assert!(pusher.pushed.lock().unwrap().is_empty(), "a refine failure is not a construct checkpoint");
+}
+
+// #5102 — a passing composition Refine capture is the head landing will create
+// its branch from. Matching Construct-only left that commit local-only and the
+// land loop 422'd on an object the source repository had never seen. Catches
+// the push arm continuing past Refine the way it used to.
+#[test]
+fn a_passing_composition_refine_capture_pushes_to_the_candidate_ref() {
+    use aether_bloomery::{CandidateRef, Event, IdempotencyKey};
+
+    let bloom = BloomId(digest(1));
+    let capture = CandidateRef { tree: digest(0xAB), checkout: digest(0xAC) };
+    let store = FakeGithub::new();
+    store.seed_git_object(&capture.checkout);
+    let fact = Fact::AttemptCompleted {
+        bloom,
+        workpiece: WorkpieceId::composition(),
+        stage: StageId::Refine,
+        passed: true,
+        evidence: aether_bloomery::Evidence {
+            subject: digest(9),
+            kind: aether_bloomery::EvidenceKind::VerificationResult,
+            detail: digest(8),
+        },
+        candidate: Some(capture),
+    };
+    let event = Event { idempotency_key: IdempotencyKey("k".to_owned()), fact };
+    let pusher = RecordingPush::default();
+    let correspondence: SharedCorrespondence = Arc::new(store);
+    push_admitted_candidates(
+        &[Admission { admit: Admit { event: to_vec(&event).unwrap() }, event }],
+        Some(&correspondence),
+        &pusher,
+    );
+
+    let issued = pusher.pushed.lock().unwrap().clone();
+    assert_eq!(issued.len(), 1, "a passing composition Refine capture publishes its candidate ref");
+    assert_eq!(issued[0].0, to_hex(&capture.checkout), "the pushed sha is the capture commit");
+    assert_eq!(
+        issued[0].1,
+        candidate_ref_name(&bloom, WorkpieceId::COMPOSITION),
+        "the target is the reserved composition workpiece's candidate ref",
+    );
 }
 
 // Tripwire: `default_candidate_push`'s fixture arm declines every push rather
@@ -1898,6 +1943,109 @@ fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
     assert_eq!(stage, StageId::Refine);
     assert!(passed, "a findings-naming-nothing repair that captured a tree keeps its passing verdict");
     assert_eq!(candidate, Some(captured), "the completion path retains the captured weave");
+}
+
+// #5102 — the same AggregateVerify → accepted weave-repair path must publish
+// the capture and then be able to create the landing ref at that commit.
+// #5098 stopped at admit; skipping the candidate-ref push left landing
+// creating a branch for a head the source repository had never seen.
+#[test]
+fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let tree = digest(30);
+    let findings = "the composed tree does not build";
+
+    let verify = DispatchRecord {
+        profile: StageCatalog::profile_of(StageId::AggregateVerify),
+        nonce: Nonce("n-av".to_owned()),
+        bloom,
+        workpiece: WorkpieceId(String::new()),
+        scope_revision: tree,
+        candidate: tree,
+        displayed_digest: tree,
+        stage: StageId::AggregateVerify,
+        transformation: Transformation::for_aggregate_verify(
+            &StageCatalog::binding_of(StageId::AggregateVerify),
+            tree,
+            tree,
+        ),
+        configs: ConfigRegistry::default(),
+    };
+    record_dispatch(&mut store, &verify).unwrap();
+    let AdmitDecision::Admitted(_) = admit_uploaded(
+        &mut store,
+        &UploadedEvidence {
+            nonce: Nonce("n-av".to_owned()),
+            subject: tree,
+            verdict: StageVerdict::VerificationFailed,
+            detail: digest(7),
+            candidate: None,
+            findings: Some(findings.to_owned()),
+            failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+            cost: None,
+            calls: None,
+        },
+    )
+    .unwrap() else {
+        panic!("the failing aggregate verify admits");
+    };
+
+    let (sequence, _) = enqueue_dispatch_at(&mut store, bloom, WorkpieceId::COMPOSITION, 5, StageId::Refine);
+    drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    let captured = CandidateRef { tree: digest(8), checkout: digest(9) };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(
+        &mut store,
+        &UploadedEvidence {
+            nonce: Nonce(format!("dispatch-{sequence}")),
+            subject: digest(5),
+            verdict: StageVerdict::VerificationPassed,
+            detail: digest(11),
+            candidate: Some(captured),
+            findings: None,
+            failed_verifiers: VerifyFailureSet::EMPTY,
+            cost: None,
+            calls: None,
+        },
+    )
+    .unwrap() else {
+        panic!("the weave-repair upload admits");
+    };
+
+    let github = FakeGithub::new();
+    let base = github.seed_base_commit(&digest(10));
+    github.seed_ref_at("heads/main", &base);
+    github.seed_git_object(&captured.checkout);
+    let pusher = RecordingPush::default();
+    let correspondence: SharedCorrespondence = Arc::new(github.clone());
+    push_admitted_candidates(std::slice::from_ref(&*admission), Some(&correspondence), &pusher);
+
+    let issued = pusher.pushed.lock().unwrap().clone();
+    assert_eq!(issued.len(), 1, "the accepted repair capture is published before landing");
+    assert_eq!(issued[0].0, to_hex(&captured.checkout), "landing's head is the capture commit that was pushed");
+    assert_eq!(
+        issued[0].1,
+        candidate_ref_name(&bloom, WorkpieceId::COMPOSITION),
+        "the published ref is the reserved composition candidate",
+    );
+
+    let source = SourceShell::new(Arc::new(GitSource::new(
+        github.clone(),
+        Arc::new(github.clone()),
+        true,
+        MainlineRef::default(),
+    )));
+    let LandOutcome::Proposed { .. } = source.land(&bloom, &base, &captured.checkout, None).unwrap() else {
+        panic!("landing creates its branch from the published repair head");
+    };
+    assert_eq!(
+        github.ref_target(&format!("heads/{}", landing_branch(&bloom))).as_deref(),
+        Some(to_hex(&captured.checkout).as_str()),
+        "the landing ref points at the capture the source repository was given",
+    );
 }
 
 // Park one dispatched construct attempt on `question` and return the outbox
