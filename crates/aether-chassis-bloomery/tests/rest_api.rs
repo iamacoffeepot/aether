@@ -974,3 +974,77 @@ fn assert_answer_door_binds_its_question(http_port: u16, bloom_id: &str) {
     assert_eq!(status, 200, "answer admitted: {answered:?}");
     assert_eq!(answered["outcome"]["AdoptAnswerRejected"], "NoMatchingHold", "no parked hold to adopt");
 }
+
+// #5090 — the existing grant request is the operator door for a selected
+// batch. The plausible bugs: the route dropping `attempts` so the reducer
+// never sees the chosen count, swallowing a reducer refusal as a silent 2xx
+// with no body, treating a repeated POST as a second grant, or letting a
+// fresh key redispatch a member that already has a worker.
+#[test]
+fn grant_route_carries_the_selected_count_and_refuses_concurrent_work() {
+    run_with_bloomery("grant_route_carries_the_selected_count_and_refuses_concurrent_work", |http_port| {
+        let draft_id = draft_with(http_port, None);
+        let (status, sealed) = send_json(
+            http_port,
+            "POST",
+            &format!("/drafts/{draft_id}/seal"),
+            &seal_body(vec![projection(&["docs/guide/x.md"], complete())]),
+        );
+        assert_eq!(status, 200, "seal admits: {sealed:?}");
+        let bloom_id = bloom_hex(&sealed["outcome"]["Sealed"]);
+        let path = format!("/blooms/{bloom_id}/grant");
+
+        let grant = |attempts: u32, key: Option<&str>| {
+            let mut body = serde_json::json!({
+                "workpiece": "wp-1",
+                "stage": "Construct",
+                "attempts": attempts,
+            });
+            if let Some(key) = key {
+                body["idempotency_key"] = Value::String(key.to_owned());
+            }
+            body
+        };
+
+        // A just-sealed member is mid-flight. The grant is admitted so the
+        // reducer can refuse it; the route does not predict NotWedged.
+        let (status, refused) = send_json(http_port, "POST", &path, &grant(2, None));
+        assert_eq!(status, 200, "a reducer refusal is still 200: {refused:?}");
+        assert_eq!(
+            refused["outcome"]["GrantAttemptsRejected"]["NotWedged"], "wp-1",
+            "the refusal stays visible: {refused:?}"
+        );
+
+        // The selected count is on the journaled fact, and it is part of the
+        // default idempotency key: the same body is a duplicate, a different
+        // count is a new admission.
+        let (status, journal) = get_json(http_port, "/journal");
+        assert_eq!(status, 200, "journal");
+        let granted = journal["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|record| record["event"]["fact"]["GrantAttempts"].as_object())
+            .expect("the grant was journaled");
+        assert_eq!(granted["attempts"], 2, "the request's selected count reached the fact: {granted:?}");
+
+        let (status, again) = send_json(http_port, "POST", &path, &grant(2, None));
+        assert_eq!(status, 200, "{again:?}");
+        assert_eq!(again["outcome"], "Duplicate", "a repeated POST of the same key is a no-op: {again:?}");
+
+        let (status, other_count) = send_json(http_port, "POST", &path, &grant(1, None));
+        assert_eq!(status, 200, "{other_count:?}");
+        assert_eq!(
+            other_count["outcome"]["GrantAttemptsRejected"]["NotWedged"], "wp-1",
+            "a different count is a new admission, not a duplicate: {other_count:?}"
+        );
+
+        let (status, fresh) = send_json(http_port, "POST", &path, &grant(2, Some("grant-fresh")));
+        assert_eq!(status, 200, "{fresh:?}");
+        assert_eq!(
+            fresh["outcome"]["GrantAttemptsRejected"]["NotWedged"], "wp-1",
+            "a fresh key still cannot put two workers on one member: {fresh:?}"
+        );
+    });
+}

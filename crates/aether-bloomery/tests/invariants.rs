@@ -3365,6 +3365,169 @@ fn grant_refuses_a_running_member_a_stale_stage_and_an_unspendable_request() {
     );
 }
 
+// #5090 — an operator-selected machinery grant is a bounded same-stage batch
+// on the host-fault axis. The plausible bugs: treating a machinery Verify
+// wedge as a work wedge (resume at Refine, spend repair rolls), charging
+// ordinary attempts, moving the candidate, admitting a second worker while
+// the first is outstanding, or letting a repeated identical grant through
+// under the same idempotency key.
+#[test]
+fn a_machinery_grant_reruns_the_wedged_stage_for_exactly_n_dispatches() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10), membership("other", 11)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let captured = CandidateRef { tree: digest(21), checkout: digest(22) };
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "c-pass",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: attempt_evidence(),
+                candidate: Some(captured),
+            },
+        ),
+    );
+    let other_before = snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("other")).copied();
+    let claims_before = snapshot.blooms.get(&bloom).unwrap().claims.clone();
+
+    let fault = |key: &str, detail: u8| {
+        event(
+            key,
+            Fact::MemberExecutorFault {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Verify,
+                evidence: Evidence { subject: digest(21), kind: EvidenceKind::ExecutorFault, detail: digest(detail) },
+            },
+        )
+    };
+    let (snapshot, _) = step(&snapshot, &fault("fault-1", 60));
+    let (snapshot, _) = step(&snapshot, &fault("fault-2", 61));
+    let (wedged, _) = step(&snapshot, &fault("fault-3", 62));
+    assert!(matches!(
+        wedged.blooms.get(&bloom).unwrap().wedged.get(&workpiece("wp")),
+        Some(wedge) if wedge.stage == StageId::Verify
+    ));
+    let before = wedged.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).copied().unwrap();
+    assert_eq!(before.attempts, 1);
+    assert_eq!(before.repair_rolls, 0);
+    assert_eq!(before.candidate, Some(captured));
+
+    let grant =
+        event("grant", Fact::GrantAttempts { bloom, workpiece: workpiece("wp"), stage: StageId::Verify, attempts: 2 });
+    let (granted, decisions) = step(&wedged, &grant);
+    assert!(
+        matches!(&decisions.outcome, Outcome::AttemptsGranted { resumes_at: StageId::Verify, attempts: 2, .. }),
+        "a machinery Verify grant resumes in place, got {:?}",
+        decisions.outcome,
+    );
+    match decisions.effects.iter().find(|effect| matches!(effect, Decision::DispatchAttempt { .. })) {
+        Some(Decision::DispatchAttempt { stage, candidate, transformation, .. }) => {
+            assert_eq!(*stage, StageId::Verify, "the grant re-runs the wedged stage");
+            assert_eq!(*candidate, Some(captured.tree), "against the same candidate");
+            assert_eq!(transformation.checkout, captured.checkout);
+        }
+        other => panic!("expected a Verify DispatchAttempt, got {other:?}"),
+    }
+    let record = granted.blooms.get(&bloom).unwrap();
+    assert!(!record.wedged.contains_key(&workpiece("wp")), "a cursor that moves clears the wedge");
+    let cursor = record.progress.get(&workpiece("wp")).copied().unwrap();
+    assert_eq!(cursor.stage, StageId::Verify);
+    assert_eq!(cursor.attempts, 1, "ordinary attempts do not move");
+    assert_eq!(cursor.repair_rolls, 0, "repair rolls do not move");
+    assert_eq!(cursor.candidate, Some(captured), "the candidate does not move");
+    assert_eq!(cursor.seen_verify_failures, before.seen_verify_failures);
+    assert_eq!(record.claims, claims_before, "resolved work does not move");
+    assert_eq!(record.progress.get(&workpiece("other")).copied(), other_before, "a sibling's cursor does not move",);
+    assert_eq!(granted.member_machinery(&bloom, &workpiece("wp")).unwrap().rolls, 1);
+
+    let (after1, d1) = step(&granted, &fault("fault-g1", 63));
+    assert!(
+        matches!(d1.outcome, Outcome::MachineryRetried { stage: StageId::Verify, rolls: 2, budget: 3, .. }),
+        "got {:?}",
+        d1.outcome,
+    );
+    assert_eq!(
+        d1.effects.iter().filter(|effect| matches!(effect, Decision::DispatchAttempt { .. })).count(),
+        1,
+        "the first spent fault of a 2-batch still redispatches",
+    );
+    let cursor = after1.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).copied().unwrap();
+    assert_eq!(cursor.attempts, 1);
+    assert_eq!(cursor.repair_rolls, 0);
+    assert_eq!(cursor.candidate, Some(captured));
+
+    let (rewedged, d2) = step(&after1, &fault("fault-g2", 64));
+    assert!(
+        matches!(d2.outcome, Outcome::MachineryWedged { stage: StageId::Verify, rolls: 3, budget: 3, .. }),
+        "got {:?}",
+        d2.outcome,
+    );
+    assert!(
+        !d2.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
+        "the Nth fault of an N-batch wedges instead of dispatching",
+    );
+    assert!(rewedged.blooms.get(&bloom).unwrap().wedged.contains_key(&workpiece("wp")));
+
+    let (dup, d_dup) = step(&rewedged, &grant);
+    assert!(matches!(d_dup.outcome, Outcome::Duplicate), "the same key cannot buy a second batch");
+    assert!(dup.blooms.get(&bloom).unwrap().wedged.contains_key(&workpiece("wp")));
+
+    let grant_again = event(
+        "grant-2",
+        Fact::GrantAttempts { bloom, workpiece: workpiece("wp"), stage: StageId::Verify, attempts: 2 },
+    );
+    let (granted_again, d_again) = step(&rewedged, &grant_again);
+    assert!(
+        matches!(&d_again.outcome, Outcome::AttemptsGranted { resumes_at: StageId::Verify, attempts: 2, .. }),
+        "a fresh key authorizes another batch, got {:?}",
+        d_again.outcome,
+    );
+    assert_eq!(d_again.effects.iter().filter(|effect| matches!(effect, Decision::DispatchAttempt { .. })).count(), 1,);
+
+    let (_, d_running) = step(
+        &granted_again,
+        &event(
+            "grant-while-running",
+            Fact::GrantAttempts { bloom, workpiece: workpiece("wp"), stage: StageId::Verify, attempts: 1 },
+        ),
+    );
+    assert!(
+        matches!(
+            &d_running.outcome,
+            Outcome::GrantAttemptsRejected(GrantAttemptsError::NotWedged(wp)) if *wp == workpiece("wp")
+        ),
+        "a running member is never redispatched, got {:?}",
+        d_running.outcome,
+    );
+
+    let (resolved, spec) = sealed_and_resolved(2, vec![membership("done", 12)], 40);
+    let resolved_bloom = spec.id();
+    let (_, d_resolved) = step(
+        &resolved,
+        &event(
+            "grant-resolved",
+            Fact::GrantAttempts {
+                bloom: resolved_bloom,
+                workpiece: workpiece("done"),
+                stage: StageId::Verify,
+                attempts: 1,
+            },
+        ),
+    );
+    assert!(
+        matches!(d_resolved.outcome, Outcome::GrantAttemptsRejected(GrantAttemptsError::UnknownOrInactiveBloom)),
+        "a resolved bloom is not grantable, got {:?}",
+        d_resolved.outcome,
+    );
+}
+
 // ADR-0149 §The line — an attempt completion is refused when it does not name the
 // member's current cursor stage, when it names the terminal `Verify` with a
 // *passing* verdict (which integrates through `Fact::Integrate`, never completes
