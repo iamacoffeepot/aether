@@ -124,6 +124,91 @@ fn schema_rejected(block: &serde_json::Value) -> bool {
     block.get("content").and_then(serde_json::Value::as_str).is_some_and(|text| text.contains("InputValidationError"))
 }
 
+fn or_zero(value: &serde_json::Value, key: &str) -> serde_json::Value {
+    value.get(key).cloned().unwrap_or_else(|| serde_json::json!(0))
+}
+
+fn or_null(value: &serde_json::Value, key: &str) -> serde_json::Value {
+    value.get(key).cloned().unwrap_or(serde_json::Value::Null)
+}
+
+/// Fold the walked transcript pieces into the ledger-shaped result record.
+fn assemble_result_record(
+    result: Option<serde_json::Value>,
+    first_main: Option<serde_json::Value>,
+    calls: Vec<serde_json::Value>,
+    texts: Vec<String>,
+    report_findings: Option<serde_json::Value>,
+) -> serde_json::Value {
+    use serde_json::{Map, Value, json};
+
+    let mut record = Map::new();
+    record.insert("schema".to_owned(), json!(1));
+    for field in ["task", "ref", "run_id", "conclusion", "model", "created_at", "pool"] {
+        record.insert(field.to_owned(), Value::Null);
+    }
+
+    match &first_main {
+        Some(first) => {
+            let usage = first.get("usage").cloned().unwrap_or(Value::Null);
+            record.insert("first_call_model".to_owned(), or_null(first, "model"));
+            record.insert("first_call_cache_read".to_owned(), or_zero(&usage, "cache_read_input_tokens"));
+            record.insert("first_call_cache_write".to_owned(), or_zero(&usage, "cache_creation_input_tokens"));
+            record.insert("first_call_input".to_owned(), or_zero(&usage, "input_tokens"));
+        }
+        None => {
+            for field in ["first_call_model", "first_call_cache_read", "first_call_cache_write", "first_call_input"] {
+                record.insert(field.to_owned(), Value::Null);
+            }
+        }
+    }
+
+    record.insert(
+        "calls".to_owned(),
+        if calls.is_empty() {
+            Value::Null
+        } else {
+            Value::Array(calls)
+        },
+    );
+    record.insert(
+        "assistant_text".to_owned(),
+        if texts.is_empty() {
+            Value::Null
+        } else {
+            json!(bound_assistant_text(&texts.join("\n\n")))
+        },
+    );
+    record.insert(
+        "report_findings".to_owned(),
+        report_findings
+            .filter(|findings| findings.as_array().is_some_and(|items| !items.is_empty()))
+            .unwrap_or(Value::Null),
+    );
+
+    let Some(result) = result else {
+        // A run that died before the terminal record — legible, cost unknown.
+        record.insert("no_result".to_owned(), json!(true));
+        return Value::Object(record);
+    };
+    let usage = result.get("usage").cloned().unwrap_or(Value::Null);
+    let cache_creation = usage.get("cache_creation").cloned().unwrap_or(Value::Null);
+    record.insert("num_turns".to_owned(), or_null(&result, "num_turns"));
+    record.insert("cost_usd".to_owned(), or_null(&result, "total_cost_usd"));
+    record.insert("duration_ms".to_owned(), or_null(&result, "duration_ms"));
+    record.insert("is_error".to_owned(), or_null(&result, "is_error"));
+    record.insert("input".to_owned(), or_zero(&usage, "input_tokens"));
+    record.insert("cache_write".to_owned(), or_zero(&usage, "cache_creation_input_tokens"));
+    record.insert("cache_write_1h".to_owned(), or_zero(&cache_creation, "ephemeral_1h_input_tokens"));
+    record.insert("cache_write_5m".to_owned(), or_zero(&cache_creation, "ephemeral_5m_input_tokens"));
+    record.insert("cache_read".to_owned(), or_zero(&usage, "cache_read_input_tokens"));
+    record.insert("output".to_owned(), or_zero(&usage, "output_tokens"));
+    record.insert("session_id".to_owned(), or_null(&result, "session_id"));
+    // The terminal record whole — keeps every meter on disk for downstream study.
+    record.insert("result".to_owned(), result);
+    Value::Object(record)
+}
+
 /// Derive a model lane's result record from an Anthropic-Messages NDJSON
 /// `transcript` — the in-repo, node-free replacement (#3572) for the retired
 /// `scripts/agent-usage-record.mjs` shell-out (#3565 deletes that script). Pure,
@@ -137,10 +222,7 @@ fn schema_rejected(block: &serde_json::Value) -> bool {
 /// transcript with no terminal `result` (a run that died early) yields a
 /// `no_result` record rather than an error, so evidence is never dropped.
 pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
-    use serde_json::{Map, Value, json};
-
-    let or_zero = |value: &Value, key: &str| value.get(key).cloned().unwrap_or_else(|| json!(0));
-    let or_null = |value: &Value, key: &str| value.get(key).cloned().unwrap_or(Value::Null);
+    use serde_json::{Value, json};
 
     let mut result: Option<Value> = None;
     let mut first_main: Option<Value> = None;
@@ -188,72 +270,7 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
         }
     }
 
-    let mut record = Map::new();
-    record.insert("schema".to_owned(), json!(1));
-    for field in ["task", "ref", "run_id", "conclusion", "model", "created_at", "pool"] {
-        record.insert(field.to_owned(), Value::Null);
-    }
-
-    match &first_main {
-        Some(first) => {
-            let usage = first.get("usage").cloned().unwrap_or(Value::Null);
-            record.insert("first_call_model".to_owned(), or_null(first, "model"));
-            record.insert("first_call_cache_read".to_owned(), or_zero(&usage, "cache_read_input_tokens"));
-            record.insert("first_call_cache_write".to_owned(), or_zero(&usage, "cache_creation_input_tokens"));
-            record.insert("first_call_input".to_owned(), or_zero(&usage, "input_tokens"));
-        }
-        None => {
-            for field in ["first_call_model", "first_call_cache_read", "first_call_cache_write", "first_call_input"] {
-                record.insert(field.to_owned(), Value::Null);
-            }
-        }
-    }
-
-    record.insert(
-        "calls".to_owned(),
-        if calls.is_empty() {
-            Value::Null
-        } else {
-            Value::Array(calls)
-        },
-    );
-    record.insert(
-        "assistant_text".to_owned(),
-        if texts.is_empty() {
-            Value::Null
-        } else {
-            json!(bound_assistant_text(&texts.join("\n\n")))
-        },
-    );
-    record.insert(
-        "report_findings".to_owned(),
-        match report_findings {
-            Some(findings) if findings.as_array().is_some_and(|items| !items.is_empty()) => findings,
-            _ => Value::Null,
-        },
-    );
-
-    let Some(result) = result else {
-        // A run that died before the terminal record — legible, cost unknown.
-        record.insert("no_result".to_owned(), json!(true));
-        return Value::Object(record);
-    };
-    let usage = result.get("usage").cloned().unwrap_or(Value::Null);
-    let cache_creation = usage.get("cache_creation").cloned().unwrap_or(Value::Null);
-    record.insert("num_turns".to_owned(), or_null(&result, "num_turns"));
-    record.insert("cost_usd".to_owned(), or_null(&result, "total_cost_usd"));
-    record.insert("duration_ms".to_owned(), or_null(&result, "duration_ms"));
-    record.insert("is_error".to_owned(), or_null(&result, "is_error"));
-    record.insert("input".to_owned(), or_zero(&usage, "input_tokens"));
-    record.insert("cache_write".to_owned(), or_zero(&usage, "cache_creation_input_tokens"));
-    record.insert("cache_write_1h".to_owned(), or_zero(&cache_creation, "ephemeral_1h_input_tokens"));
-    record.insert("cache_write_5m".to_owned(), or_zero(&cache_creation, "ephemeral_5m_input_tokens"));
-    record.insert("cache_read".to_owned(), or_zero(&usage, "cache_read_input_tokens"));
-    record.insert("output".to_owned(), or_zero(&usage, "output_tokens"));
-    record.insert("session_id".to_owned(), or_null(&result, "session_id"));
-    // The terminal record whole — keeps every meter on disk for downstream study.
-    record.insert("result".to_owned(), result);
-    Value::Object(record)
+    assemble_result_record(result, first_main, calls, texts, report_findings)
 }
 
 #[cfg(test)]

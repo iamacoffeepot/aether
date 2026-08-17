@@ -250,8 +250,9 @@ fn finding_line(value: Option<&serde_json::Value>) -> Option<String> {
 /// so the durable suffix stays the critic's own verdict. A report with no
 /// verdict line just appends.
 fn insert_before_verdict(prose: &str, structured: &str) -> String {
-    match last_verdict_line_start(prose) {
-        Some(at) => {
+    last_verdict_line_start(prose).map_or_else(
+        || format!("{prose}\n\n{structured}"),
+        |at| {
             let head = prose[..at].trim_end();
             let tail = &prose[at..];
             if head.is_empty() {
@@ -259,9 +260,8 @@ fn insert_before_verdict(prose: &str, structured: &str) -> String {
             } else {
                 format!("{head}\n\n{structured}\n\n{tail}")
             }
-        }
-        None => format!("{prose}\n\n{structured}"),
-    }
+        },
+    )
 }
 
 fn last_verdict_line_start(text: &str) -> Option<usize> {
@@ -348,10 +348,8 @@ fn advisory_only(record: &serde_json::Value) -> ReviewVerdict {
     // through `ReportFindings`, those rendered lines are what
     // `classify_findings` is meant to read (#4961 / #5118).
     let terminal = final_text(record).unwrap_or_default();
-    let report = match render_report_findings(record) {
-        Some(structured) => format!("{structured}\n{terminal}"),
-        None => terminal.to_owned(),
-    };
+    let report = render_report_findings(record)
+        .map_or_else(|| terminal.to_owned(), |structured| format!("{structured}\n{terminal}"));
     let classified = aether_bloomery::classify_findings(&report);
     if classified.is_empty() || classified.any_blocking() {
         return ReviewVerdict::Finding;
@@ -811,7 +809,7 @@ mod tests {
         assert!(findings.contains("empty input panics"), "the terminal report body survives: {findings}");
     }
 
-    fn report_findings_use(id: &str, findings: serde_json::Value) -> serde_json::Value {
+    fn report_findings_use(id: &str, findings: &serde_json::Value) -> serde_json::Value {
         assistant(&serde_json::json!([{
             "type": "tool_use",
             "id": id,
@@ -864,13 +862,13 @@ mod tests {
         ]);
         let record = derive_result_record(&transcript(&[
             assistant(&text("5092 is not: see finding below.")),
-            report_findings_use("t-reject", rejected),
+            report_findings_use("t-reject", &rejected),
             tool_result(
                 "t-reject",
                 "<tool_use_error>InputValidationError: short_summary too long</tool_use_error>",
                 true,
             ),
-            report_findings_use("t-accept", accepted),
+            report_findings_use("t-accept", &accepted),
             tool_result("t-accept", "2 findings reported.", false),
             assistant(&serde_json::json!([
                 {"type": "tool_use", "name": "Read", "input": {"path": "TOOL_INPUT_SECRET"}},
@@ -934,7 +932,7 @@ mod tests {
             assistant(&text("see finding below.")),
             report_findings_use(
                 "t-1",
-                serde_json::json!([{
+                &serde_json::json!([{
                     "file": "src/lib.rs",
                     "line": 4,
                     "category": "economy",
@@ -967,7 +965,7 @@ mod tests {
             assistant(&text("see finding below.")),
             report_findings_use(
                 "t-pending",
-                serde_json::json!([{
+                &serde_json::json!([{
                     "file": "src/lib.rs",
                     "summary": "MECHANICAL — never accepted, must not freeze",
                 }]),
