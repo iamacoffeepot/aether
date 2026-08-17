@@ -20,8 +20,48 @@ use crate::values::{Evidence, Transformation};
 ///
 /// Named once because two paths reach it: the completed fold ([`super::integrate`])
 /// and a returning weave repair ([`super::composition`]), which is the same
-/// position re-entered after a repair lap.
+/// position re-entered after a repair lap. Under an operator hold the work
+/// order is withheld and a [`Decision::DeferAggregate`] is recorded instead
+/// (#5100), the same swap [`super::attempt::move_effects_with_candidate`]
+/// makes for a member lap.
 pub(super) fn aggregate_verify_dispatch(record: &BloomRecord, bloom: BloomId, tree: Digest, head: Digest) -> Decision {
+    gate_aggregate(record, bloom, StageId::AggregateVerify, owed_aggregate_verify(record, bloom, tree, head))
+}
+
+/// The dispatch that hands a built fold to the critic: the `AggregateReview`
+/// lane over the same `tree` / `head` the mechanical gate just cleared.
+///
+/// Named once because two paths reach it — a returning green verdict, and a
+/// verify that passed by identity on an already-recorded proof (#4891) — and a
+/// second copy would let the two hand the critic different work orders. The
+/// executor-fault retry and the park-adopt re-arm go through
+/// [`gate_aggregate`] with their own roll so they cannot hand the critic a
+/// different tree. Held, the work order is withheld the same way
+/// [`aggregate_verify_dispatch`] withholds its own (#5100).
+pub(super) fn aggregate_review_dispatch(record: &BloomRecord, bloom: BloomId, tree: Digest, head: Digest) -> Decision {
+    gate_aggregate(
+        record,
+        bloom,
+        StageId::AggregateReview,
+        owed_aggregate_review(record, bloom, tree, head, record.aggregate_rolls + 1),
+    )
+}
+
+/// Withhold an aggregate work order while the bloom is on the operator brake
+/// (#5100). The one place a [`Decision::DeferAggregate`] is built, so a later
+/// site that reaches for a helper here inherits the gate.
+pub(super) fn gate_aggregate(record: &BloomRecord, bloom: BloomId, stage: StageId, dispatch: Decision) -> Decision {
+    if record.operator_hold.is_some() {
+        Decision::DeferAggregate { bloom, stage }
+    } else {
+        dispatch
+    }
+}
+
+/// Rebuild the aggregate-verify work order from the catalog and fold as they
+/// stand — the release's half of [`aggregate_verify_dispatch`]. Never consults
+/// the hold flag: the release has already decided to emit the dispatch.
+pub(super) fn owed_aggregate_verify(record: &BloomRecord, bloom: BloomId, tree: Digest, head: Digest) -> Decision {
     let binding = stage_binding(&record.stage_catalog, StageId::AggregateVerify);
 
     Decision::DispatchAggregateVerify {
@@ -32,19 +72,24 @@ pub(super) fn aggregate_verify_dispatch(record: &BloomRecord, bloom: BloomId, tr
     }
 }
 
-/// The dispatch that hands a built fold to the critic: the `AggregateReview`
-/// lane over the same `tree` / `head` the mechanical gate just cleared.
-///
-/// Named once because two paths reach it — a returning green verdict, and a
-/// verify that passed by identity on an already-recorded proof (#4891) — and a
-/// second copy would let the two hand the critic different work orders.
-pub(super) fn aggregate_review_dispatch(record: &BloomRecord, bloom: BloomId, tree: Digest, head: Digest) -> Decision {
+/// Rebuild the aggregate-review work order from the catalog, fold, and `roll`
+/// as they stand — the release's half of [`aggregate_review_dispatch`]. `roll`
+/// is an argument because a park-adopt re-arm resets the cursor in the same
+/// decision set the dispatch rides in, so the record's stored count is not
+/// yet the roll the critic should see.
+pub(super) fn owed_aggregate_review(
+    record: &BloomRecord,
+    bloom: BloomId,
+    tree: Digest,
+    head: Digest,
+    roll: u32,
+) -> Decision {
     let binding = stage_binding(&record.stage_catalog, StageId::AggregateReview);
 
     Decision::DispatchAggregateReview {
         bloom,
         transformation: Transformation::for_aggregate_review(&binding, tree, head, record.spec.base()),
-        roll: record.aggregate_rolls + 1,
+        roll,
         profile: binding.profile,
         configs: record.spec.configs().clone(),
     }

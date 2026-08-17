@@ -84,6 +84,16 @@ impl DispatchRecord {
         WorkOrder { transformation: self.transformation.clone(), nonce: self.nonce.clone() }
     }
 
+    /// Whether this order is the reserved composition workpiece's weave repair.
+    ///
+    /// `Refine` of the composition, and only that — the same fact the executor
+    /// uses to seed and park a weave-repair prompt and the intake broker uses to
+    /// decide repair-lap triage (#4959, #5098).
+    #[must_use]
+    pub fn is_composition_refine(&self) -> bool {
+        self.stage == StageId::Refine && self.workpiece.is_composition()
+    }
+
     fn to_stored(&self, deadline_unix_millis: u64) -> OutstandingOrder {
         OutstandingOrder {
             deadline_unix_millis,

@@ -429,10 +429,13 @@ pub enum Fact {
     /// "watch it spend against a refusal that will never clear, or kill the
     /// coordinator and strand what is in flight".
     ///
-    /// A hold gates [`Decision::DispatchAttempt`](crate::Decision::DispatchAttempt)
-    /// and nothing else. Claims, budgets, findings, and approval tiers are
-    /// untouched, and it composes with the review park rather than replacing it:
-    /// holding a parked bloom leaves the park exactly where it was.
+    /// A hold gates [`Decision::DispatchAttempt`](crate::Decision::DispatchAttempt),
+    /// [`Decision::DispatchAggregateVerify`](crate::Decision::DispatchAggregateVerify),
+    /// and [`Decision::DispatchAggregateReview`](crate::Decision::DispatchAggregateReview)
+    /// — every new work order, including the paid critic. Claims, budgets,
+    /// findings, and approval tiers are untouched, and it composes with the
+    /// review park rather than replacing it: holding a parked bloom leaves the
+    /// park exactly where it was.
     ///
     /// Appended past [`Fact::OperatorRepair`] so every prior fact keeps its wire
     /// discriminant.
@@ -446,9 +449,11 @@ pub enum Fact {
     ///
     /// Reducing this clears the flag and re-derives what is due: every workpiece
     /// whose dispatch the hold swallowed is dispatched from the cursor it is
-    /// sitting at *now*. Nothing was stored at hold time to be replayed — the
-    /// release re-reads the record, so the work that went out is the work the
-    /// bloom is actually due, neither lost nor doubled.
+    /// sitting at *now*, and every aggregate gate the hold swallowed is
+    /// dispatched from the fold the record is holding now. Nothing was stored
+    /// at hold time to be replayed — the release re-reads the record, so the
+    /// work that went out is the work the bloom is actually due, neither lost
+    /// nor doubled.
     ///
     /// Appended past [`Fact::OperatorHold`] so every prior fact keeps its wire
     /// discriminant.

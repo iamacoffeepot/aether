@@ -10,7 +10,7 @@
 use super::runtime::{
     AppendOutcome, CommitOutcome, JournalWrite, OutstandingOrder, RecordOutcome, SealOutcome, SqliteStore, StoreBackend,
 };
-use aether_bloomery::{MembershipMutation, OutboxPayload};
+use aether_bloomery::{MembershipMutation, OutboxPayload, WorkpieceId};
 
 fn memory() -> SqliteStore {
     SqliteStore::open(":memory:").unwrap()
@@ -764,6 +764,29 @@ fn dispatch_description_records_looks_up_and_is_key_scoped() {
     // Last-writer-wins on the key — a re-seal of the same member overwrites.
     store.record_dispatch_description(&bloom, "wp-a", "revised work order").unwrap();
     assert_eq!(store.lookup_dispatch_description(&bloom, "wp-a").unwrap().as_deref(), Some("revised work order"));
+}
+
+#[test]
+fn listing_dispatch_descriptions_omits_the_reserved_composition_workpiece() {
+    // The composition Refine persists a generated work order under the reserved
+    // workpiece (#5098). Lookup must still find it — that is what a retry reuses —
+    // but the membership roster the critic and landing proposal walk is sealed
+    // members only. A listed composition row would be attributed as a member task.
+    let mut store = memory();
+    let bloom = [0xB1; 32];
+    store.record_dispatch_description(&bloom, "wp-a", "build the widget").unwrap();
+    store.record_dispatch_description(&bloom, WorkpieceId::COMPOSITION, "repair the weave").unwrap();
+
+    assert_eq!(
+        store.lookup_dispatch_description(&bloom, WorkpieceId::COMPOSITION).unwrap().as_deref(),
+        Some("repair the weave"),
+        "the reserved workpiece's generated order is still keyed and readable",
+    );
+    assert_eq!(
+        store.list_dispatch_descriptions(&bloom).unwrap(),
+        vec![("wp-a".to_owned(), "build the widget".to_owned())],
+        "the composition row is not a sealed member order",
+    );
 }
 
 #[test]

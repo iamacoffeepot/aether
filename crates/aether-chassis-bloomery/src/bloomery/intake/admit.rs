@@ -265,6 +265,24 @@ fn persist_aggregate_findings(
     Ok(())
 }
 
+/// Persist a consumed aggregate-verify verdict's findings on the composition
+/// workpiece (#5098). The reserved Refine reads that row the way a member Refine
+/// reads its own: a compiler diagnostic the fold produced is the work order the
+/// weave repair never sealed.
+fn persist_aggregate_verify_findings(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    upload: &UploadedEvidence,
+) -> rusqlite::Result<()> {
+    if verdict_passed(upload.verdict) {
+        return store.clear_review_findings(record.bloom.0.as_bytes(), WorkpieceId::COMPOSITION);
+    }
+    let Some(findings) = &upload.findings else {
+        return Ok(());
+    };
+    store.record_review_findings(record.bloom.0.as_bytes(), WorkpieceId::COMPOSITION, findings)
+}
+
 // The read-side reconstruction lives here beside its sole caller `admit_uploaded`;
 // the write-side `to_stored` lives with `record_dispatch` in the dispatch module.
 impl DispatchRecord {
@@ -390,32 +408,6 @@ fn repair_finding(store: &mut dyn StoreBackend, record: &DispatchRecord) -> rusq
         return Ok(Some(findings));
     }
     store.lookup_review_findings(bloom, "")
-}
-
-/// Whether this result is a **weave repair** — the one repair lap a finding
-/// written by a *judge* dispatched (#4959).
-///
-/// Two conditions, and the second is the load-bearing one.
-///
-/// `Refine` is the repair stage: for the composition, ADR-0191 §5 dispatches the
-/// weave repair there. `Reconcile` is out because a fold conflict dispatches it,
-/// not a finding (ADR-0189 §3), and a failing lap needs no triage because it is
-/// already bouncing.
-///
-/// The **composition** is out of the two workpiece kinds because, post-ADR-0191,
-/// it is the only one whose findings are prose. An aggregate refusal no longer
-/// re-opens a member (§4), so every finding that reaches a *member's* `Refine` is
-/// mechanical gate output — and a compiler diagnostic is unreliable triage input
-/// in both directions: it backticks the types and locations of the symptom
-/// (`u32`, `usize`, `lib.rs:7:20`) rather than the thing a fix has to change. The
-/// member loop does not need this anyway: ADR-0178 already prices a member that
-/// came back unrepaired by *verifier identity* — a repeat failure spends a repair
-/// roll and wedges — which is a stronger signal than text matching and costs no
-/// judge round to collect. The composition's review is the gate that has no such
-/// detector and whose every roll is an Opus lap, which is exactly why the dodge
-/// cost what it did.
-fn is_weave_repair(record: &DispatchRecord) -> bool {
-    record.stage == StageId::Refine && record.workpiece.is_composition()
 }
 
 /// Triage a passing weave repair against the finding it was dispatched for
@@ -552,7 +544,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     // spends and never buys the judge round it was trying to reach. Everything
     // uncertain passes — see the `triage` module for the rules and the reason
     // they lean that way.
-    let triage = if is_weave_repair(&record) && verdict_passed(upload.verdict) {
+    let triage = if record.is_composition_refine() && verdict_passed(upload.verdict) {
         triage_repair_lap(store, &record)?
     } else {
         TriageVerdict::NotInspected
@@ -646,6 +638,12 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
 /// - A failing Verify's findings (the mechanical failure output) persist keyed by
 ///   the member so the Refine repair re-entry is directed by them; a passing
 ///   Verify clears the stale row (#3656, ADR-0153).
+/// - A failing `AggregateVerify` persists the same mechanical findings on the
+///   composition workpiece (#5098): that is the reserved Refine's findings
+///   channel, and a subject-only weave repair is what happens when they never
+///   land. A passing `AggregateVerify` clears that row so a later review-triggered
+///   repair is not still directed by a compiler diagnostic the fold already
+///   cleared.
 /// - A failing aggregate verdict freezes its set bloom-scoped and slices it per
 ///   owner. An executor fault writes none and clears none: the frozen set belongs
 ///   to the last verdict that actually judged the fold, and a host outage is not
@@ -681,6 +679,8 @@ fn persist_consumed(
         } else if let Some(findings) = &upload.findings {
             store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, findings)?;
         }
+    } else if record.stage == StageId::AggregateVerify {
+        persist_aggregate_verify_findings(store, record, upload)?;
     } else if record.stage == StageId::AggregateReview && upload.verdict != StageVerdict::ExecutorFault {
         persist_aggregate_findings(store, record, upload, aggregate_findings)?;
     }

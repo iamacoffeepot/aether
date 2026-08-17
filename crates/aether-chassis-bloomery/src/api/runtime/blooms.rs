@@ -190,7 +190,8 @@ impl ApiCapabilityState {
     ///
     /// The brake for a bloom that looks wrong but has not stopped. Journal-first
     /// like its siblings: the route appends `Fact::OperatorHold` and nothing
-    /// else. From there the reducer emits no `DispatchAttempt` for the bloom,
+    /// else. From there the reducer emits no `DispatchAttempt`,
+    /// `DispatchAggregateVerify`, or `DispatchAggregateReview` for the bloom,
     /// while every other fact — the laps already running, their verify verdicts,
     /// the fold outcomes — reduces and journals exactly as before. That is the
     /// difference between this and killing the coordinator, which strands what is
@@ -207,9 +208,10 @@ impl ApiCapabilityState {
     /// (#4976).
     ///
     /// The reducer clears the flag and re-derives what is due, dispatching each
-    /// workpiece the hold owes from the cursor it is sitting at *now*. Nothing
-    /// was stored when the hold went on, so a bloom that moved while it was held
-    /// resumes where it actually is rather than where it was frozen.
+    /// workpiece the hold owes from the cursor it is sitting at *now*, and each
+    /// aggregate gate the hold owes from the fold the record is holding now.
+    /// Nothing was stored when the hold went on, so a bloom that moved while it
+    /// was held resumes where it actually is rather than where it was frozen.
     ///
     /// Releasing an unheld bloom is refused for the reason a second hold is: it
     /// clears nothing and dispatches nothing, and a `200` on it would read as

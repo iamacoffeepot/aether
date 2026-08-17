@@ -20,7 +20,7 @@
 //! inside the candidate's reverse-dependency closure — inside is a finding
 //! about the work, outside is a statement about the host it ran on.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::MAX_FINDING_LINES;
 use super::closure::Closure;
@@ -41,6 +41,7 @@ const FAILURE_STATUSES: [&str; 3] = ["FAIL", "TIMEOUT", "ABORT"];
 const MAX_PANIC_MESSAGE_LINES: usize = 3;
 
 /// One failing test, as the log describes it.
+#[derive(Clone)]
 struct Failure {
     /// nextest's `binary-id test_name` pair, whitespace-normalized so the
     /// status line and the captured-output header agree on one key.
@@ -115,6 +116,41 @@ impl ClassifiedRun {
         );
         render(&self.out_of_closure, count, &header)
     }
+
+    /// Whether this run still names a failure the candidate must answer for —
+    /// an in-closure test, or one nobody could place.
+    pub(super) fn has_candidate_failures(&self) -> bool {
+        !self.in_closure.is_empty() || self.unattributed > 0
+    }
+
+    /// Keep only the named failures that also appear in `other`, keyed by the
+    /// nextest `binary-id test_name` pair. Unattributed counts stay with this
+    /// run: they cannot be matched by name, so they remain the candidate's.
+    pub(super) fn intersect_named(&self, other: &Self) -> Self {
+        let other_names = named_tests(other);
+        Self {
+            in_closure: named_in(&self.in_closure, &other_names),
+            out_of_closure: named_in(&self.out_of_closure, &other_names),
+            unattributed: self.unattributed,
+            closure: self.closure.clone(),
+        }
+    }
+}
+
+/// Tests that failed in exactly one of two identical runs, first-run exclusives
+/// then recheck exclusives, as the lane reports them: a host-contention
+/// signature rather than a candidate defect (#5099).
+pub(super) fn asymmetric_observation(first: &ClassifiedRun, second: &ClassifiedRun) -> Option<String> {
+    let exclusive = exclusive_named(first, second);
+    let count = exclusive.len();
+    let header = format!(
+        "{count} failing {} failed in exactly one of the two identical runs: a host-contention signature \
+         rather than a candidate defect, so they are read as an environment fault rather than handed to a \
+         repair lap.\nAsymmetric failures by package: {}.",
+        tests_word(count),
+        package_tally(&exclusive),
+    );
+    render(&exclusive, count, &header)
 }
 
 /// Split a `verify.test` log's failing tests against `closure`, or `None` when
@@ -183,6 +219,37 @@ fn render(failures: &[Failure], total: usize, header: &str) -> Option<String> {
         tests_word(omitted),
         records.len(),
     ))
+}
+
+/// The `binary-id test_name` keys this run named as failing.
+fn named_tests(run: &ClassifiedRun) -> BTreeSet<&str> {
+    run.in_closure.iter().chain(run.out_of_closure.iter()).map(|failure| failure.test.as_str()).collect()
+}
+
+/// The failures in `failures` whose test key sits in `names`.
+fn named_in(failures: &[Failure], names: &BTreeSet<&str>) -> Vec<Failure> {
+    failures.iter().filter(|failure| names.contains(failure.test.as_str())).cloned().collect()
+}
+
+/// Named failures present in exactly one of the two runs, first-run exclusives
+/// then recheck exclusives, each side in that run's order.
+fn exclusive_named(first: &ClassifiedRun, second: &ClassifiedRun) -> Vec<Failure> {
+    let first_names = named_tests(first);
+    let second_names = named_tests(second);
+    first
+        .in_closure
+        .iter()
+        .chain(first.out_of_closure.iter())
+        .filter(|failure| !second_names.contains(failure.test.as_str()))
+        .chain(
+            second
+                .in_closure
+                .iter()
+                .chain(second.out_of_closure.iter())
+                .filter(|failure| !first_names.contains(failure.test.as_str())),
+        )
+        .cloned()
+        .collect()
 }
 
 /// The failures counted by package, one line — the block's shape at a glance,
@@ -545,6 +612,63 @@ error: test run failed
         assert!(
             classify(&placed_only, Some(&closure)).expect("classifies").is_environmental(),
             "with every counted failure placed and every one of them outside, the run judged nothing",
+        );
+    }
+
+    #[test]
+    fn intersecting_two_runs_keeps_only_tests_that_failed_in_both() {
+        // Tripwire (#5099): a no-closure recheck used to take the second run
+        // wholesale. A test that failed only in run 2 would become a finding
+        // even though run 1 passed it — host contention dressed as a candidate
+        // defect. The identity is the full `binary-id test_name` pair, not the
+        // package: two different tests in the same crate failing in opposite
+        // runs are still one-sided.
+        let first = classify(
+            &run_reporting(
+                &[
+                    "aether-chassis-bloomery::control_loop a_calibration_read",
+                    "aether-chassis-bloomery::control_loop a_bloom_lands",
+                ],
+                2,
+            ),
+            None,
+        )
+        .expect("classifies");
+        let second = classify(
+            &run_reporting(
+                &[
+                    "aether-chassis-bloomery::control_loop a_calibration_read",
+                    "aether-http::rest_api the_release_route_binds",
+                ],
+                2,
+            ),
+            None,
+        )
+        .expect("classifies");
+
+        let persistent = second.intersect_named(&first);
+        let findings = persistent.findings().expect("the shared failure remains");
+        assert!(findings.contains("a_calibration_read"), "a test that failed in both runs is a finding");
+        assert!(!findings.contains("a_bloom_lands"), "a first-run-only failure is not");
+        assert!(!findings.contains("the_release_route_binds"), "and neither is a recheck-only failure");
+
+        let observation = super::asymmetric_observation(&first, &second).expect("the exclusive-or is reported");
+        assert!(observation.contains("a_bloom_lands"), "first-run exclusive reaches the observation");
+        assert!(observation.contains("the_release_route_binds"), "and so does the recheck exclusive");
+        assert!(!observation.contains("a_calibration_read"), "the persistent test is not a host-fault receipt");
+    }
+
+    #[test]
+    fn intersecting_two_runs_keys_on_the_test_not_the_package() {
+        // The closure split keys on package, so a sloppy intersection would
+        // too. Two different tests in the same package failing in opposite
+        // runs are still host contention, not a persistent defect.
+        let first = classify(&run_reporting(&["aether-http::rest_api route_a"], 1), None).expect("classifies");
+        let second = classify(&run_reporting(&["aether-http::rest_api route_b"], 1), None).expect("classifies");
+
+        assert!(
+            second.intersect_named(&first).findings().is_none(),
+            "different tests in the same package do not persist",
         );
     }
 }
