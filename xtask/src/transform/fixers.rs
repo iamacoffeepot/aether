@@ -10,6 +10,7 @@
 //! they ran and whether they moved anything, so a later reader can tell a
 //! model-authored line from a fixer-authored one at the run level.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -19,12 +20,12 @@ use std::{fs, thread};
 use crate::transform::sccache;
 
 /// How long `cargo fmt` may run before it is treated as a failed fixer.
-const FMT_BUDGET: Duration = Duration::from_secs(120);
+const FMT_BUDGET: Duration = Duration::from_mins(2);
 
 /// How long the one scoped `clippy --fix` build may run. A check-profile
 /// compile of a few packages, sccache-warm; past this the tree is restored
 /// rather than waiting out a wedged rustc.
-const CLIPPY_FIX_BUDGET: Duration = Duration::from_secs(900);
+const CLIPPY_FIX_BUDGET: Duration = Duration::from_mins(15);
 
 /// What the construct/refine evidence envelope records about the fixers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -57,7 +58,11 @@ impl Report {
 /// *that* command, and the lane still returns a report.
 pub(super) fn apply(worktree: &Path, out_dir: &Path) -> Report {
     let dirty = dirty_paths(worktree, Some(out_dir));
-    let rust_files: Vec<String> = dirty.iter().filter(|path| path.ends_with(".rs")).cloned().collect();
+    let rust_files: Vec<String> = dirty
+        .iter()
+        .filter(|path| Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("rs")))
+        .cloned()
+        .collect();
     if rust_files.is_empty() {
         return Report::default();
     }
@@ -259,7 +264,7 @@ fn porcelain_paths(stdout: &[u8]) -> Vec<String> {
         let path = line.get(3..).unwrap_or("").trim();
         let renamed = code[0] == b'R' || code[0] == b'C';
         let path = if renamed {
-            records.next().map(String::from_utf8_lossy).map_or_else(|| path.to_owned(), |next| next.into_owned())
+            records.next().map(String::from_utf8_lossy).map_or_else(|| path.to_owned(), Cow::into_owned)
         } else {
             path.to_owned()
         };
@@ -414,7 +419,7 @@ mod tests {
         assert!(argv.contains(&"--fix".to_owned()));
         assert!(argv.contains(&"--allow-dirty".to_owned()), "the model just dirtied the tree");
         assert!(argv.contains(&"--allow-staged".to_owned()));
-        assert!(!argv.iter().any(|arg| arg == "--broken-code"), "default MachineApplicable must not be widened",);
+        assert!(!argv.iter().any(|arg| arg == "--broken-code"), "default MachineApplicable must not be widened");
         assert!(
             !argv.iter().any(|arg| arg == "--workspace"),
             "a workspace clippy --fix would rewrite crates the run did not touch",
