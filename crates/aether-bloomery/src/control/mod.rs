@@ -288,10 +288,16 @@ impl Topic {
             // row, so giving either edge a topic of its own would enqueue work
             // for the one act whose entire content is that no work goes out; and
             // the dispatches a release owes ride as ordinary `DispatchAttempt`
-            // effects emitted beside it, on the topic they always had.
+            // / `DispatchAggregateVerify` / `DispatchAggregateReview` effects
+            // emitted beside it, on the topic they always had.
             | Decision::RecordOperatorHold { .. }
             | Decision::RecordOperatorRelease { .. }
             | Decision::DeferDispatch { .. }
+            // Snapshot-only: an aggregate deferral is the brake's bloom-scope
+            // sibling of `DeferDispatch` (#5100). What a hold does is withhold
+            // an outbox row, and the dispatch a release owes rides as an
+            // ordinary `DispatchAggregateVerify` / `DispatchAggregateReview`.
+            | Decision::DeferAggregate { .. }
             // Snapshot-only: the spend-quiesce marker is what `/view` reads.
             // The door it closed already refused to enqueue work, so a topic
             // here would enqueue a row nothing drains.

@@ -2,12 +2,11 @@
 //! evidence, and the adopting answer that releases a parked question
 //! (ADR-0151).
 
-use super::attempt::stage_binding;
 use super::{AdmitEvidenceError, AdoptAnswerError, BloomStatus, Decision, Decisions, Outcome, Snapshot};
 use crate::digest::digest_of;
 use crate::ids::BloomId;
 use crate::ids::StageId;
-use crate::values::{Evidence, EvidenceKind, Statement, Transformation};
+use crate::values::{Evidence, EvidenceKind, Statement};
 
 /// Admit non-integrating evidence into a bloom's evidence log (ADR-0151). Runs
 /// the same active-bloom guard `reduce_integrate` does — evidence records only
@@ -137,20 +136,17 @@ pub(super) fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: 
         // it directly; a missing fold (unreachable through the park path) just
         // resets the cycle and leaves the re-fold to dispatch the review.
         if let Some(integration) = &record.integration {
-            let binding = stage_binding(&record.stage_catalog, StageId::AggregateReview);
-
-            effects.push(Decision::DispatchAggregateReview {
-                bloom: *bloom,
-                transformation: Transformation::for_aggregate_review(
-                    &binding,
-                    integration.tree,
-                    integration.head,
-                    record.spec.base(),
-                ),
-                roll: 1,
-                profile: binding.profile,
-                configs: record.spec.configs().clone(),
-            });
+            // Roll 1, not `record.aggregate_rolls + 1`: the same decision set
+            // resets the cursor to zero, and the snapshot has not folded that
+            // yet. The gate is the same helper the other critic dispatches
+            // use, so a hold taken before the owner re-arms still withholds
+            // the paid lane (#5100).
+            effects.push(super::aggregate_verify::gate_aggregate(
+                record,
+                *bloom,
+                StageId::AggregateReview,
+                super::aggregate_verify::owed_aggregate_review(record, *bloom, integration.tree, integration.head, 1),
+            ));
         }
         return Decisions { outcome: Outcome::AnswerAdopted { bloom: *bloom, question }, effects };
     }

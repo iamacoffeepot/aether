@@ -398,8 +398,9 @@ impl NativeActor for BloomeryApiCapability {
         finish(state, ctx, routed)
     }
 
-    /// `POST /blooms/{id}/hold` — freeze the bloom's dispatch while the laps
-    /// already running finish and journal normally (#4976).
+    /// `POST /blooms/{id}/hold` — freeze the bloom's dispatch — member laps and
+    /// the two aggregate gates — while the laps already running finish and
+    /// journal normally (#4976 / #5100).
     #[http::route(Post, "/blooms/{id}/hold")]
     fn on_hold(
         state: &mut ApiCapabilityState,
@@ -412,7 +413,7 @@ impl NativeActor for BloomeryApiCapability {
     }
 
     /// `POST /blooms/{id}/release` — take the brake off and dispatch what the
-    /// hold owes, re-derived from the bloom's cursors (#4976).
+    /// hold owes, re-derived from the bloom's cursors and held fold (#4976).
     #[http::route(Post, "/blooms/{id}/release")]
     fn on_release(
         state: &mut ApiCapabilityState,

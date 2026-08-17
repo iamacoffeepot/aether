@@ -1173,6 +1173,7 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         | Decision::RecordOperatorHold { .. }
         | Decision::RecordOperatorRelease { .. }
         | Decision::DeferDispatch { .. }
+        | Decision::DeferAggregate { .. }
         | Decision::RecordSpendQuiesce { .. }
         | Decision::RecordMemberDependencies { .. }
         | Decision::RecordHostFault { .. }
@@ -1331,6 +1332,7 @@ mod tests {
             operator_repairs: Vec::new(),
             operator_hold: None,
             deferred_dispatches: BTreeSet::new(),
+            deferred_aggregates: BTreeSet::new(),
             dependencies: Vec::new(),
             host_faults: BTreeMap::new(),
             vehicles: BTreeMap::new(),
