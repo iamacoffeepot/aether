@@ -31,8 +31,8 @@ pub struct IntegrateReactorCapability;
 impl IntegrateReactorCapability {
     /// The outbox topics this reactor drains — its half of the producer/reactor
     /// pairing the topic tripwire checks against [`Topic::ALL`]. The integrate
-    /// reactor is the sole drainer of [`Topic::Integrate`].
-    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::Integrate];
+    /// reactor is the sole drainer of [`Topic::Integrate`] and [`Topic::Splice`].
+    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::Integrate, Topic::Splice];
 }
 
 mod runtime;

@@ -85,7 +85,7 @@ pub use control::{
     EnumerateClaims, EnumerateClaimsResult, IntegratePayload, JournalRecord, LandPayload, LoadConfigs,
     LoadConfigsResult, MembershipMutation, ObserveMainline, ObserveMainlineResult, OrphanClaimReleasePayload,
     OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal, ReplayJournal, ReplayJournalResult, ReviewPass,
-    Topic, TransferSeal,
+    SplicePayload, Topic, TransferSeal,
 };
 pub use correspondence::{BackendObjectId, Correspondence, CorrespondenceError, SharedCorrespondence};
 pub use digest::{ContentAddressed, Digest, digest_of};
@@ -106,7 +106,8 @@ pub use reduce::{
     Decisions, DecisionsSchemaError, Event, Fact, FoldConflictError, FoldedIntegration, GrantAttemptsError,
     HostFaultError, HostFaultHold, IntegrateError, LandError, LandingRejectedError, OperatorHoldError,
     OperatorRepairError, OrphanClaimReleaseError, Outcome, ResolveError, SealConflict, SealError, Snapshot,
-    StageProgress, SupersedeError, VerifyFailedError, decode_recorded_decisions, is_active_unlanded, reduce, view_of,
+    SpliceError, StageProgress, SupersedeError, VerifyFailedError, decode_recorded_decisions, is_active_unlanded,
+    reduce, view_of,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;

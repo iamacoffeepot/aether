@@ -9,8 +9,9 @@
 //! A chain (or any unique-maximum ancestor set) needs no git merge: the
 //! closest ancestor was itself built on everything behind it, so its
 //! capture commit *is* the spliced tree. Multiple independent tips are
-//! the residual fold-conflict class and dispatch Reconcile (ADR-0189)
-//! rather than guessing a checkout.
+//! a structural join: the host assembles them the same way the weave
+//! merges candidates, and only a residual textual collision dispatches
+//! Reconcile (ADR-0189).
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
@@ -26,9 +27,10 @@ pub(super) enum SplicedBase {
     /// One tree the lane can check out: the bloom base (a root) or the
     /// unique-maximum ancestor's capture.
     Ready(Digest),
-    /// Two or more independent ancestor tips — a residual collision the
-    /// fold cannot name a single checkout for.
-    Conflict {
+    /// Two or more independent ancestor tips — a structural join the host
+    /// assembles before Construct. A residual textual collision on that
+    /// assembly is what dispatches Reconcile (ADR-0189).
+    Join {
         /// The ancestor tips that cannot be ordered, in sealed member order.
         tips: Vec<WorkpieceId>,
     },
@@ -81,7 +83,7 @@ pub(super) fn member_construct_base(record: &BloomRecord, member: &WorkpieceId) 
     let ids = member_ids(record);
     match spliced_base(record.spec.base(), &ids, &record.dependencies, member, &|id| checkout_from(record, id)) {
         SplicedBase::Ready(digest) => digest,
-        SplicedBase::Conflict { .. } => record.spec.base(),
+        SplicedBase::Join { .. } => record.spec.base(),
     }
 }
 
@@ -118,7 +120,7 @@ pub(super) fn spliced_base<F: Fn(&WorkpieceId) -> Option<Digest>>(
             SplicedBase::Ready(lineage.last().copied().unwrap_or(bloom_base))
         }
         [] => SplicedBase::Ready(bloom_base),
-        _ => SplicedBase::Conflict { tips },
+        _ => SplicedBase::Join { tips },
     }
 }
 
@@ -425,7 +427,7 @@ mod tests {
     // The plausible bug: two independent parents are silently ordered by
     // sealed listing and B constructs on only one of them, dropping the other.
     #[test]
-    fn independent_parent_tips_are_a_splice_conflict() {
+    fn independent_parent_tips_are_a_structural_join() {
         let members = ids(&["wp-a", "wp-c", "wp-b"]);
         let edges = vec![edge("wp-b", "wp-a"), edge("wp-b", "wp-c")];
         let checkout_of = |id: &WorkpieceId| match id.0.as_str() {
@@ -436,7 +438,7 @@ mod tests {
 
         assert_eq!(
             spliced_base(digest(0), &members, &edges, &wp("wp-b"), &checkout_of),
-            SplicedBase::Conflict { tips: vec![wp("wp-a"), wp("wp-c")] },
+            SplicedBase::Join { tips: vec![wp("wp-a"), wp("wp-c")] },
             "A and C are both maxima; neither capture contains the other",
         );
         assert_eq!(
@@ -446,10 +448,20 @@ mod tests {
         );
     }
 
+    fn splice_of(decisions: &Decisions, name: &str) -> Option<(Digest, Vec<WorkpieceId>)> {
+        decisions.effects.iter().find_map(|effect| match effect {
+            Decision::DispatchSplice { workpiece, base, members, .. } if workpiece.0 == name => {
+                Some((*base, members.iter().map(|member| member.workpiece.clone()).collect()))
+            }
+            _ => None,
+        })
+    }
+
     // The plausible bug: both parents resolving starts B on one tip's
-    // checkout, silently dropping the other parent's work.
+    // checkout, silently dropping the other parent's work — or spends a
+    // model Reconcile on a join that has not yet been assembled.
     #[test]
-    fn independent_tips_do_not_start_construct() {
+    fn independent_tips_dispatch_a_splice_not_reconcile() {
         let spec = spec(&[("wp-a", 1), ("wp-c", 3), ("wp-b", 2)]);
         let edges = vec![edge("wp-b", "wp-a"), edge("wp-b", "wp-c")];
         let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges });
@@ -461,8 +473,124 @@ mod tests {
 
         assert!(
             construct_checkout(&decided, "wp-b").is_none(),
-            "B stays out of Construct: A and C are independent tips",
+            "B does not construct on one tip before the join is assembled",
         );
+        assert!(
+            !decided.effects.iter().any(|effect| {
+                matches!(effect, Decision::DispatchAttempt { workpiece, stage, .. } if workpiece.0 == "wp-b" && *stage == StageId::Reconcile)
+            }),
+            "a structural join is not a residual collision: {:?}",
+            decided.effects,
+        );
+        assert_eq!(
+            splice_of(&decided, "wp-b"),
+            Some((digest(0), vec![wp("wp-a"), wp("wp-c")])),
+            "B's join names both tips on the bloom base, in sealed order",
+        );
+        let progress = record(&after, &spec).progress.get(&wp("wp-b")).expect("B has a cursor");
+        assert_eq!(progress.stage, StageId::Construct);
+        assert_eq!(progress.fold_checkpoint, None, "the assembled head is not guessed before the host splice");
+    }
+
+    // The plausible bug: a successful host splice leaves B at Construct with
+    // no checkout, so the lane still materializes the bloom base.
+    #[test]
+    fn an_assembled_splice_starts_construct_on_the_merged_head() {
+        let spec = spec(&[("wp-a", 1), ("wp-c", 3), ("wp-b", 2)]);
+        let edges = vec![edge("wp-b", "wp-a"), edge("wp-b", "wp-c")];
+        let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges });
+        let (snapshot, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (snapshot, _) =
+            step(&snapshot, &event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) }));
+        let (snapshot, _) =
+            step(&snapshot, &event("c-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-c", 3, 30) }));
+
+        let (after, decided) = step(
+            &snapshot,
+            &event(
+                "b-splice",
+                Fact::SpliceAssembled { bloom: spec.id(), workpiece: wp("wp-b"), tree: digest(40), head: digest(41) },
+            ),
+        );
+
+        assert_eq!(
+            construct_checkout(&decided, "wp-b"),
+            Some(digest(41)),
+            "B constructs on the assembled head, not a single tip",
+        );
+        assert_eq!(
+            member_construct_base(record(&after, &spec), &wp("wp-b")),
+            digest(41),
+            "the record's construct base is the assembled head",
+        );
+        let progress = record(&after, &spec).progress.get(&wp("wp-b")).expect("B has a cursor");
+        assert_eq!(progress.stage, StageId::Construct);
+        assert_eq!(progress.fold_checkpoint, Some(digest(41)));
+        assert!(progress.candidate.is_none(), "the splice is the base, not B's candidate");
+    }
+
+    // The plausible bug: apply-only replay loses the assembled head, so a
+    // restart names the bloom base and B constructs without A or C.
+    #[test]
+    fn replay_keeps_the_assembled_splice_head() {
+        let spec = spec(&[("wp-a", 1), ("wp-c", 3), ("wp-b", 2)]);
+        let edges = vec![edge("wp-b", "wp-a"), edge("wp-b", "wp-c")];
+        let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges });
+        let a_done = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
+        let c_done = event("c-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-c", 3, 30) });
+        let assembled = event(
+            "b-splice",
+            Fact::SpliceAssembled { bloom: spec.id(), workpiece: wp("wp-b"), tree: digest(40), head: digest(41) },
+        );
+
+        let base = Snapshot::new(digest(0));
+        let (after_seal, sealed) = step(&base, &seal);
+        let (after_a, decided_a) = step(&after_seal, &a_done);
+        let (after_c, decided_c) = step(&after_a, &c_done);
+        let (live, decided_s) = step(&after_c, &assembled);
+
+        let replayed = replay_row(
+            &replay_row(&replay_row(&replay_row(&base, &seal, &sealed), &a_done, &decided_a), &c_done, &decided_c),
+            &assembled,
+            &decided_s,
+        );
+
+        assert_eq!(live, replayed, "apply-only replay rebuilds the live snapshot, assembled head included");
+        assert_eq!(
+            member_construct_base(record(&replayed, &spec), &wp("wp-b")),
+            digest(41),
+            "replay names the assembled head, not the bloom base",
+        );
+    }
+
+    // The plausible bug: a residual textual collision after the join is
+    // planted still cannot enter Reconcile, because B already has a Construct
+    // cursor and FoldConflict only handled members with no progress.
+    #[test]
+    fn a_residual_collision_on_a_join_still_enters_reconcile() {
+        let spec = spec(&[("wp-a", 1), ("wp-c", 3), ("wp-b", 2)]);
+        let edges = vec![edge("wp-b", "wp-a"), edge("wp-b", "wp-c")];
+        let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges });
+        let (snapshot, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (snapshot, _) =
+            step(&snapshot, &event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) }));
+        let (snapshot, _) =
+            step(&snapshot, &event("c-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-c", 3, 30) }));
+
+        let (after, decided) = step(
+            &snapshot,
+            &event(
+                "b-collide",
+                Fact::FoldConflict {
+                    bloom: spec.id(),
+                    workpiece: wp("wp-b"),
+                    checkpoint: digest(40),
+                    head: digest(41),
+                    evidence: Evidence { subject: digest(40), kind: EvidenceKind::FoldConflict, detail: digest(90) },
+                },
+            ),
+        );
+
         let reconcile = decided.effects.iter().find_map(|effect| match effect {
             Decision::DispatchAttempt { workpiece, stage, transformation, .. } if workpiece.0 == "wp-b" => {
                 Some((*stage, transformation.checkout))
@@ -471,12 +599,12 @@ mod tests {
         });
         assert_eq!(
             reconcile,
-            Some((StageId::Reconcile, digest(10))),
-            "B enters at Reconcile on A's tip rather than deadlocking with no cursor",
+            Some((StageId::Reconcile, digest(41))),
+            "a residual collision still dispatches Reconcile on the folded head",
         );
         let progress = record(&after, &spec).progress.get(&wp("wp-b")).expect("B has a cursor");
         assert_eq!(progress.stage, StageId::Reconcile);
-        assert_eq!(progress.fold_checkpoint, Some(digest(10)));
+        assert_eq!(progress.fold_checkpoint, Some(digest(41)));
     }
 
     fn construct_pass(bloom: BloomId, name: &str, tree: u8, checkout: u8, key: &str) -> Event {

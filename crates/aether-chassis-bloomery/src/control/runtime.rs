@@ -36,8 +36,8 @@ use aether_bloomery::control::{
     CompleteReleaseResult, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload,
     LandPayload, LoadConfigs, LoadConfigsResult, MembershipMutation, ObserveMainline, ObserveMainlineResult,
     OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, ReconcileOp, RedispatchPayload, ReplayJournal,
-    ReplayJournalResult, ReviewPass, Topic, TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals,
-    reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
+    ReplayJournalResult, ReviewPass, SplicePayload, Topic, TransferSeal, held_to_seal_error, held_to_supersede_error,
+    plan_heals, reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
     BloomId, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, Decision, Decisions, Digest, Event,
@@ -1114,6 +1114,16 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
                 adopt_from: adopt_from.map(|predecessor| predecessor.0),
             };
             Some(OutboxPayload::new(Topic::Integrate, to_vec(&payload)?))
+        }
+        Decision::DispatchSplice { bloom, workpiece, base, members, adopt_from } => {
+            let payload = SplicePayload {
+                bloom: bloom.0,
+                workpiece: workpiece.clone(),
+                base: *base,
+                members: members.clone(),
+                adopt_from: adopt_from.map(|predecessor| predecessor.0),
+            };
+            Some(OutboxPayload::new(Topic::Splice, to_vec(&payload)?))
         }
         Decision::DispatchAggregateReview { bloom, transformation, roll, profile, configs } => {
             let payload = AggregateReviewPayload {

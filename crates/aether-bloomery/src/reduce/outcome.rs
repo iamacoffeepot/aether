@@ -13,7 +13,7 @@ use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
     AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, HostFaultError,
     IntegrateError, LandError, LandingRejectedError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError,
-    ResolveError, SealError, SupersedeError, VerifyFailedError,
+    ResolveError, SealError, SpliceError, SupersedeError, VerifyFailedError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -580,6 +580,17 @@ pub enum Outcome {
     },
     /// A host-fault hold or resume was refused.
     HostFaultRejected(HostFaultError),
+    /// The host assembled a dependent's multi-tip splice and Construct
+    /// dispatched on the merged head (ADR-0196 G2). Appended so every prior
+    /// outcome keeps its wire discriminant.
+    SpliceAssembled {
+        /// The bloom the dependent belongs to.
+        bloom: BloomId,
+        /// The dependent now constructing on the assembled head.
+        workpiece: WorkpieceId,
+    },
+    /// A splice-assembly admission was refused.
+    SpliceRejected(SpliceError),
 }
 
 impl Outcome {

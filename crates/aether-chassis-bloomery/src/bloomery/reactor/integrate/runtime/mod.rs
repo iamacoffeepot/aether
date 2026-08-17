@@ -39,7 +39,7 @@ use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
     Admit, BloomId, Checkpoint, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, IntegrateOutcome,
-    IntegratePayload, MemberCandidate, Topic, WorkpieceId,
+    IntegratePayload, MemberCandidate, SplicePayload, Topic, WorkpieceId,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
@@ -409,6 +409,110 @@ fn fold_integration(source: &SourceShell, payload: &IntegratePayload) -> FoldOut
     FoldOutcome::Resolved(Box::new(event))
 }
 
+/// The scratch bloom id a member splice folds onto, so the weave's
+/// integration branch is never the destination.
+fn splice_namespace(bloom: &BloomId, workpiece: &WorkpieceId) -> BloomId {
+    let mut bytes = Vec::from(*b"aether.bloomery.splice:");
+    bytes.extend_from_slice(bloom.0.as_bytes());
+    bytes.push(b':');
+    bytes.extend_from_slice(workpiece.0.as_bytes());
+    BloomId(Digest::of_wire_bytes(&bytes))
+}
+
+fn splice_assembled_key(bloom: &Digest, workpiece: &str, tree: &Digest, head: &Digest) -> IdempotencyKey {
+    use core::fmt::Write;
+    let mut key = String::with_capacity(32 + 64 + 1 + workpiece.len() + 1 + 64 + 1 + 64);
+    key.push_str("aether.bloomery.splice-assembled:");
+    for byte in bloom.as_bytes() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    key.push(':');
+    key.push_str(workpiece);
+    key.push(':');
+    for byte in tree.as_bytes() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    key.push(':');
+    for byte in head.as_bytes() {
+        let _ = write!(key, "{byte:02x}");
+    }
+    IdempotencyKey(key)
+}
+
+/// Fold one dependent's independent tips onto a scratch branch.
+///
+/// Candidate refs stay in the real bloom's namespace (adoption fills inherited
+/// ones). The destination is a per-member integration id so this merge cannot
+/// advance the weave branch. A residual collision is the dependent's
+/// [`Fact::FoldConflict`], not a tip's — the tips are already resolved.
+fn fold_splice(source: &SourceShell, payload: &SplicePayload) -> FoldOutcome {
+    let bloom = BloomId(payload.bloom);
+    if payload.members.is_empty() {
+        return FoldOutcome::Refused("splice dispatched with zero tips".to_owned());
+    }
+    if let Some(predecessor) = payload.adopt_from {
+        let predecessor = BloomId(predecessor);
+        for member in &payload.members {
+            match source.adopt_candidate(&predecessor, &bloom, &member.workpiece.0) {
+                Ok(false) => {
+                    return FoldOutcome::Refused(format!(
+                        "tip `{}` carries a claim but no candidate ref under this bloom or its predecessor; \
+                         refusing to assemble a join missing a tip's work",
+                        member.workpiece.0
+                    ));
+                }
+                Ok(true) => {}
+                Err(error) => return FoldOutcome::Stopped(format!("adopting a splice tip failed: {error}")),
+            }
+        }
+    }
+
+    let namespace = splice_namespace(&bloom, &payload.workpiece);
+    let position = match source.integration_checkpoint(&namespace, &payload.base) {
+        Ok(position) => position,
+        Err(error) => return FoldOutcome::Stopped(format!("splice bootstrap failed: {error}")),
+    };
+    let mut expected = Checkpoint { bloom: namespace, tree: position.checkpoint.tree };
+    let mut head = position.head;
+    let mut collisions: Vec<Collision<'_>> = Vec::new();
+    for member in &payload.members {
+        match source.integrate_merge(&namespace, &candidate_ref_name(&bloom, &member.workpiece.0), &expected) {
+            Ok(IntegrateOutcome::Integrated { tree, head: new_head }) => {
+                expected = Checkpoint { bloom: namespace, tree };
+                head = Some(new_head);
+            }
+            Ok(IntegrateOutcome::Conflict { paths, diff, attempted, .. }) => {
+                collisions.push(Collision { member, at: expected.tree, paths, diff, attempted });
+            }
+            Ok(other) => {
+                return FoldOutcome::Stopped(format!("splice fold stopped by a concurrent branch advance: {other:?}"));
+            }
+            Err(error) => return FoldOutcome::Stopped(format!("splice merge failed: {error}")),
+        }
+    }
+
+    if !collisions.is_empty() {
+        let checkout = head.unwrap_or(payload.base);
+        return FoldOutcome::Conflicted(vec![conflicted_member(
+            &bloom,
+            &payload.workpiece,
+            &collisions[0],
+            expected.tree,
+            checkout,
+        )]);
+    }
+
+    let Some(head) = head else {
+        return FoldOutcome::Refused("splice branch produced no landable head; refusing to fabricate one".to_owned());
+    };
+    let tree = expected.tree;
+    let event = Event {
+        idempotency_key: splice_assembled_key(&payload.bloom, &payload.workpiece.0, &tree, &head),
+        fact: Fact::SpliceAssembled { bloom, workpiece: payload.workpiece.clone(), tree, head },
+    };
+    FoldOutcome::Resolved(Box::new(event))
+}
+
 /// Build one member's collision admission against the settled checkpoint.
 ///
 /// `owner` is the workpiece whose Reconcile lane resolves this seam, passed
@@ -552,6 +656,68 @@ fn drain_and_integrate(
                     sequence = entry.sequence,
                     %reason,
                     "integration stopped; the entry re-drains and resumes next tick",
+                );
+                break;
+            }
+        }
+    }
+    Ok((admits, ack_through))
+}
+
+fn drain_and_splice(
+    store: &mut dyn StoreBackend,
+    source: &SourceShell,
+    mut artifacts: Option<&mut ArtifactsCapabilityState>,
+) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
+    let entries = store.drain_topic(Topic::Splice)?;
+    let mut admits = Vec::new();
+    let mut ack_through = None;
+    for entry in entries {
+        let Ok(payload) = from_bytes::<SplicePayload>(&entry.payload) else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::integrate",
+                sequence = entry.sequence,
+                "splice outbox entry did not decode; stopping the ack prefix to re-drain",
+            );
+            break;
+        };
+        match fold_splice(source, &payload) {
+            FoldOutcome::Resolved(event) => {
+                let Ok(bytes) = to_vec(&*event) else {
+                    tracing::warn!(
+                        target: "aether_chassis_bloomery::integrate",
+                        sequence = entry.sequence,
+                        "splice-assembled event did not encode; stopping the ack prefix to re-drive",
+                    );
+                    break;
+                };
+                admits.push(Admit { event: bytes });
+                ack_through = Some(entry.sequence);
+            }
+            FoldOutcome::Conflicted(conflicts) => {
+                let Some(conflicted) =
+                    admit_conflicts(store, artifacts.as_deref_mut(), &payload.bloom, entry.sequence, &conflicts)
+                else {
+                    break;
+                };
+                admits.extend(conflicted);
+                ack_through = Some(entry.sequence);
+            }
+            FoldOutcome::Refused(reason) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::integrate",
+                    sequence = entry.sequence,
+                    %reason,
+                    "splice refused definitively; acking the entry instead of re-driving",
+                );
+                ack_through = Some(entry.sequence);
+            }
+            FoldOutcome::Stopped(reason) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::integrate",
+                    sequence = entry.sequence,
+                    %reason,
+                    "splice stopped; the entry re-drains and resumes next tick",
                 );
                 break;
             }
@@ -721,6 +887,21 @@ impl NativeActor for IntegrateReactorCapability {
             }
             Err(error) => {
                 tracing::warn!(target: "aether_chassis_bloomery::integrate", %error, "integrate drain failed");
+            }
+        }
+        match drain_and_splice(store, &source, state.artifacts.as_mut()) {
+            Ok((admits, ack_through)) => {
+                if let Some(sequence) = ack_through
+                    && let Err(error) = store.ack_topic(Topic::Splice, sequence)
+                {
+                    tracing::warn!(target: "aether_chassis_bloomery::integrate", %error, "splice ack failed; entries re-drive");
+                }
+                for admit in admits {
+                    let _ = ctx.send_envelope_detached(control_mailbox, Admit::ID, &admit.encode_into_bytes());
+                }
+            }
+            Err(error) => {
+                tracing::warn!(target: "aether_chassis_bloomery::integrate", %error, "splice drain failed");
             }
         }
     }

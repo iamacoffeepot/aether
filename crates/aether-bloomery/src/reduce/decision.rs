@@ -682,4 +682,26 @@ pub enum Decision {
         /// [`StageId::AggregateVerify`] or [`StageId::AggregateReview`].
         stage: StageId,
     },
+    /// Assemble a dependent's construct base from two or more independent
+    /// ancestor tips (ADR-0196 G2).
+    ///
+    /// A unique-maximum ancestor is already one tree. A join is not: the
+    /// host merges the named tips onto `base` the same way the weave merges
+    /// candidates, then admits [`Fact::SpliceAssembled`](crate::Fact::SpliceAssembled)
+    /// or a residual [`Fact::FoldConflict`](crate::Fact::FoldConflict). Snapshot-inert
+    /// outbox like [`Decision::DispatchIntegration`]. Appended so the prior
+    /// decisions' wire discriminants are unchanged.
+    DispatchSplice {
+        /// The bloom the dependent belongs to.
+        bloom: BloomId,
+        /// The dependent whose construct waits on the assembled tree.
+        workpiece: WorkpieceId,
+        /// The sealed bloom base the tips merge onto.
+        base: Digest,
+        /// The independent ancestor tips, in sealed member order.
+        members: Vec<MemberCandidate>,
+        /// The predecessor whose candidate refs this splice adopts first,
+        /// when any tip was inherited.
+        adopt_from: Option<BloomId>,
+    },
 }
