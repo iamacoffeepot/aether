@@ -109,12 +109,8 @@ fn write_tree(root: &Path) {
 }
 
 fn manifest(name: &str, dep: Option<&str>) -> String {
-    match dep {
-        Some(dep) => format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{dep} = {{ path = \"../{dep}\" }}\n"
-        ),
-        None => format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
-    }
+    let header = format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n");
+    dep.map_or_else(|| header.clone(), |dep| format!("{header}\n[dependencies]\n{dep} = {{ path = \"../{dep}\" }}\n"))
 }
 
 fn lockfile() -> String {
