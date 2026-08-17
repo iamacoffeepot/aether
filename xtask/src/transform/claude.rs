@@ -2,15 +2,13 @@
 //! and derive the result record both the `construct.implement` and
 //! `review.critic` lanes run through.
 
-use std::io::Write;
-use std::process::Stdio;
-use std::{fs, thread};
+use std::fs;
 
 use anyhow::{Context, Result, bail};
 
 use aether_bloomery::split_lane_identity;
 
-use crate::transform::lane::{resume_handle_rejected, resumed_prompt, without_resume};
+use crate::transform::lane::{execute, resume_handle_rejected, resumed_prompt, without_resume};
 use crate::transform::messages::derive_result_record;
 use crate::transform::peak_memory::PeakMemory;
 use crate::transform::sccache::{self, CompilerCache};
@@ -162,37 +160,20 @@ pub(super) fn run_headless_claude(
     claude.args(construct_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref()));
     scratch.export(&mut claude);
     sccache::export(cache, &mut claude);
-    claude.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = claude.spawn().context("run headless claude")?;
-    // Pipe the prompt on a separate thread and reap the child unconditionally: if
-    // the write races an early exit (broken pipe) or the prompt outgrows the OS
-    // pipe buffer, returning on the write error before `wait_with_output` would
-    // drop `child` un-waited — `Child`'s `Drop` neither waits nor reaps — leaving a
-    // zombie (or a live, still-billing process) behind. Waiting first, then
-    // surfacing the writer's error, guarantees the child is reaped on every path.
-    let mut stdin = child.stdin.take().context("headless claude stdin was not captured")?;
-    let prompt_bytes = launched_prompt.as_bytes().to_vec();
-    // Infra thread in a build tool — no settlement/trace umbrella applies here;
-    // it exists only to pipe stdin while the main thread reaps the child.
-    #[allow(clippy::disallowed_methods)]
-    let writer = thread::spawn(move || stdin.write_all(&prompt_bytes));
-    let run = child.wait_with_output().context("await headless claude")?;
-    // Before the exit check: a run that died still peaked at something, and the
-    // reading is what the concurrency model is calibrated from either way.
-    peak.observe(&run.stderr);
+    // Piped stdin + streamed stdout share the lane primitive: the child is
+    // reaped before any pipe-thread error returns, and a nonzero exit keeps
+    // precedence over a broken prompt pipe.
+    let run = execute(claude, &args.out, "headless claude", peak, Some(launched_prompt.into_bytes()))?;
     // A non-zero exit is the CLI itself failing to run (auth, bad args, crash) —
     // an operational failure, distinct from a task-level error, which a completed
     // run records as `is_error` inside the transcript. Surface it rather than
-    // writing an empty/garbage result record and reporting success. Check it
-    // *before* the writer's result: an early child exit makes the stdin write race
-    // a broken pipe, so joining the writer first would surface that downstream
-    // symptom and mask the child's real exit cause.
+    // writing an empty/garbage result record and reporting success.
     if args.resume.is_some() && resume_handle_rejected(run.status, &run.stdout, &run.stderr) {
         // Session file gone / unknown id — the CLI never started the billed
         // turn. Any other non-zero (auth, crash after tokens, SIGKILL) is
         // the operational failure the comment above names; retrying that
-        // cold would double the spend this pool exists to cut.
-        let _ = writer.join();
+        // cold would double the spend this pool exists to cut. Any streamed
+        // byte is already a transcript, so this degrade stays empty-only.
         return run_headless_claude(prompt, &without_resume(args), scratch, cache, peak);
     }
     if !run.status.success() {
@@ -202,13 +183,6 @@ pub(super) fn run_headless_claude(
             tail(&String::from_utf8_lossy(&run.stderr), 1000),
         );
     }
-    // The child exited zero, so a writer error here is an unexplained broken pipe
-    // (or an OS-buffer overrun) worth propagating rather than a symptom of the exit
-    // above.
-    writer.join().expect("prompt-writer thread panicked").context("pipe the assembled prompt to headless claude")?;
-
-    let transcript_path = args.out.join("transcript.jsonl");
-    fs::write(&transcript_path, &run.stdout).with_context(|| format!("write {}", transcript_path.display()))?;
 
     // Derive the result record over the whole transcript, in-repo (no node
     // shell-out): the terminal `result` plus the first-call cache signal.
@@ -217,7 +191,13 @@ pub(super) fn run_headless_claude(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::{env, fs, process};
+
     use super::{construct_argv, tail};
+    use crate::transform::lane::{execute, resume_handle_rejected};
+    use crate::transform::peak_memory;
 
     #[test]
     fn tail_snaps_to_a_char_boundary_without_panicking() {
@@ -267,5 +247,67 @@ mod tests {
             argv.windows(2).any(|w| w == ["--output-format", "stream-json"]),
             "still emits the stream-json transcript"
         );
+    }
+
+    /// A per-test evidence directory, unique per call so concurrent test threads
+    /// never collide — the sibling lanes' convention.
+    fn scratch_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = env::temp_dir().join(format!("aether-claude-stream-{tag}-{}-{seq}", process::id()));
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    // Claude's launch is the stdin-piped arm of the shared primitive. The
+    // assembled prompt has to reach the child and the transcript, not sit in
+    // an argv positional the way the other arms deliver theirs.
+    #[test]
+    fn the_prompt_reaches_the_child_on_stdin_and_lands_in_the_transcript() {
+        let out = scratch_dir("stdin");
+        let prompt = b"hello from stdin\n";
+        let run = execute(Command::new("cat"), &out, "fixture", &peak_memory::detect(), Some(prompt.to_vec()))
+            .expect("cat the prompt");
+        assert!(run.status.success());
+        assert_eq!(run.stdout, prompt);
+        assert_eq!(fs::read(out.join("transcript.jsonl")).expect("read transcript"), prompt);
+    }
+
+    // Returning on the writer error before wait drops `Child` un-waited —
+    // a zombie, or a live still-billing process. The child's exit stays the
+    // error; a broken prompt pipe is the symptom of that exit.
+    #[test]
+    fn a_broken_prompt_pipe_reaps_the_child_and_does_not_mask_its_exit() {
+        let out = scratch_dir("reap");
+        let pidfile = out.join("pid");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(format!("echo $$ > {}; exit 42", pidfile.display()));
+
+        let run = execute(command, &out, "fixture", &peak_memory::detect(), Some(vec![b'x'; 1 << 20]))
+            .expect("nonzero exit wins over a broken prompt pipe");
+        assert_eq!(run.status.code(), Some(42), "the child's exit is the error, not EPIPE");
+        let pid: u32 = fs::read_to_string(&pidfile).expect("pid").trim().parse().expect("pid number");
+        assert!(
+            !PathBuf::from(format!("/proc/{pid}")).exists(),
+            "the child must be reaped, not left as a zombie or a live process"
+        );
+    }
+
+    // Any streamed byte means the CLI ran. A resume-shaped stderr after that
+    // is not a missing session, so the Claude arm must not fall back cold.
+    #[test]
+    fn streamed_output_keeps_a_resume_launch_from_falling_back() {
+        let out = scratch_dir("no-fallback");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("printf '{\"type\":\"result\"}\\n'; echo 'No conversation found' >&2; exit 1");
+
+        let run = execute(command, &out, "fixture", &peak_memory::detect(), Some(b"prompt\n".to_vec()))
+            .expect("partial failure still returns the run");
+        assert!(
+            !resume_handle_rejected(run.status, &run.stdout, &run.stderr),
+            "streamed output must not relaunch cold"
+        );
+        assert_eq!(run.stdout, b"{\"type\":\"result\"}\n");
     }
 }

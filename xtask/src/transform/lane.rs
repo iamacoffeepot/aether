@@ -12,8 +12,11 @@
 //! closed, which reads as a critic *finding* rather than a harness bug — so the
 //! arms converge here rather than each assembling their own.
 
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Output};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::thread;
 use std::{fs, io};
 
 use anyhow::{Context, Result, bail};
@@ -127,7 +130,7 @@ pub(super) fn write_prompt(out: &Path, prompt: &str) -> Result<PathBuf> {
 /// records inside its transcript. It is surfaced rather than folded into an
 /// empty record reported as success.
 pub(super) fn capture(command: Command, out: &Path, harness: &str, peak: &PeakMemory) -> Result<String> {
-    let run = execute(command, out, harness, peak)?;
+    let run = execute(command, out, harness, peak, None)?;
     exit_check(&run, harness)?;
     Ok(String::from_utf8_lossy(&run.stdout).into_owned())
 }
@@ -144,7 +147,7 @@ pub(super) fn capture_resumed(
     harness: &str,
     peak: &PeakMemory,
 ) -> Result<Option<String>> {
-    let run = execute(command, out, harness, peak)?;
+    let run = execute(command, out, harness, peak, None)?;
     if resume_handle_rejected(run.status, &run.stdout, &run.stderr) {
         return Ok(None);
     }
@@ -152,23 +155,124 @@ pub(super) fn capture_resumed(
     Ok(Some(String::from_utf8_lossy(&run.stdout).into_owned()))
 }
 
-/// Spawn `command`, read its peak, and write its stdout to
-/// `<out>/transcript.jsonl` — everything both capture entry points do before
-/// they part ways over how the exit is read.
+/// Spawn `command`, tee stdout into `<out>/transcript.jsonl` as it arrives,
+/// drain stderr concurrently, and wait. The same primitive every harness arm
+/// uses, including Claude's piped-stdin launch.
 ///
-/// The transcript is written before either caller judges the exit, so a failed
-/// run still leaves whatever it managed to emit on disk for an operator to read.
-/// `peak` is read first for the same reason: a run that died still peaked at
-/// something, and the reading is what the concurrency model is calibrated from
-/// either way (#4912).
-fn execute(mut command: Command, out: &Path, harness: &str, peak: &PeakMemory) -> Result<Output> {
+/// The transcript is created (truncated) before the child can emit, so a
+/// heartbeat exists for the whole run. Each flushed chunk advances the file
+/// modification time; there is no timer and no per-event `fsync`.
+///
+/// The child is always reaped before any pipe-thread error is returned. A
+/// nonzero exit takes precedence over a broken stdin pipe — the child closed
+/// its end because it died, and naming the broken pipe would hide the cause.
+/// `peak` is read after the pipes drain for the same reason as before: a run
+/// that died still peaked at something (#4912).
+pub(super) fn execute(
+    mut command: Command,
+    out: &Path,
+    harness: &str,
+    peak: &PeakMemory,
+    stdin: Option<Vec<u8>>,
+) -> Result<Output> {
     fs::create_dir_all(out).with_context(|| format!("create {}", out.display()))?;
-    let run = command.output().map_err(|error| spawn_context(error, harness))?;
-    peak.observe(&run.stderr);
-
     let path = out.join("transcript.jsonl");
-    fs::write(&path, &run.stdout).with_context(|| format!("write {}", path.display()))?;
-    Ok(run)
+    let file = File::create(&path).with_context(|| format!("write {}", path.display()))?;
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if stdin.is_some() {
+        command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
+
+    let mut child = ChildReaper::new(command.spawn().map_err(|error| spawn_context(error, harness))?);
+    let writer_work = match stdin {
+        Some(bytes) => {
+            let pipe = child.child()?.stdin.take().with_context(|| format!("{harness} stdin was not captured"))?;
+            Some((pipe, bytes))
+        }
+        None => None,
+    };
+    let stdout = child.child()?.stdout.take().with_context(|| format!("{harness} stdout was not captured"))?;
+    let stderr = child.child()?.stderr.take().with_context(|| format!("{harness} stderr was not captured"))?;
+
+    // `thread::scope`, not `thread::spawn`: raw spawn is disallowed (settlement/trace
+    // umbrella); this is infra below the actor/mail layer.
+    let (status, stdout, stderr, written) = thread::scope(|scope| {
+        let writer = writer_work.map(|(mut pipe, bytes)| scope.spawn(move || pipe.write_all(&bytes)));
+        let stdout_reader = scope.spawn(|| tee_stdout(stdout, file));
+        let stderr_reader = scope.spawn(|| drain_stderr(stderr));
+
+        let status = child.wait().with_context(|| format!("await {harness}"))?;
+        let stdout = stdout_reader.join().expect("stdout reader panicked");
+        let stderr = stderr_reader.join().expect("stderr reader panicked");
+        let written = writer.map(|handle| handle.join().expect("prompt-writer thread panicked"));
+        Ok::<_, anyhow::Error>((status, stdout, stderr, written))
+    })?;
+
+    let stderr = stderr.with_context(|| format!("read {harness} stderr"))?;
+    peak.observe(&stderr);
+    let stdout = stdout.with_context(|| format!("write {}", path.display()))?;
+
+    if !status.success() {
+        return Ok(Output { status, stdout, stderr });
+    }
+    if let Some(written) = written {
+        written.with_context(|| format!("pipe the assembled prompt to {harness}"))?;
+    }
+    Ok(Output { status, stdout, stderr })
+}
+
+/// Reap `child` on every path, including early returns before `wait`. `Child`'s
+/// `Drop` neither waits nor kills, so a leaked handle is a zombie or a still-billing
+/// process.
+struct ChildReaper {
+    child: Option<Child>,
+}
+
+impl ChildReaper {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn child(&mut self) -> Result<&mut Child> {
+        self.child.as_mut().context("child already reaped")
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        self.child.take().expect("child already reaped").wait()
+    }
+}
+
+impl Drop for ChildReaper {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn tee_stdout(mut reader: impl Read, mut file: File) -> io::Result<Vec<u8>> {
+    let mut captured = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        captured.extend_from_slice(&buf[..n]);
+        file.write_all(&buf[..n])?;
+        file.flush()?;
+    }
+    Ok(captured)
+}
+
+fn drain_stderr(mut reader: impl Read) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    io::copy(&mut reader, &mut buf)?;
+    Ok(buf)
 }
 
 /// Fail the lane when the harness exited non-zero, naming a bounded stderr tail.
@@ -258,9 +362,13 @@ fn tail(s: &str, max: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use std::os::unix::process::ExitStatusExt;
-    use std::process::ExitStatus;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, ExitStatus};
+    use std::time::{Duration, Instant};
+    use std::{env, fs, process, thread};
 
-    use super::{Terminal, Usage, record, resume_handle_rejected, resumed_prompt};
+    use super::{Terminal, Usage, capture, capture_resumed, record, resume_handle_rejected, resumed_prompt};
+    use crate::transform::peak_memory;
 
     // Tripwire: the envelope's two cross-lane fields. `result_record.is_error`
     // is what the construct lane's completion gate tests `== Some(false)`, and
@@ -366,5 +474,138 @@ mod tests {
         assert_eq!(partial["no_result"], true);
         assert!(partial.get("is_error").is_none(), "no is_error means the construct gate fails closed");
         assert!(partial.get("result").is_none(), "and the review lane finds no verdict text");
+    }
+
+    /// A per-test evidence directory, unique per call so concurrent test threads
+    /// never collide — the sibling lanes' convention.
+    fn scratch_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = env::temp_dir().join(format!("aether-lane-stream-{tag}-{}-{seq}", process::id()));
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn wait_for(path: &Path, pred: impl Fn(&[u8]) -> bool) -> Vec<u8> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(bytes) = fs::read(path)
+                && pred(&bytes)
+            {
+                return bytes;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {}", path.display());
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    // The heartbeat is the file's presence (and later its mtime). Creating it
+    // only after wait returns leaves the documented signal absent for the whole
+    // run — the interval Bloomery most needs a liveness reading.
+    #[test]
+    fn the_transcript_is_created_before_the_child_can_emit() {
+        let out = scratch_dir("created");
+        let transcript = out.join("transcript.jsonl");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(format!("test -f {} || exit 7", transcript.display()));
+
+        let text = capture(command, &out, "fixture", &peak_memory::detect()).expect("child saw the transcript");
+        assert_eq!(text, "");
+        assert_eq!(fs::read(&transcript).expect("transcript remains"), b"");
+    }
+
+    // Buffering stdout and writing once at exit is the bug this replaces: an
+    // observer must see the first flushed chunk while the child is still alive.
+    #[test]
+    fn the_transcript_grows_while_the_child_is_still_running() {
+        let out = scratch_dir("grows");
+        let go = out.join("go");
+        let transcript = out.join("transcript.jsonl");
+        let script = format!(
+            "printf 'one\\n' | dd bs=4 count=1 2>/dev/null; \
+             while [ ! -f {} ]; do :; done; \
+             printf 'two\\n' | dd bs=4 count=1 2>/dev/null",
+            go.display()
+        );
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(script);
+
+        thread::scope(|scope| {
+            let worker = scope.spawn(|| capture(command, &out, "fixture", &peak_memory::detect()));
+            assert_eq!(wait_for(&transcript, |bytes| bytes == b"one\n"), b"one\n");
+            assert!(!worker.is_finished(), "the first chunk must land before wait returns");
+            fs::write(&go, b"").expect("release the child");
+            let text = worker.join().expect("capture thread panicked").expect("capture");
+            assert_eq!(text, "one\ntwo\n");
+            assert_eq!(fs::read(&transcript).expect("read transcript"), b"one\ntwo\n");
+        });
+    }
+
+    // Reading stdout to completion before touching stderr deadlocks once the
+    // child fills the unattended pipe (typically 64 KiB). Interleaved volume on
+    // both sides must drain.
+    #[test]
+    fn stdout_and_stderr_volume_cannot_deadlock_the_child() {
+        let out = scratch_dir("deadlock");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(
+            r#"
+i=0
+while [ "$i" -lt 256 ]; do
+  dd if=/dev/zero bs=1024 count=1 2>/dev/null
+  dd if=/dev/zero bs=1024 count=1 2>/dev/null >&2
+  i=$((i + 1))
+done
+"#,
+        );
+
+        let text = capture(command, &out, "fixture", &peak_memory::detect()).expect("drained both pipes");
+        assert_eq!(text.len(), 256 * 1024);
+        assert_eq!(fs::read(out.join("transcript.jsonl")).expect("read transcript").len(), 256 * 1024);
+    }
+
+    // The file keeps the child's exact bytes so result derivation can reread
+    // nothing; the returned String is still the lossy conversion callers already
+    // used. A UTF-8 "fixup" written to disk would change the transcript.
+    #[test]
+    fn returned_text_is_lossy_and_the_file_keeps_the_raw_bytes() {
+        let out = scratch_dir("raw");
+        let blob = out.join("blob");
+        let raw = b"ok\xffmore";
+        fs::write(&blob, raw).expect("write fixture bytes");
+        let mut command = Command::new("cat");
+        command.arg(&blob);
+
+        let text = capture(command, &out, "fixture", &peak_memory::detect()).expect("capture");
+        assert_eq!(text, String::from_utf8_lossy(raw));
+        assert_eq!(fs::read(out.join("transcript.jsonl")).expect("read transcript"), raw);
+    }
+
+    // A nonzero exit after any streamed byte has already spent (or might have).
+    // capture_resumed must fail the lane, not return Ok(None) and invite a
+    // second paid launch.
+    #[test]
+    fn a_partial_transcript_is_not_a_resume_refusal() {
+        let out = scratch_dir("partial");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("printf '{\"type\":\"result\"}\\n'; echo 'No conversation found' >&2; exit 1");
+
+        let err = capture_resumed(command, &out, "fixture", &peak_memory::detect()).expect_err("must not degrade");
+        assert!(err.to_string().contains("exited 1"), "{err}");
+        assert_eq!(fs::read(out.join("transcript.jsonl")).expect("read transcript"), b"{\"type\":\"result\"}\n");
+    }
+
+    // The conservative degrade stays: empty captured stdout plus a stderr that
+    // both names the handle and says it was refused.
+    #[test]
+    fn an_empty_transcript_with_a_refusal_stays_resume_eligible() {
+        let out = scratch_dir("refuse");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("echo 'No conversation found with session ID sess-1' >&2; exit 1");
+
+        let result = capture_resumed(command, &out, "fixture", &peak_memory::detect()).expect("eligible degrade");
+        assert!(result.is_none(), "empty + refusal signature relaunches cold");
+        assert_eq!(fs::read(out.join("transcript.jsonl")).expect("empty transcript was still created"), b"");
     }
 }
