@@ -1,6 +1,6 @@
 ---
 name: sweep
-description: "Enumerate, classify, confirm, and reclaim stale Aether Claude worktrees, branches, ADR status drift, or fat issues without discarding dirty or live work."
+description: "Enumerate, classify, confirm, and reclaim stale Aether Claude worktrees, branches, memory index entries, ADR status drift, or fat issues without discarding dirty or live work."
 ---
 
 # /sweep — evidence-backed cleanup and audits
@@ -12,6 +12,7 @@ Every target uses the same contract: enumerate, classify with evidence, print ex
 /sweep worktrees
 /sweep sessions
 /sweep branches
+/sweep memory
 /sweep adrs
 /sweep fat
 /sweep all
@@ -46,6 +47,16 @@ Classify with REST pull-request lookup and local ancestry:
 
 Print upstream, ahead count, last commit, and evidence. Recheck immediately before deletion.
 
+## Memory
+
+Curates the project's auto-memory index without losing knowledge: compress and de-index only, never delete a topic file, and never touch `user`-type memories without an explicit ask. Locate the memory directory at `~/.claude/projects/<slug>/memory/`, where `<slug>` is the project's absolute path with every `/` replaced by `-`.
+
+Measure `MEMORY.md` against its ~24.4 KB index limit and note the margin. Enumerate over-long index lines (over ~200 characters), topic files on disk that no index or sub-index links (orphans), and index links whose target file is missing (dead links).
+
+Classify each index entry: over-long hooks are compression candidates — compression preserves the searchable identifiers (issue, pull-request, and ADR numbers; crate, mailbox, and symbol names) and is the primary, lossless lever; entries whose body or hook says superseded, historical, or retired — or that another note explicitly supersedes — are de-index candidates; entries naming a repository file, symbol, or flag are stale when a grep shows the name renamed or removed (a memory records what was true when written, so surface these for the user's fix-or-remove call); two entries covering the same fact are a consolidation candidate, also surfaced only.
+
+Print per-entry proposed actions (compress, de-index, flag-stale, leave) with the projected index size, note which retained notes hold `[[links]]` into files being de-indexed, and wait for confirmation. De-indexing removes the index line and leaves the topic file on disk as archive, so inbound links still resolve. Report the new index size and margin, lines compressed, entries de-indexed, and stale references flagged.
+
 ## ADR audit
 
 This target is read-only unless the user later names exact edits. Enumerate numbered ADRs and surface Proposed documents contradicted by shipped code, asymmetric supersession references, and status text contradicted by current code or merged pull requests. Read relevant sentences; grep is evidence, not proof. Print current/proposed status and exact evidence. Apply only separately approved named edits as ordinary repository work.
@@ -60,4 +71,4 @@ After confirmation file children sequentially through `/sketch`. Each child star
 
 ## All
 
-Build one combined plan in order: worktrees, sessions, worktree-less branches, ADR audit. Fat-issue decomposition is excluded. Ask once for itemized confirmation but retain stricter per-item rules. Execute serially and re-enumerate between targets.
+Build one combined plan in order: worktrees, sessions, worktree-less branches, memory, ADR audit. Fat-issue decomposition is excluded. Ask once for itemized confirmation but retain stricter per-item rules. Execute serially and re-enumerate between targets.
