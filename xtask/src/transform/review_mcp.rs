@@ -150,7 +150,9 @@ fn tool_error(text: &str) -> Value {
 }
 
 fn ok(id: &Value, result: Value) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "result": result })
+    let mut value = json!({ "jsonrpc": "2.0", "id": id });
+    value["result"] = result;
+    value
 }
 
 fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
@@ -246,7 +248,7 @@ mod tests {
                 assert_eq!(findings[0].summary, "empty input panics");
                 assert_eq!(findings[0].class, FindingClass::Defect);
             }
-            other => panic!("expected a clean defect report, got {other:?}"),
+            Reports::Malformed { reason } => panic!("expected a clean defect report, got malformed: {reason}"),
         }
     }
 

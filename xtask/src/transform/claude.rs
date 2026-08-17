@@ -157,7 +157,6 @@ pub(super) fn run_headless_claude(
     // Under the host's peak-memory wrapper when it has one (#4912): what a
     // construct lane costs in RAM is the builds its agent drives, and the
     // wrapper's reading covers the whole reaped tree rather than this process.
-    let launched_prompt = resumed_prompt(prompt, args.resume.as_deref());
     let mut claude = peak.command("claude");
     let mut argv = construct_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref());
     // Tool injection is Claude-only. Codex / muse / grok review paths have no
@@ -172,7 +171,13 @@ pub(super) fn run_headless_claude(
     // Piped stdin + streamed stdout share the lane primitive: the child is
     // reaped before any pipe-thread error returns, and a nonzero exit keeps
     // precedence over a broken prompt pipe.
-    let run = execute(claude, &args.out, "headless claude", peak, Some(launched_prompt.into_bytes()))?;
+    let run = execute(
+        claude,
+        &args.out,
+        "headless claude",
+        peak,
+        Some(resumed_prompt(prompt, args.resume.as_deref()).into_bytes()),
+    )?;
     // A non-zero exit is the CLI itself failing to run (auth, bad args, crash) —
     // an operational failure, distinct from a task-level error, which a completed
     // run records as `is_error` inside the transcript. Surface it rather than
