@@ -83,7 +83,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
     Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, Fields, FnArg, GenericArgument, ItemFn, Lit, Meta,
-    PathArguments, ReturnType, Type, parse_macro_input,
+    PathArguments, ReturnType, Token, Type, parse_macro_input, token,
 };
 
 /// ADR-0048 §1 cap on input parameters.
@@ -98,7 +98,7 @@ pub fn derive_kind(input: TokenStream) -> TokenStream {
     }
 }
 
-#[proc_macro_derive(Schema, attributes(kind))]
+#[proc_macro_derive(Schema, attributes(kind, serde))]
 pub fn derive_schema(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand_schema(&input) {
@@ -306,6 +306,7 @@ fn cast_eligible_expr_for_struct(has_repr_c: bool, fields: &[FieldInfo]) -> Toke
 }
 
 fn expand_schema(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    reject_skipped_wire_fields(&input.data)?;
     let name = &input.ident;
     let name_str = name.to_string();
     let (body, label_node_body, cast_eligible_expr) = match &input.data {
@@ -567,6 +568,63 @@ fn is_vec_u8(ty: &Type) -> bool {
     // Match on the last segment so qualified spellings like
     // `core::primitive::u8` are recognized alongside bare `u8`.
     inner.path.segments.last().is_some_and(|seg| seg.ident == "u8")
+}
+
+/// Reject `skip_serializing_if` on every struct and enum-variant field.
+///
+/// ADR-0118 encodes each declared field in schema order, with an explicit
+/// `Option` presence byte or collection length. serde drops a
+/// `skip_serializing_if` field before `aether_data::wire::Serializer` is
+/// invoked, so the schema and deserializer still expect a slot the encoder
+/// never wrote. `#[serde(default)]` / `with` do not omit bytes and stay
+/// allowed.
+fn reject_skipped_wire_fields(data: &Data) -> syn::Result<()> {
+    match data {
+        Data::Struct(s) => reject_skipped_fields(&s.fields),
+        Data::Enum(e) => {
+            for variant in &e.variants {
+                reject_skipped_fields(&variant.fields)?;
+            }
+            Ok(())
+        }
+        Data::Union(_) => Ok(()),
+    }
+}
+
+fn reject_skipped_fields(fields: &Fields) -> syn::Result<()> {
+    for field in fields {
+        reject_skip_serializing_if(&field.attrs)?;
+    }
+    Ok(())
+}
+
+fn reject_skip_serializing_if(attrs: &[Attribute]) -> syn::Result<()> {
+    for attr in attrs {
+        if !attr.path().is_ident("serde") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("skip_serializing_if") {
+                return Err(meta.error(
+                    "positional Aether wire must encode `None`/empty values explicitly — \
+                     `skip_serializing_if` omits the field and shifts every following value",
+                ));
+            }
+            // Consume `name = value` / `name(...)` so sibling items still parse.
+            if meta.input.peek(Token![=]) {
+                let _ = meta.value()?.parse::<Expr>()?;
+            } else if meta.input.peek(token::Paren) {
+                meta.parse_nested_meta(|inner| {
+                    if inner.input.peek(Token![=]) {
+                        let _ = inner.value()?.parse::<Expr>()?;
+                    }
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 /// Walk a field-type syntactic tree and reject `HashMap` anywhere
