@@ -159,6 +159,36 @@ struct Evidence {
     /// that allocated nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     peak_resident_bytes: Option<u64>,
+    /// Wall-clock milliseconds this run spent doing work (#5111).
+    ///
+    /// On `verify.check` this is the umbrella's own total, so the sum of the
+    /// gate receipts is checkable against the whole and the
+    /// scope-resolution/preflight overhead between gates is the difference. On
+    /// a single-command path it is that one gate. Absent on a preflight-refused
+    /// umbrella that executed no gate: a zero there would claim the refuse was
+    /// free.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_millis: Option<u64>,
+    /// Per-gate wall-clock receipts for the `verify.check` umbrella (#5111).
+    ///
+    /// Absent on the single-command path — the record *is* that one gate — and
+    /// on a preflight-refused run that executed none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gates: Option<Vec<GateTiming>>,
+}
+
+/// One umbrella member's wall-clock share: everything run under that gate's
+/// identity, and the prepare step's own slice when one ran (#5111).
+#[derive(Serialize)]
+struct GateTiming {
+    command: String,
+    duration_millis: u64,
+    /// The wasm cross-build (or any other prepare) on its own, so the largest
+    /// single build in the lane is not lumped into the member it precedes.
+    ///
+    /// Absent when this gate has no prepare, or its prepare did not run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prepare_millis: Option<u64>,
 }
 
 impl Evidence {
@@ -168,6 +198,21 @@ impl Evidence {
     fn measured_by(mut self, cache: Option<&CompilerCache>, peak: &PeakMemory) -> Self {
         self.sccache = cache.and_then(CompilerCache::served);
         self.peak_resident_bytes = peak.peak_resident_bytes();
+        self
+    }
+
+    /// Stamp the wall-clock this run actually spent. Called only after a gate
+    /// (or the umbrella) executed, so a refused preflight never reaches it.
+    fn timed(mut self, duration_millis: u64) -> Self {
+        self.duration_millis = Some(duration_millis);
+        self
+    }
+
+    /// Attach the per-gate receipts the umbrella measured. Empty is a no-op so
+    /// a caller that collected nothing cannot stamp an empty array that reads
+    /// as "every gate took no time".
+    fn with_gates(mut self, gates: Vec<GateTiming>) -> Self {
+        self.gates = (!gates.is_empty()).then_some(gates);
         self
     }
 }
@@ -191,6 +236,8 @@ fn build_evidence(
         environment: None,
         sccache: None,
         peak_resident_bytes: None,
+        duration_millis: None,
+        gates: None,
         command: command.to_string(),
         nonce,
         status: if passed {
@@ -318,7 +365,7 @@ impl Measurements {
 
 #[cfg(test)]
 mod tests {
-    use super::build_evidence;
+    use super::{GateTiming, build_evidence};
 
     #[test]
     fn evidence_assembly_carries_status_nonce_and_exit_code() {
@@ -355,5 +402,61 @@ mod tests {
             serde_json::to_value(&evidence).expect("evidence serializes")["failed_verifiers"],
             serde_json::json!(["verify.clippy"]),
         );
+    }
+
+    #[test]
+    fn a_run_that_executed_no_gate_stamps_no_duration() {
+        // Tripwire: a preflight-refused umbrella executed no work. Presence is
+        // the signal that a gate ran; a zero would claim the refuse was free.
+        let value =
+            serde_json::to_value(&build_evidence("verify.check", None, false, Some(1), String::new(), None, None))
+                .expect("evidence serializes");
+        assert!(value.get("duration_millis").is_none());
+        assert!(value.get("gates").is_none());
+        assert!(value.get("prepare_millis").is_none());
+    }
+
+    #[test]
+    fn a_single_gate_stamps_duration_and_omits_a_prepare_that_did_not_run() {
+        // Tripwire: the single-command path is the one gate, so its receipt is
+        // the top-level duration. prepare_millis is a gate-entry field; a lone
+        // fmt/clippy/docs run never prepared, and inventing the key would say
+        // the wasm cross-build took no time.
+        let value = serde_json::to_value(
+            &build_evidence("verify.fmt", None, true, Some(0), "verify.fmt.log".into(), None, None).timed(12),
+        )
+        .expect("evidence serializes");
+        assert_eq!(value["duration_millis"], 12);
+        assert!(value.get("gates").is_none(), "a gate dispatched alone is the record, not an entry in one");
+        assert!(value.get("prepare_millis").is_none());
+    }
+
+    #[test]
+    fn umbrella_gate_receipts_name_each_share_and_the_prepare_slice() {
+        // Tripwire: lumping the wasm cross-build into verify.test hides the
+        // split the lane exists to show, and a prepare_millis on a gate that
+        // never prepared reads as a zero-cost dist.
+        let fmt = GateTiming { command: "verify.fmt".into(), duration_millis: 10, prepare_millis: None };
+        let test = GateTiming { command: "verify.test".into(), duration_millis: 80, prepare_millis: Some(50) };
+        let fmt = serde_json::to_value(&fmt).expect("fmt serializes");
+        let test = serde_json::to_value(&test).expect("test serializes");
+        assert_eq!(fmt["duration_millis"], 10);
+        assert!(fmt.get("prepare_millis").is_none());
+        assert_eq!(test["duration_millis"], 80);
+        assert_eq!(test["prepare_millis"], 50);
+
+        let umbrella = serde_json::to_value(
+            &build_evidence("verify.check", None, true, Some(0), "verify.scope.log".into(), None, None)
+                .timed(100)
+                .with_gates(vec![
+                    GateTiming { command: "verify.fmt".into(), duration_millis: 10, prepare_millis: None },
+                    GateTiming { command: "verify.test".into(), duration_millis: 80, prepare_millis: Some(50) },
+                ]),
+        )
+        .expect("umbrella serializes");
+        assert_eq!(umbrella["duration_millis"], 100);
+        assert_eq!(umbrella["gates"][0]["command"], "verify.fmt");
+        assert_eq!(umbrella["gates"][1]["prepare_millis"], 50);
+        assert!(umbrella.get("prepare_millis").is_none(), "the umbrella has no prepare of its own");
     }
 }
