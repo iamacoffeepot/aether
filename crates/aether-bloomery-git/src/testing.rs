@@ -17,12 +17,6 @@
 //! [`seed_pull_request`]: FakeGithub::seed_pull_request
 //! [`delete_comment`]: FakeGithub::delete_comment
 
-// The fake holds its `Mutex` guard to the end of each short method rather than
-// dropping it a line early: this is an in-memory test double with no
-// contention, so the nursery lint's early-drop rewrite buys nothing and only
-// clutters the store methods.
-#![allow(clippy::significant_drop_tightening)]
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -162,7 +156,7 @@ struct State {
 /// An in-memory GitHub double implementing [`GithubApi`].
 ///
 /// Cloning shares one backing store (an `Arc<Mutex<…>>`), so a demo can hand a
-/// clone to a [`GithubProjection`](crate::GithubProjection) and keep another to
+/// clone to a `GithubProjection` and keep another to
 /// introspect what the projection wrote.
 #[derive(Default, Clone)]
 pub struct FakeGithub {
@@ -650,6 +644,7 @@ impl FakeGithub {
             conclusion,
             artifacts: Vec::new(),
         });
+        drop(state);
         id
     }
 
@@ -660,13 +655,12 @@ impl FakeGithub {
     /// it panics rather than silently no-op'ing, matching the file's other
     /// id-lookup mutators (`update_comment` / `cancel_run` return `Err(404)`).
     pub fn seed_run_artifacts(&self, run_id: u64, artifacts: Vec<Artifact>) {
-        let mut state = self.lock();
-        let run = state
+        self.lock()
             .runs
             .iter_mut()
             .find(|r| r.id == run_id)
-            .expect("seed_run_artifacts: unknown run_id — seed a run first");
-        run.artifacts = artifacts;
+            .expect("seed_run_artifacts: unknown run_id — seed a run first")
+            .artifacts = artifacts;
     }
 }
 
@@ -707,6 +701,7 @@ impl GitDataApi for FakeGithub {
             return Err(GithubError::Status { status: 422, body: format!("ref {name} already exists") });
         }
         state.refs.insert(name.to_owned(), sha.to_owned());
+        drop(state);
         Ok(GitRef { name: name.to_owned(), sha: sha.to_owned() })
     }
 
@@ -720,6 +715,7 @@ impl GitDataApi for FakeGithub {
             return Err(GithubError::Status { status: 404, body: format!("no ref {name}") });
         }
         state.refs.insert(name.to_owned(), sha.to_owned());
+        drop(state);
         Ok(GitRef { name: name.to_owned(), sha: sha.to_owned() })
     }
 
@@ -732,8 +728,8 @@ impl GitDataApi for FakeGithub {
     }
 
     fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GithubError> {
-        let state = self.lock();
-        let mut refs: Vec<GitRef> = state
+        let mut refs: Vec<GitRef> = self
+            .lock()
             .refs
             .iter()
             .filter(|(name, _)| name.starts_with(prefix))
@@ -825,6 +821,7 @@ impl GitDataApi for FakeGithub {
         if let Some(target) = state.refs.get_mut(&format!("heads/{base}")) {
             target.clone_from(&sha);
         }
+        drop(state);
         Ok(MergeResult::Merged(GitCommit { sha, tree, message: message.to_owned() }))
     }
 }
@@ -1064,16 +1061,17 @@ impl ActionsApi for FakeGithub {
     }
 
     fn cancel_run(&self, run_id: u64) -> Result<(), GithubError> {
-        let mut state = self.lock();
-        let Some(run) = state.runs.iter_mut().find(|r| r.id == run_id) else {
-            return Err(GithubError::Status { status: 404, body: format!("no run {run_id}") });
-        };
         // A cancel drives the run to a completed/cancelled terminal state, so a
         // follow-up inspect reports `Cancelled` — the observable effect a test
         // asserts.
-        run.status = RunStatus::Completed;
-        run.conclusion = Some(RunConclusion::Cancelled);
-        Ok(())
+        match self.lock().runs.iter_mut().find(|r| r.id == run_id) {
+            Some(run) => {
+                run.status = RunStatus::Completed;
+                run.conclusion = Some(RunConclusion::Cancelled);
+                Ok(())
+            }
+            None => Err(GithubError::Status { status: 404, body: format!("no run {run_id}") }),
+        }
     }
 
     fn list_run_artifacts(&self, run_id: u64) -> Result<Vec<Artifact>, GithubError> {
@@ -1126,6 +1124,7 @@ impl PullRequestApi for FakeGithub {
             merge_commit_sha: None,
         };
         state.pull_requests.push(stored.clone());
+        drop(state);
         Ok(stored.project())
     }
 
@@ -1182,6 +1181,7 @@ impl PullRequestApi for FakeGithub {
             stored.merged = true;
             stored.merge_commit_sha = Some(merge_commit_sha.clone());
         }
+        drop(state);
         Ok(PullMergeResult::Merged { merge_commit_sha })
     }
 }
@@ -1213,27 +1213,30 @@ impl GithubApi for FakeGithub {
         state.next_comment += 1;
         let id = state.next_comment;
         state.comments.push(StoredComment { id, issue_number: new.issue_number, body: new.body.clone() });
+        drop(state);
         Ok(Comment { id, body: new.body.clone(), marker: parse_marker(&new.body) })
     }
 
     fn update_comment(&self, comment_id: u64, body: &str) -> Result<(), GithubError> {
-        let mut state = self.lock();
-        let Some(comment) = state.comments.iter_mut().find(|comment| comment.id == comment_id) else {
-            return Err(GithubError::Status { status: 404, body: format!("no comment {comment_id}") });
-        };
-        body.clone_into(&mut comment.body);
-        Ok(())
+        match self.lock().comments.iter_mut().find(|comment| comment.id == comment_id) {
+            Some(comment) => {
+                body.clone_into(&mut comment.body);
+                Ok(())
+            }
+            None => Err(GithubError::Status { status: 404, body: format!("no comment {comment_id}") }),
+        }
     }
 }
 
 impl IssueStateApi for FakeGithub {
     fn close_issue(&self, number: u64) -> Result<(), GithubError> {
-        let mut state = self.lock();
-        let Some(issue) = state.issues.iter_mut().find(|issue| issue.number == number) else {
-            return Err(absent_target(number));
-        };
-        issue.closed = true;
-        Ok(())
+        match self.lock().issues.iter_mut().find(|issue| issue.number == number) {
+            Some(issue) => {
+                issue.closed = true;
+                Ok(())
+            }
+            None => Err(absent_target(number)),
+        }
     }
 }
 
@@ -1255,7 +1258,6 @@ fn absent_target(number: u64) -> GithubError {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     //! The fake's merge is the seam every fold test will stand on, and nothing
     //! else exercises it yet — so its contract is pinned here rather than
@@ -1267,7 +1269,7 @@ mod tests {
 
     // Seed `branch` at a commit carrying `tree`, and hand back that commit's sha.
     fn branch_at(fake: &FakeGithub, branch: &str, tree: &str) -> String {
-        let commit = fake.create_commit(branch, tree, &[]).unwrap();
+        let commit = fake.create_commit(branch, tree, &[]).expect("test");
         fake.seed_ref(&format!("heads/{branch}"), &commit.sha);
         commit.sha
     }
@@ -1278,13 +1280,13 @@ mod tests {
         let old_digest = Digest::from_bytes([1; 32]);
         let new_digest = Digest::from_bytes([2; 32]);
         let sha = "3a3f8c0b9e1d2a4f6b8c0e2d4a6f8b0c1e3d5a7f";
-        let object = BackendObjectId::from(GitObjectId::from_hex(sha).unwrap());
+        let object = BackendObjectId::from(GitObjectId::from_hex(sha).expect("test"));
 
         fake.seed_correspondence(&old_digest, sha);
         fake.seed_correspondence(&new_digest, sha);
 
-        assert_eq!(fake.resolve_backend_object(&old_digest).unwrap(), None);
-        assert_eq!(fake.resolve_digest(&object).unwrap(), Some(new_digest));
+        assert_eq!(fake.resolve_backend_object(&old_digest).expect("test"), None);
+        assert_eq!(fake.resolve_digest(&object).expect("test"), Some(new_digest));
     }
 
     #[test]
@@ -1294,11 +1296,11 @@ mod tests {
         let old_object = BackendObjectId::new(vec![2; 20]);
         let new_object = BackendObjectId::new(vec![3; 32]);
 
-        fake.record(&digest, &old_object).unwrap();
-        fake.record(&digest, &new_object).unwrap();
+        fake.record(&digest, &old_object).expect("test");
+        fake.record(&digest, &new_object).expect("test");
 
-        assert_eq!(fake.resolve_digest(&old_object).unwrap(), None);
-        assert_eq!(fake.resolve_backend_object(&digest).unwrap(), Some(new_object));
+        assert_eq!(fake.resolve_digest(&old_object).expect("test"), None);
+        assert_eq!(fake.resolve_backend_object(&digest).expect("test"), Some(new_object));
     }
 
     #[test]
@@ -1311,7 +1313,8 @@ mod tests {
         branch_at(&fake, "integration", "base-tree");
         branch_at(&fake, "candidate", "head-tree");
 
-        let MergeResult::Merged(commit) = fake.merge("heads/integration", "heads/candidate", "fold").unwrap() else {
+        let MergeResult::Merged(commit) = fake.merge("heads/integration", "heads/candidate", "fold").expect("test")
+        else {
             panic!("two divergent trees merge");
         };
         assert_ne!(commit.tree, "head-tree", "a merge is not a tree-replace");
@@ -1319,7 +1322,11 @@ mod tests {
 
         // A real merge commits onto the base branch, so the fold's next read of
         // the integration branch must see the merge, not the pre-merge position.
-        assert_eq!(fake.get_ref("heads/integration").unwrap().unwrap().sha, commit.sha, "the base branch advanced");
+        assert_eq!(
+            fake.get_ref("heads/integration").expect("test").expect("test").sha,
+            commit.sha,
+            "the base branch advanced"
+        );
     }
 
     #[test]
@@ -1334,11 +1341,11 @@ mod tests {
         branch_at(&fake, "integration", "base-tree");
         branch_at(&fake, "candidate", "head-tree");
         assert!(
-            matches!(fake.merge("heads/integration", "heads/candidate", "fold").unwrap(), MergeResult::Merged(_)),
+            matches!(fake.merge("heads/integration", "heads/candidate", "fold").expect("test"), MergeResult::Merged(_)),
             "the first fold of a member is a real merge",
         );
         assert_eq!(
-            fake.merge("heads/integration", "heads/candidate", "fold").unwrap(),
+            fake.merge("heads/integration", "heads/candidate", "fold").expect("test"),
             MergeResult::AlreadyUpToDate,
             "re-folding a member the branch already contains has nothing to do",
         );
@@ -1348,14 +1355,16 @@ mod tests {
         branch_at(&fake, "candidate", "head-tree");
         fake.seed_merge_conflict("integration", "candidate");
         assert!(
-            matches!(fake.merge("heads/integration", "heads/candidate", "fold").unwrap(), MergeResult::Conflict { .. }),
+            matches!(
+                fake.merge("heads/integration", "heads/candidate", "fold").expect("test"),
+                MergeResult::Conflict { .. }
+            ),
             "an armed pair collides — the only way a contentless fake can model one",
         );
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod object_repo_tests {
     //! The object-repo mode, where the fake stops inventing shas and mints real
     //! git objects instead. What it buys is a fold a caller can actually check
@@ -1368,18 +1377,18 @@ mod object_repo_tests {
     use super::{FakeGithub, GitDataApi, MergeResult};
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let output = Command::new("git").current_dir(dir).args(args).output().unwrap();
+        let output = Command::new("git").current_dir(dir).args(args).output().expect("test");
         assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 
     /// A repository with one commit, and the fake that mints into it.
     fn repo_backed() -> (tempfile::TempDir, FakeGithub, String) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("test");
         git(dir.path(), &["init", "--quiet", "."]);
         git(dir.path(), &["config", "--local", "user.name", "fixture"]);
         git(dir.path(), &["config", "--local", "user.email", "fixture@example.test"]);
-        fs::write(dir.path().join("subject.txt"), "one\n").unwrap();
+        fs::write(dir.path().join("subject.txt"), "one\n").expect("test");
         git(dir.path(), &["add", "--all"]);
         git(dir.path(), &["commit", "--quiet", "--message", "base"]);
 
@@ -1399,13 +1408,17 @@ mod object_repo_tests {
         let (dir, fake, head) = repo_backed();
         let tree = git(dir.path(), &["rev-parse", "HEAD:"]);
 
-        let commit = fake.create_commit("bloomery integrate", &tree, slice::from_ref(&head)).unwrap();
+        let commit = fake.create_commit("bloomery integrate", &tree, slice::from_ref(&head)).expect("test");
 
         assert_eq!(git(dir.path(), &["cat-file", "-t", &commit.sha]), "commit", "the minted sha names a real object");
         assert_eq!(git(dir.path(), &["rev-parse", &format!("{}^", commit.sha)]), head, "over the parent it was given");
         // And a commit the fake never minted still reads, so a branch standing
         // at the repository's own base resolves its tree like any other.
-        assert_eq!(fake.get_commit(&head).unwrap().tree, tree, "an unminted commit reads through to the repository");
+        assert_eq!(
+            fake.get_commit(&head).expect("test").tree,
+            tree,
+            "an unminted commit reads through to the repository"
+        );
     }
 
     #[test]
@@ -1418,8 +1431,8 @@ mod object_repo_tests {
         let (dir, fake, head) = repo_backed();
         let tree = git(dir.path(), &["rev-parse", "HEAD:"]);
 
-        let first = fake.create_commit("bloomery integrate", &tree, slice::from_ref(&head)).unwrap();
-        let second = fake.create_commit("bloomery integrate", &tree, &[head]).unwrap();
+        let first = fake.create_commit("bloomery integrate", &tree, slice::from_ref(&head)).expect("test");
+        let second = fake.create_commit("bloomery integrate", &tree, &[head]).expect("test");
 
         assert_eq!(first.sha, second.sha, "the same message, tree and parents mint the same commit");
     }
@@ -1434,14 +1447,17 @@ mod object_repo_tests {
         let (dir, fake, head) = repo_backed();
         for (branch, line) in [("integration", "theirs\n"), ("candidate", "ours\n")] {
             git(dir.path(), &["checkout", "--quiet", "--detach", &head]);
-            fs::write(dir.path().join("subject.txt"), line).unwrap();
+            fs::write(dir.path().join("subject.txt"), line).expect("test");
             git(dir.path(), &["add", "--all"]);
             git(dir.path(), &["commit", "--quiet", "--message", branch]);
             fake.seed_ref(&format!("heads/{branch}"), &git(dir.path(), &["rev-parse", "HEAD"]));
         }
 
         assert!(
-            matches!(fake.merge("heads/integration", "heads/candidate", "fold").unwrap(), MergeResult::Conflict { .. }),
+            matches!(
+                fake.merge("heads/integration", "heads/candidate", "fold").expect("test"),
+                MergeResult::Conflict { .. }
+            ),
             "two edits of the same line collide on their own",
         );
     }

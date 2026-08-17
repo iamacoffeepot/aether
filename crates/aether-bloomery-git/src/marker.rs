@@ -112,7 +112,6 @@ fn from_hex(hex: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::Digest;
     use sha2::{Digest as _, Sha256};

@@ -1660,7 +1660,6 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> LandingSource f
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use std::slice::from_ref;
 
@@ -1692,7 +1691,7 @@ mod tests {
     // resolution plus adapter-edge conversion the port itself performs, so an
     // assertion below can name the git object a digest resolves to.
     fn resolve_git(fake: &FakeGithub, digest: &Digest) -> Option<GitObjectId> {
-        fake.resolve_backend_object(digest).unwrap().map(|object| GitObjectId::try_from(object).unwrap())
+        fake.resolve_backend_object(digest).expect("test").map(|object| GitObjectId::try_from(object).expect("test"))
     }
 
     // A `GitSource` over `fake` as both its git-data client and its correspondence
@@ -1737,15 +1736,15 @@ mod tests {
         let base = fake.seed_base_commit(&base_tree);
         fake.seed_ref_at("heads/main", &base);
         let source = git_source(&fake, false);
-        source.create_namespace(&bloom(), &base).unwrap();
+        source.create_namespace(&bloom(), &base).expect("test");
         (fake, bloom(), base)
     }
 
     #[test]
     fn parse_bloom_line_round_trips_a_held_and_a_tombstoned_message_and_rejects_a_garbled_one() {
         let held = bloom_id(42);
-        assert_eq!(parse_bloom_line(&render_claim_message(&held)).unwrap(), ClaimHolder::Held(held));
-        assert_eq!(parse_bloom_line(&render_tombstone_message()).unwrap(), ClaimHolder::Tombstoned);
+        assert_eq!(parse_bloom_line(&render_claim_message(&held)).expect("test"), ClaimHolder::Held(held));
+        assert_eq!(parse_bloom_line(&render_tombstone_message()).expect("test"), ClaimHolder::Tombstoned);
 
         match parse_bloom_line("no bloom-id line here") {
             Err(SourceError::Malformed(_)) => {}
@@ -1764,8 +1763,8 @@ mod tests {
         let base = fake.seed_base_commit(&tree);
         let source = git_source(&fake, false);
 
-        let first = source.snapshot(&base).unwrap();
-        let second = source.snapshot(&base).unwrap();
+        let first = source.snapshot(&base).expect("test");
+        let second = source.snapshot(&base).expect("test");
         assert_eq!(first, second, "a base snapshots to a stable digest");
         assert_eq!(first.tree, tree);
         assert_eq!(first.head, base);
@@ -1792,7 +1791,7 @@ mod tests {
         fake.seed_ref(ADMISSION_REF, "dddddddddddddddddddddddddddddddddddddddd");
         fake.seed_ref(&claim_ref(&workpiece("wp-live")), "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
 
-        let pruned = source.prune_working_refs(&bloom).unwrap();
+        let pruned = source.prune_working_refs(&bloom).expect("test");
         assert_eq!(pruned, 4, "integration (from create_namespace) + candidate + checkpoint + member-checkpoint");
         assert!(!fake.ref_exists(&GitSource::<FakeGithub>::integration_ref(&bloom)));
         assert!(!fake.ref_exists(&candidate));
@@ -1834,14 +1833,14 @@ mod tests {
         // Malformed and break successor reuse.
         let (fake, bloom, base) = seeded();
         let source = git_source(&fake, false);
-        let base_tree = source.snapshot(&base).unwrap().tree;
-        source.checkpoint(&bloom, &base_tree).unwrap();
+        let base_tree = source.snapshot(&base).expect("test").tree;
+        source.checkpoint(&bloom, &base_tree).expect("test");
         fake.seed_ref(
             member_checkpoint_ref_name(&bloom, "wp-0").trim_start_matches("refs/"),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         );
 
-        let listed = source.checkpoints(&bloom).unwrap();
+        let listed = source.checkpoints(&bloom).expect("test");
         assert_eq!(listed, vec![Checkpoint { bloom, tree: base_tree }]);
     }
 
@@ -1871,29 +1870,29 @@ mod tests {
         let (fake, bloom, base) = seeded();
         let source = git_source(&fake, false);
         // The base tree is the integration branch's current tree.
-        let base_tree = source.snapshot(&base).unwrap().tree;
+        let base_tree = source.snapshot(&base).expect("test").tree;
 
-        let checkpoint = source.checkpoint(&bloom, &base_tree).unwrap();
+        let checkpoint = source.checkpoint(&bloom, &base_tree).expect("test");
         assert_eq!(checkpoint, Checkpoint { bloom, tree: base_tree });
 
         // Enumerable.
-        let listed = source.checkpoints(&bloom).unwrap();
+        let listed = source.checkpoints(&bloom).expect("test");
         assert_eq!(listed, vec![Checkpoint { bloom, tree: base_tree }]);
 
         // Reusable across a successor: the successor matches the checkpoint by
         // digest without re-recording it.
-        let successor = source.checkpoints(&bloom).unwrap();
+        let successor = source.checkpoints(&bloom).expect("test");
         assert!(successor.iter().any(|c| c.tree == base_tree), "the successor reuses the checkpoint by digest");
 
         // Idempotent: re-recording the same tree does not add a second ref.
-        source.checkpoint(&bloom, &base_tree).unwrap();
-        assert_eq!(source.checkpoints(&bloom).unwrap().len(), 1);
+        source.checkpoint(&bloom, &base_tree).expect("test");
+        assert_eq!(source.checkpoints(&bloom).expect("test").len(), 1);
     }
 
     // Seed a candidate branch at its own commit and return its `heads/…` ref —
     // what a member's capture pushes (ADR-0152) and what a merge fold reads.
     fn seed_candidate_ref(fake: &FakeGithub, workpiece: &str, tree: &str) -> String {
-        let commit = fake.create_commit(workpiece, tree, &[]).unwrap();
+        let commit = fake.create_commit(workpiece, tree, &[]).expect("test");
         let name = format!("heads/bloom/cand/{workpiece}");
         fake.seed_ref(&name, &commit.sha);
         name
@@ -1912,12 +1911,12 @@ mod tests {
         // the branch unreachable to the next snapshot.
         let (fake, bloom, base) = seeded();
         let source = git_source(&fake, false);
-        let base_tree = source.snapshot(&base).unwrap().tree;
-        let expected = source.checkpoint(&bloom, &base_tree).unwrap();
+        let base_tree = source.snapshot(&base).expect("test").tree;
+        let expected = source.checkpoint(&bloom, &base_tree).expect("test");
 
         let first = seed_candidate_ref(&fake, "wp-a", "tree-a");
         let IntegrateOutcome::Integrated { tree: after_first, head } =
-            source.integrate_merge(&bloom, &first, &expected).unwrap()
+            source.integrate_merge(&bloom, &first, &expected).expect("test")
         else {
             panic!("the first member folds");
         };
@@ -1934,7 +1933,7 @@ mod tests {
         let second = seed_candidate_ref(&fake, "wp-b", "tree-b");
         let checkpoint = Checkpoint { bloom, tree: after_first };
         let IntegrateOutcome::Integrated { tree: after_second, .. } =
-            source.integrate_merge(&bloom, &second, &checkpoint).unwrap()
+            source.integrate_merge(&bloom, &second, &checkpoint).expect("test")
         else {
             panic!("the second member folds onto the first");
         };
@@ -1950,14 +1949,14 @@ mod tests {
         // single-writer refusal.
         let (fake, bloom, base) = seeded();
         let source = git_source(&fake, false);
-        let base_tree = source.snapshot(&base).unwrap().tree;
-        let expected = source.checkpoint(&bloom, &base_tree).unwrap();
+        let base_tree = source.snapshot(&base).expect("test").tree;
+        let expected = source.checkpoint(&bloom, &base_tree).expect("test");
 
         let conflicting = seed_candidate_ref(&fake, "wp-clash", "tree-clash");
         fake.seed_merge_conflict(&format!("bloom/{}/integration", short_hex(&bloom.0)), "bloom/cand/wp-clash");
         assert!(
             matches!(
-                source.integrate_merge(&bloom, &conflicting, &expected).unwrap(),
+                source.integrate_merge(&bloom, &conflicting, &expected).expect("test"),
                 IntegrateOutcome::Conflict { .. }
             ),
             "a collision is a clean outcome, not a transport error to retry",
@@ -1967,11 +1966,11 @@ mod tests {
         // and must be told where the branch stands, not that it failed.
         let folded = seed_candidate_ref(&fake, "wp-done", "tree-done");
         let IntegrateOutcome::Integrated { tree: advanced, head } =
-            source.integrate_merge(&bloom, &folded, &expected).unwrap()
+            source.integrate_merge(&bloom, &folded, &expected).expect("test")
         else {
             panic!("the member folds the first time");
         };
-        let replayed = source.integrate_merge(&bloom, &folded, &Checkpoint { bloom, tree: advanced }).unwrap();
+        let replayed = source.integrate_merge(&bloom, &folded, &Checkpoint { bloom, tree: advanced }).expect("test");
         assert_eq!(
             replayed,
             IntegrateOutcome::Integrated { tree: advanced, head },
@@ -1979,7 +1978,8 @@ mod tests {
         );
 
         // The original checkpoint is now stale — the branch advanced past it.
-        let IntegrateOutcome::StaleCheckpoint { actual } = source.integrate_merge(&bloom, &folded, &expected).unwrap()
+        let IntegrateOutcome::StaleCheckpoint { actual } =
+            source.integrate_merge(&bloom, &folded, &expected).expect("test")
         else {
             panic!("a checkpoint the branch has passed is refused");
         };
@@ -1993,13 +1993,13 @@ mod tests {
         // so an ancestry-corrected retry cannot reuse the earlier admission key.
         let (fake, bloom, base) = seeded();
         let source = git_source(&fake, false);
-        let base_tree = source.snapshot(&base).unwrap().tree;
-        let expected = source.checkpoint(&bloom, &base_tree).unwrap();
+        let base_tree = source.snapshot(&base).expect("test").tree;
+        let expected = source.checkpoint(&bloom, &base_tree).expect("test");
 
         let tree = "tree-same";
-        let first = fake.create_commit("first", tree, &[]).unwrap();
-        let parent = fake.create_commit("parent", "tree-other", &[]).unwrap();
-        let repaired = fake.create_commit("repaired", tree, &[parent.sha]).unwrap();
+        let first = fake.create_commit("first", tree, &[]).expect("test");
+        let parent = fake.create_commit("parent", "tree-other", &[]).expect("test");
+        let repaired = fake.create_commit("repaired", tree, &[parent.sha]).expect("test");
         assert_eq!(first.tree, repaired.tree, "the tree identity is unchanged");
         assert_ne!(first.sha, repaired.sha, "different parentage is a different commit");
 
@@ -2017,9 +2017,9 @@ mod tests {
         fake.seed_merge_conflict(&integration, "bloom/cand/wp-first");
         fake.seed_merge_conflict(&integration, "bloom/cand/wp-repaired");
 
-        let first_conflict = source.integrate_merge(&bloom, first_ref, &expected).unwrap();
-        let repaired_conflict = source.integrate_merge(&bloom, repaired_ref, &expected).unwrap();
-        let replayed = source.integrate_merge(&bloom, repaired_ref, &expected).unwrap();
+        let first_conflict = source.integrate_merge(&bloom, first_ref, &expected).expect("test");
+        let repaired_conflict = source.integrate_merge(&bloom, repaired_ref, &expected).expect("test");
+        let replayed = source.integrate_merge(&bloom, repaired_ref, &expected).expect("test");
 
         let attempted = |outcome| match outcome {
             IntegrateOutcome::Conflict { attempted, .. } => attempted,
@@ -2038,14 +2038,14 @@ mod tests {
     fn integrate_resolves_the_candidate_tree_and_rejects_a_stale_checkpoint() {
         let (fake, bloom, base) = seeded();
         let source = git_source(&fake, false);
-        let base_tree = source.snapshot(&base).unwrap().tree;
-        let expected = source.checkpoint(&bloom, &base_tree).unwrap();
+        let base_tree = source.snapshot(&base).expect("test").tree;
+        let expected = source.checkpoint(&bloom, &base_tree).expect("test");
 
         // The candidate tree must have a recorded git-object correspondence
         // (materialized elsewhere); integrate resolves it for the commit's tree.
         let candidate = digest(50);
         fake.seed_git_object(&candidate);
-        let outcome = source.integrate(&bloom, &candidate, &expected).unwrap();
+        let outcome = source.integrate(&bloom, &candidate, &expected).expect("test");
         let IntegrateOutcome::Integrated { tree, head } = outcome else {
             panic!("expected Integrated, got {outcome:?}");
         };
@@ -2063,7 +2063,7 @@ mod tests {
         // reverse-resolving the advanced branch's tree back to the candidate.
         let another = digest(60);
         fake.seed_git_object(&another);
-        let stale = source.integrate(&bloom, &another, &expected).unwrap();
+        let stale = source.integrate(&bloom, &another, &expected).expect("test");
         assert_eq!(stale, IntegrateOutcome::StaleCheckpoint { actual: candidate });
     }
 
@@ -2094,8 +2094,8 @@ mod tests {
         // never re-integratable. The ref staying put is what keeps the retry a
         // retry.
         let (fake, bloom, base) = seeded();
-        let base_tree = git_source(&fake, false).snapshot(&base).unwrap().tree;
-        let expected = git_source(&fake, false).checkpoint(&bloom, &base_tree).unwrap();
+        let base_tree = git_source(&fake, false).snapshot(&base).expect("test").tree;
+        let expected = git_source(&fake, false).checkpoint(&bloom, &base_tree).expect("test");
         let candidate = digest(50);
         fake.seed_git_object(&candidate);
 
@@ -2105,7 +2105,7 @@ mod tests {
 
         // The retry runs against a working store and still sees its own
         // checkpoint, so it integrates rather than refusing as stale.
-        let outcome = git_source(&fake, false).integrate(&bloom, &candidate, &expected).unwrap();
+        let outcome = git_source(&fake, false).integrate(&bloom, &candidate, &expected).expect("test");
         let IntegrateOutcome::Integrated { head, .. } = outcome else {
             panic!("the retry must integrate, got {outcome:?}");
         };
@@ -2126,7 +2126,7 @@ mod tests {
         // an endless false advance, once per boot.
         let (fake, _, base) = seeded();
 
-        let observed = git_source(&fake, false).observe_mainline_head().unwrap();
+        let observed = git_source(&fake, false).observe_mainline_head().expect("test");
 
         assert_eq!(observed, base, "the observation returns the digest already naming the head, not a fresh mint");
     }
@@ -2139,11 +2139,11 @@ mod tests {
         // mainline would fault `UnresolvedCorrespondence` — the coordinator
         // wedged on a base it named itself.
         let (fake, _, base) = seeded();
-        let tree_sha = resolve_git(&fake, &digest(10)).unwrap().to_hex();
+        let tree_sha = resolve_git(&fake, &digest(10)).expect("test").to_hex();
         let foreign = fake.seed_commit_with_message("someone else's merge", &tree_sha);
         fake.seed_ref("heads/main", &foreign);
 
-        let observed = git_source(&fake, false).observe_mainline_head().unwrap();
+        let observed = git_source(&fake, false).observe_mainline_head().expect("test");
 
         assert_ne!(observed, base, "a moved head is a different digest from the one mainline sat at");
         assert_eq!(
@@ -2161,11 +2161,11 @@ mod tests {
         // naming a commit off the line, is not.
         let (fake, _, base) = seeded();
         let source = git_source(&fake, false);
-        let base_sha = resolve_git(&fake, &base).unwrap().to_hex();
+        let base_sha = resolve_git(&fake, &base).expect("test").to_hex();
 
-        assert!(source.is_fast_forward(&base, &base).unwrap(), "equal digests are a fast-forward");
+        assert!(source.is_fast_forward(&base, &base).expect("test"), "equal digests are a fast-forward");
         assert!(
-            source.is_fast_forward(&aether_bloomery::Snapshot::GENESIS_MAINLINE, &base).unwrap(),
+            source.is_fast_forward(&aether_bloomery::Snapshot::GENESIS_MAINLINE, &base).expect("test"),
             "the genesis sentinel is the boot bind, not an ancestry question",
         );
 
@@ -2173,13 +2173,16 @@ mod tests {
             fake.create_commit("forward", &to_hex(&digest(10)), &[base_sha]).expect("the child commit mints").sha;
         fake.seed_correspondence(&digest(11), &child_sha);
 
-        assert!(source.is_fast_forward(&base, &digest(11)).unwrap(), "a descendant of mainline is a fast-forward");
-        assert!(!source.is_fast_forward(&digest(11), &base).unwrap(), "an ancestor of mainline is not");
+        assert!(
+            source.is_fast_forward(&base, &digest(11)).expect("test"),
+            "a descendant of mainline is a fast-forward"
+        );
+        assert!(!source.is_fast_forward(&digest(11), &base).expect("test"), "an ancestor of mainline is not");
 
         let side = fake.seed_commit_with_message("sideways", &to_hex(&digest(12)));
         fake.seed_correspondence(&digest(13), &side);
         assert!(
-            !source.is_fast_forward(&base, &digest(13)).unwrap(),
+            !source.is_fast_forward(&base, &digest(13)).expect("test"),
             "an unrelated commit is sideways, not a fast-forward"
         );
     }
@@ -2191,8 +2194,8 @@ mod tests {
         // `Malformed` or a hex-punned sha git cannot resolve (ADR-0150 boundary).
         let (fake, bloom, base) = seeded();
         let source = git_source(&fake, false);
-        let base_tree = source.snapshot(&base).unwrap().tree;
-        let expected = source.checkpoint(&bloom, &base_tree).unwrap();
+        let base_tree = source.snapshot(&base).expect("test").tree;
+        let expected = source.checkpoint(&bloom, &base_tree).expect("test");
 
         match source.integrate(&bloom, &digest(77), &expected) {
             Err(SourceError::UnresolvedCorrespondence(_)) => {}
@@ -2225,7 +2228,7 @@ mod tests {
         // Enabled: reverse-resolve the sha1 mainline to the base, point the
         // landing branch at the resolved head, and propose it.
         let enabled = git_source(&fake, true);
-        let number = match enabled.land(&bloom, &base, &new_head).unwrap() {
+        let number = match enabled.land(&bloom, &base, &new_head).expect("test") {
             LandOutcome::Proposed { number } => number,
             other @ LandOutcome::BaseMoved { .. } => panic!("expected Proposed, got {other:?}"),
         };
@@ -2238,7 +2241,7 @@ mod tests {
         // back to the direct compare-and-swap would 403 against the real repo —
         // a failure no fake-backed test would otherwise catch.
         assert_eq!(fake.ref_target("heads/main"), Some(mainline_sha1), "land never writes mainline");
-        assert!(fake.get_pull_request(number).unwrap().is_some(), "the proposal exists");
+        assert!(fake.get_pull_request(number).expect("test").is_some(), "the proposal exists");
     }
 
     // Tripwire: a repoint moves every mainline read at once (ADR-0186). The
@@ -2264,14 +2267,14 @@ mod tests {
 
         let source = git_source_on(&fake, true, day.clone());
 
-        assert_eq!(source.mainline_head_sha().unwrap(), day_sha, "the observation reads the configured ref");
-        assert_eq!(source.observe_mainline_head().unwrap(), base, "and names the base the day branch sits at");
+        assert_eq!(source.mainline_head_sha().expect("test"), day_sha, "the observation reads the configured ref");
+        assert_eq!(source.observe_mainline_head().expect("test"), base, "and names the base the day branch sits at");
 
-        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head).unwrap() else {
+        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head).expect("test") else {
             panic!("the sealed base is what the day branch holds, so the land proposes");
         };
         assert_eq!(
-            fake.get_pull_request(number).unwrap().expect("the proposal exists").base,
+            fake.get_pull_request(number).expect("test").expect("the proposal exists").base,
             day.branch(),
             "the landing is proposed onto the day branch",
         );
@@ -2309,8 +2312,8 @@ mod tests {
         fake.seed_git_object(&new_head);
         let source = git_source(&fake, true);
 
-        let first = source.land(&bloom, &base, &new_head).unwrap();
-        let second = source.land(&bloom, &base, &new_head).unwrap();
+        let first = source.land(&bloom, &base, &new_head).expect("test");
+        let second = source.land(&bloom, &base, &new_head).expect("test");
         assert_eq!(first, second, "a re-issued land adopts the same proposal");
     }
 
@@ -2333,7 +2336,7 @@ mod tests {
         fake.seed_git_object(&refined);
         let source = git_source(&fake, true);
 
-        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &refused).unwrap() else {
+        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &refused).expect("test") else {
             panic!("the first land opens the proposal");
         };
         assert_eq!(
@@ -2343,7 +2346,7 @@ mod tests {
         );
 
         assert_eq!(
-            source.land(&bloom, &base, &refined).unwrap(),
+            source.land(&bloom, &base, &refined).expect("test"),
             LandOutcome::Proposed { number },
             "the second land adopts the same proposal",
         );
@@ -2367,7 +2370,7 @@ mod tests {
         // A stale expected base is the clean BaseMoved refusal, carrying the base
         // the mainline object actually resolves to — and no proposal is opened.
         let stale_expected = digest(200);
-        match enabled.land(&bloom, &stale_expected, &digest(91)).unwrap() {
+        match enabled.land(&bloom, &stale_expected, &digest(91)).expect("test") {
             LandOutcome::BaseMoved { expected, actual } => {
                 assert_eq!(expected, stale_expected);
                 assert_eq!(actual, actual_base);
@@ -2375,7 +2378,7 @@ mod tests {
             other @ LandOutcome::Proposed { .. } => panic!("expected BaseMoved, got {other:?}"),
         }
         assert_eq!(
-            fake.find_pull_request_for_head(&landing_branch(&bloom)).unwrap(),
+            fake.find_pull_request_for_head(&landing_branch(&bloom)).expect("test"),
             None,
             "a moved base proposes nothing",
         );
@@ -2404,8 +2407,8 @@ mod tests {
                 assert_eq!(
                     enabled
                         .correspondence
-                        .resolve_digest(&BackendObjectId::from(GitObjectId::from_hex(&foreign).unwrap()))
-                        .unwrap(),
+                        .resolve_digest(&BackendObjectId::from(GitObjectId::from_hex(&foreign).expect("test")))
+                        .expect("test"),
                     Some(actual),
                     "the minted address is recorded, so the next check resolves it",
                 );
@@ -2431,7 +2434,7 @@ mod tests {
         fake.seed_git_object(&new_head);
         let enabled = git_source(&fake, true);
 
-        let LandOutcome::Proposed { number } = enabled.land(&bloom, &base, &new_head).unwrap() else {
+        let LandOutcome::Proposed { number } = enabled.land(&bloom, &base, &new_head).expect("test") else {
             panic!("the first land opens the proposal");
         };
 
@@ -2439,7 +2442,7 @@ mod tests {
         fake.seed_ref("heads/main", &"d4".repeat(20));
 
         assert_eq!(
-            enabled.land(&bloom, &base, &new_head).unwrap(),
+            enabled.land(&bloom, &base, &new_head).expect("test"),
             LandOutcome::Proposed { number },
             "the same proposal is re-adopted so the watch can still reach its terminal",
         );
@@ -2465,7 +2468,7 @@ mod tests {
         fake.seed_git_object(&new_head);
         let source = git_source(&fake, true);
 
-        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head).unwrap() else {
+        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head).expect("test") else {
             panic!("expected Proposed");
         };
         let head_sha = fake.pull_request_head_sha(number).expect("the proposal has a head");
@@ -2478,7 +2481,7 @@ mod tests {
         ] {
             fake.seed_checks(&head_sha, state.clone());
             assert_eq!(
-                source.poll_land(&bloom, &base, number).unwrap(),
+                source.poll_land(&bloom, &base, number).expect("test"),
                 LandProposal::Open,
                 "a {state:?} check is not a landing verdict",
             );
@@ -2496,16 +2499,20 @@ mod tests {
         fake.seed_git_object(&new_head);
         let source = git_source(&fake, true);
 
-        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head).unwrap() else {
+        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &new_head).expect("test") else {
             panic!("expected Proposed");
         };
-        assert_eq!(source.poll_land(&bloom, &base, number).unwrap(), LandProposal::Open, "an open proposal waits");
+        assert_eq!(
+            source.poll_land(&bloom, &base, number).expect("test"),
+            LandProposal::Open,
+            "an open proposal waits"
+        );
 
         // The operator squash-merges: mainline becomes a commit that is neither
         // the proposed head nor anything Bloomery created.
         let squashed = "5c".repeat(20);
         fake.merge_pull_request(number, &squashed);
-        let landed = source.poll_land(&bloom, &base, number).unwrap();
+        let landed = source.poll_land(&bloom, &base, number).expect("test");
         let LandProposal::Landed(receipt) = landed else {
             panic!("expected Landed, got {landed:?}")
         };
@@ -2528,15 +2535,15 @@ mod tests {
         fake.seed_git_object(&digest(90));
         let source = git_source(&fake, true);
 
-        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &digest(90)).unwrap() else {
+        let LandOutcome::Proposed { number } = source.land(&bloom, &base, &digest(90)).expect("test") else {
             panic!("expected Proposed");
         };
         fake.close_pull_request(number);
-        assert_eq!(source.poll_land(&bloom, &base, number).unwrap(), LandProposal::Declined, "closed unmerged");
+        assert_eq!(source.poll_land(&bloom, &base, number).expect("test"), LandProposal::Declined, "closed unmerged");
 
         // A number nothing answers is terminal too — otherwise the watch spins
         // forever on a proposal that will never resolve.
-        assert_eq!(source.poll_land(&bloom, &base, 9999).unwrap(), LandProposal::Declined, "vanished");
+        assert_eq!(source.poll_land(&bloom, &base, 9999).expect("test"), LandProposal::Declined, "vanished");
     }
 
     // A proposal, its head sha, and an enabled port over `fake` — the state
@@ -2547,7 +2554,7 @@ mod tests {
         fake.seed_correspondence(base, &"a1".repeat(20));
         fake.seed_git_object(new_head);
         let source = git_source(fake, true);
-        let LandOutcome::Proposed { number } = source.land(&bloom(), base, new_head).unwrap() else {
+        let LandOutcome::Proposed { number } = source.land(&bloom(), base, new_head).expect("test") else {
             panic!("the port opens the proposal it is then asked to accept");
         };
         let head_sha = fake.pull_request_head_sha(number).expect("the proposal has a head");
@@ -2564,10 +2571,10 @@ mod tests {
         let (base, new_head) = (digest(10), digest(90));
         let (source, number, _) = proposed(&fake, &base, &new_head);
 
-        assert_eq!(source.accept_land(&bloom(), &base, &new_head, number).unwrap(), LandAcceptance::Accepted);
+        assert_eq!(source.accept_land(&bloom(), &base, &new_head, number).expect("test"), LandAcceptance::Accepted);
         assert_eq!(fake.pull_request_merged(number), Some(true), "the port merged the proposal it opened");
 
-        let LandProposal::Landed(receipt) = source.poll_land(&bloom(), &base, number).unwrap() else {
+        let LandProposal::Landed(receipt) = source.poll_land(&bloom(), &base, number).expect("test") else {
             panic!("the accepted proposal reads as landed");
         };
         assert_ne!(receipt.new_head, new_head, "the receipt attests the squash commit, not the proposed head");
@@ -2608,7 +2615,7 @@ mod tests {
             fake.seed_checks(&head_sha, state.clone());
 
             assert_eq!(
-                source.accept_land(&bloom(), &base, &new_head, number).unwrap(),
+                source.accept_land(&bloom(), &base, &new_head, number).expect("test"),
                 LandAcceptance::Accepted,
                 "a {state:?} check does not block acceptance",
             );
@@ -2629,7 +2636,7 @@ mod tests {
         let pushed = "ee".repeat(20);
         fake.push_to_pull_request(number, &pushed);
 
-        match source.accept_land(&bloom(), &base, &new_head, number).unwrap() {
+        match source.accept_land(&bloom(), &base, &new_head, number).expect("test") {
             LandAcceptance::Refused(LandingRefusal::Drifted { detail }) => {
                 assert!(detail.contains(&pushed), "the refusal names the head it found: {detail}");
             }
@@ -2652,7 +2659,7 @@ mod tests {
         fake.seed_ref("heads/main", &"d4".repeat(20));
         fake.seed_correspondence(&moved, &"d4".repeat(20));
 
-        match source.accept_land(&bloom(), &base, &new_head, number).unwrap() {
+        match source.accept_land(&bloom(), &base, &new_head, number).expect("test") {
             LandAcceptance::Refused(LandingRefusal::BaseMoved { expected, actual }) => {
                 assert_eq!(expected, base);
                 assert_eq!(actual, moved, "the refusal names where mainline actually stands");
@@ -2672,7 +2679,7 @@ mod tests {
         let (source, number, _) = proposed(&fake, &base, &new_head);
         fake.merge_pull_request(number, &"5c".repeat(20));
 
-        assert_eq!(source.accept_land(&bloom(), &base, &new_head, number).unwrap(), LandAcceptance::Accepted);
+        assert_eq!(source.accept_land(&bloom(), &base, &new_head, number).expect("test"), LandAcceptance::Accepted);
     }
 
     #[test]
@@ -2682,7 +2689,7 @@ mod tests {
         let claimant = bloom_id(1);
         let (w1, w2) = (workpiece("wp-1"), workpiece("wp-2"));
 
-        let outcome = source.claim_seal(&claimant, &[w1.clone(), w2.clone()]).unwrap();
+        let outcome = source.claim_seal(&claimant, &[w1.clone(), w2.clone()]).expect("test");
         assert_eq!(outcome, ClaimOutcome::Acquired);
 
         // Each member claim ref and the single admission ref resolves to the
@@ -2690,9 +2697,9 @@ mod tests {
         // which is always the well-known empty tree (a real per-claim tree is
         // what 500s against a real GitHub repo).
         for name in [claim_ref(&w1), claim_ref(&w2), ADMISSION_REF.to_owned()] {
-            assert_eq!(source.claim_holder(&name).unwrap(), Some(claimant), "{name} held by the claimant");
-            let sha = fake.ref_target(&name).unwrap();
-            let commit = source.client().get_commit(&sha).unwrap();
+            assert_eq!(source.claim_holder(&name).expect("test"), Some(claimant), "{name} held by the claimant");
+            let sha = fake.ref_target(&name).expect("test");
+            let commit = source.client().get_commit(&sha).expect("test");
             assert_eq!(commit.tree, EMPTY_TREE, "{name}'s claim commit points at the empty tree, not a real one");
         }
     }
@@ -2703,11 +2710,11 @@ mod tests {
         let source = git_source(&fake, false);
         let (holder, contender) = (bloom_id(1), bloom_id(2));
         let w1 = workpiece("wp-1");
-        source.claim_seal(&holder, from_ref(&w1)).unwrap();
+        source.claim_seal(&holder, from_ref(&w1)).expect("test");
 
         // The contender's acquire hits the held member ref first — reported as
         // the conflict, naming the workpiece and its holder.
-        let outcome = source.claim_seal(&contender, from_ref(&w1)).unwrap();
+        let outcome = source.claim_seal(&contender, from_ref(&w1)).expect("test");
         assert_eq!(outcome, ClaimOutcome::Held { ref_kind: ClaimRefKind::Workpiece(w1), held_by: holder });
     }
 
@@ -2717,11 +2724,11 @@ mod tests {
         let source = git_source(&fake, false);
         let (holder, contender) = (bloom_id(1), bloom_id(2));
         // The holder takes the admission ref (empty member set → admission only).
-        source.claim_seal(&holder, &[]).unwrap();
+        source.claim_seal(&holder, &[]).expect("test");
 
         // A member-carrying contender clears its members, then hits the held
         // admission ref last — reported as the conflict on the admission ref.
-        let outcome = source.claim_seal(&contender, &[workpiece("wp-1")]).unwrap();
+        let outcome = source.claim_seal(&contender, &[workpiece("wp-1")]).expect("test");
         assert_eq!(outcome, ClaimOutcome::Held { ref_kind: ClaimRefKind::MainlineAdmission, held_by: holder });
     }
 
@@ -2733,10 +2740,10 @@ mod tests {
         let fake = FakeGithub::new();
         let source = git_source(&fake, false);
         let (holder, contender) = (bloom_id(1), bloom_id(2));
-        source.claim_seal(&holder, &[]).unwrap(); // holder owns the admission ref
+        source.claim_seal(&holder, &[]).expect("test"); // holder owns the admission ref
 
         let members = [workpiece("wp-1"), workpiece("wp-2"), workpiece("wp-3")];
-        let outcome = source.claim_seal(&contender, &members).unwrap();
+        let outcome = source.claim_seal(&contender, &members).expect("test");
         assert_eq!(outcome, ClaimOutcome::Held { ref_kind: ClaimRefKind::MainlineAdmission, held_by: holder });
         for member in &members {
             assert!(!fake.ref_exists(&claim_ref(member)), "{} rolled back", member.0);
@@ -2749,13 +2756,13 @@ mod tests {
         let source = git_source(&fake, false);
         let (predecessor, successor) = (bloom_id(1), bloom_id(2));
         let w1 = workpiece("wp-1");
-        source.claim_seal(&predecessor, from_ref(&w1)).unwrap();
+        source.claim_seal(&predecessor, from_ref(&w1)).expect("test");
 
-        let outcome = source.transfer_seal(&predecessor, &successor, from_ref(&w1), &[], &[]).unwrap();
+        let outcome = source.transfer_seal(&predecessor, &successor, from_ref(&w1), &[], &[]).expect("test");
         assert_eq!(outcome, ClaimOutcome::Acquired);
         // The carried member and the admission ref now name the successor.
-        assert_eq!(source.claim_holder(&claim_ref(&w1)).unwrap(), Some(successor));
-        assert_eq!(source.claim_holder(ADMISSION_REF).unwrap(), Some(successor));
+        assert_eq!(source.claim_holder(&claim_ref(&w1)).expect("test"), Some(successor));
+        assert_eq!(source.claim_holder(ADMISSION_REF).expect("test"), Some(successor));
     }
 
     #[test]
@@ -2764,7 +2771,7 @@ mod tests {
         let source = git_source(&fake, false);
         let (predecessor, successor, intruder) = (bloom_id(1), bloom_id(2), bloom_id(3));
         let w1 = workpiece("wp-1");
-        source.claim_seal(&predecessor, from_ref(&w1)).unwrap();
+        source.claim_seal(&predecessor, from_ref(&w1)).expect("test");
 
         // A concurrent writer repoints the carried ref onto a third bloom's claim
         // commit between the predecessor's seal and the transfer.
@@ -2772,7 +2779,7 @@ mod tests {
         let intruder_commit = fake.seed_commit_with_message(&render_claim_message(&intruder), EMPTY_TREE);
         fake.seed_ref(&w1_ref, &intruder_commit);
 
-        let outcome = source.transfer_seal(&predecessor, &successor, from_ref(&w1), &[], &[]).unwrap();
+        let outcome = source.transfer_seal(&predecessor, &successor, from_ref(&w1), &[], &[]).expect("test");
         assert_eq!(outcome, ClaimOutcome::Held { ref_kind: ClaimRefKind::Workpiece(w1), held_by: intruder });
         // The CAS never removed the ref — it still names the intruder.
         assert_eq!(fake.ref_target(&w1_ref), Some(intruder_commit));
@@ -2784,16 +2791,16 @@ mod tests {
         let source = git_source(&fake, false);
         let (predecessor, successor) = (bloom_id(1), bloom_id(2));
         let (carried, dropped, fresh) = (workpiece("wp-carried"), workpiece("wp-dropped"), workpiece("wp-fresh"));
-        source.claim_seal(&predecessor, &[carried.clone(), dropped.clone()]).unwrap();
+        source.claim_seal(&predecessor, &[carried.clone(), dropped.clone()]).expect("test");
 
         let outcome = source
             .transfer_seal(&predecessor, &successor, from_ref(&carried), from_ref(&fresh), from_ref(&dropped))
-            .unwrap();
+            .expect("test");
         assert_eq!(outcome, ClaimOutcome::Acquired);
         // The net-new member is freshly created for the successor, the carried
         // one is fast-forwarded to it, and the dropped one is released.
-        assert_eq!(source.claim_holder(&claim_ref(&fresh)).unwrap(), Some(successor));
-        assert_eq!(source.claim_holder(&claim_ref(&carried)).unwrap(), Some(successor));
+        assert_eq!(source.claim_holder(&claim_ref(&fresh)).expect("test"), Some(successor));
+        assert_eq!(source.claim_holder(&claim_ref(&carried)).expect("test"), Some(successor));
         assert!(!fake.ref_exists(&claim_ref(&dropped)), "dropped member released");
     }
 
@@ -2803,9 +2810,9 @@ mod tests {
         let source = git_source(&fake, false);
         let owner = bloom_id(1);
         let w1 = workpiece("wp-1");
-        source.claim_seal(&owner, from_ref(&w1)).unwrap();
+        source.claim_seal(&owner, from_ref(&w1)).expect("test");
 
-        let outcome = source.release_seal(&owner, from_ref(&w1)).unwrap();
+        let outcome = source.release_seal(&owner, from_ref(&w1)).expect("test");
         assert_eq!(outcome, ClaimOutcome::Acquired);
         // Both the member claim ref and the admission ref the owner held are gone.
         assert!(!fake.ref_exists(&claim_ref(&w1)), "owned member released");
@@ -2820,9 +2827,9 @@ mod tests {
         let source = git_source(&fake, false);
         let (owner, stranger) = (bloom_id(1), bloom_id(2));
         let w1 = workpiece("wp-1");
-        source.claim_seal(&owner, from_ref(&w1)).unwrap();
+        source.claim_seal(&owner, from_ref(&w1)).expect("test");
 
-        let outcome = source.release_seal(&stranger, from_ref(&w1)).unwrap();
+        let outcome = source.release_seal(&stranger, from_ref(&w1)).expect("test");
         assert_eq!(outcome, ClaimOutcome::Held { ref_kind: ClaimRefKind::Workpiece(w1.clone()), held_by: owner });
         assert!(fake.ref_exists(&claim_ref(&w1)), "the foreign hold is spared, not deleted");
     }
@@ -2851,10 +2858,10 @@ mod tests {
         let (w1, w2) = (workpiece("wp-1"), workpiece("wp-2"));
         // w1 held by the claimant (which also takes the admission ref); w2 left at a
         // tombstone by an interrupted release.
-        source.claim_seal(&holder, from_ref(&w1)).unwrap();
+        source.claim_seal(&holder, from_ref(&w1)).expect("test");
         seed_tombstone(&fake, &claim_ref(&w2));
 
-        let mut states = source.enumerate_claims().unwrap();
+        let mut states = source.enumerate_claims().expect("test");
         states.sort_by(|a, b| format!("{:?}", a.ref_kind).cmp(&format!("{:?}", b.ref_kind)));
 
         assert_eq!(
@@ -2873,17 +2880,23 @@ mod tests {
         let source = git_source(&fake, false);
         let (predecessor, successor) = (bloom_id(1), bloom_id(2));
         let w1 = workpiece("wp-1");
-        source.claim_seal(&predecessor, from_ref(&w1)).unwrap();
+        source.claim_seal(&predecessor, from_ref(&w1)).expect("test");
         let ref_kind = ClaimRefKind::Workpiece(w1.clone());
 
         // A predecessor-held ref fast-forwards to the successor.
-        assert_eq!(source.complete_transfer(&predecessor, &successor, &ref_kind).unwrap(), ClaimOutcome::Acquired);
-        assert_eq!(source.claim_holder(&claim_ref(&w1)).unwrap(), Some(successor));
+        assert_eq!(
+            source.complete_transfer(&predecessor, &successor, &ref_kind).expect("test"),
+            ClaimOutcome::Acquired
+        );
+        assert_eq!(source.claim_holder(&claim_ref(&w1)).expect("test"), Some(successor));
 
         // Re-driving the same completion over the already-moved ref is the no-op
         // that lets a boot re-drive converge — Acquired, ref unchanged.
-        assert_eq!(source.complete_transfer(&predecessor, &successor, &ref_kind).unwrap(), ClaimOutcome::Acquired);
-        assert_eq!(source.claim_holder(&claim_ref(&w1)).unwrap(), Some(successor));
+        assert_eq!(
+            source.complete_transfer(&predecessor, &successor, &ref_kind).expect("test"),
+            ClaimOutcome::Acquired
+        );
+        assert_eq!(source.claim_holder(&claim_ref(&w1)).expect("test"), Some(successor));
     }
 
     #[test]
@@ -2894,12 +2907,12 @@ mod tests {
         let source = git_source(&fake, false);
         let (predecessor, successor, foreign) = (bloom_id(1), bloom_id(2), bloom_id(3));
         let w1 = workpiece("wp-1");
-        source.claim_seal(&foreign, from_ref(&w1)).unwrap();
+        source.claim_seal(&foreign, from_ref(&w1)).expect("test");
         let ref_kind = ClaimRefKind::Workpiece(w1.clone());
 
-        let outcome = source.complete_transfer(&predecessor, &successor, &ref_kind).unwrap();
+        let outcome = source.complete_transfer(&predecessor, &successor, &ref_kind).expect("test");
         assert_eq!(outcome, ClaimOutcome::Held { ref_kind, held_by: foreign });
-        assert_eq!(source.claim_holder(&claim_ref(&w1)).unwrap(), Some(foreign), "the foreign hold is untouched");
+        assert_eq!(source.claim_holder(&claim_ref(&w1)).expect("test"), Some(foreign), "the foreign hold is untouched");
     }
 
     #[test]
@@ -2910,19 +2923,19 @@ mod tests {
         let source = git_source(&fake, false);
         let (w1, w2) = (workpiece("wp-1"), workpiece("wp-2"));
         seed_tombstone(&fake, &claim_ref(&w1));
-        source.claim_seal(&bloom_id(9), from_ref(&w2)).unwrap();
+        source.claim_seal(&bloom_id(9), from_ref(&w2)).expect("test");
 
         // The tombstoned ref is swept. A tombstone *is* the released state, so
         // the sweep reports it absent rather than freshly released.
         assert_eq!(
-            source.complete_release(None, &ClaimRefKind::Workpiece(w1.clone())).unwrap(),
+            source.complete_release(None, &ClaimRefKind::Workpiece(w1.clone())).expect("test"),
             ClaimReleaseOutcome::AlreadyAbsent
         );
         assert!(!fake.ref_exists(&claim_ref(&w1)), "the tombstoned ref name was reclaimed");
 
         // A live ref under a `None` sweep is spared, reporting the holder it
         // found, never deleted.
-        let outcome = source.complete_release(None, &ClaimRefKind::Workpiece(w2.clone())).unwrap();
+        let outcome = source.complete_release(None, &ClaimRefKind::Workpiece(w2.clone())).expect("test");
         assert_eq!(outcome, ClaimReleaseOutcome::Changed { observed_holder: bloom_id(9) });
         assert!(fake.ref_exists(&claim_ref(&w2)), "a live ref is not swept");
     }
@@ -2933,14 +2946,14 @@ mod tests {
         let source = git_source(&fake, false);
         let (owner, foreign) = (bloom_id(1), bloom_id(2));
         let (mine, theirs) = (workpiece("wp-mine"), workpiece("wp-theirs"));
-        source.claim_seal(&owner, from_ref(&mine)).unwrap();
+        source.claim_seal(&owner, from_ref(&mine)).expect("test");
         // Stage the foreign hold directly — a second `claim_seal` would conflict on
         // the admission ref the owner already holds and roll its member back.
         seed_hold(&fake, &claim_ref(&theirs), &foreign);
 
         // Naming the owner releases exactly its ref (the stranded-drop release path).
         assert_eq!(
-            source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(mine.clone())).unwrap(),
+            source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(mine.clone())).expect("test"),
             ClaimReleaseOutcome::Released
         );
         assert!(!fake.ref_exists(&claim_ref(&mine)), "the owner's ref was released");
@@ -2948,7 +2961,7 @@ mod tests {
         // A ref a foreign bloom holds is spared even when a holder is named — the
         // expected-holder compare that keeps the ADR-0179 operator surface from
         // destroying another instance's live claim.
-        let outcome = source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(theirs.clone())).unwrap();
+        let outcome = source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(theirs.clone())).expect("test");
         assert_eq!(outcome, ClaimReleaseOutcome::Changed { observed_holder: foreign });
         assert!(fake.ref_exists(&claim_ref(&theirs)), "the foreign ref is spared");
 
@@ -2956,7 +2969,7 @@ mod tests {
         // redrive ADR-0179 relies on to finish a release whose completion was
         // never admitted.
         assert_eq!(
-            source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(mine)).unwrap(),
+            source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(mine)).expect("test"),
             ClaimReleaseOutcome::AlreadyAbsent
         );
     }
@@ -2970,7 +2983,7 @@ mod tests {
         fake.seed_issue(7, "the order");
         let source = git_source(&fake, false);
 
-        source.close_issue(7, "landed via pull request #3").unwrap();
+        source.close_issue(7, "landed via pull request #3").expect("test");
 
         assert_eq!(fake.comments_on(7), ["landed via pull request #3"]);
         assert_eq!(fake.issue_is_closed(7), Some(true));
