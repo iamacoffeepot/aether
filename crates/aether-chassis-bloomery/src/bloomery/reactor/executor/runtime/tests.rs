@@ -852,9 +852,9 @@ fn an_order_that_outlives_its_sealed_limit_is_cancelled_as_a_host_fault() {
         Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
         "the producer classifies the deadline as a host fault",
     );
-    // Intake on this tree still refuses a member-stage ExecutorFault (#5091
-    // owns the machinery fact). The cancel and the verdict are this issue's
-    // surface; the order staying live is the known dependency.
+    // Intake admits a dispatched member-stage ExecutorFault as a member
+    // machinery fault and redispatches the cancelled order. The cancel and
+    // the verdict are this test's surface; admission is not.
     let _ = admits;
 }
 
@@ -2913,9 +2913,8 @@ fn progress_extends_only_the_silence_window() {
     // A live transcript keeps the lane; a stamp that stops moving does not
     // buy another sealed hour. Catches promoting last-progress into a new
     // deadline, or ignoring it so every model lane dies at ten minutes.
-    // Intake on this tree still refuses a member-stage ExecutorFault (#5091
-    // owns the machinery fact), so the cancel is the observation this issue
-    // owns; the order staying live is the known dependency.
+    // Intake admits the silence as a member machinery fault and redispatches;
+    // the cancel is the observation this test owns.
     let mut store = SqliteStore::open(":memory:").unwrap();
     let backend = HeartbeatBackend::new();
     let shell = heartbeat_shell(&backend);
