@@ -18,8 +18,13 @@
 mod common;
 mod lane;
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use aether_bloomery::{
     BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure,
@@ -359,6 +364,106 @@ fn a_lane_that_never_exits_reaches_an_accountable_wedge_rather_than_sitting_outs
     assert!(runs >= 2, "the first timeout re-drove the stage rather than wedging on one attempt: {runs} runs");
 
     assert_scratch_checkouts_are_lane_slots(&harness, "a cancelled run leaves no checkout of its own behind");
+    harness.assert_live();
+}
+
+#[test]
+fn a_lane_that_goes_silent_is_cancelled_before_its_wall_clock_and_retries_the_same_stage() {
+    // ADR-0195 §8: a local model lane that streamed progress and then stopped
+    // must not occupy the slot until the sealed hour. The host silence
+    // threshold cancels it, the scratch checkout is the slot's (not the
+    // order's), and the same stage is re-dispatched — the retry #5091 will
+    // later classify as machinery. The wall clock here is far longer than
+    // the silence window, so coming to rest early is the heartbeat, not the
+    // deadline.
+    let mut harness =
+        LaneHarness::start_with_heartbeat(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 60, 2);
+
+    // One write per attempt, then stop. A retry that never gets a transcript
+    // is deadline-only and would sit until the 60s wall clock, which the
+    // harness's quiescence budget treats as a stall. Priming each new
+    // evidence dir once is what makes every lap silent rather than only the
+    // first.
+    let stop = Arc::new(AtomicBool::new(false));
+    let runs = harness.runs_dir();
+    let pumping = {
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            let mut primed = HashSet::new();
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok(entries) = fs::read_dir(&runs) {
+                    for entry in entries.filter_map(Result::ok) {
+                        let name = entry.file_name();
+                        let Some(nonce) = name.to_str().and_then(|name| name.strip_suffix("-evidence")) else {
+                            continue;
+                        };
+                        if !primed.insert(nonce.to_owned()) {
+                            continue;
+                        }
+                        let path = entry.path().join("transcript.jsonl");
+                        let _ = fs::write(&path, b"{}\n");
+                    }
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+        })
+    };
+
+    let bloom = harness.settle("the silent member comes to rest", at_rest);
+    stop.store(true, Ordering::Relaxed);
+    let _ = pumping.join();
+
+    assert!(bloom.members[0].resolution.is_none(), "a silent lane resolves nothing");
+    assert!(bloom.members[0].wedge.is_some(), "silence must reach the same wedge a timeout does");
+    assert!(harness.outstanding().is_empty(), "every silenced order was consumed exactly once");
+    let constructs = harness.ledger().iter().filter(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND).count();
+    assert!(
+        constructs >= 2,
+        "the first silence re-drove the same stage rather than wedging on one attempt: {constructs} construct runs",
+    );
+    assert_scratch_checkouts_are_lane_slots(&harness, "a silenced run leaves no checkout of its own behind");
+    harness.assert_live();
+}
+
+#[test]
+fn a_continuously_noisy_lane_still_dies_at_its_absolute_deadline() {
+    // Progress only extends the silence window. A lane that keeps writing
+    // its transcript must still hit the sealed wall clock — otherwise a
+    // noisy but unproductive process would run forever.
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut harness =
+        LaneHarness::start_with_heartbeat(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 5, 30);
+    let runs = harness.runs_dir();
+    let pumping = {
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok(entries) = fs::read_dir(&runs) {
+                    for entry in entries.filter_map(Result::ok) {
+                        let name = entry.file_name();
+                        let Some(nonce) = name.to_str().and_then(|name| name.strip_suffix("-evidence")) else {
+                            continue;
+                        };
+                        let path = entry.path().join("transcript.jsonl");
+                        let _ = fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| {
+                            use std::io::Write as _;
+                            file.write_all(nonce.as_bytes())
+                        });
+                    }
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+        })
+    };
+
+    let bloom = harness.settle("the noisy hung member comes to rest", at_rest);
+    stop.store(true, Ordering::Relaxed);
+    let _ = pumping.join();
+
+    assert!(bloom.members[0].resolution.is_none(), "a noisy hung lane resolves nothing");
+    assert!(bloom.members[0].wedge.is_some(), "the sealed deadline still terminates a continuously noisy lane");
+    assert!(harness.outstanding().is_empty(), "every expired noisy order was consumed exactly once");
+    assert_scratch_checkouts_are_lane_slots(&harness, "a deadline-killed noisy run leaves no checkout of its own");
     harness.assert_live();
 }
 

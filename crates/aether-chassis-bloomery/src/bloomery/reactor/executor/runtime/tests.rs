@@ -9,13 +9,14 @@ use std::slice;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use aether_bloomery::{
-    Admit, AgentSelection, AggregateReviewPayload, BloomId, CandidateRef, ConfigKind, ConfigRegistry, DispatchPayload,
-    EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, LandOutcome, ModelOverride, Nonce, ReasoningEffort,
-    RedispatchPayload, ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride, TimeoutRecord, Topic,
-    Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
+    Admit, AgentSelection, AggregateReviewPayload, BloomId, CandidateRef, Conclusion, ConfigKind, ConfigRegistry,
+    DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, LandOutcome, ModelOverride, Nonce,
+    ReasoningEffort, RedispatchPayload, ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride,
+    TimeoutRecord, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
+    pin_workpiece_description,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -30,9 +31,10 @@ use aether_substrate::mail::registry::Registry;
 use super::strand::readopt_stranded_dispatches;
 use super::{
     BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, ExecutorReactorState, GitCandidatePush, NameEvidenceClaims,
-    Stores, TickClock, TrackedHandle, backoff_delay, default_candidate_push, drain_and_dispatch,
-    drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_stale, next_backoff, pull_and_admit,
-    push_admitted_candidates, seed_dispatches, seed_tracked, select_stale_handles,
+    Stores, TickClock, TrackedHandle, backoff_delay, default_candidate_push, dispatch_origin, drain_and_dispatch,
+    drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_silent, is_stale, next_backoff,
+    observe_heartbeat, pull_and_admit, push_admitted_candidates, seed_dispatches, seed_tracked, select_stale_handles,
+    silence_from,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -189,7 +191,14 @@ fn tick_clock() -> TickClock {
 }
 
 fn tick_clock_at(now_unix_millis: u64) -> TickClock {
-    TickClock { now_unix_millis, stale_warn_after: None }
+    // Existing deadline tests must not trip the silence reaper: `u64::MAX` is
+    // longer than any sealed wall clock, and Actions inspects report no
+    // heartbeat anyway. Heartbeat scenarios pass an explicit allowance.
+    TickClock { now_unix_millis, stale_warn_after: None, heartbeat_silence_millis: u64::MAX }
+}
+
+fn tick_clock_silent(now_unix_millis: u64, heartbeat_silence_millis: u64) -> TickClock {
+    TickClock { now_unix_millis, stale_warn_after: None, heartbeat_silence_millis }
 }
 
 // Enqueue one per-member Construct dispatch on the dispatch topic (the bytes the
@@ -1449,14 +1458,21 @@ fn select_stale_handles_warns_once_for_a_wedged_handle_and_never_for_a_fresh_one
         ),
         TrackedHandle::new(WorkHandle::new(fresh_nonce.clone()), now.checked_sub(Duration::from_secs(5)).unwrap()),
     ];
-    let pending = vec![(wedged_nonce.clone(), ExecutionStatus::Running), (fresh_nonce, ExecutionStatus::Queued)];
+    let pending = vec![
+        (wedged_nonce.clone(), ExecutionStatus::Running { last_progress_unix_millis: None }),
+        (fresh_nonce, ExecutionStatus::Queued),
+    ];
 
     let warnings = select_stale_handles(&mut tracked, &pending, now, Some(threshold));
     assert_eq!(warnings.len(), 1, "only the past-threshold handle selects");
     let (nonce, age, status) = &warnings[0];
     assert_eq!(*nonce, wedged_nonce);
     assert!(*age >= threshold);
-    assert_eq!(*status, ExecutionStatus::Running, "the wedged handle's warning carries its last observed status");
+    assert_eq!(
+        *status,
+        ExecutionStatus::Running { last_progress_unix_millis: None },
+        "the wedged handle's warning carries its last observed status",
+    );
 
     let repeat = select_stale_handles(&mut tracked, &pending, now, Some(threshold));
     assert!(repeat.is_empty(), "an already-warned handle does not re-select on the next sweep");
@@ -2748,4 +2764,298 @@ fn a_stranded_dispatch_of_a_retired_bloom_is_not_re_queued() {
         readopt_stranded_dispatches(&mut store).unwrap().is_empty(),
         "a retired plan's dispatch is not resumed by a restart",
     );
+}
+
+/// Ten minutes, the host default — short enough to write against, long enough
+/// that a sealed one-hour wall clock is still the outer bound.
+const SILENCE_MILLIS: u64 = 600_000;
+
+/// A backend whose running inspect carries an injected progress timestamp, so
+/// a reactor test can drive heartbeat silence without a filesystem.
+struct HeartbeatBackend {
+    progress: Mutex<HashMap<String, Option<u64>>>,
+    cancelled: Mutex<Vec<String>>,
+    completed: Mutex<HashMap<String, Vec<EvidenceRef>>>,
+}
+
+impl HeartbeatBackend {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            progress: Mutex::new(HashMap::new()),
+            cancelled: Mutex::new(Vec::new()),
+            completed: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn set_progress(&self, nonce: &str, progress: Option<u64>) {
+        self.progress.lock().unwrap().insert(nonce.to_owned(), progress);
+    }
+
+    fn complete(&self, nonce: &str, evidence: Vec<EvidenceRef>) {
+        self.completed.lock().unwrap().insert(nonce.to_owned(), evidence);
+    }
+
+    fn cancelled(&self) -> Vec<String> {
+        self.cancelled.lock().unwrap().clone()
+    }
+}
+
+impl ExecutorBackend for HeartbeatBackend {
+    type Error = ExecutorPortError;
+
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        Ok(WorkHandle::new(order.nonce.clone()))
+    }
+
+    fn inspect(&self, handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+        if self.completed.lock().unwrap().contains_key(&handle.nonce.0) {
+            return Ok(ExecutionStatus::Completed { conclusion: Conclusion::Success });
+        }
+        Ok(ExecutionStatus::Running {
+            last_progress_unix_millis: self.progress.lock().unwrap().get(&handle.nonce.0).copied().flatten(),
+        })
+    }
+
+    fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
+        self.cancelled.lock().unwrap().push(handle.nonce.0.clone());
+        Ok(())
+    }
+
+    fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+        Ok(self.completed.lock().unwrap().get(&handle.nonce.0).cloned().unwrap_or_default())
+    }
+}
+
+fn tick_silent(
+    store: &mut SqliteStore,
+    shell: &ExecutorShell,
+    tracked: &mut Vec<TrackedHandle>,
+    now: u64,
+) -> Vec<Admit> {
+    pull_and_admit(
+        Stores { store, artifacts: None },
+        shell,
+        NameEvidenceClaims,
+        tracked,
+        &tick_clock_silent(now, SILENCE_MILLIS),
+        None,
+        &NopPush,
+    )
+}
+
+fn heartbeat_shell(backend: &Arc<HeartbeatBackend>) -> ExecutorShell {
+    ExecutorShell::new(Arc::clone(backend))
+}
+
+fn construct_attempt_ref(nonce: &Nonce, subject: u8) -> EvidenceRef {
+    let name = attempt_artifact_name(nonce, &digest(subject), StageVerdict::VerificationPassed, &digest(9));
+    EvidenceRef {
+        name,
+        nonce: nonce.clone(),
+        artifact_id: 1,
+        size_bytes: 20,
+        candidate: None,
+        findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
+        cost: None,
+        calls: None,
+    }
+}
+
+#[test]
+fn observe_heartbeat_keeps_the_newest_usable_stamp_and_refuses_the_rest() {
+    // The plausible bugs: a future mtime extending the window, a backward one
+    // rewinding it, or a stamp past the deadline outliving the sealed bound.
+    assert_eq!(observe_heartbeat(None, Some(NOW_UNIX_MILLIS + 1), NOW_UNIX_MILLIS, AT_THE_DEADLINE), None);
+    assert_eq!(
+        observe_heartbeat(
+            Some(NOW_UNIX_MILLIS + 5_000),
+            Some(NOW_UNIX_MILLIS),
+            NOW_UNIX_MILLIS + 10_000,
+            AT_THE_DEADLINE
+        ),
+        Some(NOW_UNIX_MILLIS + 5_000),
+        "a backward stamp must not rewind a newer stored heartbeat",
+    );
+    assert_eq!(
+        observe_heartbeat(None, Some(AT_THE_DEADLINE + 1), AT_THE_DEADLINE + 10, AT_THE_DEADLINE),
+        Some(AT_THE_DEADLINE),
+        "a stamp past the sealed deadline clamps rather than extending it",
+    );
+}
+
+#[test]
+fn silence_from_uses_origin_only_when_a_heartbeat_existed_but_was_unusable() {
+    // Absence is deadline-only. A future stamp still marks the lane as
+    // known-heartbeat, and falling back to the dispatch origin is what stops
+    // that future from buying more grace.
+    let origin = dispatch_origin(AT_THE_DEADLINE, 3_600);
+    assert_eq!(origin, NOW_UNIX_MILLIS);
+    assert_eq!(silence_from(None, None, origin), None);
+    assert_eq!(silence_from(None, Some(NOW_UNIX_MILLIS + 60_000), origin), Some(origin));
+    assert_eq!(
+        silence_from(Some(NOW_UNIX_MILLIS + 1_000), Some(NOW_UNIX_MILLIS + 60_000), origin),
+        Some(NOW_UNIX_MILLIS + 1_000)
+    );
+    assert!(is_silent(origin, origin + SILENCE_MILLIS, SILENCE_MILLIS));
+    assert!(!is_silent(origin, origin + SILENCE_MILLIS - 1, SILENCE_MILLIS));
+}
+
+#[test]
+fn progress_extends_only_the_silence_window() {
+    // A live transcript keeps the lane; a stamp that stops moving does not
+    // buy another sealed hour. Catches promoting last-progress into a new
+    // deadline, or ignoring it so every model lane dies at ten minutes.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-hb");
+    let nonce = tracked[0].handle.nonce.0.clone();
+
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS));
+    assert!(tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS - 1).is_empty());
+    assert_eq!(store.list_outstanding_nonces().unwrap().len(), 1, "progress inside the window keeps the order");
+
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS + SILENCE_MILLIS - 1_000));
+    assert!(
+        tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS + 8_000).is_empty(),
+        "a later heartbeat must extend only the silence window",
+    );
+    assert_eq!(store.list_outstanding_nonces().unwrap().len(), 1);
+
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS + SILENCE_MILLIS - 1_000));
+    assert_eq!(
+        tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + 2 * SILENCE_MILLIS).len(),
+        1,
+        "the same stamp left to go quiet reaches the threshold",
+    );
+    assert!(store.list_outstanding_nonces().unwrap().is_empty());
+}
+
+#[test]
+fn a_restart_does_not_reset_the_silence_window() {
+    // `first_seen` is process-local. Rebuilding the tracked handle the way
+    // boot does must not grant another full silence allowance — the
+    // filesystem stamp (or the durable origin) is the authority.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-restart");
+    let nonce = tracked[0].handle.nonce.0.clone();
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS));
+    assert!(tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS).is_empty());
+
+    let mut tracked: Vec<TrackedHandle> = seed_tracked(&mut store)
+        .unwrap()
+        .into_iter()
+        .map(|handle| TrackedHandle::new(handle, Instant::now()))
+        .collect();
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS));
+    assert_eq!(
+        tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS).len(),
+        1,
+        "a re-tracked handle still expires from the original heartbeat",
+    );
+}
+
+#[test]
+fn completed_evidence_at_the_silence_boundary_wins() {
+    // Intake runs first. A lane that finished on the same tick its silence
+    // window closed must keep its own verdict, not a synthesised silence fault.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-done");
+    let nonce = tracked[0].handle.nonce.clone();
+    backend.set_progress(&nonce.0, Some(NOW_UNIX_MILLIS));
+    assert!(tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS).is_empty());
+
+    backend.complete(&nonce.0, vec![construct_attempt_ref(&nonce, 5)]);
+    let admits = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS);
+    assert_eq!(admits.len(), 1);
+    match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
+        Fact::AttemptCompleted { passed, .. } => assert!(passed, "the finishing lane keeps its own passing verdict"),
+        other => panic!("expected a passing AttemptCompleted, got {other:?}"),
+    }
+    assert!(backend.cancelled().is_empty(), "a completed lane is not cancelled as silent");
+}
+
+#[test]
+fn future_and_backward_mtimes_cannot_extend_the_outer_deadline() {
+    // A future stamp is refused and falls back to the dispatch origin, so it
+    // cannot buy time past the sealed wall clock. A backward stamp cannot
+    // rewind a newer one into a later deadline either — the deadline sweep
+    // still fires at AT_THE_DEADLINE.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-skew");
+    let nonce = tracked[0].handle.nonce.0.clone();
+
+    backend.set_progress(&nonce, Some(AT_THE_DEADLINE + 86_400_000));
+    assert_eq!(
+        tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS).len(),
+        1,
+        "a future mtime must not postpone silence past the origin-based window",
+    );
+}
+
+#[test]
+fn an_unknown_heartbeat_lane_stays_deadline_only() {
+    // Actions and mechanical lanes report `None`. Treating that as silence
+    // would kill every Verify that does not stream a transcript.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-remote");
+    let nonce = tracked[0].handle.nonce.0.clone();
+    backend.set_progress(&nonce, None);
+
+    assert!(tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS).is_empty());
+    assert_eq!(store.list_outstanding_nonces().unwrap().len(), 1, "no heartbeat is not a silent local lane");
+    assert_eq!(
+        tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE).len(),
+        1,
+        "the sealed deadline still terminates it"
+    );
+}
+
+#[test]
+fn a_duplicate_silence_tick_admits_once() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-once");
+    let nonce = tracked[0].handle.nonce.0.clone();
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS));
+
+    assert_eq!(tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS).len(), 1);
+    assert!(
+        tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS + 1).is_empty(),
+        "a consumed silence fault must not admit again",
+    );
+    assert_eq!(backend.cancelled(), vec![nonce], "the cancel is issued once, on the tick that admitted");
+}
+
+#[test]
+fn a_silence_fault_retries_the_same_stage_as_a_timeout() {
+    // #5091 owns the machinery counter; this issue only reports the host
+    // observation through the deadline reaper's existing failed-attempt
+    // admission. A silence fault must therefore be the same fact a timeout
+    // is — so when #5091/#5095 remount the classification, both causes move
+    // together — and must not invent a second retry authority here.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-retry");
+    let nonce = tracked[0].handle.nonce.0.clone();
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS));
+
+    let admits = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS);
+    match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
+        Fact::AttemptCompleted { passed: false, stage, .. } => {
+            assert_eq!(stage, StageId::Construct, "silence retries the same stage a timeout would");
+        }
+        other => panic!("expected a failing AttemptCompleted, got {other:?}"),
+    }
 }

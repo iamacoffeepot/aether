@@ -49,6 +49,7 @@
 pub mod liveness;
 pub mod repo;
 
+use std::fs;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::thread;
@@ -114,7 +115,7 @@ impl LaneHarness {
     /// # Panics
     /// As [`start`](Self::start).
     pub fn start_with(script: &LaneScript, workpiece: &str) -> Self {
-        Self::start_sealing(script, workpiece, None)
+        Self::start_sealing(script, workpiece, None, None)
     }
 
     /// [`start`](Self::start) over a bloom that seals a stage catalog binding
@@ -129,10 +130,26 @@ impl LaneHarness {
     /// # Panics
     /// As [`start`](Self::start).
     pub fn start_with_wall_clock(script: &LaneScript, wall_clock_secs: u64) -> Self {
-        Self::start_sealing(script, "wp", Some(wall_clock_secs))
+        Self::start_sealing(script, "wp", Some(wall_clock_secs), None)
     }
 
-    fn start_sealing(script: &LaneScript, workpiece: &str, wall_clock_secs: Option<u64>) -> Self {
+    /// [`start_with_wall_clock`](Self::start_with_wall_clock) plus a host
+    /// heartbeat-silence allowance, so a scenario can tell a silent local lane
+    /// from one that is still streaming progress without waiting out the
+    /// default ten minutes.
+    ///
+    /// # Panics
+    /// As [`start`](Self::start).
+    pub fn start_with_heartbeat(script: &LaneScript, wall_clock_secs: u64, heartbeat_silence_secs: u64) -> Self {
+        Self::start_sealing(script, "wp", Some(wall_clock_secs), Some(heartbeat_silence_secs))
+    }
+
+    fn start_sealing(
+        script: &LaneScript,
+        workpiece: &str,
+        wall_clock_secs: Option<u64>,
+        heartbeat_silence_secs: Option<u64>,
+    ) -> Self {
         let repo = ScratchRepo::create();
         let runs = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
@@ -152,7 +169,8 @@ impl LaneHarness {
         // control core over the wire rather than through the REST api.
         let configs = wall_clock_secs.map_or_else(ConfigRegistry::default, |secs| author_catalog(&store_path, secs));
 
-        let (coordinator, stream) = spawn_listening_coordinator(&repo, &runs, &state, &store_path);
+        let (coordinator, stream) =
+            spawn_listening_coordinator(&repo, &runs, &state, &store_path, heartbeat_silence_secs);
 
         let mut harness = Self { repo, runs, state, store_path, _coordinator: coordinator, stream, cid: 1, base };
         harness.seal(workpiece, configs);
@@ -167,6 +185,43 @@ impl LaneHarness {
     /// Where the run directories, script, and ledger live.
     pub fn runs_dir(&self) -> PathBuf {
         self.runs.path().to_owned()
+    }
+
+    /// Append a line to the named run's streamed transcript, creating it if
+    /// needed. The local backend reads this file's modification time as the
+    /// lane's live heartbeat, so a scenario that writes then stops is silent,
+    /// and one that keeps writing stays noisy.
+    ///
+    /// # Panics
+    /// The evidence directory could not be created or the file written.
+    pub fn write_transcript(&self, nonce: &str, line: &str) {
+        use std::io::Write as _;
+
+        let dir = self.runs.path().join(format!("{nonce}-evidence"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("transcript.jsonl"))
+            .unwrap()
+            .write_all(line.as_bytes())
+            .unwrap();
+    }
+
+    /// Every evidence directory under the run root whose name ends in
+    /// `-evidence`, so a scenario can stream progress at whatever nonce the
+    /// coordinator minted.
+    ///
+    /// # Panics
+    /// The run root could not be read.
+    pub fn evidence_nonces(&self) -> Vec<String> {
+        fs::read_dir(self.runs.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                name.strip_suffix("-evidence").map(str::to_owned)
+            })
+            .collect()
     }
 
     /// Every lane run the mock has recorded, in dispatch order.
@@ -313,38 +368,42 @@ fn spawn_listening_coordinator(
     runs: &TempDir,
     state: &TempDir,
     store_path: &str,
+    heartbeat_silence_secs: Option<u64>,
 ) -> (Coordinator, TcpStream) {
+    let heartbeat = heartbeat_silence_secs.map(|secs| secs.to_string());
     for _ in 0..8 {
         let rpc_port = free_port();
-        let mut coordinator = Coordinator::spawn_in(
-            rpc_port,
-            Some(&repo.work_dir()),
-            &[
-                ("AETHER_STORE_PATH", store_path),
-                ("AETHER_ARTIFACTS_ROOT", &state.path().join("artifacts").to_string_lossy()),
-                // The whole point: the dispatch below the spawn stays real, the
-                // program at the end of the argv does not.
-                ("AETHER_BLOOMERY_LANE_PROGRAM", env!("CARGO_BIN_EXE_bloomery-mock-lane")),
-                ("AETHER_GITHUB_LOCAL_WORKTREE_BASE", &runs.path().to_string_lossy()),
-                // Every lane local, including the mechanical verify one. The
-                // production default routes verify at a shared runner, which
-                // needs a GitHub connection this tier deliberately does not
-                // configure — and the verify lane is where half the catalogue's
-                // failure modes live.
-                ("AETHER_GITHUB_LOCAL_LANE_COMMANDS", "construct.,review.,verify."),
-                ("AETHER_GITHUB_POLL_INTERVAL_SECS", "1"),
-                // In-memory GitHub for the aggregate line (#4732): the member
-                // line alone needs no GitHub, but Integrate→AggregateVerify→
-                // AggregateReview→Land do. `fake` mounts every reactor with an
-                // in-memory double and needs no token/owner/repo.
-                ("AETHER_GITHUB_BACKEND", "fixture"),
-                ("AETHER_GITHUB_FIXTURE_BASE_SHA", repo.head()),
-                // A fixed capture identity, so a candidate commit never depends
-                // on whatever git identity the host running the suite has.
-                ("AETHER_BLOOMERY_OPERATOR_NAME", "lane harness"),
-                ("AETHER_BLOOMERY_OPERATOR_EMAIL", "lane-harness@example.test"),
-            ],
-        );
+        let artifacts = state.path().join("artifacts").to_string_lossy().into_owned();
+        let worktree_base = runs.path().to_string_lossy().into_owned();
+        let mut env = vec![
+            ("AETHER_STORE_PATH", store_path),
+            ("AETHER_ARTIFACTS_ROOT", artifacts.as_str()),
+            // The whole point: the dispatch below the spawn stays real, the
+            // program at the end of the argv does not.
+            ("AETHER_BLOOMERY_LANE_PROGRAM", env!("CARGO_BIN_EXE_bloomery-mock-lane")),
+            ("AETHER_GITHUB_LOCAL_WORKTREE_BASE", worktree_base.as_str()),
+            // Every lane local, including the mechanical verify one. The
+            // production default routes verify at a shared runner, which
+            // needs a GitHub connection this tier deliberately does not
+            // configure — and the verify lane is where half the catalogue's
+            // failure modes live.
+            ("AETHER_GITHUB_LOCAL_LANE_COMMANDS", "construct.,review.,verify."),
+            ("AETHER_GITHUB_POLL_INTERVAL_SECS", "1"),
+            // In-memory GitHub for the aggregate line (#4732): the member
+            // line alone needs no GitHub, but Integrate→AggregateVerify→
+            // AggregateReview→Land do. `fake` mounts every reactor with an
+            // in-memory double and needs no token/owner/repo.
+            ("AETHER_GITHUB_BACKEND", "fixture"),
+            ("AETHER_GITHUB_FIXTURE_BASE_SHA", repo.head()),
+            // A fixed capture identity, so a candidate commit never depends
+            // on whatever git identity the host running the suite has.
+            ("AETHER_BLOOMERY_OPERATOR_NAME", "lane harness"),
+            ("AETHER_BLOOMERY_OPERATOR_EMAIL", "lane-harness@example.test"),
+        ];
+        if let Some(secs) = heartbeat.as_deref() {
+            env.push(("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS", secs));
+        }
+        let mut coordinator = Coordinator::spawn_in(rpc_port, Some(&repo.work_dir()), &env);
         if !coordinator.is_alive() {
             continue;
         }
