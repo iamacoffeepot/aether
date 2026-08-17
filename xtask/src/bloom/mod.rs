@@ -137,6 +137,15 @@ struct SupersedeArgs {
     #[arg(long, default_value = "observed", value_parser = BaseChoice::parse)]
     base: BaseChoice,
 
+    /// Member dependency (`dependent=dependency`). Repeatable. `issue-B=issue-A`
+    /// means B depends on A.
+    #[arg(long = "edge", value_parser = plan::parse_edge_flag)]
+    edges: Vec<(String, String)>,
+
+    /// Predecessor member to drop from the successor. Repeatable.
+    #[arg(long = "eject")]
+    eject: Vec<String>,
+
     #[command(flatten)]
     projection: ProjectionArgs,
 }
@@ -221,12 +230,13 @@ fn run_supersede(client: &Client<'_>, args: &SupersedeArgs) -> Result<String> {
     if let Some(forecast) = authored.forecast {
         patch.forecast = Some(forecast);
     }
+    plan::eject_members(patch.proposals.get_or_insert_with(Vec::new), &args.eject)?;
     let draft = client.open_draft()?;
     client.patch_draft(&draft.draft_id, &patch)?;
     let members = patch.proposals.unwrap_or_default();
     let outcome = client.supersede(
         &args.bloom_id,
-        &plan::supersede_request(&draft.draft_id, &members, &task, &args.projection.input()?)?,
+        &plan::supersede_request(&draft.draft_id, &members, &task, &args.projection.input()?, &args.edges)?,
     )?;
     Ok(render_outcome(&outcome.outcome))
 }
@@ -306,6 +316,45 @@ mod tests {
         }
         .seal();
         (hex_of(spec.id().0), hexify(serde_json::to_value(&spec).expect("spec encodes")))
+    }
+
+    fn predecessor_spec_of(members: &[(&str, u8)]) -> (String, Value) {
+        let mut configs = ConfigRegistry::default();
+        configs.insert_named("aether.bloomery.stage_catalog", digest(0xaa));
+        let spec = BloomDraft {
+            proposals: members
+                .iter()
+                .map(|(workpiece, revision)| Membership {
+                    workpiece: WorkpieceId((*workpiece).to_owned()),
+                    scope_revision: digest(*revision),
+                    configs: ConfigRegistry::default(),
+                    approval: Evidence { subject: digest(*revision), kind: EvidenceKind::Approval, detail: digest(9) },
+                })
+                .collect(),
+            base: digest(1),
+            configs,
+            forecast: Forecast::default(),
+        }
+        .seal();
+        (hex_of(spec.id().0), hexify(serde_json::to_value(&spec).expect("spec encodes")))
+    }
+
+    fn supersede_args(
+        bloom_id: String,
+        task: PathBuf,
+        edges: Vec<(String, String)>,
+        eject: Vec<String>,
+    ) -> BloomCommand {
+        BloomCommand::Supersede(SupersedeArgs {
+            bloom_id,
+            task_file: task,
+            configs: Vec::new(),
+            profile: None,
+            base: BaseChoice::Observed,
+            edges,
+            eject,
+            projection: projection_args(),
+        })
     }
 
     fn serve_one(mut stream: TcpStream, handler: &impl Fn(&Recorded) -> (u16, Value), log: &Mutex<Vec<Recorded>>) {
@@ -451,6 +500,8 @@ mod tests {
                         configs: Vec::new(),
                         profile: None,
                         base: BaseChoice::Observed,
+                        edges: Vec::new(),
+                        eject: Vec::new(),
                         projection: projection_args(),
                     }),
                 )
@@ -474,7 +525,177 @@ mod tests {
         assert_eq!(supersede["projections"][0]["scope_revision"], revision);
         assert_eq!(supersede["projections"][0]["completeness"]["model_routing_count"], 1);
         assert_eq!(supersede["descriptions"]["wp-1"], "recover the wedged member");
+        assert!(supersede.get("edges").is_none(), "an edgeless supersede omits the edges field: {supersede}");
         assert!(output.contains("Superseded"), "outcome is printed: {output}");
+    }
+
+    #[test]
+    fn supersede_sends_declared_edges_on_the_typed_body() {
+        // `--edge issue-B=issue-A` must reach the successor door as B depends
+        // on A. A swapped pair, or dropping the field, would journal the
+        // opposite graph or none at all — the same bug the seal flag closes.
+        let (bloom_id, spec_wire) = predecessor_spec_of(&[("issue-A", 1), ("issue-B", 2)]);
+        let bloom_id_for_view = bloom_id.clone();
+        let spec_for_journal = spec_wire;
+        let task = temp_task("supersede-edge", "recover B on A");
+        let (_, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/view") => (
+                    200,
+                    json!({
+                        "mainline": hex_of(digest(1)),
+                        "observed": hex_of(digest(2)),
+                        "blooms": [{
+                            "id": bloom_id_for_view.clone(),
+                            "status": "Sealed",
+                            "superseded_by": null,
+                            "members": [
+                                { "workpiece": "issue-A", "scope_revision": hex_of(digest(1)) },
+                                { "workpiece": "issue-B", "scope_revision": hex_of(digest(2)) }
+                            ]
+                        }]
+                    }),
+                ),
+                ("GET", "/journal") => (
+                    200,
+                    json!({ "records": [{ "sequence": 1, "idempotency_key": "k", "event": { "idempotency_key": "k", "fact": { "Seal": spec_for_journal } } }] }),
+                ),
+                ("POST", "/drafts") => (201, json!({ "draft_id": "1", "draft": {} })),
+                ("PATCH", "/drafts/1") => (200, json!({ "draft_id": "1", "draft": {} })),
+                (method, path) if method == "POST" && path.ends_with("/supersede") => (
+                    200,
+                    json!({ "outcome": { "Superseded": { "predecessor": bloom_id_for_view.clone(), "successor": hex_of(digest(3)) } } }),
+                ),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &supersede_args(
+                        bloom_id.clone(),
+                        task.clone(),
+                        vec![("issue-B".to_owned(), "issue-A".to_owned())],
+                        Vec::new(),
+                    ),
+                )
+                .expect("supersede --edge against the fake coordinator")
+            },
+        );
+        fs::remove_file(&task).ok();
+        let supersede =
+            find(&log, "POST", &format!("/blooms/{bloom_id}/supersede")).body.as_ref().expect("supersede body");
+        assert_eq!(supersede["edges"][0]["member"], "issue-B");
+        assert_eq!(supersede["edges"][0]["depends_on"], "issue-A");
+    }
+
+    #[test]
+    fn supersede_ejects_a_named_predecessor_from_proposals_and_projections() {
+        // `--eject` must drop the named member from the successor draft *and*
+        // from the projections the door gates on. Leaving it in either half
+        // would re-admit the workpiece the operator just tried to leave out.
+        let (bloom_id, spec_wire) = predecessor_spec_of(&[("wp-1", 7), ("wp-2", 8)]);
+        let bloom_id_for_view = bloom_id.clone();
+        let spec_for_journal = spec_wire;
+        let task = temp_task("supersede-eject", "recover without the wedged member");
+        let (_, log) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/view") => (
+                    200,
+                    json!({
+                        "mainline": hex_of(digest(1)),
+                        "observed": hex_of(digest(2)),
+                        "blooms": [{
+                            "id": bloom_id_for_view.clone(),
+                            "status": "Sealed",
+                            "superseded_by": null,
+                            "members": [
+                                { "workpiece": "wp-1", "scope_revision": hex_of(digest(7)) },
+                                { "workpiece": "wp-2", "scope_revision": hex_of(digest(8)) }
+                            ]
+                        }]
+                    }),
+                ),
+                ("GET", "/journal") => (
+                    200,
+                    json!({ "records": [{ "sequence": 1, "idempotency_key": "k", "event": { "idempotency_key": "k", "fact": { "Seal": spec_for_journal } } }] }),
+                ),
+                ("POST", "/drafts") => (201, json!({ "draft_id": "1", "draft": {} })),
+                ("PATCH", "/drafts/1") => (200, json!({ "draft_id": "1", "draft": {} })),
+                (method, path) if method == "POST" && path.ends_with("/supersede") => (
+                    200,
+                    json!({ "outcome": { "Superseded": { "predecessor": bloom_id_for_view.clone(), "successor": hex_of(digest(3)) } } }),
+                ),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                run_on(
+                    &Endpoint { host: "127.0.0.1".to_owned(), port },
+                    &supersede_args(bloom_id.clone(), task.clone(), Vec::new(), vec!["wp-2".to_owned()]),
+                )
+                .expect("supersede --eject against the fake coordinator")
+            },
+        );
+        fs::remove_file(&task).ok();
+        let patch = find(&log, "PATCH", "/drafts/1").body.as_ref().expect("patch body");
+        let proposals = patch["proposals"].as_array().expect("proposals");
+        assert_eq!(proposals.len(), 1, "ejected member is gone from the successor draft: {patch}");
+        assert_eq!(proposals[0]["workpiece"], "wp-1");
+
+        let supersede =
+            find(&log, "POST", &format!("/blooms/{bloom_id}/supersede")).body.as_ref().expect("supersede body");
+        let projections = supersede["projections"].as_array().expect("projections");
+        assert_eq!(projections.len(), 1, "ejected member is gone from the projections: {supersede}");
+        assert_eq!(projections[0]["workpiece"], "wp-1");
+        assert!(supersede["descriptions"].get("wp-2").is_none(), "ejected member is gone from descriptions");
+    }
+
+    #[test]
+    fn supersede_refuses_an_unknown_or_emptying_eject() {
+        // The tool is the refuse: an unknown name that reached the door would
+        // silently stay in the successor, and an emptied membership cannot seal.
+        let (bloom_id, spec_wire) = predecessor_spec();
+        let bloom_id_for_view = bloom_id.clone();
+        let spec_for_journal = spec_wire;
+        let task = temp_task("supersede-eject-refuse", "should not dispatch");
+        let ((unknown, emptying), _) = with_fake(
+            move |request| match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/view") => (
+                    200,
+                    json!({
+                        "mainline": hex_of(digest(1)),
+                        "observed": hex_of(digest(2)),
+                        "blooms": [{
+                            "id": bloom_id_for_view.clone(),
+                            "status": "Sealed",
+                            "superseded_by": null,
+                            "members": [{ "workpiece": "wp-1", "scope_revision": hex_of(digest(7)) }]
+                        }]
+                    }),
+                ),
+                ("GET", "/journal") => (
+                    200,
+                    json!({ "records": [{ "sequence": 1, "idempotency_key": "k", "event": { "idempotency_key": "k", "fact": { "Seal": spec_for_journal } } }] }),
+                ),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                let endpoint = Endpoint { host: "127.0.0.1".to_owned(), port };
+                let unknown = run_on(
+                    &endpoint,
+                    &supersede_args(bloom_id.clone(), task.clone(), Vec::new(), vec!["wp-z".to_owned()]),
+                )
+                .expect_err("unknown eject");
+                let emptying = run_on(
+                    &endpoint,
+                    &supersede_args(bloom_id.clone(), task.clone(), Vec::new(), vec!["wp-1".to_owned()]),
+                )
+                .expect_err("emptying eject");
+                (unknown, emptying)
+            },
+        );
+        fs::remove_file(&task).ok();
+        assert!(unknown.to_string().contains("wp-z"), "unknown eject names the workpiece: {unknown}");
+        assert!(emptying.to_string().contains("no members"), "emptying eject names the empty membership: {emptying}");
     }
 
     #[test]
