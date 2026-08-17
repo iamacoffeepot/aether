@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use aether_actor::Manual;
 use aether_bloomery::{
     Admit, ApprovalPolicy, AuthorityDoor, BloomDraft, BloomId, BloomSpec, ConfigScopes, DependencyError, Digest, Event,
-    Fact, IdempotencyKey, MemberDependency, Membership, SpendCeiling, Statement, WorkpieceId,
+    Fact, IdempotencyKey, MemberDependency, Membership, SpendCeiling, Statement, SurfacePattern, WorkpieceId,
     resolve_member_dependencies, surface_intersection,
 };
 use aether_data::wire::to_vec;
@@ -66,8 +66,9 @@ impl ApiCapabilityState {
     ///
     /// The gate is fail-closed at every branch: an unresolvable tier policy
     /// ([`gate_policy`](ApiCapabilityState::gate_policy)), a missing projection,
-    /// or an `Incomplete` verdict all **refuse the seal** (`422`)
-    /// rather than admit. An above-`auto` member takes the deferred
+    /// a declared-surface glob outside the grammar, or an `Incomplete` verdict
+    /// all **refuse the seal** (`422`) rather than admit. An above-`auto` member
+    /// takes the deferred
     /// signature-verification path (issue #3599): its projection's
     /// `signed_statement` is pre-checked synchronously (subject + author
     /// signature), then its signature is verified through the `aether.signing`
@@ -420,8 +421,9 @@ type PendingVerification = (usize, Digest, Statement);
 /// `gate`. An auto member is gate-formed in place; an above-auto member has its
 /// signed statement pre-checked and is queued (its `(index, scope_revision,
 /// statement)`) for the deferred `aether.signing` verify. Any missing projection,
-/// `Incomplete` verdict, missing statement, or failing pre-check returns the
-/// fail-closed `422` response instead — resolved before any signing dispatch.
+/// glob outside the surface grammar, `Incomplete` verdict, missing statement, or
+/// failing pre-check returns the fail-closed `422` response instead — resolved
+/// before any signing dispatch.
 ///
 /// Extracted from [`seal_draft`](ApiCapabilityState::seal_draft) so that hot
 /// path stays under the line ceiling; the two returned vectors are its Pass-2
@@ -445,6 +447,16 @@ fn resolve_seal_memberships(
         let Some(&projection) = projections.get(&(&proposal.workpiece, &proposal.scope_revision)) else {
             return Err(error_response(422, &format!("member {member} has no scope projection; seal fails closed")));
         };
+        // A glob outside the grammar is not an empty surface. Skipping it would
+        // admit the member, derive no overlap edges, and dispatch it beside the
+        // peers it actually shares files with. `--pre-approved` waives the tier,
+        // not this check — the grammar is decided before the gate runs.
+        if let Some(glob) = projection.declared_surface.iter().find(|glob| SurfacePattern::parse(glob).is_none()) {
+            return Err(error_response(
+                422,
+                &format!("member {member} declared surface {glob:?} is outside the surface grammar; seal fails closed"),
+            ));
+        }
         // The digest binds the approval to the projection as evaluated. It is
         // computed over the canonical wire re-encoding of the decoded struct, not
         // the raw request slice: the JSON body carries no per-projection byte
@@ -502,24 +514,28 @@ fn resolve_seal_memberships(
 
 /// Resolve the seal's member-dependency graph (ADR-0196): declared edges
 /// unioned with one ordering edge per overlapping declared-surface pair, in
-/// seal-listed order. A cycle or an edge naming a non-member is a fail-closed
-/// `422` — the graph is decided here, before any admit.
+/// seal-listed order. A cycle, an edge naming a non-member, or a member with
+/// no matching projection is a fail-closed `422` — the graph is decided here,
+/// before any admit. A missing projection is a malformed request, not an
+/// edgeless member: dropping it would derive a graph that pretends the member
+/// was never there.
 fn resolve_seal_graph(
     members: &[Membership],
     projections: &[MemberProjection],
     declared: &[MemberDependency],
 ) -> Result<Vec<MemberDependency>, HttpServerResponse> {
-    let listed: Vec<(WorkpieceId, &[String])> = members
-        .iter()
-        .filter_map(|member| {
-            projections
-                .iter()
-                .find(|projection| {
-                    projection.workpiece == member.workpiece && projection.scope_revision == member.scope_revision
-                })
-                .map(|projection| (member.workpiece.clone(), projection.declared_surface.as_slice()))
-        })
-        .collect();
+    let mut listed = Vec::with_capacity(members.len());
+    for member in members {
+        let Some(projection) = projections.iter().find(|projection| {
+            projection.workpiece == member.workpiece && projection.scope_revision == member.scope_revision
+        }) else {
+            return Err(error_response(
+                422,
+                &format!("member {} has no scope projection; seal fails closed", member.workpiece.0),
+            ));
+        };
+        listed.push((member.workpiece.clone(), projection.declared_surface.as_slice()));
+    }
     match resolve_member_dependencies(&listed, declared) {
         Ok(edges) => Ok(edges),
         Err(DependencyError::UnknownWorkpiece(workpiece)) => Err(error_response(
@@ -608,14 +624,15 @@ fn parse_optional_body<T: DeserializeOwned + Default>(body: &[u8]) -> Result<T, 
 #[cfg(test)]
 mod tests {
     use aether_bloomery::{
-        BloomDraft, BloomId, ConfigRegistry, Digest, Evidence, EvidenceKind, Fact, MemberDependency, Membership,
-        WorkpieceId,
+        ApprovalPolicy, BloomDraft, BloomId, ConfigRegistry, Digest, Evidence, EvidenceKind, Fact, MemberDependency,
+        Membership, Tier, WorkpieceId,
     };
 
     use super::{
-        MemberProjection, SealRequest, admission_fact, parse_optional_body, resolve_seal_graph, surface_overlaps,
+        MemberProjection, SealRequest, admission_fact, parse_optional_body, resolve_seal_graph,
+        resolve_seal_memberships, surface_overlaps,
     };
-    use crate::bloomery::{AdrTouch, Completeness};
+    use crate::bloomery::{AdrTouch, Completeness, Gate};
 
     /// A sealed member at `revision`. Only its workpiece and scope revision are
     /// read by the overlap scan; the rest is what a member is made of.
@@ -849,5 +866,44 @@ mod tests {
         let body = String::from_utf8_lossy(&error.body);
         assert_eq!(error.status, 422);
         assert!(body.contains("wp-z"), "refusal names the outsider: {body}");
+    }
+
+    #[test]
+    fn the_door_refuses_an_unparseable_declared_surface_glob() {
+        // A comma-joined path list is one glob containing `,`, which the
+        // grammar rejects. Skipping it would admit the member with an empty
+        // surface, derive no overlap edges, and dispatch it beside the peers
+        // it actually shares files with. `--pre-approved` waives the tier, not
+        // the grammar — the observed hole was sealing that typo as auto.
+        let policy = ApprovalPolicy { default: Tier::Auto, rules: Vec::new() };
+        let gate = Gate::new(&policy);
+        let members = [member("wp-a", 1)];
+        let mut projections = [projection("wp-a", 1, &["crates/foo/**", "crates/foo/**,crates/bar/**"])];
+        projections[0].pre_approved = true;
+
+        let error =
+            resolve_seal_memberships(&gate, &members, &projections).expect_err("an unparseable glob must refuse");
+        let body = String::from_utf8_lossy(&error.body);
+        assert_eq!(error.status, 422);
+        assert!(body.contains("wp-a"), "refusal names the member: {body}");
+        assert!(
+            body.contains("crates/foo/**,crates/bar/**"),
+            "refusal names the offending glob, not only its valid sibling: {body}"
+        );
+    }
+
+    #[test]
+    fn the_door_refuses_a_member_with_no_matching_projection() {
+        // A missing projection is a malformed request, not an edgeless
+        // member. Dropping it from the derivation set would journal a graph
+        // that pretends the member was never there, so overlapping peers
+        // would dispatch as if they had no neighbor.
+        let members = [member("wp-a", 1), member("wp-b", 2)];
+        let projections = [projection("wp-a", 1, &["docs/**"])];
+
+        let error = resolve_seal_graph(&members, &projections, &[]).expect_err("a missing projection must refuse");
+        let body = String::from_utf8_lossy(&error.body);
+        assert_eq!(error.status, 422);
+        assert!(body.contains("wp-b"), "refusal names the unmatched member: {body}");
     }
 }

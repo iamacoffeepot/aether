@@ -1903,6 +1903,7 @@ fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
             &StageCatalog::binding_of(StageId::AggregateVerify),
             tree,
             tree,
+            tree,
         ),
         configs: ConfigRegistry::default(),
     };
@@ -1991,6 +1992,7 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
         stage: StageId::AggregateVerify,
         transformation: Transformation::for_aggregate_verify(
             &StageCatalog::binding_of(StageId::AggregateVerify),
+            tree,
             tree,
             tree,
         ),

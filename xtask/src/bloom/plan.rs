@@ -188,6 +188,25 @@ pub fn successor_patch(spec: &BloomSpec, base: DigestHex, configs: ConfigRegistr
     }
 }
 
+/// Drop named predecessor members from the successor's proposals. Refuses an
+/// eject that names a workpiece the predecessor does not carry, or that would
+/// leave the successor with no members.
+pub fn eject_members(proposals: &mut Vec<WireMembership>, eject: &[String]) -> Result<()> {
+    for workpiece in eject {
+        if proposals.iter().all(|member| member.workpiece != *workpiece) {
+            bail!("--eject names {workpiece}, which is not a predecessor member");
+        }
+    }
+    if eject.is_empty() {
+        return Ok(());
+    }
+    proposals.retain(|member| !eject.contains(&member.workpiece));
+    if proposals.is_empty() {
+        bail!("--eject would leave the successor with no members");
+    }
+    Ok(())
+}
+
 pub fn projections(
     members: &[WireMembership],
     input: &ProjectionInput,
@@ -239,11 +258,16 @@ pub fn supersede_request(
     members: &[WireMembership],
     task: &str,
     input: &ProjectionInput,
+    edges: &[(String, String)],
 ) -> Result<SupersedeRequest> {
     Ok(SupersedeRequest {
         successor_draft: draft_id.to_owned(),
         projections: projections(members, input, &[])?,
         descriptions: descriptions(task, members.iter().map(|member| member.workpiece.as_str())),
+        edges: edges
+            .iter()
+            .map(|(member, depends_on)| DependencyEdge { member: member.clone(), depends_on: depends_on.clone() })
+            .collect(),
     })
 }
 
@@ -367,7 +391,7 @@ pub fn require_task(text: &str, path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BaseChoice, ProjectionInput, projections, resolve_base, seal_patch, successor_patch};
+    use super::{BaseChoice, ProjectionInput, eject_members, projections, resolve_base, seal_patch, successor_patch};
     use crate::bloom::dto::{
         AdrTouch, Approval, BloomSpec, Completeness, ConfigRegistry, DigestHex, Membership, ViewDocument,
     };
@@ -396,6 +420,32 @@ mod tests {
         assert_eq!(resolve_base(&BaseChoice::Observed, &view), digest(2));
         assert_eq!(resolve_base(&BaseChoice::Mainline, &view), digest(1));
         assert_eq!(resolve_base(&BaseChoice::Hex(digest(3)), &view), digest(3));
+    }
+
+    #[test]
+    fn eject_members_drops_a_named_predecessor() {
+        // The recovery the flag exists for: leave the wedged member out of
+        // the successor. Filtering after the copy, rather than omitting the
+        // member from the predecessor read, is what keeps an unknown name
+        // distinguishable from a successful drop.
+        let mut members = vec![member("wp-1", 1), member("wp-2", 2)];
+        eject_members(&mut members, &["wp-2".to_owned()]).expect("known member");
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].workpiece, "wp-1");
+        assert_eq!(members[0].scope_revision, digest(1));
+    }
+
+    #[test]
+    fn eject_members_refuses_an_unknown_or_emptying_eject() {
+        // Silently ignoring `--eject wp-z` would let the operator think they
+        // dropped a workpiece the successor still claims. Ejecting the last
+        // member would mint a successor with no membership, which the door
+        // cannot seal.
+        let err = eject_members(&mut vec![member("wp-1", 1)], &["wp-z".to_owned()]).expect_err("unknown");
+        assert!(err.to_string().contains("wp-z"), "error names the absent workpiece: {err}");
+
+        let err = eject_members(&mut vec![member("wp-1", 1)], &["wp-1".to_owned()]).expect_err("empty");
+        assert!(err.to_string().contains("no members"), "error names the empty membership: {err}");
     }
 
     #[test]
