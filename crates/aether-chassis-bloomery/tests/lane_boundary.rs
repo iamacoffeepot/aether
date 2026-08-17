@@ -41,10 +41,11 @@ fn at_rest(bloom: &BloomView) -> bool {
 /// has recorded, and return the harness.
 ///
 /// Shared by the evidence-shortfall scenarios below. Those used to wait for a
-/// wedge; host-fault verdicts now emit `ExecutorFault`, which this tree's
-/// intake refuses for member stages (#5091). The load-bearing property left
-/// is that the backend does not re-drive a terminal missing/unreadable body
-/// forever — the run completes and the ledger advances.
+/// wedge; host-fault verdicts now emit `ExecutorFault`, which #5091 admits as
+/// a member machinery fault and redispatches on its own axis. Callers that
+/// only need "the first run completed" still wait here — the machinery
+/// series is bounded by the sealed stage budget, so a missing body cannot
+/// loop forever.
 fn ran_under(mode: LaneMode) -> LaneHarness {
     let mut harness = LaneHarness::start(&LaneScript::all_passing().with_default(mode));
     harness.wait_for_runs(1);
@@ -163,6 +164,11 @@ fn a_construct_run_that_writes_nothing_does_not_advance_the_member() {
         "a construct run with nothing behind its claim must not resolve a member",
     );
     assert!(bloom.members[0].wedge.is_some(), "and the failed captures must reach the wedge counter");
+    assert_eq!(
+        bloom.members[0].wedge_cause,
+        Some(aether_bloomery::WedgeCause::Work),
+        "a clean tree is rejected work, not a machinery series",
+    );
     assert!(
         harness.ledger().iter().all(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND),
         "a member that never produced a candidate never reaches its verification",
@@ -216,14 +222,26 @@ fn a_lane_that_exits_non_zero_without_evidence_fails_its_attempt() {
 
 #[test]
 fn a_missing_evidence_lane_is_a_host_fault_not_a_candidate_failure() {
-    // ADR-0195 §2: an exited child that wrote no evidence.json rendered no
-    // judgment. The backend synthesizes ExecutorFault and evicts; it must
-    // not loop on the missing file.
-    let harness = ran_under(LaneMode::NoEvidence);
+    // ADR-0195 §2 / #5091: an exited child that wrote no evidence.json
+    // rendered no judgment. The backend synthesizes ExecutorFault; intake
+    // admits it as a member machinery fault and redispatches the same
+    // stage until the sealed Construct budget (2) is gone. That is a
+    // bounded series, not an eternal re-drive of the missing file.
+    let mut harness = LaneHarness::start(&LaneScript::all_passing().with_default(LaneMode::NoEvidence));
+    let bloom = harness.settle("the machinery series reaches its ceiling", at_rest);
+    let member = &bloom.members[0];
+    assert!(member.wedge.is_some(), "the sealed machinery budget ends the series");
+    assert_eq!(
+        member.wedge_cause,
+        Some(aether_bloomery::WedgeCause::Machinery),
+        "a host that never judged the candidate is a machinery wedge",
+    );
+    assert_eq!(member.machinery_rolls, 2, "Construct's sealed budget is two");
+    assert_eq!(member.machinery_budget, 2);
     assert_eq!(
         harness.ledger().iter().filter(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND).count(),
-        1,
-        "one construct attempt, not an eternal re-drive of the missing file",
+        2,
+        "one bounded redispatch, then a terminal stop — not an eternal re-drive",
     );
 }
 

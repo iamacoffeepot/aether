@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
     AggregateVerifyError, AttemptCompletedError, Decision, FoldConflictError, GrantAttemptsError, HostFaultError,
-    IntegrateError, LandError, LandingRejectedError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError,
-    ResolveError, SealError, SpliceError, SupersedeError, VerifyFailedError,
+    IntegrateError, LandError, LandingRejectedError, MemberExecutorFaultError, OperatorHoldError, OperatorRepairError,
+    OrphanClaimReleaseError, ResolveError, SealError, SpliceError, SupersedeError, VerifyFailedError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -591,6 +591,44 @@ pub enum Outcome {
     },
     /// A splice-assembly admission was refused.
     SpliceRejected(SpliceError),
+    /// A member stage could not run and the same artifact was redispatched
+    /// (ADR-0195) — a bounded retry of the *gate*, not a repair of anything.
+    ///
+    /// Nothing about the member's work moved: the candidate still stands, and
+    /// neither `attempts` nor `repair_rolls` advanced. Appended so the prior
+    /// outcomes' wire discriminants are unchanged, like the variant below.
+    MachineryRetried {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The retried member.
+        workpiece: WorkpieceId,
+        /// The stage re-dispatched.
+        stage: StageId,
+        /// Machinery faults this stage has taken, this one included.
+        rolls: u32,
+        /// The sealed stage retry budget the series is bounded by.
+        budget: u32,
+    },
+    /// A member stage's executor faults reached the sealed budget: the member
+    /// carries a terminal machinery-cause wedge and dispatches nothing further
+    /// (ADR-0195).
+    ///
+    /// Recovery is an operator door after the host is repaired — not a Refine
+    /// lap, and not another poll that quietly buys an attempt.
+    MachineryWedged {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The wedged member.
+        workpiece: WorkpieceId,
+        /// The stage that exhausted its machinery budget.
+        stage: StageId,
+        /// Machinery faults this stage took, the terminal one included.
+        rolls: u32,
+        /// The sealed budget the series exhausted.
+        budget: u32,
+    },
+    /// A member machinery-fault admission was refused.
+    MemberExecutorFaultRejected(MemberExecutorFaultError),
 }
 
 impl Outcome {

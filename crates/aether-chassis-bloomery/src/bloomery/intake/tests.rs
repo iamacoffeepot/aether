@@ -1118,20 +1118,71 @@ fn an_aggregate_review_executor_fault_admits_its_own_fact_and_touches_no_finding
     ));
 }
 
-// ADR-0176 ratified the fault lifecycle for the aggregate review alone, so every
-// other stage refuses the verdict rather than being handed semantics no decision
-// covers. Tripwire: routing it by verdict alone would send a member-stage fault
-// into `AttemptCompleted` as an ordinary failure — the flattening this issue
-// exists to remove, reintroduced one stage over.
+// ADR-0195 admits ExecutorFault for dispatched member stages as its own fact,
+// so a host outage is not flattened into AttemptCompleted / VerifyFailed.
+// Tripwire: routing it by verdict alone as a failing attempt would spend the
+// work budget this issue exists to keep separate.
 #[test]
-fn an_executor_fault_on_any_other_stage_is_refused_and_the_order_stays_live() {
+fn a_member_executor_fault_admits_its_own_fact_and_consumes_the_order_once() {
     let mut store = store();
     let bloom = BloomId(Digest::from_bytes([1; 32]));
     let subject = Digest::from_bytes([30; 32]);
 
     for (nonce, stage) in
-        [("n-f-verify", StageId::Verify), ("n-f-construct", StageId::Construct), ("n-f-av", StageId::AggregateVerify)]
+        [("n-f-verify", StageId::Verify), ("n-f-construct", StageId::Construct), ("n-f-refine", StageId::Refine)]
     {
+        let mut record = dispatch_record(nonce, bloom, &WorkpieceId("wp".to_owned()), subject, subject);
+        record.stage = stage;
+        record_dispatch(&mut store, &record).unwrap();
+
+        let upload = UploadedEvidence {
+            nonce: Nonce(nonce.to_owned()),
+            subject,
+            verdict: StageVerdict::ExecutorFault,
+            detail: Digest::from_bytes([9; 32]),
+            candidate: None,
+            findings: Some("the sandbox refused to start.\nVERDICT: environment".to_owned()),
+            failed_verifiers: VerifyFailureSet::EMPTY,
+            cost: None,
+            calls: None,
+        };
+        let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
+            panic!("{stage:?} member fault should be admitted");
+        };
+        let Fact::MemberExecutorFault { bloom: faulted, workpiece, stage: got, evidence } = &admission.event.fact
+        else {
+            panic!("{stage:?} should admit MemberExecutorFault, got {:?}", admission.event.fact);
+        };
+        assert_eq!(*faulted, bloom);
+        assert_eq!(workpiece.0, "wp");
+        assert_eq!(*got, stage);
+        assert_eq!(evidence.subject, subject);
+        assert_eq!(evidence.kind, EvidenceKind::ExecutorFault);
+        assert!(
+            store.lookup_review_findings(bloom.0.as_bytes(), "wp").unwrap().is_none(),
+            "{stage:?} must not persist findings a gate never rendered",
+        );
+
+        assert!(
+            matches!(
+                admit_uploaded(&mut store, &upload).unwrap(),
+                AdmitDecision::Refused(IntakeRefusal::UnknownNonce(_))
+            ),
+            "{stage:?} consume-once: a replayed fault must not buy a second retry",
+        );
+    }
+}
+
+// ADR-0195 left AggregateVerify (and every non-member, non-review stage)
+// without a fault lifecycle. Tripwire: treating every ExecutorFault as a
+// member fact would invent semantics for a bloom-level compiler gate.
+#[test]
+fn an_executor_fault_on_a_stage_without_a_lifecycle_is_refused_and_the_order_stays_live() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let subject = Digest::from_bytes([30; 32]);
+
+    for (nonce, stage) in [("n-f-av", StageId::AggregateVerify), ("n-f-scope", StageId::Scope)] {
         let mut record = dispatch_record(nonce, bloom, &WorkpieceId("wp".to_owned()), subject, subject);
         record.stage = stage;
         record_dispatch(&mut store, &record).unwrap();

@@ -190,6 +190,36 @@ pub struct MemberView {
     /// still decodes.
     #[serde(default)]
     pub host_fault: Option<HostFaultView>,
+    /// Machinery faults this member has taken on its current stage (ADR-0195).
+    /// `0` while none have been recorded. `#[serde(default)]` so a reader that
+    /// predates the field still decodes.
+    #[serde(default)]
+    pub machinery_rolls: u32,
+    /// The sealed retry budget the machinery series is bounded by — the bound
+    /// stated rather than left for a reader to know. `0` when the member has
+    /// no cursor yet. `#[serde(default)]` so a reader that predates the field
+    /// still decodes.
+    #[serde(default)]
+    pub machinery_budget: u32,
+    /// Why the member stopped, once it has wedged (ADR-0195). `None` while it
+    /// is still working. Distinguishes a sick host from rejected work at the
+    /// door an operator reads. `#[serde(default)]` so a reader that predates
+    /// the field still decodes.
+    #[serde(default)]
+    pub wedge_cause: Option<WedgeCause>,
+}
+
+/// Why a member stopped dispatching (ADR-0195).
+///
+/// A `Work` wedge exhausted the stage's ordinary retry or repair budget. A
+/// `Machinery` wedge exhausted the independent machinery series — the host
+/// never judged the candidate.
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum WedgeCause {
+    /// The stage's work or repair budget was exhausted.
+    Work,
+    /// The independent machinery-retry budget was exhausted.
+    Machinery,
 }
 
 /// A member's host-fault hold, rendered so an operator can see that Verify

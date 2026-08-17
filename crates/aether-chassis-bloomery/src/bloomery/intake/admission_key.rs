@@ -37,6 +37,8 @@ pub enum AdmissionKey {
     AggregateReviewExecutorFault,
     /// A whole-bloom aggregate-verify verdict.
     AggregateVerify,
+    /// A member stage whose executor could not judge the subject (ADR-0195).
+    MemberExecutorFault,
     /// A study-record evidence admission. Not a dispatch-accounting key: a
     /// study row landing must not mark the dispatch complete — the verdict
     /// is what consumes the order. Excluded from [`Self::ALL`].
@@ -48,7 +50,7 @@ impl AdmissionKey {
     /// of these is the durable statement that the dispatch reached the
     /// reducer as a verdict. [`Self::Study`] is deliberately absent: it
     /// rides the same nonce but must not satisfy the strand check.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Attempt,
         Self::Integrate,
         Self::VerifyFailed,
@@ -56,6 +58,7 @@ impl AdmissionKey {
         Self::AggregateReview,
         Self::AggregateReviewExecutorFault,
         Self::AggregateVerify,
+        Self::MemberExecutorFault,
     ];
 
     /// The key's stable prefix — the half of the key that is not the nonce.
@@ -68,6 +71,7 @@ impl AdmissionKey {
             Self::AggregateReview => "aether.bloomery.aggregate_review",
             Self::AggregateReviewExecutorFault => "aether.bloomery.aggregate_review_executor_fault",
             Self::AggregateVerify => "aether.bloomery.aggregate_verify",
+            Self::MemberExecutorFault => "aether.bloomery.member_executor_fault",
             Self::Study => "aether.bloomery.study",
         }
     }
