@@ -21,7 +21,7 @@ mod lane;
 use std::fs;
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aether_bloomery::{
     BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure,
@@ -227,7 +227,20 @@ fn a_missing_evidence_lane_is_a_host_fault_not_a_candidate_failure() {
     // admits it as a member machinery fault and redispatches the same
     // stage until the sealed Construct budget (2) is gone. That is a
     // bounded series, not an eternal re-drive of the missing file.
+    //
+    // Wait for both construct dispatches before settle: between rolls the
+    // order table is empty, and settle's quiescence window treats that gap
+    // as a stop under suite contention.
     let mut harness = LaneHarness::start(&LaneScript::all_passing().with_default(LaneMode::NoEvidence));
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while harness.ledger().iter().filter(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND).count() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the machinery series never dispatched a second construct; ledger={:?}",
+            harness.ledger().iter().map(|run| run.command.as_str()).collect::<Vec<_>>(),
+        );
+        thread::sleep(Duration::from_millis(250));
+    }
     let bloom = harness.settle("the machinery series reaches its ceiling", at_rest);
     let member = &bloom.members[0];
     assert!(member.wedge.is_some(), "the sealed machinery budget ends the series");
