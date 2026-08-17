@@ -5,7 +5,9 @@
 //! registry / lifecycle / evidence logic is exercised without a real repo or
 //! Claude credential.
 
+use std::io;
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 
 use aether_bloomery::BackendObjectId;
 
@@ -82,15 +84,67 @@ pub trait RunProcess: Send {
 }
 
 /// A transform child's folded lifecycle.
+///
+/// A clean exit status, a terminating signal, and a `try_wait` fault stay
+/// distinct: the first is whatever the child chose to report, the second and
+/// third are host observations that rendered no judgment (ADR-0195 §2).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RunLifecycle {
     /// Still executing.
     Running,
-    /// Exited; `success` mirrors the child's exit status.
+    /// The child exited with a waitable status. `success` is whether that
+    /// status was zero — a clean failure is still a clean exit, not a signal.
     Exited {
         /// Whether the child exited zero.
         success: bool,
     },
+    /// The child was terminated by a signal. Unix only in production; tests
+    /// pin the variant directly. Windows has no equivalent observation.
+    Signaled {
+        /// The signal that terminated the child (`SIGKILL` is 9).
+        signal: i32,
+    },
+    /// `try_wait` failed; the host could not obtain a status at all.
+    ObservationFault,
+}
+
+impl RunLifecycle {
+    /// Fold a non-blocking `try_wait` into the typed lifecycle.
+    #[must_use]
+    pub fn from_try_wait(result: io::Result<Option<ExitStatus>>) -> Self {
+        match result {
+            Ok(None) => Self::Running,
+            Ok(Some(status)) => Self::from_exit_status(status),
+            Err(_) => Self::ObservationFault,
+        }
+    }
+
+    /// Classify a reaped [`ExitStatus`] without collapsing a signal into a
+    /// boolean.
+    #[must_use]
+    pub fn from_exit_status(status: ExitStatus) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(signal) = status.signal() {
+                return Self::Signaled { signal };
+            }
+        }
+        Self::Exited { success: status.success() }
+    }
+
+    /// Whether this lifecycle will never change again.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        !matches!(self, Self::Running)
+    }
+
+    /// Whether the child exited zero. A signal or a wait fault is not a
+    /// success, even though both are terminal.
+    #[must_use]
+    pub const fn clean_success(self) -> bool {
+        matches!(self, Self::Exited { success: true })
+    }
 }
 
 /// The git-checkout + `cargo xtask transform` spawn seam. Production shells out

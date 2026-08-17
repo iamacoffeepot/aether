@@ -169,6 +169,27 @@ impl LaneHarness {
         self.runs.path().to_owned()
     }
 
+    /// Poll until the mock ledger holds at least `min` runs.
+    ///
+    /// Used by host-fault scenarios whose orders stay outstanding until
+    /// #5091 admits `ExecutorFault` for member stages — `settle` would
+    /// treat that standstill as a stall.
+    ///
+    /// # Panics
+    /// The budget expired before that many runs were recorded.
+    pub fn wait_for_runs(&mut self, min: usize) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while self.ledger().len() < min {
+            assert!(
+                Instant::now() < deadline,
+                "lane never recorded {min} runs; outstanding={:?} ledger={}",
+                self.outstanding(),
+                self.ledger().len(),
+            );
+            thread::sleep(POLL);
+        }
+    }
+
     /// Every lane run the mock has recorded, in dispatch order.
     ///
     /// # Panics

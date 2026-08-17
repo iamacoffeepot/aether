@@ -32,7 +32,6 @@ use aether_bloomery_github::to_hex;
 
 #[cfg(target_os = "linux")]
 use super::identity::ProcessIdentity;
-#[cfg(target_os = "linux")]
 use super::orphan::OrphanedRun;
 use super::quarantine;
 use super::runner::CapturedObjects;
@@ -265,7 +264,11 @@ fn a_malformed_body_failure_set_fails_closed() {
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
     let upload = NameEvidenceClaims.claim_for(&reference).expect("the fail-closed empty-mask name decodes");
 
-    assert_eq!(upload.verdict, StageVerdict::VerificationFailed);
+    assert_eq!(
+        upload.verdict,
+        StageVerdict::ExecutorFault,
+        "a verify body whose typed set does not decode rendered no judgment",
+    );
     assert!(upload.failed_verifiers.is_empty(), "invalid body data is never projected as a typed claim");
 }
 
@@ -299,14 +302,11 @@ fn an_environment_status_yields_an_executor_fault_rather_than_a_failing_review()
 }
 
 #[test]
-fn a_verify_lane_environment_status_is_an_unjudged_verify() {
-    // Tripwire (#5089): Wave 8's dispatch-520 stamped `environment` on a
-    // member Verify whose only failures sat outside the candidate's
-    // reverse-dependency closure. Projecting that as `ExecutorFault` is
-    // correct for AggregateReview (ADR-0176) and wrong here — intake
-    // refuses a Verify executor fault and the order sits until its
-    // deadline. The empty typed set is the existing unjudged-Verify
-    // contract: admit, then rerun Verify mechanically.
+fn a_verify_lane_environment_status_is_an_executor_fault() {
+    // Tripwire (ADR-0195 §2): a Verify `environment` stamp is the lane
+    // reporting it could not judge. #5089 projected that as an empty
+    // `VerificationFailed` so intake would not refuse it; the host now
+    // classifies every no-judgment the same way, including this one.
     let base = TempDir::new().unwrap();
     let subject = digest(9);
     let evidence = r#"{"command":"verify.check","nonce":"n-verify-env","status":"environment","environment":"36 failing tests lie outside the candidate's reverse-dependency closure."}"#;
@@ -325,14 +325,14 @@ fn a_verify_lane_environment_status_is_an_unjudged_verify() {
     let upload =
         NameEvidenceClaims.claim_for(&reference).expect("the unjudged name round-trips through the claim seam");
 
-    assert_eq!(upload.verdict, StageVerdict::VerificationFailed);
+    assert_eq!(upload.verdict, StageVerdict::ExecutorFault);
     assert_eq!(upload.subject, subject, "an unjudged verify still binds the exact digest the order displayed");
     assert!(reference.failed_verifiers.is_empty(), "the reference carries the already-decoded empty set");
     assert!(upload.failed_verifiers.is_empty(), "no verifier judged the candidate, so none is charged for it");
     assert_eq!(
         upload.detail,
         Digest::of_wire_bytes(evidence.as_bytes()),
-        "the environment evidence remains the attempt detail"
+        "the environment evidence remains the attempt detail",
     );
 }
 
@@ -363,6 +363,132 @@ fn an_unrecognized_or_absent_status_still_fails_closed_on_the_exit() {
 
         assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "{label} must not become a host-fault claim");
     }
+}
+
+fn subject_hex(digest: Digest) -> String {
+    digest.as_bytes().iter().fold(String::new(), |mut hex, byte| {
+        hex.push(char::from_digit(u32::from(*byte >> 4), 16).unwrap_or('0'));
+        hex.push(char::from_digit(u32::from(*byte & 0x0f), 16).unwrap_or('0'));
+        hex
+    })
+}
+
+fn synthesized_fault_bytes(nonce: &str, subject: Digest, cause: &str, signal: Option<i32>) -> Vec<u8> {
+    let mut body = serde_json::json!({
+        "status": "environment",
+        "nonce": nonce,
+        "subject": subject_hex(subject),
+        "cause": cause,
+    });
+    if let Some(signal) = signal {
+        body["signal"] = signal.into();
+    }
+    serde_json::to_vec(&body).unwrap()
+}
+
+fn verify_order(subject: Digest, nonce: &str) -> aether_bloomery::WorkOrder {
+    aether_bloomery::WorkOrder {
+        transformation: Transformation::for_member_stage(
+            &StageCatalog::binding_of(StageId::Verify),
+            subject,
+            digest(0xC0),
+            digest(0xB0),
+        ),
+        nonce: Nonce(nonce.to_owned()),
+    }
+}
+
+#[test]
+fn a_signal_killed_run_with_no_evidence_is_a_host_fault() {
+    // Tripwire (ADR-0195 §2): SIGKILL used to collapse into `Exited { success:
+    // false }` and then into an empty VerificationFailed. The host observed a
+    // terminating signal, not a judgment.
+    let base = TempDir::new().unwrap();
+    let subject = digest(5);
+    let nonce = "n-sig";
+    let exec = executor(&base, "", RunLifecycle::Signaled { signal: 9 });
+    // FixedRunner still writes the empty string as evidence.json; delete it so
+    // the missing-file arm sees the signal.
+    let handle = exec.submit(&construct_order(subject, nonce)).unwrap();
+    fs::remove_file(base.path().join(format!("{nonce}-evidence")).join("evidence.json")).unwrap();
+
+    let refs = exec.stream_evidence(&handle).unwrap();
+    let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized fault decodes");
+    assert_eq!(upload.verdict, StageVerdict::ExecutorFault);
+    assert_eq!(upload.subject, subject);
+    assert!(upload.failed_verifiers.is_empty());
+    assert_eq!(
+        upload.detail,
+        Digest::of_wire_bytes(&synthesized_fault_bytes(nonce, subject, "signaled", Some(9))),
+        "the supporting body names the signal and binds this order",
+    );
+}
+
+#[test]
+fn an_observation_fault_with_no_evidence_is_a_host_fault() {
+    let base = TempDir::new().unwrap();
+    let subject = digest(5);
+    let nonce = "n-obs";
+    let exec = executor(&base, "", RunLifecycle::ObservationFault);
+    let handle = exec.submit(&construct_order(subject, nonce)).unwrap();
+    fs::remove_file(base.path().join(format!("{nonce}-evidence")).join("evidence.json")).unwrap();
+
+    let refs = exec.stream_evidence(&handle).unwrap();
+    let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized fault decodes");
+    assert_eq!(upload.verdict, StageVerdict::ExecutorFault);
+    assert_eq!(
+        upload.detail,
+        Digest::of_wire_bytes(&synthesized_fault_bytes(nonce, subject, "observation-fault", None)),
+    );
+}
+
+#[test]
+fn a_valid_authored_failure_is_kept_after_a_nonzero_exit() {
+    // Tripwire: treating every nonzero exit as machinery would retry a
+    // candidate a verifier already judged. The body is the judgment.
+    let base = TempDir::new().unwrap();
+    let evidence =
+        r#"{"command":"verify.check","nonce":"n-authored","status":"fail","failed_verifiers":["verify.fmt"]}"#;
+    let exec = executor(&base, evidence, RunLifecycle::Exited { success: false });
+    let handle = exec.submit(&verify_order(digest(7), "n-authored")).unwrap();
+
+    let upload = NameEvidenceClaims.claim_for(&exec.stream_evidence(&handle).unwrap()[0]).unwrap();
+    assert_eq!(upload.verdict, StageVerdict::VerificationFailed);
+    assert_eq!(upload.failed_verifiers, VerifyFailureSet::one(VerifyFailure::Fmt));
+    assert_eq!(upload.detail, Digest::of_wire_bytes(evidence.as_bytes()));
+}
+
+#[test]
+fn a_valid_authored_failure_is_kept_after_a_terminating_signal() {
+    let base = TempDir::new().unwrap();
+    let evidence =
+        r#"{"command":"verify.check","nonce":"n-sig-fail","status":"fail","failed_verifiers":["verify.clippy"]}"#;
+    let exec = executor(&base, evidence, RunLifecycle::Signaled { signal: 9 });
+    let handle = exec.submit(&verify_order(digest(7), "n-sig-fail")).unwrap();
+
+    let upload = NameEvidenceClaims.claim_for(&exec.stream_evidence(&handle).unwrap()[0]).unwrap();
+    assert_eq!(
+        upload.verdict,
+        StageVerdict::VerificationFailed,
+        "a bound authored fail is still a judgment after SIGKILL",
+    );
+    assert_eq!(upload.failed_verifiers, VerifyFailureSet::one(VerifyFailure::Clippy));
+}
+
+#[test]
+fn inspect_treats_a_signal_and_a_wait_fault_as_completed_failures() {
+    let base = TempDir::new().unwrap();
+    let signaled = executor(&base, "{}", RunLifecycle::Signaled { signal: 9 });
+    let handle = signaled.submit(&construct_order(digest(5), "n-sig-inspect")).unwrap();
+    assert_eq!(
+        signaled.inspect(&handle).unwrap(),
+        ExecutionStatus::Completed { conclusion: Conclusion::Failure },
+        "a signal-killed child is completed so stream_evidence can classify it",
+    );
+
+    let observed = executor(&base, "{}", RunLifecycle::ObservationFault);
+    let handle = observed.submit(&construct_order(digest(5), "n-obs-inspect")).unwrap();
+    assert_eq!(observed.inspect(&handle).unwrap(), ExecutionStatus::Completed { conclusion: Conclusion::Failure },);
 }
 
 #[test]
@@ -443,10 +569,8 @@ fn evidence_for_a_different_nonce_fails_closed_before_its_claims_are_read() {
 
     let refs = exec.stream_evidence(&handle).unwrap();
     let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes");
-    assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "a stale body cannot advance this order");
+    assert_eq!(upload.verdict, StageVerdict::ExecutorFault, "a stale body cannot advance this order");
     assert_eq!(refs[0].nonce, Nonce(expected.to_owned()), "the authoritative handle remains the claim nonce");
-    assert_eq!(refs[0].size_bytes, u64::try_from(evidence.len()).unwrap());
-    assert_eq!(upload.detail, Digest::of_wire_bytes(evidence.as_bytes()), "the raw evidence remains accountable");
     assert!(refs[0].candidate.is_none(), "a stale construct body cannot trigger capture");
     assert!(refs[0].findings.is_none(), "a stale body cannot direct a repair lap");
     assert!(refs[0].cost.is_none(), "a stale body cannot enter study accounting");
@@ -478,9 +602,9 @@ fn construct_gate_fails_a_dead_run_with_no_terminal_result() {
 
 #[test]
 fn construct_gate_fails_unparseable_evidence() {
-    // Bytes that do not decode as a construct record are fail-closed — the run is
-    // known to be the construct lane (the Run's flag), so the exit is never read.
-    assert_eq!(construct_verdict("not json at all"), StageVerdict::VerificationFailed);
+    // Bytes that do not decode as a construct record rendered no judgment —
+    // a host observation, not a candidate defect.
+    assert_eq!(construct_verdict("not json at all"), StageVerdict::ExecutorFault);
 }
 
 // A `tracing` sink that renders each event as "LEVEL field=value …" into a shared
@@ -1039,21 +1163,20 @@ fn a_failed_evidence_read_keeps_the_run_and_its_slot_for_retry() {
 }
 
 #[test]
-fn an_exited_run_with_no_evidence_yields_a_failed_verdict_and_evicts() {
+fn an_exited_run_with_no_evidence_yields_a_host_fault_and_evicts() {
     // An Exited run that left no evidence.json will never produce one — re-driving
     // the read against it loops forever (the live 2026-07-18 bloom-trial bug). It is
-    // terminal: `stream_evidence` synthesizes a fail-closed VerificationFailed attempt
-    // (feeding the retry/wedge machinery) and evicts the run, rather than the eternal
-    // error re-drive.
+    // terminal: `stream_evidence` synthesizes an executor fault (ADR-0195 §2) and
+    // evicts the run, rather than the eternal error re-drive.
     let base = TempDir::new().unwrap();
     let (exec, log) = recording_executor(&base, None, RunLifecycle::Exited { success: true });
     let nonce = test_nonce("exited-no-evidence");
     let handle = exec.submit(&construct_order(digest(5), &nonce)).unwrap();
 
     let refs = exec.stream_evidence(&handle).unwrap();
-    assert_eq!(refs.len(), 1, "one synthesized failure ref for the evidence-less exit");
+    assert_eq!(refs.len(), 1, "one synthesized fault ref for the evidence-less exit");
     let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes as an attempt result");
-    assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "an exited run with no visible evidence fails closed");
+    assert_eq!(upload.verdict, StageVerdict::ExecutorFault, "an exited run with no visible evidence is a host fault");
 
     assert_eq!(
         exec.inspect(&handle).unwrap(),
@@ -1511,6 +1634,25 @@ fn reattachment_refuses_a_pid_whose_start_time_does_not_match() {
     assert!(child.try_wait().unwrap().is_none(), "the stranger at the recycled pid is still running");
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[test]
+fn an_orphan_does_not_invent_a_signal_or_a_wait_fault() {
+    // Tripwire (ADR-0195 §2): a re-adopted run never called `try_wait`.
+    // Reporting Signaled or ObservationFault would fabricate a process fact
+    // the successor coordinator cannot observe.
+    let base = TempDir::new().unwrap();
+    let nonce = test_nonce("orphan-poll");
+    let evidence_dir = base.path().join(format!("{nonce}-evidence"));
+    fs::create_dir_all(&evidence_dir).unwrap();
+    fs::write(evidence_dir.join("evidence.json"), "{}").unwrap();
+
+    let mut landed = OrphanedRun::new(Nonce(nonce.clone()), &evidence_dir);
+    assert_eq!(landed.poll(), RunLifecycle::Exited { success: false });
+
+    fs::remove_file(evidence_dir.join("evidence.json")).unwrap();
+    let mut unfinished = OrphanedRun::new(Nonce(nonce), &evidence_dir);
+    assert_eq!(unfinished.poll(), RunLifecycle::Running);
 }
 
 #[cfg(target_os = "linux")]

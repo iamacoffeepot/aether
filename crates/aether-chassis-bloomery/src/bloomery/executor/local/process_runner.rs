@@ -625,13 +625,10 @@ struct ChildProcess {
 
 impl RunProcess for ChildProcess {
     fn poll(&mut self) -> RunLifecycle {
-        match self.child.try_wait() {
-            Ok(Some(status)) => RunLifecycle::Exited { success: status.success() },
-            Ok(None) => RunLifecycle::Running,
-            // A wait fault is not a live run; read it as a failed exit rather than
-            // reporting an eternally-running child.
-            Err(_) => RunLifecycle::Exited { success: false },
-        }
+        // A wait fault is not a live run; it is an observation fault, not a
+        // clean nonzero exit and not a signal — the backend has to tell those
+        // three apart (ADR-0195 §2).
+        RunLifecycle::from_try_wait(self.child.try_wait())
     }
 
     fn kill(&mut self) -> Result<(), LocalExecutorError> {
@@ -711,12 +708,58 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use super::super::runner::RunLifecycle;
     use super::{
         CaptureIdentity, FALLBACK_CAPTURE_SUBJECT, FALLBACK_IDENTITY, ProcessTransformRunner, SETTINGS_PATH,
         TransformRunner, capture_subject, commit_parents, commitish_for, decode_object_hex, fetch_order_identities,
         fetch_subject_if_absent, git_in, materialize_checkout, neutralize_hooks, reclaim_worktree_path, reset_checkout,
         strip_hooks,
     };
+
+    #[test]
+    fn a_wait_fault_is_an_observation_fault_not_a_clean_failure() {
+        // Tripwire (ADR-0195 §2): collapsing `try_wait` Err into
+        // `Exited { success: false }` made a runner fault indistinguishable
+        // from a lane that judged the subject and exited 1.
+        let lifecycle = RunLifecycle::from_try_wait(Err(std::io::Error::other("waitid failed")));
+        assert_eq!(lifecycle, RunLifecycle::ObservationFault);
+        assert!(lifecycle.is_terminal());
+        assert!(!lifecycle.clean_success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn try_wait_keeps_a_clean_exit_and_a_terminating_signal_apart() {
+        // The process runner used to fold both through `status.success()`, so
+        // a SIGKILL'd child and `exit(1)` arrived at the backend as the same
+        // boolean. The first is a host observation; the second may still carry
+        // a valid authored verdict.
+        let mut clean = Command::new("true").spawn().unwrap();
+        let clean_lifecycle = loop {
+            match RunLifecycle::from_try_wait(clean.try_wait()) {
+                RunLifecycle::Running => std::thread::sleep(std::time::Duration::from_millis(5)),
+                other => break other,
+            }
+        };
+        assert_eq!(clean_lifecycle, RunLifecycle::Exited { success: true });
+
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        child.kill().unwrap();
+        let signaled = loop {
+            match RunLifecycle::from_try_wait(child.try_wait()) {
+                RunLifecycle::Running => std::thread::sleep(std::time::Duration::from_millis(5)),
+                other => break other,
+            }
+        };
+        assert_eq!(signaled, RunLifecycle::Signaled { signal: libc_sigkill() });
+    }
+
+    #[cfg(unix)]
+    fn libc_sigkill() -> i32 {
+        // libc is not a crate dependency; SIGKILL is 9 on every Unix this
+        // coordinator runs on, and `Child::kill` sends exactly that.
+        9
+    }
 
     #[test]
     fn a_captures_subject_is_the_lanes_own_first_line_or_the_literal() {

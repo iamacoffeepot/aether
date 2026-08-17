@@ -169,51 +169,35 @@ fn now_unix_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// The verdict a timed-out order of `stage` admits under (ADR-0177), paired with
-/// the typed verifier set the intake's ADR-0178 transport invariant requires for
-/// it. `None` when no verdict in the current vocabulary states the fact.
+/// The verdict a timed-out order of `stage` admits under (ADR-0177 / ADR-0195
+/// §2), paired with the typed verifier set the intake's ADR-0178 transport
+/// invariant requires for it. `None` when no verdict in the current vocabulary
+/// states the fact.
 ///
-/// A member stage and `AggregateVerify` are `VerificationFailed`: the attempt
-/// did not produce the passing evidence its gate wanted, which is the same fact
-/// a failed run states, so it spends the same sealed attempt or repair budget
-/// and reaches the same wedge — no parallel retry authority.
-///
-/// A member `Verify` names no verifier at all. A timeout cannot know which one
-/// would have failed, and it must not guess: the reducer prices a named identity
-/// as a defect in the candidate and sends the member to `Refine` to repair it,
-/// which is the wrong answer for a lane that was killed on the clock before it
-/// judged anything. The empty set is the honest report — the gate rendered no
-/// verdict — and the reducer answers it by re-running `Verify` on the member's
-/// own Verify budget, wedging there once that budget is spent.
-///
-/// `AggregateReview` is deliberately `None`. ADR-0177 routes it to ADR-0176's
-/// `ExecutorFault` — a review lane that never answered produced no judgement of
-/// the fold, which is the same fact as one that reported an environment failure,
-/// and must charge the same fold-fault ledger rather than reopening members.
-/// That vocabulary is issue #4738's to introduce; synthesising a
-/// `VerificationFailed` here instead would charge every member a repair lap for
-/// a critic that never ran, so this build defers the aggregate-review timeout
-/// rather than recording the wrong thing.
+/// Every dispatched stage — member, `AggregateVerify`, and `AggregateReview` —
+/// is `ExecutorFault`. A deadline is a host observation that rendered no
+/// judgment: the child was cancelled before it judged the subject, which is
+/// the same fact as a missing evidence file or a signal-killed process. The
+/// empty verifier set is required, not optional — a timeout cannot know which
+/// verifier would have failed, and naming one would dispatch a repair lap.
 ///
 /// Exhaustive over [`StageId`] rather than wildcarded. `None` here means the
-/// order never terminates, and the stages that reach it split into two very
-/// different reasons for that — one deferred vocabulary and a set of stages no
-/// executor order carries at all. A wildcard reads a stage that later becomes
-/// dispatchable into the second group silently; naming every variant makes it a
+/// order never terminates. The stages that reach it are never dispatched to an
+/// executor at all — the pre-line stages, the per-member `Review` the member
+/// walk does not enter (`StageCatalog::MEMBER_LINE` ends at `Verify`), and the
+/// bloom-level tail the coordinator performs itself — so no order carries one
+/// and none can expire. A wildcard reads a stage that later becomes
+/// dispatchable into that group silently; naming every variant makes it a
 /// compile error instead.
 fn timeout_verdict(stage: StageId) -> Option<(StageVerdict, VerifyFailureSet)> {
     match stage {
-        StageId::Verify | StageId::Construct | StageId::Refine | StageId::Reconcile | StageId::AggregateVerify => {
-            Some((StageVerdict::VerificationFailed, VerifyFailureSet::EMPTY))
-        }
-        // No verdict, for two different reasons. `AggregateReview`'s is deferred,
-        // as above. The rest are never dispatched to an executor at all — the
-        // pre-line stages, the per-member `Review` the member walk does not enter
-        // (`StageCatalog::MEMBER_LINE` ends at `Verify`), and the bloom-level
-        // tail the coordinator performs itself — so no order carries one and
-        // none can expire.
-        StageId::AggregateReview
-        | StageId::Sketch
+        StageId::Verify
+        | StageId::Construct
+        | StageId::Refine
+        | StageId::Reconcile
+        | StageId::AggregateVerify
+        | StageId::AggregateReview => Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
+        StageId::Sketch
         | StageId::Scope
         | StageId::Approve
         | StageId::Review
@@ -404,7 +388,7 @@ fn expire_overdue_orders(
                     workpiece = %record.workpiece.0,
                     stage = ?record.stage,
                     deadline_unix_millis = deadline,
-                    "dispatched run outlived its sealed execution limit; cancelled and recorded as a failed attempt",
+                    "dispatched run outlived its sealed execution limit; cancelled and recorded as a host fault",
                 );
                 admits.push(admission.admit);
                 tracked.retain(|tracked_handle| tracked_handle.handle.nonce != record.nonce);
