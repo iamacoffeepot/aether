@@ -169,6 +169,43 @@ pub struct StudyRow {
     pub study_artifact: String,
 }
 
+/// One append-only proof-fact row (ADR-0200). Column order is the wire:
+/// a reshape is a migration, not an incidental edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofFactRow {
+    /// Monotonic append sequence.
+    pub sequence: u64,
+    /// The 32-byte closure key this fact is addressed by.
+    pub closure_key: Vec<u8>,
+    /// The test the result is about.
+    pub test_id: String,
+    /// `"green"` or `"red"` — the only two spellings this table writes.
+    pub result: String,
+    /// The coordinator-supplied host class the fact was proved on.
+    pub host_class: String,
+    /// The dispatch nonce that produced the fact, for audit.
+    pub producing_dispatch: String,
+    /// The bloom that produced the fact (its `BloomId` digest bytes).
+    pub producing_bloom: Vec<u8>,
+}
+
+/// Columns of one proof-fact insert. Sequence is assigned by the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProofFactWrite<'a> {
+    /// The 32-byte closure key this fact is addressed by.
+    pub closure_key: &'a [u8],
+    /// The test the result is about.
+    pub test_id: &'a str,
+    /// `"green"` or `"red"`.
+    pub result: &'a str,
+    /// The coordinator-supplied host class the fact was proved on.
+    pub host_class: &'a str,
+    /// The dispatch nonce that produced the fact.
+    pub producing_dispatch: &'a str,
+    /// The bloom that produced the fact (its `BloomId` digest bytes).
+    pub producing_bloom: &'a [u8],
+}
+
 /// One journal row's content: a decided event — the idempotency key, the
 /// event bytes, the wire-encoded decisions the reducer produced for it, and
 /// the identity of the build that decided it (ADR-0190). Grouped because the
@@ -419,6 +456,15 @@ pub trait StoreBackend: Send {
     /// know what an operator said — a pre-ADR-0190 row would turn a landing into
     /// a hard failure over a proposal-body sentence.
     fn list_events(&mut self) -> rusqlite::Result<Vec<Vec<u8>>>;
+    /// Append discriminated proof facts (ADR-0200). Insert-only: a later
+    /// write never updates or deletes an earlier row, and a stale closure
+    /// key is left in place. The caller is the verify path after flake
+    /// discrimination — this method does not judge whether a result earned
+    /// a row.
+    fn append_proof_facts(&mut self, facts: &[ProofFactWrite<'_>]) -> rusqlite::Result<()>;
+    /// Every proof-fact row, in append order — the test oracle and the
+    /// consultation read a later slice will key.
+    fn list_proof_facts(&mut self) -> rusqlite::Result<Vec<ProofFactRow>>;
 }
 
 /// A WAL-mode `SQLite` store. Opening runs the migrations idempotently, so
@@ -467,7 +513,11 @@ impl SqliteStore {
 /// its `decisions` blob. Pre-existing decided rows are stamped with the
 /// identity current at migration — they already decode under it, and leaving
 /// them unstamped would treat every later reshape as implicit-current.
-const SCHEMA_VERSION: i64 = 3;
+///
+/// `4` is ADR-0200: the `proof_facts` ledger. Append-only rows, created empty.
+/// Existing stores gain the table; nothing is backfilled — a fact that was
+/// never discriminated is not invented. Stale closure keys are not deleted.
+const SCHEMA_VERSION: i64 = 4;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -540,8 +590,29 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
         )?;
     }
 
+    // ADR-0200 (version 4): the proof-fact ledger. Empty on creation; a
+    // pre-existing store has no facts to invent, and a stale key is left in
+    // place — lookup simply misses once the tree moves.
+    if !has_table(&migration, "proof_facts")? {
+        migration.execute_batch(PROOF_FACTS_TABLE)?;
+    }
+
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     migration.commit()
+}
+
+/// Whether `table` already exists.
+fn has_table(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
+    let found = conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
+        rusqlite::params![table],
+        |_| Ok(()),
+    );
+    match found {
+        Ok(()) => Ok(true),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// Whether `table` already declares `column`.
@@ -686,6 +757,28 @@ CREATE TABLE IF NOT EXISTS fold_conflict (
     workpiece TEXT NOT NULL,
     overlay   TEXT NOT NULL,
     PRIMARY KEY (bloom, workpiece)
+);
+CREATE TABLE IF NOT EXISTS proof_facts (
+    sequence            INTEGER PRIMARY KEY AUTOINCREMENT,
+    closure_key         BLOB NOT NULL,
+    test_id             TEXT NOT NULL,
+    result              TEXT NOT NULL,
+    host_class          TEXT NOT NULL,
+    producing_dispatch  TEXT NOT NULL,
+    producing_bloom     BLOB NOT NULL
+);
+";
+
+/// The ADR-0200 proof-fact ledger. Column order is load-bearing from row one.
+const PROOF_FACTS_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS proof_facts (
+    sequence            INTEGER PRIMARY KEY AUTOINCREMENT,
+    closure_key         BLOB NOT NULL,
+    test_id             TEXT NOT NULL,
+    result              TEXT NOT NULL,
+    host_class          TEXT NOT NULL,
+    producing_dispatch  TEXT NOT NULL,
+    producing_bloom     BLOB NOT NULL
 );
 ";
 
@@ -1234,6 +1327,50 @@ impl StoreBackend for SqliteStore {
     fn list_events(&mut self) -> rusqlite::Result<Vec<Vec<u8>>> {
         let mut stmt = self.conn.prepare("SELECT event FROM journal ORDER BY sequence")?;
         let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+        rows.collect()
+    }
+
+    fn append_proof_facts(&mut self, facts: &[ProofFactWrite<'_>]) -> rusqlite::Result<()> {
+        if facts.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO proof_facts \
+                 (closure_key, test_id, result, host_class, producing_dispatch, producing_bloom) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for fact in facts {
+                stmt.execute(rusqlite::params![
+                    fact.closure_key,
+                    fact.test_id,
+                    fact.result,
+                    fact.host_class,
+                    fact.producing_dispatch,
+                    fact.producing_bloom,
+                ])?;
+            }
+        }
+        tx.commit()
+    }
+
+    fn list_proof_facts(&mut self) -> rusqlite::Result<Vec<ProofFactRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sequence, closure_key, test_id, result, host_class, producing_dispatch, producing_bloom \
+             FROM proof_facts ORDER BY sequence",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ProofFactRow {
+                sequence: row.get(0)?,
+                closure_key: row.get(1)?,
+                test_id: row.get(2)?,
+                result: row.get(3)?,
+                host_class: row.get(4)?,
+                producing_dispatch: row.get(5)?,
+                producing_bloom: row.get(6)?,
+            })
+        })?;
         rows.collect()
     }
 }

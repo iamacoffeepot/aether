@@ -458,7 +458,8 @@ const BLOOM_ID_TOMBSTONE: &str = "tombstone";
 const BLOOM_ID_SHA256_PREFIX: &str = "sha256-";
 
 /// Render a claim commit's message: a legible lead line plus the parseable
-/// `Bloom-Id: sha256-<hex>` line [`parse_bloom_line`] resolves back.
+/// `Bloom-Id: sha256-<hex>` line the inverse parser resolves back.
+#[must_use]
 pub fn render_claim_message(bloom: &BloomId) -> String {
     format!("bloomery claim\n\n{BLOOM_ID_PREFIX}{BLOOM_ID_SHA256_PREFIX}{}", to_hex(&bloom.0))
 }
@@ -466,6 +467,7 @@ pub fn render_claim_message(bloom: &BloomId) -> String {
 /// Render a tombstone claim commit's message: the same shape as
 /// [`render_claim_message`], carrying the `tombstone` sentinel instead of a
 /// bloom id.
+#[must_use]
 pub fn render_tombstone_message() -> String {
     format!("bloomery claim tombstone\n\n{BLOOM_ID_PREFIX}{BLOOM_ID_TOMBSTONE}")
 }
@@ -519,6 +521,7 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 /// synthetic-tree encoding. **Not** for a git object sha: those are sha1/40 or
 /// sha256/32 and resolve through the [`aether_bloomery::Correspondence`] store. `pub` for the
 /// same private-module reason as [`to_hex`].
+#[must_use]
 pub fn digest_from_hex(sha: &str) -> Option<Digest> {
     if sha.len() != 64 {
         return None;

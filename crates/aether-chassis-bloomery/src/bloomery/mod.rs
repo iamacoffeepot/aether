@@ -85,4 +85,9 @@ pub use study::{
 };
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 pub use testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, ScriptedVerdict};
-pub use verify::{ClosureKey, ClosureKeyError, HostClass, closure_key};
+#[cfg(feature = "runtime")]
+pub use verify::record_proof_facts;
+pub use verify::{
+    ClosureKey, ClosureKeyError, DiscriminatedFact, DiscriminatedFacts, HostClass, ProofResult, ProofSource,
+    RunnerReport, closure_key, discriminate,
+};
