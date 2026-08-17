@@ -312,10 +312,11 @@ impl SourceShell {
         self.backend.poll_land(bloom, expected_base, number)
     }
 
-    /// Merge the landing proposal this port opened for `bloom`, once its gate is
-    /// green and it still proposes the head the bloom proved (issue #4953) —
-    /// the button press the operator used to perform by hand, under the same
-    /// compare-and-swap the proposal was opened with.
+    /// Merge the landing proposal this port opened for `bloom`, once the
+    /// structural gates hold and it still proposes the head the bloom proved
+    /// (issue #4953) — the button press the operator used to perform by hand,
+    /// under the same compare-and-swap the proposal was opened with. Check
+    /// state is not consulted (ADR-0186, #5110).
     ///
     /// # Errors
     /// [`SourceError::LandingDisabled`] while the land gate is off, or a

@@ -4,6 +4,7 @@
 - **Date:** 2026-07-15
 - **Amended:** 2026-08-11 (#4663) — the outward projection targets the objects a repository already holds instead of opening its own. See _[2026-08-11 amendment (#4663): the projection targets existing objects](#2026-08-11-amendment-4663-the-projection-targets-existing-objects)_; §The boundary's projection clause reads under it.
 - **Amended:** 2026-08-16 — the projection may create and fully own the issues it creates, and still never writes an object it did not create. See _[2026-08-16 amendment: the projection owns what it creates](#2026-08-16-amendment-the-projection-owns-what-it-creates)_; the 2026-08-11 §The write surface reads under it.
+- **Amended:** 2026-08-17 (#5110) — landing merges on the proposal's structural gates without consulting GitHub check state. See _[2026-08-17 amendment (#5110): landing acceptance](#2026-08-17-amendment-5110-landing-acceptance)_; §The bloom's landing clause reads under it.
 
 ## Context
 
@@ -493,3 +494,21 @@ number was authored against this repository, so an adoption rule is a rule about
 the object removes the question — the projection knows the number because it made it. Migration therefore
 creates replicas rather than adopting, and a workpiece whose source issue a person wrote keeps that issue as
 a human object with comments projected onto it, exactly as today.
+
+## 2026-08-17 amendment (#5110): landing acceptance
+
+ADR-0186 records that the daily ref carries no required checks because bloomery's own gates — member
+verify, aggregate verify, aggregate review — prove each landing. The pull request is correspondence
+ceremony, not a review surface. §The bloom's landing clause already named the compare-and-swap (the
+proposal is this bloom's landing branch aimed at mainline, the proposal head equals the proven head, and
+the base still matches at the write). This amendment retires the later "merges only on a green gate"
+reading of that clause.
+
+`accept_land` merges once those structural gates hold. It does not consult check state. `poll_land` reports
+an open proposal as open until it merges, is closed, or drifts; a check conclusion is not a landing
+verdict. The `LandProposal::ChecksFailed` encoding remains (the journal graph is append-only) but is no
+longer produced, and the land reactor no longer routes it to a landing rejection.
+
+The backstops that replace the per-landing CI run are the ones ADR-0186 already named: every subsequent
+bloom's aggregate verify runs the full suite on the composed tree before the next landing, and the day-roll
+barrier proves the daily branch before main receives it.
