@@ -588,7 +588,23 @@ impl LocalExecutor {
     }
 
     fn preferred_builder_slot(&self, checkout_hex: &str) -> Option<usize> {
-        self.builders.lock().unwrap_or_else(PoisonError::into_inner).preferred(checkout_hex)
+        if let Some(slot) = self.builders.lock().unwrap_or_else(PoisonError::into_inner).preferred(checkout_hex) {
+            return Some(slot);
+        }
+        let parents = match self.runner.checkout_parents(checkout_hex) {
+            Ok(parents) => parents,
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    checkout = checkout_hex,
+                    %error,
+                    "local executor backend: checkout parents unreadable; slot affinity falls back",
+                );
+                return None;
+            }
+        };
+        let builders = self.builders.lock().unwrap_or_else(PoisonError::into_inner);
+        parents.iter().find_map(|parent| builders.preferred(parent))
     }
 
     fn remember_builder(&self, checkout: &Digest, slot: usize) {

@@ -4,6 +4,7 @@
 //! round-trips through [`NameEvidenceClaims`], so an admitted local run binds
 //! exactly as a wrapper-uploaded one would.
 
+use std::collections::HashMap;
 use std::fmt::{Debug, Write as _};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1843,11 +1844,15 @@ struct ReuseRunner {
     /// A nonce that stays `Running` so its slot stays held — the fixture for
     /// forcing a predecessor into a non-lowest slot.
     hold: Option<String>,
+    /// Direct parents `checkout_parents` reports for a checkout hex.
+    parents: HashMap<String, Vec<String>>,
+    /// When set, `checkout_parents` fails rather than returning a list.
+    fail_parents: bool,
 }
 
 impl ReuseRunner {
     fn new(seen: Arc<Mutex<Vec<SeenSpec>>>) -> Self {
-        Self { seen, input_tokens: 1_000, hold: None }
+        Self { seen, input_tokens: 1_000, hold: None, parents: HashMap::new(), fail_parents: false }
     }
 
     fn with_input_tokens(mut self, input_tokens: u64) -> Self {
@@ -1857,6 +1862,16 @@ impl ReuseRunner {
 
     fn holding(mut self, nonce: impl Into<String>) -> Self {
         self.hold = Some(nonce.into());
+        self
+    }
+
+    fn with_parents(mut self, checkout: impl Into<String>, parents: Vec<String>) -> Self {
+        self.parents.insert(checkout.into(), parents);
+        self
+    }
+
+    fn failing_parents(mut self) -> Self {
+        self.fail_parents = true;
         self
     }
 }
@@ -1899,6 +1914,13 @@ impl TransformRunner for ReuseRunner {
         _message: Option<&str>,
     ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
         Ok(Some(canned_capture()))
+    }
+
+    fn checkout_parents(&self, checkout_hex: &str) -> Result<Vec<String>, LocalExecutorError> {
+        if self.fail_parents {
+            return Err(LocalExecutorError::Worktree("checkout parents unreadable".to_owned()));
+        }
+        Ok(self.parents.get(checkout_hex).cloned().unwrap_or_default())
     }
 }
 
@@ -2192,6 +2214,203 @@ fn a_dependent_construct_falls_back_when_the_preferred_slot_is_busy() {
     assert_eq!(stamped["slot_affinity"]["preferred"], 1);
     assert_eq!(stamped["slot_affinity"]["reason"], "busy");
     assert_ne!(stamped["slot_affinity"]["assigned"], 1, "B must not wait on A's occupied slot");
+}
+
+fn canned_commit_hex() -> String {
+    "cc".repeat(20)
+}
+
+fn fold_digest() -> Digest {
+    digest(0xF0)
+}
+
+fn fold_hex() -> String {
+    to_hex(&fold_digest())
+}
+
+fn integration_hex() -> String {
+    "11".repeat(20)
+}
+
+fn decoy_hex() -> String {
+    "dd".repeat(20)
+}
+
+fn correspondence_with_fold() -> Arc<FakeGithub> {
+    let fake = FakeGithub::new();
+    fake.seed_git_object(&digest(0xC0));
+    fake.seed_git_object(&digest(0xB0));
+    fake.seed_git_object(&fold_digest());
+    Arc::new(fake)
+}
+
+fn assigned_slot(base: &TempDir, nonce: &str) -> usize {
+    fs::read_to_string(base.path().join(format!("{nonce}-evidence/slot")))
+        .expect("every dispatched run records its slot")
+        .trim()
+        .parse()
+        .expect("the slot record is an index")
+}
+
+fn fold_parents(integration: String, candidate: String) -> (String, Vec<String>) {
+    (fold_hex(), vec![integration, candidate])
+}
+
+#[test]
+fn a_fold_checkout_prefers_the_captured_candidates_slot() {
+    // Acceptance (#5077): B's checkout is the synthetic fold
+    // `fold(integration, captured candidate)`, not the candidate itself.
+    // Exact-key affinity misses; the direct candidate parent must still
+    // land B in A's slot even though slot 0 is free.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let holder = test_nonce("hold");
+    let (fold, parents) = fold_parents(integration_hex(), canned_commit_hex());
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone()).with_parents(fold, parents)),
+        correspondence_with_fold(),
+        base.path(),
+    );
+
+    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
+    exec.stream_evidence(&first).unwrap();
+    exec.cancel(&holding).unwrap();
+
+    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), fold_digest())).unwrap();
+    exec.stream_evidence(&second).unwrap();
+
+    let stamped = stamped_evidence(&base, &test_nonce("B"));
+    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
+    assert_eq!(stamped["slot_affinity"]["assigned"], 1);
+    assert_eq!(stamped["slot_affinity"]["reason"], "preferred");
+    assert_eq!(
+        seen.lock().unwrap().last().and_then(|seen| seen.worktree.clone()),
+        Some(slot_path(&base, 1)),
+        "B built in A's slot, not the newly-freed lowest index",
+    );
+}
+
+#[test]
+fn a_fold_checkout_falls_back_when_the_preferred_slot_is_busy() {
+    // Preference is never a wait, including across a fold parent. A still
+    // occupies slot 1; B takes the lowest free and journals `busy`.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let holder = test_nonce("hold");
+    let (fold, parents) = fold_parents(integration_hex(), canned_commit_hex());
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone()).with_parents(fold, parents)),
+        correspondence_with_fold(),
+        base.path(),
+    );
+
+    let _holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
+    exec.stream_evidence(&first).unwrap();
+    let occupying = exec.submit(&construct_order(digest(5), &test_nonce("occupy"))).unwrap();
+    let _ = occupying;
+
+    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), fold_digest())).unwrap();
+    exec.stream_evidence(&second).unwrap();
+
+    let stamped = stamped_evidence(&base, &test_nonce("B"));
+    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
+    assert_eq!(stamped["slot_affinity"]["reason"], "busy");
+    assert_ne!(stamped["slot_affinity"]["assigned"], 1, "B must not wait on A's occupied slot");
+}
+
+#[test]
+fn a_mapped_ancestor_that_is_not_a_direct_parent_is_ignored() {
+    // Walking past the fold's direct parents would prefer a stale historical
+    // builder. Integration's parent is the captured candidate, but B must
+    // not consult it.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let holder = test_nonce("hold");
+    let exec = LocalExecutor::new(
+        Arc::new(
+            ReuseRunner::new(Arc::clone(&seen))
+                .holding(holder.clone())
+                .with_parents(fold_hex(), vec![integration_hex(), decoy_hex()])
+                .with_parents(integration_hex(), vec![canned_commit_hex()]),
+        ),
+        correspondence_with_fold(),
+        base.path(),
+    );
+
+    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
+    exec.stream_evidence(&first).unwrap();
+    exec.cancel(&holding).unwrap();
+
+    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), fold_digest())).unwrap();
+    exec.stream_evidence(&second).unwrap();
+
+    let stamped = stamped_evidence(&base, &test_nonce("B"));
+    assert!(stamped.get("slot_affinity").is_none(), "no predecessor slot: the mapped ancestor is not a direct parent",);
+    assert_eq!(assigned_slot(&base, &test_nonce("B")), 0, "B takes the lowest free slot");
+}
+
+#[test]
+fn an_exact_checkout_match_wins_over_a_mapped_parent() {
+    // Exact-key affinity is still first. The checkout itself is mapped to
+    // A's slot; a parent mapped to another slot must not steal the choice.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    fs::write(base.path().join("edge-slots"), format!("{} 2\n", decoy_hex())).unwrap();
+    let holder = test_nonce("hold");
+    let exec = LocalExecutor::new(
+        Arc::new(
+            ReuseRunner::new(Arc::clone(&seen))
+                .holding(holder.clone())
+                .with_parents(canned_commit_hex(), vec![decoy_hex()]),
+        ),
+        correspondence(),
+        base.path(),
+    );
+
+    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
+    let refs = exec.stream_evidence(&first).unwrap();
+    let checkout = refs[0].candidate.expect("A captured").checkout;
+    exec.cancel(&holding).unwrap();
+
+    let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
+    exec.stream_evidence(&second).unwrap();
+
+    let stamped = stamped_evidence(&base, &test_nonce("B"));
+    assert_eq!(stamped["slot_affinity"]["preferred"], 1);
+    assert_eq!(stamped["slot_affinity"]["assigned"], 1);
+    assert_eq!(stamped["slot_affinity"]["reason"], "preferred");
+}
+
+#[test]
+fn an_unreadable_fold_parent_list_falls_back_without_refusing_the_order() {
+    // Parent inspection is diagnostic. A git miss must not refuse B; it
+    // degrades to the ordinary lowest-free allocator.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let base = TempDir::new().unwrap();
+    let holder = test_nonce("hold");
+    let exec = LocalExecutor::new(
+        Arc::new(ReuseRunner::new(Arc::clone(&seen)).holding(holder.clone()).failing_parents()),
+        correspondence_with_fold(),
+        base.path(),
+    );
+
+    let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
+    let first = exec.submit(&claude_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
+    exec.stream_evidence(&first).unwrap();
+    exec.cancel(&holding).unwrap();
+
+    let second = exec
+        .submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), fold_digest()))
+        .expect("an unreadable parent list must not refuse dispatch");
+    exec.stream_evidence(&second).unwrap();
+
+    let stamped = stamped_evidence(&base, &test_nonce("B"));
+    assert!(stamped.get("slot_affinity").is_none(), "fallback is no preference, not a refused order");
+    assert_eq!(assigned_slot(&base, &test_nonce("B")), 0);
 }
 
 #[test]
