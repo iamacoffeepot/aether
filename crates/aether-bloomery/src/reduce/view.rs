@@ -392,6 +392,13 @@ mod tests {
         assert!(held.pending_decision.is_some(), "the member hold still projects as itself");
     }
 
+    // The plausible bug: QueryResult nests ViewDocument as raw wire bytes,
+    // so a projection type without Schema evades the Kind-level
+    // skip_serializing_if guard and GET /view 500s on omitted slots.
+    const _: fn() = || {
+        let _ = <ViewDocument as aether_data::Schema>::SCHEMA;
+    };
+
     // The plausible bug: skip_serializing_if drops None/empty ReviewParkView
     // fields on the positional wire, so the next bloom's first byte (16) is
     // read as an Option presence marker and GET /view 500s with
