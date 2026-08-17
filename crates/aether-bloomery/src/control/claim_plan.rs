@@ -71,7 +71,9 @@ pub fn reconcile_op(record: &BloomRecord) -> Option<Result<ReconcileOp, WireErro
 #[derive(Debug, Clone)]
 pub enum HealOp {
     /// Complete an interrupted supersede transfer of one carried/admission ref
-    /// from its stranded predecessor to the recorded successor (case-3 (a)).
+    /// from its stranded predecessor to the recorded successor (case-3 (a)), or
+    /// restore a ref an uncommitted successor still holds back to the journal
+    /// owner (issue 5135).
     Transfer(CompleteTransfer),
     /// Sweep a tombstoned ref (an interrupted release's stranded cleanup, case 2)
     /// or release a dropped ref stranded on a superseded predecessor (case 3's
@@ -81,17 +83,20 @@ pub enum HealOp {
 }
 
 /// Fold the enumerated claim refs into the boot-reconcile deep heals (ADR-0150
-/// §The claim registry, amended PR #3556): a tombstone sweep (case 2) and an
-/// own-bloom half-transfer completion (case 3). Pure — a function of the
-/// replay-rebuilt `snapshot` and the enumeration — so the same `claim_reconcile`
-/// integration test drives it through the real source capability, exactly as it
-/// drives [`reconcile_op`].
+/// §The claim registry, amended PR #3556): a tombstone sweep (case 2), an
+/// own-bloom half-transfer completion (case 3), and a restore of refs an
+/// interrupted transfer left on a successor the journal never sealed (issue
+/// 5135). Pure — a function of the replay-rebuilt `snapshot` and the
+/// enumeration — so the same `claim_reconcile` integration test drives it
+/// through the real source capability, exactly as it drives [`reconcile_op`].
 ///
-/// Own-orphan reclaim (case 1) is **not** planned here: it needs the write-ahead
-/// intent journal deferred to its own follow-on, and a foreign hold cannot be
-/// told from an own orphan without an instance id the claim commit does not carry
-/// — so a ref held by a bloom this journal does not know as a superseded
-/// predecessor is left untouched (report-only, the boundary ADR-0150 draws).
+/// Own-orphan reclaim of a fresh acquire that never reached the journal is
+/// **not** planned here: it needs the write-ahead intent journal deferred to
+/// its own follow-on. A foreign hold cannot be told from that orphan without
+/// an instance id the claim commit does not carry, so a ref held by a bloom
+/// this journal does not know is left untouched *unless* an active-and-unlanded
+/// bloom in this journal still owns that ref — that ownership is the proof the
+/// holder is this instance's uncommitted successor, not a peer.
 #[must_use]
 pub fn plan_heals(snapshot: &Snapshot, states: &[ClaimRefState]) -> Vec<Result<HealOp, WireError>> {
     let mut ops = Vec::new();
@@ -103,9 +108,12 @@ pub fn plan_heals(snapshot: &Snapshot, states: &[ClaimRefState]) -> Vec<Result<H
             ClaimHolder::Tombstoned => ops.push(sweep_mail(&state.ref_kind).map(HealOp::Release)),
             // A ref still held by a superseded predecessor is a crashed transfer's
             // stranded ref. A carried/admission ref completes to the successor; a
-            // dropped ref the successor never re-admitted is released. A ref held by
-            // an active bloom (V1 re-assert owns it) or a foreign bloom (report-only)
-            // is left untouched.
+            // dropped ref the successor never re-admitted is released. A ref held
+            // by a bloom this journal never sealed, while an active bloom here
+            // still owns that ref, is the uncommitted-successor split: restore
+            // it to the journal owner (the parent). An active bloom's own hold
+            // (V1 re-assert owns it) or a foreign bloom on a ref we do not own
+            // (report-only) is left untouched.
             ClaimHolder::Held(holder) => {
                 if let Some(successor) = superseded_successor(snapshot, holder) {
                     if transferred_to_successor(snapshot, &state.ref_kind, &successor) {
@@ -113,11 +121,31 @@ pub fn plan_heals(snapshot: &Snapshot, states: &[ClaimRefState]) -> Vec<Result<H
                     } else {
                         ops.push(release_heal_mail(holder, &state.ref_kind).map(HealOp::Release));
                     }
+                } else if !snapshot.blooms.contains_key(holder)
+                    && let Some(owner) = journal_owner(snapshot, &state.ref_kind)
+                {
+                    ops.push(transfer_heal_mail(holder, &owner, &state.ref_kind).map(HealOp::Transfer));
                 }
             }
         }
     }
     ops
+}
+
+/// The bloom this journal still records as owning `ref_kind`, if it is
+/// active-and-unlanded. An interrupted transfer can leave the ref pointing at
+/// a successor id the journal never sealed; the owner here is the parent to
+/// restore it to.
+fn journal_owner(snapshot: &Snapshot, ref_kind: &ClaimRefKind) -> Option<BloomId> {
+    match ref_kind {
+        ClaimRefKind::MainlineAdmission => {
+            snapshot.blooms.iter().find(|(_, record)| is_active_unlanded(record.status)).map(|(id, _)| *id)
+        }
+        ClaimRefKind::Workpiece(workpiece) => {
+            let owner = snapshot.active.get(workpiece)?;
+            snapshot.blooms.get(owner).is_some_and(|record| is_active_unlanded(record.status)).then_some(*owner)
+        }
+    }
 }
 
 /// The successor a replayed bloom was superseded by, or `None` if the bloom is

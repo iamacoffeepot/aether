@@ -27,8 +27,10 @@
 //! The deep heals the deep-heal slice added (#3555, ADR-0150 as amended PR #3556)
 //! — the tombstone sweep and the own-bloom half-transfer completion — drive the
 //! pure `plan_heals` fold over the capability's real enumeration the same way,
-//! covering their restart convergence below. Own-orphan reclaim (case 1) stays
-//! deferred to its own follow-on and is deliberately absent.
+//! covering their restart convergence below. An interrupted transfer whose
+//! successor the journal never sealed (issue 5135) is restored to the still-
+//! sealed predecessor on the same walk. Own-orphan reclaim of a fresh acquire
+//! (case 1) stays deferred to its own follow-on and is deliberately absent.
 
 #![allow(clippy::unwrap_used)]
 
@@ -279,6 +281,37 @@ fn a_supersession_transfers_carried_refs_frees_dropped_ones_and_keeps_the_admiss
 }
 
 #[test]
+fn a_supersede_retry_resumes_a_claim_transfer_that_failed_after_k_of_n_refs() {
+    // Live class (issue 5135): transfer moved k of n refs onto the
+    // deterministic successor, then a GitHub 503 aborted the op before the
+    // successor bloom was committed. Retry mints the same successor id and
+    // used to refuse MembershipConflict { held_by: successor } on the first
+    // already-moved ref. The successor is deliberately not reduced into the
+    // snapshot — that is the uncommitted state the retry sees.
+    let (state, fake) = claim_state();
+    let predecessor = spec(1, vec![membership("w1", 11), membership("w2", 12), membership("w3", 13)]);
+    let snapshot = seal(&predecessor, 1);
+    assert_eq!(drive_seal(&state, &seal_claim_mail(&predecessor.id(), &predecessor).unwrap()), ClaimResult::Acquired);
+
+    let successor = spec(1, vec![membership("w1", 11), membership("w2", 12), membership("w3", 13)]);
+    // k=2 of n=4 (w1, w2, w3, admission): the first two members transferred.
+    stage_hold_at(&fake, &claim_ref("w1"), &successor.id());
+    stage_hold_at(&fake, &claim_ref("w2"), &successor.id());
+
+    let reply = drive_transfer(&state, &transfer_seal_mail(&snapshot, &predecessor.id(), &successor).unwrap());
+
+    assert_eq!(reply, ClaimResult::Acquired, "the retry resumes instead of refusing its own partial transfer");
+    for name in ["w1", "w2", "w3"] {
+        let contender = spec(1, vec![membership(name, 99)]);
+        let (_, held_by) = decode_held(&drive_seal(&state, &seal_claim_mail(&contender.id(), &contender).unwrap()));
+        assert_eq!(held_by, successor.id(), "{name} completed to the successor");
+    }
+    let fresh = spec(1, vec![membership("w9", 19)]);
+    let (ref_kind, held_by) = decode_held(&drive_seal(&state, &seal_claim_mail(&fresh.id(), &fresh).unwrap()));
+    assert_eq!((ref_kind, held_by), (ClaimRefKind::MainlineAdmission, successor.id()));
+}
+
+#[test]
 fn a_supersession_refuses_on_a_foreign_held_net_new_member_as_a_membership_conflict() {
     let (state, fake) = claim_state();
     let predecessor = spec(1, vec![membership("w1", 11)]);
@@ -500,6 +533,32 @@ fn boot_reconcile_completes_a_half_transferred_supersede() {
 }
 
 #[test]
+fn boot_reconcile_restores_refs_held_by_a_bloom_the_journal_never_sealed() {
+    // Same live class as the retry: transfer moved a carried ref onto the
+    // successor, then the process died before the successor was committed.
+    // Restart sees a Sealed predecessor and a ref held by an id the journal
+    // never sealed. The deep heal restores it to the predecessor — the
+    // restart lever an operator reaches for first.
+    let (state, fake) = claim_state();
+    let predecessor = spec(1, vec![membership("w1", 11), membership("w2", 12)]);
+    let snapshot = seal(&predecessor, 1);
+    assert_eq!(drive_seal(&state, &seal_claim_mail(&predecessor.id(), &predecessor).unwrap()), ClaimResult::Acquired);
+
+    let successor = spec(1, vec![membership("w1", 11), membership("w2", 12)]);
+    stage_hold_at(&fake, &claim_ref("w1"), &successor.id());
+
+    drive_heals(&state, &snapshot);
+
+    let contender = spec(1, vec![membership("w1", 31)]);
+    let (ref_kind, held_by) = decode_held(&drive_seal(&state, &seal_claim_mail(&contender.id(), &contender).unwrap()));
+    assert_eq!((ref_kind, held_by), (ClaimRefKind::Workpiece(workpiece("w1")), predecessor.id()));
+    // The still-predecessor-held sibling is untouched; a second boot re-drives
+    // to no effect.
+    drive_heals(&state, &snapshot);
+    assert!(fake.ref_exists(&claim_ref("w2")), "an already-predecessor-held sibling is not released");
+}
+
+#[test]
 fn boot_reconcile_deep_heal_leaves_a_foreign_held_ref_untouched() {
     // A ref held by a bloom this journal does not know as a superseded predecessor
     // is report-only (ADR-0150's foreign-staleness boundary): the deep heal plans
@@ -515,5 +574,25 @@ fn boot_reconcile_deep_heal_leaves_a_foreign_held_ref_untouched() {
     assert!(fake.ref_exists(&claim_ref("w1")), "a foreign live claim is never healed away");
     let local = spec(1, vec![membership("w1", 11)]);
     let (_, held_by) = decode_held(&drive_seal(&state, &seal_claim_mail(&local.id(), &local).unwrap()));
+    assert_eq!(held_by, foreign, "the foreign hold still blocks a local seal");
+}
+
+#[test]
+fn boot_reconcile_does_not_restore_a_foreign_hold_on_a_workpiece_this_journal_does_not_claim() {
+    // The unsealed-holder restore is gated on journal ownership: a foreign
+    // hold on a workpiece no active bloom here claims must survive even when
+    // this journal has some other sealed bloom (the over-eager restore the
+    // 5135 heal must not become).
+    let (state, fake) = claim_state();
+    let local = spec(1, vec![membership("w2", 12)]);
+    let snapshot = seal(&local, 1);
+    let foreign = BloomId(digest(70));
+    stage_foreign_hold(&fake, "w1", &foreign);
+
+    drive_heals(&state, &snapshot);
+
+    assert!(fake.ref_exists(&claim_ref("w1")), "a foreign live claim is never healed away");
+    let probe = spec(1, vec![membership("w1", 11)]);
+    let (_, held_by) = decode_held(&drive_seal(&state, &seal_claim_mail(&probe.id(), &probe).unwrap()));
     assert_eq!(held_by, foreign, "the foreign hold still blocks a local seal");
 }

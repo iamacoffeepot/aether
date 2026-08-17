@@ -29,6 +29,8 @@ mod messages;
 mod muse;
 mod peak_memory;
 mod review;
+mod review_mcp;
+mod review_reports;
 mod sccache;
 mod scratch;
 mod verify;
@@ -44,6 +46,7 @@ use crate::cargo::write_json_pretty;
 use crate::transform::construct::CONSTRUCT_IMPLEMENT;
 use crate::transform::peak_memory::PeakMemory;
 use crate::transform::review::REVIEW_CRITIC;
+use crate::transform::review_reports::REVIEW_REPORT;
 use crate::transform::sccache::{CompilerCache, Counters};
 use crate::transform::scratch::Scratch;
 use crate::transform::verify::VERIFY_CHECK;
@@ -263,6 +266,9 @@ pub fn run(args: &TransformArgs) -> Result<()> {
     if args.command == REVIEW_CRITIC {
         return review::run_review(args);
     }
+    if args.command == REVIEW_REPORT {
+        return review_mcp::serve(&args.out);
+    }
     if args.command == VERIFY_CHECK {
         return verify::run_verify_check(args);
     }
@@ -288,7 +294,7 @@ const DEFAULT_HARNESS: Harness = Harness::Claude;
 /// coordinator and the worker's checkout, and silently running the default
 /// would produce evidence attributed to a harness that never ran — the exact
 /// claim the sealed profile digest is supposed to make verifiable.
-fn resolve_harness(harness: Option<&str>) -> Result<Harness> {
+pub fn resolve_harness(harness: Option<&str>) -> Result<Harness> {
     let Some(name) = harness else {
         return Ok(DEFAULT_HARNESS);
     };
@@ -302,8 +308,8 @@ fn resolve_harness(harness: Option<&str>) -> Result<Harness> {
 ///
 /// Every arm returns the same record envelope, which is what lets the lanes
 /// stay harness-agnostic: `construct.rs` reads `result_record.is_error` and
-/// `review.rs` reads `result.result` for the critic's verdict text, neither
-/// knowing which CLI produced them.
+/// the review lane reads either the Claude findings file or, on harnesses
+/// without tool injection, `result.result` for the critic's `VERDICT:` text.
 ///
 /// The run's [`Scratch`] directory is prepared here and dropped when the lane
 /// returns, so every arm hands its child the same place to build throwaway

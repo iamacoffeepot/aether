@@ -465,7 +465,10 @@ pub trait SourceBackend {
     /// workpieces, and release the `dropped` ones. A carried ref a concurrent
     /// mutation moved off the predecessor loses the CAS cleanly, and a `net_new`
     /// workpiece a foreign bloom holds is a conflict — both the clean
-    /// [`ClaimOutcome::Held`], not an error.
+    /// [`ClaimOutcome::Held`], not an error. A ref **already at `successor`**
+    /// is this same deterministic transfer's prior attempt (issue 5135): skip
+    /// it and finish the rest rather than refusing the retry as a membership
+    /// conflict against itself.
     ///
     /// # Errors
     /// Backend-defined — a transport or backend fault, distinct from the clean
@@ -510,11 +513,10 @@ pub trait SourceBackend {
     /// fast-forwards to `successor` ([`ClaimOutcome::Acquired`]); a ref **already
     /// at `successor` is [`Acquired`](ClaimOutcome::Acquired) — the no-op that
     /// lets a boot re-drive converge**; a ref at any other holder is the clean
-    /// [`ClaimOutcome::Held`]. This leaves [`transfer_seal`](Self::transfer_seal)'s
-    /// all-or-nothing landed CAS untouched — it re-drives one already-decided
-    /// transfer per ref rather than re-attempting the whole op, so a mixed split
-    /// (some carried refs at the successor, some still at the predecessor) is
-    /// finished without short-circuiting on the first ref already moved.
+    /// [`ClaimOutcome::Held`]. [`transfer_seal`](Self::transfer_seal) now
+    /// applies the same successor-held skip across the whole op so a retry of
+    /// an interrupted transfer converges; this primitive remains the
+    /// per-ref form the boot reconcile drives on a mixed split.
     ///
     /// # Errors
     /// Backend-defined — a transport or backend fault, distinct from the clean
