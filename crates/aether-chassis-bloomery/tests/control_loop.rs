@@ -29,7 +29,7 @@ mod common;
 
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::process::Command;
+use std::process::{self, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -68,7 +68,7 @@ fn spawn(port: u16, db: &str) -> Coordinator {
 /// window for a sibling to steal — and the handshake helper discovers the
 /// listen the child actually owns.
 fn spawn_with_store(db: &str, client_name: &str) -> (Coordinator, TcpStream) {
-    spawn_and_connect(client_name, Duration::from_secs(60), || (0, spawn(0, db)))
+    spawn_and_connect(client_name, Duration::from_mins(1), || (0, spawn(0, db)))
 }
 
 /// Pipeline two typed `Call`s to `mailbox` — write **both** frames before reading
@@ -364,7 +364,7 @@ fn the_capability_ledger_is_measured_live_and_rebuilt_on_replay() {
 /// collision used to, boot error still can) is another attempt, not a
 /// 30s wait on a closed port.
 fn spawn_with_artifacts(db: &str, artifacts: &str, client_name: &str) -> (Coordinator, TcpStream) {
-    spawn_and_connect(client_name, Duration::from_secs(60), || {
+    spawn_and_connect(client_name, Duration::from_mins(1), || {
         (
             0,
             Coordinator::spawn(
@@ -528,7 +528,7 @@ fn handshake_while_alive_abandons_a_dead_child_without_the_deadline() {
 fn listening_ports_reports_a_listener_this_process_owns() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let ports = Coordinator::listening_ports_for(std::process::id());
+    let ports = Coordinator::listening_ports_for(process::id());
     assert!(ports.contains(&port), "procfs listen scan missed {port}: {ports:?}");
 }
 
@@ -542,7 +542,7 @@ fn spawn_and_connect_handshakes_an_os_assigned_port() {
     let db = db.to_str().unwrap();
 
     let start = Instant::now();
-    let (mut coordinator, _stream) = spawn_and_connect("port-zero", Duration::from_secs(60), || (0, spawn(0, db)));
+    let (mut coordinator, _stream) = spawn_and_connect("port-zero", Duration::from_mins(1), || (0, spawn(0, db)));
     assert!(coordinator.is_alive(), "the child that bound :0 stayed up through handshake");
     assert!(
         start.elapsed() < Duration::from_secs(30),
