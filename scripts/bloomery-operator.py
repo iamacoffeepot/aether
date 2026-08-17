@@ -207,6 +207,11 @@ MACHINERY_WEDGE_OUTCOMES = frozenset(
 # localhost from AETHER_HTTP_PORT.
 DEFAULT_BASE = "http://127.0.0.1:8789"
 
+# The reserved composition workpiece (ADR-0191). It is not a sealed member, so
+# /view used to omit it; the bloom now projects it as `composition` and the
+# operator addresses it by this name.
+COMPOSITION_WORKPIECE = "aether.bloomery.composition"
+
 # How long to wait on the coordinator before calling it unreachable. An override
 # route admits a fact and answers from the reducer, so it is not instant.
 HTTP_TIMEOUT_SECS = 30.0
@@ -889,14 +894,29 @@ def members_of(view: Any) -> Iterable[tuple[dict[str, Any], dict[str, Any]]]:
 
 
 def find_member(view: Any, workpiece: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    if workpiece == COMPOSITION_WORKPIECE:
+        for bloom in (view or {}).get("blooms", []):
+            if composition_of(bloom) is not None:
+                return bloom, composition_as_member(bloom)
+        die(
+            f"no member named {workpiece!r} in any live bloom. Known members: "
+            + (_known_workpieces(view) or "(none -- no bloom is live)")
+        )
     for bloom, member in members_of(view):
         if member.get("workpiece") == workpiece:
             return bloom, member
-    known = sorted({member.get("workpiece", "?") for _, member in members_of(view)})
+    known = _known_workpieces(view)
     die(
         f"no member named {workpiece!r} in any live bloom. Known members: "
-        + (", ".join(known) if known else "(none -- no bloom is live)")
+        + (known if known else "(none -- no bloom is live)")
     )
+
+
+def _known_workpieces(view: Any) -> str:
+    names = {member.get("workpiece", "?") for _, member in members_of(view)}
+    if any(composition_of(bloom) is not None for bloom in (view or {}).get("blooms", [])):
+        names.add(COMPOSITION_WORKPIECE)
+    return ", ".join(sorted(names))
 
 
 def member_status_state(member: dict[str, Any], *, has_order: bool) -> str:
@@ -1605,6 +1625,60 @@ def supersede_command(bloom_id: str) -> str:
     return f"{OPERATOR_SCRIPT} supersede {bloom_id} --draft <draft>"
 
 
+def composition_of(bloom: dict[str, Any]) -> dict[str, Any] | None:
+    """The bloom's projected composition line, or None when the bloom has none."""
+    composition = bloom.get("composition")
+    return composition if isinstance(composition, dict) else None
+
+
+def composition_finding_digests(bloom: dict[str, Any]) -> list[str]:
+    """Open composition-finding detail digests, in projection order."""
+    composition = composition_of(bloom)
+    if composition is None:
+        return []
+    digests: list[str] = []
+    for item in composition.get("findings") or []:
+        if not isinstance(item, dict):
+            continue
+        detail = digest_hex(item.get("detail"))
+        if detail:
+            digests.append(detail)
+    return digests
+
+
+def composition_as_member(bloom: dict[str, Any]) -> dict[str, Any]:
+    """A member-shaped dict so `why` and status can address the composition."""
+    composition = composition_of(bloom) or {}
+    cursor = composition.get("cursor") if isinstance(composition.get("cursor"), dict) else {}
+    candidate = cursor.get("candidate") if isinstance(cursor.get("candidate"), dict) else {}
+    return {
+        "workpiece": COMPOSITION_WORKPIECE,
+        "wedge": composition.get("wedge") if isinstance(composition.get("wedge"), dict) else None,
+        "resolution": None,
+        "pending_decision": None,
+        "blocked_by": None,
+        "wedge_cause": None,
+        "cursor": cursor.get("stage"),
+        "candidate": candidate.get("tree"),
+    }
+
+
+def adjudicate_hint(bloom: dict[str, Any], bloom_id: str) -> str | None:
+    """The ready-to-run adjudicate line, from a park or an open composition finding.
+
+    A refine-budget wedge files a finding and no review park — the live class
+    that left `why` and `status` silent. The park still wins when both exist,
+    because its digest is the one the ceiling already named.
+    """
+    park = review_park_of(bloom)
+    if park:
+        return adjudicate_command(bloom_id, park["question"])
+    findings = composition_finding_digests(bloom)
+    if findings:
+        return adjudicate_command(bloom_id, findings[-1])
+    return None
+
+
 def review_park_of(bloom: dict[str, Any]) -> dict[str, Any] | None:
     """The bloom-scoped aggregate-review park, or None when the bloom is not parked.
 
@@ -1828,41 +1902,7 @@ def cmd_status(args: argparse.Namespace) -> None:
         "blooms": [],
     }
     for bloom in view.get("blooms", []):
-        park = review_park_of(bloom)
-        bloom_id = digest_hex(bloom.get("id"))
-        entry = {
-            "id": bloom.get("id"),
-            "status": bloom.get("status"),
-            "superseded_by": bloom.get("superseded_by"),
-            "landing_blocked": bloom.get("landing_blocked"),
-            "executor_fault": bloom.get("executor_fault"),
-            "review_park": park,
-            "adjudicate": adjudicate_command(bloom_id or "<bloom>", park["question"]) if park else None,
-            "members": [],
-        }
-        for member in bloom.get("members", []):
-            workpiece = member.get("workpiece")
-            order = orders.get(workpiece)
-            wedge = member.get("wedge")
-            resolution = member.get("resolution")
-            pending = member.get("pending_decision")
-            blocked_by = blocked_by_of(member)
-            entry["members"].append(
-                {
-                    "workpiece": workpiece,
-                    "cursor": order["stage"] if order else (wedge or {}).get("stage"),
-                    "cursor_source": "outstanding order" if order else ("wedge" if wedge else "none"),
-                    "candidate": (resolution or {}).get("candidate"),
-                    "integrated": resolution is not None,
-                    "wedged_at": (wedge or {}).get("stage"),
-                    "wedge_evidence": (wedge or {}).get("evidence"),
-                    "held_on_question": (pending or {}).get("question"),
-                    "outstanding_nonce": order["nonce"] if order else None,
-                    "blocked_by": blocked_by,
-                    "state": member_status_state(member, has_order=order is not None),
-                }
-            )
-        report["blooms"].append(entry)
+        report["blooms"].append(bloom_status_entry(bloom, orders))
 
     if args.json:
         print_json(report)
@@ -1878,29 +1918,98 @@ def cmd_status(args: argparse.Namespace) -> None:
         print_status_bloom(bloom)
 
 
+def bloom_status_entry(bloom: dict[str, Any], orders: dict[str, Any]) -> dict[str, Any]:
+    """One bloom's status row, including a wedged composition beside members."""
+    park = review_park_of(bloom)
+    bloom_id = digest_hex(bloom.get("id"))
+    entry = {
+        "id": bloom.get("id"),
+        "status": bloom.get("status"),
+        "superseded_by": bloom.get("superseded_by"),
+        "landing_blocked": bloom.get("landing_blocked"),
+        "executor_fault": bloom.get("executor_fault"),
+        "review_park": park,
+        "adjudicate": adjudicate_hint(bloom, bloom_id or "<bloom>"),
+        "composition": composition_of(bloom),
+        "members": [],
+    }
+    for member in bloom.get("members", []):
+        workpiece = member.get("workpiece")
+        order = orders.get(workpiece)
+        wedge = member.get("wedge")
+        resolution = member.get("resolution")
+        pending = member.get("pending_decision")
+        blocked_by = blocked_by_of(member)
+        entry["members"].append(
+            {
+                "workpiece": workpiece,
+                "cursor": order["stage"] if order else (wedge or {}).get("stage"),
+                "cursor_source": "outstanding order" if order else ("wedge" if wedge else "none"),
+                "candidate": (resolution or {}).get("candidate"),
+                "integrated": resolution is not None,
+                "wedged_at": (wedge or {}).get("stage"),
+                "wedge_evidence": (wedge or {}).get("evidence"),
+                "held_on_question": (pending or {}).get("question"),
+                "outstanding_nonce": order["nonce"] if order else None,
+                "blocked_by": blocked_by,
+                "state": member_status_state(member, has_order=order is not None),
+            }
+        )
+    composition = composition_of(bloom)
+    if composition is not None:
+        order = orders.get(COMPOSITION_WORKPIECE)
+        synthetic = composition_as_member(bloom)
+        wedge = synthetic.get("wedge")
+        cursor = composition.get("cursor") if isinstance(composition.get("cursor"), dict) else {}
+        entry["members"].append(
+            {
+                "workpiece": COMPOSITION_WORKPIECE,
+                "cursor": order["stage"] if order else (cursor.get("stage") or (wedge or {}).get("stage")),
+                "cursor_source": "outstanding order" if order else ("composition" if cursor or wedge else "none"),
+                "candidate": synthetic.get("candidate"),
+                "integrated": False,
+                "wedged_at": (wedge or {}).get("stage"),
+                "wedge_evidence": (wedge or {}).get("evidence"),
+                "held_on_question": None,
+                "outstanding_nonce": order["nonce"] if order else None,
+                "blocked_by": None,
+                "state": member_status_state(synthetic, has_order=order is not None),
+            }
+        )
+    return entry
+
+
 def print_status_bloom(bloom: dict[str, Any]) -> None:
     """One bloom's human status block, including a bloom-scoped review park."""
     line = f"bloom {bloom['id']}  status={bloom['status']}"
-    if bloom["superseded_by"]:
+    if bloom.get("superseded_by"):
         line += f"  superseded_by={bloom['superseded_by']}"
-    if bloom["review_park"]:
+    if bloom.get("review_park"):
         line += "  REVIEW PARK"
+    composition_wedged = any(
+        member.get("workpiece") == COMPOSITION_WORKPIECE and member.get("wedged_at")
+        for member in bloom.get("members") or []
+    )
+    if composition_wedged:
+        line += "  COMPOSITION WEDGE"
     print(line)
-    if bloom["landing_blocked"]:
+    if bloom.get("landing_blocked"):
         block = bloom["landing_blocked"]
         print(f"  landing blocked: {block.get('rolls')}/{block.get('budget')} refused")
-    if bloom["executor_fault"]:
+    if bloom.get("executor_fault"):
         fault = bloom["executor_fault"]
         terminal = " TERMINAL" if fault.get("terminal") else ""
         print(f"  executor fault: {fault.get('rolls')}/{fault.get('budget')}{terminal}")
-    if bloom["review_park"]:
+    if bloom.get("review_park"):
         print_review_park(bloom["review_park"], digest_hex(bloom["id"]))
+    elif bloom.get("adjudicate"):
+        print(f"  adjudicate  {bloom['adjudicate']}")
     print(f"  {'MEMBER':<28} {'CURSOR':<17} {'STATE':<12} CANDIDATE")
-    for member in bloom["members"]:
-        candidate = member["candidate"] or "-"
-        cursor = member["cursor"] or "-"
-        line = f"  {member['workpiece']:<28} {cursor:<17} {member['state']:<12} {candidate}"
-        if member["blocked_by"]:
+    for member in bloom.get("members") or []:
+        candidate = member.get("candidate") or "-"
+        cursor = member.get("cursor") or "-"
+        line = f"  {member.get('workpiece'):<28} {cursor:<17} {member.get('state'):<12} {candidate}"
+        if member.get("blocked_by"):
             line += f"  blocked by {member['blocked_by']}"
         print(line)
 
@@ -1989,23 +2098,23 @@ def cmd_why(args: argparse.Namespace) -> None:
         "workpiece": args.workpiece,
         "bloom": bloom.get("id"),
         "bloom_status": bloom.get("status"),
-        "cursor": order["stage"] if order else (movement or {}).get("stage"),
-        "cursor_source": "outstanding order" if order else "journal",
+        "cursor": order["stage"] if order else (member.get("cursor") or (movement or {}).get("stage")),
+        "cursor_source": "outstanding order" if order else ("composition" if member.get("cursor") else "journal"),
         "attempt": (movement or {}).get("attempt"),
         # The per-stage retry budget lives in the bloom's sealed stage catalog,
         # which no read route projects -- so the attempt count is reported
         # without the ceiling it is counting toward rather than guessed at.
         "attempt_budget": "unavailable (the sealed catalog is not served by the API)",
         "last_movement": movement,
-        "candidate": (resolution or {}).get("candidate"),
-        "has_candidate": resolution is not None,
+        "candidate": (resolution or {}).get("candidate") or member.get("candidate"),
+        "has_candidate": resolution is not None or member.get("candidate") is not None,
         "outstanding_order": order,
         "wedge": wedge,
         "wedge_cause": member.get("wedge_cause"),
         "held_on_question": pending,
         "blocked_by": blocked_by,
         "review_park": park,
-        "adjudicate": adjudicate_command(bloom_id or "<bloom>", park["question"]) if park else None,
+        "adjudicate": adjudicate_hint(bloom, bloom_id or "<bloom>"),
         "last_lane_result": lane,
         "ladder": ladder,
     }
@@ -2054,6 +2163,8 @@ def cmd_why(args: argparse.Namespace) -> None:
         print(f"             {pending.get('prompt')}")
     if park:
         print_review_park(park, bloom_id)
+    elif diagnosis.get("adjudicate"):
+        print(f"  adjudicate  {diagnosis['adjudicate']}")
     if lane:
         print(
             f"  last lane  {lane['command']} status={lane['status']} turns={lane['turns']} "
@@ -2339,16 +2450,13 @@ def cmd_repair(args: argparse.Namespace) -> None:
     emit_outcome(Api(args.base).post(f"/blooms/{bloom}/members/{args.workpiece}/repair", override_body(args, **extra)))
 
 
-COMPOSITION_WORKPIECE = "aether.bloomery.composition"
-
-
 def require_repairable(api: Api, workpiece: str) -> None:
     """Refuse a from-commit repair of a member that is not wedged.
 
     The chassis reducer still refuses the same case after host-side work; this
     check is the one that names the precondition *before* a candidate ref is
-    force-pushed. The composition is not a member in the view, so it is left
-    to the reducer — the only authority that can see its wedge.
+    force-pushed. The composition is not a sealed member, so a from-commit
+    repair of it is left to the reducer.
     """
     if workpiece == COMPOSITION_WORKPIECE:
         return

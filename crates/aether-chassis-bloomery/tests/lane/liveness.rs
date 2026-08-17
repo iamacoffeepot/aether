@@ -186,6 +186,7 @@ mod tests {
                 landing_blocked: None,
                 executor_fault: None,
                 review_park: None,
+                composition: None,
             }],
         }
     }
@@ -236,6 +237,7 @@ mod tests {
                     terminal: true,
                 }),
                 review_park: None,
+                composition: None,
             }],
         };
 

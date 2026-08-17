@@ -1,13 +1,13 @@
 //! The outward projection: a self-contained [`ViewDocument`] an adapter can
 //! render without querying back into the store (ADR-0149 §The boundary).
 
-use super::Snapshot;
 use super::readiness::blocking_ancestor;
+use super::{BloomRecord, Snapshot};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{
-    BloomView, ExecutorFaultView, HostFaultView, LandingBlock, MemberView, PendingDecisionView, ReviewParkView,
-    ViewDocument, WedgeCause,
+    BloomView, CompositionCursorView, CompositionView, ExecutorFaultView, HostFaultView, LandingBlock, MemberView,
+    PendingDecisionView, ReviewParkView, ViewDocument, WedgeCause,
 };
 use crate::values::Question;
 
@@ -18,7 +18,7 @@ use crate::values::Question;
 /// into the store. Pure: reads the snapshot, allocates a document, mutates
 /// nothing.
 ///
-/// Each [`BloomRecord`](crate::BloomRecord) becomes a [`BloomView`] (its sealed-spec id, status,
+/// Each [`BloomRecord`] becomes a [`BloomView`] (its sealed-spec id, status,
 /// and successor), and each sealed [`crate::Membership`] a [`MemberView`]
 /// carrying the member's scope revision, approval evidence, — matched by
 /// workpiece from the record's accumulated claims — its resolution claim once
@@ -26,7 +26,10 @@ use crate::values::Question;
 /// [`Question`] each open hold resolves to — its pending-decision hold (`None`
 /// when the member is not held), its wedge if it has stopped dispatching
 /// for good (`None` while it is still working), and — when the sealed graph
-/// is holding it out of the line — the ancestor it is waiting on.
+/// is holding it out of the line — the ancestor it is waiting on. The
+/// composition workpiece is not a sealed member: its cursor, wedge, and open
+/// findings ride on [`BloomView::composition`] so a refine-budget stop is
+/// visible without attaching it to every member.
 ///
 /// `resolve_question` resolves an open hold's question digest to its
 /// [`Question`] bytes, the same injected read-only resolver
@@ -36,7 +39,7 @@ use crate::values::Question;
 /// A hold whose bytes the resolver cannot read (a caller with no artifact
 /// access, e.g. the live-query path) surfaces no `pending_decision` on its
 /// member, exactly as an unresolvable study record contributes no cost to a
-/// grade. A bloom-scoped [`BloomRecord::review_park`](crate::BloomRecord::review_park)
+/// grade. A bloom-scoped [`BloomRecord::review_park`]
 /// is different: the digest is always projected, and resolved details ride
 /// only when the same resolver can read them. The park is never copied onto
 /// a member hold.
@@ -48,102 +51,16 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
         .blooms
         .values()
         .map(|record| {
-            // Resolve each open hold once, then bind it to the member it names —
-            // a parked question raises one hold per member, so the map is small.
-            let held: Vec<(WorkpieceId, PendingDecisionView)> = record
-                .holds
-                .iter()
-                .filter_map(|digest| {
-                    let question = resolve_question(digest)?;
-                    Some((
-                        question.workpiece.clone(),
-                        PendingDecisionView {
-                            question: *digest,
-                            stage: question.stage,
-                            prompt: question.prompt,
-                            options: question.options,
-                            blocked: question.blocked,
-                        },
-                    ))
-                })
-                .collect();
-            let members = record
-                .spec
-                .members()
-                .iter()
-                .map(|member| MemberView {
-                    workpiece: member.workpiece.clone(),
-                    scope_revision: member.scope_revision,
-                    approval: member.approval.clone(),
-                    resolution: record.claims.get(&member.workpiece).cloned(),
-                    pending_decision: held
-                        .iter()
-                        .find(|(workpiece, _)| *workpiece == member.workpiece)
-                        .map(|(_, view)| view.clone()),
-                    wedge: record.wedged.get(&member.workpiece).copied(),
-                    blocked_by: blocking_ancestor(record, &member.workpiece),
-                    host_fault: record
-                        .host_faults
-                        .get(&member.workpiece)
-                        .map(|hold| HostFaultView { findings: hold.findings.clone() }),
-                    machinery_rolls: snapshot
-                        .member_machinery(&record.spec.id(), &member.workpiece)
-                        .map_or(0, |fault| fault.rolls),
-                    machinery_budget: record
-                        .progress
-                        .get(&member.workpiece)
-                        .map(|cursor| cursor.stage)
-                        .or_else(|| record.wedged.get(&member.workpiece).map(|wedge| wedge.stage))
-                        .map_or(0, |stage| record.stage_catalog.retry_budget_of(stage).unwrap_or(1)),
-                    wedge_cause: record.wedged.get(&member.workpiece).map(|wedge| {
-                        let budget = record.stage_catalog.retry_budget_of(wedge.stage).unwrap_or(1);
-                        match snapshot.member_machinery(&record.spec.id(), &member.workpiece) {
-                            Some(fault) if fault.stage == wedge.stage && fault.rolls >= budget => WedgeCause::Machinery,
-                            _ => WedgeCause::Work,
-                        }
-                    }),
-                })
-                .collect();
-            // Rendered only once a landing has actually been refused, so an
-            // ordinary bloom's view is unchanged.
-            let landing_blocked = (record.landing_rolls > 0).then(|| LandingBlock {
-                rolls: record.landing_rolls,
-                budget: record.stage_catalog.retry_budget_of(StageId::Land).unwrap_or(1),
-            });
-
-            // Rendered only once a review has actually failed to run, so an
-            // ordinary bloom's view is unchanged here too.
-            let review_budget = record.stage_catalog.retry_budget_of(StageId::AggregateReview).unwrap_or(1);
-            let executor_fault = record.aggregate_fault.map(|fault| ExecutorFaultView {
-                subject: fault.subject,
-                rolls: fault.rolls,
-                budget: review_budget,
-                evidence: fault.evidence,
-                terminal: fault.rolls >= review_budget,
-            });
-
-            // The digest is the recovery key even when the live-query path
-            // cannot read the question bytes — unlike a member hold, which
-            // degrades to `None`.
-            let review_park = record.review_park.map(|question| match resolve_question(&question) {
-                Some(resolved) => ReviewParkView {
-                    question,
-                    stage: Some(resolved.stage),
-                    prompt: Some(resolved.prompt),
-                    options: resolved.options,
-                    blocked: Some(resolved.blocked),
-                },
-                None => ReviewParkView { question, stage: None, prompt: None, options: Vec::new(), blocked: None },
-            });
-
+            let held = held_decisions(record, &resolve_question);
             BloomView {
                 id: record.spec.id(),
                 status: record.status,
                 superseded_by: record.superseded_by,
-                members,
-                landing_blocked,
-                executor_fault,
-                review_park,
+                members: member_views(record, snapshot, &held),
+                landing_blocked: landing_block(record),
+                executor_fault: executor_fault_view(record),
+                review_park: review_park_view(record, &resolve_question),
+                composition: composition_view(record),
             }
         })
         .collect();
@@ -155,6 +72,128 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
     }
 }
 
+/// Resolve each open hold once, then bind it to the member it names — a parked
+/// question raises one hold per member, so the map is small.
+fn held_decisions(
+    record: &BloomRecord,
+    resolve_question: impl Fn(&Digest) -> Option<Question>,
+) -> Vec<(WorkpieceId, PendingDecisionView)> {
+    record
+        .holds
+        .iter()
+        .filter_map(|digest| {
+            let question = resolve_question(digest)?;
+            Some((
+                question.workpiece.clone(),
+                PendingDecisionView {
+                    question: *digest,
+                    stage: question.stage,
+                    prompt: question.prompt,
+                    options: question.options,
+                    blocked: question.blocked,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn member_views(
+    record: &BloomRecord,
+    snapshot: &Snapshot,
+    held: &[(WorkpieceId, PendingDecisionView)],
+) -> Vec<MemberView> {
+    record
+        .spec
+        .members()
+        .iter()
+        .map(|member| MemberView {
+            workpiece: member.workpiece.clone(),
+            scope_revision: member.scope_revision,
+            approval: member.approval.clone(),
+            resolution: record.claims.get(&member.workpiece).cloned(),
+            pending_decision: held
+                .iter()
+                .find(|(workpiece, _)| *workpiece == member.workpiece)
+                .map(|(_, view)| view.clone()),
+            wedge: record.wedged.get(&member.workpiece).copied(),
+            blocked_by: blocking_ancestor(record, &member.workpiece),
+            host_fault: record
+                .host_faults
+                .get(&member.workpiece)
+                .map(|hold| HostFaultView { findings: hold.findings.clone() }),
+            machinery_rolls: snapshot
+                .member_machinery(&record.spec.id(), &member.workpiece)
+                .map_or(0, |fault| fault.rolls),
+            machinery_budget: record
+                .progress
+                .get(&member.workpiece)
+                .map(|cursor| cursor.stage)
+                .or_else(|| record.wedged.get(&member.workpiece).map(|wedge| wedge.stage))
+                .map_or(0, |stage| record.stage_catalog.retry_budget_of(stage).unwrap_or(1)),
+            wedge_cause: record.wedged.get(&member.workpiece).map(|wedge| {
+                let budget = record.stage_catalog.retry_budget_of(wedge.stage).unwrap_or(1);
+                match snapshot.member_machinery(&record.spec.id(), &member.workpiece) {
+                    Some(fault) if fault.stage == wedge.stage && fault.rolls >= budget => WedgeCause::Machinery,
+                    _ => WedgeCause::Work,
+                }
+            }),
+        })
+        .collect()
+}
+
+/// Rendered only once a landing has actually been refused, so an ordinary
+/// bloom's view is unchanged.
+fn landing_block(record: &BloomRecord) -> Option<LandingBlock> {
+    (record.landing_rolls > 0).then(|| LandingBlock {
+        rolls: record.landing_rolls,
+        budget: record.stage_catalog.retry_budget_of(StageId::Land).unwrap_or(1),
+    })
+}
+
+/// Rendered only once a review has actually failed to run, so an ordinary
+/// bloom's view is unchanged here too.
+fn executor_fault_view(record: &BloomRecord) -> Option<ExecutorFaultView> {
+    let review_budget = record.stage_catalog.retry_budget_of(StageId::AggregateReview).unwrap_or(1);
+    record.aggregate_fault.map(|fault| ExecutorFaultView {
+        subject: fault.subject,
+        rolls: fault.rolls,
+        budget: review_budget,
+        evidence: fault.evidence,
+        terminal: fault.rolls >= review_budget,
+    })
+}
+
+/// The digest is the recovery key even when the live-query path cannot read
+/// the question bytes — unlike a member hold, which degrades to `None`.
+fn review_park_view(
+    record: &BloomRecord,
+    resolve_question: impl Fn(&Digest) -> Option<Question>,
+) -> Option<ReviewParkView> {
+    record.review_park.map(|question| match resolve_question(&question) {
+        Some(resolved) => ReviewParkView {
+            question,
+            stage: Some(resolved.stage),
+            prompt: Some(resolved.prompt),
+            options: resolved.options,
+            blocked: Some(resolved.blocked),
+        },
+        None => ReviewParkView { question, stage: None, prompt: None, options: Vec::new(), blocked: None },
+    })
+}
+
+/// Rendered only once the composition has a cursor, a wedge, or an open
+/// finding, so an ordinary bloom's view is unchanged here too.
+fn composition_view(record: &BloomRecord) -> Option<CompositionView> {
+    let cursor = record.progress.get(&WorkpieceId::composition()).map(|progress| CompositionCursorView {
+        stage: progress.stage,
+        attempts: progress.attempts,
+        candidate: progress.candidate,
+    });
+    let wedge = record.wedged.get(&WorkpieceId::composition()).copied();
+    let findings = record.open_composition_findings().cloned().collect::<Vec<_>>();
+    (cursor.is_some() || wedge.is_some() || !findings.is_empty()).then_some(CompositionView { cursor, wedge, findings })
+}
+
 #[cfg(test)]
 mod tests {
     use aether_data::wire::{from_bytes, to_vec};
@@ -163,10 +202,10 @@ mod tests {
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
     use crate::port::{BloomView, ViewDocument, WedgeCause};
-    use crate::reduce::{BloomStatus, Event, Fact, Snapshot, reduce};
+    use crate::reduce::{BloomStatus, Event, Fact, Outcome, Snapshot, reduce};
     use crate::values::{
         BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, Question,
-        ResolvedConfigs, SpendWindow,
+        ResolutionClaim, ResolvedConfigs, SpendWindow, VerifyFailureSet, Wedge,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -352,6 +391,7 @@ mod tests {
             landing_blocked: None,
             executor_fault: None,
             review_park: None,
+            composition: None,
         }
     }
 
@@ -508,5 +548,112 @@ mod tests {
         assert_eq!(park["prompt"], question.prompt);
         assert_eq!(park["options"], serde_json::to_value(&question.options).expect("options have a JSON form"));
         assert_eq!(park["blocked"], question.blocked);
+    }
+
+    fn step(snapshot: &Snapshot, event: &Event) -> (Snapshot, Outcome) {
+        let configs = ResolvedConfigs::default();
+        let spend = SpendWindow::default();
+        let decisions = reduce(snapshot, event, &configs, &spend);
+        (snapshot.apply(event, &decisions, &configs), decisions.outcome)
+    }
+
+    fn claim(name: &str, revision: u8, candidate: u8) -> ResolutionClaim {
+        ResolutionClaim {
+            workpiece: WorkpieceId(name.into()),
+            scope_revision: digest(revision),
+            candidate: digest(candidate),
+            evidence: Evidence { subject: digest(candidate), kind: EvidenceKind::ResolutionClaim, detail: digest(200) },
+        }
+    }
+
+    fn event(key: &str, fact: Fact) -> Event {
+        Event { idempotency_key: IdempotencyKey(key.into()), fact }
+    }
+
+    // The plausible bug (issue 5138): a composition that exhausted its Refine
+    // budget records CompositionWedged + a RecordWedge + an open finding, but
+    // /view still renders status Sealed with every member integrated and no
+    // park, so the operator cannot see the stop or the digest adjudicate needs.
+    #[test]
+    fn a_composition_wedge_surfaces_its_wedge_and_open_finding() {
+        let spec = BloomDraft { proposals: vec![membership("wp", 1)], base: digest(0), ..BloomDraft::default() }.seal();
+        let bloom = spec.id();
+        let mut snapshot = Snapshot::new(digest(0));
+        snapshot = step(&snapshot, &event("seal", Fact::Seal(spec))).0;
+        snapshot = step(&snapshot, &event("integrate", Fact::Integrate { bloom, claim: claim("wp", 1, 10) })).0;
+        snapshot = step(
+            &snapshot,
+            &event("resolve", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: Vec::new() }),
+        )
+        .0;
+
+        let failed_verify = event(
+            "verify-fail",
+            Fact::AggregateVerifyCompleted {
+                bloom,
+                passed: false,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::VerificationResult, detail: digest(52) },
+            },
+        );
+        snapshot = step(&snapshot, &failed_verify).0;
+
+        let fail_refine = |key: &str, detail: u8| {
+            event(
+                key,
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: WorkpieceId::composition(),
+                    stage: StageId::Refine,
+                    passed: false,
+                    evidence: Evidence {
+                        subject: digest(40),
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(detail),
+                    },
+                    candidate: None,
+                },
+            )
+        };
+        let mut outcome = None;
+        let mut last_detail = 70;
+        for (index, detail) in [(1_u8, 70_u8), (2, 71), (3, 72), (4, 73)] {
+            last_detail = detail;
+            let (next, next_outcome) = step(&snapshot, &fail_refine(&format!("refine-{index}"), detail));
+            snapshot = next;
+            if matches!(next_outcome, Outcome::CompositionWedged { .. }) {
+                outcome = Some(next_outcome);
+                break;
+            }
+        }
+        assert!(
+            matches!(outcome, Some(Outcome::CompositionWedged { refused_at: StageId::Refine, .. })),
+            "failed refine completions spend the budget: {outcome:?}"
+        );
+
+        let view = with_following_bloom(view_of(&snapshot, |_| None));
+        let decoded = wire_round_trip(&view);
+        assert_eq!(decoded, view, "composition slots must not steal the next bloom's bytes");
+
+        let composition = view.blooms[0].composition.as_ref().expect("the composition line is on the bloom");
+        assert_eq!(
+            composition.wedge,
+            Some(Wedge {
+                stage: StageId::Refine,
+                evidence: digest(last_detail),
+                repeated_verifiers: VerifyFailureSet::EMPTY,
+            }),
+            "the wedge is the same shape a member wedge renders",
+        );
+        assert!(
+            composition.findings.iter().any(|finding| finding.detail == digest(52)),
+            "the open finding digest is what adjudicate --finding quotes",
+        );
+        let cursor = composition.cursor.as_ref().expect("the composition still names the stage it stopped at");
+        assert_eq!(cursor.stage, StageId::Refine);
+        assert!(view.blooms[0].review_park.is_none(), "a refine-budget wedge is not a review park");
+        assert!(
+            view.blooms[0].members.iter().all(|member| member.wedge.is_none()),
+            "the stop is the composition's, not a member's",
+        );
     }
 }
