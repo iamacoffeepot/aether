@@ -5,6 +5,7 @@
 //! compilation cover; this pins the loop that actually dispatches and admits.
 
 use std::path::Path;
+use std::slice;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -2021,7 +2022,7 @@ fn an_aggregate_verify_repair_candidate_reaches_landing_ref_creation() {
     github.seed_git_object(&captured.checkout);
     let pusher = RecordingPush::default();
     let correspondence: SharedCorrespondence = Arc::new(github.clone());
-    push_admitted_candidates(std::slice::from_ref(&*admission), Some(&correspondence), &pusher);
+    push_admitted_candidates(slice::from_ref(&*admission), Some(&correspondence), &pusher);
 
     let issued = pusher.pushed.lock().unwrap().clone();
     assert_eq!(issued.len(), 1, "the accepted repair capture is published before landing");

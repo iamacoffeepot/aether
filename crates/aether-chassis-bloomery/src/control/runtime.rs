@@ -1076,17 +1076,16 @@ fn project(decisions: &Decisions) -> Result<ProjectedAxes, WireError> {
 /// a payload under a topic, and the classification of which effects are
 /// snapshot-only is one list rather than a tail on a longer match.
 fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError> {
-    let payload = match effect {
+    Ok(match effect {
         // The landing-receipt topic carries the receipt *and* the landed
         // bloom's membership: the receipt value names no members, so a
         // payload without them cannot reach the objects it belongs on after
         // a restart drains it (ADR-0149 §The receipt carries its members).
-        Decision::EmitReceipt(projected) => OutboxPayload::new(Topic::LandingReceipt, to_vec(projected)?),
-        Decision::RedispatchStage { bloom, question, answer, words } => {
-            let payload =
-                RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer, words: words.clone() };
-            OutboxPayload::new(Topic::Redispatch, to_vec(&payload)?)
-        }
+        Decision::EmitReceipt(projected) => Some(OutboxPayload::new(Topic::LandingReceipt, to_vec(projected)?)),
+        Decision::RedispatchStage { bloom, question, answer, words } => Some(OutboxPayload::new(
+            Topic::Redispatch,
+            to_vec(&RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer, words: words.clone() })?,
+        )),
         Decision::DispatchAttempt {
             bloom,
             workpiece,
@@ -1107,11 +1106,11 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
                 profile: profile.clone(),
                 configs: configs.clone(),
             };
-            OutboxPayload::new(Topic::Dispatch, to_vec(&payload)?)
+            Some(OutboxPayload::new(Topic::Dispatch, to_vec(&payload)?))
         }
         Decision::DispatchLand { bloom, expected_base, new_head } => {
             let payload = LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head };
-            OutboxPayload::new(Topic::Land, to_vec(&payload)?)
+            Some(OutboxPayload::new(Topic::Land, to_vec(&payload)?))
         }
         Decision::DispatchIntegration { bloom, base, members, adopt_from } => {
             let payload = IntegratePayload {
@@ -1120,7 +1119,7 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
                 members: members.clone(),
                 adopt_from: adopt_from.map(|predecessor| predecessor.0),
             };
-            OutboxPayload::new(Topic::Integrate, to_vec(&payload)?)
+            Some(OutboxPayload::new(Topic::Integrate, to_vec(&payload)?))
         }
         Decision::DispatchAggregateReview { bloom, transformation, roll, profile, configs } => {
             let payload = AggregateReviewPayload {
@@ -1130,7 +1129,7 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
                 pass: ReviewPass::from_roll(*roll),
                 configs: configs.clone(),
             };
-            OutboxPayload::new(Topic::AggregateReview, to_vec(&payload)?)
+            Some(OutboxPayload::new(Topic::AggregateReview, to_vec(&payload)?))
         }
         Decision::DispatchAggregateVerify { bloom, transformation, profile, roll: _ } => {
             let payload = AggregateVerifyPayload {
@@ -1138,11 +1137,11 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
                 bloom: bloom.0,
                 transformation: transformation.clone(),
             };
-            OutboxPayload::new(Topic::AggregateVerify, to_vec(&payload)?)
+            Some(OutboxPayload::new(Topic::AggregateVerify, to_vec(&payload)?))
         }
         Decision::DispatchOrphanClaimRelease { request, target } => {
             let payload = OrphanClaimReleasePayload { request: *request, target: target.clone() };
-            OutboxPayload::new(Topic::OrphanClaimRelease, to_vec(&payload)?)
+            Some(OutboxPayload::new(Topic::OrphanClaimRelease, to_vec(&payload)?))
         }
         Decision::ClaimMembership { .. }
         | Decision::ReleaseMembership { .. }
@@ -1178,9 +1177,8 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         | Decision::RecordMemberDependencies { .. }
         | Decision::RecordHostFault { .. }
         | Decision::ClearHostFault { .. }
-        | Decision::RecordCandidateVehicle { .. } => return Ok(None),
-    };
-    Ok(Some(payload))
+        | Decision::RecordCandidateVehicle { .. } => None,
+    })
 }
 
 /// Answer a duplicate admission, naming the key it discarded.
