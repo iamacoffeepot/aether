@@ -224,7 +224,7 @@ impl SessionReuse {
         slot_path: &str,
         is_builder: bool,
     ) {
-        self.persist_and_remember(key, None, session_id, manifest, slot_path, is_builder, None);
+        self.persist_and_remember(key, None, session_id, manifest, (slot_path, is_builder), None);
     }
 
     /// Decide whether this lap resumes, acquire from the pool, and return the
@@ -369,8 +369,7 @@ impl SessionReuse {
             plan.lease.as_ref(),
             session_id,
             &manifest,
-            &plan.slot_path,
-            plan.is_builder,
+            (&plan.slot_path, plan.is_builder),
             Some(concluded),
         );
     }
@@ -381,10 +380,10 @@ impl SessionReuse {
         lease: Option<&LeaseToken>,
         session_id: &str,
         manifest: &SessionManifest,
-        slot_path: &str,
-        is_builder: bool,
+        seat: (&str, bool),
         concluded: Option<bool>,
     ) {
+        let (slot_path, is_builder) = seat;
         let mut state = lock(&self.state);
         match concluded {
             Some(true) => {
@@ -557,7 +556,7 @@ pub fn stamp_reuse(
     let Some(object) = value.as_object_mut() else {
         return bytes.to_vec();
     };
-    let priced = prices.price_dispatch(&plan.key.model, &actuals.as_cost(), calls);
+    let priced_micro_usd = prices.price_dispatch(&plan.key.model, &actuals.as_cost(), calls);
     let counterfactual = calls.filter(|calls| !calls.is_empty()).and_then(|calls| {
         let replayed: Vec<StudyCall> = calls.iter().copied().map(|call| replay_other_arm(plan.arm, call)).collect();
         prices.price_dispatch(&plan.key.model, &sum_calls(&replayed), Some(&replayed))
@@ -572,7 +571,7 @@ pub fn stamp_reuse(
             "cache_read_tokens": actuals.cache_read_tokens,
             "cache_write_tokens": actuals.cache_write_tokens,
             "output_tokens": actuals.output_tokens,
-            "priced_micro_usd": priced,
+            "priced_micro_usd": priced_micro_usd,
             "counterfactual_micro_usd": counterfactual,
             "edge": plan.edge,
         }),
@@ -858,17 +857,17 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_slice(&stamped).expect("stamp_reuse emits JSON beside the result record");
 
-        let priced = prices
+        let priced_micro_usd = prices
             .price_dispatch("claude-opus-5", &actuals.as_cost(), Some(&calls))
             .expect("the fixture table prices this model");
         let replayed: Vec<StudyCall> = calls.iter().copied().map(|call| replay_other_arm(plan.arm, call)).collect();
         let counterfactual = prices
             .price_dispatch("claude-opus-5", &sum_calls(&replayed), Some(&replayed))
             .expect("the fixture table prices the replayed calls");
-        assert_ne!(priced, counterfactual, "read and write columns differ, so the arms must price apart");
+        assert_ne!(priced_micro_usd, counterfactual, "read and write columns differ, so the arms must price apart");
         assert_eq!(value["session_reuse"]["arm"], "resumed");
         assert_eq!(value["session_reuse"]["actual_turns"], 12);
-        assert_eq!(value["session_reuse"]["priced_micro_usd"], priced);
+        assert_eq!(value["session_reuse"]["priced_micro_usd"], priced_micro_usd);
         assert_eq!(value["session_reuse"]["counterfactual_micro_usd"], counterfactual);
         assert_eq!(value["session_reuse"]["input_tokens"], 3_000);
         assert_eq!(value["result_record"]["num_turns"], 12, "the actuals stay on the record");

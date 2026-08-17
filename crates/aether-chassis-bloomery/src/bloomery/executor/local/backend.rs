@@ -712,19 +712,18 @@ impl LocalExecutor {
         {
             sessions.observe(plan, &actuals);
             if let Some(session_id) = super::session_reuse::parse_session_id(&bytes) {
-                match super::session_reuse::parse_context_tokens(&bytes) {
-                    Some(context) => {
-                        let concluded = if plan.is_builder {
-                            construct_conclusion(&bytes)
-                        } else {
-                            parse_status(&bytes) == Some(LaneStatus::Pass)
-                        };
-                        sessions.deposit(plan, &session_id, context, concluded);
-                    }
-                    None => tracing::warn!(
+                if let Some(context) = super::session_reuse::parse_context_tokens(&bytes) {
+                    let concluded = if plan.is_builder {
+                        construct_conclusion(&bytes)
+                    } else {
+                        parse_status(&bytes) == Some(LaneStatus::Pass)
+                    };
+                    sessions.deposit(plan, &session_id, context, concluded);
+                } else {
+                    tracing::warn!(
                         nonce,
                         "local executor backend: result record has no per-call usage; skipping session deposit so an unmeasured lap cannot look empty"
-                    ),
+                    );
                 }
             }
         }
