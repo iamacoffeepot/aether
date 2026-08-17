@@ -56,6 +56,15 @@ fn spawn(port: u16, db: &str) -> Coordinator {
     Coordinator::spawn(port, &[("AETHER_STORE_PATH", db)])
 }
 
+/// Fork the coordinator against `db` and handshake only with the child that
+/// stayed alive. Same bind-race retry as [`spawn_with_artifacts`].
+fn spawn_with_store(db: &str, client_name: &str) -> (Coordinator, TcpStream) {
+    spawn_and_connect(client_name, Duration::from_secs(30), || {
+        let port = free_port();
+        (port, spawn(port, db))
+    })
+}
+
 /// Pipeline two typed `Call`s to `mailbox` — write **both** frames before reading
 /// either reply — so the second request sits in the actor's mailbox while the
 /// first's store round-trip is still outstanding, forcing the in-flight
@@ -245,9 +254,7 @@ fn control_loop_converges_across_a_restart() {
 
     // First boot: load the control core and seal a synthetic bloom through the
     // admit ingress — the reducer decides, the combined commit persists.
-    let port = free_port();
-    let coordinator = spawn(port, db);
-    let mut stream = connect_and_handshake(port, "control-loop-test");
+    let (coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
 
     let control = control_mailbox();
     let sealed = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp"));
@@ -259,9 +266,7 @@ fn control_loop_converges_across_a_restart() {
 
     // Restart against the same database and reload the control core; its `wire`
     // replays the journal to rebuild the snapshot.
-    let port = free_port();
-    let _coordinator = spawn(port, db);
-    let mut stream = connect_and_handshake(port, "control-loop-test");
+    let (_coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
     let control = control_mailbox();
 
     // Convergence: the rebuilt snapshot names the bloom, folded from the
@@ -321,9 +326,7 @@ fn the_capability_ledger_is_measured_live_and_rebuilt_on_replay() {
     // harness/model/effort are refinable without an ADR.
     let construct = ModelOverride::default().resolve(StageId::Construct, &StageCatalog::profile_of(StageId::Construct));
 
-    let port = free_port();
-    let coordinator = spawn(port, db);
-    let mut stream = connect_and_handshake(port, "calibration-test");
+    let (coordinator, mut stream) = spawn_with_store(db, "calibration-test");
     let control = control_mailbox();
 
     // The seal dispatches its one member at the entry stage, which is the one
@@ -341,9 +344,7 @@ fn the_capability_ledger_is_measured_live_and_rebuilt_on_replay() {
     drop(stream);
     coordinator.kill9();
 
-    let port = free_port();
-    let _coordinator = spawn(port, db);
-    let mut stream = connect_and_handshake(port, "calibration-test");
+    let (_coordinator, mut stream) = spawn_with_store(db, "calibration-test");
     let control = control_mailbox();
 
     let replayed = calibration_until_measured(&mut stream, 30, control);
@@ -751,9 +752,7 @@ fn a_rejected_repair_does_not_shadow_the_same_content_after_release() {
     let db = dir.path().join("bloomery.db");
     let db = db.to_str().unwrap();
 
-    let port = free_port();
-    let coordinator = spawn(port, db);
-    let mut stream = connect_and_handshake(port, "control-loop-test");
+    let (coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
     let control = control_mailbox();
 
     let Outcome::Sealed(bloom) = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp")) else {
@@ -782,9 +781,7 @@ fn a_rejected_repair_does_not_shadow_the_same_content_after_release() {
     drop(stream);
     coordinator.kill9();
 
-    let port = free_port();
-    let _coordinator = spawn(port, db);
-    let mut stream = connect_and_handshake(port, "control-loop-test");
+    let (_coordinator, mut stream) = spawn_with_store(db, "control-loop-test");
     let control = control_mailbox();
 
     let after_replay = admit(&mut stream, 8, control, &repair);
