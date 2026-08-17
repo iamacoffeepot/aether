@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 use std::collections::BTreeMap;
 
 use aether_bloomery::{
-    Admit, AgentSelection, AggregateReviewPayload, BloomId, ConfigKind, ConfigRegistry, DispatchPayload, EvidenceRef,
-    ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce, ReasoningEffort, RedispatchPayload,
-    ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride, TimeoutRecord, Topic, Transformation,
-    VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
+    Admit, AgentSelection, AggregateReviewPayload, BloomId, CandidateRef, ConfigKind, ConfigRegistry, DispatchPayload,
+    EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce, ReasoningEffort,
+    RedispatchPayload, ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride, TimeoutRecord, Topic,
+    Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -28,16 +28,16 @@ use aether_substrate::mail::registry::Registry;
 
 use super::strand::readopt_stranded_dispatches;
 use super::{
-    BACKOFF_CAP, CandidatePush, ExecutorReactorState, GitCandidatePush, NameEvidenceClaims, Stores, TickClock,
-    TrackedHandle, backoff_delay, default_candidate_push, drain_and_dispatch, drain_and_dispatch_aggregate,
-    drain_and_redispatch, is_disabled_mount, is_stale, next_backoff, pull_and_admit, push_admitted_candidates,
-    seed_dispatches, seed_tracked, select_stale_handles,
+    BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, ExecutorReactorState, GitCandidatePush, NameEvidenceClaims,
+    Stores, TickClock, TrackedHandle, backoff_delay, default_candidate_push, drain_and_dispatch,
+    drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_stale, next_backoff, pull_and_admit,
+    push_admitted_candidates, seed_dispatches, seed_tracked, select_stale_handles,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
 use crate::bloomery::intake::{
-    Admission, AdmissionKey, AdmitDecision, DispatchError, UploadedEvidence, admit_uploaded, attempt_artifact_name,
-    dispatch_nonce,
+    Admission, AdmissionKey, AdmitDecision, DispatchError, DispatchRecord, UploadedEvidence, admit_uploaded,
+    attempt_artifact_name, dispatch_nonce, record_dispatch,
 };
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::{CoordinatorConfig, GithubConnectionConfig};
@@ -1727,6 +1727,177 @@ fn drain_threads_persisted_findings_onto_the_construct_order() {
         description.contains("## Findings\n\nclippy: off-by-one in the loop bound"),
         "the findings follow as their own labeled section",
     );
+}
+
+// #5098 — the reserved composition Refine has no sealed work order, so the
+// first weave-repair dispatch authors one from the aggregate findings and
+// persists it. A retry looks that row up instead of writing a new body, while
+// the latest findings still overlay. Catches the subject-only prompt that
+// launched (and then looped) when AggregateVerify refused the fold.
+#[test]
+fn composition_refine_persists_a_generated_order_carrying_aggregate_findings() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let composition = WorkpieceId::COMPOSITION;
+    let findings = "verify.check failed.\n\nerror[E0308]: mismatched types in the fold";
+    store.record_review_findings(bloom.0.as_bytes(), composition, findings).unwrap();
+    enqueue_dispatch_at(&mut store, bloom, composition, 5, StageId::Refine);
+
+    let (handles, ack_through, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    assert_eq!(handles.len(), 1, "a composition Refine with findings dispatches");
+    store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
+
+    let orders = backend.orders();
+    let description = orders[0].transformation.description.as_deref().unwrap();
+    assert!(
+        description.starts_with(&pin_workpiece_description(composition, COMPOSITION_REFINE_ORDER)),
+        "the generated weave-repair order is the task body",
+    );
+    assert!(
+        description.contains(&format!("## Findings\n\n{findings}")),
+        "the failing aggregate verify's findings ride the same prompt",
+    );
+    assert_eq!(
+        store.lookup_dispatch_description(bloom.0.as_bytes(), composition).unwrap().as_deref(),
+        Some(COMPOSITION_REFINE_ORDER),
+        "the generated order is persisted so a retry can reuse it",
+    );
+
+    // A second lap must reuse that row rather than authoring a different body,
+    // even when the findings channel has grown a triage note.
+    let threaded = format!("{findings}\n\n## Repair triage\n\n`fold` was not touched.");
+    store.record_review_findings(bloom.0.as_bytes(), composition, &threaded).unwrap();
+    enqueue_dispatch_at(&mut store, bloom, composition, 6, StageId::Refine);
+    drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    assert_eq!(
+        store.lookup_dispatch_description(bloom.0.as_bytes(), composition).unwrap().as_deref(),
+        Some(COMPOSITION_REFINE_ORDER),
+        "a retry does not rewrite the persisted work order",
+    );
+    let orders = backend.orders();
+    let retry = orders[1].transformation.description.as_deref().unwrap();
+    assert!(
+        retry.starts_with(&pin_workpiece_description(composition, COMPOSITION_REFINE_ORDER)),
+        "the retry still leads with the same generated order",
+    );
+    assert!(retry.contains(&threaded), "the latest findings still overlay on top");
+}
+
+// #5098 — a composition Refine with neither a persisted order nor findings
+// cannot assemble a task. Launching it is a paid subject-only no-op; park
+// instead so the missing work order cannot spend a model dispatch.
+#[test]
+fn composition_refine_without_findings_parks_rather_than_dispatching() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let (sequence, _) = enqueue_dispatch_at(&mut store, bloom, WorkpieceId::COMPOSITION, 5, StageId::Refine);
+
+    let (handles, ack_through, transient) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    assert!(handles.is_empty(), "a subject-only composition Refine never submits");
+    assert!(backend.orders().is_empty(), "the model lane is not launched");
+    assert_eq!(ack_through, Some(sequence), "the missing work order parks rather than re-driving");
+    assert_eq!(transient, None, "a missing composition task is not a transient submit failure");
+    assert_eq!(
+        store.lookup_dispatch_description(bloom.0.as_bytes(), WorkpieceId::COMPOSITION).unwrap(),
+        None,
+        "nothing is persisted when there are no findings to carry",
+    );
+}
+
+// #5098 — an AggregateVerify failure can produce a weave-repair candidate:
+// intake persists the compiler diagnostic, drain threads it onto the reserved
+// Refine's prompt, and a passing lap that captured a tree admits as a
+// completed repair rather than a bounce.
+#[test]
+fn an_aggregate_verify_failure_can_produce_a_repair_candidate() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let tree = digest(30);
+    let findings = "the composed tree does not build";
+
+    let verify = DispatchRecord {
+        profile: StageCatalog::profile_of(StageId::AggregateVerify),
+        nonce: Nonce("n-av".to_owned()),
+        bloom,
+        workpiece: WorkpieceId(String::new()),
+        scope_revision: tree,
+        candidate: tree,
+        displayed_digest: tree,
+        stage: StageId::AggregateVerify,
+        transformation: Transformation::for_aggregate_verify(
+            &StageCatalog::binding_of(StageId::AggregateVerify),
+            tree,
+            tree,
+        ),
+        configs: ConfigRegistry::default(),
+    };
+    record_dispatch(&mut store, &verify).unwrap();
+    let AdmitDecision::Admitted(_) = admit_uploaded(
+        &mut store,
+        &UploadedEvidence {
+            nonce: Nonce("n-av".to_owned()),
+            subject: tree,
+            verdict: StageVerdict::VerificationFailed,
+            detail: digest(7),
+            candidate: None,
+            findings: Some(findings.to_owned()),
+            failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+            cost: None,
+            calls: None,
+        },
+    )
+    .unwrap() else {
+        panic!("the failing aggregate verify admits");
+    };
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), WorkpieceId::COMPOSITION).unwrap().as_deref(),
+        Some(findings),
+        "the diagnostic is on the composition's findings channel before Refine drains",
+    );
+
+    let (sequence, _) = enqueue_dispatch_at(&mut store, bloom, WorkpieceId::COMPOSITION, 5, StageId::Refine);
+    let (handles, _, _) = drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    assert_eq!(handles.len(), 1, "the weave repair dispatches once the findings exist");
+    let orders = backend.orders();
+    let description = orders[0].transformation.description.as_deref().unwrap();
+    assert!(
+        description.contains(&format!("## Findings\n\n{findings}")),
+        "the failing aggregate verify's findings reach the repair prompt",
+    );
+
+    let captured = CandidateRef { tree: digest(8), checkout: digest(9) };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(
+        &mut store,
+        &UploadedEvidence {
+            nonce: Nonce(format!("dispatch-{sequence}")),
+            subject: digest(5),
+            verdict: StageVerdict::VerificationPassed,
+            detail: digest(11),
+            candidate: Some(captured),
+            findings: None,
+            failed_verifiers: VerifyFailureSet::EMPTY,
+            cost: None,
+            calls: None,
+        },
+    )
+    .unwrap() else {
+        panic!("the weave-repair upload admits");
+    };
+    let Fact::AttemptCompleted { workpiece, stage, passed, candidate, .. } = admission.event.fact else {
+        panic!("a composition Refine admits AttemptCompleted, got {:?}", admission.event.fact);
+    };
+    assert!(workpiece.is_composition());
+    assert_eq!(stage, StageId::Refine);
+    assert!(passed, "a findings-naming-nothing repair that captured a tree keeps its passing verdict");
+    assert_eq!(candidate, Some(captured), "the completion path retains the captured weave");
 }
 
 // Park one dispatched construct attempt on `question` and return the outbox

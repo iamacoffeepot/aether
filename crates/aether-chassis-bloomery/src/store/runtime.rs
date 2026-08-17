@@ -22,7 +22,7 @@ use aether_actor::runtime;
 // inward for its `StoreCapability` handlers (issue #3497).
 use aether_bloomery::{
     Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, JournalRecord, LoadConfigs, LoadConfigsResult,
-    MembershipMutation, OutboxPayload, ReplayJournal, ReplayJournalResult,
+    MembershipMutation, OutboxPayload, ReplayJournal, ReplayJournalResult, WorkpieceId,
 };
 use std::iter::repeat_n;
 use std::time::Duration;
@@ -297,11 +297,13 @@ pub trait StoreBackend: Send {
     /// superseded, so a bloom with none left is retired, and the executor reactor
     /// reads this to retire its already-queued dispatches with it (#4640).
     fn holds_active_membership(&mut self, bloom: &[u8]) -> rusqlite::Result<bool>;
-    /// Every persisted work-order description for one bloom as
+    /// Every persisted *member* work-order description for one bloom as
     /// (`workpiece`, `description`) pairs in workpiece order — the aggregate
     /// review composes its task context from the whole membership's orders
     /// (ADR-0153): the sealed intent the critic judges the integrated diff
-    /// against.
+    /// against. The reserved composition workpiece's generated refine order is
+    /// keyed the same way but is not a sealed member, so it is omitted here and
+    /// read only via [`Self::lookup_dispatch_description`].
     fn list_dispatch_descriptions(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<(String, String)>>;
     /// Record the review critic's findings for (`bloom`, `workpiece`) (#3656) —
     /// what a Refine re-entry is directed by. Last-writer-wins on the key: a
@@ -914,7 +916,9 @@ impl StoreBackend for SqliteStore {
             .prepare("SELECT workpiece, description FROM dispatch_description WHERE bloom = ?1 ORDER BY workpiece")?;
         let rows =
             stmt.query_map(rusqlite::params![bloom], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
-        rows.collect()
+        let mut listed = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        listed.retain(|(workpiece, _)| workpiece != WorkpieceId::COMPOSITION);
+        Ok(listed)
     }
 
     fn record_review_findings(&mut self, bloom: &[u8], workpiece: &str, findings: &str) -> rusqlite::Result<()> {

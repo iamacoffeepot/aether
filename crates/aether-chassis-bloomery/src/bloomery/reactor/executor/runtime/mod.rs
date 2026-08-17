@@ -622,6 +622,14 @@ impl AdmitSink for CollectingSink {
 /// the member instead. A member that sealed *no* override resolves to the
 /// default, which is not an error and changes nothing.
 ///
+/// The work order the composition workpiece never sealed (#5098). Generated on
+/// the first weave-repair dispatch and reused on every retry, so the reserved
+/// Refine has a nonempty `## Task` instead of a subject-only prompt.
+pub(crate) const COMPOSITION_REFINE_ORDER: &str = "\
+Repair the composed tree. A composite gate refused this weave. \
+Address every defect in the Findings section so the composed tree builds. \
+Do not reopen finished member work; repair at the seam.";
+
 /// Shared by the first dispatch of a stage and the replay of a parked one
 /// (#3664), so a re-dispatched lane resolves its profile and prompt exactly the
 /// way the attempt that parked did.
@@ -647,7 +655,9 @@ fn overlay_member_advisory(
     let model_override =
         resolve_config::<ModelOverride>(store, ConfigScopes::bloom_wide(&record.configs))?.unwrap_or_default();
     record.transformation.model = Some(dispatch_model(record.stage, &record.profile, &model_override));
-    if let Some(description) = store.lookup_dispatch_description(&bloom, &workpiece)? {
+    if is_composition_refine(record) {
+        seed_composition_refine_order(store, record)?;
+    } else if let Some(description) = store.lookup_dispatch_description(&bloom, &workpiece)? {
         // Sibling members share a sealed body; the header is what keeps each
         // dispatch's `--task` (and `pool_task` key) distinct (#4984).
         record.transformation.description = Some(pin_workpiece_description(&workpiece, &description));
@@ -686,6 +696,49 @@ fn overlay_member_advisory(
         record.transformation.description = Some(format!("{task}\n\n{overlay}"));
     }
     Ok(())
+}
+
+/// Whether this order is the reserved composition workpiece's weave repair.
+fn is_composition_refine(record: &DispatchRecord) -> bool {
+    record.stage == StageId::Refine && record.workpiece.is_composition()
+}
+
+/// Seed the composition Refine's work order from the persisted row, or generate
+/// and persist one when findings exist to carry (#5098).
+///
+/// The reserved workpiece is not sealed with operator text, so the first weave
+/// repair authors the standing instruction here and every retry looks that row
+/// up instead of writing it again. Findings still overlay separately, the same
+/// way a member Refine keeps its sealed order and threads the latest verdict.
+fn seed_composition_refine_order(
+    store: &mut dyn StoreBackend,
+    record: &mut DispatchRecord,
+) -> Result<(), StoreConfigError> {
+    let bloom = record.bloom.0.as_bytes();
+    let workpiece = record.workpiece.0.as_str();
+    if let Some(description) = store.lookup_dispatch_description(bloom, workpiece)? {
+        record.transformation.description = Some(pin_workpiece_description(workpiece, &description));
+        return Ok(());
+    }
+    let has_findings =
+        store.lookup_review_findings(bloom, workpiece)?.is_some_and(|findings| !findings.trim().is_empty())
+            || store.lookup_review_findings(bloom, "")?.is_some_and(|findings| !findings.trim().is_empty());
+    if !has_findings {
+        return Ok(());
+    }
+    store.record_dispatch_description(bloom, workpiece, COMPOSITION_REFINE_ORDER)?;
+    record.transformation.description = Some(pin_workpiece_description(workpiece, COMPOSITION_REFINE_ORDER));
+    Ok(())
+}
+
+/// A composition Refine is ready to pay for a model lane only when the assembled
+/// task carries the findings the repair was dispatched to address.
+fn composition_refine_has_findings_task(record: &DispatchRecord) -> bool {
+    record
+        .transformation
+        .description
+        .as_deref()
+        .is_some_and(|task| task.split_once("## Findings").is_some_and(|(_, rest)| !rest.trim().is_empty()))
 }
 
 /// Drain the dispatch topic and submit each entry through the executor, recording
@@ -786,6 +839,20 @@ fn drain_and_dispatch(
                 workpiece = %record.workpiece.0,
                 %error,
                 "sealed configuration did not resolve; parking the dispatch rather than running the default",
+            );
+            ack_through = Some(entry.sequence);
+            continue;
+        }
+        if is_composition_refine(&record) && !composition_refine_has_findings_task(&record) {
+            // A subject-only weave repair is a paid no-op: the lane refuses an
+            // empty `## Task` and the refusal is classified as another composition
+            // failure (#5098). Park before submit so the missing work order cannot
+            // spend a model dispatch.
+            tracing::error!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                workpiece = %record.workpiece.0,
+                "composition refine has no work order carrying findings; parking rather than launching a subject-only lane",
             );
             ack_through = Some(entry.sequence);
             continue;
@@ -1183,6 +1250,15 @@ fn resolve_replay(
             workpiece = %record.workpiece.0,
             %error,
             "sealed configuration did not resolve on replay; acking past the redispatch",
+        );
+        return Ok(None);
+    }
+    if is_composition_refine(&record) && !composition_refine_has_findings_task(&record) {
+        tracing::error!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            workpiece = %record.workpiece.0,
+            "composition refine replay has no work order carrying findings; acking past the redispatch",
         );
         return Ok(None);
     }
