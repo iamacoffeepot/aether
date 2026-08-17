@@ -31,6 +31,13 @@ const CLOSURE_KEY_DOMAIN: &str = "aether.bloomery.proof.closure_key";
 pub struct ClosureKey(Digest);
 
 impl ClosureKey {
+    /// Wrap a digest already computed as a closure key — reconstructing one
+    /// from the ledger, or naming a fixed one in a test.
+    #[must_use]
+    pub const fn from_digest(digest: Digest) -> Self {
+        Self(digest)
+    }
+
     /// The 32 digest bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {

@@ -80,8 +80,8 @@ pub use correspondence::SqliteCorrespondence;
 mod runtime;
 #[cfg(feature = "runtime")]
 pub use runtime::{
-    AppendOutcome, CommitOutcome, JournalWrite, OutstandingOrder, RecordOutcome, SealOutcome, SqliteStore,
-    StoreBackend, StoreCapabilityState, StudyRow,
+    AppendOutcome, CommitOutcome, JournalWrite, OutstandingOrder, ProofFactRow, ProofFactWrite, RecordOutcome,
+    SealOutcome, SqliteStore, StoreBackend, StoreCapabilityState, StudyRow,
 };
 
 #[cfg(all(test, feature = "runtime"))]

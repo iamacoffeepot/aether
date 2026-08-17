@@ -1,13 +1,18 @@
-//! Proof-fact addressing for the verification ledger (ADR-0200 §The fact).
+//! Proof-fact addressing and recording for the verification ledger
+//! (ADR-0200 §The fact).
 //!
-//! A proof fact is addressed by `(closure_key, test, result, host_class)`. This
-//! slice owns the two halves that do not need a journal row: the
-//! [`closure_key`] computed over a package's git-addressed dependency closure,
-//! and the opaque [`HostClass`] the coordinator supplies. The key is a value.
+//! A proof fact is addressed by `(closure_key, test, result, host_class)`.
+//! [`closure_key`] hashes a package's git-addressed dependency closure;
+//! [`HostClass`] is the opaque host the coordinator supplies; [`discriminate`]
+//! is the only constructor of facts the ledger will store.
 
 mod closure;
+mod facts;
 
 pub use closure::{ClosureKey, ClosureKeyError, closure_key};
+#[cfg(feature = "runtime")]
+pub use facts::record_proof_facts;
+pub use facts::{DiscriminatedFact, DiscriminatedFacts, ProofResult, ProofSource, RunnerReport, discriminate};
 
 /// The host class a proof fact is keyed on (ADR-0200 integrity rule 2).
 ///

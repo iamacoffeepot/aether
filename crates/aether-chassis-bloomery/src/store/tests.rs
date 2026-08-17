@@ -8,7 +8,8 @@
 #![allow(clippy::unwrap_used)]
 
 use super::runtime::{
-    AppendOutcome, CommitOutcome, JournalWrite, OutstandingOrder, RecordOutcome, SealOutcome, SqliteStore, StoreBackend,
+    AppendOutcome, CommitOutcome, JournalWrite, OutstandingOrder, ProofFactWrite, RecordOutcome, SealOutcome,
+    SqliteStore, StoreBackend,
 };
 use aether_bloomery::{MembershipMutation, OutboxPayload, WorkpieceId};
 
@@ -1048,4 +1049,55 @@ mod pre_migration_price_table {
             SealedPriceTable::Current(PriceTable::default()),
         );
     }
+}
+
+#[test]
+fn a_v3_store_gains_the_proof_facts_table_empty() {
+    // ADR-0200: a store at schema 3 has no proof-fact rows to invent, and
+    // opening it must create the ledger empty rather than skip the table
+    // because user_version was already "current" at 3.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v3.db").to_str().unwrap().to_owned();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE journal (
+                 sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+                 idempotency_key TEXT NOT NULL UNIQUE,
+                 event           BLOB NOT NULL,
+                 decisions       BLOB,
+                 decider         TEXT,
+                 decisions_schema TEXT
+             );
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+
+    let mut store = SqliteStore::open(&path).expect("a v3 store migrates");
+    assert!(store.list_proof_facts().unwrap().is_empty(), "the ledger starts empty; nothing is backfilled");
+}
+
+#[test]
+fn proof_facts_append_and_never_replace() {
+    // The table is a ledger, not a cache keyed on (closure, test). Two writes
+    // of the same address are two rows; a later slice consults, this one only
+    // records.
+    let mut store = memory();
+    let write = ProofFactWrite {
+        closure_key: &[0xC1; 32],
+        test_id: "crate::once",
+        result: "green",
+        host_class: "fleet",
+        producing_dispatch: "n-1",
+        producing_bloom: &[0xB1; 32],
+    };
+    store.append_proof_facts(&[write]).unwrap();
+    store.append_proof_facts(&[write]).unwrap();
+
+    let rows = store.list_proof_facts().unwrap();
+    assert_eq!(rows.len(), 2, "a second write appends; it does not replace");
+    assert_eq!(rows[0].sequence, 1);
+    assert_eq!(rows[1].sequence, 2);
+    assert_eq!(rows[0].test_id, "crate::once");
+    assert_eq!(rows[1].producing_dispatch, "n-1");
 }
