@@ -22,7 +22,7 @@ use alloc::string::String;
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::BloomStatus;
-use crate::values::{Evidence, LandingReceipt, ResolutionClaim, SpendQuiesce, Wedge};
+use crate::values::{CandidateRef, CompositionFinding, Evidence, LandingReceipt, ResolutionClaim, SpendQuiesce, Wedge};
 
 /// The self-contained render input a reconcile pushes outward: the current
 /// mainline, the last-reported observed head, and every projectable bloom,
@@ -50,8 +50,10 @@ pub struct ViewDocument {
 }
 
 /// One bloom's outward view: its sealed identity, lifecycle status, optional
-/// successor, the full per-member render data, and — when the aggregate review
-/// has parked the bloom — the bloom-scoped question an operator must settle.
+/// successor, the full per-member render data, the composition workpiece's
+/// own line when it has a cursor, a wedge, or an open finding, and — when
+/// the aggregate review has parked the bloom — the bloom-scoped question an
+/// operator must settle.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BloomView {
     /// The bloom's identity — the sealed-spec digest ([`crate::BloomSpec::id`]).
@@ -89,6 +91,53 @@ pub struct BloomView {
     /// `#[serde(default)]` so a reader that predates the field still decodes.
     #[serde(default)]
     pub review_park: Option<ReviewParkView>,
+    /// The composition workpiece's own line (ADR-0191): its cursor, a wedge in
+    /// the same shape a member wedge renders, and the open findings whose
+    /// `detail` digests `adjudicate --finding` must quote. `None` while the
+    /// composition has never taken a cursor, wedged, or filed a finding — an
+    /// ordinary bloom stays unchanged. Trailing and `#[serde(default)]` so a
+    /// reader that predates the field still decodes.
+    #[serde(default)]
+    pub composition: Option<CompositionView>,
+}
+
+/// The composition workpiece's outward line: the cursor a weave repair sits
+/// at, the wedge that stops it, and the open findings an operator must name.
+///
+/// Every field serializes in declaration order even when it is `None` or
+/// empty: `aether_data::wire` encodes structs positionally, so omitting a
+/// slot shifts the next bloom's bytes into it. `#[serde(default)]` is only
+/// for a human-readable reader that predates a field.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct CompositionView {
+    /// The composition's stage cursor, when a weave repair (or its follow-on
+    /// gate) has written one. `None` when the composition has findings or a
+    /// wedge but no cursor of its own.
+    #[serde(default)]
+    pub cursor: Option<CompositionCursorView>,
+    /// Why the composition stopped, once it has wedged; `None` while it is
+    /// still working. Same [`Wedge`] shape a [`MemberView::wedge`] renders —
+    /// `stage` is `wedged_at`, `evidence` is the digest a reader follows.
+    #[serde(default)]
+    pub wedge: Option<Wedge>,
+    /// The composition findings no operator adjudication has closed, each
+    /// carrying the `detail` digest `adjudicate --finding` quotes.
+    #[serde(default)]
+    pub findings: Vec<CompositionFinding>,
+}
+
+/// The composition workpiece's stage cursor as the operator reads it: the
+/// stage, how many attempts that stage has taken, and the candidate the
+/// repair is targeting.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct CompositionCursorView {
+    /// The stage the composition currently sits at.
+    pub stage: StageId,
+    /// Attempts dispatched against that stage so far.
+    pub attempts: u32,
+    /// The weave the composition is repairing, when one has been captured.
+    #[serde(default)]
+    pub candidate: Option<CandidateRef>,
 }
 
 /// A bloom's aggregate-review park, rendered so an operator can see that the
