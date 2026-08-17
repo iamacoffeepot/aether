@@ -32,7 +32,7 @@ impl ProofResult {
     }
 
     /// Parse a persisted row's `result` column. Anything other than the two
-    /// spellings [`as_str`] writes is not a fact.
+    /// spellings [`Self::as_str`] writes is not a fact.
     #[must_use]
     pub fn from_stored(stored: &str) -> Option<Self> {
         match stored {
