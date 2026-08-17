@@ -31,6 +31,7 @@ mod study;
 mod testing;
 #[cfg(feature = "github")]
 mod triage;
+mod verify;
 
 pub use approve::{
     AdmissionRequest, AdrTouch, ApprovalPolicy, Completeness, Decision, Gate, Incompleteness, PolicyError,
@@ -84,3 +85,4 @@ pub use study::{
 };
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 pub use testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, ScriptedVerdict};
+pub use verify::{ClosureKey, ClosureKeyError, HostClass, closure_key};
