@@ -26,9 +26,12 @@ impl ApiCapabilityState {
     /// `POST /blooms/{id}/supersede` — seal the named successor draft and admit
     /// `Fact::Supersede` against the `{id}` predecessor bloom.
     ///
-    /// An edgeless body is the drop-a-subtree case (ADR-0196): the reducer
-    /// keeps the predecessor's remaining member graph, so adopted dependents
-    /// stay based on their inherited ancestors rather than becoming roots.
+    /// Declared edges ride the same `resolve_seal_graph` path a first seal
+    /// uses: they union with derived overlap-ordering edges and refuse a
+    /// cycle or a non-member. An edgeless body is the drop-a-subtree case
+    /// (ADR-0196): the reducer keeps the predecessor's remaining member
+    /// graph, so adopted dependents stay based on their inherited ancestors
+    /// rather than becoming roots.
     pub(super) fn supersede(&self, ctx: &NativeCtx<'_, Manual>, id: &str, body: &[u8]) -> Routed {
         let predecessor = match digest_from_hex(id) {
             Some(digest) => BloomId(digest),
@@ -54,7 +57,7 @@ impl ApiCapabilityState {
             &request.projections,
             request.descriptions,
             request.idempotency_key,
-            &[],
+            &request.edges,
         )
     }
 
@@ -555,8 +558,8 @@ pub(super) fn query_response(result: QueryResult) -> HttpServerResponse {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::{
-        AdjudicationError, BloomId, Digest, Event, Fact, OperatorHoldError, OperatorRepairError, Outcome, QueryResult,
-        SpendQuiesce, ViewDocument, WorkpieceId,
+        AdjudicationError, BloomId, Digest, Event, Fact, MemberDependency, OperatorHoldError, OperatorRepairError,
+        Outcome, QueryResult, SpendQuiesce, ViewDocument, WorkpieceId,
     };
     use aether_data::wire::{from_bytes, to_vec};
 
@@ -760,6 +763,34 @@ mod tests {
         let parsed: SupersedeRequest = serde_json::from_slice(body).unwrap();
 
         assert_eq!(parsed.descriptions.get("wp-a").map(String::as_str), Some("build the thing"));
+    }
+
+    #[test]
+    fn a_supersede_body_without_edges_still_parses() {
+        // Tripwire (#5115): edges were added to this body after the route
+        // shipped, so every existing caller omits them. Making the field
+        // required would turn each of those into a `400` on the one route an
+        // operator reaches for when a bloom has already failed to land.
+        let body = br#"{"successor_draft":"1"}"#;
+
+        let parsed: SupersedeRequest = serde_json::from_slice(body).expect("a body predating edges parses");
+
+        assert!(parsed.edges.is_empty(), "an absent list defaults empty rather than erroring");
+    }
+
+    #[test]
+    fn a_supersede_body_carries_declared_edges() {
+        let body = br#"{"successor_draft":"1","edges":[{"member":"issue-B","depends_on":"issue-A"}]}"#;
+
+        let parsed: SupersedeRequest = serde_json::from_slice(body).unwrap();
+
+        assert_eq!(
+            parsed.edges,
+            [MemberDependency {
+                member: WorkpieceId("issue-B".to_owned()),
+                depends_on: WorkpieceId("issue-A".to_owned())
+            }]
+        );
     }
 
     fn candidate_pair() -> aether_bloomery::CandidateRef {

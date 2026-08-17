@@ -2079,6 +2079,11 @@ fn the_fold_passes_verify_then_review_before_the_bloom_resolves() {
         Some(Decision::DispatchAggregateVerify { transformation, roll, .. }) => {
             assert_eq!(transformation.inputs[0], tree, "the verify evidence binds the integrated tree");
             assert_eq!(transformation.checkout, head, "the compiler builds the integrated head");
+            assert_eq!(
+                transformation.diff_base,
+                Some(spec.base()),
+                "the compiler narrows by the woven tree against the sealed base",
+            );
             assert_eq!(*roll, 1);
         }
         other => panic!("expected a DispatchAggregateVerify, got {other:?}"),

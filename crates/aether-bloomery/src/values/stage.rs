@@ -657,12 +657,13 @@ pub struct Transformation {
     /// ([`checkout`](Self::checkout)).
     ///
     /// `None` names the working tree: the candidate is the uncommitted change
-    /// the checked-out tree carries, which is what every member lane produces.
-    /// `Some(base)` names a commit range instead — the candidate is everything
-    /// `base..checkout` contains. The aggregate review is the one stage whose
-    /// candidate is already committed (the integration the fold built), so a
-    /// working-tree diff there is always empty and a lane that assumed one
-    /// judged nothing at all (#4723).
+    /// the checked-out tree carries, which is what every member model lane
+    /// produces. `Some(base)` names a commit range instead — the candidate is
+    /// everything `base..checkout` contains. The fold's candidate is already
+    /// committed (the integration the fold built), so both whole-bloom gates
+    /// name the sealed base: the critic would otherwise judge an empty
+    /// working tree (#4723), and the compiler would otherwise run the whole
+    /// workspace instead of the woven tree's reverse-dependency closure.
     ///
     /// A digest like [`checkout`](Self::checkout), resolved to a real git object
     /// by the executor backend through the same correspondence store, so the
@@ -762,12 +763,13 @@ impl Transformation {
             checkout,
             // A model lane's candidate is the uncommitted change its worker
             // leaves in the checked-out tree, so it names no diff base. The
-            // mechanical `Verify` lane is the exception: by the time it runs,
-            // the candidate is already captured as `base..checkout`, and
-            // naming that range is what lets it narrow its compiling gates to
-            // the diff's reverse-dependency closure instead of recompiling the
-            // workspace on every refine lap (#4890). The whole-bloom aggregate
-            // verify deliberately names none, so it keeps the whole tree.
+            // mechanical `Verify` lane is the exception among member stages:
+            // by the time it runs, the candidate is already captured as
+            // `base..checkout`, and naming that range is what lets it narrow
+            // its compiling gates to the diff's reverse-dependency closure
+            // instead of recompiling the workspace on every refine lap
+            // (#4890). The whole-bloom aggregate verify is built by
+            // `for_aggregate_verify`, not this constructor.
             diff_base: matches!(binding.stage, StageId::Verify).then_some(base),
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
             image: String::from(image),
@@ -794,6 +796,14 @@ impl Transformation {
     /// an owner. Zero-egress like the member lane — it runs a compiler and
     /// nothing else.
     ///
+    /// `base` is the bloom's sealed base the fold was built onto. The woven
+    /// tree against that base is the union of the members' diffs, so naming
+    /// it as [`diff_base`](Self::diff_base) lets the existing `Scope::resolve`
+    /// closure machinery compute that union — the same narrowing the member
+    /// lane already uses — instead of re-proving the workspace. A missing or
+    /// unresolvable base still fails open to workspace breadth; that fallback
+    /// is the lane's, recorded in `verify.scope.log`.
+    ///
     /// `binding` is the sealed catalog's `AggregateVerify` binding, carrying the
     /// authored wall-clock limit this fan-out runs under. That pairing is
     /// checked rather than assumed, but only in a debug build: the sibling
@@ -806,7 +816,7 @@ impl Transformation {
     ///
     /// In a debug build, when `binding` is not the `AggregateVerify` binding.
     #[must_use]
-    pub fn for_aggregate_verify(binding: &StageBinding, subject: Digest, checkout: Digest) -> Self {
+    pub fn for_aggregate_verify(binding: &StageBinding, subject: Digest, checkout: Digest, base: Digest) -> Self {
         debug_assert_eq!(
             binding.stage,
             StageId::AggregateVerify,
@@ -817,9 +827,7 @@ impl Transformation {
             command: String::from(VERIFY_CHECK_COMMAND),
             inputs: alloc::vec![subject],
             checkout,
-            // The mechanical lane runs a compiler over the checked-out tree and
-            // reads no diff at all, so there is no source to name.
-            diff_base: None,
+            diff_base: Some(base),
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
             image: String::from(VERIFY_LANE_IMAGE),
             limits: ExecutionLimits { wall_clock_secs: binding.wall_clock_secs },
@@ -1184,20 +1192,20 @@ mod tests {
         assert_ne!(construct.checkout, construct.inputs[0], "checkout and subject are independent axes");
     }
 
-    // Only the mechanical Verify lane names a diff base (#4890). It is the one
-    // member stage whose candidate is already captured by the time it runs, so
-    // `base..checkout` is a real range there, and naming it is what lets the
-    // lane narrow its compiling gates to that range's reverse-dependency
-    // closure instead of recompiling the workspace on every refine lap.
+    // A committed candidate names the range it was captured over. Member
+    // Verify (#4890) and both whole-bloom gates share that shape: the
+    // candidate is already a commit, so `base..checkout` is a real range,
+    // and naming it is what lets the lane read that range instead of the
+    // working tree.
     //
-    // Tripwire in both directions. A model lane that gained one would judge the
-    // sealed base's own history instead of the uncommitted candidate in front
-    // of it. And the whole-bloom aggregate verify — built by
-    // `for_aggregate_verify`, asserted here beside its member sibling — must
-    // keep naming none, because the stage that proves what lands is the one
-    // stage that must go on compiling the whole tree.
+    // Tripwire in both directions. A model lane that gained one would judge
+    // the sealed base's own history instead of the uncommitted candidate in
+    // front of it. An aggregate verify that dropped one would silently
+    // restore the full-suite gate — the woven tree against the sealed base
+    // *is* the union of member diffs, and `Scope::resolve` computes that
+    // union only when the range is named.
     #[test]
-    fn only_the_member_verify_lane_names_the_range_its_candidate_was_captured_over() {
+    fn a_committed_candidate_names_the_range_it_was_captured_over() {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
         let base = Digest::from_bytes([5; 32]);
@@ -1215,9 +1223,14 @@ mod tests {
             );
         }
         assert_eq!(
-            Transformation::for_aggregate_verify(&binding(StageId::AggregateVerify), subject, checkout).diff_base,
-            None,
-            "the aggregate verify keeps the whole workspace, so it names nothing to narrow by",
+            Transformation::for_aggregate_verify(&binding(StageId::AggregateVerify), subject, checkout, base).diff_base,
+            Some(base),
+            "the woven tree against the sealed base is the union of member diffs",
+        );
+        assert_eq!(
+            Transformation::for_aggregate_review(&binding(StageId::AggregateReview), subject, checkout, base).diff_base,
+            Some(base),
+            "the critic's candidate is the committed range the fold built",
         );
     }
 
@@ -1275,7 +1288,9 @@ mod tests {
             "an untouched sibling keeps the compiled calibration"
         );
         assert_eq!(
-            Transformation::for_aggregate_verify(&shortened_aggregate_verify, subject, checkout).limits.wall_clock_secs,
+            Transformation::for_aggregate_verify(&shortened_aggregate_verify, subject, checkout, base)
+                .limits
+                .wall_clock_secs,
             1_200,
             "the aggregate-verify fan-out copies the binding it was handed, not the compiled calibration"
         );
@@ -1305,7 +1320,7 @@ mod tests {
     fn for_aggregate_verify_panics_on_a_binding_for_another_stage() {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
-        let _ = Transformation::for_aggregate_verify(&binding(StageId::Verify), subject, checkout);
+        let _ = Transformation::for_aggregate_verify(&binding(StageId::Verify), subject, checkout, checkout);
     }
 
     #[cfg(debug_assertions)]
