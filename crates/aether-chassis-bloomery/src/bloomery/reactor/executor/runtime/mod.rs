@@ -655,8 +655,20 @@ fn overlay_member_advisory(
     let model_override =
         resolve_config::<ModelOverride>(store, ConfigScopes::bloom_wide(&record.configs))?.unwrap_or_default();
     record.transformation.model = Some(dispatch_model(record.stage, &record.profile, &model_override));
-    if is_composition_refine(record) {
-        seed_composition_refine_order(store, record)?;
+
+    // A failing verdict's persisted findings ride the same advisory channel as
+    // their own labeled section (#3656, ADR-0153), so a Refine re-entry's prompt
+    // names both the original order and what the failing gate flagged. The member
+    // row wins; a failing aggregate review persists bloom-scoped findings under
+    // the empty workpiece key until the decomposition slices them per member, and
+    // every re-opened member reads that bloom row. Looked up once here so a
+    // composition Refine can seed from the same `Option` the overlay appends.
+    let findings = match store.lookup_review_findings(&bloom, &workpiece)? {
+        Some(findings) => Some(findings),
+        None => store.lookup_review_findings(&bloom, "")?,
+    };
+    if record.is_composition_refine() {
+        seed_composition_refine_order(store, record, findings.as_deref())?;
     } else if let Some(description) = store.lookup_dispatch_description(&bloom, &workpiece)? {
         // Sibling members share a sealed body; the header is what keeps each
         // dispatch's `--task` (and `pool_task` key) distinct (#4984).
@@ -670,17 +682,6 @@ fn overlay_member_advisory(
         );
     }
 
-    // A failing verdict's persisted findings ride the same advisory channel as
-    // their own labeled section (#3656, ADR-0153), so a Refine re-entry's prompt
-    // names both the original order and what the failing gate flagged. The member
-    // row wins; a failing aggregate review persists bloom-scoped findings under
-    // the empty workpiece key until the decomposition slices them per member, and
-    // every re-opened member reads that bloom row. The assembled prompt is plain
-    // markdown concatenation, so the section header composes in-channel.
-    let findings = match store.lookup_review_findings(&bloom, &workpiece)? {
-        Some(findings) => Some(findings),
-        None => store.lookup_review_findings(&bloom, "")?,
-    };
     if let Some(findings) = findings {
         let task = record.transformation.description.take().unwrap_or_default();
         record.transformation.description = Some(format!("{task}\n\n## Findings\n\n{findings}"));
@@ -698,11 +699,6 @@ fn overlay_member_advisory(
     Ok(())
 }
 
-/// Whether this order is the reserved composition workpiece's weave repair.
-fn is_composition_refine(record: &DispatchRecord) -> bool {
-    record.stage == StageId::Refine && record.workpiece.is_composition()
-}
-
 /// Seed the composition Refine's work order from the persisted row, or generate
 /// and persist one when findings exist to carry (#5098).
 ///
@@ -710,9 +706,12 @@ fn is_composition_refine(record: &DispatchRecord) -> bool {
 /// repair authors the standing instruction here and every retry looks that row
 /// up instead of writing it again. Findings still overlay separately, the same
 /// way a member Refine keeps its sealed order and threads the latest verdict.
+/// `findings` is the overlay value the caller already resolved — do not look
+/// it up again just to test non-emptiness.
 fn seed_composition_refine_order(
     store: &mut dyn StoreBackend,
     record: &mut DispatchRecord,
+    findings: Option<&str>,
 ) -> Result<(), StoreConfigError> {
     let bloom = record.bloom.0.as_bytes();
     let workpiece = record.workpiece.0.as_str();
@@ -720,10 +719,7 @@ fn seed_composition_refine_order(
         record.transformation.description = Some(pin_workpiece_description(workpiece, &description));
         return Ok(());
     }
-    let has_findings =
-        store.lookup_review_findings(bloom, workpiece)?.is_some_and(|findings| !findings.trim().is_empty())
-            || store.lookup_review_findings(bloom, "")?.is_some_and(|findings| !findings.trim().is_empty());
-    if !has_findings {
+    if !findings.is_some_and(|findings| !findings.trim().is_empty()) {
         return Ok(());
     }
     store.record_dispatch_description(bloom, workpiece, COMPOSITION_REFINE_ORDER)?;
@@ -748,7 +744,7 @@ fn composition_refine_has_findings_task(record: &DispatchRecord) -> bool {
 /// (#5098). Called after overlay so a missing work order cannot spend a model
 /// dispatch.
 fn park_composition_refine_without_findings(record: &DispatchRecord, sequence: u64) -> bool {
-    if !is_composition_refine(record) || composition_refine_has_findings_task(record) {
+    if !record.is_composition_refine() || composition_refine_has_findings_task(record) {
         return false;
     }
     tracing::error!(
@@ -1262,7 +1258,7 @@ fn resolve_replay(
         );
         return Ok(None);
     }
-    if is_composition_refine(&record) && !composition_refine_has_findings_task(&record) {
+    if record.is_composition_refine() && !composition_refine_has_findings_task(&record) {
         tracing::error!(
             target: "aether_chassis_bloomery::executor",
             sequence,

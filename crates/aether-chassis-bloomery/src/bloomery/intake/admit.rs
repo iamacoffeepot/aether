@@ -410,32 +410,6 @@ fn repair_finding(store: &mut dyn StoreBackend, record: &DispatchRecord) -> rusq
     store.lookup_review_findings(bloom, "")
 }
 
-/// Whether this result is a **weave repair** — the one repair lap a finding
-/// written by a *judge* dispatched (#4959).
-///
-/// Two conditions, and the second is the load-bearing one.
-///
-/// `Refine` is the repair stage: for the composition, ADR-0191 §5 dispatches the
-/// weave repair there. `Reconcile` is out because a fold conflict dispatches it,
-/// not a finding (ADR-0189 §3), and a failing lap needs no triage because it is
-/// already bouncing.
-///
-/// The **composition** is out of the two workpiece kinds because, post-ADR-0191,
-/// it is the only one whose findings are prose. An aggregate refusal no longer
-/// re-opens a member (§4), so every finding that reaches a *member's* `Refine` is
-/// mechanical gate output — and a compiler diagnostic is unreliable triage input
-/// in both directions: it backticks the types and locations of the symptom
-/// (`u32`, `usize`, `lib.rs:7:20`) rather than the thing a fix has to change. The
-/// member loop does not need this anyway: ADR-0178 already prices a member that
-/// came back unrepaired by *verifier identity* — a repeat failure spends a repair
-/// roll and wedges — which is a stronger signal than text matching and costs no
-/// judge round to collect. The composition's review is the gate that has no such
-/// detector and whose every roll is an Opus lap, which is exactly why the dodge
-/// cost what it did.
-fn is_weave_repair(record: &DispatchRecord) -> bool {
-    record.stage == StageId::Refine && record.workpiece.is_composition()
-}
-
 /// Triage a passing weave repair against the finding it was dispatched for
 /// (#4959), or [`TriageVerdict::NotInspected`] when the bloom holds no finding
 /// for it to have repaired.
@@ -570,7 +544,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     // spends and never buys the judge round it was trying to reach. Everything
     // uncertain passes — see the `triage` module for the rules and the reason
     // they lean that way.
-    let triage = if is_weave_repair(&record) && verdict_passed(upload.verdict) {
+    let triage = if record.is_composition_refine() && verdict_passed(upload.verdict) {
         triage_repair_lap(store, &record)?
     } else {
         TriageVerdict::NotInspected
