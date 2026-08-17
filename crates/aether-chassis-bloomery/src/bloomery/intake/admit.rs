@@ -664,10 +664,10 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
 /// - A failing Verify's findings (the mechanical failure output) persist keyed by
 ///   the member so the Refine repair re-entry is directed by them; a passing
 ///   Verify clears the stale row (#3656, ADR-0153).
-/// - A failing AggregateVerify persists the same mechanical findings on the
+/// - A failing `AggregateVerify` persists the same mechanical findings on the
 ///   composition workpiece (#5098): that is the reserved Refine's findings
 ///   channel, and a subject-only weave repair is what happens when they never
-///   land. A passing AggregateVerify clears that row so a later review-triggered
+///   land. A passing `AggregateVerify` clears that row so a later review-triggered
 ///   repair is not still directed by a compiler diagnostic the fold already
 ///   cleared.
 /// - A failing aggregate verdict freezes its set bloom-scoped and slices it per

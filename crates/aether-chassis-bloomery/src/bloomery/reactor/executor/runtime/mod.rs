@@ -625,7 +625,7 @@ impl AdmitSink for CollectingSink {
 /// The work order the composition workpiece never sealed (#5098). Generated on
 /// the first weave-repair dispatch and reused on every retry, so the reserved
 /// Refine has a nonempty `## Task` instead of a subject-only prompt.
-pub(crate) const COMPOSITION_REFINE_ORDER: &str = "\
+const COMPOSITION_REFINE_ORDER: &str = "\
 Repair the composed tree. A composite gate refused this weave. \
 Address every defect in the Findings section so the composed tree builds. \
 Do not reopen finished member work; repair at the seam.";
@@ -741,6 +741,25 @@ fn composition_refine_has_findings_task(record: &DispatchRecord) -> bool {
         .is_some_and(|task| task.split_once("## Findings").is_some_and(|(_, rest)| !rest.trim().is_empty()))
 }
 
+/// Park a composition Refine whose assembled task does not carry findings.
+///
+/// A subject-only weave repair is a paid no-op: the lane refuses an empty
+/// `## Task` and the refusal is classified as another composition failure
+/// (#5098). Called after overlay so a missing work order cannot spend a model
+/// dispatch.
+fn park_composition_refine_without_findings(record: &DispatchRecord, sequence: u64) -> bool {
+    if !is_composition_refine(record) || composition_refine_has_findings_task(record) {
+        return false;
+    }
+    tracing::error!(
+        target: "aether_chassis_bloomery::executor",
+        sequence,
+        workpiece = %record.workpiece.0,
+        "composition refine has no work order carrying findings; parking rather than launching a subject-only lane",
+    );
+    true
+}
+
 /// Drain the dispatch topic and submit each entry through the executor, recording
 /// its intake context. Returns the newly-tracked handles and the highest
 /// contiguously-submitted outbox sequence to ack (`None` when nothing submitted).
@@ -843,17 +862,7 @@ fn drain_and_dispatch(
             ack_through = Some(entry.sequence);
             continue;
         }
-        if is_composition_refine(&record) && !composition_refine_has_findings_task(&record) {
-            // A subject-only weave repair is a paid no-op: the lane refuses an
-            // empty `## Task` and the refusal is classified as another composition
-            // failure (#5098). Park before submit so the missing work order cannot
-            // spend a model dispatch.
-            tracing::error!(
-                target: "aether_chassis_bloomery::executor",
-                sequence = entry.sequence,
-                workpiece = %record.workpiece.0,
-                "composition refine has no work order carrying findings; parking rather than launching a subject-only lane",
-            );
+        if park_composition_refine_without_findings(&record, entry.sequence) {
             ack_through = Some(entry.sequence);
             continue;
         }
