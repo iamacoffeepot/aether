@@ -30,6 +30,17 @@ impl ProofResult {
             Self::Red => "red",
         }
     }
+
+    /// Parse a persisted row's `result` column. Anything other than the two
+    /// spellings [`Self::as_str`] writes is not a fact.
+    #[must_use]
+    pub fn from_stored(stored: &str) -> Option<Self> {
+        match stored {
+            "green" => Some(Self::Green),
+            "red" => Some(Self::Red),
+            _ => None,
+        }
+    }
 }
 
 /// Per-test outcomes from one runner invocation. Not a fact — a single run
