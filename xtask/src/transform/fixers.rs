@@ -61,6 +61,7 @@ pub(super) fn apply(worktree: &Path, out_dir: &Path) -> Report {
     let rust_files: Vec<String> = dirty
         .iter()
         .filter(|path| Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("rs")))
+        .filter(|path| worktree.join(path).is_file())
         .cloned()
         .collect();
     if rust_files.is_empty() {
@@ -71,7 +72,7 @@ pub(super) fn apply(worktree: &Path, out_dir: &Path) -> Report {
         workspace_members(worktree).map(|members| owning_packages(&members, &rust_files)).unwrap_or_default();
     let before = worktree_state(worktree, out_dir);
 
-    run_fixer(worktree, "cargo", &fmt_argv(&rust_files), FMT_BUDGET, |_| {});
+    run_fixer(worktree, "cargo", &fmt_argv(worktree, &rust_files), FMT_BUDGET, |_| {});
     if !packages.is_empty() {
         run_fixer(worktree, "cargo", &clippy_fix_argv(&packages), CLIPPY_FIX_BUDGET, |command| {
             command.env("CARGO_INCREMENTAL", "0");
@@ -100,12 +101,13 @@ fn owning_packages(members: &[(String, String)], paths: &[String]) -> Vec<String
     names.into_iter().collect()
 }
 
-/// `cargo fmt` over the rust files the run actually left dirty — never the
+/// `cargo fmt` over the rust files the run actually left on disk — never the
 /// whole workspace, so a rustfmt version drift cannot pull untouched files
-/// into the candidate.
-fn fmt_argv(paths: &[String]) -> Vec<String> {
+/// into the candidate. A deleted path is omitted so rustfmt cannot fail on a
+/// model deletion and trigger a restore that used to resurrect it.
+fn fmt_argv(worktree: &Path, paths: &[String]) -> Vec<String> {
     let mut args = vec!["fmt".to_owned(), "--".to_owned()];
-    args.extend(paths.iter().cloned());
+    args.extend(paths.iter().filter(|path| worktree.join(path).is_file()).cloned());
     args
 }
 
@@ -300,17 +302,23 @@ fn workspace_members(worktree: &Path) -> Option<Vec<(String, String)>> {
 }
 
 /// Contents of every dirty path, used to put the tree back when a fixer
-/// cannot finish. Newly dirtied files (a clippy edit to a file the model
-/// never touched, a rustfmt tempfile) are reverted to HEAD or deleted.
+/// cannot finish. `None` is a model deletion and is re-deleted on restore
+/// rather than treated as fixer-introduced. Newly dirtied files (a clippy
+/// edit to a file the model never touched, a rustfmt tempfile) are
+/// reverted to HEAD or deleted.
 struct Snapshot {
-    files: BTreeMap<String, Vec<u8>>,
+    files: BTreeMap<String, Option<Vec<u8>>>,
 }
 
 impl Snapshot {
     fn capture(worktree: &Path) -> Option<Self> {
         let files = porcelain_dirty(worktree)?
             .into_iter()
-            .filter_map(|path| fs::read(worktree.join(&path)).ok().map(|bytes| (path, bytes)))
+            .filter_map(|path| match fs::read(worktree.join(&path)) {
+                Ok(bytes) => Some((path, Some(bytes))),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some((path, None)),
+                Err(_) => None,
+            })
             .collect();
         Some(Self { files })
     }
@@ -323,12 +331,19 @@ impl Snapshot {
         for path in now.iter().filter(|path| !self.files.contains_key(*path)) {
             revert_introduced(worktree, path);
         }
-        for (path, bytes) in &self.files {
-            let dest = worktree.join(path);
-            if let Some(parent) = dest.parent() {
-                let _ = fs::create_dir_all(parent);
+        for (path, contents) in &self.files {
+            match contents {
+                Some(bytes) => {
+                    let dest = worktree.join(path);
+                    if let Some(parent) = dest.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let _ = fs::write(dest, bytes);
+                }
+                None => {
+                    let _ = fs::remove_file(worktree.join(path));
+                }
             }
-            let _ = fs::write(dest, bytes);
         }
     }
 }
@@ -432,7 +447,10 @@ mod tests {
 
     #[test]
     fn fmt_is_restricted_to_the_dirty_rust_files() {
-        let argv = fmt_argv(&paths(&["crates/aether-math/src/lib.rs", "xtask/src/lib.rs"]));
+        let repo = git_scratch("fmt-scope");
+        write(&repo, "crates/aether-math/src/lib.rs", "fn x() {}\n");
+        write(&repo, "xtask/src/lib.rs", "fn y() {}\n");
+        let argv = fmt_argv(&repo, &paths(&["crates/aether-math/src/lib.rs", "xtask/src/lib.rs"]));
         assert_eq!(argv[0], "fmt");
         assert_eq!(argv[1], "--");
         assert_eq!(&argv[2..], ["crates/aether-math/src/lib.rs", "xtask/src/lib.rs"]);
@@ -440,6 +458,21 @@ mod tests {
             !argv.iter().any(|arg| arg == "--all" || arg == "--workspace"),
             "workspace fmt on rustfmt drift would pull untouched files into the candidate",
         );
+    }
+
+    // rustfmt errors on a missing path and that non-zero used to restore the
+    // deletion away. The argv must not include a path that is gone.
+    #[test]
+    fn fmt_argv_omits_a_deleted_path() {
+        let repo = git_scratch("fmt-deleted");
+        write(&repo, "kept.rs", "fn x() {}\n");
+        write(&repo, "gone.rs", "fn y() {}\n");
+        git(&repo, &["add", "kept.rs", "gone.rs"]);
+        git(&repo, &["commit", "-m", "init"]);
+        fs::remove_file(repo.join("gone.rs")).expect("delete");
+
+        let argv = fmt_argv(&repo, &paths(&["kept.rs", "gone.rs"]));
+        assert_eq!(&argv[2..], ["kept.rs"]);
     }
 
     #[test]
@@ -484,6 +517,27 @@ mod tests {
         assert_eq!(fs::read_to_string(repo.join("kept.rs")).expect("kept"), "model-edited\n");
         assert_eq!(fs::read_to_string(repo.join("clean.rs")).expect("clean"), "clean\n");
         assert!(!repo.join("new.rs").exists(), "a file the fixer created must not survive the restore");
+    }
+
+    // A model-deleted tracked file used to drop out of the snapshot (the
+    // read failed) and restore classified it as fixer-introduced, so
+    // `git checkout` resurrected it. Pre-fix this fails by execution.
+    #[test]
+    fn a_failed_fixer_keeps_a_model_deleted_file_deleted() {
+        let repo = git_scratch("restore-deleted");
+        write(&repo, "kept.rs", "model\n");
+        write(&repo, "gone.rs", "delete-me\n");
+        git(&repo, &["add", "kept.rs", "gone.rs"]);
+        git(&repo, &["commit", "-m", "init"]);
+        write(&repo, "kept.rs", "model-edited\n");
+        fs::remove_file(repo.join("gone.rs")).expect("delete");
+
+        let snapshot = Snapshot::capture(&repo).expect("snapshot");
+        write(&repo, "kept.rs", "fixer-half-applied\n");
+        snapshot.restore(&repo);
+
+        assert_eq!(fs::read_to_string(repo.join("kept.rs")).expect("kept"), "model-edited\n");
+        assert!(!repo.join("gone.rs").exists(), "a model deletion must survive the restore");
     }
 
     #[test]
