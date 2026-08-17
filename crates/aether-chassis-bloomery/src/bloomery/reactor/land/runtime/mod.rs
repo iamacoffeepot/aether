@@ -253,12 +253,11 @@ fn watch_proposal(
     number: u64,
 ) -> Result<Watched, SourceError> {
     match source.poll_land(bloom, &payload.expected_base, number)? {
-        LandProposal::Open => accept_proposal(source, bloom, payload, number),
-        LandProposal::Declined => Ok(Watched::Declined("the landing proposal was declined".to_owned())),
-        // Production no longer emits this variant (#5110). Treat a residual
+        // Production no longer emits `ChecksFailed` (#5110). Treat a residual
         // encoding the same as `Open` rather than routing it to
         // [`Watched::Rejected`]: a check conclusion is not a landing verdict.
-        LandProposal::ChecksFailed { .. } => accept_proposal(source, bloom, payload, number),
+        LandProposal::Open | LandProposal::ChecksFailed { .. } => accept_proposal(source, bloom, payload, number),
+        LandProposal::Declined => Ok(Watched::Declined("the landing proposal was declined".to_owned())),
         LandProposal::Landed(receipt) => landed(bloom, payload, receipt.new_head),
     }
 }
