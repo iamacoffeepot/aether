@@ -298,14 +298,14 @@ fn an_environment_status_yields_an_executor_fault_rather_than_a_failing_review()
 }
 
 #[test]
-fn a_verify_lane_environment_status_faults_instead_of_charging_the_member() {
-    // Tripwire (#4895): the verify lane can now stamp `environment` too — a
-    // member whose only failures lay outside the candidate's
-    // reverse-dependency closure, twice. The verify branch of this seam is not
-    // the review branch: it additionally demands `failed_verifiers` decode, and
-    // a fault carries none. Reading that absence as a shortfall would fold the
-    // host's outage back into `VerificationFailed`, which is the repair lap the
-    // discrimination exists to not spend.
+fn a_verify_lane_environment_status_is_an_unjudged_verify() {
+    // Tripwire (#5089): Wave 8's dispatch-520 stamped `environment` on a
+    // member Verify whose only failures sat outside the candidate's
+    // reverse-dependency closure. Projecting that as `ExecutorFault` is
+    // correct for AggregateReview (ADR-0176) and wrong here — intake
+    // refuses a Verify executor fault and the order sits until its
+    // deadline. The empty typed set is the existing unjudged-Verify
+    // contract: admit, then rerun Verify mechanically.
     let base = TempDir::new().unwrap();
     let subject = digest(9);
     let evidence = r#"{"command":"verify.check","nonce":"n-verify-env","status":"environment","environment":"36 failing tests lie outside the candidate's reverse-dependency closure."}"#;
@@ -321,11 +321,18 @@ fn a_verify_lane_environment_status_faults_instead_of_charging_the_member() {
         nonce: Nonce("n-verify-env".to_owned()),
     };
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
-    let upload = NameEvidenceClaims.claim_for(&reference).expect("the fault name round-trips through the claim seam");
+    let upload =
+        NameEvidenceClaims.claim_for(&reference).expect("the unjudged name round-trips through the claim seam");
 
-    assert_eq!(upload.verdict, StageVerdict::ExecutorFault);
-    assert_eq!(upload.subject, subject, "a fault still binds the exact digest the order displayed");
+    assert_eq!(upload.verdict, StageVerdict::VerificationFailed);
+    assert_eq!(upload.subject, subject, "an unjudged verify still binds the exact digest the order displayed");
+    assert!(reference.failed_verifiers.is_empty(), "the reference carries the already-decoded empty set");
     assert!(upload.failed_verifiers.is_empty(), "no verifier judged the candidate, so none is charged for it");
+    assert_eq!(
+        upload.detail,
+        Digest::of_wire_bytes(evidence.as_bytes()),
+        "the environment evidence remains the attempt detail"
+    );
 }
 
 #[test]
