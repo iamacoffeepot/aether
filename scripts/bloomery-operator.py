@@ -7,11 +7,13 @@ API does not project. What it did not have was a way to reach either without
 hand-writing a throwaway query or hand-encoding a request body -- which is how
 an hour disappears while a bloom sits wedged.
 
-Read commands (status / orders / why / evidence) answer "what is stopping this
-member". Action commands (hold / release / repair / supersede / grant /
-adjudicate) are the coordinator's override routes with their bodies built
-correctly. Repair names a commit (`--from-commit`) and the chassis derives the
-candidate; `--tree` / `--checkout` stay for a pair the coordinator cannot read.
+Read commands (status / orders / why / evidence / flakes) answer "what is
+stopping this member" and, for flakes, which stage/cause signatures recur
+beside live queue/slot/filesystem pressure. Action commands (hold / release /
+repair / supersede / grant / adjudicate) are the coordinator's override routes
+with their bodies built correctly. Repair names a commit (`--from-commit`) and
+the chassis derives the candidate; `--tree` / `--checkout` stay for a pair the
+coordinator cannot read.
 
 Standard library only -- this runs on the coordinator host, which installs
 nothing.
@@ -53,6 +55,144 @@ STAGES = (
     "Land",
     "Study",
     "Reconcile",
+)
+
+# Fact and Outcome variant names in declaration order. The journal stores each
+# as aether_data::wire: a little-endian u32 variant index, then the selected
+# body's positional fields. ORDER is load-bearing the same way STAGES is — a
+# variant inserted anywhere but the tail renumbers every name after it. Re-read
+# event.rs / outcome.rs before editing either list.
+FACT_NAMES = (
+    "Seal",
+    "Supersede",
+    "Integrate",
+    "AdmitEvidence",
+    "Resolve",
+    "Land",
+    "AdoptAnswer",
+    "AttemptCompleted",
+    "AggregateReviewCompleted",
+    "ObserveMainline",
+    "AggregateVerifyCompleted",
+    "LandingRejected",
+    "GrantAttempts",
+    "VerifyFailed",
+    "RequestOrphanClaimRelease",
+    "CompleteOrphanClaimRelease",
+    "AggregateReviewExecutorFault",
+    "FoldConflict",
+    "ObserveMainlineDiverged",
+    "OperatorAdjudication",
+    "OperatorRepair",
+    "OperatorHold",
+    "OperatorRelease",
+    "SurfaceOverlap",
+    "GraphSeal",
+    "VerifyHostFault",
+    "ResumeHostFault",
+)
+
+OUTCOME_NAMES = (
+    "Duplicate",
+    "Sealed",
+    "SealRejected",
+    "Superseded",
+    "SupersedeRejected",
+    "Integrated",
+    "IntegrateRejected",
+    "EvidenceAdmitted",
+    "AdmitEvidenceRejected",
+    "Resolved",
+    "ResolveRejected",
+    "Landed",
+    "LandRejected",
+    "AnswerAdopted",
+    "AdoptAnswerRejected",
+    "AttemptAdvanced",
+    "AttemptRetried",
+    "AttemptWedged",
+    "AttemptCompletedRejected",
+    "RefineReentered",
+    "AggregateReviewDispatched",
+    "AggregateReviewReentered",
+    "AggregateReviewParked",
+    "AggregateReviewRejected",
+    "MainlineAdvanced",
+    "MainlineUnchanged",
+    "MainlineHeld",
+    "AggregateVerifyDispatched",
+    "AggregateVerifyPassed",
+    "AggregateVerifyReentered",
+    "AggregateVerifyParked",
+    "AggregateVerifyRejected",
+    "LandingReentered",
+    "LandingParked",
+    "LandingRejectedRefused",
+    "AttemptsGranted",
+    "GrantAttemptsRejected",
+    "VerifyFailedRejected",
+    "OrphanClaimReleaseRequested",
+    "OrphanClaimReleaseCompleted",
+    "OrphanClaimReleaseRejected",
+    "AggregateReviewExecutorFaulted",
+    "AggregateReviewExecutorWedged",
+    "VerifyReused",
+    "AggregateVerifyReused",
+    "FoldConflictDispatched",
+    "FoldConflictRejected",
+    "MainlineDiverged",
+    "CompositionRewoven",
+    "CompositionWedged",
+    "CompositionRepaired",
+    "FindingsAdjudicated",
+    "AdjudicationRejected",
+    "OperatorRepairAccepted",
+    "OperatorRepairRejected",
+    "BloomHeld",
+    "BloomReleased",
+    "OperatorHoldRejected",
+    "SurfaceOverlap",
+    "SealQuiesced",
+    "VerifyHostFaultHeld",
+    "HostFaultResumed",
+    "HostFaultRejected",
+)
+
+# Canonical verifier identities, in the bit order VerifyFailure::ALL uses. A
+# set travels on the wire as the sorted sequence of these names, never as the
+# in-memory mask, so grouping must sort by this order rather than by whatever
+# order a fixture happened to list.
+VERIFY_FAILURE_NAMES = (
+    "verify.preflight",
+    "verify.fmt",
+    "verify.clippy",
+    "verify.docs",
+    "verify.test",
+    "verify.dup",
+    "verify.deps",
+    "verify.suppress",
+)
+
+# Typed machinery facts/outcomes. The aggregate-review pair already exists in
+# this tree; the MemberMachinery* names are the #5091 member-stage lifecycle
+# (tail-appended on the journal, JSON-shaped in fixtures and in GET /journal).
+MACHINERY_FACT_NAMES = frozenset(
+    {
+        "AggregateReviewExecutorFault",
+        "MemberMachineryFault",
+    }
+)
+MACHINERY_RETRY_OUTCOMES = frozenset(
+    {
+        "AggregateReviewExecutorFaulted",
+        "MemberMachineryRetried",
+    }
+)
+MACHINERY_WEDGE_OUTCOMES = frozenset(
+    {
+        "AggregateReviewExecutorWedged",
+        "MemberMachineryWedged",
+    }
 )
 
 # The REST control API when nothing overrides it. The coordinator binds this on
@@ -304,6 +444,28 @@ class Journal:
             return None
         return bytes(row[0]).hex()
 
+    def records(self) -> list[dict[str, Any]]:
+        """Every journaled event, oldest first, with its recorded outcome.
+
+        Sequence comes from the `sequence` column — not from rowid or Python
+        insertion order — so a report survives coordinator restart and a
+        vacuum. A missing table or an undecodable row is skipped rather than
+        taking the rest of the report down: flakes is a diagnosis, and one
+        surprising blob must not hide the signatures that did decode.
+        """
+        try:
+            rows = list(
+                self.conn.execute("SELECT sequence, event, decisions FROM journal ORDER BY sequence")
+            )
+        except sqlite3.Error:
+            return []
+        decoded = []
+        for row in rows:
+            record = decode_journal_row(row["sequence"], row["event"], row["decisions"])
+            if record is not None:
+                decoded.append(record)
+        return decoded
+
 
 def order_summary(row: sqlite3.Row, now_millis: int) -> dict[str, Any]:
     """One outstanding order as the fields an operator reads."""
@@ -489,6 +651,138 @@ def list_slots(worktree_base: str) -> list[dict[str, Any]]:
             }
         )
     return listed
+
+
+def filesystem_capacity(path: str) -> dict[str, Any] | None:
+    """Capacity and free bytes for one path, via statvfs.
+
+    The path is stated, never walked. A cargo target tree holds millions of
+    files; sizing it by walking is the race the janitor already documents.
+    """
+    try:
+        stat = os.stat(path)
+        vfs = os.statvfs(path)
+    except OSError:
+        return None
+    fragment = vfs.f_frsize
+    return {
+        "path": str(Path(path)),
+        "device": stat.st_dev,
+        "total_bytes": fragment * vfs.f_blocks,
+        "free_bytes": fragment * vfs.f_bavail,
+    }
+
+
+def _unmeasured_fs(reason: str, **extra: Any) -> dict[str, Any]:
+    report = {"measured": False, "reason": reason}
+    report.update(extra)
+    return report
+
+
+def _measured_fs(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "measured": True,
+        "path": snapshot["path"],
+        "total_bytes": snapshot["total_bytes"],
+        "free_bytes": snapshot["free_bytes"],
+    }
+
+
+def live_filesystems(worktree_base: str, target_base: str) -> dict[str, Any]:
+    """Worktree and lane-target capacity, with absent/shared axes unmeasured."""
+    if not worktree_base:
+        worktree = _unmeasured_fs("worktree base not supplied")
+        worktree_snap = None
+    else:
+        worktree_snap = filesystem_capacity(worktree_base)
+        worktree = (
+            _measured_fs(worktree_snap)
+            if worktree_snap
+            else _unmeasured_fs(f"cannot stat worktree base {worktree_base}")
+        )
+
+    if not target_base:
+        target = _unmeasured_fs("lane target base not supplied")
+    else:
+        target_snap = filesystem_capacity(target_base)
+        if target_snap is None:
+            target = _unmeasured_fs(f"cannot stat lane target base {target_base}", path=str(Path(target_base)))
+        elif worktree_snap is not None and target_snap["device"] == worktree_snap["device"]:
+            target = _unmeasured_fs(
+                "shares the worktree filesystem",
+                shared_with="worktree",
+                path=target_snap["path"],
+            )
+        else:
+            target = _measured_fs(target_snap)
+    return {"worktree": worktree, "lane_target": target}
+
+
+def slot_pressure(worktree_base: str) -> dict[str, Any]:
+    """Occupied/free/quarantined/unknown counts, or an unmeasured axis."""
+    if not worktree_base:
+        return _unmeasured_fs("worktree base not supplied")
+    if not Path(worktree_base).is_dir():
+        return _unmeasured_fs(f"no worktree base at {worktree_base}")
+    listed = list_slots(worktree_base)
+    counts = {"occupied": 0, "free": 0, "quarantined": 0, "unknown": 0}
+    for entry in listed:
+        state = entry.get("state")
+        if state in counts:
+            counts[state] += 1
+    return {"measured": True, "total": len(listed), **counts}
+
+
+def order_pressure(orders: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Outstanding and overdue orders, by stage, plus queue depth."""
+    by_stage: dict[str, dict[str, int]] = {}
+    overdue = 0
+    for order in orders:
+        stage = order.get("stage") or "unknown"
+        bucket = by_stage.setdefault(stage, {"outstanding": 0, "overdue": 0})
+        bucket["outstanding"] += 1
+        if order.get("overdue_secs", 0) > 0:
+            bucket["overdue"] += 1
+            overdue += 1
+    return {
+        "outstanding": len(orders),
+        "overdue": overdue,
+        "by_stage": [
+            {"stage": stage, "outstanding": bucket["outstanding"], "overdue": bucket["overdue"]}
+            for stage, bucket in sorted(by_stage.items())
+        ],
+    }
+
+
+def live_pressure(
+    orders: Sequence[dict[str, Any]],
+    worktree_base: str,
+    target_base: str,
+    now_millis: int,
+) -> dict[str, Any]:
+    """Point-in-time host pressure: queue, slots, deadlines, filesystems."""
+    queued = order_pressure(orders)
+    return {
+        "observed_unix_millis": now_millis,
+        "orders": queued,
+        "queue_depth": queued["outstanding"],
+        "slots": slot_pressure(worktree_base),
+        "filesystems": live_filesystems(worktree_base, target_base),
+    }
+
+
+def flakes_report(
+    records: Sequence[dict[str, Any]],
+    orders: Sequence[dict[str, Any]],
+    worktree_base: str,
+    target_base: str,
+    now_millis: int,
+) -> dict[str, Any]:
+    """The flakes document: durable signatures beside live pressure."""
+    return {
+        "signatures": group_flake_signatures(records),
+        "pressure": live_pressure(orders, worktree_base, target_base, now_millis),
+    }
 
 
 def clear_quarantine(worktree_base: str, slot: int) -> dict[str, Any]:
@@ -693,6 +987,462 @@ def fact_of(record: dict[str, Any]) -> dict[str, Any] | None:
         return None
     fact = event.get("fact")
     return fact if isinstance(fact, dict) else event
+
+
+class _WireCursor:
+    """A one-shot walk over an aether_data::wire blob."""
+
+    def __init__(self, blob: bytes) -> None:
+        self.blob = blob
+        self.offset = 0
+
+    def remaining(self) -> int:
+        return len(self.blob) - self.offset
+
+    def take(self, count: int) -> bytes | None:
+        if count < 0 or self.remaining() < count:
+            return None
+        start = self.offset
+        self.offset += count
+        return self.blob[start : self.offset]
+
+    def u32(self) -> int | None:
+        raw = self.take(4)
+        return None if raw is None else struct.unpack("<I", raw)[0]
+
+    def digest(self) -> str | None:
+        raw = self.take(DIGEST_BYTES)
+        return None if raw is None else raw.hex()
+
+    def string(self) -> str | None:
+        length = self.u32()
+        if length is None or length > self.remaining():
+            return None
+        raw = self.take(length)
+        if raw is None:
+            return None
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+
+    def strings(self) -> list[str] | None:
+        count = self.u32()
+        if count is None or count > 1024:
+            return None
+        values = []
+        for _ in range(count):
+            value = self.string()
+            if value is None:
+                return None
+            values.append(value)
+        return values
+
+
+def _variant_name(index: int | None, names: Sequence[str]) -> str | None:
+    if index is None:
+        return None
+    if 0 <= index < len(names):
+        return names[index]
+    return f"unknown({index})"
+
+
+def _looks_like_json(blob: bytes) -> bool:
+    for byte in blob:
+        if byte in b" \t\r\n":
+            continue
+        return byte in b"{[\""
+    return False
+
+
+def _enum_payload(value: Any) -> tuple[str | None, Any]:
+    """An externally-tagged serde enum as (variant, payload).
+
+    Unit variants arrive as a bare string (`"Duplicate"`). Struct variants
+    arrive as a one-key object. Anything else is not a variant.
+    """
+    if isinstance(value, str) and value:
+        return value, None
+    if isinstance(value, dict) and len(value) == 1:
+        name, payload = next(iter(value.items()))
+        return name, payload
+    return None, None
+
+
+def _wire_evidence(cursor: _WireCursor) -> dict[str, Any] | None:
+    subject = cursor.digest()
+    kind_index = cursor.u32()
+    detail = cursor.digest()
+    if subject is None or kind_index is None or detail is None:
+        return None
+    kinds = (
+        "Approval",
+        "VerificationResult",
+        "ReviewFinding",
+        "ResolutionClaim",
+        "StudyRecord",
+        "Question",
+        "ExecutorFault",
+        "FoldConflict",
+        "RepairTriage",
+        "ReviewAdvisory",
+    )
+    kind = kinds[kind_index] if kind_index < len(kinds) else f"unknown({kind_index})"
+    return {"subject": subject, "kind": kind, "detail": detail}
+
+
+def _decode_known_fact(name: str, cursor: _WireCursor) -> dict[str, Any] | None:
+    """The fields flakes groups, for the facts it recognizes on the wire."""
+    if name == "VerifyFailed":
+        bloom = cursor.digest()
+        workpiece = cursor.string()
+        evidence = _wire_evidence(cursor)
+        verifiers = cursor.strings()
+        if bloom is None or workpiece is None or evidence is None or verifiers is None:
+            return None
+        return {"bloom": bloom, "workpiece": workpiece, "evidence": evidence, "failed_verifiers": verifiers}
+    if name == "AggregateReviewExecutorFault":
+        bloom = cursor.digest()
+        evidence = _wire_evidence(cursor)
+        if bloom is None or evidence is None:
+            return None
+        return {"bloom": bloom, "evidence": evidence, "stage": "AggregateReview"}
+    if name == "MemberMachineryFault":
+        bloom = cursor.digest()
+        workpiece = cursor.string()
+        stage = _variant_name(cursor.u32(), STAGES)
+        evidence = _wire_evidence(cursor)
+        if bloom is None or workpiece is None or stage is None or evidence is None:
+            return None
+        return {"bloom": bloom, "workpiece": workpiece, "stage": stage, "evidence": evidence}
+    return {}
+
+
+def _decode_known_outcome(name: str, cursor: _WireCursor) -> dict[str, Any] | None:
+    """The fields flakes counts, for the outcomes it recognizes on the wire."""
+    if name in {"RefineReentered"}:
+        bloom = cursor.digest()
+        workpiece = cursor.string()
+        rolls = cursor.u32()
+        if bloom is None or workpiece is None or rolls is None:
+            return None
+        return {"bloom": bloom, "workpiece": workpiece, "rolls": rolls}
+    if name == "AttemptWedged":
+        bloom = cursor.digest()
+        workpiece = cursor.string()
+        stage = _variant_name(cursor.u32(), STAGES)
+        verifiers = cursor.strings()
+        if bloom is None or workpiece is None or stage is None or verifiers is None:
+            return None
+        return {"bloom": bloom, "workpiece": workpiece, "stage": stage, "repeated_verifiers": verifiers}
+    if name in {"AggregateReviewExecutorFaulted", "AggregateReviewExecutorWedged"}:
+        bloom = cursor.digest()
+        subject = cursor.digest()
+        rolls = cursor.u32()
+        evidence = cursor.digest()
+        budget = cursor.u32()
+        if bloom is None or subject is None or rolls is None or evidence is None or budget is None:
+            return None
+        return {
+            "bloom": bloom,
+            "stage": "AggregateReview",
+            "rolls": rolls,
+            "budget": budget,
+            "evidence": {"detail": evidence, "kind": "ExecutorFault", "subject": subject},
+        }
+    if name in {"MemberMachineryRetried", "MemberMachineryWedged"}:
+        bloom = cursor.digest()
+        workpiece = cursor.string()
+        stage = _variant_name(cursor.u32(), STAGES)
+        rolls = cursor.u32()
+        if bloom is None or workpiece is None or stage is None or rolls is None:
+            return None
+        return {"bloom": bloom, "workpiece": workpiece, "stage": stage, "rolls": rolls}
+    return {}
+
+
+def decode_event_blob(blob: bytes | None) -> dict[str, Any] | None:
+    """An Event as `{idempotency_key, fact}` — JSON fixture or wire bytes."""
+    if not blob:
+        return None
+    if _looks_like_json(blob):
+        try:
+            value = json.loads(blob)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(value, dict):
+            return None
+        fact = value.get("fact") if isinstance(value.get("fact"), dict) else value
+        key = value.get("idempotency_key")
+        return {"idempotency_key": key, "fact": fact}
+    cursor = _WireCursor(blob)
+    key = cursor.string()
+    name = _variant_name(cursor.u32(), FACT_NAMES)
+    if key is None or name is None:
+        return None
+    payload = _decode_known_fact(name, cursor)
+    if payload is None:
+        return None
+    return {"idempotency_key": key, "fact": {name: payload}}
+
+
+def decode_decisions_blob(blob: bytes | None) -> dict[str, Any] | None:
+    """A Decisions outcome — JSON fixture or the leading wire Outcome.
+
+    Effects are unread: flakes groups facts and outcomes, never the outbox,
+    and not reading the tail means a Decision append cannot break this.
+    """
+    if not blob:
+        return None
+    if _looks_like_json(blob):
+        try:
+            value = json.loads(blob)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(value, dict) and "outcome" in value:
+            return value["outcome"]
+        return value
+    cursor = _WireCursor(blob)
+    name = _variant_name(cursor.u32(), OUTCOME_NAMES)
+    if name is None:
+        return None
+    payload = _decode_known_outcome(name, cursor)
+    if payload is None:
+        return None
+    return {name: payload} if payload else name
+
+
+def decode_journal_row(sequence: Any, event: bytes | None, decisions: bytes | None) -> dict[str, Any] | None:
+    """One journal row as the record shape `fact_of` / grouping already walk."""
+    decoded_event = decode_event_blob(event)
+    if decoded_event is None:
+        return None
+    return {
+        "sequence": sequence,
+        "event": decoded_event,
+        "outcome": decode_decisions_blob(decisions),
+    }
+
+
+def _payload_field(payload: Any, *names: str) -> Any:
+    if not isinstance(payload, dict):
+        return None
+    for name in names:
+        if name in payload:
+            return payload[name]
+    return None
+
+
+def _payload_stage(payload: Any, default: str | None = None) -> str | None:
+    stage = _payload_field(payload, "stage")
+    if isinstance(stage, str) and stage:
+        return stage
+    if isinstance(stage, int):
+        return _variant_name(stage, STAGES)
+    if isinstance(stage, (bytes, bytearray)):
+        return stage_name(bytes(stage))
+    return default
+
+
+def _payload_workpiece(payload: Any) -> str | None:
+    value = _payload_field(payload, "workpiece")
+    if isinstance(value, str) and value:
+        return value
+    if isinstance(value, dict):
+        inner = value.get("0") if "0" in value else value.get("id")
+        if isinstance(inner, str) and inner:
+            return inner
+    return None
+
+
+def _payload_bloom(payload: Any) -> str | None:
+    return digest_hex(_payload_field(payload, "bloom"))
+
+
+def _payload_rolls(payload: Any) -> int | None:
+    rolls = _payload_field(payload, "rolls", "attempt")
+    return rolls if isinstance(rolls, int) else None
+
+
+def _payload_evidence(payload: Any) -> dict[str, Any]:
+    evidence = _payload_field(payload, "evidence")
+    if not isinstance(evidence, dict):
+        return {"kind": None, "detail": None}
+    kind = evidence.get("kind")
+    if isinstance(kind, dict):
+        kind, _ = _enum_payload(kind)
+    return {
+        "kind": kind if isinstance(kind, str) and kind else None,
+        "detail": digest_hex(evidence.get("detail")),
+    }
+
+
+def canonical_verifiers(value: Any) -> list[str]:
+    """A VerifyFailureSet as the canonical name list, order-stable.
+
+    Unknown names are kept (sorted after the vocabulary) so a future identity
+    still groups with itself instead of vanishing into an empty cause.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        names = [value]
+    elif isinstance(value, (list, tuple)):
+        names = [item for item in value if isinstance(item, str) and item]
+    else:
+        return []
+    rank = {name: index for index, name in enumerate(VERIFY_FAILURE_NAMES)}
+    unique = sorted(set(names), key=lambda name: (rank.get(name, len(rank)), name))
+    return unique
+
+
+def outcome_name_of(outcome: Any) -> str | None:
+    name, _ = _enum_payload(outcome)
+    return name
+
+
+def _is_refused_or_duplicate(outcome_name: str | None) -> bool:
+    if outcome_name is None:
+        return False
+    return outcome_name == "Duplicate" or outcome_name.endswith("Rejected")
+
+
+def flake_observation(record: dict[str, Any]) -> dict[str, Any] | None:
+    """One admitted verifier or machinery failure, or None.
+
+    Refused and duplicate outcomes are not observations: they never entered
+    the durable ledger as a failure. Free-form stderr and timestamps are
+    unread — they are unstable text, not a signature.
+    """
+    outcome = record.get("outcome")
+    outcome_name = outcome_name_of(outcome)
+    if _is_refused_or_duplicate(outcome_name):
+        return None
+    _, outcome_payload = _enum_payload(outcome)
+    fact = fact_of(record)
+    fact_name, fact_payload = _enum_payload(fact) if fact else (None, None)
+
+    sequence = record.get("sequence")
+    if not isinstance(sequence, int):
+        return None
+
+    if fact_name == "VerifyFailed":
+        verifiers = canonical_verifiers(_payload_field(fact_payload, "failed_verifiers"))
+        evidence = _payload_evidence(fact_payload)
+        return {
+            "kind": "verifier",
+            "stage": _payload_stage(fact_payload, "Verify") or "Verify",
+            "cause": ",".join(verifiers) if verifiers else "verify",
+            "verifiers": verifiers,
+            "evidence_kind": evidence["kind"] or "VerificationResult",
+            "evidence_detail": evidence["detail"],
+            "bloom": _payload_bloom(fact_payload),
+            "workpiece": _payload_workpiece(fact_payload),
+            "sequence": sequence,
+            "machinery_retry": False,
+            "machinery_wedge": False,
+            "rolls": _payload_rolls(outcome_payload),
+        }
+
+    machinery_from_fact = fact_name in MACHINERY_FACT_NAMES
+    machinery_from_outcome = outcome_name in MACHINERY_RETRY_OUTCOMES or outcome_name in MACHINERY_WEDGE_OUTCOMES
+    if not machinery_from_fact and not machinery_from_outcome:
+        return None
+
+    payload = fact_payload if machinery_from_fact else outcome_payload
+    stage = _payload_stage(payload) or _payload_stage(outcome_payload) or _payload_stage(fact_payload)
+    if fact_name == "AggregateReviewExecutorFault" or (
+        outcome_name in {"AggregateReviewExecutorFaulted", "AggregateReviewExecutorWedged"}
+    ):
+        stage = stage or "AggregateReview"
+    evidence = _payload_evidence(payload)
+    if evidence["kind"] is None:
+        evidence = _payload_evidence(outcome_payload)
+    return {
+        "kind": "machinery",
+        "stage": stage or "unknown",
+        "cause": "executor_fault",
+        "verifiers": [],
+        "evidence_kind": evidence["kind"] or "ExecutorFault",
+        "evidence_detail": evidence["detail"],
+        "bloom": _payload_bloom(payload) or _payload_bloom(outcome_payload),
+        "workpiece": _payload_workpiece(payload) or _payload_workpiece(outcome_payload),
+        "sequence": sequence,
+        "machinery_retry": outcome_name in MACHINERY_RETRY_OUTCOMES,
+        "machinery_wedge": outcome_name in MACHINERY_WEDGE_OUTCOMES,
+        "rolls": _payload_rolls(outcome_payload) or _payload_rolls(payload),
+    }
+
+
+def _signature_key(observation: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        observation["kind"],
+        observation["stage"],
+        observation["cause"],
+        tuple(observation["verifiers"]),
+        observation["evidence_kind"],
+    )
+
+
+def group_flake_signatures(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stable stage/cause signatures with counts, spans, and machinery tallies.
+
+    Evidence.detail is reported from the newest observation, not keyed: the
+    detail is a per-run artifact digest, and grouping on it would make every
+    recurrence look unique. The typed evidence kind stays in the key.
+    """
+    grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for record in records:
+        observation = flake_observation(record)
+        if observation is None:
+            continue
+        key = _signature_key(observation)
+        entry = grouped.get(key)
+        if entry is None:
+            entry = {
+                "kind": observation["kind"],
+                "stage": observation["stage"],
+                "cause": observation["cause"],
+                "verifiers": list(observation["verifiers"]),
+                "evidence_kind": observation["evidence_kind"],
+                "evidence_detail": observation["evidence_detail"],
+                "count": 0,
+                "blooms": [],
+                "workpieces": [],
+                "first_sequence": observation["sequence"],
+                "last_sequence": observation["sequence"],
+                "machinery_retries": 0,
+                "machinery_wedges": 0,
+                "_retry_events": 0,
+                "_max_rolls": 0,
+            }
+            grouped[key] = entry
+        entry["count"] += 1
+        entry["last_sequence"] = observation["sequence"]
+        if observation["evidence_detail"]:
+            entry["evidence_detail"] = observation["evidence_detail"]
+        bloom = observation["bloom"]
+        if bloom and bloom not in entry["blooms"]:
+            entry["blooms"].append(bloom)
+        workpiece = observation["workpiece"]
+        if workpiece and workpiece not in entry["workpieces"]:
+            entry["workpieces"].append(workpiece)
+        if observation["machinery_retry"]:
+            entry["_retry_events"] += 1
+        if observation["machinery_wedge"]:
+            entry["machinery_wedges"] += 1
+        rolls = observation["rolls"]
+        if observation["kind"] == "machinery" and isinstance(rolls, int):
+            entry["_max_rolls"] = max(entry["_max_rolls"], rolls)
+
+    signatures = []
+    for entry in grouped.values():
+        entry["machinery_retries"] = max(entry.pop("_retry_events"), entry.pop("_max_rolls"))
+        entry["blooms"] = sorted(entry["blooms"])
+        entry["workpieces"] = sorted(entry["workpieces"])
+        signatures.append(entry)
+    signatures.sort(key=lambda item: (-item["count"], -item["last_sequence"], item["kind"], item["stage"], item["cause"]))
+    return signatures
 
 
 def bloom_sealed_base(records: Sequence[dict[str, Any]], bloom_id: str) -> str | None:
@@ -1347,6 +2097,92 @@ def cmd_slots(args: argparse.Namespace) -> None:
         print(f"{entry['slot']:<8} {entry['state']:<12} {str(entry['nonce'] or '-'):<20} {rendered}")
 
 
+def human_bytes(value: int) -> str:
+    """A byte count an operator can read next to a volume size."""
+    remaining = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if remaining < 1024.0 or unit == "TiB":
+            if unit == "B":
+                return f"{int(remaining)}{unit}"
+            return f"{remaining:.1f}{unit}"
+        remaining /= 1024.0
+    return f"{value}B"
+
+
+def _print_fs_axis(label: str, axis: dict[str, Any]) -> None:
+    if axis.get("measured"):
+        print(
+            f"  {label:<12} {axis.get('path', '-')}  "
+            f"{human_bytes(axis.get('free_bytes', 0))} free / {human_bytes(axis.get('total_bytes', 0))}"
+        )
+        return
+    extra = f" (shared with {axis['shared_with']})" if axis.get("shared_with") else ""
+    path = f" {axis['path']}" if axis.get("path") else ""
+    print(f"  {label:<12} unmeasured{extra}{path}  {axis.get('reason', '')}")
+
+
+def print_flakes_table(report: dict[str, Any]) -> None:
+    signatures = report["signatures"]
+    if not signatures:
+        print("no durable signatures have yet been observed")
+    else:
+        print(f"{'KIND':<10} {'STAGE':<17} {'CAUSE':<28} {'N':>4} {'RETRY':>6} {'WEDGE':>6} {'FIRST':>6} {'LAST':>6}  WHERE")
+        for item in signatures:
+            where = ",".join(item["workpieces"]) or "-"
+            blooms = item["blooms"]
+            if blooms:
+                where = f"{where}  blooms={len(blooms)}"
+            print(
+                f"{item['kind']:<10} {item['stage']:<17} {item['cause']:<28} "
+                f"{item['count']:>4} {item['machinery_retries']:>6} {item['machinery_wedges']:>6} "
+                f"{item['first_sequence']:>6} {item['last_sequence']:>6}  {where}"
+            )
+
+    pressure = report["pressure"]
+    orders = pressure["orders"]
+    print()
+    print(
+        f"orders     outstanding={orders['outstanding']} overdue={orders['overdue']}  "
+        + " ".join(
+            f"{bucket['stage']}:{bucket['outstanding']}"
+            + (f"({bucket['overdue']} overdue)" if bucket["overdue"] else "")
+            for bucket in orders["by_stage"]
+        )
+    )
+    slots = pressure["slots"]
+    if slots.get("measured"):
+        print(
+            f"slots      occupied={slots['occupied']} free={slots['free']} "
+            f"quarantined={slots['quarantined']} unknown={slots['unknown']}"
+        )
+    else:
+        print(f"slots      unmeasured  {slots.get('reason', '')}")
+    print(f"queue      {pressure['queue_depth']}")
+    filesystems = pressure["filesystems"]
+    _print_fs_axis("worktree", filesystems["worktree"])
+    _print_fs_axis("lane-target", filesystems["lane_target"])
+
+
+def cmd_flakes(args: argparse.Namespace) -> None:
+    journal = Journal(args.journal)
+    now = now_unix_millis()
+    try:
+        orders = [order_summary(row, now) for row in journal.outstanding_orders()]
+    except OperatorError:
+        orders = []
+    report = flakes_report(
+        journal.records(),
+        orders,
+        args.worktree_base,
+        getattr(args, "target_base", "") or "",
+        now,
+    )
+    if args.json:
+        print_json(report)
+        return
+    print_flakes_table(report)
+
+
 def cmd_clear_quarantine(args: argparse.Namespace) -> None:
     result = clear_quarantine(args.worktree_base, args.slot)
     if args.json:
@@ -1587,6 +2423,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     slots.set_defaults(handler=cmd_slots)
 
+    flakes = subparsers.add_parser(
+        "flakes",
+        help="recurring verifier and machinery signatures beside live queue/slot/filesystem pressure",
+    )
+    flakes.add_argument(
+        "--target-base",
+        default=os.environ.get("AETHER_BLOOMERY_LANE_TARGET_BASE", ""),
+        help="per-slot cargo target root (env AETHER_BLOOMERY_LANE_TARGET_BASE); "
+        "omit to leave that pressure axis unmeasured rather than assuming it shares the worktree volume",
+    )
+    flakes.set_defaults(handler=cmd_flakes)
+
     clear_q = subparsers.add_parser(
         "clear-quarantine",
         help="clear a named slot quarantine after you have confirmed its child is gone",
@@ -1671,7 +2519,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    needs_journal = args.handler in (cmd_status, cmd_orders, cmd_why)
+    needs_journal = args.handler in (cmd_status, cmd_orders, cmd_why, cmd_flakes)
     if needs_journal and not args.journal:
         print(
             "error: no journal path. Pass --journal or set AETHER_STORE_PATH to the "
