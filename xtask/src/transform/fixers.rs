@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
-use std::{fs, thread};
+use std::{fs, io, thread};
 
 use crate::transform::sccache;
 
@@ -316,7 +316,7 @@ impl Snapshot {
             .into_iter()
             .filter_map(|path| match fs::read(worktree.join(&path)) {
                 Ok(bytes) => Some((path, Some(bytes))),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some((path, None)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Some((path, None)),
                 Err(_) => None,
             })
             .collect();
