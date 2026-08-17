@@ -165,8 +165,8 @@ mod tests {
     use crate::port::{BloomView, ViewDocument, WedgeCause};
     use crate::reduce::{BloomStatus, Event, Fact, Snapshot, reduce};
     use crate::values::{
-        BloomDraft, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, Question, ResolvedConfigs,
-        SpendWindow,
+        BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, Question,
+        ResolvedConfigs, SpendWindow,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -282,7 +282,7 @@ mod tests {
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         snapshot = snapshot.apply(&seal, &reduce(&snapshot, &seal, &configs, &spend), &configs);
 
-        let captured = crate::values::CandidateRef { tree: digest(21), checkout: digest(22) };
+        let captured = CandidateRef { tree: digest(21), checkout: digest(22) };
         let construct = Event {
             idempotency_key: IdempotencyKey("c-pass".into()),
             fact: Fact::AttemptCompleted {

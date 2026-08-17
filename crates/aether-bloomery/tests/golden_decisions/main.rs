@@ -229,6 +229,22 @@ fn record_candidate_vehicle(bloom: BloomId, workpiece: WorkpieceId) -> Decision 
     }
 }
 
+fn record_wedge(bloom: BloomId, workpiece: WorkpieceId) -> Decision {
+    Decision::RecordWedge {
+        bloom,
+        workpiece,
+        wedge: Wedge {
+            stage: StageId::Verify,
+            evidence: digest(11),
+            repeated_verifiers: [VerifyFailure::Fmt, VerifyFailure::Dup].into_iter().collect(),
+        },
+    }
+}
+
+fn record_member_machinery(bloom: BloomId, workpiece: WorkpieceId) -> Decision {
+    Decision::RecordMemberMachinery { bloom, workpiece, stage: StageId::Verify, rolls: 2, evidence: digest(41) }
+}
+
 fn host_fault_records(bloom: BloomId, workpiece: WorkpieceId) -> [Decision; 2] {
     [
         Decision::RecordHostFault {
@@ -301,15 +317,7 @@ fn representative() -> Decisions {
             Decision::RecordAggregateRoll { bloom, rolls: 1 },
             Decision::RecordAggregateVerifyRoll { bloom, rolls: 2 },
             Decision::RecordLandingRoll { bloom, rolls: 3 },
-            Decision::RecordWedge {
-                bloom,
-                workpiece: workpiece.clone(),
-                wedge: Wedge {
-                    stage: StageId::Verify,
-                    evidence: digest(11),
-                    repeated_verifiers: [VerifyFailure::Fmt, VerifyFailure::Dup].into_iter().collect(),
-                },
-            },
+            record_wedge(bloom, workpiece.clone()),
             Decision::MarkSuperseded { bloom, by: successor },
             dispatch_attempt(bloom, workpiece.clone()),
             Decision::RedispatchStage {
@@ -359,13 +367,7 @@ fn representative() -> Decisions {
         .chain(host_fault_records(bloom, workpiece.clone()))
         .chain([record_candidate_vehicle(bloom, workpiece.clone())])
         .chain(brake_aggregates(bloom))
-        .chain([Decision::RecordMemberMachinery {
-            bloom,
-            workpiece,
-            stage: StageId::Verify,
-            rolls: 2,
-            evidence: digest(41),
-        }])
+        .chain([record_member_machinery(bloom, workpiece)])
         .collect(),
     }
 }

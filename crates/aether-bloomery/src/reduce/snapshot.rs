@@ -627,32 +627,7 @@ impl Snapshot {
                 }
             }
             Decision::ReleaseHold { .. } | Decision::RecordReviewPark { .. } => self.apply_hold_effect(effect),
-            Decision::AdvanceStage { bloom, workpiece, progress } => {
-                let was_wedged = if let Some(record) = self.blooms.get_mut(bloom) {
-                    record.progress.insert(workpiece.clone(), *progress);
-                    // A moving cursor is a member that is dispatching again, so it
-                    // is by definition no longer wedged. This is the only way out
-                    // of the wedged set — there is no clearing decision, because
-                    // every route back into the line already writes a cursor.
-                    record.wedged.remove(workpiece).is_some()
-                } else {
-                    false
-                };
-                // A grant or stage change starts a fresh machinery series
-                // (ADR-0195): the operator repaired the host, or the member
-                // left the stage the faults were against. A same-stage work
-                // retry keeps the series — the two axes are independent.
-                let stage_changed = self
-                    .member_machinery
-                    .get(bloom)
-                    .and_then(|by_member| by_member.get(workpiece))
-                    .is_some_and(|fault| fault.stage != progress.stage);
-                if was_wedged || stage_changed {
-                    if let Some(by_member) = self.member_machinery.get_mut(bloom) {
-                        by_member.remove(workpiece);
-                    }
-                }
-            }
+            Decision::AdvanceStage { .. } => self.apply_advance_stage(effect),
             Decision::RecordWedge { bloom, workpiece, wedge } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.wedged.insert(workpiece.clone(), *wedge);
@@ -741,17 +716,58 @@ impl Snapshot {
             Decision::RecordMemberDependencies { .. } => self.apply_graph_effect(effect),
             Decision::RecordHostFault { .. } | Decision::ClearHostFault { .. } => self.apply_host_fault_effect(effect),
             Decision::RecordCandidateVehicle { .. } => self.apply_vehicle_effect(effect),
-            Decision::RecordMemberMachinery { bloom, workpiece, stage, rolls, evidence } => {
-                self.member_machinery.entry(*bloom).or_default().insert(
-                    workpiece.clone(),
-                    MemberMachineryFault { stage: *stage, rolls: *rolls, evidence: *evidence },
-                );
-            }
+            Decision::RecordMemberMachinery { .. } => self.apply_machinery_effect(effect),
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;
                 }
             }
+        }
+    }
+
+    /// Fold a moving cursor and the machinery series it may retire (ADR-0195).
+    ///
+    /// Split out of [`apply_effect`](Self::apply_effect) so the parent match
+    /// stays inside its line budget: writing the cursor, leaving the wedged
+    /// set, and retiring a machinery series that no longer applies are one
+    /// fold, and that is only visible when they sit together.
+    fn apply_advance_stage(&mut self, effect: &Decision) {
+        let Decision::AdvanceStage { bloom, workpiece, progress } = effect else {
+            return;
+        };
+        let was_wedged = if let Some(record) = self.blooms.get_mut(bloom) {
+            record.progress.insert(workpiece.clone(), *progress);
+            // A moving cursor is a member that is dispatching again, so it
+            // is by definition no longer wedged. This is the only way out
+            // of the wedged set — there is no clearing decision, because
+            // every route back into the line already writes a cursor.
+            record.wedged.remove(workpiece).is_some()
+        } else {
+            false
+        };
+        // A grant or stage change starts a fresh machinery series
+        // (ADR-0195): the operator repaired the host, or the member
+        // left the stage the faults were against. A same-stage work
+        // retry keeps the series — the two axes are independent.
+        let stage_changed = self
+            .member_machinery
+            .get(bloom)
+            .and_then(|by_member| by_member.get(workpiece))
+            .is_some_and(|fault| fault.stage != progress.stage);
+        if (was_wedged || stage_changed)
+            && let Some(by_member) = self.member_machinery.get_mut(bloom)
+        {
+            by_member.remove(workpiece);
+        }
+    }
+
+    /// Fold a member machinery-fault series (ADR-0195).
+    fn apply_machinery_effect(&mut self, effect: &Decision) {
+        if let Decision::RecordMemberMachinery { bloom, workpiece, stage, rolls, evidence } = effect {
+            self.member_machinery
+                .entry(*bloom)
+                .or_default()
+                .insert(workpiece.clone(), MemberMachineryFault { stage: *stage, rolls: *rolls, evidence: *evidence });
         }
     }
 
