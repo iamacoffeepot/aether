@@ -7,8 +7,6 @@
 //! derived from the findings file. Harnesses without tool injection
 //! (codex / muse / grok) keep the terminal `VERDICT:` parse.
 
-use std::path::Path;
-
 use aether_bloomery::Harness;
 use anyhow::Result;
 
@@ -17,9 +15,7 @@ use crate::transform::messages::bound_assistant_text;
 use crate::transform::review_reports::{
     FindingClass, Reports, findings_path, load_notes, load_reports, notes_path, render_reports,
 };
-use crate::transform::{
-    Measurements, TransformArgs, conventions, resolve_harness, run_model_lane, write_evidence_json,
-};
+use crate::transform::{Measurements, TransformArgs, resolve_harness, run_model_lane, write_evidence_json};
 
 /// The typed id of the model-driven review lane — the member line's terminal
 /// critic (`Transformation::for_member_stage` dispatches it for the Review
@@ -487,9 +483,10 @@ fn status_token(verdict: ReviewVerdict) -> &'static str {
 /// zero-secret path.
 pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
     // Pillars 3 and 5 judge the candidate against the repository's stated
-    // conventions, so the critic is given them rather than told to go and read
-    // them (#4647) — a critic without the rules cannot cite the one a candidate
-    // broke, and passes convention drift by default.
+    // conventions, so the critic is given the curated lane context rather than
+    // told to go and read them (#4647, #5141) — a critic without the rules
+    // cannot cite the one a candidate broke, and passes convention drift by
+    // default.
     //
     // The instruction text arrives with the `## Candidate` section the order's
     // diff source composes (#4723): what the critic runs to see the candidate is
@@ -503,7 +500,6 @@ pub(super) fn run_review(args: &TransformArgs) -> Result<()> {
             candidate_section(args.diff_base.as_deref()),
             composition_contract(args.diff_base.as_deref()),
         ),
-        conventions::read(Path::new(".")).as_deref(),
         args.subject.as_deref(),
         args.task.as_deref(),
         None,

@@ -57,11 +57,11 @@ fn construct_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str
 }
 
 /// Assemble the headless-Claude prompt for the construct lane from the lane-owned
-/// `instructions`, the subject tree's `conventions`, the checked-out `subject`,
-/// and the work-order `task` — pure so the assembly is testable without spawning
-/// Claude (#3572). The subject header names the exact sealed tree the worker is
-/// on; the `## Task` section carries the operator's work-order description
-/// (#3595) so the model is told *what* to build, not just *where*.
+/// `instructions`, the curated lane context, the checked-out `subject`, and the
+/// work-order `task` — pure so the assembly is testable without spawning Claude
+/// (#3572). The subject header names the exact sealed tree the worker is on; the
+/// `## Task` section carries the operator's work-order description (#3595) so
+/// the model is told *what* to build, not just *where*.
 ///
 /// `seeded` names the construct checkpoint this dispatch resumes from (#4994).
 /// Present only when the reducer seeded the checkout from a dead attempt's
@@ -72,16 +72,15 @@ fn construct_argv(model: Option<&str>, effort: Option<&str>, resume: Option<&str
 /// through the stable bulk (#4985).
 ///
 /// Prompt caching is prefix-exact (#4985). The shared bulk leads — conventions
-/// first (the same `CLAUDE.md` every lane of a bloom inlines), then the lane
-/// instructions, subject, and work-order body — and anything that varies per
-/// lane (a leading `Workpiece:` identity header, #4984) sits in a trailing
-/// `## Lane` section. Sibling lanes then share the cached prefix; each writes
-/// only the tail. A `None` task appends none (the fail-legible path for a
-/// member with no persisted description); `None` conventions append none (a
-/// subject tree that carries no conventions file, #4647).
+/// first (the same curated lane context every lane of a bloom inlines, #5141),
+/// then the lane instructions, subject, and work-order body — and anything that
+/// varies per lane (a leading `Workpiece:` identity header, #4984) sits in a
+/// trailing `## Lane` section. Sibling lanes then share the cached prefix; each
+/// writes only the tail. A `None` task appends none (the fail-legible path for a
+/// member with no persisted description). The conventions section is never
+/// optional: a missing `lane_context.md` is a compile error, not a silent omit.
 pub(super) fn assemble_construct_prompt(
     instructions: &str,
-    conventions: Option<&str>,
     subject: Option<&str>,
     task: Option<&str>,
     seeded: Option<&str>,
@@ -95,8 +94,7 @@ pub(super) fn assemble_construct_prompt(
             )
         },
     );
-    let conventions_section =
-        conventions.map_or_else(String::new, |text| format!("{}\n\n", conventions::section(text)));
+    let conventions_section = format!("{}\n\n", conventions::section());
     let (task_body, lane_identity) = task.map_or(("", None), split_lane_identity);
     let task_section = if task_body.is_empty() {
         String::new()
