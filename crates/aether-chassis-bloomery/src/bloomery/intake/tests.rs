@@ -552,7 +552,10 @@ fn a_pending_handle_is_reported_and_neither_completed_nor_admitted() {
 
     let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, None, &mut sink).unwrap();
     assert_eq!((report.completed, report.admitted, report.refused), (0, 0, 0));
-    assert_eq!(report.pending, vec![(Nonce("n-pending".to_owned()), ExecutionStatus::Running)]);
+    assert_eq!(
+        report.pending,
+        vec![(Nonce("n-pending".to_owned()), ExecutionStatus::Running { last_progress_unix_millis: None })],
+    );
     assert!(sink.0.is_empty());
 }
 

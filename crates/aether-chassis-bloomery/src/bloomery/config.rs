@@ -1,5 +1,8 @@
 //! Bloomery coordinator and GitHub adapter configuration boundaries.
 
+use std::error::Error;
+use std::fmt;
+
 #[cfg(feature = "github")]
 use std::fs;
 #[cfg(feature = "github")]
@@ -15,6 +18,7 @@ use aether_bloomery::SharedCorrespondence;
 use aether_bloomery_github::{AppTokenSource, GithubConfig, GithubError, MainlineRef, ReqwestGithub};
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
 use aether_bloomery_github::{GitSource, testing::FakeGithub};
+use aether_substrate::config::ConfigError;
 
 const DEFAULT_LANE_PROGRAM: &str = "cargo xtask transform";
 #[cfg(all(feature = "github", any(test, feature = "testing")))]
@@ -270,6 +274,23 @@ pub struct CoordinatorConfig {
     /// re-drive. `0` disables the warn.
     #[config(default = 1800)]
     pub stale_warn_after_secs: u64,
+    /// How long (in seconds) a local model lane may stay silent — no advance of
+    /// its streamed `transcript.jsonl` — before the executor reactor cancels it
+    /// as a host-observed machinery failure (ADR-0195 §8). The sealed wall clock
+    /// is still the outer bound; this only answers how long this host will trust
+    /// a process that has stopped producing its declared liveness signal.
+    ///
+    /// Ten minutes by default: long enough that a slow compile is not silence,
+    /// short enough that a dead child does not consume the sealed hour. `0` is
+    /// refused at startup rather than meaning unbounded silence — a lane with
+    /// no trustworthy heartbeat stays deadline-only because its backend reports
+    /// none, not because this knob is off.
+    ///
+    /// Named `AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS` rather than under this
+    /// struct's `AETHER_GITHUB` prefix: how long a host trusts a silent local
+    /// process is a property of the machine, not of the GitHub connection.
+    #[config(env = "AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS", default = 600)]
+    pub heartbeat_silence_secs: u64,
     /// Where the executor reactor puts an admitted attempt's study record
     /// (#4679) — the artifacts content store's root.
     ///
@@ -366,6 +387,7 @@ impl Default for CoordinatorConfig {
             evidence_retention_days: 7,
             lane_build_jobs: 8,
             stale_warn_after_secs: 1800,
+            heartbeat_silence_secs: 600,
             artifacts_root: None,
             operator_name: String::new(),
             operator_email: String::new(),
@@ -392,7 +414,30 @@ impl CoordinatorConfig {
             .map(str::to_owned)
             .collect()
     }
+
+    /// The host heartbeat-silence allowance, or a boot fault when the knob is
+    /// zero. Zero is not "unbounded": a lane without a trustworthy progress
+    /// signal stays deadline-only because its backend reports none.
+    pub fn heartbeat_silence_secs(&self) -> Result<u64, ConfigError> {
+        if self.heartbeat_silence_secs == 0 {
+            return Err(ConfigError::unparseable("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS", "0", HeartbeatSilenceZero));
+        }
+        Ok(self.heartbeat_silence_secs)
+    }
 }
+
+/// Why a zero heartbeat-silence setting is refused rather than treated as
+/// "never reap on silence".
+#[derive(Debug)]
+struct HeartbeatSilenceZero;
+
+impl fmt::Display for HeartbeatSilenceZero {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("must be nonzero; zero is not unbounded silence")
+    }
+}
+
+impl Error for HeartbeatSilenceZero {}
 
 #[cfg(feature = "github")]
 impl GithubConnectionConfig {
@@ -619,5 +664,20 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         assert_eq!(coordinator.poll_interval_secs, 5);
         assert_eq!(coordinator.local_lane_prefixes(), ["construct.", "review."]);
         assert_eq!(coordinator.store_path, ":memory:");
+        assert_eq!(coordinator.heartbeat_silence_secs, 600);
+        assert_eq!(coordinator.heartbeat_silence_secs().expect("the default is nonzero"), 600);
+    }
+
+    #[test]
+    fn a_zero_heartbeat_silence_is_refused_rather_than_meaning_unbounded() {
+        // The plausible bug: treating `0` like `stale_warn_after_secs`, where
+        // zero disables the sweep. Silence has no "off" — a missing heartbeat
+        // is already deadline-only — so zero would silently disable the
+        // recovery this knob exists to perform.
+        let coordinator = CoordinatorConfig { heartbeat_silence_secs: 0, ..CoordinatorConfig::default() };
+        let error = coordinator.heartbeat_silence_secs().expect_err("zero must not resolve");
+        let message = error.to_string();
+        assert!(message.contains("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS"), "{message}");
+        assert!(message.contains("nonzero"), "{message}");
     }
 }

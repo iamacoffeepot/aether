@@ -285,7 +285,11 @@ fn artifact_failed_verifiers(name: &str) -> VerifyFailureSet {
 fn map_status(run: &WorkflowRun) -> ExecutionStatus {
     match run.status {
         RunStatus::Queued => ExecutionStatus::Queued,
-        RunStatus::InProgress => ExecutionStatus::Running,
+        // Actions artifacts are opaque zips observed after the run ends, so
+        // there is no live transcript to read. `None` is "no trustworthy
+        // signal", not "the worker is silent" — a remote model lane stays
+        // deadline-only.
+        RunStatus::InProgress => ExecutionStatus::Running { last_progress_unix_millis: None },
         RunStatus::Completed => match run.conclusion {
             Some(RunConclusion::Cancelled) => ExecutionStatus::Cancelled,
             Some(RunConclusion::Success) => ExecutionStatus::Completed { conclusion: Conclusion::Success },
@@ -632,7 +636,7 @@ mod tests {
         assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Queued);
 
         let _ = fake.seed_run("n-2", RunStatus::InProgress, None);
-        assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Running);
+        assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Running { last_progress_unix_millis: None });
 
         let _ = fake.seed_run("n-2", RunStatus::Completed, Some(RunConclusion::Success));
         assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Completed { conclusion: Conclusion::Success });

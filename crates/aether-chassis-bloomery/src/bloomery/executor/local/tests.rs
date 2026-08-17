@@ -9,7 +9,10 @@ use std::fmt::{Debug, Write as _};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 #[cfg(target_os = "linux")]
 use std::process::{Child, Command};
 
@@ -504,7 +507,7 @@ fn cancel_evicts_the_tracked_run() {
     let base = TempDir::new().unwrap();
     let exec = executor(&base, "{}", RunLifecycle::Running);
     let handle = exec.submit(&construct_order(digest(5), "n-c")).unwrap();
-    assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Running);
+    assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Running { last_progress_unix_millis: None },);
 
     // A cancel kills the child and evicts the run — a subsequent inspect reports
     // the clean Unknown (never the killed child's exit as a plain completion), and
@@ -519,6 +522,75 @@ fn cancel_evicts_the_tracked_run() {
     // deadline enforcement reissues its cancel on every tick until the expired
     // order is admitted, so a refusal here would make one store fault permanent.
     exec.cancel(&handle).expect("a repeat cancel of an already-evicted run is a clean success");
+}
+
+fn evidence_dir(base: &TempDir, nonce: &str) -> PathBuf {
+    base.path().join(format!("{nonce}-evidence"))
+}
+
+fn unix_millis(time: SystemTime) -> u64 {
+    u64::try_from(time.duration_since(UNIX_EPOCH).expect("mtime is after the epoch").as_millis()).expect("fits u64")
+}
+
+#[test]
+fn a_running_lane_reports_its_transcript_mtime_and_inspect_does_not_advance_it() {
+    // The heartbeat is the transcript the worker streams, not the coordinator
+    // asking. A poll that opened the file for write would make every inspect
+    // look like progress and a hung harness would stay healthy forever.
+    let base = TempDir::new().unwrap();
+    let exec = executor(&base, "{}", RunLifecycle::Running);
+    let handle = exec.submit(&construct_order(digest(5), "n-hb")).unwrap();
+    let transcript = evidence_dir(&base, "n-hb").join("transcript.jsonl");
+    fs::write(&transcript, b"{}\n").unwrap();
+    let stamped = unix_millis(fs::metadata(&transcript).unwrap().modified().unwrap());
+
+    let first = exec.inspect(&handle).unwrap();
+    assert_eq!(first, ExecutionStatus::Running { last_progress_unix_millis: Some(stamped) });
+    assert_eq!(
+        unix_millis(fs::metadata(&transcript).unwrap().modified().unwrap()),
+        stamped,
+        "inspect must not touch the transcript it is reading",
+    );
+    assert_eq!(exec.inspect(&handle).unwrap(), first, "a second poll reports the same stamp, not a later one");
+}
+
+#[test]
+fn an_absent_or_unreadable_or_future_transcript_is_not_fabricated_progress() {
+    // Absence is "no trustworthy signal", never "silent since epoch". A
+    // future stamp would extend the silence window past the sealed deadline,
+    // and a broken path is the same as no file — both must stay `None`.
+    let base = TempDir::new().unwrap();
+    let exec = executor(&base, "{}", RunLifecycle::Running);
+    let handle = exec.submit(&construct_order(digest(5), "n-none")).unwrap();
+    let dir = evidence_dir(&base, "n-none");
+
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: None },
+        "no transcript is not a heartbeat",
+    );
+
+    #[cfg(unix)]
+    {
+        symlink("/no-such-transcript", dir.join("transcript.jsonl")).unwrap();
+        assert_eq!(
+            exec.inspect(&handle).unwrap(),
+            ExecutionStatus::Running { last_progress_unix_millis: None },
+            "unreadable metadata is not a heartbeat",
+        );
+        fs::remove_file(dir.join("transcript.jsonl")).unwrap();
+    }
+
+    let transcript = dir.join("transcript.jsonl");
+    fs::write(&transcript, b"{}\n").unwrap();
+    let file = fs::File::open(&transcript).unwrap();
+    file.set_modified(SystemTime::now() + Duration::from_hours(1)).unwrap();
+    drop(file);
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: None },
+        "a future mtime is refused rather than reported as progress",
+    );
 }
 
 #[test]
@@ -1150,7 +1222,7 @@ fn a_failed_evidence_read_keeps_the_run_and_its_slot_for_retry() {
     assert!(matches!(exec.stream_evidence(&handle), Err(LocalExecutorError::Evidence(_))));
     assert_eq!(
         exec.inspect(&handle).unwrap(),
-        ExecutionStatus::Running,
+        ExecutionStatus::Running { last_progress_unix_millis: None },
         "the still-running run is retained after a transient failed read",
     );
 
@@ -1510,7 +1582,10 @@ fn a_readopted_run_whose_evidence_has_not_landed_reads_as_running() {
 
     exec.reconcile(&[outstanding(digest(5), &nonce)]);
 
-    assert_eq!(exec.inspect(&WorkHandle::new(Nonce(nonce))).unwrap(), ExecutionStatus::Running);
+    assert_eq!(
+        exec.inspect(&WorkHandle::new(Nonce(nonce))).unwrap(),
+        ExecutionStatus::Running { last_progress_unix_millis: None },
+    );
     assert!(log.released().is_empty(), "an unfinished run keeps its checkout");
 }
 
@@ -1539,7 +1614,7 @@ fn a_readopted_run_holds_the_slot_it_was_dispatched_in() {
     }
     assert_eq!(
         exec.inspect(&handle).unwrap(),
-        ExecutionStatus::Running,
+        ExecutionStatus::Running { last_progress_unix_millis: None },
         "an unterminated orphan stays tracked so its slot is not handed out",
     );
     assert!(
