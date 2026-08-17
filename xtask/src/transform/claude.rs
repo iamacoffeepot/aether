@@ -11,6 +11,8 @@ use aether_bloomery::split_lane_identity;
 use crate::transform::lane::{execute, resume_handle_rejected, resumed_prompt, without_resume};
 use crate::transform::messages::derive_result_record;
 use crate::transform::peak_memory::PeakMemory;
+use crate::transform::review::REVIEW_CRITIC;
+use crate::transform::review_mcp;
 use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::scratch::Scratch;
 use crate::transform::{TransformArgs, conventions};
@@ -157,7 +159,14 @@ pub(super) fn run_headless_claude(
     // wrapper's reading covers the whole reaped tree rather than this process.
     let launched_prompt = resumed_prompt(prompt, args.resume.as_deref());
     let mut claude = peak.command("claude");
-    claude.args(construct_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref()));
+    let mut argv = construct_argv(args.model.as_deref(), args.effort.as_deref(), args.resume.as_deref());
+    // Tool injection is Claude-only. Codex / muse / grok review paths have no
+    // MCP hook and keep the terminal `VERDICT:` parse.
+    if args.command == REVIEW_CRITIC {
+        let config = review_mcp::prepare(&args.out)?;
+        argv.extend(review_mcp::mcp_argv(&config));
+    }
+    claude.args(argv);
     scratch.export(&mut claude);
     sccache::export(cache, &mut claude);
     // Piped stdin + streamed stdout share the lane primitive: the child is
@@ -228,6 +237,7 @@ mod tests {
         // (bloom `73d025b42e0a`).
         assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"), "headless needs the write gate open");
         assert!(!argv.iter().any(|a| a == "--resume"), "a cold launch names no session");
+        assert!(!argv.iter().any(|a| a == "--mcp-config"), "construct does not inject the review report server");
     }
 
     #[test]

@@ -6,7 +6,9 @@
 //!
 //! - the construct lane's completion gate reads `result_record.is_error`
 //!   (`LocalExecutor::stream_evidence`, #3596),
-//! - the review lane reads `result.result` for the critic's `VERDICT:` line.
+//! - the review lane reads `result.result` for the critic's `VERDICT:` line
+//!   on harnesses without tool injection; the Claude path reads the findings
+//!   file the reviewer appended to instead.
 //!
 //! An arm that returned a differently-shaped record would fail the review gate
 //! closed, which reads as a critic *finding* rather than a harness bug — so the
@@ -28,8 +30,8 @@ use crate::transform::peak_memory::PeakMemory;
 pub(super) struct Terminal {
     /// Whether the run ended in error. The construct gate demands `false`.
     pub is_error: bool,
-    /// The run's final message text — what the review lane parses its
-    /// `VERDICT:` line out of.
+    /// The run's final message text — what the non-Claude review path
+    /// parses its `VERDICT:` line out of.
     pub text: String,
     /// The token counts the harness reported, or `None` when it reports none.
     /// `None` renders the token columns null rather than zero, so a study reads
