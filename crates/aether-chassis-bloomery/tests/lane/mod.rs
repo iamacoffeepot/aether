@@ -70,14 +70,17 @@ use crate::common::{Coordinator, free_port};
 use repo::ScratchRepo;
 
 /// How long a scenario waits for the coordinator to reach a state before giving
-/// up. Generous against the coordinator's one-second poll cadence and a lane
-/// that forks a process per dispatch.
-const SETTLE_BUDGET: Duration = Duration::from_mins(1);
+/// up. Generous against the coordinator's one-second poll cadence, a lane that
+/// forks a process per dispatch, and a `git worktree` reset that stretches
+/// under full-suite contention before the child starts.
+const SETTLE_BUDGET: Duration = Duration::from_mins(2);
 
-/// How long the world must hold still before a settle loop calls it quiescent
-/// and judges it. Comfortably more than the poll cadence plus one dispatch, so
-/// a coordinator that is merely between steps is never mistaken for one that has
-/// stopped.
+/// How long the world must hold still, with nothing in flight, before a settle
+/// loop calls it quiescent and judges it. Comfortably more than the poll cadence
+/// plus the gap between consuming one order and dispatching the next, so a
+/// coordinator that is merely between steps is never mistaken for one that has
+/// stopped. An outstanding order is not stillness — the fingerprint cannot see
+/// a checkout that has not spawned the child yet.
 const QUIESCENCE: Duration = Duration::from_secs(12);
 
 /// Between polls of the projection.
@@ -250,13 +253,17 @@ impl LaneHarness {
             }
 
             let progress = liveness::Progress::observe(&document, self.outstanding(), self.ledger().len());
+            let in_flight = !progress.outstanding.is_empty();
             if last.as_ref() != Some(&progress) {
                 last = Some(progress);
                 still_since = Instant::now();
-            } else if still_since.elapsed() >= QUIESCENCE {
+            } else if !in_flight && still_since.elapsed() >= QUIESCENCE {
                 // The world stopped moving before reaching what the scenario
                 // asked for. Whether that is legitimate is not the scenario's
-                // call — it is the invariant's.
+                // call — it is the invariant's. An outstanding order is still
+                // work, even when the projection and ledger have not moved: the
+                // child may be mid-checkout. The settle budget is the backstop
+                // for an order that is truly stuck.
                 self.judge_quiescence(label, &document);
                 panic!(
                     "{label}: the coordinator settled into a legitimate stop without reaching it — {:?}",
