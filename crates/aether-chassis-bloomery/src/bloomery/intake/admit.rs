@@ -265,6 +265,24 @@ fn persist_aggregate_findings(
     Ok(())
 }
 
+/// Persist a consumed aggregate-verify verdict's findings on the composition
+/// workpiece (#5098). The reserved Refine reads that row the way a member Refine
+/// reads its own: a compiler diagnostic the fold produced is the work order the
+/// weave repair never sealed.
+fn persist_aggregate_verify_findings(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    upload: &UploadedEvidence,
+) -> rusqlite::Result<()> {
+    if verdict_passed(upload.verdict) {
+        return store.clear_review_findings(record.bloom.0.as_bytes(), WorkpieceId::COMPOSITION);
+    }
+    let Some(findings) = &upload.findings else {
+        return Ok(());
+    };
+    store.record_review_findings(record.bloom.0.as_bytes(), WorkpieceId::COMPOSITION, findings)
+}
+
 // The read-side reconstruction lives here beside its sole caller `admit_uploaded`;
 // the write-side `to_stored` lives with `record_dispatch` in the dispatch module.
 impl DispatchRecord {
@@ -646,6 +664,12 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
 /// - A failing Verify's findings (the mechanical failure output) persist keyed by
 ///   the member so the Refine repair re-entry is directed by them; a passing
 ///   Verify clears the stale row (#3656, ADR-0153).
+/// - A failing AggregateVerify persists the same mechanical findings on the
+///   composition workpiece (#5098): that is the reserved Refine's findings
+///   channel, and a subject-only weave repair is what happens when they never
+///   land. A passing AggregateVerify clears that row so a later review-triggered
+///   repair is not still directed by a compiler diagnostic the fold already
+///   cleared.
 /// - A failing aggregate verdict freezes its set bloom-scoped and slices it per
 ///   owner. An executor fault writes none and clears none: the frozen set belongs
 ///   to the last verdict that actually judged the fold, and a host outage is not
@@ -681,6 +705,8 @@ fn persist_consumed(
         } else if let Some(findings) = &upload.findings {
             store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, findings)?;
         }
+    } else if record.stage == StageId::AggregateVerify {
+        persist_aggregate_verify_findings(store, record, upload)?;
     } else if record.stage == StageId::AggregateReview && upload.verdict != StageVerdict::ExecutorFault {
         persist_aggregate_findings(store, record, upload, aggregate_findings)?;
     }

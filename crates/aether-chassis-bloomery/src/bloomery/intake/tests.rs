@@ -876,6 +876,61 @@ fn a_failing_aggregate_verify_admits_its_typed_set_as_a_bloom_level_failure() {
     assert!(store.lookup_order("n-agg-ver").unwrap().is_none(), "the admitted order is consumed");
 }
 
+// #5098 — a failing AggregateVerify's findings persist on the composition
+// workpiece so the reserved Refine can assemble a work order from them. A
+// passing verdict clears that row: otherwise a later review-triggered repair
+// would still be directed by a compiler diagnostic the fold already cleared.
+#[test]
+fn aggregate_verify_findings_persist_on_the_composition_and_clear_on_a_pass() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let tree = Digest::from_bytes([30; 32]);
+    let findings = "verify.check failed.\n\nerror[E0308]: mismatched types in the fold";
+    let upload = |nonce: &str, verdict: StageVerdict, findings: Option<&str>| UploadedEvidence {
+        nonce: Nonce(nonce.to_owned()),
+        subject: tree,
+        verdict,
+        detail: Digest::from_bytes([7; 32]),
+        candidate: None,
+        findings: findings.map(str::to_owned),
+        failed_verifiers: if verdict == StageVerdict::VerificationFailed {
+            VerifyFailureSet::one(VerifyFailure::Clippy)
+        } else {
+            VerifyFailureSet::EMPTY
+        },
+        cost: None,
+        calls: None,
+    };
+
+    let mut failing = dispatch_record("n-av-fail", bloom, &WorkpieceId(String::new()), tree, tree);
+    failing.stage = StageId::AggregateVerify;
+    record_dispatch(&mut store, &failing).unwrap();
+    let AdmitDecision::Admitted(_) =
+        admit_uploaded(&mut store, &upload("n-av-fail", StageVerdict::VerificationFailed, Some(findings))).unwrap()
+    else {
+        panic!("the failing aggregate verify admits");
+    };
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), WorkpieceId::COMPOSITION).unwrap().as_deref(),
+        Some(findings),
+        "the composition Refine reads the compiler diagnostic the fold produced",
+    );
+
+    let mut passing = dispatch_record("n-av-pass", bloom, &WorkpieceId(String::new()), tree, tree);
+    passing.stage = StageId::AggregateVerify;
+    record_dispatch(&mut store, &passing).unwrap();
+    let AdmitDecision::Admitted(_) =
+        admit_uploaded(&mut store, &upload("n-av-pass", StageVerdict::VerificationPassed, None)).unwrap()
+    else {
+        panic!("the passing aggregate verify admits");
+    };
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), WorkpieceId::COMPOSITION).unwrap(),
+        None,
+        "a passing aggregate verify clears the composition's stale findings",
+    );
+}
+
 // ADR-0153 — an AggregateReview order's verdict admits as
 // Fact::AggregateReviewCompleted: a bloom-level fact with an empty implication
 // (the reducer expands it to every member on a fail). A failing verdict's
