@@ -588,7 +588,23 @@ impl LocalExecutor {
     }
 
     fn preferred_builder_slot(&self, checkout_hex: &str) -> Option<usize> {
-        self.builders.lock().unwrap_or_else(PoisonError::into_inner).preferred(checkout_hex)
+        if let Some(slot) = self.builders.lock().unwrap_or_else(PoisonError::into_inner).preferred(checkout_hex) {
+            return Some(slot);
+        }
+        let parents = match self.runner.checkout_parents(checkout_hex) {
+            Ok(parents) => parents,
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_chassis_bloomery::executor",
+                    checkout = checkout_hex,
+                    %error,
+                    "local executor backend: checkout parents unreadable; slot affinity falls back",
+                );
+                return None;
+            }
+        };
+        let builders = self.builders.lock().unwrap_or_else(PoisonError::into_inner);
+        parents.iter().find_map(|parent| builders.preferred(parent))
     }
 
     fn remember_builder(&self, checkout: &Digest, slot: usize) {
@@ -1461,12 +1477,11 @@ impl ExecutorBackend for LocalExecutor {
         // The run is off the registry, so its lane slot belongs to whatever has been
         // waiting for one.
         self.pump();
-        // A lane that stamped `environment` claims it judged nothing (ADR-0176),
-        // so it reports an executor fault rather than a failing verdict against
-        // the subject. Gated on the nonce binding like every other body-derived
-        // claim, and on the lane actually stamping a status — the construct lane
-        // stamps none, and its gate is `construct_conclusion`, never this.
-        let faulted = nonce_matches && !is_construct && status == Some(LaneStatus::Environment);
+        // ADR-0176 owns `ExecutorFault` for AggregateReview. A Verify
+        // `environment` stamp is an unjudged Verify (ADR-0178 empty set):
+        // intake admits it and the reducer reruns the same stage under the
+        // sealed budget, with no repair lap (#5089).
+        let faulted = nonce_matches && !is_construct && !is_verify && status == Some(LaneStatus::Environment);
         let verdict = if passed {
             StageVerdict::VerificationPassed
         } else if faulted {
