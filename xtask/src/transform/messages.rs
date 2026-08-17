@@ -135,9 +135,9 @@ fn or_null(value: &serde_json::Value, key: &str) -> serde_json::Value {
 /// Fold the walked transcript pieces into the ledger-shaped result record.
 fn assemble_result_record(
     result: Option<serde_json::Value>,
-    first_main: Option<serde_json::Value>,
+    first_main: Option<&serde_json::Value>,
     calls: Vec<serde_json::Value>,
-    texts: Vec<String>,
+    texts: &[String],
     report_findings: Option<serde_json::Value>,
 ) -> serde_json::Value {
     use serde_json::{Map, Value, json};
@@ -148,7 +148,7 @@ fn assemble_result_record(
         record.insert(field.to_owned(), Value::Null);
     }
 
-    match &first_main {
+    match first_main {
         Some(first) => {
             let usage = first.get("usage").cloned().unwrap_or(Value::Null);
             record.insert("first_call_model".to_owned(), or_null(first, "model"));
@@ -270,7 +270,7 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
         }
     }
 
-    assemble_result_record(result, first_main, calls, texts, report_findings)
+    assemble_result_record(result, first_main.as_ref(), calls, &texts, report_findings)
 }
 
 #[cfg(test)]
