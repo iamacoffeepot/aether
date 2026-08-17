@@ -78,8 +78,9 @@ pub struct ApprovalPolicy {
 
 /// A declared-surface pattern inside the validated grammar: a concrete
 /// repository-relative path, or a literal directory prefix followed by one
-/// final `/**`. Parsed once at the resolve boundary; anything else is [`None`]
-/// and fails closed to [`Tier::Human`].
+/// final `/**`. Parsed once at the resolve boundary; anything else is [`None`].
+/// The tier resolver fails closed to [`Tier::Human`]; the seal and supersede
+/// doors refuse the projection instead of admitting it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SurfacePattern {
     /// A single concrete path.
@@ -155,10 +156,10 @@ impl SurfacePattern {
 /// however the two were ordered and however many globs on each side reduce to
 /// the same overlap. An empty answer means disjoint.
 ///
-/// A glob outside the surface grammar is skipped rather than reported. There is
-/// no pattern to name for it, and the same gate already resolves it to
-/// [`Tier::Human`] — it stops at the owner's desk with or without a warning, so
-/// the fail-closed direction is already covered by the tier the door assigns it.
+/// A glob outside the surface grammar is skipped rather than reported: there is
+/// no pattern to name for it. The seal and supersede doors refuse such a glob
+/// before this check runs, so an overlap scan here never sees one on the
+/// admission path. `--pre-approved` waives the tier, not the grammar.
 ///
 /// Quadratic in the globs handed to it. A declared surface is a short list of
 /// crate and path globs, and the pairwise member scan calling this is what
@@ -508,7 +509,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use super::{ApprovalPolicy, ApprovalRule, Tier, surface_intersection};
+    use super::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, surface_intersection};
 
     /// The reference tier policy — the same rules `test-surface-match.py`'s
     /// `POLICY` used, so the resolver is checked against the same cases.
@@ -672,9 +673,20 @@ mod tests {
     fn disjoint_and_out_of_grammar_surfaces_intersect_in_nothing() {
         assert!(surface_intersection(&surface(&["crates/aether-fs/**"]), &surface(&["docs/guide/**"])).is_empty());
         // A glob outside the surface grammar names no pattern to intersect, so
-        // it contributes nothing rather than matching by raw string equality —
-        // the same gate already resolves it to `Human`, where a person reads it.
+        // it contributes nothing rather than matching by raw string equality.
+        // The seal door refuses such a glob before this check runs.
         assert!(surface_intersection(&surface(&["docs/*"]), &surface(&["docs/*"])).is_empty());
+    }
+
+    #[test]
+    fn a_comma_joined_path_list_is_outside_the_surface_grammar() {
+        // Tripwire: `--surface` does not split on comma, so a joined list is
+        // one glob containing `,`. That must stay outside the grammar so the
+        // seal door can refuse it rather than skip it as "no pattern".
+        assert!(
+            SurfacePattern::parse("crates/foo/**,crates/bar/**").is_none(),
+            "a comma-joined path list must stay outside the surface grammar"
+        );
     }
 
     #[test]
