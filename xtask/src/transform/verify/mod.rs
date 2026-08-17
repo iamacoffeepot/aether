@@ -996,19 +996,25 @@ fn elapsed_millis(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Run `invocation`'s prepare step when it has one, and return that step's
-/// own wall-clock share so the gate receipt can split the wasm cross-build
-/// out of the member it precedes.
+/// A failed prepare's framed member log and exit code. `None` is clear to run.
+type PrepareFailure = Option<(String, i32)>;
+
+/// Prepare-step result plus its own wall-clock share.
 ///
 /// `(None, None)` is a member with no prepare. `(Some(log), Some(millis))` is
 /// a prepare that failed. `(None, Some(millis))` is a prepare that ran and
 /// left the member clear to run.
+type TimedPrepare = (PrepareFailure, Option<u64>);
+
+/// Run `invocation`'s prepare step when it has one, and return that step's
+/// own wall-clock share so the gate receipt can split the wasm cross-build
+/// out of the member it precedes.
 fn run_timed_prepare(
     id: &str,
     invocation: &VerifyInvocation,
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
-) -> Result<(Option<(String, i32)>, Option<u64>)> {
+) -> Result<TimedPrepare> {
     if invocation.prepare.is_none() {
         return Ok((None, None));
     }
@@ -1364,6 +1370,7 @@ mod tests {
 
     use crate::cargo::WASM_TARGET;
     use crate::transform::construct::{CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS};
+    use crate::transform::peak_memory;
     use crate::transform::review::REVIEW_CRITIC;
     use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 
@@ -1772,9 +1779,8 @@ mod tests {
         // prepare_millis: 0 on every gate that never prepared, which reads as
         // a free wasm cross-build rather than as "this gate has no prepare".
         let invocation = verify_command("verify.fmt").expect("verify.fmt mapped");
-        let (failure, prepare_millis) =
-            run_timed_prepare("verify.fmt", &invocation, None, &crate::transform::peak_memory::detect())
-                .expect("a member with no prepare is a no-op");
+        let (failure, prepare_millis) = run_timed_prepare("verify.fmt", &invocation, None, &peak_memory::detect())
+            .expect("a member with no prepare is a no-op");
         assert!(failure.is_none());
         assert!(prepare_millis.is_none(), "a gate that never prepared must not stamp a prepare share");
     }

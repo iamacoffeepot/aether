@@ -409,7 +409,7 @@ mod tests {
         // Tripwire: a preflight-refused umbrella executed no work. Presence is
         // the signal that a gate ran; a zero would claim the refuse was free.
         let value =
-            serde_json::to_value(&build_evidence("verify.check", None, false, Some(1), String::new(), None, None))
+            serde_json::to_value(build_evidence("verify.check", None, false, Some(1), String::new(), None, None))
                 .expect("evidence serializes");
         assert!(value.get("duration_millis").is_none());
         assert!(value.get("gates").is_none());
@@ -423,7 +423,7 @@ mod tests {
         // fmt/clippy/docs run never prepared, and inventing the key would say
         // the wasm cross-build took no time.
         let value = serde_json::to_value(
-            &build_evidence("verify.fmt", None, true, Some(0), "verify.fmt.log".into(), None, None).timed(12),
+            build_evidence("verify.fmt", None, true, Some(0), "verify.fmt.log".into(), None, None).timed(12),
         )
         .expect("evidence serializes");
         assert_eq!(value["duration_millis"], 12);
@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(test["prepare_millis"], 50);
 
         let umbrella = serde_json::to_value(
-            &build_evidence("verify.check", None, true, Some(0), "verify.scope.log".into(), None, None)
+            build_evidence("verify.check", None, true, Some(0), "verify.scope.log".into(), None, None)
                 .timed(100)
                 .with_gates(vec![
                     GateTiming { command: "verify.fmt".into(), duration_millis: 10, prepare_millis: None },
