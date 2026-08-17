@@ -390,13 +390,43 @@ def identity_matches(recorded: dict[str, Any], live: dict[str, Any]) -> bool:
     return recorded.get("starttime") == live.get("starttime") and recorded.get("boot_id") == live.get("boot_id")
 
 
+def live_occupant(
+    claims: Sequence[tuple[str, dict[str, Any] | None]],
+) -> tuple[str | None, dict[str, Any] | None, str]:
+    """The sole live identity among `claims`, or why there isn't one.
+
+    Occupancy is a `/proc` match, never directory order or nonce age. Several
+    live matches, or a claim whose identity cannot be read when nothing live
+    matches, is `unknown` — not a guessed owner. Every readable identity being
+    dead is `free`.
+    """
+    live: list[tuple[str, dict[str, Any]]] = []
+    unreadable = False
+    for nonce, identity in claims:
+        if identity is None or not isinstance(identity.get("pid"), int):
+            unreadable = True
+            continue
+        observed = observe_process(identity["pid"])
+        if observed is not None and identity_matches(identity, observed):
+            live.append((nonce, identity))
+    if len(live) == 1:
+        nonce, identity = live[0]
+        return nonce, identity, "occupied"
+    if len(live) > 1 or unreadable:
+        return None, None, "unknown"
+    return None, None, "free"
+
+
 def list_slots(worktree_base: str) -> list[dict[str, Any]]:
     """Every slot visible under the scratch root, with occupancy and quarantine.
 
-    Occupied means a dispatch's `slot` record still names it. Quarantined
-    means a sibling `slot-<n>.quarantine` file is present — the child could
-    not be terminated and the next dispatch must not build there. A slot can
-    be both: a live re-adopted run whose cancel just failed.
+    Occupied means exactly one retained evidence identity still matches a live
+    `/proc` process. Retained dead evidence is not occupancy. Quarantined means
+    a sibling `slot-<n>.quarantine` file is present — the child could not be
+    terminated and the next dispatch must not build there. A slot can be both:
+    a live re-adopted run whose cancel just failed. Ambiguous live matches or
+    an unreadable identity with nothing live to select are unknown, never a
+    guessed current owner.
     """
     base = Path(worktree_base)
     if not base.is_dir():
@@ -406,8 +436,7 @@ def list_slots(worktree_base: str) -> list[dict[str, Any]]:
             "checks lanes out under."
         )
 
-    occupants: dict[int, str] = {}
-    identities: dict[int, dict[str, Any]] = {}
+    claims: dict[int, list[tuple[str, dict[str, Any] | None]]] = {}
     for entry in base.iterdir():
         if not entry.is_dir() or not entry.name.endswith(EVIDENCE_SUFFIX):
             continue
@@ -417,11 +446,10 @@ def list_slots(worktree_base: str) -> list[dict[str, Any]]:
         slot_body = (entry / SLOT_RECORD).read_text(encoding="utf-8").strip() if (entry / SLOT_RECORD).is_file() else ""
         if not slot_body.isdigit():
             continue
-        slot = int(slot_body)
-        occupants[slot] = nonce
-        identity = read_json_object(entry / IDENTITY_RECORD)
-        if identity is not None:
-            identities[slot] = identity
+        claims.setdefault(int(slot_body), []).append((nonce, read_json_object(entry / IDENTITY_RECORD)))
+
+    for slot_claims in claims.values():
+        slot_claims.sort(key=lambda claim: claim[0])
 
     quarantines: dict[int, dict[str, Any]] = {}
     checkout_slots: set[int] = set()
@@ -435,27 +463,27 @@ def list_slots(worktree_base: str) -> list[dict[str, Any]]:
         elif entry.is_dir():
             checkout_slots.add(index)
 
-    slots = sorted(checkout_slots | set(occupants) | set(quarantines))
+    slots = sorted(checkout_slots | set(claims) | set(quarantines))
     listed = []
     for slot in slots:
         quarantine = quarantines.get(slot)
-        occupant = occupants.get(slot)
+        occupant, identity, occupancy = live_occupant(claims.get(slot, []))
         if quarantine is not None:
             state = "quarantined"
-        elif occupant is not None:
-            state = "occupied"
         else:
-            state = "free"
-        identity = None
+            state = occupancy
         if quarantine is not None and isinstance(quarantine.get("identity"), dict):
             identity = quarantine["identity"]
-        elif slot in identities:
-            identity = identities[slot]
+        elif occupancy != "occupied":
+            identity = None
+        nonce = (quarantine or {}).get("nonce")
+        if not nonce and occupancy == "occupied":
+            nonce = occupant
         listed.append(
             {
                 "slot": slot,
                 "state": state,
-                "nonce": (quarantine or {}).get("nonce") or occupant,
+                "nonce": nonce,
                 "identity": identity,
                 "quarantine": quarantine,
             }
@@ -1554,7 +1582,9 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("nonce", help="e.g. dispatch-1746, or just 1746")
     evidence.set_defaults(handler=cmd_evidence)
 
-    slots = subparsers.add_parser("slots", help="lane slots: occupied, free, or quarantined, with the identity that caused it")
+    slots = subparsers.add_parser(
+        "slots", help="lane slots: occupied, free, quarantined, or unknown, with the identity that caused it"
+    )
     slots.set_defaults(handler=cmd_slots)
 
     clear_q = subparsers.add_parser(
