@@ -4764,6 +4764,88 @@ fn a_pre_fix_park_still_replays_and_stays_adjudicable() {
     assert_eq!(after.blooms.get(&bloom).unwrap().review_park, None, "the park is released");
 }
 
+/// The first review has refused a verify-green weave and the composition's
+/// refine lap has captured a newer candidate that has not yet been proven —
+/// the #5104 incident shape, stopped before the newer head's aggregate verify
+/// returns. The first refusal's finding stays open, so the same adjudication
+/// can be issued against either fork.
+fn newer_weave_awaiting_aggregate_verify() -> (Snapshot, BloomId) {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: claim("alpha", 10, 100) }));
+    let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+    let (snapshot, _) = step(&snapshot, &verify_passed(bloom, "v1", 40));
+    let (snapshot, _) = step(&snapshot, &review_refused(bloom, "refuse-1", 40, 70));
+    let (snapshot, _) = step(&snapshot, &weave_repaired(bloom, "weave-1", 40, 44, 45));
+    (snapshot, bloom)
+}
+
+// #5104 — closing findings and re-arming the landing are separable. A refine
+// lap can replace the held fold while an earlier finding is still open;
+// adjudicating that finding must not propose the newer head whose aggregate
+// verify is red. The same override, issued after that head goes green, is what
+// dispatches the land. The plausible bug is the one the incident was:
+// `proceed_to_landing` reading the current fold and emitting `DispatchLand`
+// without consulting the proof bound to it.
+#[test]
+fn an_adjudication_does_not_land_a_head_whose_aggregate_verify_is_red() {
+    let (pending, bloom) = newer_weave_awaiting_aggregate_verify();
+    let before = pending.blooms.get(&bloom).unwrap();
+    assert_eq!(before.integration.as_ref().unwrap().head, digest(45), "the refine lap already replaced the fold");
+    assert!(before.verify_proof_for(digest(44)).is_none(), "the newer weave has no green proof yet");
+    assert!(
+        before.open_composition_findings().any(|open| open.detail == digest(70)),
+        "the first refusal is still open"
+    );
+
+    let failed = event(
+        "v-red",
+        Fact::AggregateVerifyCompleted {
+            bloom,
+            passed: false,
+            evidence: Evidence { subject: digest(44), kind: EvidenceKind::VerificationResult, detail: digest(52) },
+        },
+    );
+    let (red, _) = step(&pending, &failed);
+    let (after_red, decided_red) = step(&red, &adjudicated(bloom, "adj-red", vec![70]));
+
+    assert!(
+        matches!(decided_red.outcome, Outcome::FindingsAdjudicated { proceeds_to_landing: false, ref closed, .. }
+            if *closed == vec![digest(70)]),
+        "a red head is not a landing: {:?}",
+        decided_red.outcome,
+    );
+    assert!(
+        !decided_red.effects.iter().any(|effect| matches!(effect, Decision::DispatchLand { .. })),
+        "the override must not propose the unproven weave: {:?}",
+        decided_red.effects,
+    );
+    assert_no_member_dispatch(&decided_red, "closing a finding is still not a way back into a member");
+    let record = after_red.blooms.get(&bloom).unwrap();
+    assert_eq!(record.adjudications.len(), 1, "the findings still close");
+    assert_eq!(record.status, BloomStatus::Sealed, "landing waits on a green proof, it does not resolve early");
+
+    let (green, _) = step(&pending, &verify_passed(bloom, "v-green", 44));
+    let (after_green, decided_green) = step(&green, &adjudicated(bloom, "adj-green", vec![70]));
+
+    assert!(
+        matches!(decided_green.outcome, Outcome::FindingsAdjudicated { proceeds_to_landing: true, .. }),
+        "the same override lands once the head is proven: {:?}",
+        decided_green.outcome,
+    );
+    match decided_green.effects.iter().find(|effect| matches!(effect, Decision::DispatchLand { .. })) {
+        Some(Decision::DispatchLand { new_head, .. }) => {
+            assert_eq!(*new_head, digest(45), "landing the weave the refine captured, now proven");
+        }
+        other => panic!("expected the land dispatch, got {other:?}"),
+    }
+    assert_eq!(after_green.blooms.get(&bloom).unwrap().status, BloomStatus::Resolved);
+}
+
 // #4957 — a deferral that names no filed issue is refused. Deferring a finding
 // to nothing filed is exactly how a waived defect silently vanishes, which is
 // the failure mode the disposition exists to prevent, so the reducer refuses it
