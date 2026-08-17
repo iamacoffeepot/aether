@@ -7,7 +7,7 @@ use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{
     BloomView, ExecutorFaultView, HostFaultView, LandingBlock, MemberView, PendingDecisionView, ReviewParkView,
-    ViewDocument,
+    ViewDocument, WedgeCause,
 };
 use crate::values::Question;
 
@@ -86,6 +86,22 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                         .host_faults
                         .get(&member.workpiece)
                         .map(|hold| HostFaultView { findings: hold.findings.clone() }),
+                    machinery_rolls: snapshot
+                        .member_machinery(&record.spec.id(), &member.workpiece)
+                        .map_or(0, |fault| fault.rolls),
+                    machinery_budget: record
+                        .progress
+                        .get(&member.workpiece)
+                        .map(|cursor| cursor.stage)
+                        .or_else(|| record.wedged.get(&member.workpiece).map(|wedge| wedge.stage))
+                        .map_or(0, |stage| record.stage_catalog.retry_budget_of(stage).unwrap_or(1)),
+                    wedge_cause: record.wedged.get(&member.workpiece).map(|wedge| {
+                        let budget = record.stage_catalog.retry_budget_of(wedge.stage).unwrap_or(1);
+                        match snapshot.member_machinery(&record.spec.id(), &member.workpiece) {
+                            Some(fault) if fault.stage == wedge.stage && fault.rolls >= budget => WedgeCause::Machinery,
+                            _ => WedgeCause::Work,
+                        }
+                    }),
                 })
                 .collect();
             // Rendered only once a landing has actually been refused, so an
@@ -146,11 +162,11 @@ mod tests {
     use super::view_of;
     use crate::digest::Digest;
     use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
-    use crate::port::{BloomView, ViewDocument};
+    use crate::port::{BloomView, ViewDocument, WedgeCause};
     use crate::reduce::{BloomStatus, Event, Fact, Snapshot, reduce};
     use crate::values::{
-        BloomDraft, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, Question, ResolvedConfigs,
-        SpendWindow,
+        BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, MemberDependency, Membership, Question,
+        ResolvedConfigs, SpendWindow,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -251,6 +267,58 @@ mod tests {
         let hold = view.blooms[0].members[0].host_fault.as_ref().expect("the member is held on the host");
         assert_eq!(hold.findings, findings, "the missing tools are what the operator reads");
         assert!(view.blooms[0].members[0].wedge.is_none(), "a host fault is not a wedge");
+    }
+
+    // The plausible bug: a member that exhausted its machinery budget renders
+    // identically to one that exhausted its work budget, so `/view` cannot tell
+    // a sick host from rejected work (ADR-0195).
+    #[test]
+    fn a_machinery_wedge_surfaces_its_cause_and_roll() {
+        let spec = BloomDraft { proposals: vec![membership("wp", 1)], base: digest(0), ..BloomDraft::default() }.seal();
+        let bloom = spec.id();
+        let configs = ResolvedConfigs::default();
+        let spend = SpendWindow::default();
+        let mut snapshot = Snapshot::new(digest(0));
+        let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
+        snapshot = snapshot.apply(&seal, &reduce(&snapshot, &seal, &configs, &spend), &configs);
+
+        let captured = CandidateRef { tree: digest(21), checkout: digest(22) };
+        let construct = Event {
+            idempotency_key: IdempotencyKey("c-pass".into()),
+            fact: Fact::AttemptCompleted {
+                bloom,
+                workpiece: WorkpieceId("wp".into()),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: Evidence { subject: digest(21), kind: EvidenceKind::VerificationResult, detail: digest(70) },
+                candidate: Some(captured),
+            },
+        };
+        snapshot = snapshot.apply(&construct, &reduce(&snapshot, &construct, &configs, &spend), &configs);
+
+        for (key, detail) in [("f1", 60), ("f2", 61), ("f3", 62)] {
+            let fault = Event {
+                idempotency_key: IdempotencyKey(key.into()),
+                fact: Fact::MemberExecutorFault {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    stage: StageId::Verify,
+                    evidence: Evidence {
+                        subject: digest(21),
+                        kind: EvidenceKind::ExecutorFault,
+                        detail: digest(detail),
+                    },
+                },
+            };
+            snapshot = snapshot.apply(&fault, &reduce(&snapshot, &fault, &configs, &spend), &configs);
+        }
+
+        let view = view_of(&snapshot, |_| None);
+        let member = &view.blooms[0].members[0];
+        assert_eq!(member.machinery_rolls, 3, "the operator can see how many times the host failed");
+        assert_eq!(member.machinery_budget, 3, "and the sealed bound those faults spent");
+        assert_eq!(member.wedge_cause, Some(WedgeCause::Machinery), "the wedge names the host, not the work");
+        assert!(member.wedge.is_some(), "the member is wedged");
     }
 
     fn sealed(name: &str) -> Snapshot {

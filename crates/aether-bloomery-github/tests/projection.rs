@@ -46,6 +46,9 @@ fn member(number: u64, revision: u8) -> MemberView {
         wedge: None,
         blocked_by: None,
         host_fault: None,
+        machinery_rolls: 0,
+        machinery_budget: 0,
+        wedge_cause: None,
     }
 }
 

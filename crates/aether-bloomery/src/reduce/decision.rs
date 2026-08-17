@@ -682,4 +682,46 @@ pub enum Decision {
         /// [`StageId::AggregateVerify`] or [`StageId::AggregateReview`].
         stage: StageId,
     },
+    /// Assemble a dependent's construct base from two or more independent
+    /// ancestor tips (ADR-0196 G2).
+    ///
+    /// A unique-maximum ancestor is already one tree. A join is not: the
+    /// host merges the named tips onto `base` the same way the weave merges
+    /// candidates, then admits [`Fact::SpliceAssembled`](crate::Fact::SpliceAssembled)
+    /// or a residual [`Fact::FoldConflict`](crate::Fact::FoldConflict). Snapshot-inert
+    /// outbox like [`Decision::DispatchIntegration`]. Appended so the prior
+    /// decisions' wire discriminants are unchanged.
+    DispatchSplice {
+        /// The bloom the dependent belongs to.
+        bloom: BloomId,
+        /// The dependent whose construct waits on the assembled tree.
+        workpiece: WorkpieceId,
+        /// The sealed bloom base the tips merge onto.
+        base: Digest,
+        /// The independent ancestor tips, in sealed member order.
+        members: Vec<MemberCandidate>,
+        /// The predecessor whose candidate refs this splice adopts first,
+        /// when any tip was inherited.
+        adopt_from: Option<BloomId>,
+    },
+    /// Record one member-stage machinery fault (ADR-0195) — see
+    /// [`crate::Snapshot::member_machinery`].
+    ///
+    /// Counted apart from [`StageProgress::attempts`](crate::StageProgress::attempts)
+    /// and [`StageProgress::repair_rolls`](crate::StageProgress::repair_rolls)
+    /// because an executor that could not run judged no candidate. Snapshot-folding
+    /// and journal-derived like every other `Record*`. Appended so the prior
+    /// decisions' wire discriminants are unchanged.
+    RecordMemberMachinery {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The member whose gate could not run.
+        workpiece: WorkpieceId,
+        /// The stage the fault ran against.
+        stage: StageId,
+        /// Machinery faults this stage has taken, this one included.
+        rolls: u32,
+        /// The latest fault report's artifact digest.
+        evidence: Digest,
+    },
 }

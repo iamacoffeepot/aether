@@ -49,21 +49,22 @@ pub use decision::Decision;
 pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
     AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, HostFaultError, IntegrateError,
-    LandError, LandingRejectedError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError,
-    SealConflict, SealError, SupersedeError, VerifyFailedError,
+    LandError, LandingRejectedError, MemberExecutorFaultError, OperatorHoldError, OperatorRepairError,
+    OrphanClaimReleaseError, ResolveError, SealConflict, SealError, SpliceError, SupersedeError, VerifyFailedError,
 };
 pub use event::{Event, Fact};
 pub use outcome::{DECISIONS_SCHEMA, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions};
 pub use seal::is_active_unlanded;
 pub use snapshot::{
-    AggregateReviewFault, BloomRecord, BloomStatus, FoldedIntegration, HostFaultHold, Snapshot, StageProgress,
+    AggregateReviewFault, BloomRecord, BloomStatus, FoldedIntegration, HostFaultHold, MemberMachineryFault, Snapshot,
+    StageProgress,
 };
 pub use view::view_of;
 
 use crate::values::{ResolvedConfigs, SpendWindow};
 
 use aggregate_verify::reduce_aggregate_verify_completed;
-use attempt::reduce_attempt_completed;
+use attempt::{reduce_attempt_completed, reduce_member_executor_fault};
 use evidence::{reduce_admit_evidence, reduce_adopt_answer};
 use fold_conflict::reduce_fold_conflict;
 use grant::reduce_grant_attempts;
@@ -74,6 +75,7 @@ use observe::{reduce_observe_mainline, reduce_observe_mainline_diverged};
 use operator::{reduce_operator_adjudication, reduce_operator_repair};
 use operator_hold::{reduce_operator_hold, reduce_operator_release};
 use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_claim_release};
+use readiness::reduce_splice_assembled;
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
 use seal::{reduce_seal, reduce_supersede, reduce_surface_overlap};
 use verify::{reduce_resume_host_fault, reduce_verify_failed, reduce_verify_host_fault};
@@ -158,5 +160,11 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
             reduce_verify_host_fault(snapshot, bloom, workpiece, evidence, findings)
         }
         Fact::ResumeHostFault { bloom, workpiece } => reduce_resume_host_fault(snapshot, bloom, workpiece),
+        Fact::SpliceAssembled { bloom, workpiece, tree, head } => {
+            reduce_splice_assembled(snapshot, bloom, workpiece, *tree, *head)
+        }
+        Fact::MemberExecutorFault { bloom, workpiece, stage, evidence } => {
+            reduce_member_executor_fault(snapshot, bloom, workpiece, *stage, evidence)
+        }
     }
 }

@@ -49,8 +49,10 @@
 pub mod liveness;
 pub mod repo;
 
+use std::fs;
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -70,14 +72,17 @@ use crate::common::{Coordinator, free_port};
 use repo::ScratchRepo;
 
 /// How long a scenario waits for the coordinator to reach a state before giving
-/// up. Generous against the coordinator's one-second poll cadence and a lane
-/// that forks a process per dispatch.
-const SETTLE_BUDGET: Duration = Duration::from_mins(1);
+/// up. Generous against the coordinator's one-second poll cadence, a lane that
+/// forks a process per dispatch, and a `git worktree` reset that stretches
+/// under full-suite contention before the child starts.
+const SETTLE_BUDGET: Duration = Duration::from_mins(2);
 
-/// How long the world must hold still before a settle loop calls it quiescent
-/// and judges it. Comfortably more than the poll cadence plus one dispatch, so
-/// a coordinator that is merely between steps is never mistaken for one that has
-/// stopped.
+/// How long the world must hold still, with nothing in flight, before a settle
+/// loop calls it quiescent and judges it. Comfortably more than the poll cadence
+/// plus the gap between consuming one order and dispatching the next, so a
+/// coordinator that is merely between steps is never mistaken for one that has
+/// stopped. An outstanding order is not stillness — the fingerprint cannot see
+/// a checkout that has not spawned the child yet.
 const QUIESCENCE: Duration = Duration::from_secs(12);
 
 /// Between polls of the projection.
@@ -114,7 +119,7 @@ impl LaneHarness {
     /// # Panics
     /// As [`start`](Self::start).
     pub fn start_with(script: &LaneScript, workpiece: &str) -> Self {
-        Self::start_sealing(script, workpiece, None)
+        Self::start_sealing(script, workpiece, None, None)
     }
 
     /// [`start`](Self::start) over a bloom that seals a stage catalog binding
@@ -129,10 +134,26 @@ impl LaneHarness {
     /// # Panics
     /// As [`start`](Self::start).
     pub fn start_with_wall_clock(script: &LaneScript, wall_clock_secs: u64) -> Self {
-        Self::start_sealing(script, "wp", Some(wall_clock_secs))
+        Self::start_sealing(script, "wp", Some(wall_clock_secs), None)
     }
 
-    fn start_sealing(script: &LaneScript, workpiece: &str, wall_clock_secs: Option<u64>) -> Self {
+    /// [`start_with_wall_clock`](Self::start_with_wall_clock) plus a host
+    /// heartbeat-silence allowance, so a scenario can tell a silent local lane
+    /// from one that is still streaming progress without waiting out the
+    /// default ten minutes.
+    ///
+    /// # Panics
+    /// As [`start`](Self::start).
+    pub fn start_with_heartbeat(script: &LaneScript, wall_clock_secs: u64, heartbeat_silence_secs: u64) -> Self {
+        Self::start_sealing(script, "wp", Some(wall_clock_secs), Some(heartbeat_silence_secs))
+    }
+
+    fn start_sealing(
+        script: &LaneScript,
+        workpiece: &str,
+        wall_clock_secs: Option<u64>,
+        heartbeat_silence_secs: Option<u64>,
+    ) -> Self {
         let repo = ScratchRepo::create();
         let runs = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
@@ -152,7 +173,8 @@ impl LaneHarness {
         // control core over the wire rather than through the REST api.
         let configs = wall_clock_secs.map_or_else(ConfigRegistry::default, |secs| author_catalog(&store_path, secs));
 
-        let (coordinator, stream) = spawn_listening_coordinator(&repo, &runs, &state, &store_path);
+        let (coordinator, stream) =
+            spawn_listening_coordinator(&repo, &runs, &state, &store_path, heartbeat_silence_secs);
 
         let mut harness = Self { repo, runs, state, store_path, _coordinator: coordinator, stream, cid: 1, base };
         harness.seal(workpiece, configs);
@@ -167,6 +189,64 @@ impl LaneHarness {
     /// Where the run directories, script, and ledger live.
     pub fn runs_dir(&self) -> PathBuf {
         self.runs.path().to_owned()
+    }
+
+    /// Append a line to the named run's streamed transcript, creating it if
+    /// needed. The local backend reads this file's modification time as the
+    /// lane's live heartbeat, so a scenario that writes then stops is silent,
+    /// and one that keeps writing stays noisy.
+    ///
+    /// # Panics
+    /// The evidence directory could not be created or the file written.
+    pub fn write_transcript(&self, nonce: &str, line: &str) {
+        use std::io::Write as _;
+
+        let dir = self.runs.path().join(format!("{nonce}-evidence"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("transcript.jsonl"))
+            .unwrap()
+            .write_all(line.as_bytes())
+            .unwrap();
+    }
+
+    /// Every evidence directory under the run root whose name ends in
+    /// `-evidence`, so a scenario can stream progress at whatever nonce the
+    /// coordinator minted.
+    ///
+    /// # Panics
+    /// The run root could not be read.
+    pub fn evidence_nonces(&self) -> Vec<String> {
+        fs::read_dir(self.runs.path())
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                name.strip_suffix("-evidence").map(str::to_owned)
+            })
+            .collect()
+    }
+
+    /// Poll until the mock ledger holds at least `min` runs.
+    ///
+    /// Used by host-fault scenarios whose orders stay outstanding until
+    /// #5091 admits `ExecutorFault` for member stages — `settle` would
+    /// treat that standstill as a stall.
+    ///
+    /// # Panics
+    /// The budget expired before that many runs were recorded.
+    pub fn wait_for_runs(&mut self, min: usize) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while self.ledger().len() < min {
+            assert!(
+                Instant::now() < deadline,
+                "lane never recorded {min} runs; outstanding={:?} ledger={}",
+                self.outstanding(),
+                self.ledger().len(),
+            );
+            thread::sleep(POLL);
+        }
     }
 
     /// Every lane run the mock has recorded, in dispatch order.
@@ -229,13 +309,17 @@ impl LaneHarness {
             }
 
             let progress = liveness::Progress::observe(&document, self.outstanding(), self.ledger().len());
+            let in_flight = !progress.outstanding.is_empty();
             if last.as_ref() != Some(&progress) {
                 last = Some(progress);
                 still_since = Instant::now();
-            } else if still_since.elapsed() >= QUIESCENCE {
+            } else if !in_flight && still_since.elapsed() >= QUIESCENCE {
                 // The world stopped moving before reaching what the scenario
                 // asked for. Whether that is legitimate is not the scenario's
-                // call — it is the invariant's.
+                // call — it is the invariant's. An outstanding order is still
+                // work, even when the projection and ledger have not moved: the
+                // child may be mid-checkout. The settle budget is the backstop
+                // for an order that is truly stuck.
                 self.judge_quiescence(label, &document);
                 panic!(
                     "{label}: the coordinator settled into a legitimate stop without reaching it — {:?}",
@@ -299,6 +383,30 @@ impl LaneHarness {
     }
 }
 
+/// Drive `body` while a scoped worker keeps calling `tick`. The worker
+/// stops when `body` returns or panics, so this is `thread::scope` rather
+/// than a detached spawn the settlement umbrella would refuse.
+pub fn while_pumping<T>(mut tick: impl FnMut() + Send, body: impl FnOnce() -> T) -> T {
+    struct StopOnDrop<'a>(&'a AtomicBool);
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let stop = AtomicBool::new(false);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            while !stop.load(Ordering::Relaxed) {
+                tick();
+                thread::sleep(Duration::from_millis(200));
+            }
+        });
+        let _stop = StopOnDrop(&stop);
+        body()
+    })
+}
+
 /// Fork a coordinator and handshake only once the child we spawned is still
 /// the process on that port.
 ///
@@ -313,38 +421,42 @@ fn spawn_listening_coordinator(
     runs: &TempDir,
     state: &TempDir,
     store_path: &str,
+    heartbeat_silence_secs: Option<u64>,
 ) -> (Coordinator, TcpStream) {
+    let heartbeat = heartbeat_silence_secs.map(|secs| secs.to_string());
     for _ in 0..8 {
         let rpc_port = free_port();
-        let mut coordinator = Coordinator::spawn_in(
-            rpc_port,
-            Some(&repo.work_dir()),
-            &[
-                ("AETHER_STORE_PATH", store_path),
-                ("AETHER_ARTIFACTS_ROOT", &state.path().join("artifacts").to_string_lossy()),
-                // The whole point: the dispatch below the spawn stays real, the
-                // program at the end of the argv does not.
-                ("AETHER_BLOOMERY_LANE_PROGRAM", env!("CARGO_BIN_EXE_bloomery-mock-lane")),
-                ("AETHER_GITHUB_LOCAL_WORKTREE_BASE", &runs.path().to_string_lossy()),
-                // Every lane local, including the mechanical verify one. The
-                // production default routes verify at a shared runner, which
-                // needs a GitHub connection this tier deliberately does not
-                // configure — and the verify lane is where half the catalogue's
-                // failure modes live.
-                ("AETHER_GITHUB_LOCAL_LANE_COMMANDS", "construct.,review.,verify."),
-                ("AETHER_GITHUB_POLL_INTERVAL_SECS", "1"),
-                // In-memory GitHub for the aggregate line (#4732): the member
-                // line alone needs no GitHub, but Integrate→AggregateVerify→
-                // AggregateReview→Land do. `fake` mounts every reactor with an
-                // in-memory double and needs no token/owner/repo.
-                ("AETHER_GITHUB_BACKEND", "fixture"),
-                ("AETHER_GITHUB_FIXTURE_BASE_SHA", repo.head()),
-                // A fixed capture identity, so a candidate commit never depends
-                // on whatever git identity the host running the suite has.
-                ("AETHER_BLOOMERY_OPERATOR_NAME", "lane harness"),
-                ("AETHER_BLOOMERY_OPERATOR_EMAIL", "lane-harness@example.test"),
-            ],
-        );
+        let artifacts = state.path().join("artifacts").to_string_lossy().into_owned();
+        let worktree_base = runs.path().to_string_lossy().into_owned();
+        let mut env = vec![
+            ("AETHER_STORE_PATH", store_path),
+            ("AETHER_ARTIFACTS_ROOT", artifacts.as_str()),
+            // The whole point: the dispatch below the spawn stays real, the
+            // program at the end of the argv does not.
+            ("AETHER_BLOOMERY_LANE_PROGRAM", env!("CARGO_BIN_EXE_bloomery-mock-lane")),
+            ("AETHER_GITHUB_LOCAL_WORKTREE_BASE", worktree_base.as_str()),
+            // Every lane local, including the mechanical verify one. The
+            // production default routes verify at a shared runner, which
+            // needs a GitHub connection this tier deliberately does not
+            // configure — and the verify lane is where half the catalogue's
+            // failure modes live.
+            ("AETHER_GITHUB_LOCAL_LANE_COMMANDS", "construct.,review.,verify."),
+            ("AETHER_GITHUB_POLL_INTERVAL_SECS", "1"),
+            // In-memory GitHub for the aggregate line (#4732): the member
+            // line alone needs no GitHub, but Integrate→AggregateVerify→
+            // AggregateReview→Land do. `fake` mounts every reactor with an
+            // in-memory double and needs no token/owner/repo.
+            ("AETHER_GITHUB_BACKEND", "fixture"),
+            ("AETHER_GITHUB_FIXTURE_BASE_SHA", repo.head()),
+            // A fixed capture identity, so a candidate commit never depends
+            // on whatever git identity the host running the suite has.
+            ("AETHER_BLOOMERY_OPERATOR_NAME", "lane harness"),
+            ("AETHER_BLOOMERY_OPERATOR_EMAIL", "lane-harness@example.test"),
+        ];
+        if let Some(secs) = heartbeat.as_deref() {
+            env.push(("AETHER_BLOOMERY_HEARTBEAT_SILENCE_SECS", secs));
+        }
+        let mut coordinator = Coordinator::spawn_in(rpc_port, Some(&repo.work_dir()), &env);
         if !coordinator.is_alive() {
             continue;
         }

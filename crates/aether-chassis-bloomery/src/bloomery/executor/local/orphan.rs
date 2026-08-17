@@ -49,12 +49,12 @@ impl RunProcess for OrphanedRun {
     /// the order rides on its dispatch deadline, which is the mechanism that
     /// exists to bound exactly this.
     ///
-    /// The exit is reported as a **failure** because no zero exit was ever
-    /// observed, and fail-closed is what the rest of this backend does with an
-    /// unobservable run. It costs the evidence nothing: the construct gate
-    /// ignores the exit entirely and the verify gate rides its stamped `status`,
-    /// so this decides a verdict only for a body that stamps neither — the shape
-    /// that already fails closed.
+    /// The exit is a clean **failure**, not a signal and not a wait fault.
+    /// This process never called `try_wait` on the child, so fabricating
+    /// [`RunLifecycle::Signaled`] or [`RunLifecycle::ObservationFault`] would
+    /// invent a process fact an orphan cannot observe (ADR-0195 §2). Fail-closed
+    /// on the exit costs the evidence nothing: a bound authored body still
+    /// drives the verdict, and a missing body is the host-fault path.
     fn poll(&mut self) -> RunLifecycle {
         if self.evidence_path.exists() {
             RunLifecycle::Exited { success: false }

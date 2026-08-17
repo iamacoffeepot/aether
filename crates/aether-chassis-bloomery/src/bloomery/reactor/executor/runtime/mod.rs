@@ -77,7 +77,7 @@ use crate::bloomery::study::{StudyAdmitDecision, UploadedStudyRecord, admit_stud
 use crate::bloomery::testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload};
 use crate::bloomery::{CoordinatorConfig, ExecutorReactorSetup};
 use crate::control::ControlCore;
-use crate::store::{SqliteStore, StoreBackend, StoreConfigError, resolve_config};
+use crate::store::{OutstandingOrder, SqliteStore, StoreBackend, StoreConfigError, resolve_config};
 
 mod strand;
 
@@ -146,11 +146,16 @@ struct TrackedHandle {
     /// a latch its report buries the first one under the poll cadence, and its
     /// reclaiming cancel is reissued at that same cadence forever.
     unterminable_reported: bool,
+    /// Newest usable heartbeat observed for this nonce this process, in Unix
+    /// milliseconds. `None` until a backend reports a trustworthy progress
+    /// timestamp; restart drops it and the next inspect re-reads the durable
+    /// transcript mtime (or leaves it `None`, which stays deadline-only).
+    last_heartbeat_unix_millis: Option<u64>,
 }
 
 impl TrackedHandle {
     fn new(handle: WorkHandle, first_seen: Instant) -> Self {
-        Self { handle, first_seen, stale_warned: false, unterminable_reported: false }
+        Self { handle, first_seen, stale_warned: false, unterminable_reported: false, last_heartbeat_unix_millis: None }
     }
 }
 
@@ -169,51 +174,35 @@ fn now_unix_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// The verdict a timed-out order of `stage` admits under (ADR-0177), paired with
-/// the typed verifier set the intake's ADR-0178 transport invariant requires for
-/// it. `None` when no verdict in the current vocabulary states the fact.
+/// The verdict a timed-out order of `stage` admits under (ADR-0177 / ADR-0195
+/// §2), paired with the typed verifier set the intake's ADR-0178 transport
+/// invariant requires for it. `None` when no verdict in the current vocabulary
+/// states the fact.
 ///
-/// A member stage and `AggregateVerify` are `VerificationFailed`: the attempt
-/// did not produce the passing evidence its gate wanted, which is the same fact
-/// a failed run states, so it spends the same sealed attempt or repair budget
-/// and reaches the same wedge — no parallel retry authority.
-///
-/// A member `Verify` names no verifier at all. A timeout cannot know which one
-/// would have failed, and it must not guess: the reducer prices a named identity
-/// as a defect in the candidate and sends the member to `Refine` to repair it,
-/// which is the wrong answer for a lane that was killed on the clock before it
-/// judged anything. The empty set is the honest report — the gate rendered no
-/// verdict — and the reducer answers it by re-running `Verify` on the member's
-/// own Verify budget, wedging there once that budget is spent.
-///
-/// `AggregateReview` is deliberately `None`. ADR-0177 routes it to ADR-0176's
-/// `ExecutorFault` — a review lane that never answered produced no judgement of
-/// the fold, which is the same fact as one that reported an environment failure,
-/// and must charge the same fold-fault ledger rather than reopening members.
-/// That vocabulary is issue #4738's to introduce; synthesising a
-/// `VerificationFailed` here instead would charge every member a repair lap for
-/// a critic that never ran, so this build defers the aggregate-review timeout
-/// rather than recording the wrong thing.
+/// Every dispatched stage — member, `AggregateVerify`, and `AggregateReview` —
+/// is `ExecutorFault`. A deadline is a host observation that rendered no
+/// judgment: the child was cancelled before it judged the subject, which is
+/// the same fact as a missing evidence file or a signal-killed process. The
+/// empty verifier set is required, not optional — a timeout cannot know which
+/// verifier would have failed, and naming one would dispatch a repair lap.
 ///
 /// Exhaustive over [`StageId`] rather than wildcarded. `None` here means the
-/// order never terminates, and the stages that reach it split into two very
-/// different reasons for that — one deferred vocabulary and a set of stages no
-/// executor order carries at all. A wildcard reads a stage that later becomes
-/// dispatchable into the second group silently; naming every variant makes it a
+/// order never terminates. The stages that reach it are never dispatched to an
+/// executor at all — the pre-line stages, the per-member `Review` the member
+/// walk does not enter (`StageCatalog::MEMBER_LINE` ends at `Verify`), and the
+/// bloom-level tail the coordinator performs itself — so no order carries one
+/// and none can expire. A wildcard reads a stage that later becomes
+/// dispatchable into that group silently; naming every variant makes it a
 /// compile error instead.
 fn timeout_verdict(stage: StageId) -> Option<(StageVerdict, VerifyFailureSet)> {
     match stage {
-        StageId::Verify | StageId::Construct | StageId::Refine | StageId::Reconcile | StageId::AggregateVerify => {
-            Some((StageVerdict::VerificationFailed, VerifyFailureSet::EMPTY))
-        }
-        // No verdict, for two different reasons. `AggregateReview`'s is deferred,
-        // as above. The rest are never dispatched to an executor at all — the
-        // pre-line stages, the per-member `Review` the member walk does not enter
-        // (`StageCatalog::MEMBER_LINE` ends at `Verify`), and the bloom-level
-        // tail the coordinator performs itself — so no order carries one and
-        // none can expire.
-        StageId::AggregateReview
-        | StageId::Sketch
+        StageId::Verify
+        | StageId::Construct
+        | StageId::Refine
+        | StageId::Reconcile
+        | StageId::AggregateVerify
+        | StageId::AggregateReview => Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
+        StageId::Sketch
         | StageId::Scope
         | StageId::Approve
         | StageId::Review
@@ -311,6 +300,67 @@ fn store_timeout_record(artifacts: Option<&mut ArtifactsCapabilityState>, record
 /// terminating its order — an undecodable row, a deferred stage verdict, an
 /// intake refusal — will get the same answer every time, so each is reported and
 /// reclaimed exactly once per process (see [`reported_unterminable`]).
+/// The durable dispatch origin for a stored order: the instant its sealed
+/// wall-clock allowance began, recovered from the deadline minus that
+/// allowance so a restart cannot renew the grace period from `first_seen`.
+fn dispatch_origin(deadline_unix_millis: u64, wall_clock_secs: u64) -> u64 {
+    deadline_unix_millis.saturating_sub(wall_clock_secs.saturating_mul(1_000))
+}
+
+/// Fold a newly observed progress timestamp into the newest heartbeat this
+/// process has accepted for the nonce.
+///
+/// Future stamps are refused: they would extend the silence window past
+/// "now" and, left unclamped, past the sealed deadline. A stamp past the
+/// deadline is clamped to it. A backward stamp cannot rewind a newer stored
+/// one. `None` in, `None` stored stays `None` — that lane has no trustworthy
+/// heartbeat and stays deadline-only.
+fn observe_heartbeat(
+    stored: Option<u64>,
+    observed: Option<u64>,
+    now_unix_millis: u64,
+    deadline_unix_millis: u64,
+) -> Option<u64> {
+    let usable = match observed {
+        Some(stamp) if stamp > now_unix_millis => None,
+        Some(stamp) => Some(stamp.min(deadline_unix_millis)),
+        None => None,
+    };
+    match (usable, stored) {
+        (Some(fresh), Some(kept)) => Some(fresh.max(kept)),
+        (Some(fresh), None) => Some(fresh),
+        (None, Some(kept)) => Some(kept),
+        (None, None) => None,
+    }
+}
+
+/// The instant silence is measured from, or `None` when this lane has no
+/// trustworthy heartbeat and must stay deadline-only.
+///
+/// A usable heartbeat (stored or just observed) is the authority. A raw
+/// observation that could not be used — a future stamp — still marks the
+/// lane as known-heartbeat, and silence then starts at the durable dispatch
+/// origin so the future stamp cannot extend the grace period. Absence of
+/// any observation is not a heartbeat.
+fn silence_from(heartbeat: Option<u64>, observed: Option<u64>, origin: u64) -> Option<u64> {
+    heartbeat.or_else(|| observed.is_some().then_some(origin))
+}
+
+/// Whether silence from `start` has reached `threshold` as of `now`. Pure so
+/// it is unit-testable without a clock, mirroring [`is_stale`].
+fn is_silent(start: u64, now_unix_millis: u64, threshold_millis: u64) -> bool {
+    now_unix_millis.saturating_sub(start) >= threshold_millis
+}
+
+/// Why a synthesised failed attempt is being admitted for a still-pending
+/// order. Both causes reuse the same cancel → timeout-record → intake path;
+/// the distinction is the log line, not a new journal variant.
+#[derive(Clone, Copy)]
+enum TerminationCause {
+    Deadline,
+    HeartbeatSilence,
+}
+
 fn expire_overdue_orders(
     stores: Stores<'_>,
     executor: &ExecutorShell,
@@ -328,111 +378,232 @@ fn expire_overdue_orders(
 
     let mut admits = Vec::new();
     for order in expired {
-        let deadline = order.deadline_unix_millis;
-        let nonce = Nonce(order.nonce.clone());
-        // An order this build already cancelled and then could not terminate is
-        // still outstanding, so every sweep after it selects the same row again.
-        // Idempotence makes a repeat cancel *harmless*, not free: on the Actions
-        // lane each one probes both wrappers over the network for a run that
-        // will never change again, once per poll interval for the life of the
-        // process.
-        if reported_unterminable(tracked, &nonce) {
-            continue;
+        if let Some(admit) =
+            terminate_live_order(store, artifacts.as_deref_mut(), executor, tracked, &order, TerminationCause::Deadline)
+        {
+            admits.push(admit);
         }
-        // Cancel first, verdict second, and before the decode. Whether this
-        // build can *account* for the expiry is a separate question from whether
-        // the run may keep going: an overdue order still has a child burning
-        // wall clock and a scratch worktree checked out behind it, and neither a
-        // stage whose verdict vocabulary has not landed yet nor a row that no
-        // longer decodes is a reason to leave those running until the process
-        // exits. The nonce is a plain column, so the cancel needs none of the
-        // decoding below.
-        if let Err(error) = executor.cancel(&WorkHandle::new(nonce.clone())) {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::executor",
-                nonce = %nonce.0,
-                %error,
-                "expired order's cancel failed; leaving it live to retry",
-            );
-            continue;
-        }
-        let Some(record) = DispatchRecord::from_stored(&order) else {
-            latch_unterminable(tracked, &nonce);
-            tracing::error!(
-                target: "aether_chassis_bloomery::executor",
-                nonce = %nonce.0,
-                "expired order did not decode into a dispatch record; its run was cancelled, but the order cannot be terminated by this build",
-            );
-            continue;
-        };
-        let Some((verdict, failed_verifiers)) = timeout_verdict(record.stage) else {
-            warn_deferred_timeout(tracked, &record, deadline);
-            continue;
-        };
+    }
+    admits
+}
 
-        let timeout = TimeoutRecord {
-            bloom: record.bloom,
-            // A bloom-level lane carries no member axis, and the empty
-            // workpiece the dispatch fills in is that absence, not a member
-            // named "".
-            workpiece: (!record.workpiece.0.is_empty()).then(|| record.workpiece.clone()),
-            stage: record.stage,
-            nonce: record.nonce.clone(),
-            subject: record.displayed_digest,
-            deadline_unix_millis: deadline,
-        };
-        let Some(detail) = store_timeout_record(artifacts.as_deref_mut(), &timeout) else {
-            continue;
-        };
+/// Cancel a still-pending order and admit the synthesised failed attempt the
+/// deadline reaper already uses. Shared by wall-clock expiry and heartbeat
+/// silence so both keep cancel → deterministic record → intake ordering and
+/// the same consume-once retry story.
+fn terminate_live_order(
+    store: &mut dyn StoreBackend,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
+    executor: &ExecutorShell,
+    tracked: &mut Vec<TrackedHandle>,
+    order: &OutstandingOrder,
+    cause: TerminationCause,
+) -> Option<Admit> {
+    let deadline = order.deadline_unix_millis;
+    let nonce = Nonce(order.nonce.clone());
+    // An order this build already cancelled and then could not terminate is
+    // still outstanding, so every sweep after it selects the same row again.
+    // Idempotence makes a repeat cancel *harmless*, not free: on the Actions
+    // lane each one probes both wrappers over the network for a run that
+    // will never change again, once per poll interval for the life of the
+    // process.
+    if reported_unterminable(tracked, &nonce) {
+        return None;
+    }
+    // Cancel first, verdict second, and before the decode. Whether this
+    // build can *account* for the expiry is a separate question from whether
+    // the run may keep going: an overdue or silent order still has a child
+    // burning wall clock and a scratch worktree checked out behind it, and
+    // neither a stage whose verdict vocabulary has not landed yet nor a row
+    // that no longer decodes is a reason to leave those running until the
+    // process exits. The nonce is a plain column, so the cancel needs none
+    // of the decoding below.
+    if let Err(error) = executor.cancel(&WorkHandle::new(nonce.clone())) {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            nonce = %nonce.0,
+            %error,
+            "expired order's cancel failed; leaving it live to retry",
+        );
+        return None;
+    }
+    let Some(record) = DispatchRecord::from_stored(order) else {
+        latch_unterminable(tracked, &nonce);
+        tracing::error!(
+            target: "aether_chassis_bloomery::executor",
+            nonce = %nonce.0,
+            "expired order did not decode into a dispatch record; its run was cancelled, but the order cannot be terminated by this build",
+        );
+        return None;
+    };
+    let Some((verdict, failed_verifiers)) = timeout_verdict(record.stage) else {
+        warn_deferred_timeout(tracked, &record, deadline);
+        return None;
+    };
 
-        let upload = UploadedEvidence {
-            nonce: record.nonce.clone(),
-            subject: record.displayed_digest,
-            verdict,
-            detail,
-            candidate: None,
-            findings: None,
-            failed_verifiers,
-            cost: None,
-            calls: None,
-        };
-        match admit_uploaded(store, &upload) {
-            Ok(AdmitDecision::Admitted(admission)) => {
-                tracing::warn!(
+    let timeout = TimeoutRecord {
+        bloom: record.bloom,
+        // A bloom-level lane carries no member axis, and the empty
+        // workpiece the dispatch fills in is that absence, not a member
+        // named "".
+        workpiece: (!record.workpiece.0.is_empty()).then(|| record.workpiece.clone()),
+        stage: record.stage,
+        nonce: record.nonce.clone(),
+        subject: record.displayed_digest,
+        deadline_unix_millis: deadline,
+    };
+    let detail = store_timeout_record(artifacts, &timeout)?;
+
+    let upload = UploadedEvidence {
+        nonce: record.nonce.clone(),
+        subject: record.displayed_digest,
+        verdict,
+        detail,
+        candidate: None,
+        findings: None,
+        failed_verifiers,
+        cost: None,
+        calls: None,
+    };
+    match admit_uploaded(store, &upload) {
+        Ok(AdmitDecision::Admitted(admission)) => {
+            match cause {
+                TerminationCause::Deadline => tracing::warn!(
                     target: "aether_chassis_bloomery::executor",
                     nonce = %record.nonce.0,
                     workpiece = %record.workpiece.0,
                     stage = ?record.stage,
                     deadline_unix_millis = deadline,
-                    "dispatched run outlived its sealed execution limit; cancelled and recorded as a failed attempt",
-                );
-                admits.push(admission.admit);
-                tracked.retain(|tracked_handle| tracked_handle.handle.nonce != record.nonce);
-            }
-            Ok(AdmitDecision::Refused(refusal)) => {
-                // A refusal is a judgement about the order's own stored columns,
-                // so the same order refuses the same way on every later sweep —
-                // latch it with the other two unterminable shapes rather than
-                // re-logging and re-cancelling at the poll cadence.
-                latch_unterminable(tracked, &record.nonce);
-                tracing::error!(
+                    "dispatched run outlived its sealed execution limit; cancelled and recorded as a host fault",
+                ),
+                TerminationCause::HeartbeatSilence => tracing::warn!(
                     target: "aether_chassis_bloomery::executor",
                     nonce = %record.nonce.0,
-                    ?refusal,
-                    "the intake refused a timeout for this order; it cannot be terminated by this build",
-                );
+                    workpiece = %record.workpiece.0,
+                    stage = ?record.stage,
+                    deadline_unix_millis = deadline,
+                    "dispatched run was silent past the host heartbeat threshold; cancelled and recorded as a host fault",
+                ),
             }
+            tracked.retain(|tracked_handle| tracked_handle.handle.nonce != record.nonce);
+            Some(admission.admit)
+        }
+        Ok(AdmitDecision::Refused(refusal)) => {
+            // A refusal is a judgement about the order's own stored columns,
+            // so the same order refuses the same way on every later sweep —
+            // latch it with the other two unterminable shapes rather than
+            // re-logging and re-cancelling at the poll cadence.
+            latch_unterminable(tracked, &record.nonce);
+            tracing::error!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %record.nonce.0,
+                ?refusal,
+                "the intake refused a timeout for this order; it cannot be terminated by this build",
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                nonce = %record.nonce.0,
+                %error,
+                "timeout admission faulted; leaving the order live to retry",
+            );
+            None
+        }
+    }
+}
+
+/// Record the newest usable heartbeat from this cycle's pending inspects and
+/// terminate every known-heartbeat lane whose silence has reached the host
+/// threshold. Runs after completed evidence has been drained and after the
+/// deadline sweep, so a finishing lane at the silence boundary keeps its own
+/// verdict and a lane that is also overdue is charged as a deadline.
+fn expire_silent_orders(
+    stores: Stores<'_>,
+    executor: &ExecutorShell,
+    tracked: &mut Vec<TrackedHandle>,
+    pending: &[(Nonce, ExecutionStatus)],
+    now_unix_millis: u64,
+    silence_millis: u64,
+) -> Vec<Admit> {
+    let Stores { store, mut artifacts } = stores;
+    record_observed_heartbeats(tracked, pending, store, now_unix_millis);
+
+    let mut admits = Vec::new();
+    let nonces: Vec<Nonce> = tracked.iter().map(|tracked_handle| tracked_handle.handle.nonce.clone()).collect();
+    for nonce in nonces {
+        let order = match store.lookup_order(&nonce.0) {
+            Ok(Some(order)) => order,
+            Ok(None) => continue,
             Err(error) => {
                 tracing::warn!(
                     target: "aether_chassis_bloomery::executor",
-                    nonce = %record.nonce.0,
+                    nonce = %nonce.0,
                     %error,
-                    "timeout admission faulted; leaving the order live to retry",
+                    "silent-order lookup failed; heartbeats re-check next tick",
                 );
+                continue;
             }
+        };
+        let Some(record) = DispatchRecord::from_stored(&order) else {
+            continue;
+        };
+        let origin = dispatch_origin(order.deadline_unix_millis, record.transformation.limits.wall_clock_secs);
+        let observed =
+            pending.iter().find(|(pending_nonce, _)| *pending_nonce == nonce).and_then(|(_, status)| match status {
+                ExecutionStatus::Running { last_progress_unix_millis } => *last_progress_unix_millis,
+                _ => None,
+            });
+        let Some(tracked_handle) = tracked.iter().find(|tracked_handle| tracked_handle.handle.nonce == nonce) else {
+            continue;
+        };
+        let Some(start) = silence_from(tracked_handle.last_heartbeat_unix_millis, observed, origin) else {
+            continue;
+        };
+        if !is_silent(start, now_unix_millis, silence_millis) {
+            continue;
+        }
+        if let Some(admit) = terminate_live_order(
+            store,
+            artifacts.as_deref_mut(),
+            executor,
+            tracked,
+            &order,
+            TerminationCause::HeartbeatSilence,
+        ) {
+            admits.push(admit);
         }
     }
     admits
+}
+
+/// Fold this cycle's running-status observations into per-nonce newest
+/// heartbeats. Called before silence enforcement so a progress stamp seen on
+/// the same tick extends the window rather than losing to a stale stored one.
+fn record_observed_heartbeats(
+    tracked: &mut [TrackedHandle],
+    pending: &[(Nonce, ExecutionStatus)],
+    store: &mut dyn StoreBackend,
+    now_unix_millis: u64,
+) {
+    for tracked_handle in tracked.iter_mut() {
+        let observed = pending.iter().find(|(nonce, _)| *nonce == tracked_handle.handle.nonce).and_then(
+            |(_, status)| match status {
+                ExecutionStatus::Running { last_progress_unix_millis } => *last_progress_unix_millis,
+                _ => None,
+            },
+        );
+        let Ok(Some(order)) = store.lookup_order(&tracked_handle.handle.nonce.0) else {
+            continue;
+        };
+        tracked_handle.last_heartbeat_unix_millis = observe_heartbeat(
+            tracked_handle.last_heartbeat_unix_millis,
+            observed,
+            now_unix_millis,
+            order.deadline_unix_millis,
+        );
+    }
 }
 
 /// Whether the expiry sweep has already cancelled `nonce` and found it could not
@@ -541,6 +712,9 @@ pub struct ExecutorReactorState {
     // How long a tracked handle may stay unresolved before the tick warns
     // (#3635); `None` when `stale_warn_after_secs == 0` disables the sweep.
     stale_warn_after: Option<Duration>,
+    // How long a known-heartbeat local lane may stay silent before this host
+    // cancels it (ADR-0195 §8). Always nonzero: chassis boot refuses `0`.
+    heartbeat_silence_millis: u64,
     // The correspondence the push side resolves an admitted capture's commit
     // through (ADR-0152); `None` on a disabled reactor.
     correspondence: Option<SharedCorrespondence>,
@@ -579,6 +753,7 @@ impl ExecutorReactorState {
             _timer: None,
             backoff: None,
             stale_warn_after: stale_warn_after(CoordinatorConfig::default().stale_warn_after_secs),
+            heartbeat_silence_millis: CoordinatorConfig::default().heartbeat_silence_secs.saturating_mul(1_000),
             correspondence: None,
             pusher: default_candidate_push(true),
         }
@@ -1715,6 +1890,9 @@ struct TickClock {
     /// (#3635); `None` when the sweep is disabled. Advisory only: it warns, and
     /// the deadline beside it is what terminates.
     stale_warn_after: Option<Duration>,
+    /// How long a known-heartbeat local lane may stay silent before this tick
+    /// cancels it. Always nonzero at boot; tests inject the allowance they need.
+    heartbeat_silence_millis: u64,
 }
 
 /// Pull matched attempt results for the tracked handles and return the [`Admit`]s
@@ -1783,7 +1961,28 @@ fn pull_and_admit(
     // deferred sweep costs one poll interval and the transport re-drives; a wrong
     // sweep destroys the attempt.
     let timed_out = if completion_was_observed {
-        expire_overdue_orders(Stores { store, artifacts }, executor, tracked, clock.now_unix_millis)
+        expire_overdue_orders(
+            Stores { store, artifacts: artifacts.as_deref_mut() },
+            executor,
+            tracked,
+            clock.now_unix_millis,
+        )
+    } else {
+        Vec::new()
+    };
+    // Silence after the deadline sweep: a finishing lane has already been
+    // consumed, and an overdue one has already been charged as a deadline.
+    // A faulted cycle has not looked at every handle, so its "silent" is as
+    // unearned as its "still pending".
+    let silenced = if completion_was_observed {
+        expire_silent_orders(
+            Stores { store, artifacts },
+            executor,
+            tracked,
+            &report.pending,
+            clock.now_unix_millis,
+            clock.heartbeat_silence_millis,
+        )
     } else {
         Vec::new()
     };
@@ -1803,7 +2002,7 @@ fn pull_and_admit(
     // stage to a zero-secret Actions runner that must fetch it (ADR-0152).
     push_admitted_candidates(&sink.0, correspondence, pusher);
 
-    sink.0.into_iter().map(|admission| admission.admit).chain(timed_out).collect()
+    sink.0.into_iter().map(|admission| admission.admit).chain(timed_out).chain(silenced).collect()
 }
 
 /// Admit one scripted lane verdict against this reactor's own stores, returning
@@ -1962,6 +2161,7 @@ impl NativeActor for ExecutorReactorCapability {
                 _timer: None,
                 backoff: None,
                 stale_warn_after: stale_warn_after(config.stale_warn_after_secs),
+                heartbeat_silence_millis: config.heartbeat_silence_secs.saturating_mul(1_000),
                 correspondence: None,
                 pusher: config.pusher,
             });
@@ -2026,6 +2226,7 @@ impl NativeActor for ExecutorReactorCapability {
             _timer: Some(timer),
             backoff: None,
             stale_warn_after: stale_warn_after(config.stale_warn_after_secs),
+            heartbeat_silence_millis: config.heartbeat_silence_secs.saturating_mul(1_000),
             correspondence,
             pusher: config.pusher,
         })
@@ -2062,7 +2263,11 @@ impl NativeActor for ExecutorReactorCapability {
         // takes its deadline from it, and every persisted deadline is tested
         // against it, so a dispatch and an expiry in the same tick cannot
         // disagree about when the tick was.
-        let clock = TickClock { now_unix_millis: now_unix_millis(), stale_warn_after: state.stale_warn_after };
+        let clock = TickClock {
+            now_unix_millis: now_unix_millis(),
+            stale_warn_after: state.stale_warn_after,
+            heartbeat_silence_millis: state.heartbeat_silence_millis,
+        };
 
         // Skip the drain while inside a transient-failure backoff window (#3593) —
         // paces the re-drive instead of hammering GitHub at the flat poll cadence.

@@ -499,6 +499,18 @@ pub enum OperatorHoldError {
     NotHeld,
 }
 
+/// Why a host splice-assembly admission was refused (ADR-0196 G2).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum SpliceError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The named workpiece is not a member of the bloom.
+    NotAMember(WorkpieceId),
+    /// The member is not waiting on a join assembly — it is not in the line
+    /// at Construct without a candidate of its own.
+    NotAwaitingSplice(WorkpieceId),
+}
+
 /// A land refused because mainline had moved off the bloom's sealed base.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BaseMismatch {
@@ -561,4 +573,30 @@ pub enum HostFaultError {
     },
     /// The member is not held on a host fault, so there is nothing to resume.
     NotHeld(WorkpieceId),
+}
+
+/// Why a member machinery-fault admission was refused (ADR-0195).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum MemberExecutorFaultError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The fact names a workpiece that is not a member of the bloom.
+    NotAMember(WorkpieceId),
+    /// The member holds no dispatched cursor.
+    NotDispatched(WorkpieceId),
+    /// The named stage is not the member's current cursor stage — a stale
+    /// report from an attempt the member has already left.
+    StageMismatch {
+        /// The stage the member is actually waiting at.
+        expected: StageId,
+        /// The stage the fault named.
+        got: StageId,
+    },
+    /// The evidence does not bind the member's current subject.
+    EvidenceNotBound {
+        /// The candidate tree, or scope revision before a candidate exists.
+        expected: Digest,
+        /// The subject the evidence actually names.
+        got: Digest,
+    },
 }

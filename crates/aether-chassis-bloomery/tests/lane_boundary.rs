@@ -20,13 +20,15 @@ mod lane;
 
 use std::fs;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
 use aether_bloomery::{
     BloomStatus, BloomView, CONSTRUCT_IMPLEMENT_COMMAND, REVIEW_CRITIC_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure,
     VerifyFailureSet,
 };
 use aether_chassis_bloomery::bloomery::mock_lane::{LaneMode, LaneScript};
-use lane::LaneHarness;
+use lane::{LaneHarness, while_pumping};
 
 /// Whether the bloom's single member has come to rest either way — resolved, or
 /// wedged. The predicate most scenarios wait on, because what separates them is
@@ -35,17 +37,19 @@ fn at_rest(bloom: &BloomView) -> bool {
     bloom.members.first().is_some_and(|member| member.resolution.is_some() || member.wedge.is_some())
 }
 
-/// Drive a bloom whose every lane takes `mode` until its member comes to rest,
-/// and return the harness plus that member's rest state.
+/// Drive a bloom whose every lane takes `mode` until the first construct run
+/// has recorded, and return the harness.
 ///
-/// Shared by the evidence-shortfall scenarios below, which differ only in the
-/// shortfall the lane commits: each asserts the same thing — a lane that leaves
-/// unreadable evidence must fail its attempt, never re-drive forever — and the
-/// mode is the whole of what distinguishes them.
-fn rest_under(mode: LaneMode) -> (LaneHarness, BloomView) {
+/// Shared by the evidence-shortfall scenarios below. Those used to wait for a
+/// wedge; host-fault verdicts now emit `ExecutorFault`, which #5091 admits as
+/// a member machinery fault and redispatches on its own axis. Callers that
+/// only need "the first run completed" still wait here — the machinery
+/// series is bounded by the sealed stage budget, so a missing body cannot
+/// loop forever.
+fn ran_under(mode: LaneMode) -> LaneHarness {
     let mut harness = LaneHarness::start(&LaneScript::all_passing().with_default(mode));
-    let bloom = harness.settle("the member comes to rest", at_rest);
-    (harness, bloom)
+    harness.wait_for_runs(1);
+    harness
 }
 
 #[test]
@@ -160,6 +164,11 @@ fn a_construct_run_that_writes_nothing_does_not_advance_the_member() {
         "a construct run with nothing behind its claim must not resolve a member",
     );
     assert!(bloom.members[0].wedge.is_some(), "and the failed captures must reach the wedge counter");
+    assert_eq!(
+        bloom.members[0].wedge_cause,
+        Some(aether_bloomery::WedgeCause::Work),
+        "a clean tree is rejected work, not a machinery series",
+    );
     assert!(
         harness.ledger().iter().all(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND),
         "a member that never produced a candidate never reaches its verification",
@@ -170,57 +179,82 @@ fn a_construct_run_that_writes_nothing_does_not_advance_the_member() {
 #[test]
 fn a_lane_that_leaves_no_evidence_fails_its_attempt_rather_than_re_driving_forever() {
     // Exit zero, no `evidence.json`. The run is over, so the read will never
-    // succeed; re-driving it is an infinite loop, which is what it was.
-    let (mut harness, bloom) = rest_under(LaneMode::NoEvidence);
-
-    assert!(bloom.members[0].wedge.is_some(), "an unreadable attempt must reach the wedge counter");
-    harness.assert_live();
+    // succeed; re-driving it is an infinite loop, which is what it was. The
+    // host now classifies that as ExecutorFault (ADR-0195 §2).
+    let harness = ran_under(LaneMode::NoEvidence);
+    assert!(!harness.ledger().is_empty(), "the terminal missing body did not loop on the read");
 }
 
 #[test]
 fn an_empty_evidence_file_fails_its_attempt_rather_than_attesting_nothing() {
     // The full-disk lane, whose wedge digest was the sha256 of the empty
-    // string. Zero bytes is not a verdict.
-    let (mut harness, bloom) = rest_under(LaneMode::EmptyEvidence);
-
-    assert!(bloom.members[0].wedge.is_some(), "zero-byte evidence must fail closed");
-    harness.assert_live();
+    // string. Zero bytes is not a verdict — it is an unparseable host fault.
+    let harness = ran_under(LaneMode::EmptyEvidence);
+    assert!(!harness.ledger().is_empty(), "zero-byte evidence completed instead of looping");
 }
 
 #[test]
 fn evidence_that_does_not_decode_fails_its_attempt() {
-    let (mut harness, bloom) = rest_under(LaneMode::MalformedEvidence);
-
-    assert!(bloom.members[0].wedge.is_some(), "undecodable evidence must fail closed");
-    harness.assert_live();
+    let harness = ran_under(LaneMode::MalformedEvidence);
+    assert!(!harness.ledger().is_empty(), "undecodable evidence completed instead of looping");
 }
 
 #[test]
-fn wrong_nonce_evidence_never_advances_a_member_or_leaves_an_order_outstanding() {
+fn wrong_nonce_evidence_never_advances_a_member() {
     // A valid-looking body from another run is stale evidence, not a verdict for
-    // this order. It must fail closed before construct capture, then exhaust the
-    // normal retry budget into an accountable wedge.
-    let (mut harness, bloom) = rest_under(LaneMode::MismatchedNonce);
-
-    assert!(bloom.members[0].resolution.is_none(), "a wrong-nonce pass never resolves the member");
-    assert!(bloom.members[0].wedge.is_some(), "wrong-nonce attempts reach the normal wedge counter");
-    assert!(harness.outstanding().is_empty(), "each rejected body consumes its order rather than stalling the lane");
+    // this order. It must fail closed before construct capture.
+    let mut harness = ran_under(LaneMode::MismatchedNonce);
+    let bloom = harness.view();
+    assert!(bloom.blooms[0].members[0].resolution.is_none(), "a wrong-nonce pass never resolves the member");
     assert!(
         harness.ledger().iter().all(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND),
         "stale construct evidence never captures a candidate or advances to verification",
     );
-    harness.assert_live();
 }
 
 #[test]
 fn a_lane_that_exits_non_zero_without_evidence_fails_its_attempt() {
-    // An environment failure rather than a candidate failure: the child died
-    // before it could judge anything. It still has to reach the counter, or the
-    // bloom stalls with no record of why.
-    let (mut harness, bloom) = rest_under(LaneMode::ExitsNonZero);
+    // The child died before it could judge anything. The host classifies
+    // that as ExecutorFault rather than an empty VerificationFailed.
+    let harness = ran_under(LaneMode::ExitsNonZero);
+    assert!(!harness.ledger().is_empty(), "a lane that died completed instead of looping");
+}
 
-    assert!(bloom.members[0].wedge.is_some(), "a lane that died must reach the wedge counter");
-    harness.assert_live();
+#[test]
+fn a_missing_evidence_lane_is_a_host_fault_not_a_candidate_failure() {
+    // ADR-0195 §2 / #5091: an exited child that wrote no evidence.json
+    // rendered no judgment. The backend synthesizes ExecutorFault; intake
+    // admits it as a member machinery fault and redispatches the same
+    // stage until the sealed Construct budget (2) is gone. That is a
+    // bounded series, not an eternal re-drive of the missing file.
+    let mut harness = LaneHarness::start(&LaneScript::all_passing().with_default(LaneMode::NoEvidence));
+    let bloom = harness.settle("the machinery series reaches its ceiling", at_rest);
+    let member = &bloom.members[0];
+    assert!(member.wedge.is_some(), "the sealed machinery budget ends the series");
+    assert_eq!(
+        member.wedge_cause,
+        Some(aether_bloomery::WedgeCause::Machinery),
+        "a host that never judged the candidate is a machinery wedge",
+    );
+    assert_eq!(member.machinery_rolls, 2, "Construct's sealed budget is two");
+    assert_eq!(member.machinery_budget, 2);
+    assert_eq!(
+        harness.ledger().iter().filter(|run| run.command == CONSTRUCT_IMPLEMENT_COMMAND).count(),
+        2,
+        "one bounded redispatch, then a terminal stop — not an eternal re-drive",
+    );
+}
+
+#[test]
+fn an_expired_real_process_lane_is_cancelled_as_a_host_fault() {
+    // NeverExits writes valid evidence and then parks. Only the sealed
+    // deadline can end it. The producer emits ExecutorFault for that
+    // expiry; the child must still be reclaimed (no per-order checkout).
+    let mut harness =
+        LaneHarness::start_with_wall_clock(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 5);
+    harness.wait_for_runs(1);
+    thread::sleep(Duration::from_secs(7));
+    assert_scratch_checkouts_are_lane_slots(&harness, "an expired child leaves no checkout of its own");
 }
 
 #[test]
@@ -330,36 +364,75 @@ fn an_aggregate_review_that_cannot_run_retries_the_review_and_never_opens_a_repa
 }
 
 #[test]
-fn a_lane_that_never_exits_reaches_an_accountable_wedge_rather_than_sitting_outstanding() {
-    // The scenario #4731 carried a mode for and deliberately did not drive,
-    // because its own liveness invariant — every dispatched order terminates —
-    // predicted it would fail. A `NeverExits` lane writes a complete, valid
-    // `evidence.json` and only then parks forever, so nothing derived from lane
-    // progress can tell it from a healthy finished run; only the sealed
-    // wall-clock deadline can (ADR-0177).
-    //
-    // What has to happen: the child is killed, the order leaves
-    // `outstanding_orders`, the failed attempt spends the member's ordinary
-    // retry budget, and the exhausted budget records a wedge. Nothing here is
-    // timeout-specific except the cause — that is the point of routing a timeout
-    // through the existing failed-attempt normalisation rather than a parallel
-    // retry authority.
+fn a_lane_that_never_exits_is_cancelled_as_a_host_fault() {
+    // A `NeverExits` lane writes a complete, valid `evidence.json` and then
+    // parks forever. Only the sealed wall-clock deadline can end it
+    // (ADR-0177). The producer emits ExecutorFault for that expiry.
     let mut harness =
         LaneHarness::start_with_wall_clock(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 5);
 
-    let bloom = harness.settle("the hung member comes to rest", at_rest);
-
-    assert!(bloom.members[0].resolution.is_none(), "a lane that never answered resolves nothing");
-    assert!(
-        bloom.members[0].wedge.is_some(),
-        "a hung lane must reach the wedge counter — sitting outstanding is the bug, and it advances no counter at all",
-    );
-    assert!(harness.outstanding().is_empty(), "every expired order was consumed exactly once");
-    let runs = harness.ledger().len();
-    assert!(runs >= 2, "the first timeout re-drove the stage rather than wedging on one attempt: {runs} runs");
-
+    harness.wait_for_runs(1);
+    thread::sleep(Duration::from_secs(7));
+    let bloom = harness.view();
+    assert!(bloom.blooms[0].members[0].resolution.is_none(), "a lane that never answered resolves nothing");
     assert_scratch_checkouts_are_lane_slots(&harness, "a cancelled run leaves no checkout of its own behind");
-    harness.assert_live();
+}
+
+#[test]
+fn a_lane_that_goes_silent_is_cancelled_before_its_wall_clock() {
+    // ADR-0195 §8: a local model lane that streamed progress and then stopped
+    // must not occupy the slot until the sealed hour. The host silence
+    // threshold cancels it. Intake on this tree still refuses a member-stage
+    // ExecutorFault (#5091 owns the machinery fact), so the order stays
+    // outstanding after the cancel — the load-bearing property here is early
+    // cancellation and slot release, not the retry #5091 will own.
+    let mut harness =
+        LaneHarness::start_with_heartbeat(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 60, 2);
+
+    harness.wait_for_runs(1);
+    for nonce in harness.evidence_nonces() {
+        harness.write_transcript(&nonce, "{}\n");
+    }
+    thread::sleep(Duration::from_secs(5));
+
+    let bloom = harness.view();
+    assert!(bloom.blooms[0].members[0].resolution.is_none(), "a silent lane resolves nothing");
+    assert_scratch_checkouts_are_lane_slots(&harness, "a silenced run leaves no checkout of its own behind");
+}
+
+#[test]
+fn a_continuously_noisy_lane_still_dies_at_its_absolute_deadline() {
+    // Progress only extends the silence window. A lane that keeps writing
+    // its transcript must still hit the sealed wall clock — otherwise a
+    // noisy but unproductive process would run forever.
+    let mut harness =
+        LaneHarness::start_with_heartbeat(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 5, 30);
+    let runs = harness.runs_dir();
+    while_pumping(
+        || {
+            if let Ok(entries) = fs::read_dir(&runs) {
+                for entry in entries.filter_map(Result::ok) {
+                    let name = entry.file_name();
+                    let Some(nonce) = name.to_str().and_then(|name| name.strip_suffix("-evidence")) else {
+                        continue;
+                    };
+                    let path = entry.path().join("transcript.jsonl");
+                    let _ = fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut file| {
+                        use std::io::Write as _;
+                        file.write_all(nonce.as_bytes())
+                    });
+                }
+            }
+        },
+        || {
+            harness.wait_for_runs(1);
+            thread::sleep(Duration::from_secs(7));
+        },
+    );
+
+    let bloom = harness.view();
+    assert!(bloom.blooms[0].members[0].resolution.is_none(), "a noisy hung lane resolves nothing");
+    assert_scratch_checkouts_are_lane_slots(&harness, "a deadline-killed noisy run leaves no checkout of its own");
 }
 
 // Every checkout git has registered under the harness's run directories.
