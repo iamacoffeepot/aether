@@ -2348,7 +2348,7 @@ fn a_mapped_ancestor_that_is_not_a_direct_parent_is_ignored() {
     exec.stream_evidence(&second).unwrap();
 
     let stamped = stamped_evidence(&base, &test_nonce("B"));
-    assert!(stamped.get("slot_affinity").is_none(), "no predecessor slot: the mapped ancestor is not a direct parent",);
+    assert!(stamped.get("slot_affinity").is_none(), "no predecessor slot: the mapped ancestor is not a direct parent");
     assert_eq!(assigned_slot(&base, &test_nonce("B")), 0, "B takes the lowest free slot");
 }
 

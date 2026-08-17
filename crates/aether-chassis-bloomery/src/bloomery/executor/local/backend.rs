@@ -588,7 +588,8 @@ impl LocalExecutor {
     }
 
     fn preferred_builder_slot(&self, checkout_hex: &str) -> Option<usize> {
-        if let Some(slot) = self.builders.lock().unwrap_or_else(PoisonError::into_inner).preferred(checkout_hex) {
+        let exact = self.builders.lock().unwrap_or_else(PoisonError::into_inner).preferred(checkout_hex);
+        if let Some(slot) = exact {
             return Some(slot);
         }
         let parents = match self.runner.checkout_parents(checkout_hex) {

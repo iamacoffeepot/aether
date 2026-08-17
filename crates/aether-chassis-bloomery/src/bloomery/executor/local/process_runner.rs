@@ -707,6 +707,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::process::Command;
+    use std::slice;
 
     use tempfile::TempDir;
 
@@ -1026,7 +1027,10 @@ mod tests {
             [first.clone(), second.clone()],
             "git parent order: integration first, captured candidate second",
         );
-        assert_eq!(commit_parents(repo.path(), &second).expect("a linear commit lists its parent"), [first.clone()],);
+        assert_eq!(
+            commit_parents(repo.path(), &second).expect("a linear commit lists its parent").as_slice(),
+            slice::from_ref(&first),
+        );
         assert!(
             commit_parents(repo.path(), &first).expect("a root commit has no parents").is_empty(),
             "a parentless commit is not a miss — it has nothing to prefer",

@@ -16,7 +16,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::{fs, io};
 
 use anyhow::{Context, Result, bail};
@@ -187,22 +187,29 @@ pub(super) fn execute(
     }
 
     let mut child = ChildReaper::new(command.spawn().map_err(|error| spawn_context(error, harness))?);
-    let writer = match stdin {
+    let writer_work = match stdin {
         Some(bytes) => {
-            let mut pipe = child.child()?.stdin.take().with_context(|| format!("{harness} stdin was not captured"))?;
-            Some(spawn_io(move || pipe.write_all(&bytes)))
+            let pipe = child.child()?.stdin.take().with_context(|| format!("{harness} stdin was not captured"))?;
+            Some((pipe, bytes))
         }
         None => None,
     };
     let stdout = child.child()?.stdout.take().with_context(|| format!("{harness} stdout was not captured"))?;
     let stderr = child.child()?.stderr.take().with_context(|| format!("{harness} stderr was not captured"))?;
-    let stdout_reader = spawn_io(move || tee_stdout(stdout, file));
-    let stderr_reader = spawn_io(move || drain_stderr(stderr));
 
-    let status = child.wait().with_context(|| format!("await {harness}"))?;
-    let stdout = stdout_reader.join().expect("stdout reader panicked");
-    let stderr = stderr_reader.join().expect("stderr reader panicked");
-    let written = writer.map(|handle| handle.join().expect("prompt-writer thread panicked"));
+    // `thread::scope`, not `thread::spawn`: raw spawn is disallowed (settlement/trace
+    // umbrella); this is infra below the actor/mail layer.
+    let (status, stdout, stderr, written) = thread::scope(|scope| {
+        let writer = writer_work.map(|(mut pipe, bytes)| scope.spawn(move || pipe.write_all(&bytes)));
+        let stdout_reader = scope.spawn(|| tee_stdout(stdout, file));
+        let stderr_reader = scope.spawn(|| drain_stderr(stderr));
+
+        let status = child.wait().with_context(|| format!("await {harness}"))?;
+        let stdout = stdout_reader.join().expect("stdout reader panicked");
+        let stderr = stderr_reader.join().expect("stderr reader panicked");
+        let written = writer.map(|handle| handle.join().expect("prompt-writer thread panicked"));
+        Ok::<_, anyhow::Error>((status, stdout, stderr, written))
+    })?;
 
     let stderr = stderr.with_context(|| format!("read {harness} stderr"))?;
     peak.observe(&stderr);
@@ -245,17 +252,6 @@ impl Drop for ChildReaper {
             let _ = child.wait();
         }
     }
-}
-
-/// Infra thread in a build tool — no settlement/trace umbrella applies here;
-/// it exists to drain a child pipe (or write stdin) while the main thread reaps.
-fn spawn_io<F, T>(work: F) -> JoinHandle<T>
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
-{
-    #[allow(clippy::disallowed_methods)] // infra pipe thread, below the actor/mail layer
-    thread::spawn(work)
 }
 
 fn tee_stdout(mut reader: impl Read, mut file: File) -> io::Result<Vec<u8>> {
@@ -366,12 +362,12 @@ fn tail(s: &str, max: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use std::os::unix::process::ExitStatusExt;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, ExitStatus};
     use std::time::{Duration, Instant};
     use std::{env, fs, process, thread};
 
-    use super::{Terminal, Usage, capture, capture_resumed, record, resume_handle_rejected, resumed_prompt, spawn_io};
+    use super::{Terminal, Usage, capture, capture_resumed, record, resume_handle_rejected, resumed_prompt};
     use crate::transform::peak_memory;
 
     // Tripwire: the envelope's two cross-lane fields. `result_record.is_error`
@@ -491,7 +487,7 @@ mod tests {
         dir
     }
 
-    fn wait_for(path: &std::path::Path, pred: impl Fn(&[u8]) -> bool) -> Vec<u8> {
+    fn wait_for(path: &Path, pred: impl Fn(&[u8]) -> bool) -> Vec<u8> {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if let Ok(bytes) = fs::read(path)
@@ -535,13 +531,15 @@ mod tests {
         let mut command = Command::new("sh");
         command.arg("-c").arg(script);
 
-        let worker = spawn_io(move || capture(command, &out, "fixture", &peak_memory::detect()));
-        assert_eq!(wait_for(&transcript, |bytes| bytes == b"one\n"), b"one\n");
-        assert!(!worker.is_finished(), "the first chunk must land before wait returns");
-        fs::write(&go, b"").expect("release the child");
-        let text = worker.join().expect("capture thread panicked").expect("capture");
-        assert_eq!(text, "one\ntwo\n");
-        assert_eq!(fs::read(&transcript).expect("read transcript"), b"one\ntwo\n");
+        thread::scope(|scope| {
+            let worker = scope.spawn(|| capture(command, &out, "fixture", &peak_memory::detect()));
+            assert_eq!(wait_for(&transcript, |bytes| bytes == b"one\n"), b"one\n");
+            assert!(!worker.is_finished(), "the first chunk must land before wait returns");
+            fs::write(&go, b"").expect("release the child");
+            let text = worker.join().expect("capture thread panicked").expect("capture");
+            assert_eq!(text, "one\ntwo\n");
+            assert_eq!(fs::read(&transcript).expect("read transcript"), b"one\ntwo\n");
+        });
     }
 
     // Reading stdout to completion before touching stderr deadlocks once the
