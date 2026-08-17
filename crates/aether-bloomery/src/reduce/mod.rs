@@ -50,7 +50,7 @@ pub use error::{
     AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
     AttemptCompletedError, BaseMismatch, FoldConflictError, GrantAttemptsError, HostFaultError, IntegrateError,
     LandError, LandingRejectedError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, ResolveError,
-    SealConflict, SealError, SupersedeError, VerifyFailedError,
+    SealConflict, SealError, SpliceError, SupersedeError, VerifyFailedError,
 };
 pub use event::{Event, Fact};
 pub use outcome::{DECISIONS_SCHEMA, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions};
@@ -74,6 +74,7 @@ use observe::{reduce_observe_mainline, reduce_observe_mainline_diverged};
 use operator::{reduce_operator_adjudication, reduce_operator_repair};
 use operator_hold::{reduce_operator_hold, reduce_operator_release};
 use orphan_claim::{reduce_complete_orphan_claim_release, reduce_request_orphan_claim_release};
+use readiness::reduce_splice_assembled;
 use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor_fault};
 use seal::{reduce_seal, reduce_supersede, reduce_surface_overlap};
 use verify::{reduce_resume_host_fault, reduce_verify_failed, reduce_verify_host_fault};
@@ -158,5 +159,8 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
             reduce_verify_host_fault(snapshot, bloom, workpiece, evidence, findings)
         }
         Fact::ResumeHostFault { bloom, workpiece } => reduce_resume_host_fault(snapshot, bloom, workpiece),
+        Fact::SpliceAssembled { bloom, workpiece, tree, head } => {
+            reduce_splice_assembled(snapshot, bloom, workpiece, *tree, *head)
+        }
     }
 }

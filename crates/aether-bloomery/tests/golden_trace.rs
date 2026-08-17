@@ -304,7 +304,7 @@ fn fact_selector(fact: &Fact) -> u32 {
 fn appended_facts_leave_every_prior_selector_where_the_journal_left_it() {
     let bloom = BloomId(digest(2));
     let evidence = |kind| Evidence { subject: digest(30), kind, detail: digest(60) };
-    let pinned: [(u32, Fact); 9] = [
+    let pinned: [(u32, Fact); 10] = [
         (5, Fact::Land { bloom, new_head: digest(40) }),
         (
             8,
@@ -346,6 +346,10 @@ fn appended_facts_leave_every_prior_selector_where_the_journal_left_it() {
                 head: digest(40),
                 evidence: evidence(EvidenceKind::FoldConflict),
             },
+        ),
+        (
+            27,
+            Fact::SpliceAssembled { bloom, workpiece: WorkpieceId("alpha".into()), tree: digest(30), head: digest(40) },
         ),
     ];
 

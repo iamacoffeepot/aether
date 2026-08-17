@@ -619,6 +619,7 @@ impl Snapshot {
             }
             Decision::DispatchAttempt { .. }
             | Decision::DispatchIntegration { .. }
+            | Decision::DispatchSplice { .. }
             | Decision::DispatchAggregateVerify { .. }
             | Decision::DispatchAggregateReview { .. }
             | Decision::DispatchLand { .. } => self.apply_dispatch_effect(effect),
@@ -910,6 +911,9 @@ impl Snapshot {
                 (bloom, DispatchKey::Member { workpiece: workpiece.clone(), stage: *stage })
             }
             Decision::DispatchIntegration { bloom, .. } => (bloom, DispatchKey::Bloom { stage: StageId::Integrate }),
+            Decision::DispatchSplice { bloom, workpiece, .. } => {
+                (bloom, DispatchKey::Member { workpiece: workpiece.clone(), stage: StageId::Integrate })
+            }
             Decision::DispatchAggregateVerify { bloom, .. } => {
                 (bloom, DispatchKey::Bloom { stage: StageId::AggregateVerify })
             }

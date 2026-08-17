@@ -188,6 +188,13 @@ topic_vocabulary! {
     /// admits the terminal result (ADR-0179). Appended so the prior topics'
     /// display spellings and ordering are unchanged.
     OrphanClaimRelease,
+    /// A per-member splice assembly (reducer-minted, from
+    /// [`Decision::DispatchSplice`]), drained by the integrate reactor, which
+    /// merges independent dependency tips and admits
+    /// [`Fact::SpliceAssembled`](crate::Fact::SpliceAssembled) or a residual
+    /// [`Fact::FoldConflict`](crate::Fact::FoldConflict). Appended so the prior
+    /// topics' display spellings and ordering are unchanged.
+    Splice,
 }
 
 impl Topic {
@@ -209,6 +216,7 @@ impl Topic {
             Self::AggregateVerify => "topic:aggregate_verify",
             Self::ViewDocument => "topic:view_document",
             Self::OrphanClaimRelease => "topic:orphan_claim_release",
+            Self::Splice => "topic:splice",
         }
     }
 
@@ -228,6 +236,7 @@ impl Topic {
             Decision::DispatchAttempt { .. } => Some(Self::Dispatch),
             Decision::DispatchLand { .. } => Some(Self::Land),
             Decision::DispatchIntegration { .. } => Some(Self::Integrate),
+            Decision::DispatchSplice { .. } => Some(Self::Splice),
             Decision::DispatchAggregateReview { .. } => Some(Self::AggregateReview),
             Decision::DispatchAggregateVerify { .. } => Some(Self::AggregateVerify),
             Decision::DispatchOrphanClaimRelease { .. } => Some(Self::OrphanClaimRelease),
@@ -427,6 +436,26 @@ pub struct IntegratePayload {
     pub members: Vec<MemberCandidate>,
     /// The predecessor whose candidate refs this fold adopts first, when the
     /// bloom inherited its whole claim set from one.
+    pub adopt_from: Option<Digest>,
+}
+
+/// The per-member splice-assembly outbox payload (ADR-0196 G2): the wasm
+/// control actor enqueues it under [`Topic::Splice`] from a
+/// [`Decision::DispatchSplice`]; the host integrate reactor drains it,
+/// merges the named tips onto a scratch branch, and admits
+/// [`Fact::SpliceAssembled`](crate::reduce::Fact::SpliceAssembled) or a residual
+/// [`Fact::FoldConflict`](crate::reduce::Fact::FoldConflict).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SplicePayload {
+    /// The bloom the dependent belongs to.
+    pub bloom: Digest,
+    /// The dependent whose construct waits on the assembled tree.
+    pub workpiece: WorkpieceId,
+    /// The sealed bloom base the tips merge onto.
+    pub base: Digest,
+    /// The independent ancestor tips, in sealed member order.
+    pub members: Vec<MemberCandidate>,
+    /// The predecessor whose candidate refs this splice adopts first.
     pub adopt_from: Option<Digest>,
 }
 

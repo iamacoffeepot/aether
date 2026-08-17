@@ -509,12 +509,13 @@ fn adopt_predecessor_work(
     // predecessor never integrated (the wedged-member escape hatch) would
     // otherwise be claimed but never executed, leaving the successor
     // unresolvable.
-    let (every_member_inherited, entries) = successor_entries(successor_id, successor, record, graph, catalog);
+    let (every_member_inherited, entries) =
+        successor_entries(successor_id, successor, *predecessor, record, graph, catalog);
     effects.extend(entries);
     for (member, candidate) in &reverify {
         let base = match successor_construct_base(successor, graph, record, &member.workpiece) {
             SplicedBase::Ready(digest) => digest,
-            SplicedBase::Conflict { .. } => successor.base(),
+            SplicedBase::Join { .. } => successor.base(),
         };
         effects.extend(verify_reentry(
             successor_id,
@@ -606,10 +607,27 @@ fn adoption_of(
         return Adoption::ClaimOnly;
     };
     let pred_base = member_construct_base(predecessor, &member.workpiece);
-    match successor_construct_base(successor, edges, predecessor, &member.workpiece) {
+    let succ = successor_construct_base(successor, edges, predecessor, &member.workpiece);
+    let same_join = match (&succ, spliced_base_of(predecessor, &member.workpiece)) {
+        (SplicedBase::Join { tips: succ_tips }, SplicedBase::Join { tips: pred_tips }) => {
+            succ_tips == &pred_tips
+                && predecessor
+                    .progress
+                    .get(&member.workpiece)
+                    .is_none_or(|progress| progress.fold_conflict_evidence.is_none())
+        }
+        _ => false,
+    };
+    match succ {
         SplicedBase::Ready(succ_base) if succ_base == pred_base => Adoption::WithProof(proof.clone()),
+        SplicedBase::Join { .. } if same_join => Adoption::WithProof(proof.clone()),
         _ => Adoption::Reverify(inherited_candidate(predecessor, claim)),
     }
+}
+
+fn spliced_base_of(record: &BloomRecord, member: &WorkpieceId) -> SplicedBase {
+    let ids: Vec<WorkpieceId> = record.spec.members().iter().map(|item| item.workpiece.clone()).collect();
+    spliced_base(record.spec.base(), &ids, &record.dependencies, member, &|id| checkout_from(record, id))
 }
 
 fn successor_construct_base(

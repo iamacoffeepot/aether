@@ -499,6 +499,18 @@ pub enum OperatorHoldError {
     NotHeld,
 }
 
+/// Why a host splice-assembly admission was refused (ADR-0196 G2).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum SpliceError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The named workpiece is not a member of the bloom.
+    NotAMember(WorkpieceId),
+    /// The member is not waiting on a join assembly — it is not in the line
+    /// at Construct without a candidate of its own.
+    NotAwaitingSplice(WorkpieceId),
+}
+
 /// A land refused because mainline had moved off the bloom's sealed base.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BaseMismatch {

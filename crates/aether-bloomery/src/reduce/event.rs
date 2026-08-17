@@ -539,6 +539,25 @@ pub enum Fact {
         /// The member to re-probe.
         workpiece: WorkpieceId,
     },
+    /// The host assembled a dependent's multi-tip splice without a textual
+    /// collision (ADR-0196 G2).
+    ///
+    /// `tree` is the merged artifact; `head` is the checkout commit wrapping
+    /// it — the same pair [`Fact::Resolve`] carries for the weave. The
+    /// reducer records `head` as the member's construct base and dispatches
+    /// Construct. A residual collision arrives as [`Fact::FoldConflict`]
+    /// instead. Appended past [`Fact::ResumeHostFault`] so every prior fact
+    /// keeps its wire discriminant.
+    SpliceAssembled {
+        /// The bloom the dependent belongs to.
+        bloom: BloomId,
+        /// The dependent whose construct base this is.
+        workpiece: WorkpieceId,
+        /// The assembled tree.
+        tree: Digest,
+        /// The checkout commit wrapping that tree.
+        head: Digest,
+    },
 }
 
 impl Fact {
