@@ -1,0 +1,5 @@
+error: positional Aether wire must encode `None`/empty values explicitly — `skip_serializing_if` omits the field and shifts every following value
+ --> tests/ui/rejects_skipped_struct_field.rs:9:13
+  |
+9 |     #[serde(skip_serializing_if = "Option::is_none")]
+  |             ^^^^^^^^^^^^^^^^^^^

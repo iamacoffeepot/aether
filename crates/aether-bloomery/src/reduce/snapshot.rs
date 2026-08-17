@@ -472,7 +472,7 @@ pub struct StageProgress {
 }
 
 /// A bloom's position in the one-way lifecycle.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum BloomStatus {
     /// Sealed and active — the single unlanded bloom (V1 permits one per
     /// mainline).
