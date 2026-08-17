@@ -315,7 +315,11 @@ impl Topic {
             // Snapshot-only: the capture vehicle is what splice reads off the
             // record so a dependent construct checks out the real parent.
             // Nothing is dispatched from the row itself.
-            | Decision::RecordCandidateVehicle { .. } => None,
+            | Decision::RecordCandidateVehicle { .. }
+            // Snapshot-only: the member machinery series is what `/view` reads
+            // to tell a sick host from rejected work. The retry it owes rides
+            // as an ordinary `DispatchAttempt` beside this row.
+            | Decision::RecordMemberMachinery { .. } => None,
         }
     }
 }

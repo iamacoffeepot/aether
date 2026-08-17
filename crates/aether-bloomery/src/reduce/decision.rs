@@ -682,4 +682,24 @@ pub enum Decision {
         /// [`StageId::AggregateVerify`] or [`StageId::AggregateReview`].
         stage: StageId,
     },
+    /// Record one member-stage machinery fault (ADR-0195) — see
+    /// [`crate::Snapshot::member_machinery`].
+    ///
+    /// Counted apart from [`StageProgress::attempts`](crate::StageProgress::attempts)
+    /// and [`StageProgress::repair_rolls`](crate::StageProgress::repair_rolls)
+    /// because an executor that could not run judged no candidate. Snapshot-folding
+    /// and journal-derived like every other `Record*`. Appended so the prior
+    /// decisions' wire discriminants are unchanged.
+    RecordMemberMachinery {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The member whose gate could not run.
+        workpiece: WorkpieceId,
+        /// The stage the fault ran against.
+        stage: StageId,
+        /// Machinery faults this stage has taken, this one included.
+        rolls: u32,
+        /// The latest fault report's artifact digest.
+        evidence: Digest,
+    },
 }

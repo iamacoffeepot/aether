@@ -101,9 +101,10 @@ pub enum IntakeRefusal {
         failed_verifiers: VerifyFailureSet,
     },
     /// An executor-fault verdict arrived against a stage that has no
-    /// environment-fault lifecycle. Only `AggregateReview` has one (ADR-0176);
-    /// every other stage refuses rather than being given unratified semantics
-    /// by admission.
+    /// environment-fault lifecycle. Dispatched member stages (Construct /
+    /// Verify / Refine / Reconcile) and `AggregateReview` have one
+    /// (ADR-0195 / ADR-0176); every other stage refuses rather than being
+    /// given unratified semantics by admission.
     ExecutorFaultOutOfStage(StageId),
 }
 
@@ -395,6 +396,31 @@ fn aggregate_review_executor_fault_event(record: &DispatchRecord, evidence: Evid
     }
 }
 
+/// The admission event for a dispatched member stage whose executor could not
+/// judge the subject (ADR-0195) — the sibling of
+/// [`aggregate_review_executor_fault_event`] for per-member gates.
+///
+/// The idempotency key is its own, so a replayed fault is a no-op against the
+/// journal rather than colliding with the completion key a later real verdict
+/// on the same order would carry.
+fn member_executor_fault_event(record: &DispatchRecord, evidence: Evidence) -> Event {
+    Event {
+        idempotency_key: AdmissionKey::MemberExecutorFault.of(&record.nonce.0),
+        fact: Fact::MemberExecutorFault {
+            bloom: record.bloom,
+            workpiece: record.workpiece.clone(),
+            stage: record.stage,
+            evidence,
+        },
+    }
+}
+
+/// Whether `stage` is a dispatched member gate that ADR-0195 gives an
+/// executor-fault lifecycle.
+fn admits_member_executor_fault(stage: StageId) -> bool {
+    stage == StageId::Verify || admits_as_attempt_completed(stage)
+}
+
 /// The finding a weave repair was dispatched to repair: the composition's own
 /// row when a previous bounce wrote one, else the bloom-scoped frozen set.
 ///
@@ -496,11 +522,14 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     if let Some(refusal) = verifier_failure_refusal(record.stage, upload) {
         return Ok(AdmitDecision::Refused(refusal));
     }
-    // ADR-0176 ratified the executor-fault lifecycle for the aggregate review
-    // alone. A fault claimed against any other stage is refused here rather than
-    // routed — the refusal precedes the consume, so the order stays live and an
-    // honest result on it can still land.
-    if upload.verdict == StageVerdict::ExecutorFault && record.stage != StageId::AggregateReview {
+    // ADR-0195 admits ExecutorFault for dispatched member stages and the
+    // aggregate review. A fault claimed against any other stage is refused
+    // here rather than routed — the refusal precedes the consume, so the
+    // order stays live and an honest result on it can still land.
+    if upload.verdict == StageVerdict::ExecutorFault
+        && record.stage != StageId::AggregateReview
+        && !admits_member_executor_fault(record.stage)
+    {
         return Ok(AdmitDecision::Refused(IntakeRefusal::ExecutorFaultOutOfStage(record.stage)));
     }
     let observed = StageResult { subject: upload.subject, verdict: upload.verdict, detail: upload.detail };
@@ -560,6 +589,8 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             idempotency_key: AdmissionKey::Park.of(&record.nonce.0),
             fact: Fact::AdmitEvidence { bloom: record.bloom, evidence },
         }
+    } else if upload.verdict == StageVerdict::ExecutorFault && admits_member_executor_fault(record.stage) {
+        member_executor_fault_event(&record, evidence)
     } else if record.stage == StageId::Verify {
         verify_event(&record, upload, evidence)
     } else if admits_as_attempt_completed(record.stage) {
@@ -673,7 +704,7 @@ fn persist_consumed(
             thread_triage_note(store, record, &finding, named)?;
         }
     }
-    if record.stage == StageId::Verify {
+    if record.stage == StageId::Verify && upload.verdict != StageVerdict::ExecutorFault {
         if verdict_passed(upload.verdict) {
             store.clear_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0)?;
         } else if let Some(findings) = &upload.findings {

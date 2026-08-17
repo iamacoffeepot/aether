@@ -330,6 +330,27 @@ fn an_aggregate_review_that_cannot_run_retries_the_review_and_never_opens_a_repa
 }
 
 #[test]
+fn a_hung_lane_wedges_with_a_work_cause_not_a_machinery_cause() {
+    // ADR-0195: a wall-clock expiry is still a work-budget wedge — the host
+    // classified it as a failed attempt, not an ExecutorFault. The projection
+    // must say so, or an operator repairs the host for a member the model
+    // simply could not finish.
+    let mut harness =
+        LaneHarness::start_with_wall_clock(&LaneScript::all_passing().with_default(LaneMode::NeverExits), 5);
+
+    let bloom = harness.settle("the hung member comes to rest", at_rest);
+    let member = &bloom.members[0];
+    assert!(member.wedge.is_some(), "a hung lane reaches the work-budget wedge");
+    assert_eq!(
+        member.wedge_cause,
+        Some(aether_bloomery::WedgeCause::Work),
+        "a deadline-killed attempt is rejected work, not a machinery series",
+    );
+    assert_eq!(member.machinery_rolls, 0, "no ExecutorFault was admitted, so the machinery counter stays at zero");
+    harness.assert_live();
+}
+
+#[test]
 fn a_lane_that_never_exits_reaches_an_accountable_wedge_rather_than_sitting_outstanding() {
     // The scenario #4731 carried a mode for and deliberately did not drive,
     // because its own liveness invariant — every dispatched order terminates —

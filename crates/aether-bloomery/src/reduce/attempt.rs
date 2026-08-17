@@ -7,7 +7,10 @@ use super::composition::reduce_composition_attempt;
 use super::integrate::claim_effects;
 use super::splice::member_construct_base;
 use super::verify_memo::reuse_of;
-use super::{AttemptCompletedError, BloomRecord, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress};
+use super::{
+    AttemptCompletedError, BloomRecord, BloomStatus, Decision, Decisions, MemberExecutorFaultError, Outcome, Snapshot,
+    StageProgress,
+};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
@@ -302,6 +305,108 @@ pub(super) fn reduce_attempt_completed(
         return advance_after_pass(snapshot, record, next, &ctx, effects);
     }
     retry_or_wedge(record, stage, &ctx, evidence, effects)
+}
+
+/// Reduce a member-stage executor environment fault (ADR-0195) — the dispatched
+/// gate reporting that it could not judge the member at all.
+///
+/// A branch entirely separate from [`reduce_attempt_completed`] and
+/// [`super::verify::reduce_verify_failed`], because nothing here is a verdict
+/// about a candidate: the cursor stays put, the candidate stays put, and neither
+/// `attempts` nor `repair_rolls` move. The fault records against the member's
+/// current stage and, while the sealed stage budget allows, redispatches the
+/// *same* artifact under a fresh order through [`reconcile_or_line_targets`].
+/// At the ceiling it records a wedge whose cause the projection reads as
+/// machinery.
+pub(super) fn reduce_member_executor_fault(
+    snapshot: &Snapshot,
+    bloom: &BloomId,
+    workpiece: &WorkpieceId,
+    stage: StageId,
+    evidence: &Evidence,
+) -> Decisions {
+    let Some(record) = snapshot.blooms.get(bloom) else {
+        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(
+            MemberExecutorFaultError::UnknownOrInactiveBloom,
+        ));
+    };
+    if record.status != BloomStatus::Sealed {
+        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(
+            MemberExecutorFaultError::UnknownOrInactiveBloom,
+        ));
+    }
+    let Some(member) = record.spec.members().iter().find(|member| member.workpiece == *workpiece) else {
+        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(MemberExecutorFaultError::NotAMember(
+            workpiece.clone(),
+        )));
+    };
+    let Some(cursor) = record.progress.get(workpiece).copied() else {
+        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(MemberExecutorFaultError::NotDispatched(
+            workpiece.clone(),
+        )));
+    };
+    if cursor.stage != stage {
+        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(MemberExecutorFaultError::StageMismatch {
+            expected: cursor.stage,
+            got: stage,
+        }));
+    }
+    let subject = cursor.candidate.map_or(member.scope_revision, |current| current.tree);
+    if !evidence.validates(&subject) {
+        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(MemberExecutorFaultError::EvidenceNotBound {
+            expected: subject,
+            got: evidence.subject,
+        }));
+    }
+
+    let rolls = match snapshot.member_machinery(bloom, workpiece) {
+        Some(fault) if fault.stage == stage => fault.rolls.saturating_add(1),
+        _ => 1,
+    };
+    let budget = record.stage_catalog.retry_budget_of(stage).unwrap_or(1);
+    let mut effects = alloc::vec![
+        Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() },
+        Decision::RecordMemberMachinery {
+            bloom: *bloom,
+            workpiece: workpiece.clone(),
+            stage,
+            rolls,
+            evidence: evidence.detail,
+        },
+    ];
+
+    if rolls >= budget {
+        effects.push(Decision::RecordWedge {
+            bloom: *bloom,
+            workpiece: workpiece.clone(),
+            wedge: Wedge { stage, evidence: evidence.detail, repeated_verifiers: VerifyFailureSet::EMPTY },
+        });
+        return Decisions {
+            outcome: Outcome::MachineryWedged { bloom: *bloom, workpiece: workpiece.clone(), stage, rolls, budget },
+            effects,
+        };
+    }
+
+    let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile);
+    let targets = reconcile_or_line_targets(
+        member.scope_revision,
+        member_construct_base(record, workpiece),
+        cursor.candidate,
+        fold_checkpoint,
+        snapshot.member_checkpoint(bloom, workpiece),
+    );
+    effects.extend(move_effects(
+        *bloom,
+        workpiece,
+        member.scope_revision,
+        cursor,
+        targets,
+        SealedLine::of(record, member),
+    ));
+    Decisions {
+        outcome: Outcome::MachineryRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, rolls, budget },
+        effects,
+    }
 }
 
 #[derive(Clone, Copy)]

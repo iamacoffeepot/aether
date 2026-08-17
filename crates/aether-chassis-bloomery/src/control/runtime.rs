@@ -1171,7 +1171,8 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         | Decision::RecordMemberDependencies { .. }
         | Decision::RecordHostFault { .. }
         | Decision::ClearHostFault { .. }
-        | Decision::RecordCandidateVehicle { .. } => None,
+        | Decision::RecordCandidateVehicle { .. }
+        | Decision::RecordMemberMachinery { .. } => None,
     })
 }
 

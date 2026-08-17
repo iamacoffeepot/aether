@@ -1352,6 +1352,119 @@ fn a_fault_series_resets_when_a_different_fold_arrives() {
     );
 }
 
+// ADR-0195 — a member-stage executor fault is not a verdict about the candidate,
+// so it must not move one. The cursor stays put, attempts and repair_rolls stay
+// put, and the retry is a re-dispatch of the *same* stage against the *same*
+// artifact, bounded by the sealed stage budget on a ledger of its own.
+//
+// Tripwire for the ledger separation above all: charging `attempts` would spend
+// the model's laps on judgments it never gave, and routing to Refine would spend
+// a candidate's repair budget on a host outage.
+#[test]
+fn a_member_executor_fault_retries_the_same_stage_without_charging_work_or_repair() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let captured = CandidateRef { tree: digest(21), checkout: digest(22) };
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "c-pass",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: Evidence { subject: digest(21), kind: EvidenceKind::VerificationResult, detail: digest(80) },
+                candidate: Some(captured),
+            },
+        ),
+    );
+
+    let before = snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).copied().unwrap();
+    assert_eq!(before.stage, StageId::Verify);
+    assert_eq!(before.attempts, 1);
+    assert_eq!(before.repair_rolls, 0);
+    assert_eq!(before.candidate, Some(captured));
+
+    let fault = |key: &str, detail: u8| {
+        event(
+            key,
+            Fact::MemberExecutorFault {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Verify,
+                evidence: Evidence { subject: digest(21), kind: EvidenceKind::ExecutorFault, detail: digest(detail) },
+            },
+        )
+    };
+
+    // A fault bound to a tree other than the member's current candidate is stale.
+    let stale = event(
+        "stale",
+        Fact::MemberExecutorFault {
+            bloom,
+            workpiece: workpiece("wp"),
+            stage: StageId::Verify,
+            evidence: Evidence { subject: digest(99), kind: EvidenceKind::ExecutorFault, detail: digest(60) },
+        },
+    );
+    assert!(matches!(
+        reduce(&snapshot, &stale, &ResolvedConfigs::default(), &SpendWindow::default()).outcome,
+        Outcome::MemberExecutorFaultRejected(aether_bloomery::MemberExecutorFaultError::EvidenceNotBound { .. }),
+    ));
+
+    let (after1, d1) = step(&snapshot, &fault("fault-1", 60));
+    assert!(matches!(d1.outcome, Outcome::MachineryRetried { stage: StageId::Verify, rolls: 1, budget: 3, .. },));
+    match d1.effects.iter().find(|effect| matches!(effect, Decision::DispatchAttempt { .. })) {
+        Some(Decision::DispatchAttempt { stage, candidate, transformation, .. }) => {
+            assert_eq!(*stage, StageId::Verify, "the retry is the same stage");
+            assert_eq!(*candidate, Some(captured.tree), "and aims at the same candidate");
+            assert_eq!(transformation.checkout, captured.checkout);
+        }
+        other => panic!("expected a same-stage redispatch, got {other:?}"),
+    }
+    assert!(
+        !d1.effects
+            .iter()
+            .any(|effect| matches!(effect, Decision::RecordWedge { .. } | Decision::RevokeResolution { .. })),
+        "a fault below the ceiling wedges nothing and revokes no claim",
+    );
+    let cursor = after1.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).copied().unwrap();
+    assert_eq!(cursor.attempts, 1, "ordinary attempts do not move");
+    assert_eq!(cursor.repair_rolls, 0, "repair rolls do not move");
+    assert_eq!(cursor.candidate, Some(captured), "the candidate does not move");
+    assert_eq!(cursor.seen_verify_failures, VerifyFailureSet::EMPTY, "no verifier history is written");
+    assert_eq!(after1.member_machinery(&bloom, &workpiece("wp")).unwrap().rolls, 1);
+
+    let (replayed, d_replay) = step(&after1, &fault("fault-1", 60));
+    assert!(matches!(d_replay.outcome, Outcome::Duplicate));
+    assert_eq!(replayed.member_machinery(&bloom, &workpiece("wp")).unwrap().rolls, 1);
+
+    let (after2, _) = step(&after1, &fault("fault-2", 61));
+    assert_eq!(after2.member_machinery(&bloom, &workpiece("wp")).unwrap().rolls, 2);
+    let cursor = after2.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).copied().unwrap();
+    assert_eq!(cursor.attempts, 1);
+    assert_eq!(cursor.repair_rolls, 0);
+
+    let (after3, d3) = step(&after2, &fault("fault-3", 62));
+    assert!(matches!(d3.outcome, Outcome::MachineryWedged { stage: StageId::Verify, rolls: 3, budget: 3, .. },));
+    assert!(
+        !d3.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
+        "the terminal fault dispatches nothing further",
+    );
+    let record = after3.blooms.get(&bloom).unwrap();
+    let wedge = record.wedged.get(&workpiece("wp")).expect("the machinery ceiling records a wedge");
+    assert_eq!(wedge.stage, StageId::Verify);
+    assert_eq!(wedge.evidence, digest(62));
+    let cursor = record.progress.get(&workpiece("wp")).copied().unwrap();
+    assert_eq!(cursor.attempts, 1, "even the terminal fault charges the work budget nothing");
+    assert_eq!(cursor.repair_rolls, 0);
+    assert_eq!(cursor.candidate, Some(captured));
+}
+
 // ADR-0153 — the owner's answer to a parked bloom re-arms the review cycle:
 // adopting the park question releases the hold, clears the marker, resets the
 // roll cursor, and dispatches a fresh full review from the still-held fold.

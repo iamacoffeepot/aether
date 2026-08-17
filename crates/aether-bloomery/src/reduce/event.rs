@@ -539,6 +539,34 @@ pub enum Fact {
         /// The member to re-probe.
         workpiece: WorkpieceId,
     },
+    /// A dispatched member stage reported that its executor could not judge
+    /// the subject at all (ADR-0195).
+    ///
+    /// Distinct from a failing [`Fact::AttemptCompleted`] or
+    /// [`Fact::VerifyFailed`] because no candidate was judged: the reducer
+    /// records the fault against the member's current stage and retries the
+    /// same artifact under a fresh order while the sealed stage budget allows,
+    /// then records a wedge whose cause is machinery. It never spends
+    /// [`attempts`](crate::StageProgress::attempts),
+    /// [`repair_rolls`](crate::StageProgress::repair_rolls), moves the
+    /// candidate, or dispatches Refine — an executor outage is not something
+    /// a member repair lap can fix.
+    ///
+    /// Appended past [`Fact::ResumeHostFault`] so the prior facts' wire
+    /// discriminants are unchanged.
+    MemberExecutorFault {
+        /// The bloom whose member could not run.
+        bloom: BloomId,
+        /// The member sitting at the named stage.
+        workpiece: WorkpieceId,
+        /// The stage the faulting attempt ran — must be the member's current
+        /// cursor stage, or the report is a stale/mismatched result.
+        stage: StageId,
+        /// The fault evidence, bound to the member's current subject — the
+        /// reducer refuses a fault naming any other subject, so a report from
+        /// a superseded candidate cannot spend a newer one's retries.
+        evidence: Evidence,
+    },
 }
 
 impl Fact {

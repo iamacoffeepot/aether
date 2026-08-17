@@ -77,6 +77,17 @@ pub struct Snapshot {
     /// [`Decision::RecordSpendQuiesce`] folds it back on replay.
     #[serde(default)]
     pub spend_quiesce: Option<SpendQuiesce>,
+    /// Per-member machinery-fault series, keyed by bloom then workpiece
+    /// (ADR-0195). Folded from [`Decision::RecordMemberMachinery`].
+    ///
+    /// Counted apart from [`StageProgress::attempts`] and
+    /// [`StageProgress::repair_rolls`] because an executor that could not run
+    /// judged no candidate. Snapshot-level rather than a [`BloomRecord`] field
+    /// so every existing `BloomRecord { … }` literal stays compiling, the
+    /// `member_checkpoints` precedent. `#[serde(default)]` is the same
+    /// JSON-reader rescue.
+    #[serde(default)]
+    pub member_machinery: BTreeMap<BloomId, BTreeMap<WorkpieceId, MemberMachineryFault>>,
 }
 
 impl Snapshot {
@@ -94,6 +105,29 @@ impl Snapshot {
     pub fn member_checkpoint(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<CandidateRef> {
         self.member_checkpoints.get(bloom)?.get(workpiece).copied()
     }
+
+    /// The machinery-fault series recorded for `workpiece` in `bloom`.
+    #[must_use]
+    pub fn member_machinery(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<MemberMachineryFault> {
+        self.member_machinery.get(bloom)?.get(workpiece).copied()
+    }
+}
+
+/// A member's run of executor faults against one stage (ADR-0195) — how many
+/// times the dispatched gate could not judge that member, and what the latest
+/// of them reported.
+///
+/// Keyed to the stage rather than to the bloom: leaving the stage begins a
+/// fresh series, so a member that advanced after an outage is not carrying
+/// the previous stage's spent retries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct MemberMachineryFault {
+    /// The stage the faults are against.
+    pub stage: StageId,
+    /// How many faults this stage has taken, the latest one included.
+    pub rolls: u32,
+    /// The latest fault report's artifact digest.
+    pub evidence: Digest,
 }
 
 /// The per-bloom projection record.
@@ -594,13 +628,29 @@ impl Snapshot {
             }
             Decision::ReleaseHold { .. } | Decision::RecordReviewPark { .. } => self.apply_hold_effect(effect),
             Decision::AdvanceStage { bloom, workpiece, progress } => {
-                if let Some(record) = self.blooms.get_mut(bloom) {
+                let was_wedged = if let Some(record) = self.blooms.get_mut(bloom) {
                     record.progress.insert(workpiece.clone(), *progress);
                     // A moving cursor is a member that is dispatching again, so it
                     // is by definition no longer wedged. This is the only way out
                     // of the wedged set — there is no clearing decision, because
                     // every route back into the line already writes a cursor.
-                    record.wedged.remove(workpiece);
+                    record.wedged.remove(workpiece).is_some()
+                } else {
+                    false
+                };
+                // A grant or stage change starts a fresh machinery series
+                // (ADR-0195): the operator repaired the host, or the member
+                // left the stage the faults were against. A same-stage work
+                // retry keeps the series — the two axes are independent.
+                let stage_changed = self
+                    .member_machinery
+                    .get(bloom)
+                    .and_then(|by_member| by_member.get(workpiece))
+                    .is_some_and(|fault| fault.stage != progress.stage);
+                if was_wedged || stage_changed {
+                    if let Some(by_member) = self.member_machinery.get_mut(bloom) {
+                        by_member.remove(workpiece);
+                    }
                 }
             }
             Decision::RecordWedge { bloom, workpiece, wedge } => {
@@ -691,6 +741,12 @@ impl Snapshot {
             Decision::RecordMemberDependencies { .. } => self.apply_graph_effect(effect),
             Decision::RecordHostFault { .. } | Decision::ClearHostFault { .. } => self.apply_host_fault_effect(effect),
             Decision::RecordCandidateVehicle { .. } => self.apply_vehicle_effect(effect),
+            Decision::RecordMemberMachinery { bloom, workpiece, stage, rolls, evidence } => {
+                self.member_machinery.entry(*bloom).or_default().insert(
+                    workpiece.clone(),
+                    MemberMachineryFault { stage: *stage, rolls: *rolls, evidence: *evidence },
+                );
+            }
             Decision::EmitReceipt(projected) => {
                 if let Some(record) = self.blooms.get_mut(&projected.receipt.bloom) {
                     record.status = BloomStatus::Landed;
@@ -1082,8 +1138,18 @@ impl BloomRecord {
             // fresh fold starts over rather than inheriting the previous fold's
             // spent retries.
             EvidenceKind::ExecutorFault => {
-                self.aggregate_fault =
-                    Some(AggregateReviewFault::next(self.aggregate_fault.as_ref(), evidence.subject, evidence.detail));
+                // Only the bloom-scoped aggregate-review series folds here
+                // (ADR-0176). A member-stage fault (ADR-0195) binds a member
+                // subject, not the held fold, and records its roll via
+                // `RecordMemberMachinery`. Folding every ExecutorFault here
+                // would charge the critic's series for a member-stage outage.
+                if self.integration.as_ref().is_some_and(|fold| fold.tree == evidence.subject) {
+                    self.aggregate_fault = Some(AggregateReviewFault::next(
+                        self.aggregate_fault.as_ref(),
+                        evidence.subject,
+                        evidence.detail,
+                    ));
+                }
             }
             EvidenceKind::Approval
             | EvidenceKind::VerificationResult
