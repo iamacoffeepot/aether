@@ -8,13 +8,13 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomId, Digest, Event, Fact, IdempotencyKey, IntegratePayload, MemberCandidate, Topic, WorkpieceId,
+    BloomId, Digest, Event, Fact, IdempotencyKey, IntegratePayload, MemberCandidate, SplicePayload, Topic, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitDataApi, GitSource, MainlineRef, MergeResult, short_hex};
 use aether_data::wire::{from_bytes, to_vec};
 
-use super::drain_and_integrate;
+use super::{drain_and_integrate, drain_and_splice};
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::SourceShell;
 use crate::bloomery::outbox::TopicOutbox;
@@ -136,6 +136,49 @@ fn a_multi_member_fold_merges_every_members_candidate() {
     assert_ne!(tree, first, "nor the first member's — the fold combined them");
     assert_ne!(head, tree, "the landable head stays a distinct commit digest");
     assert_eq!(lineage, vec![first, second], "the lineage records every member's candidate, in member order");
+}
+
+// ADR-0196 G2 — a multi-tip join merges the named tips onto a scratch
+// branch and admits SpliceAssembled, not the weave's Resolve. Catches
+// routing a structural join through the bloom integration branch (which
+// would steal the weave's resume position) or skipping assembly entirely.
+#[test]
+fn a_multi_tip_join_admits_splice_assembled_not_resolve() {
+    let (first, second) = (digest(0xAB), digest(0xAC));
+    let (fake, base) = seeded(&first);
+    fake.seed_git_object(&second);
+    let bloom = BloomId(digest(1));
+    seed_candidate_branch(&fake, &bloom, "wp-a", "tree-a");
+    seed_candidate_branch(&fake, &bloom, "wp-c", "tree-c");
+    let source = shell(fake);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let payload = SplicePayload {
+        bloom: bloom.0,
+        workpiece: WorkpieceId("wp-b".into()),
+        base,
+        members: vec![
+            MemberCandidate { workpiece: WorkpieceId("wp-a".into()), candidate: first },
+            MemberCandidate { workpiece: WorkpieceId("wp-c".into()), candidate: second },
+        ],
+        adopt_from: None,
+    };
+    let sequence = store.enqueue_topic(Topic::Splice, &to_vec(&payload).unwrap()).unwrap();
+
+    let (admits, ack_through) = drain_and_splice(&mut store, &source, None).unwrap();
+
+    assert_eq!(admits.len(), 1, "a clean join admits one assembled splice");
+    assert_eq!(ack_through, Some(sequence), "the spliced entry is acked");
+    let event: Event = from_bytes(&admits[0].event).unwrap();
+    match event.fact {
+        Fact::SpliceAssembled { bloom: assembled_bloom, workpiece, tree, head } => {
+            assert_eq!(assembled_bloom, bloom);
+            assert_eq!(workpiece.0, "wp-b");
+            assert_ne!(tree, first, "the assembled tree is not a single tip");
+            assert_ne!(tree, second, "nor the other tip — the host merged them");
+            assert_ne!(head, tree, "the checkout commit stays distinct from the tree");
+        }
+        other => panic!("expected Fact::SpliceAssembled, got {other:?}"),
+    }
 }
 
 // A successor that inherited its claims has no candidate refs of its own — a

@@ -57,7 +57,18 @@ pub enum ExecutionStatus {
     /// The run is dispatched but not yet started.
     Queued,
     /// The run is in progress.
-    Running,
+    ///
+    /// `last_progress_unix_millis` is a host-observed liveness signal, not a
+    /// claim that the worker is idle. `None` means this backend exposes no
+    /// trustworthy live progress (the Actions artifact transport, a mechanical
+    /// lane that does not stream a transcript, or a local model lane whose
+    /// transcript is absent, unreadable, or stamped in the future) — never that
+    /// the worker has gone silent. Only a `Some` timestamp is a heartbeat.
+    Running {
+        /// Unix-millisecond modification time of the backend's live progress
+        /// signal, when it has one.
+        last_progress_unix_millis: Option<u64>,
+    },
     /// The run finished with a concluded result.
     Completed {
         /// The concluded result.

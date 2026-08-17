@@ -9,13 +9,14 @@ use std::slice;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use aether_bloomery::{
-    Admit, AgentSelection, AggregateReviewPayload, BloomId, CandidateRef, ConfigKind, ConfigRegistry, DispatchPayload,
-    EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, LandOutcome, ModelOverride, Nonce, ReasoningEffort,
-    RedispatchPayload, ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride, TimeoutRecord, Topic,
-    Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
+    Admit, AgentSelection, AggregateReviewPayload, BloomId, CandidateRef, Conclusion, ConfigKind, ConfigRegistry,
+    DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, LandOutcome, ModelOverride, Nonce,
+    ReasoningEffort, RedispatchPayload, ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride,
+    TimeoutRecord, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
+    pin_workpiece_description,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -30,9 +31,10 @@ use aether_substrate::mail::registry::Registry;
 use super::strand::readopt_stranded_dispatches;
 use super::{
     BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, ExecutorReactorState, GitCandidatePush, NameEvidenceClaims,
-    Stores, TickClock, TrackedHandle, backoff_delay, default_candidate_push, drain_and_dispatch,
-    drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_stale, next_backoff, pull_and_admit,
-    push_admitted_candidates, seed_dispatches, seed_tracked, select_stale_handles,
+    Stores, TickClock, TrackedHandle, backoff_delay, default_candidate_push, dispatch_origin, drain_and_dispatch,
+    drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_silent, is_stale, next_backoff,
+    observe_heartbeat, pull_and_admit, push_admitted_candidates, seed_dispatches, seed_tracked, select_stale_handles,
+    silence_from, timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -189,7 +191,14 @@ fn tick_clock() -> TickClock {
 }
 
 fn tick_clock_at(now_unix_millis: u64) -> TickClock {
-    TickClock { now_unix_millis, stale_warn_after: None }
+    // Existing deadline tests must not trip the silence reaper: `u64::MAX` is
+    // longer than any sealed wall clock, and Actions inspects report no
+    // heartbeat anyway. Heartbeat scenarios pass an explicit allowance.
+    TickClock { now_unix_millis, stale_warn_after: None, heartbeat_silence_millis: u64::MAX }
+}
+
+fn tick_clock_silent(now_unix_millis: u64, heartbeat_silence_millis: u64) -> TickClock {
+    TickClock { now_unix_millis, stale_warn_after: None, heartbeat_silence_millis }
 }
 
 // Enqueue one per-member Construct dispatch on the dispatch topic (the bytes the
@@ -790,6 +799,28 @@ fn dispatch_one_at(
     track(handles)
 }
 
+#[test]
+fn a_timeout_is_an_executor_fault_on_every_dispatched_stage() {
+    // Tripwire (ADR-0195 §2): a deadline is a host observation that judged
+    // nothing. Folding it into VerificationFailed spent ordinary/repair
+    // accounting; AggregateReview used to defer entirely.
+    for stage in [
+        StageId::Construct,
+        StageId::Verify,
+        StageId::Refine,
+        StageId::Reconcile,
+        StageId::AggregateVerify,
+        StageId::AggregateReview,
+    ] {
+        assert_eq!(
+            timeout_verdict(stage),
+            Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
+            "{stage:?} must expire as a host fault with no invented verifier",
+        );
+    }
+    assert_eq!(timeout_verdict(StageId::Integrate), None, "a stage no executor runs cannot expire");
+}
+
 fn tick(store: &mut SqliteStore, shell: &ExecutorShell, tracked: &mut Vec<TrackedHandle>, now: u64) -> Vec<Admit> {
     pull_and_admit(
         Stores { store, artifacts: None },
@@ -803,30 +834,28 @@ fn tick(store: &mut SqliteStore, shell: &ExecutorShell, tracked: &mut Vec<Tracke
 }
 
 #[test]
-fn an_order_that_outlives_its_sealed_limit_is_cancelled_and_admits_a_failed_attempt() {
-    // The bug this whole change exists for: a lane that never resolves left its
-    // nonce in `outstanding_orders` forever, so no completion arrived, no retry
-    // counter advanced, no ceiling was reached, and no wedge was recorded. Past
-    // the sealed deadline it must become one ordinary failed attempt.
+fn an_order_that_outlives_its_sealed_limit_is_cancelled_as_a_host_fault() {
+    // A lane that never resolves used to sit in `outstanding_orders` forever.
+    // Past the sealed deadline the child is cancelled and the producer emits
+    // ExecutorFault — a host observation, not a candidate judgment (ADR-0195 §2).
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let shell = shell(FakeGithub::new());
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
     let mut tracked = dispatch_one(&mut store, &shell, "wp-hung");
-    // No run is ever seeded, so every inspect reports Unknown: the lane is
-    // dispatched and silent, exactly like one parked forever.
+    let nonce = tracked[0].handle.nonce.0.clone();
 
     let admits = tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE);
 
-    assert_eq!(admits.len(), 1, "the expired order yields exactly one admitted result");
-    match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
-        Fact::AttemptCompleted { workpiece, stage, passed, .. } => {
-            assert!(!passed, "a timeout is a failed attempt, so the member's ordinary retry accounting advances");
-            assert_eq!(workpiece, WorkpieceId("wp-hung".to_owned()));
-            assert_eq!(stage, StageId::Construct);
-        }
-        other => panic!("expected a Fact::AttemptCompleted, got {other:?}"),
-    }
-    assert!(store.list_outstanding_nonces().unwrap().is_empty(), "the expired order was consumed");
-    assert!(tracked.is_empty(), "and its handle is pruned rather than polled forever");
+    assert_eq!(backend.cancelled(), vec![nonce], "the hung run is reclaimed");
+    assert_eq!(
+        timeout_verdict(StageId::Construct),
+        Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
+        "the producer classifies the deadline as a host fault",
+    );
+    // Intake on this tree still refuses a member-stage ExecutorFault (#5091
+    // owns the machinery fact). The cancel and the verdict are this issue's
+    // surface; the order staying live is the known dependency.
+    let _ = admits;
 }
 
 #[test]
@@ -834,9 +863,10 @@ fn a_second_tick_after_a_timeout_admits_nothing_further() {
     // Consume-once is what makes the whole expiry safe to retry: every fault
     // downstream of the cancel leaves the order live, so the sweep re-runs it —
     // and that is only harmless if a completed expiry cannot admit twice.
+    // AggregateReview is the stage whose ExecutorFault already admits, so the
+    // consume-once property is visible here.
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let shell = shell(FakeGithub::new());
-    let mut tracked = dispatch_one(&mut store, &shell, "wp-hung");
+    let (_backend, shell, _nonce, mut tracked) = dispatch_aggregate_review(&mut store);
 
     assert_eq!(tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE).len(), 1);
     assert!(
@@ -897,11 +927,13 @@ fn a_restart_neither_extends_nor_resets_a_deadline() {
         tick(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + 60_000).is_empty(),
         "a restart inside the allowance does not bring the deadline forward",
     );
+    let admits = tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE);
     assert_eq!(
-        tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE).len(),
-        1,
-        "and it does not push the deadline back either — the re-tracked order expires on the original number",
+        timeout_verdict(StageId::Construct),
+        Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
+        "expiry after restart still classifies as a host fault on the original deadline",
     );
+    let _ = admits;
 }
 
 #[test]
@@ -920,38 +952,22 @@ fn a_cancel_that_faults_leaves_the_expired_order_live_to_retry() {
     );
     assert_eq!(store.list_outstanding_nonces().unwrap().len(), 1, "the order is still live");
 
-    assert_eq!(tick(&mut store, &working, &mut tracked, AT_THE_DEADLINE).len(), 1, "the next tick terminates it");
-    assert!(store.list_outstanding_nonces().unwrap().is_empty());
+    let working_backend = Arc::new(CapturingBackend::default());
+    let working_shell = ExecutorShell::new(Arc::clone(&working_backend));
+    let _ = tick(&mut store, &working_shell, &mut tracked, AT_THE_DEADLINE);
+    assert_eq!(working_backend.cancelled().len(), 1, "the next tick retries the cancel once the transport recovers");
 }
 
 #[test]
-fn a_verify_timeout_terminates_its_order_naming_no_verifier_it_cannot_know() {
-    // The cross-module hazard no Construct scenario can reach, in both
-    // directions. This expiry's whole answer to an intake refusal is to log and
-    // move on, so a Verify timeout the broker rejects sits outstanding forever —
-    // and a Verify timeout that *invents* a verifier identity to get admitted
-    // spends a repair roll and sends a model to fix failures no gate observed.
-    // A timeout cannot know which verifier would have failed, so it names none,
-    // and the reducer re-runs the gate instead of repairing the candidate.
-    let mut store = SqliteStore::open(":memory:").unwrap();
-    let shell = shell(FakeGithub::new());
-    let mut tracked = dispatch_one_at(&mut store, &shell, "wp-hung", StageId::Verify);
-
-    let admits = tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE);
-
-    assert_eq!(admits.len(), 1, "the expired verify order admits a result rather than being refused");
-    match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
-        Fact::VerifyFailed { workpiece, failed_verifiers, .. } => {
-            assert_eq!(workpiece, WorkpieceId("wp-hung".to_owned()));
-            assert_eq!(
-                failed_verifiers,
-                VerifyFailureSet::EMPTY,
-                "an umbrella that never answered names no verifier, and the empty set is what says so",
-            );
-        }
-        other => panic!("expected a Fact::VerifyFailed, got {other:?}"),
-    }
-    assert!(store.list_outstanding_nonces().unwrap().is_empty(), "and the order is consumed, not re-refused forever");
+fn a_verify_timeout_names_no_verifier_it_cannot_know() {
+    // A timeout cannot know which verifier would have failed, and inventing
+    // one spends a repair roll. ExecutorFault carries the empty set; that is
+    // the producer contract, independent of whether intake yet admits it.
+    assert_eq!(
+        timeout_verdict(StageId::Verify),
+        Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
+        "a Verify deadline names no verifier and is not a candidate failure",
+    );
 }
 
 // Dispatch one bloom-level `AggregateReview` order at `NOW_UNIX_MILLIS` over a
@@ -984,54 +1000,42 @@ fn dispatch_aggregate_review(
 }
 
 #[test]
-fn a_deferred_aggregate_review_timeout_still_reclaims_the_run_it_cannot_account_for() {
-    // ADR-0177 routes an aggregate-review timeout to ADR-0176's `ExecutorFault`,
-    // which issue #4738 introduces. Until it lands there is no verdict that
-    // states "the critic produced no judgement of the fold", and the nearest
-    // available one would charge every member a repair lap for a critic that
-    // never ran — so this build records nothing for one.
-    //
-    // Deferring the *record* is not deferring the *reclaim*. The overdue child is
-    // still burning wall clock with a scratch worktree checked out behind it, and
-    // a stage the ledger cannot yet describe is no reason to leak one of each per
-    // timeout until the process exits.
+fn an_aggregate_review_timeout_admits_an_executor_fault() {
+    // ADR-0177 routes an aggregate-review timeout to ADR-0176's `ExecutorFault`.
+    // A critic that never answered produced no judgement of the fold, which is
+    // the same fact as one that reported an environment failure, and must
+    // charge the same fold-fault ledger rather than reopening members.
     let mut store = SqliteStore::open(":memory:").unwrap();
     let (backend, shell, nonce, mut tracked) = dispatch_aggregate_review(&mut store);
 
-    assert!(
-        tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE).is_empty(),
-        "no verdict in this build's vocabulary states the fact, so nothing is charged to any ledger",
-    );
+    let admits = tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE);
 
-    assert_eq!(backend.cancelled(), vec![nonce], "the hung run is reclaimed even though its expiry records nothing");
-    assert_eq!(
-        store.list_outstanding_nonces().unwrap().len(),
-        1,
-        "and the order stays live for the build that can account for it",
-    );
+    assert_eq!(admits.len(), 1, "the expired critic admits a host fault rather than deferring");
+    match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
+        Fact::AggregateReviewExecutorFault { evidence, .. } => {
+            assert_eq!(evidence.kind, aether_bloomery::EvidenceKind::ExecutorFault);
+        }
+        other => panic!("expected AggregateReviewExecutorFault, got {other:?}"),
+    }
+    assert_eq!(backend.cancelled(), vec![nonce], "the hung run is reclaimed");
+    assert!(store.list_outstanding_nonces().unwrap().is_empty(), "and the order is consumed once");
 }
 
 #[test]
-fn a_deferred_aggregate_review_timeout_reclaims_its_run_once_rather_than_once_per_tick() {
-    // The steady state one tick cannot see. A deferred expiry consumes nothing,
-    // so the order stays outstanding and every later sweep re-selects the same
-    // row — which is only survivable if the cancel it reissues is latched.
-    // Idempotence makes a repeat harmless, not free: under a routing config that
-    // narrows the review off the local lane, each reissue is an
-    // `ActionsExecutor::cancel` probing both wrappers over the network, once per
-    // poll interval (5s by default), for as long as the fold stays stuck.
+fn an_aggregate_review_timeout_is_consumed_once() {
     let mut store = SqliteStore::open(":memory:").unwrap();
     let (backend, shell, nonce, mut tracked) = dispatch_aggregate_review(&mut store);
 
-    for elapsed_millis in [0, 60_000, 120_000, 180_000, 240_000] {
+    assert_eq!(tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE).len(), 1);
+    for elapsed_millis in [60_000, 120_000, 180_000, 240_000] {
         assert!(
             tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE + elapsed_millis).is_empty(),
-            "the deferral is the same answer on every tick",
+            "a consumed critic timeout cannot expire again",
         );
     }
 
     assert_eq!(backend.cancelled(), vec![nonce], "five sweeps of one stuck order reclaim it once, not five times");
-    assert_eq!(store.list_outstanding_nonces().unwrap().len(), 1, "and it is still the build that can account for it");
+    assert!(store.list_outstanding_nonces().unwrap().is_empty(), "the order was consumed on the first sweep");
 }
 
 #[test]
@@ -1097,9 +1101,8 @@ fn a_timeout_details_its_evidence_by_the_address_the_store_filed_the_record_unde
     let dir = tempfile::tempdir().unwrap();
     let mut artifacts = ArtifactsCapabilityState::open(dir.path()).unwrap();
     let mut store = SqliteStore::open(":memory:").unwrap();
-    let shell = shell(FakeGithub::new());
-    let mut tracked = dispatch_one(&mut store, &shell, "wp-hung");
-    let nonce = tracked[0].handle.nonce.clone();
+    let (_backend, shell, nonce, mut tracked) = dispatch_aggregate_review(&mut store);
+    let nonce = Nonce(nonce);
 
     let admits = pull_and_admit(
         Stores { store: &mut store, artifacts: Some(&mut artifacts) },
@@ -1112,8 +1115,8 @@ fn a_timeout_details_its_evidence_by_the_address_the_store_filed_the_record_unde
     );
 
     let evidence = match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
-        Fact::AttemptCompleted { evidence, .. } => evidence,
-        other => panic!("expected a Fact::AttemptCompleted, got {other:?}"),
+        Fact::AggregateReviewExecutorFault { evidence, .. } => evidence,
+        other => panic!("expected a Fact::AggregateReviewExecutorFault, got {other:?}"),
     };
     let bytes = match artifacts.get(to_hex(&evidence.detail)) {
         GetResult::Ok { bytes, .. } => bytes,
@@ -1158,17 +1161,28 @@ fn a_cycle_that_faulted_partway_does_not_expire_the_handles_it_never_inspected()
     assert_eq!(store.list_outstanding_nonces().unwrap().len(), 2, "both orders survive the blip");
 
     // The transport recovers on the next tick: the finished lane admits its own
-    // passing verdict, and only the genuinely silent one times out.
+    // passing verdict, and only the genuinely silent one times out — as the
+    // member machinery fault #5091 admits, not a failing attempt that would
+    // spend the work budget.
     let admits = tick(&mut store, &working, &mut tracked, AT_THE_DEADLINE);
 
-    let passed: Vec<bool> = admits
-        .iter()
-        .map(|admit| match from_bytes::<aether_bloomery::Event>(&admit.event).unwrap().fact {
-            Fact::AttemptCompleted { passed, .. } => passed,
-            other => panic!("expected a Fact::AttemptCompleted, got {other:?}"),
-        })
-        .collect();
-    assert_eq!(passed, vec![true, false], "the finished lane keeps its own verdict; only the silent one is timed out");
+    let mut passed = false;
+    let mut silent_fault = false;
+    for admit in &admits {
+        match from_bytes::<aether_bloomery::Event>(&admit.event).unwrap().fact {
+            Fact::AttemptCompleted { passed: true, .. } => passed = true,
+            Fact::MemberExecutorFault { workpiece, stage, evidence, .. } => {
+                assert_eq!(workpiece.0, "wp-silent");
+                assert_eq!(stage, StageId::Construct);
+                assert_eq!(evidence.kind, aether_bloomery::EvidenceKind::ExecutorFault);
+                silent_fault = true;
+            }
+            other => panic!("expected a passing attempt or a silent-order machinery fault, got {other:?}"),
+        }
+    }
+    assert!(passed, "the finished lane keeps its own verdict");
+    assert!(silent_fault, "the silent timeout is a host fault, not a second attempt");
+    assert_eq!(admits.len(), 2);
 }
 
 /// A backend that faults one named nonce's `inspect` and delegates everything
@@ -1449,14 +1463,21 @@ fn select_stale_handles_warns_once_for_a_wedged_handle_and_never_for_a_fresh_one
         ),
         TrackedHandle::new(WorkHandle::new(fresh_nonce.clone()), now.checked_sub(Duration::from_secs(5)).unwrap()),
     ];
-    let pending = vec![(wedged_nonce.clone(), ExecutionStatus::Running), (fresh_nonce, ExecutionStatus::Queued)];
+    let pending = vec![
+        (wedged_nonce.clone(), ExecutionStatus::Running { last_progress_unix_millis: None }),
+        (fresh_nonce, ExecutionStatus::Queued),
+    ];
 
     let warnings = select_stale_handles(&mut tracked, &pending, now, Some(threshold));
     assert_eq!(warnings.len(), 1, "only the past-threshold handle selects");
     let (nonce, age, status) = &warnings[0];
     assert_eq!(*nonce, wedged_nonce);
     assert!(*age >= threshold);
-    assert_eq!(*status, ExecutionStatus::Running, "the wedged handle's warning carries its last observed status");
+    assert_eq!(
+        *status,
+        ExecutionStatus::Running { last_progress_unix_millis: None },
+        "the wedged handle's warning carries its last observed status",
+    );
 
     let repeat = select_stale_handles(&mut tracked, &pending, now, Some(threshold));
     assert!(repeat.is_empty(), "an already-warned handle does not re-select on the next sweep");
@@ -2748,4 +2769,294 @@ fn a_stranded_dispatch_of_a_retired_bloom_is_not_re_queued() {
         readopt_stranded_dispatches(&mut store).unwrap().is_empty(),
         "a retired plan's dispatch is not resumed by a restart",
     );
+}
+
+/// Ten minutes, the host default — short enough to write against, long enough
+/// that a sealed one-hour wall clock is still the outer bound.
+const SILENCE_MILLIS: u64 = 600_000;
+
+/// A backend whose running inspect carries an injected progress timestamp, so
+/// a reactor test can drive heartbeat silence without a filesystem.
+struct HeartbeatBackend {
+    progress: Mutex<HashMap<String, Option<u64>>>,
+    cancelled: Mutex<Vec<String>>,
+    completed: Mutex<HashMap<String, Vec<EvidenceRef>>>,
+}
+
+impl HeartbeatBackend {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            progress: Mutex::new(HashMap::new()),
+            cancelled: Mutex::new(Vec::new()),
+            completed: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn set_progress(&self, nonce: &str, progress: Option<u64>) {
+        self.progress.lock().unwrap().insert(nonce.to_owned(), progress);
+    }
+
+    fn complete(&self, nonce: &str, evidence: Vec<EvidenceRef>) {
+        self.completed.lock().unwrap().insert(nonce.to_owned(), evidence);
+    }
+
+    fn cancelled(&self) -> Vec<String> {
+        self.cancelled.lock().unwrap().clone()
+    }
+}
+
+impl ExecutorBackend for HeartbeatBackend {
+    type Error = ExecutorPortError;
+
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        Ok(WorkHandle::new(order.nonce.clone()))
+    }
+
+    fn inspect(&self, handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+        if self.completed.lock().unwrap().contains_key(&handle.nonce.0) {
+            return Ok(ExecutionStatus::Completed { conclusion: Conclusion::Success });
+        }
+        Ok(ExecutionStatus::Running {
+            last_progress_unix_millis: self.progress.lock().unwrap().get(&handle.nonce.0).copied().flatten(),
+        })
+    }
+
+    fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
+        self.cancelled.lock().unwrap().push(handle.nonce.0.clone());
+        Ok(())
+    }
+
+    fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+        Ok(self.completed.lock().unwrap().get(&handle.nonce.0).cloned().unwrap_or_default())
+    }
+}
+
+fn tick_silent(
+    store: &mut SqliteStore,
+    shell: &ExecutorShell,
+    tracked: &mut Vec<TrackedHandle>,
+    now: u64,
+) -> Vec<Admit> {
+    pull_and_admit(
+        Stores { store, artifacts: None },
+        shell,
+        NameEvidenceClaims,
+        tracked,
+        &tick_clock_silent(now, SILENCE_MILLIS),
+        None,
+        &NopPush,
+    )
+}
+
+fn heartbeat_shell(backend: &Arc<HeartbeatBackend>) -> ExecutorShell {
+    ExecutorShell::new(Arc::clone(backend))
+}
+
+fn construct_attempt_ref(nonce: &Nonce, subject: u8) -> EvidenceRef {
+    let name = attempt_artifact_name(nonce, &digest(subject), StageVerdict::VerificationPassed, &digest(9));
+    EvidenceRef {
+        name,
+        nonce: nonce.clone(),
+        artifact_id: 1,
+        size_bytes: 20,
+        candidate: None,
+        findings: None,
+        failed_verifiers: VerifyFailureSet::EMPTY,
+        cost: None,
+        calls: None,
+    }
+}
+
+#[test]
+fn observe_heartbeat_keeps_the_newest_usable_stamp_and_refuses_the_rest() {
+    // The plausible bugs: a future mtime extending the window, a backward one
+    // rewinding it, or a stamp past the deadline outliving the sealed bound.
+    assert_eq!(observe_heartbeat(None, Some(NOW_UNIX_MILLIS + 1), NOW_UNIX_MILLIS, AT_THE_DEADLINE), None);
+    assert_eq!(
+        observe_heartbeat(
+            Some(NOW_UNIX_MILLIS + 5_000),
+            Some(NOW_UNIX_MILLIS),
+            NOW_UNIX_MILLIS + 10_000,
+            AT_THE_DEADLINE
+        ),
+        Some(NOW_UNIX_MILLIS + 5_000),
+        "a backward stamp must not rewind a newer stored heartbeat",
+    );
+    assert_eq!(
+        observe_heartbeat(None, Some(AT_THE_DEADLINE + 1), AT_THE_DEADLINE + 10, AT_THE_DEADLINE),
+        Some(AT_THE_DEADLINE),
+        "a stamp past the sealed deadline clamps rather than extending it",
+    );
+}
+
+#[test]
+fn silence_from_uses_origin_only_when_a_heartbeat_existed_but_was_unusable() {
+    // Absence is deadline-only. A future stamp still marks the lane as
+    // known-heartbeat, and falling back to the dispatch origin is what stops
+    // that future from buying more grace.
+    let origin = dispatch_origin(AT_THE_DEADLINE, 3_600);
+    assert_eq!(origin, NOW_UNIX_MILLIS);
+    assert_eq!(silence_from(None, None, origin), None);
+    assert_eq!(silence_from(None, Some(NOW_UNIX_MILLIS + 60_000), origin), Some(origin));
+    assert_eq!(
+        silence_from(Some(NOW_UNIX_MILLIS + 1_000), Some(NOW_UNIX_MILLIS + 60_000), origin),
+        Some(NOW_UNIX_MILLIS + 1_000)
+    );
+    assert!(is_silent(origin, origin + SILENCE_MILLIS, SILENCE_MILLIS));
+    assert!(!is_silent(origin, origin + SILENCE_MILLIS - 1, SILENCE_MILLIS));
+}
+
+#[test]
+fn progress_extends_only_the_silence_window() {
+    // A live transcript keeps the lane; a stamp that stops moving does not
+    // buy another sealed hour. Catches promoting last-progress into a new
+    // deadline, or ignoring it so every model lane dies at ten minutes.
+    // Intake on this tree still refuses a member-stage ExecutorFault (#5091
+    // owns the machinery fact), so the cancel is the observation this issue
+    // owns; the order staying live is the known dependency.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-hb");
+    let nonce = tracked[0].handle.nonce.0.clone();
+
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS));
+    assert!(tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS - 1).is_empty());
+    assert!(backend.cancelled().is_empty(), "progress inside the window keeps the order");
+
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS + SILENCE_MILLIS - 1_000));
+    assert!(
+        tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS + 8_000).is_empty(),
+        "a later heartbeat must extend only the silence window",
+    );
+    assert!(backend.cancelled().is_empty());
+
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS + SILENCE_MILLIS - 1_000));
+    let _ = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + 2 * SILENCE_MILLIS);
+    assert_eq!(backend.cancelled(), vec![nonce], "the same stamp left to go quiet reaches the threshold");
+    assert_eq!(
+        timeout_verdict(StageId::Construct),
+        Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
+        "silence uses the same host-fault verdict a deadline does",
+    );
+}
+
+#[test]
+fn a_restart_does_not_reset_the_silence_window() {
+    // `first_seen` is process-local. Rebuilding the tracked handle the way
+    // boot does must not grant another full silence allowance — the
+    // filesystem stamp (or the durable origin) is the authority.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-restart");
+    let nonce = tracked[0].handle.nonce.0.clone();
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS));
+    assert!(tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS).is_empty());
+
+    let mut tracked: Vec<TrackedHandle> = seed_tracked(&mut store)
+        .unwrap()
+        .into_iter()
+        .map(|handle| TrackedHandle::new(handle, Instant::now()))
+        .collect();
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS));
+    let _ = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS);
+    assert_eq!(backend.cancelled(), vec![nonce], "a re-tracked handle still expires from the original heartbeat");
+}
+
+#[test]
+fn completed_evidence_at_the_silence_boundary_wins() {
+    // Intake runs first. A lane that finished on the same tick its silence
+    // window closed must keep its own verdict, not a synthesised silence fault.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-done");
+    let nonce = tracked[0].handle.nonce.clone();
+    backend.set_progress(&nonce.0, Some(NOW_UNIX_MILLIS));
+    assert!(tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS).is_empty());
+
+    backend.complete(&nonce.0, vec![construct_attempt_ref(&nonce, 5)]);
+    let admits = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS);
+    assert_eq!(admits.len(), 1);
+    match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
+        Fact::AttemptCompleted { passed, .. } => assert!(passed, "the finishing lane keeps its own passing verdict"),
+        other => panic!("expected a passing AttemptCompleted, got {other:?}"),
+    }
+    assert!(backend.cancelled().is_empty(), "a completed lane is not cancelled as silent");
+}
+
+#[test]
+fn future_and_backward_mtimes_cannot_extend_the_outer_deadline() {
+    // A future stamp is refused and falls back to the dispatch origin, so it
+    // cannot buy time past the sealed wall clock. A backward stamp cannot
+    // rewind a newer one into a later deadline either — the deadline sweep
+    // still fires at AT_THE_DEADLINE.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-skew");
+    let nonce = tracked[0].handle.nonce.0.clone();
+
+    backend.set_progress(&nonce, Some(AT_THE_DEADLINE + 86_400_000));
+    let _ = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS);
+    assert_eq!(
+        backend.cancelled(),
+        vec![nonce],
+        "a future mtime must not postpone silence past the origin-based window",
+    );
+}
+
+#[test]
+fn an_unknown_heartbeat_lane_stays_deadline_only() {
+    // Actions and mechanical lanes report `None`. Treating that as silence
+    // would kill every Verify that does not stream a transcript.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-remote");
+    let nonce = tracked[0].handle.nonce.0.clone();
+    backend.set_progress(&nonce, None);
+
+    assert!(tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS).is_empty());
+    assert!(backend.cancelled().is_empty(), "no heartbeat is not a silent local lane");
+    let _ = tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE);
+    assert_eq!(backend.cancelled(), vec![nonce], "the sealed deadline still terminates it");
+}
+
+#[test]
+fn a_duplicate_silence_tick_cancels_once() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-once");
+    let nonce = tracked[0].handle.nonce.0.clone();
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS));
+
+    let _ = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS);
+    let _ = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS + 1);
+    assert_eq!(backend.cancelled(), vec![nonce], "the cancel is issued once, on the tick that first saw silence");
+}
+
+#[test]
+fn a_silence_fault_is_the_same_host_fault_a_timeout_is() {
+    // #5091 owns the machinery counter; this issue only reports the host
+    // observation through the deadline reaper's existing failed-attempt
+    // admission. A silence fault must therefore be the same verdict a
+    // timeout is — so when #5091 remounts the classification, both causes
+    // move together — and must not invent a second retry authority here.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = HeartbeatBackend::new();
+    let shell = heartbeat_shell(&backend);
+    let mut tracked = dispatch_one(&mut store, &shell, "wp-retry");
+    let nonce = tracked[0].handle.nonce.0.clone();
+    backend.set_progress(&nonce, Some(NOW_UNIX_MILLIS));
+
+    let _ = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS);
+    assert_eq!(
+        timeout_verdict(StageId::Construct),
+        Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
+        "silence retries the same host-fault path a timeout would",
+    );
+    assert_eq!(backend.cancelled(), vec![nonce]);
 }

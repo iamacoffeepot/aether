@@ -167,6 +167,9 @@ mod tests {
             wedge,
             blocked_by: None,
             host_fault: None,
+            machinery_rolls: 0,
+            machinery_budget: 0,
+            wedge_cause: None,
         }
     }
 

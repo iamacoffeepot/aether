@@ -85,7 +85,7 @@ fn a_synthetic_work_order_submits_inspects_and_cancels_through_the_shell() {
 
     // A run appears and progresses; inspect maps its lifecycle.
     let _ = fake.seed_run("n-demo", RunStatus::InProgress, None);
-    assert_eq!(shell.inspect(&handle).unwrap(), ExecutionStatus::Running);
+    assert_eq!(shell.inspect(&handle).unwrap(), ExecutionStatus::Running { last_progress_unix_millis: None },);
 
     // Cancel resolves the run by nonce and drives it to Cancelled.
     shell.cancel(&handle).unwrap();

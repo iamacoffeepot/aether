@@ -44,6 +44,9 @@ pub struct ExecutorReactorSetup {
     pub artifacts_root: Option<String>,
     pub poll_interval_secs: u64,
     pub stale_warn_after_secs: u64,
+    /// How long a local model lane may stay silent before this host cancels it
+    /// (ADR-0195 §8). Already validated nonzero at chassis boot.
+    pub heartbeat_silence_secs: u64,
     pub repository: Option<(String, String)>,
     pub disabled_missing: Vec<&'static str>,
     /// The candidate-ref push seam (ADR-0152); chosen at boot by

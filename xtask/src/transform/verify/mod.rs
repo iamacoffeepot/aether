@@ -7,6 +7,7 @@ mod workflow;
 
 use std::fs;
 use std::process::{self, Command};
+use std::time::Instant;
 
 use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 use anyhow::{Context, Result, bail};
@@ -16,7 +17,7 @@ use crate::transform::peak_memory::{self, PeakMemory};
 use crate::transform::sccache::{self, CompilerCache};
 use crate::transform::verify::closure::Closure;
 use crate::transform::verify::scope::Scope;
-use crate::transform::{Evidence, TransformArgs, build_evidence};
+use crate::transform::{Evidence, GateTiming, TransformArgs, build_evidence};
 
 /// One CI-mirroring invocation for a `verify.*` command id, plus the tools it
 /// needs present to run at all (#4706).
@@ -989,6 +990,40 @@ fn run_prepare(
     Ok(Some((prepare_failure_log(id, prepare, &captured), output.status.code().unwrap_or(1))))
 }
 
+/// Wall-clock milliseconds since `started`, saturating at `u64::MAX` so a
+/// clock that ran longer than the field can name still reports a number.
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// A failed prepare's framed member log and exit code. `None` is clear to run.
+type PrepareFailure = Option<(String, i32)>;
+
+/// Prepare-step result plus its own wall-clock share.
+///
+/// `(None, None)` is a member with no prepare. `(Some(log), Some(millis))` is
+/// a prepare that failed. `(None, Some(millis))` is a prepare that ran and
+/// left the member clear to run.
+type TimedPrepare = (PrepareFailure, Option<u64>);
+
+/// Run `invocation`'s prepare step when it has one, and return that step's
+/// own wall-clock share so the gate receipt can split the wasm cross-build
+/// out of the member it precedes.
+fn run_timed_prepare(
+    id: &str,
+    invocation: &VerifyInvocation,
+    cache: Option<&CompilerCache>,
+    peak: &PeakMemory,
+) -> Result<TimedPrepare> {
+    if invocation.prepare.is_none() {
+        return Ok((None, None));
+    }
+
+    let started = Instant::now();
+    let failure = run_prepare(id, invocation, cache, peak)?;
+    Ok((failure, Some(elapsed_millis(started))))
+}
+
 /// The single mechanical-verify path: run the mapped command, capture
 /// stdout+stderr, write evidence, and mirror the verify's own exit status. An
 /// unrecognized command id is an operational failure — it exits non-zero with
@@ -1005,9 +1040,11 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     let scope = Scope::resolve(args.diff_base.as_deref());
     let cache = sccache::detect();
     let peak = peak_memory::detect();
+    let started = Instant::now();
     let output = run_captured(invocation.command(&scope, args.diff_base.as_deref(), cache.as_ref(), &peak))
         .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
     let stderr = peak.take_report(output.stderr);
+    let duration_millis = elapsed_millis(started);
 
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
@@ -1040,7 +1077,8 @@ pub(super) fn run_single(args: &TransformArgs) -> Result<()> {
     let failures = outcome.failure(&args.command).map(VerifyFailureSet::one);
     let evidence =
         build_evidence(&args.command, args.nonce.clone(), passed, Some(exit_code), log_name, findings, failures)
-            .measured_by(cache.as_ref(), &peak);
+            .measured_by(cache.as_ref(), &peak)
+            .timed(duration_millis);
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
 
     if passed {
@@ -1199,6 +1237,7 @@ fn environment_observations(members: &[MemberRun]) -> Option<String> {
 /// (#4895) — recomputing it per member would let a mid-run repository change
 /// give two members two different candidates.
 pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
+    let umbrella_started = Instant::now();
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
     // Preflight before anything runs. A host missing a tool cannot compute what
@@ -1212,9 +1251,12 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
             failed_verifiers: Some(VerifyFailureSet::one(VerifyFailure::Preflight)),
             // A run that refused before its first member compiled nothing, so
             // there is nothing for a cache to have served and nothing whose
-            // memory there was to measure.
+            // memory there was to measure — and no gate ran, so there is no
+            // wall-clock to stamp either.
             sccache: None,
             peak_resident_bytes: None,
+            duration_millis: None,
+            gates: None,
             command: VERIFY_CHECK.to_owned(),
             nonce: args.nonce.clone(),
             status: "fail",
@@ -1245,6 +1287,7 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
 
     let mut log_names = vec![scope_log];
     let mut runs = Vec::with_capacity(verify_check_members().len());
+    let mut gates = Vec::with_capacity(verify_check_members().len());
     let mut first_failure_code: Option<i32> = None;
 
     for &id in verify_check_members() {
@@ -1260,7 +1303,9 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         // it is already covered — the preflight checks the cross-target the
         // pre-build needs — so what is left is the candidate breaking its own
         // build.
-        let run = match run_prepare(id, &invocation, cache.as_ref(), &peak)? {
+        let gate_started = Instant::now();
+        let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, cache.as_ref(), &peak)?;
+        let run = match prepare_failure {
             Some((log, code)) => MemberRun::plain(id, MemberOutcome::Failed, log.into_bytes(), code),
             None => run_member_discriminated(
                 id,
@@ -1271,6 +1316,7 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
                 &mut runner,
             )?,
         };
+        let duration_millis = elapsed_millis(gate_started);
 
         let log_name = format!("{id}.log");
         let log_path = args.out.join(&log_name);
@@ -1281,6 +1327,7 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         }
         log_names.push(log_name);
         runs.push(run);
+        gates.push(GateTiming { command: id.to_owned(), duration_millis, prepare_millis });
     }
 
     let status = umbrella_status(&runs.iter().map(|run| run.outcome).collect::<Vec<MemberOutcome>>());
@@ -1290,13 +1337,17 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         failed_verifiers: (!failures.is_empty()).then_some(failures),
         sccache: cache.as_ref().and_then(CompilerCache::served),
         peak_resident_bytes: peak.peak_resident_bytes(),
+        duration_millis: None,
+        gates: None,
         command: VERIFY_CHECK.to_owned(),
         nonce: args.nonce.clone(),
         status,
         exit_code: Some(first_failure_code.unwrap_or(0)),
         log: log_names.join(", "),
         environment: environment_observations(&runs),
-    };
+    }
+    .timed(elapsed_millis(umbrella_started))
+    .with_gates(gates);
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
 
     if status == "pass" {
@@ -1312,13 +1363,14 @@ mod tests {
         Captured, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner, Scope, VERIFY_CHECK, VerifyInvocation,
         clippy_verdict, closure, distil_diagnostics, effective_exit_code, environment_observations, failed_verifiers,
         member_outcome, member_scope_notice, operational_failure_notice, preflight_tools, prepare_failure_log,
-        render_diagnostics, required_targets, required_tools, run_member_discriminated, umbrella_status,
-        verify_check_members, verify_command, verify_findings, workflow,
+        render_diagnostics, required_targets, required_tools, run_member_discriminated, run_timed_prepare,
+        umbrella_status, verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::iter;
 
     use crate::cargo::WASM_TARGET;
     use crate::transform::construct::{CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS};
+    use crate::transform::peak_memory;
     use crate::transform::review::REVIEW_CRITIC;
     use aether_bloomery::{VerifyFailure, VerifyFailureSet};
 
@@ -1719,6 +1771,18 @@ mod tests {
         assert!(distilled.contains("cargo xtask dist"), "the step that failed is named");
         assert!(distilled.contains("did not run"), "and the member's silence is stated, not inferred");
         assert!(distilled.contains("could not compile `aether-kit-mark`"), "the pre-build's diagnostics survive");
+    }
+
+    #[test]
+    fn a_member_without_a_prepare_step_reports_no_prepare_share() {
+        // Tripwire: timing run_prepare's instant None-return would stamp
+        // prepare_millis: 0 on every gate that never prepared, which reads as
+        // a free wasm cross-build rather than as "this gate has no prepare".
+        let invocation = verify_command("verify.fmt").expect("verify.fmt mapped");
+        let (failure, prepare_millis) = run_timed_prepare("verify.fmt", &invocation, None, &peak_memory::detect())
+            .expect("a member with no prepare is a no-op");
+        assert!(failure.is_none());
+        assert!(prepare_millis.is_none(), "a gate that never prepared must not stamp a prepare share");
     }
 
     #[test]
