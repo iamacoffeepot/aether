@@ -1291,13 +1291,16 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
         dropped: &[WorkpieceId],
     ) -> Result<ClaimOutcome, Self::Error> {
         // Fast-forward-CAS the carried workpiece refs + the admission ref from
-        // predecessor to successor.
+        // predecessor to successor. A ref already at the successor is this same
+        // deterministic transfer's prior attempt — skip it and finish the rest
+        // (issue 5135). A foreign holder still loses the CAS cleanly.
         for (kind, name) in Self::claim_targets(carried, true) {
             let current = self.client.get_ref(&name)?.ok_or_else(|| SourceError::MissingRef(name.clone()))?;
             let holder = self.resolve_holder(&current.sha)?;
+            if holder == *successor {
+                continue;
+            }
             if holder != *predecessor {
-                // A concurrent mutation moved the ref off the predecessor — the
-                // CAS loses cleanly, the ref never momentarily absent.
                 return Ok(ClaimOutcome::Held { ref_kind: kind, held_by: holder });
             }
             // The successor claim commit is parented on the predecessor's, so the
@@ -1307,24 +1310,31 @@ impl<C: GitDataApi + PullRequestApi + GithubApi + IssueStateApi> SourceBackend f
             match self.client.update_ref(&name, &successor_commit, false) {
                 Ok(_) => {}
                 Err(GithubError::Status { status: 422, .. }) => {
-                    return Ok(ClaimOutcome::Held { ref_kind: kind, held_by: self.require_holder(&name)? });
+                    let held_by = self.require_holder(&name)?;
+                    if held_by == *successor {
+                        continue;
+                    }
+                    return Ok(ClaimOutcome::Held { ref_kind: kind, held_by });
                 }
                 Err(error) => return Err(SourceError::Github(error)),
             }
         }
 
         // Fresh-acquire the successor's net-new workpieces (conflicting only on a
-        // foreign hold, since the carried refs already named the predecessor).
+        // foreign hold, since the carried refs already named the predecessor). A
+        // 422 whose holder is already the successor is the same prior-attempt
+        // resume as the carried skip above.
         for workpiece in net_new {
             let name = Self::workpiece_claim_ref(workpiece);
             let commit = self.create_claim_commit(successor, &[])?;
             match self.client.create_ref(&name, &commit) {
                 Ok(_) => {}
                 Err(GithubError::Status { status: 422, .. }) => {
-                    return Ok(ClaimOutcome::Held {
-                        ref_kind: ClaimRefKind::Workpiece(workpiece.clone()),
-                        held_by: self.require_holder(&name)?,
-                    });
+                    let held_by = self.require_holder(&name)?;
+                    if held_by == *successor {
+                        continue;
+                    }
+                    return Ok(ClaimOutcome::Held { ref_kind: ClaimRefKind::Workpiece(workpiece.clone()), held_by });
                 }
                 Err(error) => return Err(SourceError::Github(error)),
             }
@@ -2755,6 +2765,36 @@ mod tests {
         assert_eq!(outcome, ClaimOutcome::Acquired);
         // The carried member and the admission ref now name the successor.
         assert_eq!(source.claim_holder(&claim_ref(&w1)).unwrap(), Some(successor));
+        assert_eq!(source.claim_holder(ADMISSION_REF).unwrap(), Some(successor));
+    }
+
+    #[test]
+    fn transfer_seal_resumes_when_some_carried_refs_already_name_the_successor() {
+        // Tripwire: a prior attempt of this same deterministic transfer moved
+        // k of n refs onto the successor, then failed before the successor
+        // bloom committed. Retry must skip those and finish the rest — not
+        // refuse Held { held_by: successor }, the MembershipConflict observed
+        // live (issue 5135).
+        let fake = FakeGithub::new();
+        let source = git_source(&fake, false);
+        let (predecessor, successor) = (bloom_id(1), bloom_id(2));
+        let (w1, w2, w3) = (workpiece("wp-1"), workpiece("wp-2"), workpiece("wp-3"));
+        source.claim_seal(&predecessor, &[w1.clone(), w2.clone(), w3.clone()]).unwrap();
+        seed_hold(&fake, &claim_ref(&w1), &successor);
+        seed_hold(&fake, &claim_ref(&w2), &successor);
+
+        let outcome =
+            source.transfer_seal(&predecessor, &successor, &[w1.clone(), w2.clone(), w3.clone()], &[], &[]).unwrap();
+
+        assert_eq!(outcome, ClaimOutcome::Acquired);
+        for wp in [&w1, &w2, &w3] {
+            assert_eq!(
+                source.claim_holder(&claim_ref(wp)).unwrap(),
+                Some(successor),
+                "{} completed to the successor",
+                wp.0
+            );
+        }
         assert_eq!(source.claim_holder(ADMISSION_REF).unwrap(), Some(successor));
     }
 
