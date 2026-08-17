@@ -1516,13 +1516,13 @@ mod tests {
     #[test]
     fn a_rejected_repair_is_retagged_in_the_event_bytes() {
         let event = repair_event("aether.bloomery.repair:same");
-        let raw = to_vec(&event).unwrap();
+        let raw = to_vec(&event).expect("a reducer event encodes");
         let decisions =
             Decisions { outcome: Outcome::OperatorRepairRejected(OperatorRepairError::Held), effects: Vec::new() };
 
         let (rewritten, tagged) =
             retag_rejected_repair(&Snapshot::default(), |_| 0, raw.clone(), event.clone(), &decisions)
-                .unwrap()
+                .expect("retag encodes the tagged event")
                 .expect("an unseen refusal is journaled under a new key");
 
         assert_eq!(tagged.idempotency_key.0, "aether.bloomery.repair:same:rejected:Held");
@@ -1542,7 +1542,7 @@ mod tests {
                     effects: Vec::new(),
                 }
             )
-            .unwrap()
+            .expect("retag of an accepted repair cannot fail")
             .expect("an accepted repair is unchanged")
             .1
             .idempotency_key,
@@ -1553,7 +1553,9 @@ mod tests {
         let mut seen = Snapshot::default();
         seen.seen.insert(tagged.idempotency_key);
         assert!(
-            retag_rejected_repair(&seen, |_| 0, raw.clone(), event.clone(), &decisions).unwrap().is_none(),
+            retag_rejected_repair(&seen, |_| 0, raw.clone(), event.clone(), &decisions)
+                .expect("retag of an already-journaled refusal cannot fail")
+                .is_none(),
             "a refusal already journaled under its tagged key is not committed again",
         );
         assert!(
@@ -1564,7 +1566,7 @@ mod tests {
                 event,
                 &decisions
             )
-            .unwrap()
+            .expect("retag of an in-flight tagged commit cannot fail")
             .is_none(),
             "an in-flight tagged commit is treated as already journaled",
         );

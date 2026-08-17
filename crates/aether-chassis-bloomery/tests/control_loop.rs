@@ -807,5 +807,5 @@ fn a_rejected_repair_does_not_shadow_the_same_content_after_release() {
         "the identical repair is accepted without a key override: {accepted:?}",
     );
     let replayed = admit(&mut stream, 11, control, &repair);
-    assert!(matches!(replayed, Outcome::Duplicate), "an accepted repair still consumes the content key: {replayed:?}",);
+    assert!(matches!(replayed, Outcome::Duplicate), "an accepted repair still consumes the content key: {replayed:?}");
 }
