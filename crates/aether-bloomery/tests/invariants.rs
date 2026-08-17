@@ -872,6 +872,11 @@ fn assert_no_member_dispatch(decided: &Decisions, why: &str) {
 // an infinite loop rather than a repair. And the immutability rule (ADR-0191
 // §4): a landing rejection is a fact about the composed tree, so no member's
 // claim may be revoked and no member may be dispatched by it.
+//
+// #5106 is the admission half of the second refusal: the two facts below share
+// a cause string and differ by the head they judged, which is the shape the
+// land reactor now admits under. Under a bloom+cause key the second reduce
+// was `Outcome::Duplicate` and the bloom sat Resolved with its land acked.
 #[test]
 fn a_refused_landing_repairs_the_weave_then_parks_at_the_budget() {
     let base = Snapshot::new(digest(1));
@@ -886,9 +891,9 @@ fn a_refused_landing_repairs_the_weave_then_parks_at_the_budget() {
     let (snapshot, _) = step(&snapshot, &review_passed(bloom, "review", 40));
     assert_eq!(snapshot.blooms.get(&bloom).unwrap().status, BloomStatus::Resolved, "the bloom is awaiting its land");
 
-    let refused = |key: &str, head: u8, detail: u8| {
+    let refused = |head: u8, detail: u8| {
         event(
-            key,
+            &format!("aether.bloomery.landing_rejected:{head}:CI pass,Clippy"),
             Fact::LandingRejected {
                 bloom,
                 evidence: Evidence {
@@ -902,11 +907,11 @@ fn a_refused_landing_repairs_the_weave_then_parks_at_the_budget() {
 
     // A rejection naming a head other than the one being landed is stale.
     assert!(matches!(
-        reduce(&snapshot, &refused("stale", 99, 60), &ResolvedConfigs::default(), &SpendWindow::default()).outcome,
+        reduce(&snapshot, &refused(99, 60), &ResolvedConfigs::default(), &SpendWindow::default()).outcome,
         Outcome::LandingRejectedRefused(LandingRejectedError::SubjectMismatch { .. }),
     ));
 
-    let (after1, d1) = step(&snapshot, &refused("red-1", 41, 60));
+    let (after1, d1) = step(&snapshot, &refused(41, 60));
     assert!(matches!(d1.outcome, Outcome::CompositionRewoven { refused_at: StageId::Land, attempt: 1, .. }));
     assert_no_member_dispatch(&d1, "a refused landing repairs the weave, never a member");
     let record = after1.blooms.get(&bloom).unwrap();
@@ -927,7 +932,11 @@ fn a_refused_landing_repairs_the_weave_then_parks_at_the_budget() {
     // files its finding on the composition's channel like the refusal it is
     // (#4977). Spending the budget changes where the bloom goes next, not what
     // the gate said about the composed tree.
-    let (after2, d2) = step(&s2, &refused("red-2", 45, 61));
+    let (after2, d2) = step(&s2, &refused(45, 61));
+    assert!(
+        !matches!(d2.outcome, Outcome::Duplicate),
+        "a second landing refused for the same cause is a new fact, not a replay (#5106)",
+    );
     assert!(matches!(d2.outcome, Outcome::LandingParked { rolls: 2, question, .. } if question == digest(61)));
     assert!(
         !d2.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. } | Decision::SetUnresolved { .. })),

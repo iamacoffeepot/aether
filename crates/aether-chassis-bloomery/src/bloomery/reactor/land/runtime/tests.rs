@@ -438,6 +438,74 @@ fn a_landing_whose_proposal_drifted_is_refused_and_journaled_rather_than_merged(
     assert!(findings.contains(&pushed), "the findings name the head that was found: {findings}");
 }
 
+// Report the proposal's checks as the named failures — the landing gate going
+// red, which is what admits `Fact::LandingRejected` instead of merging.
+fn fail_checks(fake: &FakeGithub, number: u64, failing: &[&str]) {
+    fake.seed_checks(
+        &fake.pull_request_head_sha(number).expect("the proposal has a head"),
+        ChecksState::Failed { failing: failing.iter().map(|name| (*name).to_owned()).collect() },
+    );
+}
+
+// The single landing-rejection admit a drain produced, or panic.
+fn rejection_admit(admits: &[Admit]) -> Event {
+    assert_eq!(admits.len(), 1, "expected one rejection admit, got {}", admits.len());
+    from_bytes::<Event>(&admits[0].event).unwrap()
+}
+
+#[test]
+fn two_landings_refused_for_the_same_cause_admit_under_distinct_keys() {
+    // #5106: keyed only by bloom and cause, a second landing of the same bloom
+    // that fails the same checks reduces to a duplicate. The land entry is
+    // acked and the reducer never learns the second refusal happened — a
+    // Resolved bloom whose landing is silently gone. The two halves are one
+    // invariant (the sibling of #4722): the key separates attempts, without
+    // weakening the crash-replay dedup it exists for.
+    let (fake, base) = seeded();
+    let (first_head, second_head) = (digest(90), digest(91));
+    fake.seed_git_object(&first_head);
+    fake.seed_git_object(&second_head);
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    let failing = ["CI pass", "Clippy"];
+
+    enqueue_land(&mut store, bloom, base, first_head);
+    assert_eq!(drain_and_land(&mut store, &source).unwrap().1, None, "the first propose is still open");
+    fail_checks(&fake, proposal_number(&fake, bloom), &failing);
+    let (first_lap, ack) = drain_and_land(&mut store, &source).unwrap();
+    let first = rejection_admit(&first_lap);
+    store.ack_topic(Topic::Land, ack.expect("the first refusal is acked")).unwrap();
+
+    // A new outbox entry for the re-resolved bloom — the same landing branch
+    // is adopted, so the checks (and the cause string) are unchanged.
+    enqueue_land(&mut store, bloom, base, second_head);
+    let (second_lap, _) = drain_and_land(&mut store, &source).unwrap();
+    let second = rejection_admit(&second_lap);
+
+    let (replayed, _) = drain_and_land(&mut store, &source).unwrap();
+    let replayed = rejection_admit(&replayed);
+
+    match (&first.fact, &second.fact) {
+        (
+            Fact::LandingRejected { evidence: first_evidence, .. },
+            Fact::LandingRejected { evidence: second_evidence, .. },
+        ) => {
+            assert_eq!(first_evidence.subject, first_head, "the first refusal binds the head it judged");
+            assert_eq!(second_evidence.subject, second_head, "the second refusal binds the newer head");
+        }
+        other => panic!("expected two LandingRejected facts, got {other:?}"),
+    }
+    assert_ne!(
+        first.idempotency_key, second.idempotency_key,
+        "two landing attempts of one bloom are two facts, even when they fail the same way",
+    );
+    assert_eq!(
+        replayed.idempotency_key, second.idempotency_key,
+        "a re-drain of the same entry still reduces to that attempt's single key",
+    );
+}
+
 #[test]
 fn a_base_that_moved_under_an_open_proposal_leaves_the_bloom_supersedable() {
     // A moved mainline forces supersession, never a land onto the new head
