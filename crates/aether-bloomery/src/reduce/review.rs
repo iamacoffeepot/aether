@@ -10,14 +10,13 @@
 
 use alloc::vec::Vec;
 
-use super::attempt::stage_binding;
 use super::composition::{Refusal, finding_of, reweave};
 use super::{
     AggregateReviewError, AggregateReviewFault, BloomRecord, BloomStatus, Decision, Decisions, FoldedIntegration,
     Outcome, Snapshot,
 };
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{Evidence, EvidenceKind, ResolvedBloom, Transformation};
+use crate::values::{Evidence, EvidenceKind, ResolvedBloom};
 
 /// The bloom record and the integration fold a fold-bound aggregate-review
 /// result may act on, or the refusal it earns.
@@ -205,22 +204,16 @@ pub(super) fn reduce_aggregate_review_executor_fault(
         return Decisions { outcome: Outcome::AggregateReviewExecutorWedged { bloom: *bloom, fault, budget }, effects };
     }
 
-    let binding = stage_binding(&record.stage_catalog, StageId::AggregateReview);
     // The same held tree and head, under a fresh order: the fold was never
     // judged, so re-running the review is the whole retry — not a re-fold, and
-    // not a member lap. The roll stays the critic's own unspent cursor.
-    effects.push(Decision::DispatchAggregateReview {
-        bloom: *bloom,
-        transformation: Transformation::for_aggregate_review(
-            &binding,
-            integration.tree,
-            integration.head,
-            record.spec.base(),
-        ),
-        roll: record.aggregate_rolls + 1,
-        profile: binding.profile,
-        configs: record.spec.configs().clone(),
-    });
+    // not a member lap. The roll stays the critic's own unspent cursor. The
+    // helper is what withholds that work order under an operator hold (#5100).
+    effects.push(super::aggregate_verify::aggregate_review_dispatch(
+        record,
+        *bloom,
+        integration.tree,
+        integration.head,
+    ));
 
     Decisions { outcome: Outcome::AggregateReviewExecutorFaulted { bloom: *bloom, fault, budget }, effects }
 }

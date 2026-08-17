@@ -530,9 +530,11 @@ pub enum Decision {
     ///
     /// The flag the dispatch guard reads. While it is set the reducer emits
     /// [`Decision::DeferDispatch`] wherever it would have emitted a
-    /// [`Decision::DispatchAttempt`], and every other decision is unchanged — a
-    /// hold is a brake on new work, not a pause on the projection. Appended so
-    /// the prior decisions' wire discriminants are unchanged.
+    /// [`Decision::DispatchAttempt`], and [`Decision::DeferAggregate`] wherever
+    /// it would have emitted a [`Decision::DispatchAggregateVerify`] or
+    /// [`Decision::DispatchAggregateReview`]. Every other decision is unchanged
+    /// — a hold is a brake on new work, not a pause on the projection.
+    /// Appended so the prior decisions' wire discriminants are unchanged.
     RecordOperatorHold {
         /// The bloom whose dispatch is frozen.
         bloom: BloomId,
@@ -547,8 +549,9 @@ pub enum Decision {
     /// release's own reason and operator survive into the journal: a clear that
     /// carried `None` would record that a bloom was let go and nothing about who
     /// let it go. The dispatches the hold swallowed ride as ordinary
-    /// [`Decision::DispatchAttempt`] effects emitted beside this one. Appended so
-    /// the prior decisions' wire discriminants are unchanged.
+    /// [`Decision::DispatchAttempt`], [`Decision::DispatchAggregateVerify`], and
+    /// [`Decision::DispatchAggregateReview`] effects emitted beside this one.
+    /// Appended so the prior decisions' wire discriminants are unchanged.
     RecordOperatorRelease {
         /// The bloom being let go.
         bloom: BloomId,
@@ -653,5 +656,30 @@ pub enum Decision {
         workpiece: WorkpieceId,
         /// The tree-plus-checkout pair known at integration.
         vehicle: CandidateRef,
+    },
+    /// Record that a held bloom owes its aggregate `stage` the dispatch a fold
+    /// or verdict just earned (#5100) — see
+    /// [`BloomRecord::deferred_aggregates`](crate::BloomRecord::deferred_aggregates).
+    ///
+    /// Emitted in the [`Decision::DispatchAggregateVerify`] /
+    /// [`Decision::DispatchAggregateReview`] slot while the bloom is held, so
+    /// the fact that produced the dispatch still journals and the work order
+    /// is simply not written. The two aggregate gates ride their own decision
+    /// paths, not [`Decision::DispatchAttempt`], which is why they need their
+    /// own deferral rather than sharing [`Decision::DeferDispatch`].
+    ///
+    /// Recorded rather than derived for the reason [`Decision::DeferDispatch`]
+    /// is: a fold whose aggregate is still in flight and one whose dispatch
+    /// the hold swallowed sit at the same integration, so the fold cannot tell
+    /// them apart. What is *not* recorded is the dispatch itself — the release
+    /// re-derives it from the held fold as it stands then. It leaves the set
+    /// when the dispatch it names actually goes out. Appended so the prior
+    /// decisions' wire discriminants are unchanged.
+    DeferAggregate {
+        /// The held bloom.
+        bloom: BloomId,
+        /// The aggregate stage owed a dispatch once the hold lifts —
+        /// [`StageId::AggregateVerify`] or [`StageId::AggregateReview`].
+        stage: StageId,
     },
 }

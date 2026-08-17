@@ -513,7 +513,8 @@ pub enum Outcome {
     OperatorRepairRejected(OperatorRepairError),
     /// A bloom's dispatch was put on the operator brake (#4976). Everything
     /// already in flight keeps running and keeps journaling; nothing new goes
-    /// out until it is released.
+    /// out until it is released — member laps and the two aggregate gates
+    /// alike (#5100).
     BloomHeld {
         /// The frozen bloom.
         bloom: BloomId,
@@ -524,8 +525,12 @@ pub enum Outcome {
         /// The bloom let go.
         bloom: BloomId,
         /// The workpieces dispatched on the way out, in workpiece order. Empty
-        /// when the hold swallowed nothing — a bloom held and released while
-        /// every lap it had was still running owes no dispatch.
+        /// when the hold swallowed no member lap — a bloom held and released
+        /// while every lap it had was still running owes no member dispatch.
+        /// Owed aggregate gates ride as ordinary
+        /// [`Decision::DispatchAggregateVerify`] /
+        /// [`Decision::DispatchAggregateReview`] effects beside this outcome;
+        /// they are not workpieces and do not appear here.
         dispatched: Vec<WorkpieceId>,
     },
     /// An operator hold or release was refused.

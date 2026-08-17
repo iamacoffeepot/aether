@@ -5546,3 +5546,243 @@ fn a_held_composition_defers_its_weave_repair_and_resumes_it_on_release() {
     }
     assert!(after.blooms.get(&bloom).unwrap().deferred_dispatches.is_empty());
 }
+
+/// A two-member bloom whose claim set is complete and whose fold has not run.
+///
+/// The position `Fact::Resolve` acts from: every member has a claim, the
+/// integration reactor has not yet handed back a tree.
+fn ready_to_fold() -> (Snapshot, BloomId) {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: claim("alpha", 10, 100) }));
+    let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
+    (snapshot, bloom)
+}
+
+/// A completed fold over the two-member fixture, as `Fact::Resolve` states it.
+fn folded(bloom: BloomId, key: &str, tree: u8) -> Event {
+    event(key, Fact::Resolve { bloom, tree: digest(tree), head: digest(tree.wrapping_add(1)), lineage: vec![] })
+}
+
+// #5100 — a held bloom must not launch aggregate verify or review.
+//
+// The hold already swallowed `DispatchAttempt`. The two aggregate gates ride
+// their own decision paths, so a fold that completed while the brake was on
+// still launched the compiler and then the paid critic — the spend the hold
+// on bloom `a4e40021` named and failed to stop. Tripwire: a hold that still
+// lets either aggregate work order out, or one that swallowed the fold
+// itself instead of only the dispatch.
+#[test]
+fn a_held_bloom_defers_aggregate_verify_from_a_completed_fold() {
+    let (ready, bloom) = ready_to_fold();
+    let (frozen, _) = step(&ready, &held(bloom, "hold", "prevent repeated paid subject-only dispatches"));
+
+    let (after, decided) = step(&frozen, &folded(bloom, "resolve", 40));
+    assert!(
+        matches!(decided.outcome, Outcome::AggregateVerifyDispatched { roll: 1, .. }),
+        "the fold still reduces: {:?}",
+        decided.outcome,
+    );
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
+        "a held bloom must not launch aggregate verify: {:?}",
+        decided.effects,
+    );
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
+        "and must not skip ahead to the critic either: {:?}",
+        decided.effects,
+    );
+    assert!(
+        decided
+            .effects
+            .iter()
+            .any(|effect| { matches!(effect, Decision::DeferAggregate { stage: StageId::AggregateVerify, .. }) }),
+        "the withheld gate is recorded so release can rebuild it: {:?}",
+        decided.effects,
+    );
+
+    let record = after.blooms.get(&bloom).unwrap();
+    assert!(record.integration.is_some(), "the fold is still held — a hold gates dispatch, not facts");
+    assert_eq!(record.deferred_aggregates, BTreeSet::from([StageId::AggregateVerify]));
+    assert_eq!(
+        record.dispatches.get(&DispatchKey::Bloom { stage: StageId::AggregateVerify }),
+        None,
+        "a deferral is not a dispatch",
+    );
+}
+
+// #5100 — the critic is the paid half of the same hole.
+//
+// An in-flight verify that returns green while the bloom is held is work
+// already running: it journals and the fold stays. What it must not do is
+// launch the review that spend is trying to stop. Tripwire: a passing
+// aggregate verify that still emits `DispatchAggregateReview` under a hold.
+#[test]
+fn a_held_bloom_defers_aggregate_review_from_a_passing_verify() {
+    let (ready, bloom) = ready_to_fold();
+    let (folding, _) = step(&ready, &folded(bloom, "resolve", 40));
+    let (frozen, _) = step(&folding, &held(bloom, "hold", "stop the critic before it spends"));
+
+    let (after, decided) = step(&frozen, &verify_passed(bloom, "verify", 40));
+    assert!(matches!(decided.outcome, Outcome::AggregateVerifyPassed { rolls: 1, .. }), "got {:?}", decided.outcome);
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
+        "a held bloom must not launch the critic: {:?}",
+        decided.effects,
+    );
+    assert!(
+        decided
+            .effects
+            .iter()
+            .any(|effect| { matches!(effect, Decision::DeferAggregate { stage: StageId::AggregateReview, .. }) }),
+        "the withheld critic is recorded: {:?}",
+        decided.effects,
+    );
+    assert_eq!(after.blooms.get(&bloom).unwrap().deferred_aggregates, BTreeSet::from([StageId::AggregateReview]),);
+}
+
+// #5100 — release re-derives the swallowed aggregate from the fold as it
+// stands, the same way it re-derives a member lap from the cursor.
+//
+// Two failure modes. Dispatching nothing strands the compiler the fold
+// already earned. Dispatching a gate that was already in flight puts a
+// second worker on a running verify. The recorded deferral is what tells
+// those two folds apart.
+#[test]
+fn releasing_rederives_the_aggregate_verify_the_hold_owed() {
+    let (ready, bloom) = ready_to_fold();
+    let (frozen, _) = step(&ready, &held(bloom, "hold", "stop the fold's compiler"));
+    let (owed, _) = step(&frozen, &folded(bloom, "resolve", 40));
+
+    let (after, decided) = step(&owed, &released(bloom, "release", "read it; let the compiler run"));
+    match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })) {
+        Some(Decision::DispatchAggregateVerify { transformation, roll, .. }) => {
+            assert_eq!(transformation.inputs[0], digest(40), "the compiler binds the fold the hold left standing");
+            assert_eq!(transformation.checkout, digest(41), "and checks out the head that carries it");
+            assert_eq!(*roll, 1);
+        }
+        other => panic!("expected the re-derived aggregate verify, got {other:?}"),
+    }
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
+        "release does not skip the compiler and launch the critic: {:?}",
+        decided.effects,
+    );
+
+    let record = after.blooms.get(&bloom).unwrap();
+    assert!(record.operator_hold.is_none(), "the brake is off");
+    assert!(record.deferred_aggregates.is_empty(), "and the gate that went out is no longer owed");
+}
+
+// #5100 — the critic half of the same release.
+#[test]
+fn releasing_rederives_the_aggregate_review_the_hold_owed() {
+    let (ready, bloom) = ready_to_fold();
+    let (folding, _) = step(&ready, &folded(bloom, "resolve", 40));
+    let (frozen, _) = step(&folding, &held(bloom, "hold", "stop the critic"));
+    let (owed, _) = step(&frozen, &verify_passed(bloom, "verify", 40));
+
+    let (after, decided) = step(&owed, &released(bloom, "release", "let the critic judge it"));
+    match decided.effects.iter().find(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })) {
+        Some(Decision::DispatchAggregateReview { transformation, roll, .. }) => {
+            assert_eq!(transformation.inputs[0], digest(40), "the critic judges the fold the verify already passed");
+            assert_eq!(transformation.checkout, digest(41), "and checks out the same head");
+            assert_eq!(*roll, 1);
+        }
+        other => panic!("expected the re-derived aggregate review, got {other:?}"),
+    }
+
+    assert!(after.blooms.get(&bloom).unwrap().deferred_aggregates.is_empty());
+}
+
+// #5100 — an aggregate already in flight is not a deferral.
+//
+// Holding after the fold has dispatched its compiler, then releasing before
+// that compiler returns, must not launch a second verify. The fold looks
+// identical to one whose verify was withheld; only the recorded set tells
+// them apart. Tripwire: a release that inferred owed aggregates from the
+// held fold alone.
+#[test]
+fn an_in_flight_aggregate_is_not_redispatched_on_release() {
+    let (ready, bloom) = ready_to_fold();
+    let (folding, dispatched) = step(&ready, &folded(bloom, "resolve", 40));
+    assert!(
+        dispatched.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateVerify { .. })),
+        "fixture bug: the unheld fold must have launched verify",
+    );
+
+    let (frozen, _) = step(&folding, &held(bloom, "hold", "the compiler is already out; freeze the rest"));
+    let (_, decided) = step(&frozen, &released(bloom, "release", "let the in-flight compiler finish"));
+    assert!(
+        !decided.effects.iter().any(|effect| {
+            matches!(effect, Decision::DispatchAggregateVerify { .. } | Decision::DispatchAggregateReview { .. })
+        }),
+        "release must not put a second worker on a running aggregate: {:?}",
+        decided.effects,
+    );
+}
+
+// #5100 — the owner's re-arm is a new critic dispatch, so a hold taken
+// before they answer still withholds it.
+//
+// Tripwire: adopt inlined its own `DispatchAggregateReview` and so skipped
+// the helper the other critic paths share. A hold that stopped every other
+// review and still launched this one would spend the lane the operator just
+// braked.
+#[test]
+fn a_held_bloom_defers_the_review_a_park_adopt_would_rearm() {
+    let (parked, bloom) = parked_at_the_review_ceiling();
+    let question = parked.blooms.get(&bloom).unwrap().review_park.unwrap();
+    let (frozen, _) = step(&parked, &held(bloom, "hold", "do not buy another critic yet"));
+
+    let (after, decided) = step(&frozen, &event("ans", Fact::AdoptAnswer { bloom, answer: answer_adopting(question) }));
+    assert!(matches!(decided.outcome, Outcome::AnswerAdopted { .. }), "got {:?}", decided.outcome);
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAggregateReview { .. })),
+        "adopting under a hold must not launch the critic: {:?}",
+        decided.effects,
+    );
+    assert!(
+        decided
+            .effects
+            .iter()
+            .any(|effect| { matches!(effect, Decision::DeferAggregate { stage: StageId::AggregateReview, .. }) }),
+        "the re-arm is recorded as owed: {:?}",
+        decided.effects,
+    );
+    assert_eq!(after.blooms.get(&bloom).unwrap().review_park, None, "the park still clears — a hold gates dispatch");
+}
+
+// #5100 — the aggregate deferral is journal-derived (ADR-0190): folding the
+// recorded decisions alone rebuilds the same bloom.
+//
+// Tripwire: a set the reducer kept as host state, or one the release cleared
+// itself instead of letting the dispatch clear its own entry, would replay to
+// a different bloom.
+#[test]
+fn a_held_aggregate_and_its_release_replay_from_the_recorded_decisions_alone() {
+    let (ready, bloom) = ready_to_fold();
+    let script = vec![
+        held(bloom, "hold", "freeze the fold"),
+        folded(bloom, "resolve", 40),
+        released(bloom, "release", "let the compiler run"),
+    ];
+
+    let mut live = ready.clone();
+    let mut recorded = Vec::new();
+    for step_event in &script {
+        let decided = reduce(&live, step_event, &ResolvedConfigs::default(), &SpendWindow::default());
+        live = live.apply(step_event, &decided, &ResolvedConfigs::default());
+        recorded.push(decided);
+    }
+
+    let mut replayed = ready;
+    for (step_event, decided) in script.iter().zip(recorded.iter()) {
+        replayed = replayed.apply(step_event, decided, &ResolvedConfigs::default());
+    }
+
+    assert_eq!(replayed, live, "replay over the recorded decisions rebuilds the held-and-released fold exactly");
+}

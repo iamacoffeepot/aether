@@ -12,10 +12,15 @@
 //! So the hold is deliberately narrow.
 //!
 //! - **It gates dispatch, and only dispatch.** While a bloom is held the reducer
-//!   emits no [`Decision::DispatchAttempt`] for it. Every other fact — a lane
+//!   emits no [`Decision::DispatchAttempt`], [`Decision::DispatchAggregateVerify`],
+//!   or [`Decision::DispatchAggregateReview`] for it. Every other fact — a lane
 //!   completing, a verify verdict, a fold outcome, a landing refusal — reduces
 //!   exactly as it always did, so the work already running finishes and lands in
-//!   the journal. That is the whole difference between a hold and a kill.
+//!   the journal. That is the whole difference between a hold and a kill. The
+//!   two aggregate gates ride their own decision paths, so they need the same
+//!   brake the member line already had: an operator stopping a bloom that is
+//!   producing bad composition candidates must not pay for a verify or a
+//!   critic of each one (#5100).
 //! - **It touches nothing else.** No claim is released, no budget is spent or
 //!   handed back, no finding is opened or closed, no approval tier moves. It
 //!   composes with the review park rather than replacing it: holding a parked
@@ -29,14 +34,16 @@
 //!   needs none.
 //!
 //! The release stores nothing and replays nothing. It reads the record as it
-//! stands and re-derives each owed dispatch from the cursor it finds — the same
-//! move [`super::grant`] makes when it resumes a wedged member, through the same
-//! two helpers. So a bloom that moved on in some other way while it was held
-//! dispatches from where it actually is, and a dispatch can be neither lost nor
-//! doubled.
+//! stands and re-derives each owed member dispatch from the cursor it finds —
+//! the same move [`super::grant`] makes when it resumes a wedged member,
+//! through the same two helpers — and each owed aggregate gate from the fold
+//! the record is holding. So a bloom that moved on in some other way while it
+//! was held dispatches from where it actually is, and a dispatch can be
+//! neither lost nor doubled.
 
 use alloc::vec::Vec;
 
+use super::aggregate_verify::{owed_aggregate_review, owed_aggregate_verify};
 use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate, reconcile_or_line_targets};
 use super::composition::composition_line;
 use super::{BloomRecord, BloomStatus, Decision, Decisions, OperatorHoldError, Outcome, Snapshot};
@@ -105,14 +112,17 @@ pub(super) fn reduce_operator_hold(snapshot: &Snapshot, bloom: &BloomId, hold: &
 /// Reduce an operator release ([`Fact::OperatorRelease`](crate::Fact::OperatorRelease)).
 ///
 /// Clears the flag, then re-derives every dispatch the hold swallowed from the
-/// cursor that workpiece is sitting at now.
+/// cursor that workpiece is sitting at now — and every aggregate gate the hold
+/// swallowed from the fold the record is holding now.
 ///
-/// The set it walks is [`BloomRecord::deferred_dispatches`] rather than every
-/// cursor on the record, and that is the whole correctness argument. A workpiece
-/// whose worker is still running holds the same cursor as one whose dispatch was
-/// swallowed, so dispatching from every cursor would put a second worker on
-/// every lap that outlived the hold. Walking only the deferrals dispatches
-/// exactly what is owed.
+/// The member set it walks is [`BloomRecord::deferred_dispatches`] rather than
+/// every cursor on the record, and that is the whole correctness argument. A
+/// workpiece whose worker is still running holds the same cursor as one whose
+/// dispatch was swallowed, so dispatching from every cursor would put a second
+/// worker on every lap that outlived the hold. Walking only the deferrals
+/// dispatches exactly what is owed. The aggregate set is the same argument at
+/// bloom scope: a fold whose verify is still in flight looks like one whose
+/// verify was withheld, so only a recorded deferral is owed.
 ///
 /// What is re-derived, rather than recalled, is the dispatch itself: targets off
 /// the cursor, catalog and profile and configuration off the record. So a
@@ -140,8 +150,36 @@ pub(super) fn reduce_operator_release(snapshot: &Snapshot, bloom: &BloomId, rele
             dispatched.push(workpiece.clone());
         }
     }
+    effects.extend(owed_aggregates(record, *bloom));
 
     Decisions { outcome: Outcome::BloomReleased { bloom: *bloom, dispatched }, effects }
+}
+
+/// The aggregate work orders a release owes, re-derived from the fold the
+/// record is holding now.
+///
+/// Verify before review when both were swallowed: the critic judges a tree
+/// the compiler has already passed, and launching both would spend the paid
+/// lane on a fold that has not built yet. The leftover review deferral stays
+/// on the record until the verify that just went out completes and dispatches
+/// the critic itself — the same implicit clear a member dispatch uses.
+fn owed_aggregates(record: &BloomRecord, bloom: BloomId) -> Vec<Decision> {
+    let Some(integration) = record.integration.as_ref() else {
+        return Vec::new();
+    };
+    if record.deferred_aggregates.contains(&StageId::AggregateVerify) {
+        return alloc::vec![owed_aggregate_verify(record, bloom, integration.tree, integration.head)];
+    }
+    if record.deferred_aggregates.contains(&StageId::AggregateReview) {
+        return alloc::vec![owed_aggregate_review(
+            record,
+            bloom,
+            integration.tree,
+            integration.head,
+            record.aggregate_rolls + 1,
+        )];
+    }
+    Vec::new()
 }
 
 /// The advance-and-dispatch pair one owed workpiece is due, aimed from the

@@ -13,7 +13,7 @@
 //! read what the lap changed, and bounce the lap when the two do not intersect.
 //! No judge round is spent to learn what a diff inspection already shows.
 //!
-//! **Where it applies** is decided by the admission broker's `is_weave_repair`:
+//! **Where it applies** is decided by `DispatchRecord::is_composition_refine`:
 //! the composition workpiece's weave repair, and only that. Post-ADR-0191 the composition is the only workpiece
 //! whose findings are a judge's prose — an aggregate refusal no longer re-opens a
 //! member, so every finding reaching a member's `Refine` is mechanical gate

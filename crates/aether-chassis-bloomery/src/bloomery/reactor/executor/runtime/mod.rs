@@ -622,6 +622,14 @@ impl AdmitSink for CollectingSink {
 /// the member instead. A member that sealed *no* override resolves to the
 /// default, which is not an error and changes nothing.
 ///
+/// The work order the composition workpiece never sealed (#5098). Generated on
+/// the first weave-repair dispatch and reused on every retry, so the reserved
+/// Refine has a nonempty `## Task` instead of a subject-only prompt.
+const COMPOSITION_REFINE_ORDER: &str = "\
+Repair the composed tree. A composite gate refused this weave. \
+Address every defect in the Findings section so the composed tree builds. \
+Do not reopen finished member work; repair at the seam.";
+
 /// Shared by the first dispatch of a stage and the replay of a parked one
 /// (#3664), so a re-dispatched lane resolves its profile and prompt exactly the
 /// way the attempt that parked did.
@@ -647,7 +655,21 @@ fn overlay_member_advisory(
     let model_override =
         resolve_config::<ModelOverride>(store, ConfigScopes::bloom_wide(&record.configs))?.unwrap_or_default();
     record.transformation.model = Some(dispatch_model(record.stage, &record.profile, &model_override));
-    if let Some(description) = store.lookup_dispatch_description(&bloom, &workpiece)? {
+
+    // A failing verdict's persisted findings ride the same advisory channel as
+    // their own labeled section (#3656, ADR-0153), so a Refine re-entry's prompt
+    // names both the original order and what the failing gate flagged. The member
+    // row wins; a failing aggregate review persists bloom-scoped findings under
+    // the empty workpiece key until the decomposition slices them per member, and
+    // every re-opened member reads that bloom row. Looked up once here so a
+    // composition Refine can seed from the same `Option` the overlay appends.
+    let findings = match store.lookup_review_findings(&bloom, &workpiece)? {
+        Some(findings) => Some(findings),
+        None => store.lookup_review_findings(&bloom, "")?,
+    };
+    if record.is_composition_refine() {
+        seed_composition_refine_order(store, record, findings.as_deref())?;
+    } else if let Some(description) = store.lookup_dispatch_description(&bloom, &workpiece)? {
         // Sibling members share a sealed body; the header is what keeps each
         // dispatch's `--task` (and `pool_task` key) distinct (#4984).
         record.transformation.description = Some(pin_workpiece_description(&workpiece, &description));
@@ -660,17 +682,6 @@ fn overlay_member_advisory(
         );
     }
 
-    // A failing verdict's persisted findings ride the same advisory channel as
-    // their own labeled section (#3656, ADR-0153), so a Refine re-entry's prompt
-    // names both the original order and what the failing gate flagged. The member
-    // row wins; a failing aggregate review persists bloom-scoped findings under
-    // the empty workpiece key until the decomposition slices them per member, and
-    // every re-opened member reads that bloom row. The assembled prompt is plain
-    // markdown concatenation, so the section header composes in-channel.
-    let findings = match store.lookup_review_findings(&bloom, &workpiece)? {
-        Some(findings) => Some(findings),
-        None => store.lookup_review_findings(&bloom, "")?,
-    };
     if let Some(findings) = findings {
         let task = record.transformation.description.take().unwrap_or_default();
         record.transformation.description = Some(format!("{task}\n\n## Findings\n\n{findings}"));
@@ -686,6 +697,63 @@ fn overlay_member_advisory(
         record.transformation.description = Some(format!("{task}\n\n{overlay}"));
     }
     Ok(())
+}
+
+/// Seed the composition Refine's work order from the persisted row, or generate
+/// and persist one when findings exist to carry (#5098).
+///
+/// The reserved workpiece is not sealed with operator text, so the first weave
+/// repair authors the standing instruction here and every retry looks that row
+/// up instead of writing it again. Findings still overlay separately, the same
+/// way a member Refine keeps its sealed order and threads the latest verdict.
+/// `findings` is the overlay value the caller already resolved — do not look
+/// it up again just to test non-emptiness.
+fn seed_composition_refine_order(
+    store: &mut dyn StoreBackend,
+    record: &mut DispatchRecord,
+    findings: Option<&str>,
+) -> Result<(), StoreConfigError> {
+    let bloom = record.bloom.0.as_bytes();
+    let workpiece = record.workpiece.0.as_str();
+    if let Some(description) = store.lookup_dispatch_description(bloom, workpiece)? {
+        record.transformation.description = Some(pin_workpiece_description(workpiece, &description));
+        return Ok(());
+    }
+    if findings.is_none_or(|findings| findings.trim().is_empty()) {
+        return Ok(());
+    }
+    store.record_dispatch_description(bloom, workpiece, COMPOSITION_REFINE_ORDER)?;
+    record.transformation.description = Some(pin_workpiece_description(workpiece, COMPOSITION_REFINE_ORDER));
+    Ok(())
+}
+
+/// A composition Refine is ready to pay for a model lane only when the assembled
+/// task carries the findings the repair was dispatched to address.
+fn composition_refine_has_findings_task(record: &DispatchRecord) -> bool {
+    record
+        .transformation
+        .description
+        .as_deref()
+        .is_some_and(|task| task.split_once("## Findings").is_some_and(|(_, rest)| !rest.trim().is_empty()))
+}
+
+/// Park a composition Refine whose assembled task does not carry findings.
+///
+/// A subject-only weave repair is a paid no-op: the lane refuses an empty
+/// `## Task` and the refusal is classified as another composition failure
+/// (#5098). Called after overlay so a missing work order cannot spend a model
+/// dispatch.
+fn park_composition_refine_without_findings(record: &DispatchRecord, sequence: u64) -> bool {
+    if !record.is_composition_refine() || composition_refine_has_findings_task(record) {
+        return false;
+    }
+    tracing::error!(
+        target: "aether_chassis_bloomery::executor",
+        sequence,
+        workpiece = %record.workpiece.0,
+        "composition refine has no work order carrying findings; parking rather than launching a subject-only lane",
+    );
+    true
 }
 
 /// Drain the dispatch topic and submit each entry through the executor, recording
@@ -787,6 +855,10 @@ fn drain_and_dispatch(
                 %error,
                 "sealed configuration did not resolve; parking the dispatch rather than running the default",
             );
+            ack_through = Some(entry.sequence);
+            continue;
+        }
+        if park_composition_refine_without_findings(&record, entry.sequence) {
             ack_through = Some(entry.sequence);
             continue;
         }
@@ -1186,6 +1258,15 @@ fn resolve_replay(
         );
         return Ok(None);
     }
+    if record.is_composition_refine() && !composition_refine_has_findings_task(&record) {
+        tracing::error!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            workpiece = %record.workpiece.0,
+            "composition refine replay has no work order carrying findings; acking past the redispatch",
+        );
+        return Ok(None);
+    }
 
     match str::from_utf8(&payload.words) {
         Ok(answer) if record.transformation.command == CONSTRUCT_IMPLEMENT_COMMAND => {
@@ -1423,11 +1504,15 @@ pub fn default_candidate_push(refuse: bool) -> Arc<dyn CandidatePush> {
 }
 
 /// Push each admitted capture to its bloom ref (ADR-0152). A passing construct
-/// goes to [`candidate_ref_name`]; a failing construct that still captured work
-/// goes to [`member_checkpoint_ref_name`]. Best-effort with loud warns: a failed
-/// push leaves the capture local-only — a downstream checkout of it will fail
-/// visibly and retry through the stage machinery, never silently run the wrong
-/// tree. A failed checkpoint push costs a resume, never correctness.
+/// or refine goes to [`candidate_ref_name`]; a failing construct that still
+/// captured work goes to [`member_checkpoint_ref_name`]. Refine is in the
+/// passing arm because a composition weave-repair capture is the head landing
+/// will create its branch from — skipping it leaves that commit local-only and
+/// the land loop 422s on an object the source repository has never seen. Best-effort
+/// with loud warns: a failed push leaves the capture local-only — a downstream
+/// checkout of it will fail visibly and retry through the stage machinery, never
+/// silently run the wrong tree. A failed checkpoint push costs a resume, never
+/// correctness.
 fn push_admitted_candidates(
     admissions: &[Admission],
     correspondence: Option<&SharedCorrespondence>,
@@ -1438,7 +1523,7 @@ fn push_admitted_candidates(
             Fact::AttemptCompleted {
                 bloom,
                 workpiece,
-                stage: StageId::Construct,
+                stage: StageId::Construct | StageId::Refine,
                 passed: true,
                 candidate: Some(candidate),
                 ..
