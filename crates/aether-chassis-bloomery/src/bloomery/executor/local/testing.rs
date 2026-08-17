@@ -31,6 +31,9 @@ pub fn canned_capture() -> CapturedObjects {
 }
 
 /// A runner that writes `evidence` and returns a process fixed at `lifecycle`.
+///
+/// Tests pin the richer lifecycle — a clean exit, a terminating signal, or a
+/// wait fault — directly; this seam does not invent process facts.
 pub struct FixedRunner {
     /// The `evidence.json` bytes every run writes.
     pub evidence: String,
