@@ -15,6 +15,11 @@
 /// the cap keeps the durable findings channel from becoming the transcript.
 pub(super) const MAX_ASSISTANT_TEXT_BYTES: usize = 16 * 1024;
 
+/// The Claude-harness tool a reviewer is told to file findings through. Its
+/// `tool_use` payload is the structured findings channel; every other tool
+/// stays out of the result record (#5118).
+const REPORT_FINDINGS: &str = "ReportFindings";
+
 /// The last `MAX_ASSISTANT_TEXT_BYTES` of `text`, snapped forward to a char
 /// boundary. An over-budget transcript keeps the most recent prose — that is
 /// where the critic's findings and verdict usually sit — rather than the
@@ -53,6 +58,72 @@ fn public_text_block(block: &serde_json::Value) -> Option<&str> {
     block.get("text").and_then(serde_json::Value::as_str).filter(|text| !text.is_empty())
 }
 
+/// Collect `ReportFindings` `tool_use` payloads from one assistant `message`.
+/// Matched against later `tool_result`s so a schema-rejected call cannot win.
+fn collect_report_finding_uses(message: &serde_json::Value, pending: &mut Vec<(String, serde_json::Value)>) {
+    let Some(blocks) = message.get("content").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    for block in blocks {
+        if block.get("type").and_then(serde_json::Value::as_str) != Some("tool_use") {
+            continue;
+        }
+        if block.get("name").and_then(serde_json::Value::as_str) != Some(REPORT_FINDINGS) {
+            continue;
+        }
+        let Some(id) = block.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(findings) = block.get("input").and_then(|input| input.get("findings")) else {
+            continue;
+        };
+        if !findings.is_array() {
+            continue;
+        }
+        pending.push((id.to_owned(), findings.clone()));
+    }
+}
+
+/// Settle pending `ReportFindings` calls from one `user` event's `tool_result`s.
+/// The last schema-accepted call wins; a validation error leaves `accepted` as
+/// it was (#5118).
+fn settle_report_findings(
+    event: &serde_json::Value,
+    pending: &mut Vec<(String, serde_json::Value)>,
+    accepted: &mut Option<serde_json::Value>,
+) {
+    let Some(blocks) =
+        event.get("message").and_then(|message| message.get("content")).and_then(serde_json::Value::as_array)
+    else {
+        return;
+    };
+    for block in blocks {
+        if block.get("type").and_then(serde_json::Value::as_str) != Some("tool_result") {
+            continue;
+        }
+        let Some(id) = block.get("tool_use_id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(index) = pending.iter().rposition(|(pending_id, _)| pending_id == id) else {
+            continue;
+        };
+        let (_, findings) = pending.remove(index);
+        if !schema_rejected(block) {
+            *accepted = Some(findings);
+        }
+    }
+}
+
+/// Whether this `tool_result` is a harness schema rejection. Those calls are
+/// ignored so a malformed or over-budget payload cannot become the frozen
+/// findings (#5118).
+fn schema_rejected(block: &serde_json::Value) -> bool {
+    if block.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) {
+        return true;
+    }
+    block.get("content").and_then(serde_json::Value::as_str).is_some_and(|text| text.contains("InputValidationError"))
+}
+
 /// Derive a model lane's result record from an Anthropic-Messages NDJSON
 /// `transcript` — the in-repo, node-free replacement (#3572) for the retired
 /// `scripts/agent-usage-record.mjs` shell-out (#3565 deletes that script). Pure,
@@ -60,9 +131,11 @@ fn public_text_block(block: &serde_json::Value) -> Option<&str> {
 /// cost / turns / duration / usage, and the first non-haiku assistant call's usage
 /// is the warm-resume cache-hit signal. Public assistant text blocks from
 /// non-side-model messages ride `assistant_text` so a review can retain findings
-/// that never reached the terminal result (#5056). A transcript with no terminal
-/// `result` (a run that died early) yields a `no_result` record rather than an
-/// error, so evidence is never dropped.
+/// that never reached the terminal result (#5056). The last schema-accepted
+/// `ReportFindings` `tool_use` rides `report_findings` so a review that filed
+/// its findings through the harness tool still freezes them (#5118). A
+/// transcript with no terminal `result` (a run that died early) yields a
+/// `no_result` record rather than an error, so evidence is never dropped.
 pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
     use serde_json::{Map, Value, json};
 
@@ -73,6 +146,8 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
     let mut first_main: Option<Value> = None;
     let mut calls = Vec::new();
     let mut texts = Vec::new();
+    let mut pending_report_findings = Vec::new();
+    let mut report_findings = None;
     for line in transcript.lines() {
         if line.trim().is_empty() {
             continue;
@@ -82,6 +157,7 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
         };
         match event.get("type").and_then(Value::as_str) {
             Some("result") => result = Some(event),
+            Some("user") => settle_report_findings(&event, &mut pending_report_findings, &mut report_findings),
             Some("assistant") => {
                 let message = event.get("message").cloned().unwrap_or(Value::Null);
                 let model = message.get("model").and_then(Value::as_str).unwrap_or_default();
@@ -89,6 +165,7 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
                     continue;
                 }
                 collect_public_text(&message, &mut texts);
+                collect_report_finding_uses(&message, &mut pending_report_findings);
                 let Some(usage) = message.get("usage") else {
                     continue;
                 };
@@ -146,6 +223,13 @@ pub(super) fn derive_result_record(transcript: &str) -> serde_json::Value {
             Value::Null
         } else {
             json!(bound_assistant_text(&texts.join("\n\n")))
+        },
+    );
+    record.insert(
+        "report_findings".to_owned(),
+        match report_findings {
+            Some(findings) if findings.as_array().is_some_and(|items| !items.is_empty()) => findings,
+            _ => Value::Null,
         },
     );
 
@@ -268,6 +352,7 @@ mod tests {
         assert!(!text.contains("HIDDEN_REASONING"), "thinking is not public text");
         assert!(!text.contains("TOOL_INPUT_SECRET"), "tool-use payloads stay out");
         assert!(!text.contains("TOOL_RESULT_BODY"), "tool results stay out");
+        assert!(record["report_findings"].is_null(), "a Read tool is not ReportFindings");
     }
 
     #[test]
@@ -285,5 +370,87 @@ mod tests {
         assert!(text.ends_with(tail), "the most recent finding survives: {text}");
         assert!(text.starts_with('…'), "omission of the opening narration is marked");
         assert!(!text.contains(&prefix), "the opening pad does not survive whole");
+    }
+
+    #[test]
+    fn report_findings_keeps_the_last_schema_accepted_call() {
+        // Tripwire (#5118): a reviewer that follows the harness files findings
+        // through ReportFindings, and a rejected call (malformed JSON, over-
+        // budget short_summary) must not win over the later accepted one.
+        let rejected = serde_json::json!({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": "t-reject",
+                "is_error": true,
+                "content": "<tool_use_error>InputValidationError: short_summary too long</tool_use_error>",
+            }]},
+        });
+        let accepted = serde_json::json!({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": "t-accept",
+                "content": "2 findings reported.",
+            }]},
+        });
+        let record = derive_result_record(&transcript(&[
+            assistant(
+                "claude-opus-4-8",
+                &serde_json::json!([{
+                    "type": "tool_use",
+                    "id": "t-reject",
+                    "name": "ReportFindings",
+                    "input": {"findings": [{"summary": "REJECTED — must not freeze"}]},
+                }]),
+            ),
+            rejected,
+            assistant(
+                "claude-opus-4-8",
+                &serde_json::json!([{
+                    "type": "tool_use",
+                    "id": "t-accept",
+                    "name": "ReportFindings",
+                    "input": {"findings": [
+                        {"file": "src/lib.rs", "line": 10, "summary": "MECHANICAL — empty input panics"},
+                        {"file": "src/names.rs", "line": 4, "summary": "JUDGMENT — the name is ugly"},
+                    ]},
+                }]),
+            ),
+            accepted,
+            serde_json::json!({"type": "result", "is_error": false, "result": "VERDICT: finding"}),
+        ]));
+
+        let findings = record["report_findings"].as_array().expect("the last accepted call is retained");
+        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert_eq!(findings[0]["summary"], "MECHANICAL — empty input panics");
+        assert_eq!(findings[1]["summary"], "JUDGMENT — the name is ugly");
+        assert!(record["assistant_text"].is_null(), "a tool-only turn contributes no public text");
+
+        let only_rejected = derive_result_record(&transcript(&[
+            assistant(
+                "claude-opus-4-8",
+                &serde_json::json!([{
+                    "type": "tool_use",
+                    "id": "t-reject",
+                    "name": "ReportFindings",
+                    "input": {"findings": [{"summary": "REJECTED — must not freeze"}]},
+                }]),
+            ),
+            serde_json::json!({
+                "type": "user",
+                "message": {"content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "t-reject",
+                    "is_error": true,
+                    "content": "<tool_use_error>InputValidationError: JSON parse failed</tool_use_error>",
+                }]},
+            }),
+        ]));
+        assert!(
+            only_rejected["report_findings"].is_null(),
+            "a rejected call is not an accepted one: {}",
+            only_rejected["report_findings"],
+        );
     }
 }

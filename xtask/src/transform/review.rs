@@ -39,12 +39,16 @@ enum ReviewVerdict {
 /// verdict line — the caller fails closed. Pure so the parse is testable without
 /// spawning Claude.
 fn parse_review_verdict(final_text: &str) -> Option<ReviewVerdict> {
-    final_text.lines().rev().find_map(|line| match line.trim() {
+    final_text.lines().rev().find_map(verdict_line)
+}
+
+fn verdict_line(line: &str) -> Option<ReviewVerdict> {
+    match line.trim() {
         "VERDICT: pass" => Some(ReviewVerdict::Pass),
         "VERDICT: finding" => Some(ReviewVerdict::Finding),
         "VERDICT: environment" => Some(ReviewVerdict::Environment),
         _ => None,
-    })
+    }
 }
 
 /// The `## Candidate` section of the assembled prompt: the exact commands that
@@ -151,8 +155,24 @@ fn assistant_text(record: &serde_json::Value) -> Option<&str> {
 
 /// The durable findings report: earlier public assistant text plus the terminal
 /// result, with an identical terminal suffix kept once and the earlier prose
-/// bounded. Verdict parsing does not read this string — only [`final_text`].
+/// bounded, plus any schema-accepted `ReportFindings` payloads rendered beside
+/// that prose (#5118). Verdict parsing does not read this string — only
+/// [`final_text`].
 fn compose_findings(record: &serde_json::Value) -> Option<String> {
+    let prose = compose_prose(record);
+    let structured = render_report_findings(record);
+    match (prose, structured) {
+        (None, None) => None,
+        (Some(prose), None) => Some(prose),
+        (None, Some(structured)) => Some(structured),
+        (Some(prose), Some(structured)) => Some(insert_before_verdict(&prose, &structured)),
+    }
+}
+
+/// The assistant-prose path: public assistant text plus the terminal result,
+/// with an identical terminal suffix kept once. A review that never called
+/// `ReportFindings` still composes exactly this.
+fn compose_prose(record: &serde_json::Value) -> Option<String> {
     let assistant = assistant_text(record);
     let terminal = final_text(record).filter(|text| !text.is_empty());
     match (assistant, terminal) {
@@ -161,6 +181,99 @@ fn compose_findings(record: &serde_json::Value) -> Option<String> {
         (Some(assistant), None) => Some(bound_assistant_text(assistant)),
         (Some(assistant), Some(terminal)) => Some(merge_assistant_and_terminal(assistant, terminal)),
     }
+}
+
+/// The last schema-accepted `ReportFindings` payload, rendered one finding per
+/// line. Empty or absent is `None` so a prose-only review keeps the prose path.
+fn render_report_findings(record: &serde_json::Value) -> Option<String> {
+    let findings =
+        record.get("report_findings").and_then(serde_json::Value::as_array).filter(|items| !items.is_empty())?;
+    let rendered: Vec<String> = findings.iter().filter_map(render_reported_finding).collect();
+    (!rendered.is_empty()).then(|| rendered.join("\n"))
+}
+
+/// One structured finding as a classified line. The summary stays first so a
+/// `MECHANICAL` / `JUDGMENT` prefix the reviewer wrote there is still what
+/// [`aether_bloomery::classify_findings`] reads (#4961 / #5118).
+fn render_reported_finding(finding: &serde_json::Value) -> Option<String> {
+    let summary =
+        finding.get("summary").and_then(serde_json::Value::as_str).map(str::trim).filter(|text| !text.is_empty())?;
+    let file = finding.get("file").and_then(serde_json::Value::as_str).unwrap_or("");
+    let line = finding_line(finding.get("line"));
+    let category = finding.get("category").and_then(serde_json::Value::as_str).unwrap_or("");
+    let scenario = finding.get("failure_scenario").and_then(serde_json::Value::as_str).unwrap_or("");
+
+    let location = match (file.is_empty(), line.as_deref()) {
+        (true, None) => String::new(),
+        (true, Some(line)) => line.to_owned(),
+        (false, None) => file.to_owned(),
+        (false, Some(line)) => format!("{file}:{line}"),
+    };
+
+    let mut rendered = format!("- {summary}");
+    if location.is_empty() && category.is_empty() && scenario.is_empty() {
+        return Some(rendered);
+    }
+    rendered.push_str(" — ");
+    if !location.is_empty() {
+        rendered.push_str(&location);
+    }
+    if !category.is_empty() {
+        if !location.is_empty() {
+            rendered.push(' ');
+        }
+        rendered.push('(');
+        rendered.push_str(category);
+        rendered.push(')');
+    }
+    if !scenario.is_empty() {
+        if !location.is_empty() || !category.is_empty() {
+            rendered.push_str(": ");
+        }
+        rendered.push_str(scenario);
+    }
+    Some(rendered)
+}
+
+fn finding_line(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    if let Some(line) = value.as_u64() {
+        return Some(line.to_string());
+    }
+    if let Some(line) = value.as_i64() {
+        return Some(line.to_string());
+    }
+    value.as_str().map(str::trim).filter(|text| !text.is_empty()).map(str::to_owned)
+}
+
+/// Slip `structured` in immediately before the last well-formed `VERDICT:` line
+/// so the durable suffix stays the critic's own verdict. A report with no
+/// verdict line just appends.
+fn insert_before_verdict(prose: &str, structured: &str) -> String {
+    match last_verdict_line_start(prose) {
+        Some(at) => {
+            let head = prose[..at].trim_end();
+            let tail = &prose[at..];
+            if head.is_empty() {
+                format!("{structured}\n\n{tail}")
+            } else {
+                format!("{head}\n\n{structured}\n\n{tail}")
+            }
+        }
+        None => format!("{prose}\n\n{structured}"),
+    }
+}
+
+fn last_verdict_line_start(text: &str) -> Option<usize> {
+    let mut found = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if verdict_line(line.trim_end_matches(['\n', '\r'])).is_some() {
+            found = Some(offset);
+        }
+        offset += line.len();
+    }
+    found
 }
 
 fn merge_assistant_and_terminal(assistant: &str, terminal: &str) -> String {
@@ -204,7 +317,7 @@ fn review_conclusion(record: &serde_json::Value) -> ReviewVerdict {
         return ReviewVerdict::Finding;
     }
     match final_text(record).and_then(parse_review_verdict) {
-        Some(ReviewVerdict::Finding) => advisory_only(final_text(record).unwrap_or_default()),
+        Some(ReviewVerdict::Finding) => advisory_only(record),
         Some(other) => other,
         None => ReviewVerdict::Finding,
     }
@@ -229,8 +342,17 @@ fn review_conclusion(record: &serde_json::Value) -> ReviewVerdict {
 /// every defect a non-conforming reviewer names. The parse is the domain crate's
 /// (`aether_bloomery::classify_findings`) rather than a local re-spelling, so the
 /// lane that writes the format and the chassis that reads it cannot drift.
-fn advisory_only(report: &str) -> ReviewVerdict {
-    let classified = aether_bloomery::classify_findings(report);
+fn advisory_only(record: &serde_json::Value) -> ReviewVerdict {
+    // Classification stays on the terminal result for a prose-only review, so
+    // earlier narration cannot mint a pass (#5056). When the reviewer filed
+    // through `ReportFindings`, those rendered lines are what
+    // `classify_findings` is meant to read (#4961 / #5118).
+    let terminal = final_text(record).unwrap_or_default();
+    let report = match render_report_findings(record) {
+        Some(structured) => format!("{structured}\n{terminal}"),
+        None => terminal.to_owned(),
+    };
+    let classified = aether_bloomery::classify_findings(&report);
     if classified.is_empty() || classified.any_blocking() {
         return ReviewVerdict::Finding;
     }
@@ -687,5 +809,174 @@ mod tests {
         assert!(findings.len() <= MAX_ASSISTANT_TEXT_BYTES + 80, "the prefix is bounded: {}", findings.len());
         assert!(findings.ends_with("VERDICT: finding"), "the terminal verdict survives the bound: {findings}");
         assert!(findings.contains("empty input panics"), "the terminal report body survives: {findings}");
+    }
+
+    fn report_findings_use(id: &str, findings: serde_json::Value) -> serde_json::Value {
+        assistant(&serde_json::json!([{
+            "type": "tool_use",
+            "id": id,
+            "name": "ReportFindings",
+            "input": {"findings": findings},
+        }]))
+    }
+
+    fn tool_result(id: &str, content: &str, is_error: bool) -> serde_json::Value {
+        let mut block = serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": id,
+            "content": content,
+        });
+        if is_error {
+            block["is_error"] = serde_json::json!(true);
+        }
+        serde_json::json!({"type": "user", "message": {"content": [block]}})
+    }
+
+    #[test]
+    fn report_findings_are_frozen_from_the_last_accepted_tool_call() {
+        // Tripwire (#5118): Wave 1 and bloom 4604e4a5 froze "see finding below"
+        // plus VERDICT while the actual findings sat in ReportFindings. A
+        // rejected first call (schema validation) must not win, a later accepted
+        // call must, and every field the payload carries has to reach the
+        // durable report so a repair / delta-confirm can read it.
+        let rejected = serde_json::json!([{
+            "file": "src/wrong.rs",
+            "line": 1,
+            "category": "correctness",
+            "summary": "MECHANICAL — rejected payload must not freeze",
+            "failure_scenario": "this call was schema-rejected",
+        }]);
+        let accepted = serde_json::json!([
+            {
+                "file": "scripts/bloomery-operator.py",
+                "line": 65,
+                "category": "correctness",
+                "summary": "MECHANICAL (check: `cmd_flakes_decodes_machinery_names`) — FACT_NAMES never grew the #5091 tail",
+                "failure_scenario": "a live journal's machinery facts render as unknown(28)",
+            },
+            {
+                "file": "src/intake/tests.rs",
+                "line": 855,
+                "category": "test-integrity",
+                "summary": "JUDGMENT — three comments still say intake refuses ExecutorFault",
+                "failure_scenario": "a reader of those comments is told the opposite of current admission",
+            },
+        ]);
+        let record = derive_result_record(&transcript(&[
+            assistant(&text("5092 is not: see finding below.")),
+            report_findings_use("t-reject", rejected),
+            tool_result(
+                "t-reject",
+                "<tool_use_error>InputValidationError: short_summary too long</tool_use_error>",
+                true,
+            ),
+            report_findings_use("t-accept", accepted),
+            tool_result("t-accept", "2 findings reported.", false),
+            assistant(&serde_json::json!([
+                {"type": "tool_use", "name": "Read", "input": {"path": "TOOL_INPUT_SECRET"}},
+            ])),
+            result("VERDICT: finding"),
+        ]));
+
+        let evidence = stamped(&record);
+        let findings = evidence["findings"].as_str().expect("a completed finding run stamps findings");
+        assert!(findings.contains("5092 is not: see finding below"), "the assistant prose survives: {findings}");
+        assert!(
+            findings.contains("FACT_NAMES never grew the #5091 tail"),
+            "the accepted mechanical finding is frozen: {findings}",
+        );
+        assert!(
+            findings.contains("three comments still say intake refuses ExecutorFault"),
+            "the accepted judgment finding is frozen: {findings}",
+        );
+        assert!(
+            findings.contains(
+                "scripts/bloomery-operator.py:65 (correctness): a live journal's machinery facts render as unknown(28)"
+            ),
+            "file, line, category, and failure scenario ride the mechanical line: {findings}",
+        );
+        assert!(
+            findings.contains("src/intake/tests.rs:855 (test-integrity): a reader of those comments is told the opposite of current admission"),
+            "file, line, category, and failure scenario ride the judgment line: {findings}",
+        );
+        assert!(
+            !findings.contains("rejected payload must not freeze"),
+            "a schema-rejected call is ignored: {findings}"
+        );
+        assert!(!findings.contains("TOOL_INPUT_SECRET"), "non-findings tool input is still not findings: {findings}");
+        assert!(findings.ends_with("VERDICT: finding"), "the terminal verdict stays the durable suffix: {findings}");
+        assert_eq!(findings.matches("VERDICT: finding").count(), 1, "the terminal line is not duplicated: {findings}");
+
+        let classified = aether_bloomery::classify_findings(findings);
+        assert_eq!(classified.findings.len(), 2, "{classified:?}");
+        assert!(classified.any_blocking(), "the mechanical prefix must still classify as blocking: {classified:?}");
+        assert_eq!(
+            classified.advisories().count(),
+            1,
+            "the judgment prefix must still classify as advisory: {classified:?}"
+        );
+        assert_eq!(
+            classified.named_checks().collect::<Vec<_>>(),
+            ["`cmd_flakes_decodes_machinery_names`"],
+            "the check named inside the summary survives rendering: {classified:?}",
+        );
+        assert_eq!(review_conclusion(&record), ReviewVerdict::Finding);
+        assert_eq!(evidence["status"], "fail");
+    }
+
+    #[test]
+    fn a_tool_only_advisory_report_still_classifies_as_a_pass() {
+        // Tripwire (#5118 / #4961): a reviewer that follows the harness puts
+        // JUDGMENT only in ReportFindings and ends with VERDICT: finding. The
+        // prefixes have to survive so the lane reads them the same way it reads
+        // prose; otherwise every harness-following advisory review blocks.
+        let record = derive_result_record(&transcript(&[
+            assistant(&text("see finding below.")),
+            report_findings_use(
+                "t-1",
+                serde_json::json!([{
+                    "file": "src/lib.rs",
+                    "line": 4,
+                    "category": "economy",
+                    "summary": "JUDGMENT — `weave` would read better as `composition`",
+                    "failure_scenario": "a later reader spends a moment on the name",
+                }]),
+            ),
+            tool_result("t-1", "1 finding reported.", false),
+            result("VERDICT: finding"),
+        ]));
+
+        assert_eq!(review_conclusion(&record), ReviewVerdict::Pass);
+        let evidence = stamped(&record);
+        assert_eq!(evidence["status"], "pass");
+        let findings = evidence["findings"].as_str().expect("findings");
+        assert!(findings.contains("JUDGMENT — `weave` would read better as `composition`"), "{findings}");
+        assert!(findings.contains("VERDICT: finding"), "{findings}");
+    }
+
+    #[test]
+    fn a_prose_only_review_is_unchanged_when_the_transcript_has_no_report_findings() {
+        // Tripwire (#5118): no tool call means today's path. An unmatched
+        // ReportFindings (no tool_result) is not schema-accepted, so it must
+        // not invent findings the reviewer never landed.
+        let report = "- MECHANICAL — src/lib.rs: empty input panics.\nVERDICT: finding";
+        let record = derive_result_record(&transcript(&[assistant(&text(report)), result(report)]));
+        assert_eq!(stamped(&record)["findings"].as_str(), Some(report));
+
+        let unmatched = derive_result_record(&transcript(&[
+            assistant(&text("see finding below.")),
+            report_findings_use(
+                "t-pending",
+                serde_json::json!([{
+                    "file": "src/lib.rs",
+                    "summary": "MECHANICAL — never accepted, must not freeze",
+                }]),
+            ),
+            result("VERDICT: finding"),
+        ]));
+        let unmatched_evidence = stamped(&unmatched);
+        let findings = unmatched_evidence["findings"].as_str().expect("findings");
+        assert_eq!(findings, "see finding below.\n\nVERDICT: finding");
+        assert!(!findings.contains("never accepted"), "an unmatched call is not accepted: {findings}");
     }
 }
