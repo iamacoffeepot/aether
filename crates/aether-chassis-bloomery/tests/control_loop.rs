@@ -27,7 +27,7 @@
 
 mod common;
 
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
 use std::thread;
@@ -50,19 +50,25 @@ use common::client::{call, call_frame, handshake_while_alive, spawn_and_connect}
 use common::{Coordinator, free_port};
 use serde::Serialize;
 
+/// Not the production `cargo xtask transform` line. That boots a 15-tool
+/// `--version` inspect before the RPC port exists, and under full-suite load
+/// the inspect parks the handshake past its deadline (#5116, #5035).
+const CONTROL_LOOP_LANE: &str = "bloomery-control-loop-test";
+
 /// Fork the `bloomery` bin against `db` on `port`, reaped when the returned
 /// guard drops.
 fn spawn(port: u16, db: &str) -> Coordinator {
-    Coordinator::spawn(port, &[("AETHER_STORE_PATH", db)])
+    Coordinator::spawn(port, &[("AETHER_STORE_PATH", db), ("AETHER_BLOOMERY_LANE_PROGRAM", CONTROL_LOOP_LANE)])
 }
 
 /// Fork the coordinator against `db` and handshake only with the child that
 /// stayed alive. Same bind-race retry as [`spawn_with_artifacts`].
+///
+/// RPC port 0 lets the child bind atomically — no `free_port` reservation
+/// window for a sibling to steal — and the handshake helper discovers the
+/// listen the child actually owns.
 fn spawn_with_store(db: &str, client_name: &str) -> (Coordinator, TcpStream) {
-    spawn_and_connect(client_name, Duration::from_secs(30), || {
-        let port = free_port();
-        (port, spawn(port, db))
-    })
+    spawn_and_connect(client_name, Duration::from_secs(60), || (0, spawn(0, db)))
 }
 
 /// Pipeline two typed `Call`s to `mailbox` — write **both** frames before reading
@@ -352,16 +358,24 @@ fn the_capability_ledger_is_measured_live_and_rebuilt_on_replay() {
 /// Fork the coordinator against a unique artifacts root and handshake only
 /// with the child that stayed alive.
 ///
-/// Port selection, spawn, and handshake are one bounded retryable
-/// transaction. `free_port` binds `:0` and releases, so a sibling can claim
-/// the port before this bin binds. The loser exits; a deadline handshake
-/// then waits 30s for a process that can never become ready. Retrying the
-/// whole fork after an early exit (or a handshake that landed on a
-/// stranger) is what turns that flake into another attempt.
+/// Port 0 is the bind: the OS assigns the RPC port to the child, so there
+/// is no `free_port` reservation window for a sibling to steal. The
+/// handshake helper discovers that listen. A child that still exits (HTTP
+/// collision used to, boot error still can) is another attempt, not a
+/// 30s wait on a closed port.
 fn spawn_with_artifacts(db: &str, artifacts: &str, client_name: &str) -> (Coordinator, TcpStream) {
-    spawn_and_connect(client_name, Duration::from_secs(30), || {
-        let port = free_port();
-        (port, Coordinator::spawn(port, &[("AETHER_STORE_PATH", db), ("AETHER_ARTIFACTS_ROOT", artifacts)]))
+    spawn_and_connect(client_name, Duration::from_secs(60), || {
+        (
+            0,
+            Coordinator::spawn(
+                0,
+                &[
+                    ("AETHER_STORE_PATH", db),
+                    ("AETHER_ARTIFACTS_ROOT", artifacts),
+                    ("AETHER_BLOOMERY_LANE_PROGRAM", CONTROL_LOOP_LANE),
+                ],
+            ),
+        )
     })
 }
 
@@ -507,6 +521,36 @@ fn handshake_while_alive_abandons_a_dead_child_without_the_deadline() {
     );
 }
 
+// The plausible bug: `/proc/net/tcp` column math is off by one, so an
+// OS-assigned listen is invisible and spawn_and_connect polls an empty
+// candidate list until the deadline (#5116).
+#[test]
+fn listening_ports_reports_a_listener_this_process_owns() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let ports = Coordinator::listening_ports_for(std::process::id());
+    assert!(ports.contains(&port), "procfs listen scan missed {port}: {ports:?}");
+}
+
+// The plausible bug: AETHER_RPC_PORT=0 binds a real ingress but the helper
+// keeps polling port 0, which never accepts, and the deadline expires as
+// "Connection refused" — the full-suite failure at this handshake (#5116).
+#[test]
+fn spawn_and_connect_handshakes_an_os_assigned_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let db = db.to_str().unwrap();
+
+    let start = Instant::now();
+    let (mut coordinator, _stream) = spawn_and_connect("port-zero", Duration::from_secs(60), || (0, spawn(0, db)));
+    assert!(coordinator.is_alive(), "the child that bound :0 stayed up through handshake");
+    assert!(
+        start.elapsed() < Duration::from_secs(30),
+        "discovering the OS-assigned port must not burn the handshake deadline: {:?}",
+        start.elapsed()
+    );
+}
+
 // The plausible bug: the first child loses the bind race and exits, but
 // the fixture keeps calling the 30s handshake helper against that port,
 // so a recoverable startup collision becomes a verifier timeout.
@@ -539,8 +583,17 @@ fn an_early_dead_study_artifact_coordinator_is_retried_without_the_handshake_dea
             if second_started_at.is_none() {
                 second_started_at = Some(Instant::now());
             }
-            let port = free_port();
-            (port, Coordinator::spawn(port, &[("AETHER_STORE_PATH", db), ("AETHER_ARTIFACTS_ROOT", artifacts)]))
+            (
+                0,
+                Coordinator::spawn(
+                    0,
+                    &[
+                        ("AETHER_STORE_PATH", db),
+                        ("AETHER_ARTIFACTS_ROOT", artifacts),
+                        ("AETHER_BLOOMERY_LANE_PROGRAM", CONTROL_LOOP_LANE),
+                    ],
+                ),
+            )
         }
     });
 

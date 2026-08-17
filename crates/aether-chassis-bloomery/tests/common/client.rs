@@ -14,7 +14,7 @@
 #![allow(dead_code, reason = "each test binary compiles the whole module and uses only the fixtures it needs")]
 #![allow(clippy::unwrap_used, reason = "a fixture that cannot reach its process reports it by panicking")]
 
-use std::net::TcpStream;
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,16 @@ use aether_rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_V
 use serde::Serialize;
 
 use super::Coordinator;
+
+/// How long one Hello probe may wait. A stranger that completes TCP (kernel
+/// listen backlog) but never speaks the wire used to hold this helper for the
+/// 20s call timeout, which is enough to burn the handshake deadline in one
+/// attempt (#5116).
+const HELLO_PROBE: Duration = Duration::from_secs(1);
+
+/// Timeout restored on a stream that has completed Hello, so later `Call`
+/// reads have a real budget.
+const CALL_READ_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Handshake as a client peer named `client_name`, reporting a refusal instead
 /// of panicking — the fallible half [`try_connect_and_handshake`] returns.
@@ -45,9 +55,17 @@ fn try_handshake(stream: &mut TcpStream, client_name: &str) -> Result<(), String
 /// `Hello` / `HelloAck` step that refused, so a caller can tell a closed port
 /// from a stranger that answered TCP but not the wire.
 pub fn try_connect_and_handshake(port: u16, client_name: &str) -> Result<TcpStream, String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|error| format!("connecting: {error}"))?;
-    stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    connect_and_hello(port, client_name, CALL_READ_TIMEOUT)
+}
+
+fn connect_and_hello(port: u16, client_name: &str, timeout: Duration) -> Result<TcpStream, String> {
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(|error| format!("connecting: {error}"))?;
+    stream.set_read_timeout(Some(timeout)).unwrap();
+    stream.set_write_timeout(Some(timeout)).unwrap();
     try_handshake(&mut stream, client_name)?;
+    stream.set_read_timeout(Some(CALL_READ_TIMEOUT)).unwrap();
+    stream.set_write_timeout(None).unwrap();
     Ok(stream)
 }
 
@@ -77,9 +95,11 @@ pub fn connect_and_handshake(port: u16, client_name: &str) -> TcpStream {
 }
 
 /// Run `spawn` and handshake as one transaction: a fresh child per attempt,
-/// handshake attempts only while that child is alive, the whole fork retried
-/// after an early exit or a bind collision. Returns the live guard beside
-/// the stream so the caller cannot keep a connection to a stranger.
+/// handshake only against a listen that child owns, the whole fork retried
+/// after an early exit. Pass port `0` so the child binds atomically — no
+/// `free_port` reservation window — and this helper discovers the OS-assigned
+/// listen. Returns the live guard beside the stream so the caller cannot keep
+/// a connection to a stranger.
 pub fn spawn_and_connect(
     client_name: &str,
     budget: Duration,
@@ -89,12 +109,57 @@ pub fn spawn_and_connect(
     let mut last = String::from("no attempt");
     while Instant::now() < deadline {
         let (port, mut coordinator) = spawn();
-        match handshake_while_alive(port, client_name, deadline, || coordinator.is_alive()) {
+        match handshake_our_child(&mut coordinator, port, client_name, deadline) {
             Ok(stream) => return (coordinator, stream),
             Err(why) => last = why,
         }
     }
     panic!("no coordinator answered a handshake: {last}");
+}
+
+/// Handshake only sockets this child owns. A reserved port another process
+/// claimed is never Hello'd — that connect succeeds against the thief's
+/// listen backlog and then burns the Hello timeout (#5116). `port == 0` is
+/// the OS-assigned bind: probe every listen the child holds until one
+/// answers Hello.
+fn handshake_our_child(
+    coordinator: &mut Coordinator,
+    port: u16,
+    client_name: &str,
+    deadline: Instant,
+) -> Result<TcpStream, String> {
+    let mut last = String::from("child exited before a handshake attempt");
+    let mut refused = Vec::new();
+    while coordinator.is_alive() && Instant::now() < deadline {
+        let candidates = if port == 0 {
+            coordinator.listening_ports()
+        } else if coordinator.listens_on(port) {
+            vec![port]
+        } else {
+            Vec::new()
+        };
+        refused.retain(|seen| candidates.contains(seen));
+        for candidate in &candidates {
+            if refused.contains(candidate) {
+                continue;
+            }
+            match connect_and_hello(*candidate, client_name, HELLO_PROBE) {
+                Ok(stream) => return Ok(stream),
+                Err(why) => {
+                    last = why;
+                    if !last.starts_with("connecting:") {
+                        refused.push(*candidate);
+                    }
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    if coordinator.is_alive() {
+        Err(last)
+    } else {
+        Err(format!("child on port {port} exited: {last}"))
+    }
 }
 
 /// Poll the one-attempt handshake while `alive` stays true. An exited child
@@ -109,7 +174,7 @@ pub fn handshake_while_alive(
 ) -> Result<TcpStream, String> {
     let mut last = String::from("child exited before a handshake attempt");
     while alive() && Instant::now() < deadline {
-        match try_connect_and_handshake(port, client_name) {
+        match connect_and_hello(port, client_name, HELLO_PROBE) {
             Ok(stream) if alive() => return Ok(stream),
             Ok(_) => return Err(format!("child on port {port} exited after handshake")),
             Err(why) => {

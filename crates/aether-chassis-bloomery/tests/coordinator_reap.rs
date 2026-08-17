@@ -18,8 +18,8 @@ use std::panic::{self, AssertUnwindSafe};
 use std::time::Duration;
 
 use aether_substrate::pid_lock::is_pid_alive;
+use common::Coordinator;
 use common::client::spawn_and_connect;
-use common::{Coordinator, free_port};
 
 #[test]
 fn a_panic_between_the_fork_and_the_teardown_reaps_the_coordinator() {
@@ -28,12 +28,10 @@ fn a_panic_between_the_fork_and_the_teardown_reaps_the_coordinator() {
     // store, and a run under a coordinator's environment inherits one — the live
     // journal (#4714). Handshake is the boot gate so the panic below unwinds
     // past a *booted* coordinator — the shape that leaked, and the one that
-    // holds a lock. The whole fork is retried when the child loses the
-    // `free_port` bind race and exits: a single wait on one port burns the
-    // 30s deadline against a process that will never accept (#5116).
-    let (coordinator, _stream) = spawn_and_connect("reap-test", Duration::from_secs(30), || {
-        let rpc_port = free_port();
-        (rpc_port, Coordinator::spawn(rpc_port, &[("AETHER_STORE_PATH", ":memory:")]))
+    // holds a lock. Port 0 lets the child bind atomically; the helper
+    // discovers that listen instead of racing a reserved port (#5116).
+    let (coordinator, _stream) = spawn_and_connect("reap-test", Duration::from_secs(60), || {
+        (0, Coordinator::spawn(0, &[("AETHER_STORE_PATH", ":memory:")]))
     });
     let pid = i32::try_from(coordinator.pid()).unwrap();
     assert!(is_pid_alive(pid), "the forked coordinator is live before the panic");
