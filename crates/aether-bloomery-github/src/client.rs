@@ -418,8 +418,8 @@ pub enum PullMergeResult {
 }
 
 /// The pull-request surface the land path drives — Bloomery proposes a
-/// resolved bloom by opening one, watches its gate, and merges the proposal it
-/// opened once that gate is green (ADR-0149 §The bloom, issue #4953).
+/// resolved bloom by opening one and merges the proposal it opened once the
+/// structural gates hold (ADR-0149 §The bloom, ADR-0186, issue #4953).
 ///
 /// A third sibling of [`GithubApi`] and [`GitDataApi`] for the reason those two
 /// are separate: the projection has no use for pull requests and the land path
@@ -459,8 +459,7 @@ pub trait PullRequestApi {
     /// A transport fault or an error status.
     fn find_pull_request_for_head(&self, head: &str) -> Result<Option<PullRequest>, GithubError>;
 
-    /// How the checks on commit `sha` stand — the landing gate's verdict on a
-    /// proposal that has not merged yet.
+    /// How the checks on commit `sha` stand.
     ///
     /// # Errors
     /// The source surface is unreachable or returned an error status.
