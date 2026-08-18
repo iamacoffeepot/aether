@@ -197,7 +197,7 @@ topic_vocabulary! {
     Splice,
     /// A source-replica push (host-minted): after a local landing receipt is
     /// admitted, the host enqueues a request to push the allowlisted refs to
-    /// the configured GitHub URL. Independent of [`LandingReceipt`] so a
+    /// the configured GitHub URL. Independent of [`Self::LandingReceipt`] so a
     /// projection stall cannot hold source refs and vice versa (ADR-0199).
     /// Appended so the prior topics' display spellings and ordering are
     /// unchanged.

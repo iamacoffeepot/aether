@@ -6,6 +6,8 @@
 //! passed in-process as an `http.extraHeader` and is never written to disk
 //! or to a remote URL.
 
+use std::error::Error;
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -28,8 +30,8 @@ pub enum ReplicaError {
     ForceRejected(String),
 }
 
-impl std::fmt::Display for ReplicaError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ReplicaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Transient(detail) => write!(f, "source replica push failed: {detail}"),
             Self::ForceRejected(detail) => {
@@ -39,7 +41,7 @@ impl std::fmt::Display for ReplicaError {
     }
 }
 
-impl std::error::Error for ReplicaError {}
+impl Error for ReplicaError {}
 
 impl From<io::Error> for ReplicaError {
     fn from(error: io::Error) -> Self {

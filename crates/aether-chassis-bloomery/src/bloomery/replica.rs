@@ -67,7 +67,6 @@ pub fn writer_marker_present(path: &str) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::{github_push_url, writer_marker_present};
 

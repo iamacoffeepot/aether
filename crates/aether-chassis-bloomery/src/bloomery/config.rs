@@ -834,6 +834,8 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         // credentials would both push. The marker is the operator-created file
         // that makes the writer claim explicit; an empty or missing path must
         // refuse the boot rather than start a second writer.
+        use std::fs;
+
         let github = GithubConnectionConfig {
             token: "t".into(),
             owner: "octo".into(),
@@ -850,11 +852,11 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         assert!(message.contains("SINGLE_WRITER_MARKER"), "{message}");
         assert!(message.contains("two writers"), "{message}");
 
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("writer");
-        std::fs::write(&marker, "this host writes the replica\n").unwrap();
-        let marked = CoordinatorConfig { single_writer_marker: marker.to_string_lossy().into_owned(), ..local };
-        marked.require_single_writer_marker(&github).expect("a present marker is the writer claim");
+        let dir = tempfile::tempdir().expect("writer-marker fixture dir");
+        let writer_file = dir.path().join("writer");
+        fs::write(&writer_file, "this host writes the replica\n").expect("writer marker writes");
+        let claimed = CoordinatorConfig { single_writer_marker: writer_file.to_string_lossy().into_owned(), ..local };
+        claimed.require_single_writer_marker(&github).expect("a present marker is the writer claim");
 
         assert!(
             CoordinatorConfig::default().require_single_writer_marker(&GithubConnectionConfig::default()).is_ok(),

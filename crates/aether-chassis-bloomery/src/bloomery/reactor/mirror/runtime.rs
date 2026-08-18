@@ -363,14 +363,9 @@ impl NativeActor for MirrorReactorCapability {
         ctx.spawn_detached::<MirrorReactorCapability, _>(move |mut root| {
             let _slot = slot; // released here, so the next tick can drain again.
             let acks = if entries.first().is_some_and(|entry| entry.topic == Topic::SourceReplica) {
-                match replica.as_ref() {
-                    Some(replica) => publish_replica_batch(replica, &entries),
-                    None => Vec::new(),
-                }
-            } else if let Some(projection) = projection.as_ref() {
-                project_batch(projection, &entries)
+                replica.as_ref().map_or_else(Vec::new, |replica| publish_replica_batch(replica, &entries))
             } else {
-                Vec::new()
+                projection.as_ref().map_or_else(Vec::new, |projection| project_batch(projection, &entries))
             };
             for ack in acks {
                 root.send::<StoreCapability, AckOutbox>(&ack);
@@ -397,15 +392,17 @@ mod tests {
     //! the timer / `spawn_detached` are the thin glue the chassis-boot test and
     //! compilation cover; this pins the behavior that actually mirrors and acks.
 
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::Receiver;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use aether_bloomery::{
         BloomDraft, BloomId, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey,
-        LandingReceipt, Membership, ProjectedReceipt, ResolvedConfigs, Snapshot, Topic, WorkpieceId, reduce, view_of,
+        LandingReceipt, Membership, ProjectedReceipt, ResolvedConfigs, Snapshot, SourceReplicaPayload, Topic,
+        WorkpieceId, reduce, view_of,
     };
-    use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
+    use aether_bloomery_github::{GithubProjection, ReplicaError, SourceReplica, testing::FakeGithub};
     use aether_data::wire::{from_bytes, to_vec};
     use aether_data::{MailId, MailboxId, Source};
     use aether_substrate::actor::native::binding::NativeBinding;
@@ -416,7 +413,7 @@ mod tests {
 
     use super::{
         AckOutbox, DrainOutbox, DrainOutboxResult, DrainTick, Kind, MirrorReactorCapability, MirrorReactorState,
-        OutboxEntry, ProjectionShell, project_batch, publish_replica_batch,
+        OutboxEntry, ProjectionShell, SourceReplicaShell, project_batch, publish_replica_batch,
     };
     use crate::bloomery::outbox::TopicOutbox;
     use crate::store::{SqliteStore, StoreBackend};
@@ -688,8 +685,8 @@ mod tests {
     struct FakeReplica {
         fail: bool,
         reject_force: bool,
-        publishes: std::sync::atomic::AtomicUsize,
-        alerts: std::sync::Mutex<Vec<String>>,
+        publishes: AtomicUsize,
+        alerts: Mutex<Vec<String>>,
     }
 
     impl FakeReplica {
@@ -697,8 +694,8 @@ mod tests {
             Arc::new(Self {
                 fail: false,
                 reject_force: false,
-                publishes: std::sync::atomic::AtomicUsize::new(0),
-                alerts: std::sync::Mutex::new(Vec::new()),
+                publishes: AtomicUsize::new(0),
+                alerts: Mutex::new(Vec::new()),
             })
         }
 
@@ -706,8 +703,8 @@ mod tests {
             Arc::new(Self {
                 fail: true,
                 reject_force: false,
-                publishes: std::sync::atomic::AtomicUsize::new(0),
-                alerts: std::sync::Mutex::new(Vec::new()),
+                publishes: AtomicUsize::new(0),
+                alerts: Mutex::new(Vec::new()),
             })
         }
 
@@ -715,26 +712,26 @@ mod tests {
             Arc::new(Self {
                 fail: false,
                 reject_force: true,
-                publishes: std::sync::atomic::AtomicUsize::new(0),
-                alerts: std::sync::Mutex::new(Vec::new()),
+                publishes: AtomicUsize::new(0),
+                alerts: Mutex::new(Vec::new()),
             })
         }
 
         fn count(&self) -> usize {
-            self.publishes.load(std::sync::atomic::Ordering::SeqCst)
+            self.publishes.load(Ordering::SeqCst)
         }
     }
 
-    impl aether_bloomery_github::SourceReplica for FakeReplica {
-        fn publish(&self) -> Result<(), aether_bloomery_github::ReplicaError> {
-            self.publishes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    impl SourceReplica for FakeReplica {
+        fn publish(&self) -> Result<(), ReplicaError> {
+            self.publishes.fetch_add(1, Ordering::SeqCst);
             if self.reject_force {
                 let detail = "protected branch hook declined".to_owned();
                 self.alerts.lock().unwrap().push(detail.clone());
-                return Err(aether_bloomery_github::ReplicaError::ForceRejected(detail));
+                return Err(ReplicaError::ForceRejected(detail));
             }
             if self.fail {
-                return Err(aether_bloomery_github::ReplicaError::Transient("github unreachable".into()));
+                return Err(ReplicaError::Transient("github unreachable".into()));
             }
             Ok(())
         }
@@ -744,7 +741,7 @@ mod tests {
         OutboxEntry {
             sequence,
             topic: Topic::SourceReplica.as_str().to_owned(),
-            payload: to_vec(&aether_bloomery::SourceReplicaPayload { new_head: digest(20) }).unwrap(),
+            payload: to_vec(&SourceReplicaPayload { new_head: digest(20) }).unwrap(),
         }
     }
 
@@ -754,7 +751,7 @@ mod tests {
         // that). A push fault must not ack the replica row and must not invent
         // a second land.
         let fake = FakeReplica::failing();
-        let shell = crate::bloomery::SourceReplicaShell::new(fake.clone());
+        let shell = SourceReplicaShell::new(fake.clone());
         let mut store = SqliteStore::open(":memory:").unwrap();
         store.enqueue_topic(Topic::SourceReplica, &replica_entry(1).payload).unwrap();
 
@@ -769,7 +766,7 @@ mod tests {
     #[test]
     fn a_rejected_force_surfaces_an_operator_visible_alert() {
         let fake = FakeReplica::rejecting();
-        let shell = crate::bloomery::SourceReplicaShell::new(fake.clone());
+        let shell = SourceReplicaShell::new(fake.clone());
         let acks = publish_replica_batch(&shell, &[replica_entry(3)]);
         assert!(acks.is_empty(), "a rejected force is not silently acked away");
         assert_eq!(
@@ -782,7 +779,7 @@ mod tests {
     #[test]
     fn superseded_replica_requests_coalesce_to_the_latest_head() {
         let fake = FakeReplica::ok();
-        let shell = crate::bloomery::SourceReplicaShell::new(fake.clone());
+        let shell = SourceReplicaShell::new(fake.clone());
         let entries = vec![replica_entry(1), replica_entry(2), replica_entry(3)];
         let acks = publish_replica_batch(&shell, &entries);
         assert_eq!(fake.count(), 1, "an outage must not replay every intermediate head");
@@ -799,7 +796,7 @@ mod tests {
         fake.seed_issue(MEMBER_ISSUE, "the workpiece's own issue");
         let projection = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
         let replica = FakeReplica::ok();
-        let replica_shell = crate::bloomery::SourceReplicaShell::new(replica.clone());
+        let replica_shell = SourceReplicaShell::new(replica.clone());
 
         let bad_view = OutboxEntry {
             sequence: 1,
@@ -814,7 +811,7 @@ mod tests {
         assert_eq!(replica.count(), 1);
 
         let replica = FakeReplica::failing();
-        let replica_shell = crate::bloomery::SourceReplicaShell::new(replica);
+        let replica_shell = SourceReplicaShell::new(replica);
         let replica_acks = publish_replica_batch(&replica_shell, &[replica_entry(4)]);
         assert!(replica_acks.is_empty(), "a replica fault stalls only the replica topic");
 

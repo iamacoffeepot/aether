@@ -142,7 +142,7 @@ fn seed_ref(repo: &Path, name: &str) {
 }
 
 fn advance_mainline(repo: &Path) {
-    let tree = git_stdout(repo, &["rev-parse", "HEAD^{tree}"]);
+    let tree = git_stdout(repo, &["rev-parse", concat!("HEAD^", "{tree}")]);
     let parent = git_stdout(repo, &["rev-parse", "HEAD"]);
     let output = Command::new("git")
         .current_dir(repo)
