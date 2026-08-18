@@ -157,6 +157,12 @@ struct State {
     // is backed by a real one (`with_object_repo`). `None` keeps the synthetic
     // in-memory shas.
     object_repo: Option<PathBuf>,
+    // When set, each `create_ref` hides that name from the next `get_ref` once
+    // — GitHub's read-after-create cache lag (#5072). `seed_ref` is not a create.
+    lag_created_refs: bool,
+    unread_creates: HashSet<String>,
+    next_get_ref_fault: Option<String>,
+    next_create_ref_fault: Option<String>,
 }
 
 /// An in-memory GitHub double implementing [`GithubApi`].
@@ -394,6 +400,26 @@ impl FakeGithub {
     /// Seed a ref (`heads/…` form) pointing at `sha`.
     pub fn seed_ref(&self, name: &str, sha: &str) {
         self.lock().refs.insert(name.to_owned(), sha.to_owned());
+    }
+
+    /// After each [`GitDataApi::create_ref`], the next [`GitDataApi::get_ref`] of
+    /// that name returns `Ok(None)` once — the GitHub read-after-create window
+    /// Wave 3 sequence 432 hit. Subsequent reads see the ref. [`Self::seed_ref`]
+    /// is not a create and is not lagged.
+    pub fn lag_next_read_after_create(&self) {
+        self.lock().lag_created_refs = true;
+    }
+
+    /// The next [`GitDataApi::get_ref`] fails as a transport/`Command` fault
+    /// rather than a clean miss.
+    pub fn fail_next_get_ref(&self, detail: impl Into<String>) {
+        self.lock().next_get_ref_fault = Some(detail.into());
+    }
+
+    /// The next [`GitDataApi::create_ref`] fails as a transport/`Command` fault
+    /// rather than writing the ref.
+    pub fn fail_next_create_ref(&self, detail: impl Into<String>) {
+        self.lock().next_create_ref_fault = Some(detail.into());
     }
 
     /// The head sha of pull request `number` — what a landing watch reads its
@@ -697,16 +723,28 @@ fn hex_of(bytes: &[u8; 32]) -> String {
 
 impl GitDataApi for FakeGithub {
     fn get_ref(&self, name: &str) -> Result<Option<GitRef>, GitDataError> {
-        let state = self.lock();
+        let mut state = self.lock();
+        if let Some(detail) = state.next_get_ref_fault.take() {
+            return Err(GitDataError::Command(detail));
+        }
+        if state.unread_creates.remove(name) {
+            return Ok(None);
+        }
         Ok(state.refs.get(name).map(|sha| GitRef { name: name.to_owned(), sha: sha.clone() }))
     }
 
     fn create_ref(&self, name: &str, sha: &str) -> Result<GitRef, GitDataError> {
         let mut state = self.lock();
+        if let Some(detail) = state.next_create_ref_fault.take() {
+            return Err(GitDataError::Command(detail));
+        }
         if state.refs.contains_key(name) {
             return Err(GitDataError::RefConflict(format!("ref {name} already exists")));
         }
         state.refs.insert(name.to_owned(), sha.to_owned());
+        if state.lag_created_refs {
+            state.unread_creates.insert(name.to_owned());
+        }
         Ok(GitRef { name: name.to_owned(), sha: sha.to_owned() })
     }
 
