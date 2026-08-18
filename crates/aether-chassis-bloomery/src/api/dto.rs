@@ -416,6 +416,119 @@ pub struct ErrorView {
     pub error: String,
 }
 
+/// `GET /blooms/{id}/dispatches` — rollup attempts plus live outstanding orders.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BloomDispatchesView {
+    /// One row per attempt, oldest first.
+    pub dispatches: Vec<BloomDispatchView>,
+}
+
+/// One attempt on a bloom: a completed rollup row and/or a still-live order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BloomDispatchView {
+    /// Host nonce (`dispatch-` / `redispatch-`) when known.
+    pub nonce: String,
+    /// Member workpiece, empty for a bloom-wide stage.
+    pub workpiece: String,
+    /// Stage this attempt ran.
+    pub stage: StageId,
+    /// 1-based rank among this workpiece+stage pair, oldest first.
+    pub attempt: u32,
+    /// Lane status when evidence is still on disk; absent while in flight or swept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+    /// Study cost in micro-USD. `None` when no study record exists — never a
+    /// synthesized zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<u64>,
+    /// Whether `{nonce}-evidence` is still on disk.
+    pub evidence_retained: bool,
+}
+
+/// `GET /dispatches/{nonce}` — one dispatch's evidence header.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchEvidenceView {
+    /// The nonce that matched (may be the alternate prefix).
+    pub nonce: String,
+    /// Whether the evidence directory is still on disk.
+    pub retained: bool,
+    /// Set when the journal names the nonce but the directory is gone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+    /// Public assistant prose, independently capped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_text: Option<String>,
+    /// True when [`assistant_text`](Self::assistant_text) was truncated to the cap.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub assistant_text_truncated: bool,
+    /// Construct/refine commit message, independently capped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_message: Option<String>,
+    /// True when [`commit_message`](Self::commit_message) was truncated to the cap.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub commit_message_truncated: bool,
+    /// Process identity recorded beside the evidence, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<DispatchProcessView>,
+    /// File names in the evidence directory, sorted, bounded.
+    pub files: Vec<String>,
+}
+
+/// The pid / pgid / starttime / boot id a lane recorded at spawn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchProcessView {
+    pub pid: u32,
+    pub pgid: u32,
+    pub starttime: u64,
+    pub boot_id: String,
+}
+
+/// A line-snapped page of `transcript.jsonl` or `prompt.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchFilePage {
+    /// Complete lines in this page. A line longer than the per-line cap is
+    /// truncated here; the cursor still advances past the whole line.
+    pub lines: Vec<String>,
+    /// Byte offset this page starts at (snapped to a line boundary).
+    pub cursor: u64,
+    /// Byte offset to pass as the next `cursor`. Absent at the current end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+    /// The file's length at the moment of the read — follow-tail compares this.
+    pub length: u64,
+    /// Set when the caller named a `limit` above the clamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+/// `GET /logs/coordinator` — one bounded page of journald output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordinatorLogsView {
+    /// Filtered entries, oldest first.
+    pub entries: Vec<CoordinatorLogEntry>,
+    /// Cursor to thread as `cursor` on the next call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// True when more matching entries remain after this page.
+    pub truncated: bool,
+    /// Set when the caller named a `limit` above the clamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+/// One journald entry as the coordinator log route renders it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordinatorLogEntry {
+    /// Journal realtime timestamp, Unix microseconds when journald provides it.
+    pub timestamp_unix_micros: u64,
+    /// Canonical level string: `trace` / `debug` / `info` / `warn` / `error`.
+    pub level: String,
+    /// The MESSAGE field.
+    pub message: String,
+    /// journald `__CURSOR`, used as the page cursor.
+    pub cursor: String,
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
