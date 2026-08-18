@@ -452,6 +452,21 @@ pub struct DecodedArtifact {
     pub notice: Option<String>,
 }
 
+/// One bounded `GET /dispatches/{nonce}/transcript` (or `/prompt`) page.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DispatchFilePage {
+    #[serde(default)]
+    pub lines: Vec<String>,
+    #[serde(default)]
+    pub cursor: u64,
+    #[serde(default)]
+    pub next_cursor: Option<u64>,
+    #[serde(default)]
+    pub length: u64,
+    #[serde(default)]
+    pub notice: Option<String>,
+}
+
 fn encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
