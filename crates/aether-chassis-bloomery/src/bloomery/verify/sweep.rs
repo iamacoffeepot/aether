@@ -196,6 +196,8 @@ fn swept_result(facts: &DiscriminatedFacts, test_id: &str) -> Option<ProofResult
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use aether_bloomery::Digest;
 
     use super::{
@@ -251,7 +253,7 @@ mod tests {
         assert_eq!(rows.len(), 1, "discrimination recorded one fact");
         assert_eq!(rows[0].result, "red");
         assert!(
-            unknowns(&mut store, &host, std::slice::from_ref(&cheap)).expect("the read").is_empty(),
+            unknowns(&mut store, &host, slice::from_ref(&cheap)).expect("the read").is_empty(),
             "a converted key is no longer unknown"
         );
 
