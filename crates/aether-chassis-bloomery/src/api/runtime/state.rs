@@ -30,8 +30,8 @@ use aether_actor::{HandlesKind, Manual};
 #[cfg(feature = "github")]
 use aether_bloomery::EnumerateClaims;
 use aether_bloomery::{
-    Admit, ApprovalPolicy, BloomDraft, BloomId, Digest, Event, MemberDependency, Query, ResolvedConfigs, Statement,
-    Workpiece,
+    Admit, ApprovalPolicy, BloomDraft, BloomId, Digest, Event, MemberDependency, MetricsQuery, Query, ResolvedConfigs,
+    SpendQuery, Statement, Workpiece,
 };
 use aether_data::wire::to_vec;
 use aether_data::{Kind, MailId, MailboxId};
@@ -249,6 +249,10 @@ pub(super) enum Routed {
     Admit(Admit),
     /// Relay to the control core; its `QueryResult` answers.
     Query(Query),
+    /// Relay to the control core; its `MetricsQueryResult` answers.
+    Metrics(MetricsQuery),
+    /// Relay to the control core; its `SpendQueryResult` answers.
+    Spend(SpendQuery),
     /// Relay to the store; its `PageJournalResult` answers.
     ReplayJournal(PageJournal),
     /// Relay to the artifacts cap; its `GetRangeResult` answers.
@@ -353,6 +357,8 @@ pub(super) fn finish(
         Routed::Reply(response) => http::Outcome::Reply(response),
         Routed::Admit(request) => ctx.defer(&request).to::<ControlCore>(),
         Routed::Query(request) => ctx.defer(&request).to::<ControlCore>(),
+        Routed::Metrics(request) => ctx.defer(&request).to::<ControlCore>(),
+        Routed::Spend(request) => ctx.defer(&request).to::<ControlCore>(),
         Routed::ReplayJournal(request) => ctx.defer(&request).to::<StoreCapability>(),
         Routed::GetRange(request) => ctx.defer(&request).to::<ArtifactsCapability>(),
         Routed::RecordConfig(request) => ctx.defer(&request).to::<StoreCapability>(),

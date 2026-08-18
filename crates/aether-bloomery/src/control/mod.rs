@@ -693,6 +693,11 @@ pub struct JournalRecord {
     /// (ADR-0187). `None` is a pre-stamp row: implicit current-at-migration.
     #[serde(default)]
     pub decisions_schema: Option<String>,
+    /// Host-clock stamp written at admission (`recorded_unix_millis`). `None`
+    /// is a pre-column row: reconstruct, never invent a time. Trailing
+    /// optional so prior replay replies still decode.
+    #[serde(default)]
+    pub recorded_unix_millis: Option<u64>,
 }
 
 /// Reply to [`ReplayJournal`].
@@ -880,6 +885,79 @@ pub enum QueryResult {
         /// The wire-encoded `CalibrationDocument`.
         #[serde(with = "aether_data::bytes")]
         document: Vec<u8>,
+    },
+}
+
+/// Which metrics document a [`MetricsQuery`] asks for.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsView {
+    /// Fixed-size fleet summary.
+    Summary,
+    /// Day rollups, newest last, clamped at 90.
+    Days,
+    /// Bloom rollups, cursor on seal sequence.
+    Blooms,
+    /// Per-member stage spans for one bloom.
+    Timeline,
+    /// Calibration seats plus token / cache columns.
+    Seats,
+    /// Dispatch rows, cursor on journal sequence.
+    Dispatches,
+}
+
+/// Read the metrics ledger the control core folded beside its snapshot.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.bloomery.metrics_query")]
+pub struct MetricsQuery {
+    /// Which document to render.
+    pub view: MetricsView,
+    /// Bloom id bytes; required for [`MetricsView::Timeline`].
+    pub bloom: Option<Vec<u8>>,
+    /// Exclusive cursor (seal sequence for blooms, journal sequence for
+    /// dispatches).
+    pub from_sequence: Option<u64>,
+    /// Requested page size; the edge clamps it.
+    pub limit: Option<u64>,
+}
+
+/// Reply to [`MetricsQuery`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.bloomery.metrics_result")]
+pub enum MetricsQueryResult {
+    /// Wire-encoded document for the requested view.
+    Ok {
+        /// The encoded document.
+        #[serde(with = "aether_data::bytes")]
+        document: Vec<u8>,
+    },
+    /// The named bloom is not in the ledger.
+    NotFound,
+    /// The document could not be encoded or the request was incomplete.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
+/// Read the window spend [`measure`](crate::measure) already computes.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[kind(name = "aether.bloomery.spend_query")]
+pub struct SpendQuery;
+
+/// Reply to [`SpendQuery`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.bloomery.spend_result")]
+pub enum SpendQueryResult {
+    /// Wire-encoded [`SpendWindow`](crate::SpendWindow).
+    Ok {
+        /// The encoded window.
+        #[serde(with = "aether_data::bytes")]
+        window: Vec<u8>,
+    },
+    /// The window could not be encoded.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
     },
 }
 

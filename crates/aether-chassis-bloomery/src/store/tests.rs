@@ -1154,6 +1154,20 @@ fn replay_state_matches_whether_the_envelope_stamp_is_populated() {
     assert_eq!(fold_journal(&mut stamped), fold_journal(&mut unstamped));
 }
 
+#[test]
+fn metrics_rollups_refold_to_identical_payloads() {
+    // The tables are cache: delete and refold from the journal must reproduce
+    // the same dispatch payloads. The fold itself is proven in aether-bloomery;
+    // this pins the persist/clear/refold path the host uses.
+    let mut store = memory();
+    store.fold_metrics_from_journal().unwrap();
+    let first = store.metric_dispatch_payloads().unwrap();
+    store.clear_metrics().unwrap();
+    assert_eq!(store.metrics_cursor().unwrap(), 0, "clear drops the cursor");
+    store.fold_metrics_from_journal().unwrap();
+    assert_eq!(store.metric_dispatch_payloads().unwrap(), first);
+}
+
 fn fold_journal(store: &mut SqliteStore) -> aether_bloomery::Snapshot {
     use aether_bloomery::{Decisions, Event, ResolvedConfigs, Snapshot};
     use aether_data::wire::from_bytes;
