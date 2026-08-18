@@ -124,7 +124,7 @@ fn footer() -> Paragraph<'static> {
 #[cfg(test)]
 mod tests {
     use super::render;
-    use crate::dto::{BloomView, DigestHex, LandingBlock, MemberView, Present, ViewDocument};
+    use crate::dto::{BloomView, DigestHex, LandingBlock, MemberView, Present, ReviewParkView, ViewDocument};
     use crate::state::BoardState;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -153,7 +153,7 @@ mod tests {
         let view = ViewDocument {
             blooms: vec![BloomView {
                 id: digest(0xab),
-                review_park: Some(Present {}),
+                review_park: Some(ReviewParkView::default()),
                 landing_blocked: Some(LandingBlock { rolls: 1, budget: 2 }),
                 members: vec![MemberView {
                     workpiece: "issue-1".to_owned(),
@@ -163,6 +163,7 @@ mod tests {
                 }],
                 ..BloomView::default()
             }],
+            ..ViewDocument::default()
         };
         let mut state = BoardState::new("127.0.0.1:8910".to_owned());
         state.apply_view(&view);
@@ -186,6 +187,7 @@ mod tests {
                 members: vec![MemberView { workpiece: "issue-keep".to_owned(), ..MemberView::default() }],
                 ..BloomView::default()
             }],
+            ..ViewDocument::default()
         };
         let mut state = BoardState::new("127.0.0.1:8910".to_owned());
         state.apply_view(&view);

@@ -3,9 +3,7 @@
 use std::fmt::Display;
 use std::time::{Duration, Instant};
 
-use aether_bloomery::BloomStatus;
-
-use crate::dto::{BloomView, DigestHex, MemberView, ViewDocument};
+use crate::dto::{BloomStatus, BloomView, DigestHex, MemberView, ViewDocument};
 
 /// Stable identity of one selectable row. Refreshes look this up so the
 /// cursor does not walk out from under the operator when `/view` reorders.
@@ -179,7 +177,7 @@ fn rows_of(view: &ViewDocument) -> Vec<BoardRow> {
                 state: member_status_state(member, false).to_owned(),
                 machinery: format!("{}/{}", member.machinery_rolls, member.machinery_budget),
                 blocked_by: member.blocked_by.clone().filter(|name| !name.is_empty()).unwrap_or_default(),
-                wedge_cause: member.wedge_cause.map_or_else(String::new, |cause| format!("{cause:?}")),
+                wedge_cause: member.wedge_cause.map_or_else(String::new, |cause| cause.to_string()),
             }));
         }
     }
@@ -233,13 +231,7 @@ fn executor_fault_token(rolls: u32, budget: u32, terminal: bool) -> String {
 }
 
 fn bloom_status_label(status: Option<BloomStatus>) -> String {
-    match status {
-        Some(BloomStatus::Sealed) => "Sealed".to_owned(),
-        Some(BloomStatus::Resolved) => "Resolved".to_owned(),
-        Some(BloomStatus::Landed) => "Landed".to_owned(),
-        Some(BloomStatus::Superseded) => "Superseded".to_owned(),
-        None => "?".to_owned(),
-    }
+    status.map_or_else(|| "?".to_owned(), |status| status.to_string())
 }
 
 /// Age of the last successful sample, for the header.
@@ -262,8 +254,10 @@ pub fn format_age(age: Option<Duration>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{BoardRow, BoardState, RowId, alerts_of, format_age, member_status_state, rows_of};
-    use crate::dto::{BloomView, DigestHex, ExecutorFaultView, LandingBlock, MemberView, Present, ViewDocument};
-    use aether_bloomery::{BloomStatus, WedgeCause};
+    use crate::dto::{
+        BloomStatus, BloomView, DigestHex, ExecutorFaultView, LandingBlock, MemberView, PendingDecisionView, Present,
+        ReviewParkView, ViewDocument, WedgeCause,
+    };
     use std::time::Duration;
 
     fn digest(byte: u8) -> DigestHex {
@@ -299,7 +293,10 @@ mod tests {
             "WEDGED"
         );
         assert_eq!(
-            member_status_state(&MemberView { pending_decision: Some(Present {}), ..member("wp") }, false),
+            member_status_state(
+                &MemberView { pending_decision: Some(PendingDecisionView::default()), ..member("wp") },
+                false,
+            ),
             "held"
         );
         assert_eq!(member_status_state(&MemberView { blocked_by: Some(String::new()), ..member("wp") }, false), "idle");
@@ -313,7 +310,7 @@ mod tests {
         let view = ViewDocument {
             blooms: vec![BloomView {
                 id: digest(0xab),
-                review_park: Some(Present {}),
+                review_park: Some(ReviewParkView::default()),
                 landing_blocked: Some(LandingBlock { rolls: 2, budget: 3 }),
                 executor_fault: Some(ExecutorFaultView { rolls: 3, budget: 3, terminal: true }),
                 members: vec![
@@ -322,6 +319,7 @@ mod tests {
                 ],
                 ..BloomView::default()
             }],
+            ..ViewDocument::default()
         };
         let tokens: Vec<_> = alerts_of(&view).into_iter().map(|alert| alert.token).collect();
         assert_eq!(tokens, ["PARK", "land: blocked 2/3", "FAULT 3/3 TERMINAL", "WEDGED", "hostfault"]);
@@ -336,6 +334,7 @@ mod tests {
                 BloomView { id: digest(1), members: vec![member("wp-a"), member("wp-b")], ..BloomView::default() },
                 BloomView { id: digest(2), members: vec![member("wp-c")], ..BloomView::default() },
             ],
+            ..ViewDocument::default()
         };
         let mut state = BoardState::new("127.0.0.1:8910".to_owned());
         state.apply_view(&first);
@@ -347,6 +346,7 @@ mod tests {
                 BloomView { id: digest(2), members: vec![member("wp-c")], ..BloomView::default() },
                 BloomView { id: digest(1), members: vec![member("wp-b"), member("wp-a")], ..BloomView::default() },
             ],
+            ..ViewDocument::default()
         };
         state.apply_view(&reordered);
         assert_eq!(state.selected, Some(RowId::Member { bloom: digest(1), workpiece: "wp-b".to_owned() }));
@@ -359,6 +359,7 @@ mod tests {
         // so a coordinator restart blanks the board instead of dimming it.
         let view = ViewDocument {
             blooms: vec![BloomView { id: digest(1), members: vec![member("wp-a")], ..BloomView::default() }],
+            ..ViewDocument::default()
         };
         let mut state = BoardState::new("127.0.0.1:8910".to_owned());
         state.apply_view(&view);
@@ -390,6 +391,7 @@ mod tests {
                 }],
                 ..BloomView::default()
             }],
+            ..ViewDocument::default()
         };
         let rows = rows_of(&view);
         assert_eq!(rows.len(), 2);
