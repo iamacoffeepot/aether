@@ -4,6 +4,7 @@
 
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
+use std::str;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -49,10 +50,9 @@ impl ControlApi {
         } else {
             format!("Authorization: Bearer {}\r\n", self.token)
         };
-        let content = match body {
-            Some(bytes) => format!("Content-Type: application/json\r\nContent-Length: {}\r\n", bytes.len()),
-            None => String::new(),
-        };
+        let content = body.map_or_else(String::new, |bytes| {
+            format!("Content-Type: application/json\r\nContent-Length: {}\r\n", bytes.len())
+        });
         let mut request =
             format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n{auth}{content}\r\n")
                 .into_bytes();
@@ -86,7 +86,7 @@ fn parse_response(response: &[u8]) -> Result<(u16, Vec<u8>)> {
     let head = &response[..head_end];
     let body = response[head_end + separator.len()..].to_vec();
     let status_line = head.split(|&byte| byte == b'\r').next().unwrap_or(head);
-    let status_text = std::str::from_utf8(status_line).context("control API status line is not UTF-8")?;
+    let status_text = str::from_utf8(status_line).context("control API status line is not UTF-8")?;
     let Some(code) = status_text.split_whitespace().nth(1) else {
         bail!("control API status line has no code: {status_text}");
     };

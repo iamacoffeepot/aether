@@ -1,10 +1,11 @@
 //! Parse a managed-heading markdown file into a canonical [`ScopeRevision`].
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::Path;
 
-use aether_bloomery::{SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, SurfacePattern, WorkpieceId};
-use anyhow::{Result, bail};
+use aether_bloomery::{Digest, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, SurfacePattern, WorkpieceId};
+use anyhow::{Result, anyhow, bail};
 
 const PROBLEM: &str = "Problem statement";
 const DESIGN: &str = "Design notes";
@@ -16,11 +17,7 @@ const DOGFOOD: &str = "Dogfood brief";
 const MANAGED: &[&str] = &[PROBLEM, DESIGN, PLAN, "Sub-issues", DEPENDS, SURFACE, DOGFOOD, "Side findings"];
 
 /// Render `markdown` as the next scope revision for `workpiece`.
-pub(super) fn parse_revision(
-    workpiece: &str,
-    markdown: &str,
-    predecessor: Option<aether_bloomery::Digest>,
-) -> Result<ScopeRevision> {
+pub(super) fn parse_revision(workpiece: &str, markdown: &str, predecessor: Option<Digest>) -> Result<ScopeRevision> {
     let sections = managed_sections(markdown)?;
     let problem = required_body(&sections, PROBLEM)?;
     let design = required_body(&sections, DESIGN)?;
@@ -45,14 +42,9 @@ pub(super) fn parse_revision(
 }
 
 /// Load `path` and parse it as a revision for `workpiece`.
-pub(super) fn load_revision(
-    workpiece: &str,
-    path: &Path,
-    predecessor: Option<aether_bloomery::Digest>,
-) -> Result<ScopeRevision> {
-    let markdown =
-        std::fs::read_to_string(path).map_err(|error| anyhow::anyhow!("read {}: {error}", path.display()))?;
-    parse_revision(workpiece, &markdown, predecessor).map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))
+pub(super) fn load_revision(workpiece: &str, path: &Path, predecessor: Option<Digest>) -> Result<ScopeRevision> {
+    let markdown = fs::read_to_string(path).map_err(|error| anyhow!("read {}: {error}", path.display()))?;
+    parse_revision(workpiece, &markdown, predecessor).map_err(|error| anyhow!("{}: {error}", path.display()))
 }
 
 fn managed_sections(body: &str) -> Result<BTreeMap<String, String>> {
@@ -185,7 +177,8 @@ fn parse_workpieces(span: &str) -> Vec<WorkpieceId> {
     body_of(span)
         .lines()
         .filter_map(|line| {
-            let entry = line.trim().strip_prefix("- ").unwrap_or(line.trim());
+            let trimmed = line.trim();
+            let entry = trimmed.strip_prefix("- ").unwrap_or(trimmed);
             if entry.is_empty() || entry.starts_with("N/A") {
                 return None;
             }
@@ -229,10 +222,8 @@ Create then show.\n"
 
     #[test]
     fn managed_headings_become_a_revision() {
-        let revision = match parse_revision("issue-5047", fixture(), None) {
-            Ok(revision) => revision,
-            Err(error) => panic!("a complete managed file must parse: {error}"),
-        };
+        let revision = parse_revision("issue-5047", fixture(), None)
+            .unwrap_or_else(|error| panic!("a complete managed file must parse: {error}"));
         assert_eq!(revision.workpiece.0, "issue-5047");
         assert_eq!(revision.problem, "Need a CLI.");
         assert_eq!(revision.design, "Separate binary.");

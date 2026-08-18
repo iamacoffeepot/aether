@@ -9,10 +9,11 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_bloomery::{AuthorityDoor, KeyId, SignatureEnvelope, authorization_message};
+use aether_bloomery::{AuthorityDoor, Digest, KeyId, SignatureEnvelope, authorization_message};
 use aether_chassis_bloomery::commission;
 use common::{Coordinator, free_port};
 use ed25519_dalek::{Signer, SigningKey};
+use tempfile::TempDir;
 
 const TOKEN: &str = "secret";
 
@@ -35,9 +36,15 @@ fn owner_allowlist() -> String {
 }
 
 fn write_file(path: &Path, bytes: &[u8]) {
-    if let Err(error) = fs::write(path, bytes) {
-        panic!("write {}: {error}", path.display());
-    }
+    fs::write(path, bytes).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+}
+
+fn temp_dir() -> TempDir {
+    tempfile::tempdir().unwrap_or_else(|error| panic!("temp dir: {error}"))
+}
+
+fn utf8_path(path: &Path) -> &str {
+    path.to_str().unwrap_or_else(|| panic!("{} is UTF-8", path.display()))
 }
 
 fn spawn(http_port: u16, policy_path: &str) -> Coordinator {
@@ -54,12 +61,12 @@ fn spawn(http_port: u16, policy_path: &str) -> Coordinator {
     )
 }
 
-fn cli(port: u16, args: &[&str]) -> Result<String, anyhow::Error> {
-    let port = port.to_string();
-    let mut argv =
+fn cli(http_port: u16, rest: &[&str]) -> Result<String, anyhow::Error> {
+    let port = http_port.to_string();
+    let mut invocation =
         vec!["bloomery-commission".to_owned(), "--http-port".to_owned(), port, "--token".to_owned(), TOKEN.to_owned()];
-    argv.extend(args.iter().map(|arg| (*arg).to_owned()));
-    commission::run(argv)
+    invocation.extend(rest.iter().map(|word| (*word).to_owned()));
+    commission::run(invocation)
 }
 
 fn wait_ready(port: u16) {
@@ -74,20 +81,16 @@ fn wait_ready(port: u16) {
 }
 
 fn envelope_for(door: AuthorityDoor, digest_hex: &str) -> Vec<u8> {
-    let bytes = match hex_to_32(digest_hex) {
-        Some(bytes) => bytes,
-        None => panic!("test digest must be 32 bytes hex, got {digest_hex}"),
+    let Some(bytes) = hex_to_32(digest_hex) else {
+        panic!("test digest must be 32 bytes hex, got {digest_hex}");
     };
-    let digest = aether_bloomery::Digest::from_bytes(bytes);
+    let digest = Digest::from_bytes(bytes);
     let message = authorization_message(door, digest, digest.as_bytes());
     let envelope = SignatureEnvelope {
         signer: KeyId("owner".to_owned()),
         signature: owner_key().sign(message.as_bytes()).to_bytes().to_vec(),
     };
-    match serde_json::to_vec(&envelope) {
-        Ok(bytes) => bytes,
-        Err(error) => panic!("encode envelope: {error}"),
-    }
+    serde_json::to_vec(&envelope).unwrap_or_else(|error| panic!("encode envelope: {error}"))
 }
 
 fn hex_to_32(hex: &str) -> Option<[u8; 32]> {
@@ -104,10 +107,7 @@ fn hex_to_32(hex: &str) -> Option<[u8; 32]> {
 }
 
 fn first_token(output: &str) -> &str {
-    match output.split_whitespace().next() {
-        Some(token) => token,
-        None => panic!("expected output, got {output:?}"),
-    }
+    output.split_whitespace().next().unwrap_or_else(|| panic!("expected output, got {output:?}"))
 }
 
 #[test]
@@ -122,16 +122,10 @@ fn the_commission_cli_is_a_sibling_binary() {
 fn a_bare_bloomery_invocation_still_starts_the_daemon() {
     let http_port = free_port();
     let http = http_port.to_string();
-    let dir = match tempfile::tempdir() {
-        Ok(dir) => dir,
-        Err(error) => panic!("temp dir: {error}"),
-    };
+    let dir = temp_dir();
     let policy = dir.path().join("policy.toml");
     write_file(&policy, b"default = \"judge\"\n");
-    let policy_path = match policy.to_str() {
-        Some(path) => path,
-        None => panic!("policy path is UTF-8"),
-    };
+    let policy_path = utf8_path(&policy);
     let mut coordinator = Coordinator::spawn(
         free_port(),
         &[
@@ -148,29 +142,16 @@ fn a_bare_bloomery_invocation_still_starts_the_daemon() {
 #[test]
 fn create_scope_approve_show_and_list_round_trip() {
     let http_port = free_port();
-    let dir = match tempfile::tempdir() {
-        Ok(dir) => dir,
-        Err(error) => panic!("temp dir: {error}"),
-    };
+    let dir = temp_dir();
     let policy = dir.path().join("policy.toml");
     write_file(&policy, b"default = \"judge\"\n");
-    let policy_path = match policy.to_str() {
-        Some(path) => path,
-        None => panic!("policy path is UTF-8"),
-    };
-    let _coordinator = spawn(http_port, policy_path);
+    let _coordinator = spawn(http_port, utf8_path(&policy));
     wait_ready(http_port);
 
     let intent = dir.path().join("intent.txt");
     write_file(&intent, b"ship the commission CLI");
-    let intent_path = match intent.to_str() {
-        Some(path) => path,
-        None => panic!("intent path is UTF-8"),
-    };
-    let created = match cli(http_port, &["create", "--id", "issue-5047", "--intent-file", intent_path]) {
-        Ok(output) => output,
-        Err(error) => panic!("create: {error}"),
-    };
+    let created = cli(http_port, &["create", "--id", "issue-5047", "--intent-file", utf8_path(&intent)])
+        .unwrap_or_else(|error| panic!("create: {error}"));
     assert!(created.contains("issue-5047"), "create names the workpiece: {created}");
 
     let scope = dir.path().join("scope.md");
@@ -203,48 +184,27 @@ crates/aether-chassis-bloomery/src/commission/**\n\
 \n\
 Create then show.\n",
     );
-    let scope_path = match scope.to_str() {
-        Some(path) => path,
-        None => panic!("scope path is UTF-8"),
-    };
-    let scope_out = match cli(http_port, &["scope", "issue-5047", "--file", scope_path]) {
-        Ok(output) => output,
-        Err(error) => panic!("scope: {error}"),
-    };
+    let scope_out = cli(http_port, &["scope", "issue-5047", "--file", utf8_path(&scope)])
+        .unwrap_or_else(|error| panic!("scope: {error}"));
     let digest = first_token(&scope_out).to_owned();
     assert_eq!(digest.len(), 64, "scope prints a hex digest: {scope_out}");
 
     let envelope = dir.path().join("approve.json");
     write_file(&envelope, &envelope_for(AuthorityDoor::Approve, &digest));
-    let envelope_path = match envelope.to_str() {
-        Some(path) => path,
-        None => panic!("envelope path is UTF-8"),
-    };
-    if let Err(error) = cli(http_port, &["approve", "issue-5047", "--scope", &digest, "--envelope", envelope_path]) {
-        panic!("approve: {error}");
-    }
+    cli(http_port, &["approve", "issue-5047", "--scope", &digest, "--envelope", utf8_path(&envelope)])
+        .unwrap_or_else(|error| panic!("approve: {error}"));
 
-    let shown = match cli(http_port, &["show", "issue-5047"]) {
-        Ok(output) => output,
-        Err(error) => panic!("show: {error}"),
-    };
+    let shown = cli(http_port, &["show", "issue-5047"]).unwrap_or_else(|error| panic!("show: {error}"));
     assert!(shown.contains("issue-5047"), "show names the workpiece: {shown}");
     assert!(shown.contains("open"), "show reports open: {shown}");
     assert!(shown.contains(&digest), "show reports the current revision: {shown}");
 
-    let listed = match cli(http_port, &["list", "--status", "open"]) {
-        Ok(output) => output,
-        Err(error) => panic!("list: {error}"),
-    };
+    let listed = cli(http_port, &["list", "--status", "open"]).unwrap_or_else(|error| panic!("list: {error}"));
     assert!(listed.contains("issue-5047"), "list includes the commission: {listed}");
 
     let garbage = dir.path().join("garbage.json");
     write_file(&garbage, b"{not-an-envelope");
-    let garbage_path = match garbage.to_str() {
-        Some(path) => path,
-        None => panic!("garbage path is UTF-8"),
-    };
-    match cli(http_port, &["approve", "issue-5047", "--scope", &digest, "--envelope", garbage_path]) {
+    match cli(http_port, &["approve", "issue-5047", "--scope", &digest, "--envelope", utf8_path(&garbage)]) {
         Ok(output) => panic!("malformed envelope must be refused, got {output}"),
         Err(error) => {
             let message = error.to_string();
@@ -254,11 +214,7 @@ Create then show.\n",
 
     let wrong = dir.path().join("wrong.json");
     write_file(&wrong, &envelope_for(AuthorityDoor::Approve, &"aa".repeat(32)));
-    let wrong_path = match wrong.to_str() {
-        Some(path) => path,
-        None => panic!("wrong envelope path is UTF-8"),
-    };
-    match cli(http_port, &["approve", "issue-5047", "--scope", &digest, "--envelope", wrong_path]) {
+    match cli(http_port, &["approve", "issue-5047", "--scope", &digest, "--envelope", utf8_path(&wrong)]) {
         Ok(output) => panic!("mismatched envelope must be refused, got {output}"),
         Err(error) => {
             let message = error.to_string();

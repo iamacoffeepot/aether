@@ -43,10 +43,10 @@ mod tests {
     fn round_trips_thirty_two_bytes() {
         let bytes = [0x5c; 32];
         let hex = encode(&bytes);
-        match decode_digest(&hex) {
-            Some(decoded) => assert_eq!(decoded, bytes),
-            None => panic!("a hex spelling this encoder just wrote must decode"),
-        }
+        let Some(decoded) = decode_digest(&hex) else {
+            panic!("a hex spelling this encoder just wrote must decode");
+        };
+        assert_eq!(decoded, bytes);
     }
 
     #[test]

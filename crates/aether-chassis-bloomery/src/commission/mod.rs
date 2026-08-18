@@ -10,10 +10,11 @@ mod hex;
 mod scope;
 
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_bloomery::{Digest, Observation, Provenance, SignatureEnvelope, Statement};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
@@ -107,7 +108,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    dispatch(CommissionCli::try_parse_from(args).map_err(|error| anyhow::anyhow!("{error}"))?)
+    dispatch(CommissionCli::try_parse_from(args).map_err(|error| anyhow!("{error}"))?)
 }
 
 /// Parse process argv and run. `--help` exits through clap before this returns.
@@ -198,10 +199,7 @@ fn show(api: &ControlApi, id: &str, json: bool) -> Result<String> {
 }
 
 fn list(api: &ControlApi, status: Option<&str>) -> Result<String> {
-    let path = match status {
-        Some(status) => format!("/commissions?status={status}"),
-        None => "/commissions".to_owned(),
-    };
+    let path = status.map_or_else(|| "/commissions".to_owned(), |status| format!("/commissions?status={status}"));
     let view: ListView = api.get_json(&path)?;
     let mut out = String::new();
     for head in view.commissions {
@@ -232,7 +230,7 @@ fn current_revision(api: &ControlApi, id: &str) -> Result<Option<String>> {
 }
 
 fn load_intent(path: &Path) -> Result<Statement> {
-    let bytes = std::fs::read(path).map_err(|error| anyhow::anyhow!("read {}: {error}", path.display()))?;
+    let bytes = fs::read(path).map_err(|error| anyhow!("read {}: {error}", path.display()))?;
     if bytes.first() == Some(&b'{') {
         return serde_json::from_slice(&bytes).with_context(|| format!("parse intent statement {}", path.display()));
     }
@@ -244,51 +242,40 @@ fn load_intent(path: &Path) -> Result<Statement> {
 }
 
 fn signed_statement(path: &Path, words: &[u8]) -> Result<Statement> {
-    let bytes = std::fs::read(path).map_err(|error| anyhow::anyhow!("read {}: {error}", path.display()))?;
+    let bytes = fs::read(path).map_err(|error| anyhow!("read {}: {error}", path.display()))?;
     let envelope: SignatureEnvelope = serde_json::from_slice(&bytes)
         .with_context(|| format!("envelope {} is not an ADR-0179 SignatureEnvelope", path.display()))?;
     Ok(Statement { words: words.to_vec(), provenance: Provenance::AuthorSignature(envelope), parents: Vec::new() })
 }
 
 fn digest_from_hex(hex: &str) -> Result<Digest> {
-    match hex::decode_digest(hex) {
-        Some(bytes) => Ok(Digest::from_bytes(bytes)),
-        None => bail!("expected a 64-character hex digest, got {hex:?}"),
-    }
+    let Some(bytes) = hex::decode_digest(hex) else {
+        bail!("expected a 64-character hex digest, got {hex:?}");
+    };
+    Ok(Digest::from_bytes(bytes))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::{CommissionCli, load_intent, signed_statement};
     use clap::Parser;
 
     #[test]
     fn the_cli_is_a_subcommand_family_on_its_own_binary() {
-        let cli = match CommissionCli::try_parse_from([
-            "bloomery-commission",
-            "list",
-            "--http-port",
-            "8910",
-            "--token",
-            "secret",
-        ]) {
-            Ok(cli) => cli,
-            Err(error) => panic!("list must parse: {error}"),
-        };
+        let cli =
+            CommissionCli::try_parse_from(["bloomery-commission", "list", "--http-port", "8910", "--token", "secret"])
+                .unwrap_or_else(|error| panic!("list must parse: {error}"));
         assert_eq!(cli.http_port, 8910);
         assert_eq!(cli.token, "secret");
     }
 
     #[test]
     fn a_malformed_envelope_file_is_refused_before_http() {
-        let dir = match tempfile::tempdir() {
-            Ok(dir) => dir,
-            Err(error) => panic!("temp dir: {error}"),
-        };
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("temp dir: {error}"));
         let path = dir.path().join("envelope.json");
-        if let Err(error) = std::fs::write(&path, "{not-an-envelope") {
-            panic!("write envelope fixture: {error}");
-        }
+        fs::write(&path, "{not-an-envelope").unwrap_or_else(|error| panic!("write envelope fixture: {error}"));
         match signed_statement(&path, &[0; 32]) {
             Ok(_) => panic!("malformed envelope must not parse"),
             Err(error) => {
@@ -300,18 +287,10 @@ mod tests {
 
     #[test]
     fn a_text_intent_file_preserves_its_bytes() {
-        let dir = match tempfile::tempdir() {
-            Ok(dir) => dir,
-            Err(error) => panic!("temp dir: {error}"),
-        };
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("temp dir: {error}"));
         let path = dir.path().join("intent.txt");
-        if let Err(error) = std::fs::write(&path, "ship the CLI") {
-            panic!("write intent fixture: {error}");
-        }
-        let statement = match load_intent(&path) {
-            Ok(statement) => statement,
-            Err(error) => panic!("text intent must load: {error}"),
-        };
+        fs::write(&path, "ship the CLI").unwrap_or_else(|error| panic!("write intent fixture: {error}"));
+        let statement = load_intent(&path).unwrap_or_else(|error| panic!("text intent must load: {error}"));
         assert_eq!(statement.words, b"ship the CLI");
     }
 }
