@@ -89,10 +89,11 @@ pub use testing::{ScriptedEvidence, ScriptedEvidenceResult, ScriptedUpload, Scri
 pub use verify::{
     Accumulation, Attribution, AttributionError, AttributionRequest, BaseProbe, BaseRepairWorkpiece, BatchBisect,
     BatchComposer, BatchContext, BatchFailure, BatchFailureHooks, BatchGate, BatchMember, BatchReport, BatchRestart,
-    BloomDisposition, GateOutcome, Land, LandProbe, MemberFate, RepairBoard, RunningGate, SurfaceOverlap, SweepContext,
-    SweepDecision, SweepOutcome, TaintSet, UnknownFact, attribute_gate_failure, bisect_land_order, bloom_disposition,
-    consult_proof_fact, decide_accumulation, decide_sweep, record_proof_facts, repair_landed, run_batch_gate,
-    run_sweep, unknowns,
+    BloomDisposition, CoverageEntry, CoverageMap, CoverageStatus, GateOutcome, Land, LandProbe, MemberFate,
+    MissingCoverage, RepairBoard, RollDecision, RollHold, RunningGate, SurfaceOverlap, SweepContext, SweepDecision,
+    SweepOutcome, TaintSet, TestClosure, UnknownFact, attribute_gate_failure, bisect_land_order, bloom_disposition,
+    consult_proof_fact, coverage_map, decide_accumulation, decide_roll, decide_sweep, record_proof_facts,
+    repair_landed, run_batch_gate, run_sweep, unknowns,
 };
 pub use verify::{
     ClosureKey, ClosureKeyError, DiscriminatedFact, DiscriminatedFacts, HostClass, ProofResult, ProofSource,
