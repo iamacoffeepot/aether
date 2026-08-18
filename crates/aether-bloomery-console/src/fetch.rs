@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Receiver, RecvError, SendError, Sender};
 use std::thread;
 use std::time::Duration;
 
-use crate::dto::ViewDocument;
+use crate::dto::{DecodedArtifact, JournalPage, ViewDocument};
 use crate::http::{self, Endpoint};
 use crate::store::{Lane, ResourceKey};
 
@@ -26,6 +26,8 @@ pub struct FetchRequest {
 #[derive(Clone, Debug)]
 pub enum ResourceBody {
     View(ViewDocument),
+    Journal(JournalPage),
+    Artifact(DecodedArtifact),
 }
 
 /// Outcome posted back to the shell. The event loop never calls HTTP.
@@ -99,9 +101,16 @@ fn lane_loop(endpoint: &Endpoint, requests: &Receiver<FetchRequest>, replies: &S
 }
 
 fn fetch_key(endpoint: &Endpoint, key: ResourceKey, timeout: Duration) -> Result<ResourceBody, String> {
+    let path = key.path();
     match key {
-        ResourceKey::View => http::get_json::<ViewDocument>(endpoint, key.path(), timeout)
+        ResourceKey::View => http::get_json::<ViewDocument>(endpoint, &path, timeout)
             .map(ResourceBody::View)
+            .map_err(|error| error.to_string()),
+        ResourceKey::Journal(_) => http::get_json::<JournalPage>(endpoint, &path, timeout)
+            .map(ResourceBody::Journal)
+            .map_err(|error| error.to_string()),
+        ResourceKey::Artifact(_) => http::get_json::<DecodedArtifact>(endpoint, &path, timeout)
+            .map(ResourceBody::Artifact)
             .map_err(|error| error.to_string()),
     }
 }

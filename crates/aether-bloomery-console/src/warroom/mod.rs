@@ -11,13 +11,16 @@ use crate::dto::DigestHex;
 pub use alerts::{Alert, AlertKind, alerts};
 pub use interrupts::{Interrupt, InterruptKind, interrupts};
 
-/// The subject an alert token or interrupt entry jumps to.
+/// The subject a chrome token or drill-in frame is about.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Focus {
     Bloom { id: DigestHex },
     Member { bloom: DigestHex, workpiece: String },
     Composition { bloom: DigestHex },
     Seal,
+    Dispatch { bloom: DigestHex, workpiece: String },
+    Record { sequence: u64 },
+    Artifact { digest: DigestHex },
 }
 
 impl Focus {
@@ -41,6 +44,21 @@ impl Focus {
         Self::Composition { bloom: id }
     }
 
+    #[must_use]
+    pub fn dispatch(bloom: DigestHex, workpiece: impl Into<String>) -> Self {
+        Self::Dispatch { bloom, workpiece: workpiece.into() }
+    }
+
+    #[must_use]
+    pub fn record(sequence: u64) -> Self {
+        Self::Record { sequence }
+    }
+
+    #[must_use]
+    pub fn artifact(digest: DigestHex) -> Self {
+        Self::Artifact { digest }
+    }
+
     /// The one line a pushed subject frame paints.
     #[must_use]
     pub fn label(&self) -> String {
@@ -49,6 +67,19 @@ impl Focus {
             Self::Member { workpiece, .. } => format!("member {workpiece}"),
             Self::Composition { bloom } => format!("composition {}", bloom.prefix()),
             Self::Seal => "seal door".to_owned(),
+            Self::Dispatch { workpiece, .. } => format!("dispatch {workpiece}"),
+            Self::Record { sequence } => format!("record {sequence}"),
+            Self::Artifact { digest } => format!("artifact {}", digest.prefix()),
+        }
+    }
+
+    /// Stable parent used when the exact subject has vanished.
+    #[must_use]
+    pub fn parent(&self) -> Option<Self> {
+        match self {
+            Self::Dispatch { bloom, workpiece } => Some(Self::member(*bloom, workpiece.clone())),
+            Self::Member { bloom, .. } | Self::Composition { bloom } => Some(Self::bloom(*bloom)),
+            Self::Bloom { .. } | Self::Seal | Self::Record { .. } | Self::Artifact { .. } => None,
         }
     }
 }

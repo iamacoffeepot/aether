@@ -18,18 +18,20 @@ use crate::dto::ViewDocument;
 use crate::fetch::{FetchLanes, FetchReply, ResourceBody};
 use crate::http::Endpoint;
 use crate::keys::{KeyHint, Outcome};
+use crate::nav::Nav;
 use crate::screen::Screen;
 use crate::store::{ResourceKey, Store};
-use crate::warroom::{self, Alert, ChromeId, Interrupt};
+use crate::warroom::{self, Alert, ChromeId, Focus, Interrupt};
 
+#[cfg(test)]
+use crate::dto::DigestHex;
 #[cfg(test)]
 use crate::fetch::FetchProbe;
 #[cfg(test)]
 use crate::screen::Board;
-#[cfg(test)]
-use crate::warroom::Focus;
 
 const ENTER_HINT: KeyHint = KeyHint { keys: "Enter", action: "jump" };
+const ARTIFACT_HINT: KeyHint = KeyHint { keys: "a", action: "artifact" };
 
 /// The running console: one stack, one store, two fetch lanes.
 pub struct Shell {
@@ -85,6 +87,7 @@ impl Shell {
             }
             KeyCode::Char('k') | KeyCode::Up => self.handle_up(&ids, key),
             KeyCode::Enter => self.handle_enter(key),
+            KeyCode::Char('a') => self.handle_artifact(),
             _ => self.delegate_key(key),
         }
     }
@@ -136,17 +139,43 @@ impl Shell {
         };
         let replies: Vec<FetchReply> = fetch.drain().collect();
         let mut view_changed = false;
+        let mut other_changed = false;
         for reply in replies {
-            if reply.key == ResourceKey::View {
-                view_changed = true;
-                match reply.outcome {
-                    Ok(ResourceBody::View(view)) => self.store.apply_view(Ok(view)),
-                    Err(error) => self.store.apply_view(Err(error)),
+            match reply.key {
+                ResourceKey::View => {
+                    view_changed = true;
+                    match reply.outcome {
+                        Ok(ResourceBody::View(view)) => self.store.apply_view(Ok(view)),
+                        Err(error) => self.store.apply_view(Err(error)),
+                        Ok(_) => self.store.apply_view(Err("view lane returned a non-view body".to_owned())),
+                    }
+                }
+                ResourceKey::Journal(query) => {
+                    other_changed = true;
+                    match reply.outcome {
+                        Ok(ResourceBody::Journal(page)) => self.store.apply_journal(query, Ok(page)),
+                        Err(error) => self.store.apply_journal(query, Err(error)),
+                        Ok(_) => {
+                            self.store.apply_journal(query, Err("journal lane returned a non-journal body".to_owned()));
+                        }
+                    }
+                }
+                ResourceKey::Artifact(digest) => {
+                    other_changed = true;
+                    match reply.outcome {
+                        Ok(ResourceBody::Artifact(body)) => self.store.apply_artifact(digest, Ok(body)),
+                        Err(error) => self.store.apply_artifact(digest, Err(error)),
+                        Ok(_) => self
+                            .store
+                            .apply_artifact(digest, Err("artifact lane returned a non-artifact body".to_owned())),
+                    }
                 }
             }
         }
         if view_changed {
             self.reseat_top();
+        } else if other_changed && let Some(top) = self.stack.last_mut() {
+            top.reseat(&self.store);
         }
     }
 
@@ -183,8 +212,8 @@ impl Shell {
         let mut keys = Vec::new();
         for screen in &self.stack {
             for key in screen.subscriptions() {
-                if !keys.contains(key) {
-                    keys.push(*key);
+                if !keys.contains(&key) {
+                    keys.push(key);
                 }
             }
         }
@@ -198,6 +227,10 @@ impl Shell {
         match top.handle_key(key, &self.store) {
             Outcome::Refresh => {
                 self.refresh();
+                Outcome::Handled
+            }
+            Outcome::Push(nav) => {
+                self.push_nav(nav);
                 Outcome::Handled
             }
             other => other,
@@ -218,10 +251,25 @@ impl Shell {
 
     fn handle_enter(&mut self, key: KeyEvent) -> Outcome {
         if let Some(id) = self.chrome.selected() {
-            self.stack.push(Screen::subject(id.focus().clone()));
+            self.push_nav(Nav::focus(id.focus().clone()));
             return Outcome::Handled;
         }
         self.delegate_key(key)
+    }
+
+    fn handle_artifact(&mut self) -> Outcome {
+        let Some(digest) = self.stack.last().and_then(Screen::digest_under_cursor) else {
+            return self.delegate_key(KeyEvent::from(KeyCode::Char('a')));
+        };
+        self.push_nav(Nav::focus(Focus::artifact(digest)));
+        Outcome::Handled
+    }
+
+    fn push_nav(&mut self, nav: Nav) {
+        self.stack.push(Screen::from_nav(nav));
+        if let Some(top) = self.stack.last_mut() {
+            top.reseat(&self.store);
+        }
     }
 
     fn chrome_next(&mut self, ids: &[ChromeId]) {
@@ -306,6 +354,9 @@ impl Shell {
         if self.chrome.selected().is_some() {
             hints.push(ENTER_HINT);
         }
+        if self.stack.last().and_then(Screen::digest_under_cursor).is_some() {
+            hints.push(ARTIFACT_HINT);
+        }
         if let Some(screen) = self.stack.last() {
             hints.extend_from_slice(screen.key_hints());
         }
@@ -331,11 +382,29 @@ impl Shell {
         shell
     }
 
-    fn top_focus(&self) -> Option<&Focus> {
-        match self.stack.last() {
-            Some(Screen::Subject(subject)) => Some(subject.focus()),
-            _ => None,
-        }
+    fn top_focus(&self) -> Option<Focus> {
+        self.stack.last().and_then(Screen::focus)
+    }
+
+    fn apply_view(&mut self, view: ViewDocument) {
+        self.store.apply_view(Ok(view));
+        self.reseat_top();
+    }
+
+    fn top_scroll(&self) -> usize {
+        self.stack.last().map_or(0, Screen::scroll)
+    }
+
+    fn top_selected(&self) -> Option<String> {
+        self.stack.last().and_then(Screen::selected_key)
+    }
+
+    fn stack_depth(&self) -> usize {
+        self.stack.len()
+    }
+
+    fn top_digest(&self) -> Option<DigestHex> {
+        self.stack.last().and_then(Screen::digest_under_cursor)
     }
 
     fn board(&self) -> &Board {
@@ -350,12 +419,14 @@ impl Shell {
 mod tests {
     use super::Shell;
     use crate::dto::{
-        BloomView, CompositionFinding, CompositionView, DigestHex, ExecutorFaultView, LandingBlock, MemberView,
-        OperatorHoldView, PendingDecisionView, Present, ReviewParkView, SpendQuiesce, ViewDocument,
+        BloomStatus, BloomView, CompositionFinding, CompositionView, DigestHex, ExecutorFaultView, HostFaultView,
+        LandingBlock, MemberView, OperatorHoldView, PendingDecisionView, Present, ReviewParkView, SpendQuiesce,
+        ViewDocument,
     };
     use crate::fetch::{FetchReply, ResourceBody};
     use crate::http::Endpoint;
     use crate::keys::Outcome;
+    use crate::nav::Nav;
     use crate::screen::RowId;
     use crate::store::ResourceKey;
     use crate::warroom::Focus;
@@ -395,7 +466,7 @@ mod tests {
                 members: vec![MemberView {
                     workpiece: "issue-1".to_owned(),
                     wedge: Some(Present {}),
-                    host_fault: Some(Present {}),
+                    host_fault: Some(HostFaultView::default()),
                     ..MemberView::default()
                 }],
                 ..BloomView::default()
@@ -524,7 +595,7 @@ mod tests {
         let text = draw(&mut shell);
         assert!(text.contains(label), "interrupt {label} missing from:\n{text}");
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
-        assert_eq!(shell.top_focus(), Some(focus), "Enter on {label} jumped to the wrong subject");
+        assert_eq!(shell.top_focus().as_ref(), Some(focus), "Enter on {label} jumped to the wrong subject");
     }
 
     #[test]
@@ -630,7 +701,11 @@ mod tests {
         // The plausible bug: the band reserves a row for an empty queue, so a
         // quiet document still paints a blank interrupt strip.
         let view = bloom_with(
-            vec![MemberView { workpiece: "issue-1".to_owned(), host_fault: Some(Present {}), ..MemberView::default() }],
+            vec![MemberView {
+                workpiece: "issue-1".to_owned(),
+                host_fault: Some(HostFaultView::default()),
+                ..MemberView::default()
+            }],
             |bloom| bloom.landing_blocked = Some(LandingBlock { rolls: 1, budget: 3 }),
         );
         let mut shell = Shell::showing(&view, None);
@@ -662,5 +737,90 @@ mod tests {
         assert!(text.contains("PARK"), "{text}");
         assert!(text.contains("WEDGED"), "{text}");
         assert!(text.contains("bloom"), "{text}");
+    }
+
+    #[test]
+    fn a_dropped_member_reseats_to_its_bloom() {
+        // The plausible bug: a supersede that drops the member walks the
+        // cursor onto an unrelated bloom's first row instead of the parent.
+        let other = digest(0xcd);
+        let start = ViewDocument {
+            blooms: vec![
+                BloomView {
+                    id: digest(0xab),
+                    members: vec![MemberView { workpiece: "issue-1".to_owned(), ..MemberView::default() }],
+                    ..BloomView::default()
+                },
+                BloomView {
+                    id: other,
+                    members: vec![MemberView { workpiece: "issue-9".to_owned(), ..MemberView::default() }],
+                    ..BloomView::default()
+                },
+            ],
+            ..ViewDocument::default()
+        };
+        let mut shell = Shell::showing(&start, None);
+        shell.push_nav(Nav::focus(Focus::member(digest(0xab), "issue-1")));
+        assert_eq!(shell.top_focus(), Some(Focus::member(digest(0xab), "issue-1")));
+        let depth = shell.stack_depth();
+
+        shell.apply_view(ViewDocument {
+            blooms: vec![
+                BloomView {
+                    id: digest(0xab),
+                    status: Some(BloomStatus::Superseded),
+                    superseded_by: Some(other),
+                    members: Vec::new(),
+                    ..BloomView::default()
+                },
+                BloomView {
+                    id: other,
+                    members: vec![MemberView { workpiece: "issue-9".to_owned(), ..MemberView::default() }],
+                    ..BloomView::default()
+                },
+            ],
+            ..ViewDocument::default()
+        });
+        assert_eq!(shell.stack_depth(), depth, "a refresh must not pop the frame");
+        assert_eq!(shell.top_focus(), Some(Focus::bloom(digest(0xab))));
+        assert_ne!(shell.top_focus(), Some(Focus::bloom(other)));
+        assert_ne!(shell.top_focus(), Some(Focus::member(other, "issue-9")));
+    }
+
+    #[test]
+    fn enter_on_a_digest_pushes_the_artifact_and_esc_restores_cursor() {
+        // The plausible bug: opening an artifact replaces the detail frame,
+        // so Esc lands on the board with a reset cursor and scroll.
+        let subject = digest(0x66);
+        let detail = digest(0x99);
+        let view = bloom_with(Vec::new(), |bloom| {
+            bloom.composition = Some(CompositionView {
+                findings: vec![CompositionFinding { subject, detail, implicated: vec!["issue-1".to_owned()] }],
+                ..CompositionView::default()
+            });
+        });
+        let mut shell = Shell::showing(&view, None);
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
+        assert_eq!(shell.top_focus(), Some(Focus::composition(digest(0xab))));
+
+        let mut hops = 0;
+        while shell.top_digest() != Some(detail) {
+            assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('j'))), Outcome::Handled);
+            hops += 1;
+            assert!(hops < 16, "never reached the finding digest");
+        }
+        let cursor = shell.top_selected();
+        let scroll = shell.top_scroll();
+        let depth = shell.stack_depth();
+
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
+        assert_eq!(shell.top_focus(), Some(Focus::artifact(detail)));
+        assert_eq!(shell.stack_depth(), depth + 1);
+
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Esc)), Outcome::Handled);
+        assert_eq!(shell.top_focus(), Some(Focus::composition(digest(0xab))));
+        assert_eq!(shell.stack_depth(), depth);
+        assert_eq!(shell.top_selected(), cursor);
+        assert_eq!(shell.top_scroll(), scroll);
     }
 }

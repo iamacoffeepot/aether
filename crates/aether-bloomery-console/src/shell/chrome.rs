@@ -66,15 +66,7 @@ pub fn format_status(view: &ViewDocument) -> String {
 /// Seal-door-closed marker: window and ceiling from `spend_quiesce`.
 #[must_use]
 pub fn format_seal(quiesce: &SpendQuiesce) -> String {
-    match quiesce {
-        SpendQuiesce::Window { window, spent_micro_usd, ceiling_micro_usd } => {
-            format!("SEAL CLOSED  {window}  {spent_micro_usd}/{ceiling_micro_usd}")
-        }
-        SpendQuiesce::Bloom { window, bloom, spent_micro_usd, ceiling_micro_usd } => {
-            format!("SEAL CLOSED  {window}  {}  {spent_micro_usd}/{ceiling_micro_usd}", bloom.prefix())
-        }
-        SpendQuiesce::Unknown => "SEAL CLOSED".to_owned(),
-    }
+    quiesce.label()
 }
 
 #[must_use]
