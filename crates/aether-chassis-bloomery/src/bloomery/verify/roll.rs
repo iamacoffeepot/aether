@@ -211,7 +211,7 @@ mod tests {
         ClosureKey, HostClass, ProofResult, ProofSource, RunnerReport, SweepDecision, decide_sweep, discriminate,
         record_proof_facts,
     };
-    use crate::store::SqliteStore;
+    use crate::store::{SqliteStore, StoreBackend};
 
     const TEST_ID: &str = "crate::day_head";
     const DAY_COMMIT: &str = "cccccccccccccccccccccccccccccccccccccccc";
@@ -293,7 +293,7 @@ mod tests {
         ClosureKey::from_digest(Digest::from_bytes([fill; 32]))
     }
 
-    fn seed(store: &mut dyn crate::store::StoreBackend, closure: ClosureKey, result: ProofResult, host: &HostClass) {
+    fn seed(store: &mut dyn StoreBackend, closure: ClosureKey, result: ProofResult, host: &HostClass) {
         let mut first = RunnerReport::new();
         first.insert(TEST_ID, result);
         let mut second = RunnerReport::new();
