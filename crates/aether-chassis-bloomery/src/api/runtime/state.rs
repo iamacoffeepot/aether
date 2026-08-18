@@ -42,7 +42,7 @@ use aether_substrate::actor::native::{NativeActorMailbox, NativeCtx};
 use aether_substrate::{InboundMail, Mailer};
 
 use super::response::error_response;
-use crate::artifacts::ArtifactsCapability;
+use crate::artifacts::{ArtifactsCapability, GetRange};
 #[cfg(feature = "github")]
 use crate::bloomery::CandidatePush;
 // The control core is a native sibling cap since the wasm-boundary retirement
@@ -52,7 +52,7 @@ use crate::bloomery::CandidatePush;
 use crate::control::ControlCore;
 #[cfg(feature = "github")]
 use crate::source::SourceCapability;
-use crate::store::{RecordConfig, StoreCapability};
+use crate::store::{PageJournal, RecordConfig, StoreCapability};
 
 /// Per-process ceilings on the pre-seal shaping maps. Staged workpieces and
 /// open drafts are pure in-memory shaping state with no durable owner to evict
@@ -250,9 +250,9 @@ pub(super) enum Routed {
     /// Relay to the control core; its `QueryResult` answers.
     Query(Query),
     /// Relay to the store; its `PageJournalResult` answers.
-    ReplayJournal(crate::store::PageJournal),
+    ReplayJournal(PageJournal),
     /// Relay to the artifacts cap; its `GetRangeResult` answers.
-    GetRange(crate::artifacts::GetRange),
+    GetRange(GetRange),
     /// Relay to the store; its `RecordConfigResult` answers.
     RecordConfig(RecordConfig),
     /// Relay to the source cap; its `EnumerateClaimsResult` answers (ADR-0179).

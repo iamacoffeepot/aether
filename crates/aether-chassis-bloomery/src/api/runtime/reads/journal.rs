@@ -99,10 +99,9 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
     match fact {
         Fact::Seal(spec) => vec![spec.id()],
         Fact::Supersede { predecessor, successor } => vec![*predecessor, successor.id()],
-        Fact::GraphSeal { predecessor, spec, .. } => match predecessor {
-            Some(predecessor) => vec![*predecessor, spec.id()],
-            None => vec![spec.id()],
-        },
+        Fact::GraphSeal { predecessor, spec, .. } => {
+            predecessor.map_or_else(|| vec![spec.id()], |predecessor| vec![predecessor, spec.id()])
+        }
         Fact::Integrate { bloom, .. }
         | Fact::AdmitEvidence { bloom, .. }
         | Fact::Resolve { bloom, .. }

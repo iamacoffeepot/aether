@@ -15,7 +15,7 @@ use aether_http::HttpServerResponse;
 use super::hex::digest_from_hex;
 use super::response::{bytes_response, error_response, json};
 use crate::api::dto::DecodedArtifactView;
-use crate::artifacts::GetRangeResult;
+use crate::artifacts::{ArtifactsError, GetRangeResult};
 use crate::store::PageJournalResult;
 
 pub use artifacts::{ArtifactRange, range_bytes, resolve_kind};
@@ -75,9 +75,7 @@ pub fn artifact_response(result: GetRangeResult) -> HttpServerResponse {
                 .push(aether_http::HttpHeader { name: "content-range".to_owned(), value: format!("bytes */{total}") });
             response
         }
-        GetRangeResult::Err { error: crate::artifacts::ArtifactsError::NotFound, .. } => {
-            error_response(404, "no such artifact")
-        }
+        GetRangeResult::Err { error: ArtifactsError::NotFound, .. } => error_response(404, "no such artifact"),
         GetRangeResult::Err { error, .. } => error_response(500, &format!("artifacts error: {error:?}")),
     }
 }

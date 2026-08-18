@@ -354,7 +354,7 @@ pub enum RecordConfigResult {
 
 /// A REST journal page request. Echoed on [`PageJournalResult`] so the HTTP
 /// reply can bound the body without a second correlation table. The
-/// coordinator's own replay still uses [`ReplayJournal`].
+/// coordinator's own replay still uses [`aether_bloomery::ReplayJournal`].
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.store.page_journal")]
 pub struct PageJournal {

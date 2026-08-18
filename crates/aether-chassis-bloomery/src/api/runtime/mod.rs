@@ -94,11 +94,12 @@ use state::{Routed, SealVerify, VerifyPending, finish};
 use super::BloomeryApiCapability;
 use super::dto::WorkpiecesView;
 
+use crate::artifacts::{GetRange, GetRangeResult};
 #[cfg(feature = "github")]
 use crate::bloomery::CandidatePush;
 use crate::bloomery::load_policy;
 use crate::signing::VerifyResult;
-use crate::store::{RecordConfigResult, RecordDispatchDescriptionResult};
+use crate::store::{PageJournal, PageJournalResult, RecordConfigResult, RecordDispatchDescriptionResult};
 
 /// The claim routes' bodies for a build with no GitHub source runtime: an
 /// immediate `503` rather than a deferral onto a `SourceCapability` mailbox that
@@ -487,7 +488,7 @@ impl NativeActor for BloomeryApiCapability {
         finish(
             state,
             ctx,
-            Routed::ReplayJournal(crate::store::PageJournal {
+            Routed::ReplayJournal(PageJournal {
                 bloom: query.bloom.map(|digest| hex::hex_encode(digest.as_bytes())),
                 from_sequence: query.from_sequence,
                 limit: query.limit,
@@ -511,7 +512,7 @@ impl NativeActor for BloomeryApiCapability {
         finish(
             state,
             ctx,
-            Routed::GetRange(crate::artifacts::GetRange {
+            Routed::GetRange(GetRange {
                 digest: digest.0,
                 offset: query.offset,
                 limit: query.limit,
@@ -536,7 +537,7 @@ impl NativeActor for BloomeryApiCapability {
         finish(
             state,
             ctx,
-            Routed::GetRange(crate::artifacts::GetRange {
+            Routed::GetRange(GetRange {
                 digest: digest.0,
                 offset: query.offset,
                 limit: query.limit,
@@ -600,7 +601,7 @@ impl NativeActor for BloomeryApiCapability {
     fn on_replay_result(
         _state: &mut ApiCapabilityState,
         _ctx: &mut NativeCtx<'_, Manual>,
-        mail: crate::store::PageJournalResult,
+        mail: PageJournalResult,
     ) -> HttpServerResponse {
         journal_response(mail)
     }
@@ -610,7 +611,7 @@ impl NativeActor for BloomeryApiCapability {
     fn on_get_result(
         _state: &mut ApiCapabilityState,
         _ctx: &mut NativeCtx<'_, Manual>,
-        mail: crate::artifacts::GetRangeResult,
+        mail: GetRangeResult,
     ) -> HttpServerResponse {
         artifact_response(mail)
     }

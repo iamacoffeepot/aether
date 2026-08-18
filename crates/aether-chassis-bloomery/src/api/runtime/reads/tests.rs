@@ -1,7 +1,5 @@
 //! Paging, ranging, and kind-resolution tests for the REST read surface.
 
-#![allow(clippy::unwrap_used)]
-
 use aether_bloomery::{
     BloomId, DECISIONS_SCHEMA, Decisions, Digest, Event, Fact, IdempotencyKey, JournalRecord, Outcome, StudyCost,
     StudyRecord,
@@ -39,15 +37,15 @@ fn record(sequence: u64, event: &Event) -> JournalRecord {
     JournalRecord {
         sequence,
         idempotency_key: event.idempotency_key.0.clone(),
-        event: to_vec(event).unwrap(),
-        decisions: to_vec(&decisions).unwrap(),
+        event: to_vec(event).expect("event encodes"),
+        decisions: to_vec(&decisions).expect("decisions encode"),
         decider: "test".to_owned(),
         decisions_schema: Some(DECISIONS_SCHEMA.to_owned()),
     }
 }
 
 fn bare() -> JournalQuery {
-    JournalQuery::parse("").unwrap()
+    JournalQuery::parse("").expect("empty query is valid")
 }
 
 #[test]
@@ -55,8 +53,8 @@ fn a_bare_journal_query_is_the_newest_page() {
     // Tripwire: a bare GET /journal used to return the entire journal oldest
     // first. The console cannot absorb that; the default is the newest 100
     // with truncation flags.
-    let records: Vec<JournalRecord> = (1..=3).map(|n| observe(n, n as u8)).collect();
-    let view = page_journal(&records, &bare()).unwrap();
+    let records: Vec<JournalRecord> = (1_u8..=3).map(|n| observe(u64::from(n), n)).collect();
+    let view = page_journal(&records, &bare()).expect("fixture records decode");
     assert_eq!(view.records.iter().map(|entry| entry.sequence).collect::<Vec<_>>(), vec![3, 2, 1]);
     assert_eq!(view.total_matched, 3);
     assert_eq!(view.shown, 3);
@@ -68,20 +66,20 @@ fn a_bare_journal_query_is_the_newest_page() {
 #[test]
 fn following_next_from_sequence_yields_every_record_once() {
     // Acceptance: paging to exhaustion visits each sequence exactly once.
-    let records: Vec<JournalRecord> = (1..=5).map(|n| observe(n, n as u8)).collect();
+    let records: Vec<JournalRecord> = (1_u8..=5).map(|n| observe(u64::from(n), n)).collect();
     let first = JournalQuery { limit: 2, ..bare() };
-    let page_a = page_journal(&records, &first).unwrap();
+    let page_a = page_journal(&records, &first).expect("fixture records decode");
     assert_eq!(page_a.records.iter().map(|entry| entry.sequence).collect::<Vec<_>>(), vec![5, 4]);
     assert!(page_a.truncated);
     assert_eq!(page_a.next_from_sequence, Some(4));
 
     let second = JournalQuery { from_sequence: page_a.next_from_sequence, limit: 2, ..bare() };
-    let page_b = page_journal(&records, &second).unwrap();
+    let page_b = page_journal(&records, &second).expect("fixture records decode");
     assert_eq!(page_b.records.iter().map(|entry| entry.sequence).collect::<Vec<_>>(), vec![3, 2]);
     assert_eq!(page_b.next_from_sequence, Some(2));
 
     let third = JournalQuery { from_sequence: page_b.next_from_sequence, limit: 2, ..bare() };
-    let page_c = page_journal(&records, &third).unwrap();
+    let page_c = page_journal(&records, &third).expect("fixture records decode");
     assert_eq!(page_c.records.iter().map(|entry| entry.sequence).collect::<Vec<_>>(), vec![1]);
     assert!(!page_c.truncated);
     assert_eq!(page_c.next_from_sequence, None);
@@ -96,7 +94,7 @@ fn following_next_from_sequence_yields_every_record_once() {
 
 #[test]
 fn a_limit_above_the_journal_clamp_is_applied_and_named() {
-    let query = JournalQuery::parse(&format!("limit={}", JOURNAL_MAX_LIMIT + 50)).unwrap();
+    let query = JournalQuery::parse(&format!("limit={}", JOURNAL_MAX_LIMIT + 50)).expect("numeric limit parses");
     assert_eq!(query.limit, JOURNAL_MAX_LIMIT);
     assert_eq!(
         query.notice.as_deref(),
@@ -110,7 +108,7 @@ fn the_bloom_filter_keeps_only_events_that_name_it() {
     let other = Digest::from_bytes([8; 32]);
     let records = vec![observe(1, 1), land(2, wanted), land(3, other), land(4, wanted)];
     let query = JournalQuery { bloom: Some(wanted), ..bare() };
-    let view = page_journal(&records, &query).unwrap();
+    let view = page_journal(&records, &query).expect("fixture records decode");
     assert_eq!(view.records.iter().map(|entry| entry.sequence).collect::<Vec<_>>(), vec![4, 2]);
     assert_eq!(view.total_matched, 2);
 }
@@ -137,10 +135,10 @@ fn artifact_range_honors_bounds_and_rejects_past_the_end() {
 
 #[test]
 fn an_artifact_limit_above_the_clamp_is_applied_and_named() {
-    let query = ArtifactQuery::parse(&format!("limit={}", ARTIFACT_MAX_LIMIT + 1)).unwrap();
+    let query = ArtifactQuery::parse(&format!("limit={}", ARTIFACT_MAX_LIMIT + 1)).expect("numeric limit parses");
     assert_eq!(query.limit, ARTIFACT_MAX_LIMIT);
-    assert!(query.notice.as_deref().unwrap().contains("clamped"));
-    assert_eq!(ArtifactQuery::parse("").unwrap().limit, ARTIFACT_DEFAULT_LIMIT);
+    assert!(query.notice.as_deref().is_some_and(|notice| notice.contains("clamped")));
+    assert_eq!(ArtifactQuery::parse("").expect("empty query is valid").limit, ARTIFACT_DEFAULT_LIMIT);
 }
 
 #[test]
@@ -150,10 +148,10 @@ fn decoded_resolves_a_known_kind_and_reports_null_for_unknown_bytes() {
         subject: Digest::from_bytes([2; 32]),
         cost: StudyCost::default(),
     };
-    let bytes = to_vec(&record).unwrap();
+    let bytes = to_vec(&record).expect("study record encodes");
     let (kind, value) = resolve_kind(&bytes).expect("a study record is a known kind");
     assert_eq!(kind, "aether.bloomery.study_record");
-    let subject: Vec<u8> = serde_json::from_value(value["subject"].clone()).unwrap();
+    let subject: Vec<u8> = serde_json::from_value(value["subject"].clone()).expect("subject is a byte array");
     assert_eq!(subject, vec![2; 32]);
 
     assert_eq!(resolve_kind(b"not-an-artifact"), None);
