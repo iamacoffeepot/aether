@@ -41,16 +41,16 @@ impl Journal {
             bloom,
             next_sequence: 1,
         };
-        journal.admit(event("seal", Fact::Seal(spec)), Some(1_000));
+        journal.admit(&event("seal", Fact::Seal(spec)), Some(1_000));
         journal
     }
 
-    fn admit(&mut self, event: Event, envelope: Option<u64>) -> Decisions {
+    fn admit(&mut self, event: &Event, envelope: Option<u64>) -> Decisions {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.saturating_add(1);
-        let decisions = reduce(&self.snapshot, &event, &self.configs, &SpendWindow::default());
-        self.ledger.observe(sequence, &event, &decisions, &self.configs, envelope);
-        self.snapshot = self.snapshot.apply(&event, &decisions, &self.configs);
+        let decisions = reduce(&self.snapshot, event, &self.configs, &SpendWindow::default());
+        self.ledger.observe(sequence, event, &decisions, &self.configs, envelope);
+        self.snapshot = self.snapshot.apply(event, &decisions, &self.configs);
         decisions
     }
 
@@ -62,7 +62,7 @@ impl Journal {
         envelope: Option<u64>,
     ) -> Decisions {
         self.admit(
-            event(
+            &event(
                 key,
                 Fact::AttemptCompleted {
                     bloom: self.bloom,
@@ -83,7 +83,7 @@ impl Journal {
 
     fn study(&mut self, key: &str, subject: u8, detail: u8) -> Decisions {
         self.admit(
-            event(
+            &event(
                 key,
                 Fact::AdmitEvidence {
                     bloom: self.bloom,

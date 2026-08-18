@@ -25,8 +25,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId};
 use crate::reduce::{Decision, Decisions, Event, Fact};
 use crate::values::{
-    AgentProfile, ConfigRegistry, ConfigScopes, DispatchKey, EvidenceKind, ModelOverride, ResolvedConfigs,
-    ResolvedModel, StudyRecord,
+    AgentProfile, ConfigRegistry, ConfigScopes, DispatchKey, EvidenceKind, ModelOverride, ReasoningEffort,
+    ResolvedConfigs, ResolvedModel, StudyRecord,
 };
 
 /// How many timeline spans one bloom read returns before it truncates.
@@ -324,7 +324,7 @@ impl MetricsLedger {
         }
         for study in &self.studies {
             let Some(acc) =
-                self.dispatches.values().find(|row| row.bloom == study.bloom && row.displayed == study.subject)
+                self.dispatches.values().find(|row| (row.bloom == study.bloom) && (row.displayed == study.subject))
             else {
                 continue;
             };
@@ -453,7 +453,7 @@ impl MetricsLedger {
 
         let id = (bloom, key, displayed);
         let is_new = !self.dispatches.contains_key(&id);
-        self.dispatches.entry(id).or_insert(DispatchAcc {
+        self.dispatches.entry(id).or_insert_with(|| DispatchAcc {
             bloom,
             workpiece,
             stage,
@@ -476,7 +476,7 @@ impl MetricsLedger {
         let study = self
             .studies
             .iter()
-            .find(|study| study.bloom == acc.bloom && study.subject == acc.displayed)
+            .find(|study| (study.bloom == acc.bloom) && (study.subject == acc.displayed))
             .map(|study| study.detail);
         MetricDispatch {
             id: dispatch_id(acc),
@@ -507,7 +507,7 @@ struct Dispatched<'a> {
 struct SeatKey {
     harness: &'static str,
     model: String,
-    effort: crate::values::ReasoningEffort,
+    effort: ReasoningEffort,
     stage: StageId,
 }
 

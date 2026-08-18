@@ -24,6 +24,7 @@ use aether_bloomery::{
     Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, JournalRecord, LoadConfigs, LoadConfigsResult,
     MembershipMutation, OutboxPayload, ReplayJournal, ReplayJournalResult, WorkpieceId,
 };
+use aether_data::wire::{from_bytes, to_vec};
 use std::iter::repeat_n;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1591,7 +1592,7 @@ impl StoreBackend for SqliteStore {
         let mut ledger = aether_bloomery::MetricsLedger::default();
         self.clear_metrics()?;
         for record in &records {
-            let event: aether_bloomery::Event = aether_data::wire::from_bytes(&record.event).map_err(|error| {
+            let event: aether_bloomery::Event = from_bytes(&record.event).map_err(|error| {
                 rusqlite::Error::SqliteFailure(
                     SqliteFfiError::new(SQLITE_ERROR),
                     Some(format!("metrics fold: event {} did not decode: {error}", record.sequence)),
@@ -1638,7 +1639,7 @@ impl StoreBackend for SqliteStore {
 }
 
 fn encode_metric<T: serde::Serialize>(value: &T) -> rusqlite::Result<Vec<u8>> {
-    aether_data::wire::to_vec(value).map_err(|error| {
+    to_vec(value).map_err(|error| {
         rusqlite::Error::SqliteFailure(
             SqliteFfiError::new(SQLITE_ERROR),
             Some(format!("metrics encode failed: {error}")),

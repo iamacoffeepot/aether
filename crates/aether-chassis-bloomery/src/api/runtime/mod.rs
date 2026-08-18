@@ -517,7 +517,8 @@ impl NativeActor for BloomeryApiCapability {
         ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
         id: http::Path<String>,
     ) -> http::Outcome {
-        match metrics::timeline(&id.0) {
+        let id = id.0;
+        match metrics::timeline(&id) {
             Ok(routed) => finish(state, ctx, routed),
             Err(error) => http::Outcome::Reply(error_response(400, &error)),
         }

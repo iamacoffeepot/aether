@@ -53,7 +53,7 @@ use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 #[cfg(feature = "github")]
 use crate::bloomery::{LandReactorCapability, LandTick};
 use crate::source::SourceCapability;
-use crate::store::StoreCapability;
+use crate::store::{StoreCapability, now_unix_millis};
 
 /// The cap on same-key admits in flight at once. A well-behaved client sends one
 /// admit per key and at most a few retries; without a bound a client spamming one
@@ -390,13 +390,7 @@ impl NativeActor for ControlCore {
             CommitResult::Applied { .. } => {
                 state.calibration.observe(&event, &decisions, &state.configs);
                 let sequence = state.metrics.through_sequence().saturating_add(1);
-                state.metrics.observe(
-                    sequence,
-                    &event,
-                    &decisions,
-                    &state.configs,
-                    Some(crate::store::now_unix_millis()),
-                );
+                state.metrics.observe(sequence, &event, &decisions, &state.configs, Some(now_unix_millis()));
                 state.snapshot = state.snapshot.apply(&event, &decisions, &state.configs);
                 state.refresh_spend();
                 // A committed land decision is already in the outbox; wake the
@@ -756,7 +750,7 @@ impl NativeActor for ControlCore {
     #[handler::manual]
     fn on_metrics_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: MetricsQuery) {
         let inbound = ctx.take_inbound();
-        inbound.reply(&metrics_response(state, mail));
+        inbound.reply(&metrics_response(state, &mail));
     }
 
     /// `GET /spend` — the window `measure` already computes, previously unserved.
@@ -855,7 +849,7 @@ impl ControlCoreState {
         let records = load_study_records(self.artifacts.as_mut(), &self.snapshot);
         self.spend = measure(&self.snapshot, |digest| records.get(digest).copied());
         if self.spend.label.is_empty() {
-            self.spend.label = window_label(crate::store::now_unix_millis());
+            self.spend.label = window_label(now_unix_millis());
         }
     }
 
@@ -979,7 +973,7 @@ fn calibration_response(
     }
 }
 
-fn metrics_response(state: &mut ControlCoreState, query: MetricsQuery) -> MetricsQueryResult {
+fn metrics_response(state: &mut ControlCoreState, query: &MetricsQuery) -> MetricsQueryResult {
     let clamp = |requested: Option<u64>| match requested {
         None => METRICS_DEFAULT_LIMIT,
         Some(limit) if limit > METRICS_MAX_LIMIT => METRICS_MAX_LIMIT,
