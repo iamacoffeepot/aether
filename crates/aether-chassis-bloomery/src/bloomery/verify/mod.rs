@@ -1,5 +1,6 @@
-//! Proof-fact addressing, recording, attribution, and the batch gate
-//! (ADR-0200 §The fact, §"Attribution through the ledger", §"The batch gate").
+//! Proof-fact addressing, recording, attribution, the batch gate, and
+//! daily sweeps (ADR-0200 §The fact, §"Attribution through the ledger",
+//! §"The batch gate", §"The gate ladder").
 //!
 //! A proof fact is addressed by `(closure_key, test, result, host_class)`.
 //! [`closure_key`] hashes a package's git-addressed dependency closure;
@@ -7,7 +8,8 @@
 //! is the only constructor of facts the ledger will store;
 //! [`attribute_gate_failure`] is the failure-attribution path member verify
 //! and the aggregate gate share; [`run_batch_gate`] composes disjoint-surface
-//! members into one prove.
+//! members into one prove; [`run_sweep`] converts unknown facts on idle
+//! prover time and taints a closure on red.
 
 #[cfg(feature = "runtime")]
 mod attribution;
@@ -15,10 +17,12 @@ mod attribution;
 mod batch;
 mod closure;
 mod facts;
+#[cfg(feature = "runtime")]
+mod sweep;
 
 #[cfg(feature = "runtime")]
 pub use attribution::{
-    Attribution, AttributionError, AttributionRequest, BaseProbe, BaseRepairWorkpiece, RepairBoard,
+    Attribution, AttributionError, AttributionRequest, BaseProbe, BaseRepairWorkpiece, RepairBoard, TaintSet,
     attribute_gate_failure, consult_proof_fact,
 };
 #[cfg(feature = "runtime")]
@@ -31,6 +35,11 @@ pub use closure::{ClosureKey, ClosureKeyError, closure_key};
 #[cfg(feature = "runtime")]
 pub use facts::record_proof_facts;
 pub use facts::{DiscriminatedFact, DiscriminatedFacts, ProofResult, ProofSource, RunnerReport, discriminate};
+#[cfg(feature = "runtime")]
+pub use sweep::{
+    BloomDisposition, Land, LandProbe, SweepContext, SweepDecision, SweepOutcome, UnknownFact, bisect_land_order,
+    bloom_disposition, decide_sweep, repair_landed, run_sweep, unknowns,
+};
 
 /// The host class a proof fact is keyed on (ADR-0200 integrity rule 2).
 ///

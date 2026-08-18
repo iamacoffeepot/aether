@@ -13,7 +13,7 @@ use aether_bloomery::{SurfacePattern, WorkpieceId, surface_intersection};
 
 use super::{
     Attribution, AttributionError, AttributionRequest, BaseProbe, ClosureKey, DiscriminatedFacts, HostClass,
-    ProofSource, RepairBoard, attribute_gate_failure, record_proof_facts,
+    ProofSource, RepairBoard, TaintSet, attribute_gate_failure, record_proof_facts,
 };
 use crate::store::StoreBackend;
 
@@ -326,7 +326,7 @@ fn ledger_rung<'a>(
         producing_dispatch: ctx.producing_dispatch,
         producing_bloom: ctx.producing_bloom,
     };
-    let attribution = attribute_gate_failure(ctx.store, &request, hooks.probe, hooks.board)?;
+    let attribution = attribute_gate_failure(ctx.store, &request, hooks.probe, hooks.board, &TaintSet::new())?;
     let fate = match attribution {
         Attribution::Member => MemberFate::Resume,
         Attribution::Predating => MemberFate::Predating,

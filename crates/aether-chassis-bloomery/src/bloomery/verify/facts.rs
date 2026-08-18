@@ -113,6 +113,11 @@ pub enum ProofSource<'a> {
         /// One key per member the aggregate run covers.
         closures: &'a [ClosureKey],
     },
+    /// Daily sweep: one invalidated closure the idle prover just converted.
+    Sweep {
+        /// The post-land closure key the unknown fact was addressed by.
+        closure: ClosureKey,
+    },
 }
 
 /// Keep only tests that appear in both reports with the same result.
@@ -151,7 +156,7 @@ pub fn record_proof_facts(
     use std::slice::from_ref;
 
     let closures: &[ClosureKey] = match source {
-        ProofSource::Member { closure } => from_ref(closure),
+        ProofSource::Member { closure } | ProofSource::Sweep { closure } => from_ref(closure),
         ProofSource::Aggregate { closures } => closures,
     };
     let writes: Vec<ProofFactWrite<'_>> = closures
