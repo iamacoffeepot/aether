@@ -88,6 +88,7 @@ mod process_runner;
 mod quarantine;
 mod runner;
 mod session_reuse;
+mod task_argv;
 
 pub use backend::LocalExecutor;
 pub use error::LocalExecutorError;
