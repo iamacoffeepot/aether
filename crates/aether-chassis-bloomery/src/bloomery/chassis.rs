@@ -20,6 +20,8 @@ use aether_substrate::config::ConfigError;
 use aether_substrate::{Chassis, SubstrateBoot};
 use aether_trace::TraceDispatchCapability;
 
+#[cfg(feature = "github")]
+use super::local_landing::LocalLanding;
 use crate::api::{ApiParams, BloomeryApiCapability};
 use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
 use crate::bloomery::CoordinatorConfig;
@@ -195,11 +197,13 @@ fn actor_setups(
         .map_err(|error| BootError::Other(Box::new(error)))?;
     let executor_correspondence = mounted_correspondence(executor.as_ref(), &correspondence);
     let repo = coordinator.lane_repository();
-    let pusher = candidate_push_at(
-        cfg!(any(test, feature = "testing")) || github.uses_fixture(),
-        repo.clone(),
-        coordinator.candidate_remote(),
-    );
+    // A testing-featured binary must never `git push` to `origin` — cargo test
+    // forks exactly that binary with its cwd inside the live checkout (#4842).
+    // A local authority's remote is an absolute path, never origin, so the
+    // hermetic publication path is the one this refuse exists to protect.
+    let refuse_origin =
+        (cfg!(any(test, feature = "testing")) || github.uses_fixture()) && !coordinator.uses_local_authority();
+    let pusher = candidate_push_at(refuse_origin, repo.clone(), coordinator.candidate_remote());
 
     Ok(BloomeryActorSetups {
         mirror: MirrorReactorSetup {
@@ -229,7 +233,11 @@ fn actor_setups(
             pusher: Arc::clone(&pusher),
         },
         land: LandReactorSetup {
-            source: configured.then(|| landing_source(github, coordinator, Arc::clone(&correspondence))).transpose()?,
+            source: if coordinator.uses_local_authority() {
+                Some(Arc::new(LocalLanding::new(source.clone())))
+            } else {
+                configured.then(|| landing_source(github, coordinator, Arc::clone(&correspondence))).transpose()?
+            },
             store_path: coordinator.store_path.clone(),
             poll_interval_secs: coordinator.poll_interval_secs,
             repository: repository.clone(),

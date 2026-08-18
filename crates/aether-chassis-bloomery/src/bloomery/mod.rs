@@ -19,6 +19,8 @@ mod mirror;
 mod outbox;
 // Crate-visible: the control core runs the same sidecar for its mainline
 // observer, and that cap lives outside this module.
+#[cfg(feature = "github")]
+mod local_landing;
 pub(crate) mod poll_timer;
 #[cfg(feature = "github")]
 mod reactor;
