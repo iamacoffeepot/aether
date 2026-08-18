@@ -218,7 +218,7 @@ pub trait GitDataApi {
     ///
     /// # Errors
     /// A transport or adapter fault, or a non-absent miss (a clean miss is
-    /// [`Ok`]`(None)`).
+    /// `Ok(None)`).
     fn get_ref(&self, name: &str) -> Result<Option<GitRef>, GitDataError>;
 
     /// Create ref `name` at `sha`.
