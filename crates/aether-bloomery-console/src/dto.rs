@@ -199,6 +199,10 @@ pub struct BloomView {
     pub review_park: Option<ReviewParkView>,
     #[serde(default)]
     pub composition: Option<CompositionView>,
+    /// The operator brake (#4976). Absent when the coordinator predates the
+    /// field or the bloom is not held.
+    #[serde(default)]
+    pub operator_hold: Option<OperatorHoldView>,
 }
 
 /// One sealed member as the projection renders it.
@@ -325,6 +329,15 @@ pub struct CandidateRef {
     pub tree: DigestHex,
     #[serde(default)]
     pub checkout: DigestHex,
+}
+
+/// The operator brake on a bloom, when the coordinator serves it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OperatorHoldView {
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub operator: String,
 }
 
 /// Presence marker: any JSON object (or other value) deserializes, extra
@@ -480,6 +493,7 @@ mod tests {
         assert!(bloom.review_park.is_none());
         assert!(bloom.composition.is_none());
         assert!(bloom.landing_blocked.is_none());
+        assert!(bloom.operator_hold.is_none());
         let member = &bloom.members[0];
         assert_eq!(member.workpiece, "issue-1");
         assert!(member.wedge.is_some());
@@ -495,7 +509,7 @@ mod tests {
     fn widened_fields_decode_from_a_realistic_document() {
         // The plausible bug: the mirror still drops mainline / observed /
         // spend_quiesce / superseded_by / review-park prose / pending_decision
-        // / composition, so the war-room chrome has nothing to paint.
+        // / composition / operator_hold, so the war-room chrome has nothing to paint.
         let view: ViewDocument = serde_json::from_value(json!({
             "mainline": hex(0x11),
             "observed": hex(0x22),
@@ -529,6 +543,10 @@ mod tests {
                         "detail": hex(0x99),
                         "implicated": ["issue-1"]
                     }]
+                },
+                "operator_hold": {
+                    "reason": "wait for the host",
+                    "operator": "owner"
                 },
                 "members": [{
                     "workpiece": "issue-1",
@@ -575,6 +593,9 @@ mod tests {
         assert_eq!(composition.findings.len(), 1);
         assert_eq!(composition.findings[0].detail, digest(0x99));
         assert_eq!(composition.findings[0].implicated, ["issue-1"]);
+        let hold = bloom.operator_hold.as_ref().expect("operator hold");
+        assert_eq!(hold.reason, "wait for the host");
+        assert_eq!(hold.operator, "owner");
         let pending = bloom.members[0].pending_decision.as_ref().expect("pending decision");
         assert_eq!(pending.question, digest(0xaa));
         assert_eq!(pending.stage, Some(StageId::Construct));

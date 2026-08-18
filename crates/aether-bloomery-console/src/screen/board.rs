@@ -1,14 +1,13 @@
-//! The Board: alert band plus bloom/member table.
+//! The Board: bloom/member table. Alert and interrupt bands live on the shell.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
+use ratatui::layout::{Constraint, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use crate::cursor::Cursor;
-use crate::dto::{BloomStatus, BloomView, DigestHex, MemberView, ViewDocument};
+use crate::dto::{BloomStatus, DigestHex, MemberView, ViewDocument};
 use crate::keys::{KeyHint, Outcome};
 use crate::store::{ResourceKey, Store};
 
@@ -55,13 +54,6 @@ impl BoardRow {
             Self::Member(row) => RowId::Member { bloom: row.bloom, workpiece: row.workpiece.clone() },
         }
     }
-}
-
-/// One loud token in the alert band.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Alert {
-    pub token: String,
-    pub detail: String,
 }
 
 const HINTS: &[KeyHint] = &[
@@ -128,24 +120,17 @@ impl Board {
         });
     }
 
+    /// True when k should leave the table for the chrome above it.
+    #[must_use]
+    pub fn selected_is_first(&self, store: &Store) -> bool {
+        let rows = rows_from(store);
+        matches!(self.cursor.selected_index(&rows, BoardRow::id), Some(0) | None)
+    }
+
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
         let rows = rows_from(store);
-        let alerts = alerts_from(store);
         let dimmed = store.view().is_stale();
-        let alert_height = if alerts.is_empty() {
-            0
-        } else {
-            u16::try_from(alerts.len().clamp(1, 4)).unwrap_or(1)
-        };
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(alert_height), Constraint::Min(3)])
-            .split(area);
-
-        if alert_height > 0 {
-            frame.render_widget(alert_band(&alerts), chunks[0]);
-        }
-        self.render_table(frame, chunks[1], &rows, dimmed);
+        self.render_table(frame, area, &rows, dimmed);
     }
 
     fn render_table(&mut self, frame: &mut Frame<'_>, area: Rect, rows: &[BoardRow], dimmed: bool) {
@@ -223,10 +208,6 @@ fn rows_from(store: &Store) -> Vec<BoardRow> {
     store.view().value.as_ref().map(rows_of).unwrap_or_default()
 }
 
-fn alerts_from(store: &Store) -> Vec<Alert> {
-    store.view().value.as_ref().map(alerts_of).unwrap_or_default()
-}
-
 fn rows_of(view: &ViewDocument) -> Vec<BoardRow> {
     let mut rows = Vec::new();
     for bloom in &view.blooms {
@@ -250,86 +231,15 @@ fn rows_of(view: &ViewDocument) -> Vec<BoardRow> {
     rows
 }
 
-fn alerts_of(view: &ViewDocument) -> Vec<Alert> {
-    let mut alerts = Vec::new();
-    for bloom in &view.blooms {
-        let prefix = bloom.id.prefix();
-        if bloom.review_park.is_some() {
-            alerts.push(Alert { token: "PARK".to_owned(), detail: prefix.clone() });
-        }
-        if let Some(block) = &bloom.landing_blocked {
-            alerts.push(Alert {
-                token: format!("land: blocked {}/{}", block.rolls, block.budget),
-                detail: prefix.clone(),
-            });
-        }
-        if let Some(fault) = &bloom.executor_fault {
-            alerts
-                .push(Alert { token: executor_fault_token(fault.rolls, fault.budget, fault.terminal), detail: prefix });
-        }
-        for member in &bloom.members {
-            push_member_alerts(&mut alerts, bloom, member);
-        }
-    }
-    alerts
-}
-
-fn push_member_alerts(alerts: &mut Vec<Alert>, bloom: &BloomView, member: &MemberView) {
-    let detail = if member.workpiece.is_empty() {
-        bloom.id.prefix()
-    } else {
-        member.workpiece.clone()
-    };
-    if member.wedge.is_some() {
-        alerts.push(Alert { token: "WEDGED".to_owned(), detail: detail.clone() });
-    }
-    if member.host_fault.is_some() {
-        alerts.push(Alert { token: "hostfault".to_owned(), detail });
-    }
-}
-
-fn executor_fault_token(rolls: u32, budget: u32, terminal: bool) -> String {
-    let mut token = format!("FAULT {rolls}/{budget}");
-    if terminal {
-        token.push_str(" TERMINAL");
-    }
-    token
-}
-
 fn bloom_status_label(status: Option<BloomStatus>) -> String {
     status.map_or_else(|| "?".to_owned(), |status| status.to_string())
 }
 
-fn alert_band(alerts: &[Alert]) -> Paragraph<'static> {
-    let spans: Vec<Span<'static>> = alerts
-        .iter()
-        .flat_map(|alert| {
-            [
-                Span::styled(
-                    alert.token.clone(),
-                    Style::default().fg(alert_color(&alert.token)).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(format!(" {}  ", alert.detail)),
-            ]
-        })
-        .collect();
-    Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Black))
-}
-
-fn alert_color(token: &str) -> Color {
-    if token == "PARK" || token == "hostfault" {
-        Color::Yellow
-    } else {
-        Color::Red
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Board, BoardRow, alerts_of, member_status_state, rows_of};
+    use super::{Board, BoardRow, member_status_state, rows_of};
     use crate::dto::{
-        BloomStatus, BloomView, DigestHex, ExecutorFaultView, LandingBlock, MemberView, PendingDecisionView, Present,
-        ReviewParkView, ViewDocument, WedgeCause,
+        BloomStatus, BloomView, DigestHex, MemberView, PendingDecisionView, Present, ViewDocument, WedgeCause,
     };
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::store::Store;
@@ -377,28 +287,6 @@ mod tests {
         );
         assert_eq!(member_status_state(&MemberView { blocked_by: Some(String::new()), ..member("wp") }, false), "idle");
         assert_eq!(member_status_state(&member("wp"), false), "idle");
-    }
-
-    #[test]
-    fn alerts_name_every_loud_state() {
-        // The plausible bug: the band only looks at bloom-level fields, so a
-        // wedged or host-faulted member stays quiet; or TERMINAL is dropped.
-        let view = ViewDocument {
-            blooms: vec![BloomView {
-                id: digest(0xab),
-                review_park: Some(ReviewParkView::default()),
-                landing_blocked: Some(LandingBlock { rolls: 2, budget: 3 }),
-                executor_fault: Some(ExecutorFaultView { rolls: 3, budget: 3, terminal: true }),
-                members: vec![
-                    MemberView { wedge: Some(Present {}), wedge_cause: Some(WedgeCause::Work), ..member("issue-1") },
-                    MemberView { host_fault: Some(Present {}), ..member("issue-2") },
-                ],
-                ..BloomView::default()
-            }],
-            ..ViewDocument::default()
-        };
-        let tokens: Vec<_> = alerts_of(&view).into_iter().map(|alert| alert.token).collect();
-        assert_eq!(tokens, ["PARK", "land: blocked 2/3", "FAULT 3/3 TERMINAL", "WEDGED", "hostfault"]);
     }
 
     #[test]
