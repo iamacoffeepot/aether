@@ -4,7 +4,8 @@
 //! `init` / the timer / the ctx send are the thin glue the chassis-boot test and
 //! compilation cover; this pins the loop that actually dispatches and admits.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::slice;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -31,10 +32,10 @@ use aether_substrate::mail::registry::Registry;
 use super::strand::readopt_stranded_dispatches;
 use super::{
     BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, ExecutorReactorState, GitCandidatePush, NameEvidenceClaims,
-    Stores, TickClock, TrackedHandle, backoff_delay, default_candidate_push, dispatch_origin, drain_and_dispatch,
-    drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_silent, is_stale, next_backoff,
-    observe_heartbeat, pull_and_admit, push_admitted_candidates, seed_dispatches, seed_tracked, select_stale_handles,
-    silence_from, timeout_verdict,
+    Stores, TickClock, TrackedHandle, backoff_delay, candidate_push_at, default_candidate_push, dispatch_origin,
+    drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_silent, is_stale,
+    next_backoff, observe_heartbeat, pull_and_admit, push_admitted_candidates, seed_dispatches, seed_tracked,
+    select_stale_handles, silence_from, timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -1710,7 +1711,7 @@ fn the_real_pusher_refuses_gits_ref_delete_sentinels() {
     let target_ref = "refs/heads/aether-null-oid-tripwire-must-never-exist";
 
     for sentinel in ["0".repeat(40), "0".repeat(64), String::new()] {
-        let refusal = GitCandidatePush
+        let refusal = GitCandidatePush { repo: PathBuf::new(), remote: "origin".into() }
             .push(&sentinel, target_ref)
             .expect_err("the production pusher declines git's ref-delete sentinel");
 
@@ -1727,6 +1728,111 @@ fn the_real_pusher_refuses_gits_ref_delete_sentinels() {
     // in aether-bloomery-github). Asserting it here would mean letting the
     // shell-out run against `origin`, which is a network call this tier has no
     // business making.
+}
+
+fn run_git(dir: &Path, args: &[&str]) {
+    assert!(Command::new("git").current_dir(dir).args(args).status().unwrap().success(), "git {args:?} failed");
+}
+
+fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git").current_dir(dir).args(args).output().unwrap();
+    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// Bare authority at a path that may contain spaces, plus one seed commit.
+fn local_authority(name: &str) -> (tempfile::TempDir, PathBuf, String) {
+    let root = tempfile::tempdir().unwrap();
+    let seed = root.path().join("seed");
+    std::fs::create_dir(&seed).unwrap();
+    run_git(&seed, &["init", "--quiet", "-b", "main"]);
+    run_git(&seed, &["config", "--local", "user.name", "test"]);
+    run_git(&seed, &["config", "--local", "user.email", "test@example.test"]);
+    run_git(&seed, &["commit", "--quiet", "--allow-empty", "--message", "root"]);
+    let head = git_stdout(&seed, &["rev-parse", "HEAD"]);
+    let authority = root.path().join(name);
+    assert!(
+        Command::new("git").args(["clone", "--bare", "--quiet"]).arg(&seed).arg(&authority).status().unwrap().success(),
+        "clone --bare into {authority:?}"
+    );
+    (root, authority, head)
+}
+
+fn mint_commit(repo: &Path, parent: &str, message: &str) -> String {
+    let tree = git_stdout(repo, &["rev-parse", &format!("{parent}^{{tree}}")]);
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(["commit-tree", &tree, "-p", parent, "-m", message])
+        .envs([
+            ("GIT_AUTHOR_NAME", "test"),
+            ("GIT_AUTHOR_EMAIL", "test@example.test"),
+            ("GIT_COMMITTER_NAME", "test"),
+            ("GIT_COMMITTER_EMAIL", "test@example.test"),
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "commit-tree: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[test]
+fn a_shared_object_database_publishes_by_updating_the_ref() {
+    // When the coordinator repository *is* the local authority, publication
+    // is a ref move. No remote, no object transfer, no network.
+    let (_root, authority, parent) = local_authority("authority.git");
+    let commit = mint_commit(&authority, &parent, "candidate");
+    let target_ref = "refs/heads/bloom/demo/candidate/wp";
+
+    GitCandidatePush { repo: authority.clone(), remote: authority.display().to_string() }
+        .push(&commit, target_ref)
+        .expect("shared-db publication updates the ref");
+
+    assert_eq!(
+        git_stdout(&authority, &["rev-parse", target_ref]),
+        commit,
+        "the authority now names the capture on the candidate ref",
+    );
+}
+
+#[test]
+fn a_clone_publishes_to_a_local_authority_path_with_spaces() {
+    // Tripwire (ADR-0199): a coordinator clone whose objects are not yet on
+    // the authority force-pushes over the filesystem path. A `file://`
+    // prefix is not required, and a space in the path is not a reason to
+    // invent one.
+    let (root, authority, parent) = local_authority("authority with spaces.git");
+    let clone = root.path().join("clone");
+    assert!(
+        Command::new("git").args(["clone", "--quiet"]).arg(&authority).arg(&clone).status().unwrap().success(),
+        "clone from {authority:?} without a file:// prefix"
+    );
+    run_git(&clone, &["remote", "remove", "origin"]);
+    let commit = mint_commit(&clone, &parent, "candidate");
+    assert!(
+        !Command::new("git").current_dir(&authority).args(["cat-file", "-e", &commit]).status().unwrap().success(),
+        "the capture must start absent from the authority, or the transfer is never exercised",
+    );
+    let target_ref = "refs/heads/bloom/demo/candidate/wp";
+
+    GitCandidatePush { repo: clone, remote: authority.display().to_string() }
+        .push(&commit, target_ref)
+        .expect("push to an absolute path with spaces, no file://");
+
+    assert_eq!(git_stdout(&authority, &["rev-parse", target_ref]), commit);
+    assert!(
+        Command::new("git").current_dir(&authority).args(["cat-file", "-e", &commit]).status().unwrap().success(),
+        "the capture object arrived at the authority",
+    );
+}
+
+#[test]
+fn candidate_push_at_keeps_the_refusing_arm() {
+    // Both boot-selected implementations stay coherent: a fixture/test boot
+    // still refuses even when it is handed a local-authority path.
+    let refusal = candidate_push_at(true, PathBuf::from("/tmp/authority.git"), "/tmp/authority.git")
+        .push("abc", "refs/heads/bloom/x/candidate/wp")
+        .expect_err("refuse wins over a live local path");
+    assert!(refusal.contains("refusing to push"), "{refusal}");
 }
 
 // Tripwire: a state built by `with_parts` — the fixture-shaped constructor

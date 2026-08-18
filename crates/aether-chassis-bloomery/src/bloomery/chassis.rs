@@ -31,7 +31,7 @@ use crate::bloomery::{
     CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ExecutorReactorCapability,
     ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig, IntegrateReactorCapability, IntegrateReactorSetup,
     JanitorReactorCapability, JanitorReactorSetup, LandReactorCapability, LandReactorSetup, LaneProgram,
-    MirrorReactorCapability, MirrorReactorSetup, ProjectionShell, SourceShell, default_candidate_push,
+    MirrorReactorCapability, MirrorReactorSetup, ProjectionShell, SourceShell, candidate_push_at,
 };
 use crate::control::{ControlCore, ControlSetup};
 use crate::session::{SessionConfig, SessionPoolCapability};
@@ -194,7 +194,12 @@ fn actor_setups(
         .transpose()
         .map_err(|error| BootError::Other(Box::new(error)))?;
     let executor_correspondence = mounted_correspondence(executor.as_ref(), &correspondence);
-    let pusher = default_candidate_push(cfg!(any(test, feature = "testing")) || github.uses_fixture());
+    let repo = coordinator.lane_repository();
+    let pusher = candidate_push_at(
+        cfg!(any(test, feature = "testing")) || github.uses_fixture(),
+        repo.clone(),
+        coordinator.candidate_remote(),
+    );
 
     Ok(BloomeryActorSetups {
         mirror: MirrorReactorSetup {
@@ -251,6 +256,7 @@ fn actor_setups(
             lane_target_budget_bytes: coordinator.lane_target_budget_bytes,
             evidence_retention_days: coordinator.evidence_retention_days,
             poll_interval_secs: coordinator.poll_interval_secs,
+            repo: repo.display().to_string(),
         },
         source: SourceSetup { shell: source, claims_enabled: source_configured, mainline: coordinator.mainline() },
         correspondence,
