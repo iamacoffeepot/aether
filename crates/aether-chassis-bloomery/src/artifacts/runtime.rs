@@ -17,7 +17,7 @@ use aether_substrate::content_store::{ContentStore, EvictionPolicy, Selector};
 use serde::{Deserialize, Serialize};
 
 use super::ArtifactsCapability;
-use super::kinds::{ArtifactsError, Get, GetResult, Put, PutResult};
+use super::kinds::{ArtifactsError, Get, GetRange, GetRangeResult, GetResult, Put, PutResult};
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
@@ -190,5 +190,53 @@ impl NativeActor for ArtifactsCapability {
     #[handler::single]
     fn on_get(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Get) -> GetResult {
         state.get(mail.digest)
+    }
+
+    #[handler::single]
+    fn on_get_range(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: GetRange) -> GetRangeResult {
+        let GetRange { digest, offset, limit, decoded, notice } = mail;
+        match state.get(digest.clone()) {
+            GetResult::Ok { bytes, .. } => range_result(digest, &bytes, offset, limit, decoded, notice),
+            GetResult::Err { digest, error } => GetRangeResult::Err { digest, error },
+        }
+    }
+}
+
+fn range_result(
+    digest: String,
+    bytes: &[u8],
+    offset: u64,
+    limit: u64,
+    decoded: bool,
+    notice: Option<String>,
+) -> GetRangeResult {
+    let total = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if offset >= total && !(offset == 0 && total == 0) {
+        return GetRangeResult::Unsatisfiable { digest, total };
+    }
+    if decoded {
+        return GetRangeResult::Ok {
+            digest,
+            bytes: bytes.to_vec(),
+            total,
+            offset,
+            limit,
+            decoded,
+            notice,
+            truncated: false,
+        };
+    }
+    let start = usize::try_from(offset).unwrap_or(usize::MAX).min(bytes.len());
+    let want = usize::try_from(limit).unwrap_or(usize::MAX);
+    let end = start.saturating_add(want).min(bytes.len());
+    GetRangeResult::Ok {
+        digest,
+        bytes: bytes[start..end].to_vec(),
+        total,
+        offset,
+        limit,
+        decoded,
+        notice,
+        truncated: end < bytes.len(),
     }
 }
